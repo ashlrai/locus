@@ -1,0 +1,39 @@
+//! Locus core — identity plane primitives for multi-account agents.
+//!
+//! # Invariants
+//!
+//! - A session is sealed to exactly one Binding (exclusive mode).
+//! - Unbound sessions have no provider surface.
+//! - Isolated exec env contains only the pinned binding's providers.
+//! - Credential **values** never live in MCP responses — only CredentialRefs
+//!   and resolved secrets inside worker env maps.
+
+pub mod adapters;
+pub mod binding;
+pub mod credential;
+pub mod error;
+pub mod isolation;
+pub mod policy;
+pub mod seal;
+pub mod session;
+pub mod store;
+pub mod workspace;
+
+pub use adapters::{
+    call_tool, control_tools, tools_for_binding, AdapterTool, ToolCallResult,
+};
+pub use binding::{Binding, BindingBody, BindingSummary, Policy, ProviderBinding, Scope};
+pub use credential::{inject_keys_for_provider, resolve, resolve_binding_secrets, CredentialRef};
+pub use error::{LocusError, Result};
+pub use isolation::{
+    build_isolated_env, build_isolated_env_opts, build_isolated_env_strict,
+    visible_credential_refs, IsolatedEnv,
+};
+pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
+pub use seal::SealKey;
+pub use session::{parse_ttl, PinSource, Session, SessionMode};
+pub use store::{locus_home, ProviderView, Store, Whoami};
+pub use workspace::{find_workspace, WorkspaceConfig};
+
+/// Crate version for `locus --version` / doctor.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");

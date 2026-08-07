@@ -1,0 +1,18 @@
+[package]
+name = "locus-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP multiplexor for Locus — tools hard-scoped to the active pin"
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "locus-mcp"
+path = "src/main.rs"
+
+[dependencies]
+locus-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
