@@ -10,10 +10,18 @@
 
 use anyhow::{Context, Result};
 use locus_core::{
-    call_tool_gated, control_tools, tools_for_binding, AdapterTool, ApprovalGate, Store, VERSION,
+    call_tool_gated, control_tools, enforce_policy, tools_for_binding, AdapterTool, ApprovalGate,
+    CompositeWorkerManager, Store, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::sync::{Mutex, OnceLock};
+
+/// Process-wide worker manager (synthetic + per-provider upstream MCP).
+fn worker_manager() -> &'static Mutex<CompositeWorkerManager> {
+    static MGR: OnceLock<Mutex<CompositeWorkerManager>> = OnceLock::new();
+    MGR.get_or_init(|| Mutex::new(CompositeWorkerManager::new()))
+}
 
 /// Wire framing chosen per message so mixed clients stay happy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -204,12 +212,25 @@ fn active_binding() -> Result<Option<(locus_core::Session, locus_core::Binding)>
     }
 }
 
-/// Unpinned ⇒ only locus_* control tools. Pinned ⇒ control + provider tools.
+/// Unpinned ⇒ only locus_* control tools. Pinned ⇒ control + provider tools
+/// (synthetic adapters + namespaced upstream MCP tools when declared).
 fn handle_tools_list() -> std::result::Result<Value, Value> {
     let pinned = active_binding().map_err(|e| rpc_error(-32000, e.to_string()))?;
     let mut tools: Vec<AdapterTool> = control_tools(pinned.is_some());
-    if let Some((_, ref binding)) = pinned {
-        tools.extend(tools_for_binding(binding));
+    if let Some((ref session, ref binding)) = pinned {
+        let mut mgr = worker_manager()
+            .lock()
+            .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
+        match mgr.ensure_binding(session, binding) {
+            Ok(_) => {
+                tools.extend(mgr.tools_for_pin(session, binding));
+            }
+            Err(e) => {
+                // Soft-fail spawn: still expose synthetic adapter tools.
+                eprintln!("locus-mcp: worker ensure failed (listing synthetic only): {e}");
+                tools.extend(tools_for_binding(binding));
+            }
+        }
     }
     // INV: unpinned must not expose provider tools
     if pinned.is_none() {
@@ -253,45 +274,108 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
         ));
     };
 
+    let principal_owned = session.principal.clone();
     let gate = ApprovalGate {
         store: &s,
         session_id: &session.session_id,
+        principal: principal_owned.as_deref(),
     };
-    match call_tool_gated(&binding, name, &args, Some(gate)) {
-        Ok(r) => {
-            // Audit require_approval blocks (record already on disk under approvals/)
-            if !r.ok {
-                if let Some(err) = r.content.get("error").and_then(|v| v.as_str()) {
-                    if err == "requires_approval" {
-                        let _ = s.audit(
-                            "mcp.require_approval",
-                            &binding.alias,
-                            Some(json!({
-                                "tool": name,
-                                "status": "pending",
-                                "approval_id": r.content.get("approval_id"),
-                                "args_digest": r.content.get("args_digest"),
-                                "detail": r.content.get("detail"),
-                            })),
-                        );
-                    }
-                }
+
+    // Ensure workers for this pin (spawns upstream MCP when binding declares it).
+    {
+        let mut mgr = worker_manager()
+            .lock()
+            .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
+        if let Err(e) = mgr.ensure_binding(&session, &binding) {
+            // Only hard-fail when the tool targets an upstream-only provider.
+            let synthetic = tools_for_binding(&binding);
+            let is_synthetic = synthetic.iter().any(|t| t.name == name);
+            if !is_synthetic {
+                return Ok(tool_text(
+                    json!({
+                        "error": "worker_ensure_failed",
+                        "detail": e.to_string(),
+                        "tool": name,
+                    }),
+                    true,
+                ));
             }
-            Ok(tool_text(r.content, !r.ok))
-        }
-        Err(e) => {
-            // Scope freeze denials surface as errors from adapters
-            let msg = e.to_string();
-            if msg.contains("scope freeze") {
-                let _ = s.audit(
-                    "mcp.scope_freeze",
-                    &binding.alias,
-                    Some(json!({ "tool": name, "error": msg, "args": args })),
-                );
-            }
-            Ok(tool_text(json!({ "error": msg }), true))
+            eprintln!("locus-mcp: worker ensure failed (synthetic path): {e}");
         }
     }
+
+    let synthetic = tools_for_binding(&binding);
+    let is_synthetic = synthetic.iter().any(|t| t.name == name);
+
+    if is_synthetic {
+        match call_tool_gated(&binding, name, &args, Some(gate)) {
+            Ok(r) => {
+                audit_tool_block(&s, &binding.alias, name, &r.content);
+                Ok(tool_text(r.content, !r.ok))
+            }
+            Err(e) => Ok(tool_text(
+                scope_or_err(&s, &binding.alias, name, &args, e),
+                true,
+            )),
+        }
+    } else {
+        // Upstream (or unknown) tool: policy + worker fan-out.
+        match enforce_policy(&binding, name, &args, Some(gate)) {
+            Ok(Some(blocked)) => {
+                audit_tool_block(&s, &binding.alias, name, &blocked.content);
+                Ok(tool_text(blocked.content, true))
+            }
+            Ok(None) => {
+                let mgr = worker_manager()
+                    .lock()
+                    .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
+                match mgr.call_tool(&session, &binding, name, &args) {
+                    Ok(r) => Ok(tool_text(r.content, !r.ok)),
+                    Err(e) => Ok(tool_text(
+                        json!({ "error": e.to_string(), "tool": name }),
+                        true,
+                    )),
+                }
+            }
+            Err(e) => Ok(tool_text(json!({ "error": e.to_string() }), true)),
+        }
+    }
+}
+
+fn audit_tool_block(s: &Store, alias: &str, tool: &str, content: &Value) {
+    if let Some(err) = content.get("error").and_then(|v| v.as_str()) {
+        if err == "requires_approval" {
+            let _ = s.audit(
+                "mcp.require_approval",
+                alias,
+                Some(json!({
+                    "tool": tool,
+                    "status": "pending",
+                    "approval_id": content.get("approval_id"),
+                    "args_digest": content.get("args_digest"),
+                    "detail": content.get("detail"),
+                })),
+            );
+        }
+    }
+}
+
+fn scope_or_err(
+    s: &Store,
+    alias: &str,
+    tool: &str,
+    args: &Value,
+    e: locus_core::LocusError,
+) -> Value {
+    let msg = e.to_string();
+    if msg.contains("scope freeze") {
+        let _ = s.audit(
+            "mcp.scope_freeze",
+            alias,
+            Some(json!({ "tool": tool, "error": msg, "args": args })),
+        );
+    }
+    json!({ "error": msg })
 }
 
 fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {

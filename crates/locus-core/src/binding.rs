@@ -41,6 +41,64 @@ pub struct Scope {
     pub extra: BTreeMap<String, toml::Value>,
 }
 
+/// Upstream MCP stdio spawn for a provider (auto-spawn when pinned).
+///
+/// TOML (inline, preferred):
+/// ```toml
+/// [[binding.providers]]
+/// provider = "github"
+/// account = "acme"
+/// credential_ref = "phm:GH_TOKEN_ACME"
+/// upstream = { command = "npx", args = ["-y", "@pkg"] }
+/// ```
+///
+/// Nested table (applies to the most recent `[[binding.providers]]` entry):
+/// ```toml
+/// [binding.providers.upstream]
+/// command = "python3"
+/// args = ["-u", "-c", "..."]
+/// resolve_secrets = true
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UpstreamSpec {
+    /// Executable (e.g. `npx`, `python3`, path to MCP binary).
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Resolve `phm:` / `env:` credential_refs into the child env when spawning.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolve_secrets: bool,
+}
+
+impl UpstreamSpec {
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+            args: Vec::new(),
+            resolve_secrets: false,
+        }
+    }
+
+    pub fn with_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.args = args.into_iter().map(Into::into).collect();
+        self
+    }
+
+    pub fn resolve_secrets(mut self, yes: bool) -> Self {
+        self.resolve_secrets = yes;
+        self
+    }
+
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.command.trim().is_empty() {
+            return Err(crate::LocusError::msg(
+                "provider.upstream.command must be non-empty when upstream is set",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// One provider account inside a Binding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProviderBinding {
@@ -50,6 +108,43 @@ pub struct ProviderBinding {
     pub credential_ref: String,
     #[serde(default)]
     pub scope: Scope,
+    /// Optional upstream MCP server to auto-spawn for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<UpstreamSpec>,
+}
+
+impl ProviderBinding {
+    /// Construct a provider binding without upstream (synthetic tools only).
+    pub fn new(
+        provider: impl Into<String>,
+        account: impl Into<String>,
+        credential_ref: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            account: account.into(),
+            credential_ref: credential_ref.into(),
+            scope: Scope::default(),
+            upstream: None,
+        }
+    }
+
+    pub fn with_scope(mut self, scope: Scope) -> Self {
+        self.scope = scope;
+        self
+    }
+
+    pub fn with_upstream(mut self, upstream: UpstreamSpec) -> Self {
+        self.upstream = Some(upstream);
+        self
+    }
+
+    /// True when this provider should spawn an MCP stdio worker.
+    pub fn has_upstream(&self) -> bool {
+        self.upstream
+            .as_ref()
+            .is_some_and(|u| !u.command.is_empty())
+    }
 }
 
 /// Session / tool-call policy for a Binding.
@@ -60,6 +155,18 @@ pub struct Policy {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_approval: Vec<String>,
+
+    /// Tool globs that need two distinct principal grants before approval.
+    ///
+    /// Matching tools also go through the require_approval gate even if they
+    /// are not listed in `require_approval`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dual_control: Vec<String>,
+
+    /// When true, every tool matched by `require_approval` needs dual-control
+    /// (two distinct principals). Combined with explicit `dual_control` globs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dual_control_all_approvals: bool,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ttl: Option<String>,
@@ -80,9 +187,35 @@ impl Default for Policy {
         Self {
             default: default_allow(),
             require_approval: Vec::new(),
+            dual_control: Vec::new(),
+            dual_control_all_approvals: false,
             max_ttl: Some("8h".into()),
             parallel_sessions: default_parallel(),
         }
+    }
+}
+
+impl Policy {
+    /// Whether this tool needs two distinct principal grants.
+    ///
+    /// True when `dual_control_all_approvals` and the tool matches
+    /// `require_approval`, or when the tool matches a `dual_control` glob.
+    pub fn requires_dual_control(&self, tool: &str) -> bool {
+        use crate::policy::glob_match;
+
+        if self.dual_control_all_approvals {
+            for pat in &self.require_approval {
+                if glob_match(pat, tool) {
+                    return true;
+                }
+            }
+        }
+        for pat in &self.dual_control {
+            if glob_match(pat, tool) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -183,15 +316,11 @@ impl Binding {
                 "binding id, alias, and tenant are required",
             ));
         }
-        if !self
-            .alias
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(crate::LocusError::msg(format!(
-                "invalid alias '{}': use letters, digits, '-', '_'",
-                self.alias
-            )));
+        validate_name_component("alias", &self.alias)?;
+        // id is also used in paths / seals — keep to the same charset
+        validate_name_component("id", &self.id)?;
+        if let Some(ref p) = self.principal {
+            validate_name_component("principal", p)?;
         }
         if self.providers.is_empty() {
             return Err(crate::LocusError::msg(
@@ -204,9 +333,41 @@ impl Binding {
                     "each provider needs provider, account, and credential_ref",
                 ));
             }
+            if let Some(up) = &p.upstream {
+                up.validate()?;
+            }
         }
         Ok(())
     }
+}
+
+/// Safe name for path components and identity labels: ASCII alnum + `-` `_`.
+/// Rejects empty, path separators, `..`, and other punctuation (prompt / path injection).
+pub fn validate_name_component(field: &str, value: &str) -> crate::Result<()> {
+    if value.is_empty() {
+        return Err(crate::LocusError::msg(format!(
+            "invalid {field}: must not be empty"
+        )));
+    }
+    if value.contains('/') || value.contains('\\') || value.contains("..") || value.contains('\0') {
+        return Err(crate::LocusError::msg(format!(
+            "invalid {field} '{value}': path separators and '..' are not allowed"
+        )));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(crate::LocusError::msg(format!(
+            "invalid {field} '{value}': use letters, digits, '-', '_'"
+        )));
+    }
+    if value.len() > 128 {
+        return Err(crate::LocusError::msg(format!(
+            "invalid {field}: exceeds maximum length (128)"
+        )));
+    }
+    Ok(())
 }
 
 /// Summary for list/status (never includes secrets).
@@ -278,5 +439,191 @@ scope = { orgs = ["acme-corp"] }
         let s = b.to_toml().unwrap();
         let b2 = Binding::parse_toml(&s).unwrap();
         assert_eq!(b, b2);
+    }
+
+    const SAMPLE_WITH_UPSTREAM: &str = r#"
+[binding]
+id = "bnd_acme"
+alias = "acme"
+tenant = "acme-corp"
+
+[[binding.providers]]
+provider = "github"
+account = "acme"
+credential_ref = "phm:GH_TOKEN_ACME"
+scope = { orgs = ["acme-corp"] }
+upstream = { command = "npx", args = ["-y", "@github/mcp"], resolve_secrets = true }
+
+[[binding.providers]]
+provider = "supabase"
+account = "acme-prod"
+credential_ref = "phm:SUPABASE_ACME"
+scope = { project_ref = "abcdefghij", read_only = true }
+"#;
+
+    #[test]
+    fn parse_upstream_inline() {
+        let b = Binding::parse_toml(SAMPLE_WITH_UPSTREAM).unwrap();
+        b.validate().unwrap();
+        let gh = b.provider("github").unwrap();
+        assert!(gh.has_upstream());
+        let up = gh.upstream.as_ref().unwrap();
+        assert_eq!(up.command, "npx");
+        assert_eq!(up.args, vec!["-y", "@github/mcp"]);
+        assert!(up.resolve_secrets);
+        assert!(!b.provider("supabase").unwrap().has_upstream());
+    }
+
+    #[test]
+    fn parse_upstream_nested_table() {
+        let toml = r#"
+[binding]
+id = "bnd_x"
+alias = "x"
+tenant = "t"
+
+[[binding.providers]]
+provider = "github"
+account = "a"
+credential_ref = "env:X"
+scope = { orgs = ["o"] }
+
+[binding.providers.upstream]
+command = "python3"
+args = ["-u", "-c", "print(1)"]
+resolve_secrets = false
+"#;
+        let b = Binding::parse_toml(toml).unwrap();
+        b.validate().unwrap();
+        let up = b.provider("github").unwrap().upstream.as_ref().unwrap();
+        assert_eq!(up.command, "python3");
+        assert_eq!(up.args.len(), 3);
+        assert!(!up.resolve_secrets);
+    }
+
+    #[test]
+    fn upstream_empty_command_fails_validate() {
+        let toml = r#"
+[binding]
+id = "bnd_x"
+alias = "x"
+tenant = "t"
+
+[[binding.providers]]
+provider = "github"
+account = "a"
+credential_ref = "env:X"
+upstream = { command = "" }
+"#;
+        let b = Binding::parse_toml(toml).unwrap();
+        assert!(b.validate().is_err());
+    }
+
+    #[test]
+    fn roundtrip_preserves_upstream() {
+        let b = Binding::parse_toml(SAMPLE_WITH_UPSTREAM).unwrap();
+        let s = b.to_toml().unwrap();
+        let b2 = Binding::parse_toml(&s).unwrap();
+        assert_eq!(b, b2);
+        assert!(b2.provider("github").unwrap().has_upstream());
+    }
+
+    #[test]
+    fn validate_rejects_empty_providers() {
+        let raw = r#"
+[binding]
+id = "bnd_empty"
+alias = "empty"
+tenant = "t"
+providers = []
+"#;
+        let b = Binding::parse_toml(raw).unwrap();
+        let err = b.validate().unwrap_err().to_string();
+        assert!(err.contains("at least one provider"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_bad_alias() {
+        for alias in ["has space", "bad!", "slash/x", "dot.x", ""] {
+            let body = BindingBody {
+                id: "bnd_x".into(),
+                alias: alias.into(),
+                tenant: "t".into(),
+                principal: None,
+                description: None,
+                policy: Policy::default(),
+                providers: vec![ProviderBinding {
+                    provider: "github".into(),
+                    account: "a".into(),
+                    credential_ref: "phm:X".into(),
+                    scope: Scope::default(),
+                    upstream: None,
+                }],
+            };
+            let b = Binding::from_body(body);
+            let err = b.validate().unwrap_err().to_string();
+            if alias.is_empty() {
+                assert!(
+                    err.contains("required") || err.contains("alias"),
+                    "empty alias: {err}"
+                );
+            } else {
+                assert!(
+                    err.contains("invalid alias") || err.contains(alias),
+                    "alias={alias:?}: {err}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_toml_malformed_is_error() {
+        let err = Binding::parse_toml("not = [valid").unwrap_err();
+        let msg = err.to_string();
+        assert!(!msg.is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_incomplete_provider() {
+        let raw = r#"
+[binding]
+id = "bnd_bad"
+alias = "badprov"
+tenant = "t"
+
+[[binding.providers]]
+provider = "github"
+account = ""
+credential_ref = "phm:X"
+"#;
+        let b = Binding::parse_toml(raw).unwrap();
+        let err = b.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("provider") || err.contains("account") || err.contains("credential_ref"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_bad_principal_and_alias() {
+        let mut b = Binding::parse_toml(SAMPLE).unwrap();
+        b.principal = Some("../evil".into());
+        assert!(b.validate().is_err());
+        b.principal = Some("mason".into());
+        b.validate().unwrap();
+        b.alias = "../escape".into();
+        assert!(b.validate().is_err());
+        b.alias = "acme".into();
+        b.principal = Some("user name".into());
+        assert!(b.validate().is_err());
+    }
+
+    #[test]
+    fn validate_name_component_charset() {
+        assert!(validate_name_component("alias", "acme").is_ok());
+        assert!(validate_name_component("principal", "mason_1").is_ok());
+        assert!(validate_name_component("alias", "../x").is_err());
+        assert!(validate_name_component("alias", "a/b").is_err());
+        assert!(validate_name_component("principal", "").is_err());
     }
 }

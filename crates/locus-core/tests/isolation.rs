@@ -38,6 +38,7 @@ fn binding(
                     orgs: vec![tenant.into()],
                     ..Scope::default()
                 },
+                upstream: None,
             },
             ProviderBinding {
                 provider: "vercel".into(),
@@ -48,6 +49,7 @@ fn binding(
                     projects: vec![format!("{alias}-web")],
                     ..Scope::default()
                 },
+                upstream: None,
             },
             ProviderBinding {
                 provider: "supabase".into(),
@@ -58,6 +60,7 @@ fn binding(
                     read_only: Some(true),
                     ..Scope::default()
                 },
+                upstream: None,
             },
         ],
     })

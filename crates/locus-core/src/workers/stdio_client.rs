@@ -147,10 +147,7 @@ impl McpStdioClient {
             if let Some(err) = msg.get("error") {
                 return Err(LocusError::msg(format!("upstream mcp error: {err}")));
             }
-            return Ok(msg
-                .get("result")
-                .cloned()
-                .unwrap_or(Value::Null));
+            return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
         }
     }
 

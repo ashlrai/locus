@@ -255,6 +255,7 @@ mod tests {
                     project_ref: Some("proj_acme".into()),
                     ..Scope::default()
                 },
+                upstream: None,
             }],
         });
         let personal = Binding::from_body(BindingBody {
@@ -272,6 +273,7 @@ mod tests {
                     project_ref: Some("proj_me".into()),
                     ..Scope::default()
                 },
+                upstream: None,
             }],
         });
         (acme, personal)
@@ -335,6 +337,7 @@ mod tests {
                     project_ref: Some("proj_acme".into()),
                     ..Scope::default()
                 },
+                upstream: None,
             }],
         });
         let key = SealKey::generate();

@@ -192,19 +192,39 @@ See [PLAN.md](./PLAN.md) and [DESIGN.md](./DESIGN.md) for the full architecture.
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo test
+cargo test --workspace
 cargo build --release
 ./target/release/locus --help
+
+# Full shell e2e (build, pin, isolation, MCP freeze/approval, doctor, leave)
+./scripts/e2e.sh
 ```
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test/lint and how to add adapters.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test/lint and how to add adapters. Agent-oriented rules: [AGENTS.md](./AGENTS.md). Short IDE guide: [CLAUDE.md](./CLAUDE.md).
+
+### Landing page
+
+Static site under [`apps/web/`](./apps/web) — dark monochrome terminal aesthetic, sibling positioning vs Phantom.
+
+```bash
+cd apps/web && npm start   # http://localhost:3000
+```
+
+Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README.md).
 
 ### Docs
 
 | Doc | Topic |
 |-----|--------|
+| [AGENTS.md](./AGENTS.md) | AI coding agents: build, test, invariants, secrets |
+| [CLAUDE.md](./CLAUDE.md) | Short development guide |
+| [apps/web/](./apps/web) | Landing page (static HTML) |
+| [scripts/e2e.sh](./scripts/e2e.sh) | End-to-end shell suite |
+| [docs/architecture.md](./docs/architecture.md) | System diagram (DESIGN distilled) |
+| [docs/firm-mode.md](./docs/firm-mode.md) | Agencies: bindings, dual-control, workspaces |
 | [docs/mcp.md](./docs/mcp.md) | `locus-mcp` with Claude Code / Cursor |
 | [docs/adapters.md](./docs/adapters.md) | Writing a provider adapter |
+| [docs/workers.md](./docs/workers.md) | Synthetic vs MCP stdio workers |
 | [SECURITY.md](./SECURITY.md) | Threat model summary & reporting |
 | [CHANGELOG.md](./CHANGELOG.md) | Release notes |
 | [DESIGN.md](./DESIGN.md) / [PLAN.md](./PLAN.md) | Full architecture & roadmap |

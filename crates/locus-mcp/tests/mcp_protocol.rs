@@ -2,7 +2,7 @@
 //!
 //! Covers both Content-Length framing (MCP standard) and NDJSON.
 
-use locus_core::{Binding, BindingBody, Policy, ProviderBinding, Scope, Store};
+use locus_core::{Binding, BindingBody, Policy, ProviderBinding, Scope, Store, UpstreamSpec};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
@@ -179,6 +179,7 @@ fn sample_bindings(store: &Store) {
                     orgs: vec!["acme-corp".into()],
                     ..Scope::default()
                 },
+                upstream: None,
             },
             ProviderBinding {
                 provider: "vercel".into(),
@@ -189,6 +190,7 @@ fn sample_bindings(store: &Store) {
                     projects: vec!["acme-web".into()],
                     ..Scope::default()
                 },
+                upstream: None,
             },
             ProviderBinding {
                 provider: "supabase".into(),
@@ -199,6 +201,7 @@ fn sample_bindings(store: &Store) {
                     read_only: Some(true),
                     ..Scope::default()
                 },
+                upstream: None,
             },
         ],
     });
@@ -365,7 +368,7 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
         .unwrap()
         .id
         .clone();
-    store.grant_approval(&id, None).unwrap();
+    store.grant_approval(&id, None, "e2e").unwrap();
     let del2 = client.request(
         "tools/call",
         json!({
@@ -396,4 +399,134 @@ fn ndjson_provider_call_not_pinned() {
     let (text, is_err) = McpClient::tool_text(&resp);
     assert!(is_err);
     assert!(text.contains("not_pinned") || text.contains("pin"));
+}
+
+/// Mock upstream MCP script (python3 NDJSON) for auto-spawn tests.
+fn mock_upstream_script() -> &'static str {
+    r#"
+import sys, json
+def send(o):
+    sys.stdout.write(json.dumps(o)+"\n"); sys.stdout.flush()
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    msg=json.loads(line)
+    mid=msg.get("id")
+    method=msg.get("method","")
+    if mid is None: continue
+    if method=="initialize":
+        send({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"mock","version":"0"}}})
+    elif method=="tools/list":
+        send({"jsonrpc":"2.0","id":mid,"result":{"tools":[
+            {"name":"ping","description":"upstream ping","inputSchema":{"type":"object"}},
+            {"name":"echo","description":"echo","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}}}
+        ]}})
+    elif method=="tools/call":
+        name=msg.get("params",{}).get("name","")
+        args=msg.get("params",{}).get("arguments",{})
+        if name=="ping":
+            send({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":"pong"}],"isError":False}})
+        elif name=="echo":
+            send({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":args.get("text","")}],"isError":False}})
+        else:
+            send({"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":name}})
+    else:
+        send({"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":method}})
+"#
+}
+
+#[test]
+fn pinned_upstream_auto_spawn_list_and_call() {
+    // Requires python3 for mock upstream MCP
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+
+    let binding = Binding::from_body(BindingBody {
+        id: "bnd_up".into(),
+        alias: "up".into(),
+        tenant: "acme-corp".into(),
+        principal: None,
+        description: None,
+        policy: Policy::default(),
+        providers: vec![
+            ProviderBinding {
+                provider: "github".into(),
+                account: "acme-gh".into(),
+                credential_ref: "phm:GH_TOKEN_ACME".into(),
+                scope: Scope {
+                    orgs: vec!["acme-corp".into()],
+                    ..Scope::default()
+                },
+                upstream: Some(
+                    UpstreamSpec::new("python3").with_args(["-u", "-c", mock_upstream_script()]),
+                ),
+            },
+            ProviderBinding {
+                provider: "supabase".into(),
+                account: "acme-db".into(),
+                credential_ref: "phm:SUPABASE_ACME".into(),
+                scope: Scope {
+                    project_ref: Some("proj_acme".into()),
+                    ..Scope::default()
+                },
+                upstream: None,
+            },
+        ],
+    });
+    store.save_binding(&binding).unwrap();
+    store
+        .pin("up", dir.path(), Some("mcp-upstream".into()), false)
+        .unwrap();
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    let list = client.request("tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().expect("tools");
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+
+    // Control + synthetic + namespaced upstream
+    assert!(names.contains(&"locus_whoami"));
+    assert!(names.contains(&"github.scope")); // synthetic kept
+    assert!(names.contains(&"github.ping")); // upstream
+    assert!(names.contains(&"github.echo"));
+    assert!(names.contains(&"supabase.scope")); // synthetic only (no upstream)
+    assert!(!names.contains(&"supabase.ping"));
+
+    // Upstream call
+    let ping = client.request(
+        "tools/call",
+        json!({ "name": "github.ping", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&ping);
+    assert!(!is_err, "github.ping failed: {text}");
+    assert!(text.contains("pong"), "expected pong in {text}");
+
+    let echo = client.request(
+        "tools/call",
+        json!({
+            "name": "github.echo",
+            "arguments": { "text": "via-locus-mcp" }
+        }),
+    );
+    let (text, is_err) = McpClient::tool_text(&echo);
+    assert!(!is_err, "github.echo failed: {text}");
+    assert!(text.contains("via-locus-mcp"), "echo body: {text}");
+
+    // Synthetic still works alongside upstream
+    let scope = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&scope);
+    assert!(!is_err, "github.scope failed: {text}");
+    assert!(text.contains("phm:GH_TOKEN_ACME") || text.contains("acme"));
 }

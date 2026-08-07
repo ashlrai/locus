@@ -22,13 +22,17 @@ pub mod workers;
 pub mod workspace;
 
 pub use adapters::{
-    call_tool, call_tool_gated, control_tools, tools_for_binding, AdapterTool, ApprovalGate,
-    ToolCallResult,
+    call_tool, call_tool_gated, control_tools, enforce_policy, tools_for_binding, AdapterTool,
+    ApprovalGate, ToolCallResult,
 };
 pub use approval::{
-    args_digest, default_grant_ttl, mint_approval_id, ApprovalRecord, ApprovalStatus,
+    args_digest, default_grant_ttl, mint_approval_id, required_grant_count, validate_approval_id,
+    ApprovalGrant, ApprovalRecord, ApprovalStatus,
 };
-pub use binding::{Binding, BindingBody, BindingSummary, Policy, ProviderBinding, Scope};
+pub use binding::{
+    validate_name_component, Binding, BindingBody, BindingSummary, Policy, ProviderBinding, Scope,
+    UpstreamSpec,
+};
 pub use credential::{inject_keys_for_provider, resolve, resolve_binding_secrets, CredentialRef};
 pub use error::{LocusError, Result};
 pub use isolation::{
@@ -38,11 +42,14 @@ pub use isolation::{
 pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
 pub use seal::SealKey;
 pub use session::{parse_ttl, PinSource, Session, SessionMode};
-pub use store::{locus_home, AuditEvent, ProviderView, RuntimeDrift, Store, Whoami};
+pub use store::{
+    locus_home, ApprovalsHealth, AuditEvent, ProviderView, RuntimeDrift, Store, Whoami,
+};
 pub use workers::{
-    InMemoryWorkerManager, McpStdioBackend, McpStdioClient, McpStdioConfig, SyntheticBackend,
-    UpstreamTool, WorkerBackend, WorkerKey, WorkerManager, WorkerSlot, WorkerState,
-    WorkerToolResult,
+    mcp_config_from_upstream, namespace_upstream_tool, provider_from_tool_name,
+    strip_provider_prefix, CompositeWorkerManager, InMemoryWorkerManager, McpStdioBackend,
+    McpStdioClient, McpStdioConfig, SyntheticBackend, UpstreamTool, WorkerBackend, WorkerKey,
+    WorkerManager, WorkerSlot, WorkerState, WorkerToolResult,
 };
 pub use workspace::{find_workspace, WorkspaceConfig};
 

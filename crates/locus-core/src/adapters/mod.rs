@@ -32,6 +32,8 @@ pub use vercel::VercelAdapter;
 pub struct ApprovalGate<'a> {
     pub store: &'a Store,
     pub session_id: &'a str,
+    /// Session principal / requester label recorded on pending approvals.
+    pub principal: Option<&'a str>,
 }
 
 /// A tool exposed through locus-mcp for the active pin.
@@ -75,6 +77,19 @@ pub fn freeze_string_arg(args: &Value, key: &str, frozen: Option<&str>) -> Resul
         ))),
         (Some(f), _) => Ok(Some(f.to_string())),
         (None, Some(m)) => Ok(Some(m.to_string())),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Freeze a boolean selector (e.g. Stripe `livemode`).
+pub fn freeze_bool_arg(args: &Value, key: &str, frozen: Option<bool>) -> Result<Option<bool>> {
+    let model_val = args.get(key).and_then(|v| v.as_bool());
+    match (frozen, model_val) {
+        (Some(f), Some(m)) if m != f => Err(LocusError::msg(format!(
+            "scope freeze: refusing {key}={m}; binding freezes {key}={f}"
+        ))),
+        (Some(f), _) => Ok(Some(f)),
+        (None, Some(m)) => Ok(Some(m)),
         (None, None) => Ok(None),
     }
 }
@@ -127,73 +142,108 @@ pub fn call_tool(binding: &Binding, tool_name: &str, args: &Value) -> Result<Too
     call_tool_gated(binding, tool_name, args, None)
 }
 
+/// Run policy + approval only.
+///
+/// Returns `Ok(None)` when the call may proceed, or `Ok(Some(block))` when
+/// denied / pending approval. Used by synthetic dispatch and upstream workers.
+pub fn enforce_policy(
+    binding: &Binding,
+    tool_name: &str,
+    args: &Value,
+    gate: Option<ApprovalGate<'_>>,
+) -> Result<Option<ToolCallResult>> {
+    let verdict = evaluate(&binding.policy, tool_name);
+    match verdict.decision {
+        Decision::Deny => Ok(Some(ToolCallResult {
+            ok: false,
+            content: json!({ "error": "denied_by_policy", "detail": verdict.reason }),
+            policy: Some(verdict),
+        })),
+        Decision::RequireApproval => {
+            if let Some(gate) = gate {
+                if check_require_approval(gate, &binding.alias, tool_name, args, &verdict)?
+                    .is_some()
+                {
+                    return Ok(None);
+                }
+                let requester = gate
+                    .principal
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or("unknown");
+                let pending = gate.store.create_pending_approval(
+                    tool_name,
+                    &binding.alias,
+                    args,
+                    gate.session_id,
+                    requester,
+                )?;
+                let dual = binding.policy.requires_dual_control(tool_name);
+                let required = crate::approval::required_grant_count(dual);
+                let grants = pending.grants.len();
+                let hint = if dual {
+                    format!(
+                        "Dual-control: need {required} distinct principals (have {grants}). \
+                         Run `locus approve grant {} --as <principal>` twice with different principals, then re-call.",
+                        pending.id
+                    )
+                } else {
+                    format!(
+                        "Human: run `locus approve grant {} --as <principal>` then re-call (same args), or re-call with confirm=true and approval_id={}",
+                        pending.id, pending.id
+                    )
+                };
+                Ok(Some(ToolCallResult {
+                    ok: false,
+                    content: json!({
+                        "error": "requires_approval",
+                        "detail": verdict.reason,
+                        "approval_id": pending.id,
+                        "args_digest": pending.args_digest,
+                        "dual_control": dual,
+                        "grants": grants,
+                        "required_grants": required,
+                        "requester": pending.requester,
+                        "hint": hint,
+                    }),
+                    policy: Some(verdict),
+                }))
+            } else {
+                let dual = binding.policy.requires_dual_control(tool_name);
+                Ok(Some(ToolCallResult {
+                    ok: false,
+                    content: json!({
+                        "error": "requires_approval",
+                        "detail": verdict.reason,
+                        "dual_control": dual,
+                        "hint": "Re-call via locus-mcp after `locus approve grant <id> --as <principal>`, or adjust binding.policy.require_approval"
+                    }),
+                    policy: Some(verdict),
+                }))
+            }
+        }
+        Decision::Allow => Ok(None),
+    }
+}
+
 /// Dispatch a tool call with optional approval grant store.
 ///
-/// When policy says `require_approval`:
-/// 1. If a still-valid grant exists for tool+binding+args_digest → allow
+/// When policy says `require_approval` (or dual_control):
+/// 1. If a still-valid **fully approved** grant exists for tool+binding+args_digest → allow
 /// 2. Else if `confirm=true` and `approval_id` names a valid matching grant → allow
 /// 3. Else create/reuse a pending approval record and block with `approval_id`
+///
+/// Dual-control tools only pass once two distinct principals have granted
+/// (`status=approved`). A single grant leaves the record pending.
 pub fn call_tool_gated(
     binding: &Binding,
     tool_name: &str,
     args: &Value,
     gate: Option<ApprovalGate<'_>>,
 ) -> Result<ToolCallResult> {
-    // Policy gate
-    let verdict = evaluate(&binding.policy, tool_name);
-    match verdict.decision {
-        Decision::Deny => {
-            return Ok(ToolCallResult {
-                ok: false,
-                content: json!({ "error": "denied_by_policy", "detail": verdict.reason }),
-                policy: Some(verdict),
-            });
-        }
-        Decision::RequireApproval => {
-            if let Some(gate) = gate {
-                if check_require_approval(gate, &binding.alias, tool_name, args, &verdict)?
-                    .is_some()
-                {
-                    // Fall through to execute
-                } else {
-                    // Blocked — pending record created inside check
-                    let pending = gate.store.create_pending_approval(
-                        tool_name,
-                        &binding.alias,
-                        args,
-                        gate.session_id,
-                    )?;
-                    return Ok(ToolCallResult {
-                        ok: false,
-                        content: json!({
-                            "error": "requires_approval",
-                            "detail": verdict.reason,
-                            "approval_id": pending.id,
-                            "args_digest": pending.args_digest,
-                            "hint": format!(
-                                "Human: run `locus approve grant {}` then re-call (same args), or re-call with confirm=true and approval_id={}",
-                                pending.id, pending.id
-                            ),
-                        }),
-                        policy: Some(verdict),
-                    });
-                }
-            } else {
-                // No store: block with instructions (unit tests / synthetic without gate)
-                return Ok(ToolCallResult {
-                    ok: false,
-                    content: json!({
-                        "error": "requires_approval",
-                        "detail": verdict.reason,
-                        "hint": "Re-call via locus-mcp after `locus approve grant <id>`, or adjust binding.policy.require_approval"
-                    }),
-                    policy: Some(verdict),
-                });
-            }
-        }
-        Decision::Allow => {}
+    if let Some(blocked) = enforce_policy(binding, tool_name, args, gate)? {
+        return Ok(blocked);
     }
-
+    let verdict = evaluate(&binding.policy, tool_name);
     dispatch_tool(binding, tool_name, args, verdict)
 }
 
@@ -206,7 +256,10 @@ fn check_require_approval(
     _verdict: &PolicyVerdict,
 ) -> Result<Option<()>> {
     // Path 1: matching approved grant within TTL (same tool+binding+args_digest)
-    if let Some(rec) = gate.store.find_valid_grant(tool_name, binding_alias, args)? {
+    if let Some(rec) = gate
+        .store
+        .find_valid_grant(tool_name, binding_alias, args)?
+    {
         let _ = gate.store.audit(
             "approval.use",
             binding_alias,
@@ -348,6 +401,7 @@ pub fn control_tools(pinned: bool) -> Vec<AdapterTool> {
 mod tests {
     use super::*;
     use crate::binding::{BindingBody, Policy, Scope};
+    use std::collections::BTreeMap;
 
     fn acme() -> Binding {
         Binding::from_body(BindingBody {
@@ -369,7 +423,54 @@ mod tests {
                     read_only: Some(true),
                     ..Scope::default()
                 },
+                upstream: None,
             }],
+        })
+    }
+
+    fn multi_provider() -> Binding {
+        let mut stripe_extra = BTreeMap::new();
+        stripe_extra.insert("livemode".into(), toml::Value::Boolean(false));
+        Binding::from_body(BindingBody {
+            id: "bnd_multi".into(),
+            alias: "multi".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![
+                ProviderBinding {
+                    provider: "cloudflare".into(),
+                    account: "acme-cf".into(),
+                    credential_ref: "phm:CF_ACME".into(),
+                    scope: Scope {
+                        account_id: Some("cf_acct_acme".into()),
+                        ..Scope::default()
+                    },
+                    upstream: None,
+                },
+                ProviderBinding {
+                    provider: "stripe".into(),
+                    account: "acme-stripe".into(),
+                    credential_ref: "phm:STRIPE_ACME".into(),
+                    scope: Scope {
+                        account_id: Some("acct_acme".into()),
+                        extra: stripe_extra,
+                        ..Scope::default()
+                    },
+                    upstream: None,
+                },
+                ProviderBinding {
+                    provider: "aws".into(),
+                    account: "acme-aws".into(),
+                    credential_ref: "phm:AWS_ACME".into(),
+                    scope: Scope {
+                        account_id: Some("123456789012".into()),
+                        ..Scope::default()
+                    },
+                    upstream: None,
+                },
+            ],
         })
     }
 
@@ -401,6 +502,86 @@ mod tests {
     }
 
     #[test]
+    fn freeze_cloudflare_account_id() {
+        let b = multi_provider();
+        let ok = call_tool(
+            &b,
+            "cloudflare.scope",
+            &json!({ "account_id": "cf_acct_acme" }),
+        )
+        .unwrap();
+        assert!(ok.ok);
+        assert_eq!(
+            ok.content.get("account_id").and_then(|v| v.as_str()),
+            Some("cf_acct_acme")
+        );
+
+        let err = call_tool(
+            &b,
+            "cloudflare.scope",
+            &json!({ "account_id": "cf_acct_evil" }),
+        );
+        assert!(
+            err.is_err(),
+            "expected cloudflare account_id freeze: {err:?}"
+        );
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("scope freeze") && msg.contains("account_id"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
+    fn freeze_stripe_livemode() {
+        let b = multi_provider();
+        // Matching frozen livemode=false is allowed
+        let ok = call_tool(&b, "stripe.scope", &json!({ "livemode": false })).unwrap();
+        assert!(ok.ok);
+        assert_eq!(
+            ok.content.get("livemode").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+
+        // Model cannot flip to live
+        let err = call_tool(&b, "stripe.scope", &json!({ "livemode": true }));
+        assert!(err.is_err(), "expected stripe livemode freeze: {err:?}");
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("scope freeze") && msg.contains("livemode"),
+            "unexpected: {msg}"
+        );
+
+        // account_id freeze still enforced
+        let err2 = call_tool(
+            &b,
+            "stripe.scope",
+            &json!({ "account_id": "acct_evil", "livemode": false }),
+        );
+        assert!(err2.is_err());
+        assert!(err2.unwrap_err().to_string().contains("account_id"));
+    }
+
+    #[test]
+    fn freeze_aws_account_id() {
+        let b = multi_provider();
+        let ok = call_tool(&b, "aws.scope", &json!({ "account_id": "123456789012" })).unwrap();
+        assert!(ok.ok);
+        assert_eq!(
+            ok.content.get("account_id").and_then(|v| v.as_str()),
+            Some("123456789012")
+        );
+
+        let err = call_tool(&b, "aws.scope", &json!({ "account_id": "999999999999" }));
+        assert!(err.is_err(), "expected aws account_id freeze: {err:?}");
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("scope freeze") && msg.contains("account_id"),
+            "unexpected: {msg}"
+        );
+    }
+
+    #[test]
     fn require_approval_blocks_delete() {
         let b = acme();
         let r = call_tool(&b, "supabase.table.delete", &json!({})).unwrap();
@@ -414,12 +595,7 @@ mod tests {
     #[test]
     fn confirm_alone_does_not_bypass_without_grant() {
         let b = acme();
-        let r = call_tool(
-            &b,
-            "supabase.table.delete",
-            &json!({ "confirm": true }),
-        )
-        .unwrap();
+        let r = call_tool(&b, "supabase.table.delete", &json!({ "confirm": true })).unwrap();
         assert!(!r.ok);
         assert_eq!(
             r.content.get("error").and_then(|v| v.as_str()),

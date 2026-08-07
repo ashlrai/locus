@@ -74,6 +74,8 @@ description = "Acme client — Supabase + Vercel + GH"
 [binding.policy]
 default = "allow"                 # allow | deny
 require_approval = ["*.delete*", "*.drop*", "vercel.deploy.prod"]
+dual_control = ["*.delete*", "vercel.deploy.prod"]  # two distinct principals
+# dual_control_all_approvals = true                   # all require_approval tools
 max_ttl = "8h"                    # session auto-expires
 parallel_sessions = 4             # cap concurrent workers for this binding
 
@@ -113,6 +115,8 @@ JSON Schema (control-plane API / validation):
       "properties": {
         "default": { "enum": ["allow", "deny"] },
         "require_approval": { "type": "array", "items": { "type": "string" } },
+        "dual_control": { "type": "array", "items": { "type": "string" } },
+        "dual_control_all_approvals": { "type": "boolean" },
         "max_ttl": { "type": "string" },
         "parallel_sessions": { "type": "integer", "minimum": 1 }
       }
@@ -404,9 +408,13 @@ when = 'args.owner == "acme-corp"'
 
 **Approval UX:**
 
-- CLI: `locus approve <id>` / macOS notification + Touch ID
-- MCP tool result: clear message “Blocked pending approval: vercel.deploy production — run `locus approve appr_…`”
-- Optional: auto-deny after N minutes
+- CLI: `locus approve grant <id> --as <principal>` / `locus approve status <id>`
+- Dual-control (firm mode): tools matching `policy.dual_control` (or all when
+  `dual_control_all_approvals = true`) need **two distinct principals** before
+  `status=approved`. One grant leaves the record `pending` with `grants.len()=1`.
+  Same principal cannot grant twice. Default principal: `LOCUS_PRINCIPAL` or `$USER`.
+- MCP tool result: clear message “Blocked pending approval… run `locus approve grant appr_… --as …`”
+- Optional: auto-deny after N minutes / macOS notification + Touch ID
 
 ### 4.5 Audit plane
 

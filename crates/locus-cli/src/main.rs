@@ -25,9 +25,14 @@ use std::process::{Command, Stdio};
     version = VERSION,
     about = "Identity plane for coding agents — wrong account, impossible.",
     long_about = "Pin a Binding (tenant × providers × credentials × policy).\n\
-Every CLI exec and (soon) MCP tool call is hard-scoped to that pin.\n\
+Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
-Locus protects which identity acts."
+Locus protects which identity acts.\n\n\
+Commands are grouped (in display order):\n  \
+  Setup         init · setup · doctor · workspace · hook · mcp\n  \
+  Daily use     pin · leave · whoami · status · exec · binding\n  \
+  Approvals     approve\n  \
+  Maintenance   version"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -40,59 +45,35 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    // ───────────────────────────── Setup ─────────────────────────────
     /// Initialize ~/.locus (or LOCUS_HOME)
+    #[command(next_help_heading = "Setup")]
     Init {
         /// Also write a sample personal + acme binding pair
         #[arg(long)]
         with_samples: bool,
     },
 
-    /// Pin the current session to a binding
-    Pin {
-        /// Binding alias or id (default: .locus.toml default_binding)
-        alias: Option<String>,
-        /// Allow bindings outside workspace allowlist
+    /// Register locus-mcp with an AI client config
+    #[command(next_help_heading = "Setup")]
+    Setup {
+        /// Client: claude | cursor | codex
+        #[arg(long, default_value = "claude")]
+        client: String,
+        /// Print config JSON instead of writing
         #[arg(long)]
-        force: bool,
-        /// Client label recorded on the session (claude, cursor, cli)
+        print: bool,
+        /// Path to locus-mcp binary (default: same dir as locus, or PATH)
         #[arg(long)]
-        client: Option<String>,
+        mcp_bin: Option<String>,
     },
 
-    /// Clear the active pin and tear down worker dirs
-    Leave,
-
-    /// Show who you are acting as (active pin)
-    Whoami,
-
-    /// Short status line for prompts / CI
-    Status {
-        /// One-line machine form: `unpinned` or `alias:tenant`
-        #[arg(long)]
-        oneline: bool,
-    },
-
-    /// Run a command with only the pinned binding's identity surface
-    Exec {
-        /// Do not resolve phm:/env: credential refs into secret env vars
-        #[arg(long)]
-        no_resolve: bool,
-        /// Fail if any credential_ref cannot be resolved
-        #[arg(long)]
-        strict_creds: bool,
-        /// Command and args (after `--`)
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
-        cmd: Vec<String>,
-    },
-
-    /// Run the locus-mcp stdio server (same as the locus-mcp binary)
-    Mcp,
-
-    /// Manage bindings
-    #[command(subcommand)]
-    Binding(BindingCmd),
+    /// Health check for the local control plane
+    #[command(next_help_heading = "Setup")]
+    Doctor,
 
     /// Write a .locus.toml in the current directory
+    #[command(next_help_heading = "Setup")]
     Workspace {
         /// Default binding alias
         #[arg(long)]
@@ -108,31 +89,74 @@ enum Commands {
         force: bool,
     },
 
-    /// Health check for the local control plane
-    Doctor,
-
     /// Shell hook snippet (prints eval-able code)
+    #[command(next_help_heading = "Setup")]
     Hook {
         /// Shell: zsh | bash | fish
         shell: String,
     },
 
-    /// Register locus-mcp with an AI client config
-    Setup {
-        /// Client: claude | cursor | codex
-        #[arg(long, default_value = "claude")]
-        client: String,
-        /// Print config JSON instead of writing
+    /// Run the locus-mcp stdio server (same as the locus-mcp binary)
+    #[command(next_help_heading = "Setup")]
+    Mcp,
+
+    // ─────────────────────────── Daily use ───────────────────────────
+    /// Pin the current session to a binding
+    #[command(next_help_heading = "Daily use")]
+    Pin {
+        /// Binding alias or id (default: .locus.toml default_binding)
+        alias: Option<String>,
+        /// Allow bindings outside workspace allowlist
         #[arg(long)]
-        print: bool,
-        /// Path to locus-mcp binary (default: same dir as locus, or PATH)
+        force: bool,
+        /// Client label recorded on the session (claude, cursor, cli)
         #[arg(long)]
-        mcp_bin: Option<String>,
+        client: Option<String>,
     },
 
-    /// Manage require_approval grants for blocked tool calls
-    #[command(subcommand)]
+    /// Clear the active pin and tear down worker dirs
+    #[command(next_help_heading = "Daily use")]
+    Leave,
+
+    /// Show who you are acting as (active pin)
+    #[command(next_help_heading = "Daily use")]
+    Whoami,
+
+    /// Short status line for prompts / CI
+    #[command(next_help_heading = "Daily use")]
+    Status {
+        /// One-line machine form: `unpinned` or `alias:tenant`
+        #[arg(long)]
+        oneline: bool,
+    },
+
+    /// Run a command with only the pinned binding's identity surface
+    #[command(next_help_heading = "Daily use")]
+    Exec {
+        /// Do not resolve phm:/env: credential refs into secret env vars
+        #[arg(long)]
+        no_resolve: bool,
+        /// Fail if any credential_ref cannot be resolved
+        #[arg(long)]
+        strict_creds: bool,
+        /// Command and args (after `--`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
+    },
+
+    /// Manage bindings
+    #[command(next_help_heading = "Daily use", subcommand)]
+    Binding(BindingCmd),
+
+    // ────────────────────────── Approvals ────────────────────────────
+    /// Manage require_approval / dual-control grants for blocked tool calls
+    #[command(next_help_heading = "Approvals", subcommand)]
     Approve(ApproveCmd),
+
+    // ───────────────────────── Maintenance ───────────────────────────
+    /// Print version (also available as `locus --version`)
+    #[command(next_help_heading = "Maintenance")]
+    Version,
 }
 
 #[derive(Subcommand, Debug)]
@@ -150,6 +174,9 @@ enum ApproveCmd {
         /// Grant lifetime (e.g. 15m, 1h). Default: 15m
         #[arg(long)]
         ttl: Option<String>,
+        /// Principal granting (default: LOCUS_PRINCIPAL or $USER)
+        #[arg(long = "as")]
+        as_principal: Option<String>,
     },
     /// Deny a pending approval
     Deny {
@@ -234,6 +261,17 @@ fn run() -> Result<()> {
             mcp_bin,
         } => cmd_setup(&client, print, mcp_bin),
         Commands::Approve(sub) => cmd_approve(sub, cli.json),
+        Commands::Version => {
+            if cli.json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "version": VERSION, "name": "locus" })
+                );
+            } else {
+                println!("locus {VERSION}");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -292,6 +330,7 @@ fn write_sample_bindings(s: &Store) -> Result<()> {
                     read_only: Some(false),
                     ..Scope::default()
                 },
+                upstream: None,
             },
             ProviderBinding {
                 provider: "github".into(),
@@ -301,6 +340,7 @@ fn write_sample_bindings(s: &Store) -> Result<()> {
                     orgs: vec![],
                     ..Scope::default()
                 },
+                upstream: None,
             },
             ProviderBinding {
                 provider: "vercel".into(),
@@ -310,6 +350,7 @@ fn write_sample_bindings(s: &Store) -> Result<()> {
                     team_id: Some("team_personal_replace_me".into()),
                     ..Scope::default()
                 },
+                upstream: None,
             },
         ],
     });
@@ -334,6 +375,7 @@ fn write_sample_bindings(s: &Store) -> Result<()> {
                     read_only: Some(true),
                     ..Scope::default()
                 },
+                upstream: None,
             },
             ProviderBinding {
                 provider: "github".into(),
@@ -344,6 +386,7 @@ fn write_sample_bindings(s: &Store) -> Result<()> {
                     repos: vec!["acme-corp/*".into()],
                     ..Scope::default()
                 },
+                upstream: None,
             },
             ProviderBinding {
                 provider: "vercel".into(),
@@ -355,6 +398,7 @@ fn write_sample_bindings(s: &Store) -> Result<()> {
                     env: vec!["preview".into()],
                     ..Scope::default()
                 },
+                upstream: None,
             },
         ],
     });
@@ -370,8 +414,27 @@ fn cmd_pin(alias: Option<String>, force: bool, client: Option<String>, json: boo
         Some(a) => s.pin(&a, &cwd(), client, force)?,
         None => s.pin_auto(&cwd(), client, force)?,
     };
+    // Policy surface for the pinned binding (counts only — never secrets)
+    let binding = s.load_binding(&session.binding_alias)?;
+    let require_approval_n = binding.policy.require_approval.len();
+    let dual_control_n = binding.policy.dual_control.len();
+    let dual_control_all = binding.policy.dual_control_all_approvals;
+    let providers_n = binding.providers.len();
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&session)?);
+        let mut v = serde_json::to_value(&session)?;
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "policy".into(),
+                json!({
+                    "require_approval": require_approval_n,
+                    "dual_control": dual_control_n,
+                    "dual_control_all_approvals": dual_control_all,
+                    "providers": providers_n,
+                }),
+            );
+        }
+        println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
         println!(
             "{} pinned {} ({})",
@@ -382,6 +445,17 @@ fn cmd_pin(alias: Option<String>, force: bool, client: Option<String>, json: boo
         println!("   session  {}", session.session_id);
         println!("   expires  {}", session.expires_at.to_rfc3339());
         println!("   worker   {}", session.worker_home);
+        println!(
+            "   policy   require_approval={}  dual_control={}{}",
+            require_approval_n,
+            dual_control_n,
+            if dual_control_all {
+                "  dual_control_all_approvals=true"
+            } else {
+                ""
+            }
+        );
+        println!("   providers {}", providers_n);
         println!();
         println!("   {}", "locus whoami".dimmed());
         println!("   {}", "locus exec -- <cmd>".dimmed());
@@ -706,6 +780,7 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
                     account,
                     credential_ref,
                     scope,
+                    upstream: None,
                 }],
             });
             let path = s.save_binding(&b)?;
@@ -825,6 +900,23 @@ fn cmd_doctor(json: bool) -> Result<()> {
         ));
     }
 
+    // Approvals directory health (path, writable, counts — never raw args)
+    let approvals = s.approvals_health()?;
+    if !approvals.exists {
+        issues.push(format!(
+            "approvals dir missing: {} (will be created on first require_approval block)",
+            approvals.dir
+        ));
+    } else if !approvals.writable {
+        issues.push(format!("approvals dir not writable: {}", approvals.dir));
+    }
+    if approvals.corrupt > 0 {
+        issues.push(format!(
+            "approvals: {} corrupt record(s) in {}",
+            approvals.corrupt, approvals.dir
+        ));
+    }
+
     let report = serde_json::json!({
         "version": VERSION,
         "home": s.home().display().to_string(),
@@ -834,6 +926,7 @@ fn cmd_doctor(json: bool) -> Result<()> {
         "pin_seal_ok": pin_seal_ok,
         "phantom_on_path": phantom_on_path,
         "unresolved_phm": unresolved_phm,
+        "approvals": approvals,
         "runtime": drift,
         "issues": issues,
         "ok": issues.is_empty(),
@@ -887,6 +980,26 @@ fn cmd_doctor(json: bool) -> Result<()> {
         } else if phantom_on_path {
             println!("  phm refs  {}", "ok".green());
         }
+        // Approvals dir health
+        let appr_status = if !approvals.exists {
+            "missing".red().to_string()
+        } else if !approvals.writable {
+            "not writable".red().to_string()
+        } else if approvals.corrupt > 0 {
+            format!("{} corrupt", approvals.corrupt).yellow().to_string()
+        } else {
+            "ok".green().to_string()
+        };
+        println!(
+            "  approvals {}  pending={} approved={} expired={} denied={} total={}",
+            appr_status,
+            approvals.pending,
+            approvals.approved_valid,
+            approvals.expired_grants,
+            approvals.denied,
+            approvals.total
+        );
+        println!("            {}", approvals.dir.dimmed());
         if issues.is_empty() {
             println!("  {}", "all clear".green().bold());
         } else {
@@ -1165,29 +1278,46 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             );
             Ok(())
         }
-        ApproveCmd::Grant { id, ttl } => {
+        ApproveCmd::Grant {
+            id,
+            ttl,
+            as_principal,
+        } => {
             let ttl_dur = match ttl {
                 Some(ref t) => Some(parse_ttl(t)?),
                 None => None,
             };
-            let rec = s.grant_approval(&id, ttl_dur)?;
+            let principal = as_principal
+                .or_else(|| env::var("LOCUS_PRINCIPAL").ok().filter(|s| !s.is_empty()))
+                .or_else(|| env::var("USER").ok().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| "local".into());
+            let rec = s.grant_approval(&id, ttl_dur, &principal)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&rec)?);
             } else {
                 println!(
-                    "{} granted {}  tool={}  binding={}",
+                    "{} granted {}  tool={}  binding={}  as={}",
                     "ok".green().bold(),
                     rec.id.cyan(),
                     rec.tool,
-                    rec.binding
+                    rec.binding,
+                    principal.dimmed()
                 );
                 if let Some(exp) = rec.expires_at {
                     println!("   expires  {}", exp.to_rfc3339());
                 }
-                println!(
-                    "   {}",
-                    "Re-call the tool with the same args (or confirm=true + approval_id).".dimmed()
-                );
+                if rec.status == locus_core::ApprovalStatus::Pending {
+                    println!(
+                        "   {} still pending dual-control — need another principal",
+                        "partial".yellow()
+                    );
+                } else {
+                    println!(
+                        "   {}",
+                        "Re-call the tool with the same args (or confirm=true + approval_id)."
+                            .dimmed()
+                    );
+                }
             }
             Ok(())
         }

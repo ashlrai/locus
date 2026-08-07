@@ -1,9 +1,19 @@
-use super::{freeze_string_arg, AdapterTool, ProviderAdapter, ToolCallResult};
+use super::{freeze_bool_arg, freeze_string_arg, AdapterTool, ProviderAdapter, ToolCallResult};
 use crate::binding::{Binding, ProviderBinding};
 use crate::error::Result;
 use serde_json::{json, Value};
 
 pub struct StripeAdapter;
+
+/// Resolved livemode from binding scope (`extra.livemode`, else inverse of `read_only`).
+fn frozen_livemode(provider: &ProviderBinding) -> Option<bool> {
+    provider
+        .scope
+        .extra
+        .get("livemode")
+        .and_then(|v| v.as_bool())
+        .or(provider.scope.read_only.map(|ro| !ro))
+}
 
 impl ProviderAdapter for StripeAdapter {
     fn name(&self) -> &'static str {
@@ -11,12 +21,7 @@ impl ProviderAdapter for StripeAdapter {
     }
 
     fn tools(&self, provider: &ProviderBinding, binding: &Binding) -> Vec<AdapterTool> {
-        let livemode = provider
-            .scope
-            .extra
-            .get("livemode")
-            .and_then(|v| v.as_bool())
-            .or(provider.scope.read_only.map(|ro| !ro));
+        let livemode = frozen_livemode(provider);
         let mode_hint = match livemode {
             Some(true) => "live",
             Some(false) => "test",
@@ -35,6 +40,10 @@ impl ProviderAdapter for StripeAdapter {
                         "account_id": {
                             "type": "string",
                             "description": "Ignored if binding freezes account_id; mismatch is denied."
+                        },
+                        "livemode": {
+                            "type": "boolean",
+                            "description": "Ignored if binding freezes livemode; mismatch is denied."
                         }
                     },
                     "additionalProperties": false
@@ -62,12 +71,8 @@ impl ProviderAdapter for StripeAdapter {
         let frozen = provider.scope.account_id.as_deref();
         let account_id = freeze_string_arg(args, "account_id", frozen)?;
 
-        let livemode = provider
-            .scope
-            .extra
-            .get("livemode")
-            .and_then(|v| v.as_bool())
-            .or(provider.scope.read_only.map(|ro| !ro));
+        let frozen_live = frozen_livemode(provider);
+        let livemode = freeze_bool_arg(args, "livemode", frozen_live)?;
 
         match tool {
             "stripe.scope" | "stripe.whoami" => Ok(ToolCallResult {

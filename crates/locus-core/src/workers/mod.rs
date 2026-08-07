@@ -3,7 +3,9 @@
 //! - [`SyntheticBackend`] serves in-process adapter tools (default).
 //! - [`McpStdioBackend`] spawns an upstream MCP child, handshakes, and
 //!   fans out `tools/call` over stdio JSON-RPC.
+//! - [`CompositeWorkerManager`] routes per provider from binding `upstream`.
 
+mod composite;
 mod mcp_stdio;
 mod stdio_client;
 mod synthetic;
@@ -16,6 +18,10 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub use composite::{
+    mcp_config_from_upstream, namespace_upstream_tool, provider_from_tool_name,
+    strip_provider_prefix, CompositeWorkerManager,
+};
 pub use mcp_stdio::{McpStdioBackend, McpStdioConfig};
 pub use stdio_client::{McpStdioClient, UpstreamTool};
 pub use synthetic::SyntheticBackend;
@@ -252,12 +258,14 @@ mod tests {
                         project_ref: Some("proj_acme".into()),
                         ..Scope::default()
                     },
+                    upstream: None,
                 },
                 ProviderBinding {
                     provider: "github".into(),
                     account: "acme-gh".into(),
                     credential_ref: "phm:GH_ACME".into(),
                     scope: Scope::default(),
+                    upstream: None,
                 },
             ],
         })

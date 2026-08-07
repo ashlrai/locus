@@ -10,6 +10,9 @@ description = "Acme client engagement"
 [binding.policy]
 default = "allow"
 require_approval = ["*.delete*", "*.drop*", "vercel.deploy.prod"]
+# Firm mode: these tools need two distinct principals (`locus approve grant --as`)
+dual_control = ["*.delete*", "vercel.deploy.prod"]
+# dual_control_all_approvals = true
 max_ttl = "8h"
 parallel_sessions = 4
 
@@ -24,6 +27,8 @@ provider = "github"
 account = "acme-corp"
 credential_ref = "phm:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
+# Optional: auto-spawn upstream MCP for this provider when pinned.
+# upstream = { command = "npx", args = ["-y", "@modelcontextprotocol/server-github"], resolve_secrets = true }
 
 [[binding.providers]]
 provider = "vercel"

@@ -28,10 +28,26 @@ pub fn evaluate(policy: &Policy, tool: &str) -> PolicyVerdict {
     // require_approval first (highest priority among affirmative controls)
     for pat in &policy.require_approval {
         if glob_match(pat, tool) {
+            let dual = policy.requires_dual_control(tool);
             return PolicyVerdict {
                 decision: Decision::RequireApproval,
                 matched_rule: Some(pat.clone()),
-                reason: format!("tool '{tool}' matches require_approval pattern '{pat}'"),
+                reason: if dual {
+                    format!("tool '{tool}' matches require_approval pattern '{pat}' (dual_control)")
+                } else {
+                    format!("tool '{tool}' matches require_approval pattern '{pat}'")
+                },
+            };
+        }
+    }
+
+    // dual_control globs also require approval even if not in require_approval
+    for pat in &policy.dual_control {
+        if glob_match(pat, tool) {
+            return PolicyVerdict {
+                decision: Decision::RequireApproval,
+                matched_rule: Some(pat.clone()),
+                reason: format!("tool '{tool}' matches dual_control pattern '{pat}'"),
             };
         }
     }
@@ -102,6 +118,8 @@ mod tests {
         let p = Policy {
             default: "allow".into(),
             require_approval: vec!["*.delete*".into(), "vercel.deploy.prod".into()],
+            dual_control: vec![],
+            dual_control_all_approvals: false,
             max_ttl: None,
             parallel_sessions: 4,
         };
@@ -117,10 +135,46 @@ mod tests {
     }
 
     #[test]
+    fn dual_control_implies_require_approval() {
+        let p = Policy {
+            default: "allow".into(),
+            require_approval: vec![],
+            dual_control: vec!["vercel.deploy.prod".into()],
+            dual_control_all_approvals: false,
+            max_ttl: None,
+            parallel_sessions: 4,
+        };
+        let v = evaluate(&p, "vercel.deploy.prod");
+        assert_eq!(v.decision, Decision::RequireApproval);
+        assert!(v.reason.contains("dual_control"));
+        assert!(p.requires_dual_control("vercel.deploy.prod"));
+        assert!(!p.requires_dual_control("github.list_prs"));
+    }
+
+    #[test]
+    fn dual_control_all_approvals() {
+        let p = Policy {
+            default: "allow".into(),
+            require_approval: vec!["*.delete*".into()],
+            dual_control: vec![],
+            dual_control_all_approvals: true,
+            max_ttl: None,
+            parallel_sessions: 4,
+        };
+        assert!(p.requires_dual_control("supabase.table.delete"));
+        assert!(!p.requires_dual_control("github.list_prs"));
+        let v = evaluate(&p, "supabase.table.delete");
+        assert_eq!(v.decision, Decision::RequireApproval);
+        assert!(v.reason.contains("dual_control"));
+    }
+
+    #[test]
     fn default_deny() {
         let p = Policy {
             default: "deny".into(),
             require_approval: vec![],
+            dual_control: vec![],
+            dual_control_all_approvals: false,
             max_ttl: None,
             parallel_sessions: 1,
         };

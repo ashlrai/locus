@@ -81,7 +81,11 @@ impl McpStdioBackend {
     }
 
     /// List tools from a live upstream client (handshake if needed).
-    pub fn upstream_tools(&self, session_id: &str, provider: &str) -> Result<Vec<String>> {
+    pub fn list_upstream_tools(
+        &self,
+        session_id: &str,
+        provider: &str,
+    ) -> Result<Vec<super::UpstreamTool>> {
         let ck = client_key(session_id, provider);
         let clients = self
             .clients
@@ -90,8 +94,13 @@ impl McpStdioBackend {
         let client = clients
             .get(&ck)
             .ok_or_else(|| LocusError::msg("no live mcp client for provider"))?;
-        Ok(client
-            .list_tools_cached()?
+        client.list_tools_cached()
+    }
+
+    /// Convenience: tool names only.
+    pub fn upstream_tools(&self, session_id: &str, provider: &str) -> Result<Vec<String>> {
+        Ok(self
+            .list_upstream_tools(session_id, provider)?
             .into_iter()
             .map(|t| t.name)
             .collect())

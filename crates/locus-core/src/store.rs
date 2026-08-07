@@ -1,9 +1,10 @@
 //! Local control-plane store under `~/.locus/` (or `LOCUS_HOME`).
 
 use crate::approval::{
-    args_digest, default_grant_ttl, mint_approval_id, ApprovalRecord, ApprovalStatus,
+    args_digest, default_grant_ttl, mint_approval_id, validate_approval_id, ApprovalRecord,
+    ApprovalStatus,
 };
-use crate::binding::{Binding, BindingSummary};
+use crate::binding::{validate_name_component, Binding, BindingSummary};
 use crate::error::{LocusError, Result};
 use crate::seal::SealKey;
 use crate::session::{parse_ttl, PinSource, Session};
@@ -88,16 +89,30 @@ impl Store {
 
     pub fn save_binding(&self, binding: &Binding) -> Result<PathBuf> {
         binding.validate()?;
+        // Double-check alias cannot escape bindings/ (also enforced in validate)
+        validate_name_component("alias", &binding.alias)?;
         let path = self.bindings_dir().join(format!("{}.toml", binding.alias));
+        ensure_under_dir(&self.bindings_dir(), &path)?;
         fs::write(&path, binding.to_toml()?)?;
         self.audit("binding.save", &binding.alias, None)?;
         Ok(path)
     }
 
     pub fn load_binding(&self, alias_or_id: &str) -> Result<Binding> {
-        // Prefer alias filename
+        // Reject path traversal before any filesystem join
+        if alias_or_id.contains('/')
+            || alias_or_id.contains('\\')
+            || alias_or_id.contains("..")
+            || alias_or_id.contains('\0')
+        {
+            return Err(LocusError::msg(format!(
+                "invalid binding name '{alias_or_id}': path separators and '..' are not allowed"
+            )));
+        }
+        // Prefer alias filename (alias charset validated on save; still constrain join)
         let by_alias = self.bindings_dir().join(format!("{alias_or_id}.toml"));
         if by_alias.exists() {
+            ensure_under_dir(&self.bindings_dir(), &by_alias)?;
             let raw = fs::read_to_string(&by_alias)?;
             return Binding::parse_toml(&raw);
         }
@@ -136,7 +151,9 @@ impl Store {
     }
 
     pub fn remove_binding(&self, alias: &str) -> Result<()> {
+        validate_name_component("alias", alias)?;
         let path = self.bindings_dir().join(format!("{alias}.toml"));
+        ensure_under_dir(&self.bindings_dir(), &path)?;
         if !path.exists() {
             return Err(LocusError::BindingNotFound(alias.into()));
         }
@@ -451,20 +468,26 @@ impl Store {
 
     // ── Approvals ─────────────────────────────────────────────────────────
 
-    fn approval_path(&self, id: &str) -> PathBuf {
-        self.approvals_dir().join(format!("{id}.json"))
+    fn approval_path(&self, id: &str) -> Result<PathBuf> {
+        validate_approval_id(id)?;
+        let path = self.approvals_dir().join(format!("{id}.json"));
+        ensure_under_dir(&self.approvals_dir(), &path)?;
+        Ok(path)
     }
 
     fn write_approval(&self, rec: &ApprovalRecord) -> Result<()> {
         fs::create_dir_all(self.approvals_dir())?;
-        let path = self.approval_path(&rec.id);
+        let path = self.approval_path(&rec.id)?;
         fs::write(&path, serde_json::to_string_pretty(rec)?)?;
         Ok(())
     }
 
     /// Load a single approval by id (`appr_…`).
+    ///
+    /// Rejects ids with path separators / `..` so callers cannot escape
+    /// `$LOCUS_HOME/approvals/`.
     pub fn load_approval(&self, id: &str) -> Result<ApprovalRecord> {
-        let path = self.approval_path(id);
+        let path = self.approval_path(id)?;
         if !path.exists() {
             return Err(LocusError::msg(format!("approval not found: {id}")));
         }
@@ -520,12 +543,11 @@ impl Store {
         binding: &str,
         args: &Value,
         session_id: &str,
+        requester: &str,
     ) -> Result<ApprovalRecord> {
         let digest = args_digest(args);
         for rec in self.list_approvals()? {
-            if rec.status == ApprovalStatus::Pending
-                && rec.matches_call(tool, binding, &digest)
-            {
+            if rec.status == ApprovalStatus::Pending && rec.matches_call(tool, binding, &digest) {
                 return Ok(rec);
             }
         }
@@ -537,6 +559,8 @@ impl Store {
             created_at: Utc::now(),
             status: ApprovalStatus::Pending,
             session_id: session_id.into(),
+            requester: requester.into(),
+            grants: Vec::new(),
             expires_at: None,
             granted_at: None,
         };
@@ -549,46 +573,127 @@ impl Store {
                 "tool": rec.tool,
                 "args_digest": rec.args_digest,
                 "session_id": rec.session_id,
+                "requester": rec.requester,
                 "status": "pending",
             })),
         )?;
         Ok(rec)
     }
 
-    /// Mark approval granted until `now + ttl` (default 15m).
-    pub fn grant_approval(&self, id: &str, ttl: Option<Duration>) -> Result<ApprovalRecord> {
+    /// Whether the binding policy requires dual-control for this tool.
+    pub fn tool_requires_dual_control(&self, binding_alias: &str, tool: &str) -> bool {
+        self.load_binding(binding_alias)
+            .map(|b| b.policy.requires_dual_control(tool))
+            .unwrap_or(false)
+    }
+
+    /// Add a principal grant. Single-control → Approved immediately.
+    /// Dual-control needs two distinct principals; one grant leaves status=Pending.
+    ///
+    /// `principal` must be non-empty. The same principal cannot grant twice.
+    pub fn grant_approval(
+        &self,
+        id: &str,
+        ttl: Option<Duration>,
+        principal: &str,
+    ) -> Result<ApprovalRecord> {
+        validate_approval_id(id)?;
+        let principal = principal.trim();
+        if principal.is_empty() {
+            return Err(LocusError::msg(
+                "principal is required (pass --as <name>, LOCUS_PRINCIPAL, or $USER)",
+            ));
+        }
+        // Principals become path/audit labels — constrain charset (no injection)
+        validate_name_component("principal", principal)?;
+
         let mut rec = self.load_approval(id)?;
         if rec.status == ApprovalStatus::Denied {
             return Err(LocusError::msg(format!(
                 "approval {id} was denied — request a new one"
             )));
         }
-        let ttl = ttl.unwrap_or_else(default_grant_ttl);
+        if rec.status == ApprovalStatus::Approved && rec.is_valid_grant() {
+            return Err(LocusError::msg(format!(
+                "approval {id} is already fully approved (expires {})",
+                rec.expires_at
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_else(|| "n/a".into())
+            )));
+        }
+
+        if rec.has_grant_from(principal) {
+            return Err(LocusError::msg(format!(
+                "principal '{principal}' already granted approval {id} — dual-control needs a different principal"
+            )));
+        }
+
+        let dual = self.tool_requires_dual_control(&rec.binding, &rec.tool);
+        let required = crate::approval::required_grant_count(dual);
         let now = Utc::now();
-        rec.status = ApprovalStatus::Approved;
-        rec.granted_at = Some(now);
-        rec.expires_at = Some(now + ttl);
-        self.write_approval(&rec)?;
-        self.audit(
-            "approval.grant",
-            &rec.binding,
-            Some(serde_json::json!({
-                "id": rec.id,
-                "tool": rec.tool,
-                "args_digest": rec.args_digest,
-                "expires_at": rec.expires_at.map(|t| t.to_rfc3339()),
-                "status": "approved",
-            })),
-        )?;
+
+        rec.grants.push(crate::approval::ApprovalGrant {
+            principal: principal.into(),
+            granted_at: now,
+        });
+
+        if rec.grants.len() >= required {
+            let ttl = ttl.unwrap_or_else(default_grant_ttl);
+            rec.status = ApprovalStatus::Approved;
+            rec.granted_at = Some(now);
+            rec.expires_at = Some(now + ttl);
+            self.write_approval(&rec)?;
+            self.audit(
+                "approval.grant",
+                &rec.binding,
+                Some(serde_json::json!({
+                    "id": rec.id,
+                    "tool": rec.tool,
+                    "args_digest": rec.args_digest,
+                    "principal": principal,
+                    "grants": rec.grants.len(),
+                    "required": required,
+                    "dual_control": dual,
+                    "expires_at": rec.expires_at.map(|t| t.to_rfc3339()),
+                    "status": "approved",
+                })),
+            )?;
+        } else {
+            // Partial dual-control grant — stay pending
+            rec.status = ApprovalStatus::Pending;
+            rec.granted_at = None;
+            rec.expires_at = None;
+            self.write_approval(&rec)?;
+            self.audit(
+                "approval.grant_partial",
+                &rec.binding,
+                Some(serde_json::json!({
+                    "id": rec.id,
+                    "tool": rec.tool,
+                    "principal": principal,
+                    "grants": rec.grants.len(),
+                    "required": required,
+                    "dual_control": true,
+                    "status": "pending",
+                    "hint": format!(
+                        "Need {} more distinct principal(s); run `locus approve grant {} --as <other>`",
+                        required - rec.grants.len(),
+                        rec.id
+                    ),
+                })),
+            )?;
+        }
         Ok(rec)
     }
 
     /// Mark approval denied (terminal).
     pub fn deny_approval(&self, id: &str) -> Result<ApprovalRecord> {
+        validate_approval_id(id)?;
         let mut rec = self.load_approval(id)?;
         rec.status = ApprovalStatus::Denied;
         rec.expires_at = None;
         rec.granted_at = None;
+        // Keep grants history for audit forensics
         self.write_approval(&rec)?;
         self.audit(
             "approval.deny",
@@ -597,6 +702,7 @@ impl Store {
                 "id": rec.id,
                 "tool": rec.tool,
                 "status": "denied",
+                "grants": rec.grants.len(),
             })),
         )?;
         Ok(rec)
@@ -629,6 +735,7 @@ impl Store {
         binding: &str,
         args: &Value,
     ) -> Result<ApprovalRecord> {
+        validate_approval_id(id)?;
         let rec = self.load_approval(id)?;
         if !rec.is_valid_grant() {
             return Err(LocusError::msg(format!(
@@ -648,9 +755,131 @@ impl Store {
         Ok(rec)
     }
 
+    /// Health snapshot for the approvals directory (doctor / ops).
+    ///
+    /// Never includes raw tool args — counts and status only.
+    pub fn approvals_health(&self) -> Result<ApprovalsHealth> {
+        let dir = self.approvals_dir();
+        let exists = dir.exists();
+        let mut pending = 0usize;
+        let mut approved = 0usize;
+        let mut denied = 0usize;
+        let mut expired_grants = 0usize;
+        let mut corrupt = 0usize;
+        let mut total = 0usize;
+        let mut writable = false;
+
+        if exists {
+            // Probe writability without leaving debris when possible
+            let probe = dir.join(".locus_write_probe");
+            writable = fs::write(&probe, b"ok").is_ok();
+            let _ = fs::remove_file(&probe);
+
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for ent in entries.flatten() {
+                    let path = ent.path();
+                    if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                        continue;
+                    }
+                    total += 1;
+                    let raw = match fs::read_to_string(&path) {
+                        Ok(r) => r,
+                        Err(_) => {
+                            corrupt += 1;
+                            continue;
+                        }
+                    };
+                    match serde_json::from_str::<ApprovalRecord>(&raw) {
+                        Ok(rec) => match rec.status {
+                            ApprovalStatus::Pending => pending += 1,
+                            ApprovalStatus::Denied => denied += 1,
+                            ApprovalStatus::Approved => {
+                                if rec.is_valid_grant() {
+                                    approved += 1;
+                                } else {
+                                    expired_grants += 1;
+                                }
+                            }
+                        },
+                        Err(_) => corrupt += 1,
+                    }
+                }
+            }
+        }
+
+        Ok(ApprovalsHealth {
+            dir: dir.display().to_string(),
+            exists,
+            writable: if exists { writable } else { false },
+            total,
+            pending,
+            approved_valid: approved,
+            expired_grants,
+            denied,
+            corrupt,
+            ok: exists && writable && corrupt == 0,
+        })
+    }
+
     pub fn workspace_for(&self, cwd: &Path) -> Option<(PathBuf, WorkspaceConfig)> {
         find_workspace(cwd)
     }
+}
+
+/// Ensure `path` resolves under `base` (no path traversal escapes).
+fn ensure_under_dir(base: &Path, path: &Path) -> Result<()> {
+    // Lexical check: no parent components after join
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(LocusError::msg(format!(
+            "refusing path outside store: {}",
+            path.display()
+        )));
+    }
+    // When both exist, also compare canonical prefixes
+    if base.exists() && path.exists() {
+        let base_c = fs::canonicalize(base)?;
+        let path_c = fs::canonicalize(path)?;
+        if !path_c.starts_with(&base_c) {
+            return Err(LocusError::msg(format!(
+                "refusing path outside store: {}",
+                path.display()
+            )));
+        }
+    } else if base.exists() {
+        let base_c = fs::canonicalize(base)?;
+        // Resolve parent + file name against base
+        if let Some(parent) = path.parent() {
+            if parent.exists() {
+                let parent_c = fs::canonicalize(parent)?;
+                if !parent_c.starts_with(&base_c) {
+                    return Err(LocusError::msg(format!(
+                        "refusing path outside store: {}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Doctor / ops view of `$LOCUS_HOME/approvals`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApprovalsHealth {
+    pub dir: String,
+    pub exists: bool,
+    pub writable: bool,
+    pub total: usize,
+    pub pending: usize,
+    pub approved_valid: usize,
+    pub expired_grants: usize,
+    pub denied: usize,
+    pub corrupt: usize,
+    /// True when dir exists, is writable, and has no corrupt records.
+    pub ok: bool,
 }
 
 /// One line from `$LOCUS_HOME/audit/events.jsonl`.
@@ -765,6 +994,7 @@ mod tests {
                         read_only: Some(false),
                         ..Scope::default()
                     },
+                    upstream: None,
                 },
                 ProviderBinding {
                     provider: "github".into(),
@@ -774,6 +1004,7 @@ mod tests {
                         orgs: vec![tenant.into()],
                         ..Scope::default()
                     },
+                    upstream: None,
                 },
             ],
         })
@@ -963,6 +1194,7 @@ allowed_bindings = ["acme"]
         let gate = ApprovalGate {
             store: &store,
             session_id: &session.session_id,
+            principal: Some("agent"),
         };
 
         // 1) First call creates pending, blocks
@@ -986,6 +1218,7 @@ allowed_bindings = ["acme"]
         assert_eq!(pending[0].status, ApprovalStatus::Pending);
         assert_eq!(pending[0].tool, "supabase.table.delete");
         assert_eq!(pending[0].binding, "acme");
+        assert_eq!(pending[0].requester, "agent");
         assert!(!pending[0].args_digest.is_empty());
 
         // 2) Retry without grant reuses same id
@@ -1007,11 +1240,13 @@ allowed_bindings = ["acme"]
         .unwrap();
         assert!(!r3.ok);
 
-        // 4) Grant
-        let granted = store.grant_approval(&approval_id, None).unwrap();
+        // 4) Grant (single-control → approved)
+        let granted = store.grant_approval(&approval_id, None, "alice").unwrap();
         assert_eq!(granted.status, ApprovalStatus::Approved);
         assert!(granted.expires_at.is_some());
         assert!(granted.is_valid_grant());
+        assert_eq!(granted.grants.len(), 1);
+        assert_eq!(granted.grants[0].principal, "alice");
         assert!(store.pending_approvals().unwrap().is_empty());
 
         // 5) Same args within TTL — allowed (no confirm needed)
@@ -1039,7 +1274,7 @@ allowed_bindings = ["acme"]
         store.deny_approval(&other_id).unwrap();
         let denied = store.load_approval(&other_id).unwrap();
         assert_eq!(denied.status, ApprovalStatus::Denied);
-        assert!(store.grant_approval(&other_id, None).is_err());
+        assert!(store.grant_approval(&other_id, None, "alice").is_err());
 
         // 8) confirm=true + approval_id path (new grant)
         let r8 = call_tool_gated(
@@ -1055,7 +1290,7 @@ allowed_bindings = ["acme"]
             .and_then(|v| v.as_str())
             .unwrap()
             .to_string();
-        store.grant_approval(&id8, None).unwrap();
+        store.grant_approval(&id8, None, "alice").unwrap();
         let r8b = call_tool_gated(
             &binding,
             "supabase.table.delete",
@@ -1068,6 +1303,158 @@ allowed_bindings = ["acme"]
         )
         .unwrap();
         assert!(r8b.ok, "approval_id path: {:?}", r8b.content);
+    }
+
+    #[test]
+    fn dual_control_one_grant_insufficient() {
+        use crate::adapters::{call_tool_gated, ApprovalGate};
+        use crate::approval::ApprovalStatus;
+        use serde_json::json;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        b.policy.require_approval = vec!["*.delete*".into()];
+        b.policy.dual_control = vec!["*.delete*".into()];
+        store.save_binding(&b).unwrap();
+        let session = store.pin("acme", dir.path(), None, false).unwrap();
+        let binding = store.load_binding("acme").unwrap();
+        let args = json!({ "table": "users" });
+        let gate = ApprovalGate {
+            store: &store,
+            session_id: &session.session_id,
+            principal: Some("agent"),
+        };
+
+        let r = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        assert!(!r.ok);
+        assert_eq!(
+            r.content.get("dual_control").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            r.content.get("required_grants").and_then(|v| v.as_u64()),
+            Some(2)
+        );
+        let id = r
+            .content
+            .get("approval_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        // One grant → still pending
+        let partial = store.grant_approval(&id, None, "alice").unwrap();
+        assert_eq!(partial.status, ApprovalStatus::Pending);
+        assert_eq!(partial.grants.len(), 1);
+        assert!(!partial.is_valid_grant());
+        assert!(store
+            .pending_approvals()
+            .unwrap()
+            .iter()
+            .any(|p| p.id == id));
+
+        // Tool still blocked
+        let r2 = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        assert!(!r2.ok);
+        assert_eq!(
+            r2.content.get("error").and_then(|v| v.as_str()),
+            Some("requires_approval")
+        );
+        assert_eq!(r2.content.get("grants").and_then(|v| v.as_u64()), Some(1));
+    }
+
+    #[test]
+    fn dual_control_two_grants_allow() {
+        use crate::adapters::{call_tool_gated, ApprovalGate};
+        use crate::approval::ApprovalStatus;
+        use serde_json::json;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        b.policy.require_approval = vec!["*.delete*".into()];
+        b.policy.dual_control = vec!["*.delete*".into()];
+        store.save_binding(&b).unwrap();
+        let session = store.pin("acme", dir.path(), None, false).unwrap();
+        let binding = store.load_binding("acme").unwrap();
+        let args = json!({ "table": "users" });
+        let gate = ApprovalGate {
+            store: &store,
+            session_id: &session.session_id,
+            principal: Some("agent"),
+        };
+
+        let r = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        let id = r
+            .content
+            .get("approval_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        store.grant_approval(&id, None, "alice").unwrap();
+        let full = store.grant_approval(&id, None, "bob").unwrap();
+        assert_eq!(full.status, ApprovalStatus::Approved);
+        assert_eq!(full.grants.len(), 2);
+        assert!(full.is_valid_grant());
+        assert!(full.has_grant_from("alice"));
+        assert!(full.has_grant_from("bob"));
+        assert!(store.pending_approvals().unwrap().is_empty());
+
+        let allowed =
+            call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        assert!(allowed.ok, "two grants should allow: {:?}", allowed.content);
+    }
+
+    #[test]
+    fn dual_control_same_principal_cannot_grant_twice() {
+        use crate::adapters::{call_tool_gated, ApprovalGate};
+        use crate::approval::ApprovalStatus;
+        use serde_json::json;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        b.policy.require_approval = vec!["*.delete*".into()];
+        b.policy.dual_control_all_approvals = true;
+        store.save_binding(&b).unwrap();
+        let session = store.pin("acme", dir.path(), None, false).unwrap();
+        let binding = store.load_binding("acme").unwrap();
+        let args = json!({ "table": "users" });
+        let gate = ApprovalGate {
+            store: &store,
+            session_id: &session.session_id,
+            principal: None,
+        };
+
+        let r = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        let id = r
+            .content
+            .get("approval_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+
+        let first = store.grant_approval(&id, None, "alice").unwrap();
+        assert_eq!(first.status, ApprovalStatus::Pending);
+        assert_eq!(first.grants.len(), 1);
+
+        let err = store.grant_approval(&id, None, "alice").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already granted") || msg.contains("different principal"),
+            "unexpected: {msg}"
+        );
+
+        // Still only one grant
+        let rec = store.load_approval(&id).unwrap();
+        assert_eq!(rec.grants.len(), 1);
+        assert_eq!(rec.status, ApprovalStatus::Pending);
+
+        // Tool still blocked
+        let r2 = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        assert!(!r2.ok);
     }
 
     #[test]
@@ -1086,6 +1473,7 @@ allowed_bindings = ["acme"]
         let gate = ApprovalGate {
             store: &store,
             session_id: &session.session_id,
+            principal: Some("agent"),
         };
 
         let r = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
@@ -1097,7 +1485,7 @@ allowed_bindings = ["acme"]
             .to_string();
         // Grant then force expires_at into the past
         let mut rec = store
-            .grant_approval(&id, Some(Duration::minutes(15)))
+            .grant_approval(&id, Some(Duration::minutes(15)), "alice")
             .unwrap();
         rec.expires_at = Some(Utc::now() - Duration::seconds(5));
         let path = store.approvals_dir().join(format!("{id}.json"));
@@ -1109,5 +1497,122 @@ allowed_bindings = ["acme"]
             r2.content.get("error").and_then(|v| v.as_str()),
             Some("requires_approval")
         );
+    }
+
+    /// Sequential stress: many pin/leave cycles must not leave a sticky pin
+    /// or corrupt the seal key / active session path.
+    #[test]
+    fn pin_leave_stress_many_iterations() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+
+        const N: usize = 64;
+        for i in 0..N {
+            let alias = if i % 2 == 0 { "acme" } else { "personal" };
+            let s = store
+                .pin(alias, dir.path(), Some(format!("stress-{i}")), false)
+                .unwrap();
+            assert_eq!(s.binding_alias, alias);
+            let w = store.whoami().unwrap();
+            assert_eq!(w.binding_alias, alias);
+            assert!(w.seal_ok);
+            store.require_active().unwrap();
+            let left = store.leave().unwrap();
+            assert!(left.is_some());
+            assert!(matches!(
+                store.require_active().unwrap_err(),
+                LocusError::NotPinned
+            ));
+        }
+
+        // Final pin still seals cleanly after stress
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let d = store.verify_runtime().unwrap();
+        assert!(d.ok);
+        assert!(d.seal_ok);
+    }
+
+    /// After leave → re-pin, tampering the new active session still fails closed.
+    #[test]
+    fn invalid_seal_after_leave_repin_cycle() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+
+        let s1 = store.pin("acme", dir.path(), None, false).unwrap();
+        let s1_id = s1.session_id.clone();
+        store.leave().unwrap();
+        assert!(store.active_session().unwrap().is_none());
+
+        let s2 = store.pin("personal", dir.path(), None, false).unwrap();
+        assert_ne!(s2.session_id, s1_id, "re-pin must mint a new session id");
+        store.require_active().unwrap();
+
+        // Tamper seal on the post-repin active session
+        let path = store.active_session_path();
+        let mut s: Session = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        s.seal = "deadbeef".into();
+        fs::write(&path, serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(matches!(
+            store.require_active().unwrap_err(),
+            LocusError::InvalidSeal
+        ));
+
+        // verify_runtime surfaces invalid_seal without panicking
+        let d = store.verify_runtime().unwrap();
+        assert!(!d.ok);
+        assert!(d.pinned);
+        assert!(!d.seal_ok);
+        assert!(d.issues.iter().any(|i| i == "invalid_seal"));
+
+        // Leave + re-pin recovers to a healthy pin
+        store.leave().unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        assert!(store.verify_runtime().unwrap().ok);
+    }
+
+    #[test]
+    fn save_binding_rejects_empty_providers_and_bad_alias() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+
+        let empty = Binding::from_body(BindingBody {
+            id: "bnd_e".into(),
+            alias: "empty".into(),
+            tenant: "t".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![],
+        });
+        assert!(store.save_binding(&empty).is_err());
+
+        let bad_alias = Binding::from_body(BindingBody {
+            id: "bnd_b".into(),
+            alias: "not valid!".into(),
+            tenant: "t".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "github".into(),
+                account: "a".into(),
+                credential_ref: "phm:X".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        });
+        assert!(store.save_binding(&bad_alias).is_err());
     }
 }
