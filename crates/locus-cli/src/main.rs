@@ -991,7 +991,9 @@ fn cmd_doctor(json: bool) -> Result<()> {
         } else if !approvals.writable {
             "not writable".red().to_string()
         } else if approvals.corrupt > 0 {
-            format!("{} corrupt", approvals.corrupt).yellow().to_string()
+            format!("{} corrupt", approvals.corrupt)
+                .yellow()
+                .to_string()
         } else {
             "ok".green().to_string()
         };
@@ -1333,8 +1335,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 }
                 println!(
                     "   {}",
-                    "Re-call the tool with the same args (or confirm=true + approval_id)."
-                        .dimmed()
+                    "Re-call the tool with the same args (or confirm=true + approval_id).".dimmed()
                 );
             } else {
                 let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);

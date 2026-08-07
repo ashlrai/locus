@@ -465,9 +465,11 @@ fn pinned_upstream_auto_spawn_list_and_call() {
                     orgs: vec!["acme-corp".into()],
                     ..Scope::default()
                 },
-                upstream: Some(
-                    UpstreamSpec::new("python3").with_args(["-u", "-c", mock_upstream_script()]),
-                ),
+                upstream: Some(UpstreamSpec::new("python3").with_args([
+                    "-u",
+                    "-c",
+                    mock_upstream_script(),
+                ])),
             },
             ProviderBinding {
                 provider: "supabase".into(),
