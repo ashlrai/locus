@@ -1,0 +1,69 @@
+# Example binding with an upstream MCP mock.
+#
+# Copy to ~/.locus/bindings/upstream-demo.toml (or `locus binding add` equivalent)
+# and edit. Never put raw secrets here — use phm: or env: refs.
+#
+# When a provider has `upstream`, Locus can spawn that MCP server with an
+# isolated env (ambient identity scrubbed; only this binding's surface).
+# Without upstream, tools come from the in-process synthetic adapter.
+
+[binding]
+id = "bnd_upstream_demo"
+alias = "upstream-demo"
+tenant = "demo"
+description = "Demo pin with a mock upstream MCP + synthetic adapters"
+
+[binding.policy]
+default = "allow"
+require_approval = ["*.delete*", "*.drop*"]
+max_ttl = "2h"
+parallel_sessions = 2
+
+# ── Upstream mock (stdio MCP) ─────────────────────────────────────────────
+# Uses the public MCP "everything" server as a stand-in for a real provider
+# upstream. Requires network the first time `npx` fetches the package.
+#
+# resolve_secrets = true injects resolved credential_ref values into the child
+# only (never into MCP tool responses).
+[[binding.providers]]
+provider = "github"
+account = "demo-gh"
+credential_ref = "env:GH_TOKEN"
+scope = { orgs = ["demo-org"], repos = ["demo-org/*"] }
+upstream = { command = "npx", args = ["-y", "@modelcontextprotocol/server-everything"], resolve_secrets = true }
+
+# Nested-table form (equivalent style for a second provider):
+[[binding.providers]]
+provider = "supabase"
+account = "demo-db"
+credential_ref = "phm:SUPABASE_DEMO"
+scope = { project_ref = "YOUR_PROJECT_REF", read_only = true }
+
+# Optional: spawn a custom Python/Node mock instead of npx everything:
+# [[binding.providers]]
+# provider = "mock"
+# account = "local"
+# credential_ref = "test:unused"
+# [binding.providers.upstream]
+# command = "python3"
+# args = ["-u", "path/to/mock_mcp_server.py"]
+# resolve_secrets = false
+
+[[binding.providers]]
+provider = "stripe"
+account = "demo-stripe"
+credential_ref = "phm:STRIPE_DEMO"
+# livemode freezes test mode — model cannot flip to live via tool args
+scope = { account_id = "acct_demo", livemode = false }
+
+[[binding.providers]]
+provider = "cloudflare"
+account = "demo-cf"
+credential_ref = "phm:CF_DEMO"
+scope = { account_id = "cf_acct_demo" }
+
+[[binding.providers]]
+provider = "aws"
+account = "demo-aws"
+credential_ref = "env:AWS_ACCESS_KEY_ID"
+scope = { account_id = "123456789012" }
