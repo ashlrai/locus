@@ -21,8 +21,9 @@ jobs:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
+          # Cross-compile Intel mac from Apple Silicon runners (macos-13 is scarce)
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
 
