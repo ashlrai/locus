@@ -9,7 +9,9 @@
 //! use the same framing as the request that triggered them.
 
 use anyhow::{Context, Result};
-use locus_core::{call_tool, control_tools, tools_for_binding, AdapterTool, Store, VERSION};
+use locus_core::{
+    call_tool_gated, control_tools, tools_for_binding, AdapterTool, ApprovalGate, Store, VERSION,
+};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 
@@ -239,8 +241,9 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
     }
 
     // Provider tools require pin
+    let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     let pinned = active_binding().map_err(|e| rpc_error(-32000, e.to_string()))?;
-    let Some((_, binding)) = pinned else {
+    let Some((session, binding)) = pinned else {
         return Ok(tool_text(
             json!({
                 "error": "not_pinned",
@@ -250,24 +253,27 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
         ));
     };
 
-    match call_tool(&binding, name, &args) {
+    let gate = ApprovalGate {
+        store: &s,
+        session_id: &session.session_id,
+    };
+    match call_tool_gated(&binding, name, &args, Some(gate)) {
         Ok(r) => {
-            // Record pending approval so `locus approve` can list it.
+            // Audit require_approval blocks (record already on disk under approvals/)
             if !r.ok {
                 if let Some(err) = r.content.get("error").and_then(|v| v.as_str()) {
                     if err == "requires_approval" {
-                        if let Ok(s) = store() {
-                            let _ = s.audit(
-                                "mcp.require_approval",
-                                &binding.alias,
-                                Some(json!({
-                                    "tool": name,
-                                    "status": "pending",
-                                    "detail": r.content.get("detail"),
-                                    "args": args,
-                                })),
-                            );
-                        }
+                        let _ = s.audit(
+                            "mcp.require_approval",
+                            &binding.alias,
+                            Some(json!({
+                                "tool": name,
+                                "status": "pending",
+                                "approval_id": r.content.get("approval_id"),
+                                "args_digest": r.content.get("args_digest"),
+                                "detail": r.content.get("detail"),
+                            })),
+                        );
                     }
                 }
             }
@@ -277,13 +283,11 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
             // Scope freeze denials surface as errors from adapters
             let msg = e.to_string();
             if msg.contains("scope freeze") {
-                if let Ok(s) = store() {
-                    let _ = s.audit(
-                        "mcp.scope_freeze",
-                        &binding.alias,
-                        Some(json!({ "tool": name, "error": msg, "args": args })),
-                    );
-                }
+                let _ = s.audit(
+                    "mcp.scope_freeze",
+                    &binding.alias,
+                    Some(json!({ "tool": name, "error": msg, "args": args })),
+                );
             }
             Ok(tool_text(json!({ "error": msg }), true))
         }

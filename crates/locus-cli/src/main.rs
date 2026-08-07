@@ -11,8 +11,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use locus_core::{
-    build_isolated_env_opts, Binding, BindingBody, Policy, ProviderBinding, Scope, Store,
-    WorkspaceConfig, VERSION,
+    build_isolated_env_opts, parse_ttl, Binding, BindingBody, Policy, ProviderBinding, Scope,
+    Store, WorkspaceConfig, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -130,15 +130,31 @@ enum Commands {
         mcp_bin: Option<String>,
     },
 
-    /// List pending require_approval tool calls from the audit log (stub)
-    ///
-    /// Phase 1: read-only listing. Granting approval UX lands later — for now
-    /// re-call the tool with `confirm=true` after human review, or adjust
-    /// binding.policy.require_approval.
-    Approve {
-        /// Limit number of events shown (default: 50)
+    /// Manage require_approval grants for blocked tool calls
+    #[command(subcommand)]
+    Approve(ApproveCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum ApproveCmd {
+    /// List pending approval requests
+    List {
+        /// Max rows (default: 50)
         #[arg(long, default_value_t = 50)]
         limit: usize,
+    },
+    /// Grant a pending approval (default TTL 15m)
+    Grant {
+        /// Approval id (`appr_…`)
+        id: String,
+        /// Grant lifetime (e.g. 15m, 1h). Default: 15m
+        #[arg(long)]
+        ttl: Option<String>,
+    },
+    /// Deny a pending approval
+    Deny {
+        /// Approval id (`appr_…`)
+        id: String,
     },
 }
 
@@ -217,7 +233,7 @@ fn run() -> Result<()> {
             print,
             mcp_bin,
         } => cmd_setup(&client, print, mcp_bin),
-        Commands::Approve { limit } => cmd_approve(limit, cli.json),
+        Commands::Approve(sub) => cmd_approve(sub, cli.json),
     }
 }
 
@@ -1091,75 +1107,106 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
     Ok(())
 }
 
-/// List pending `mcp.require_approval` audit events (phase-1 stub — no grant).
-fn cmd_approve(limit: usize, json: bool) -> Result<()> {
+fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
     let s = store()?;
-    let mut pending = s.pending_approvals()?;
-    // newest last in file — reverse for most-recent-first display
-    pending.reverse();
-    if pending.len() > limit {
-        pending.truncate(limit);
-    }
+    match sub {
+        ApproveCmd::List { limit } => {
+            let mut pending = s.pending_approvals()?;
+            if pending.len() > limit {
+                pending.truncate(limit);
+            }
 
-    if json {
-        println!("{}", serde_json::to_string_pretty(&pending)?);
-        return Ok(());
-    }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&pending)?);
+                return Ok(());
+            }
 
-    if pending.is_empty() {
-        println!(
-            "{} no pending require_approval events in {}",
-            "->".dimmed(),
-            s.audit_path().display()
-        );
-        println!(
-            "   {}",
-            "Blocked tool calls are recorded when agents hit policy.require_approval.".dimmed()
-        );
-        println!(
-            "   {}",
-            "After review: re-call with confirm=true, or edit binding.policy.require_approval."
-                .dimmed()
-        );
-        return Ok(());
-    }
+            if pending.is_empty() {
+                println!(
+                    "{} no pending approvals in {}",
+                    "->".dimmed(),
+                    s.approvals_dir().display()
+                );
+                println!(
+                    "   {}",
+                    "Blocked tool calls write appr_*.json when agents hit policy.require_approval."
+                        .dimmed()
+                );
+                println!(
+                    "   {}",
+                    "Grant: locus approve grant <id>   Deny: locus approve deny <id>".dimmed()
+                );
+                return Ok(());
+            }
 
-    println!(
-        "{} {} pending approval event(s)  {}",
-        "approve".magenta().bold(),
-        pending.len(),
-        "(stub — list only)".dimmed()
-    );
-    for (i, ev) in pending.iter().enumerate() {
-        let tool = ev
-            .detail
-            .as_ref()
-            .and_then(|d| d.get("tool"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("?");
-        let detail = ev
-            .detail
-            .as_ref()
-            .and_then(|d| d.get("detail"))
-            .and_then(|t| t.as_str())
-            .unwrap_or("");
-        println!(
-            "  {}. {}  binding={}  tool={}",
-            i + 1,
-            ev.ts.dimmed(),
-            ev.binding.cyan(),
-            tool.yellow()
-        );
-        if !detail.is_empty() {
-            println!("      {}", detail.dimmed());
+            println!(
+                "{} {} pending approval(s)",
+                "approve".magenta().bold(),
+                pending.len()
+            );
+            for rec in &pending {
+                println!(
+                    "  {}  {}  binding={}  tool={}",
+                    rec.id.cyan().bold(),
+                    rec.created_at.to_rfc3339().dimmed(),
+                    rec.binding.yellow(),
+                    rec.tool.yellow()
+                );
+                println!(
+                    "      digest={}  session={}",
+                    rec.args_digest.dimmed(),
+                    rec.session_id.dimmed()
+                );
+            }
+            println!();
+            println!(
+                "{}",
+                "Grant: locus approve grant <id>   then re-call tool (same args) or with confirm=true + approval_id".dimmed()
+            );
+            Ok(())
+        }
+        ApproveCmd::Grant { id, ttl } => {
+            let ttl_dur = match ttl {
+                Some(ref t) => Some(parse_ttl(t)?),
+                None => None,
+            };
+            let rec = s.grant_approval(&id, ttl_dur)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rec)?);
+            } else {
+                println!(
+                    "{} granted {}  tool={}  binding={}",
+                    "ok".green().bold(),
+                    rec.id.cyan(),
+                    rec.tool,
+                    rec.binding
+                );
+                if let Some(exp) = rec.expires_at {
+                    println!("   expires  {}", exp.to_rfc3339());
+                }
+                println!(
+                    "   {}",
+                    "Re-call the tool with the same args (or confirm=true + approval_id).".dimmed()
+                );
+            }
+            Ok(())
+        }
+        ApproveCmd::Deny { id } => {
+            let rec = s.deny_approval(&id)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&rec)?);
+            } else {
+                println!(
+                    "{} denied {}  tool={}  binding={}",
+                    "ok".green().bold(),
+                    rec.id.cyan(),
+                    rec.tool,
+                    rec.binding
+                );
+            }
+            Ok(())
         }
     }
-    println!();
-    println!(
-        "{}",
-        "Phase 1: granting is manual — re-call tool with confirm=true after human review.".dimmed()
-    );
-    Ok(())
 }
 
 /// Merge a single server entry into an mcpServers JSON file.

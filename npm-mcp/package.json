@@ -1,0 +1,54 @@
+{
+  "name": "locus-mcp",
+  "version": "0.1.0",
+  "description": "MCP multiplexor for Locus — tools hard-scoped to the active pin so agents cannot act in the wrong tenant.",
+  "bin": {
+    "locus-mcp": "bin/locus-mcp.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ashlrai/locus"
+  },
+  "keywords": [
+    "locus",
+    "mcp",
+    "model-context-protocol",
+    "identity",
+    "multi-account",
+    "tenant",
+    "isolation",
+    "claude",
+    "cursor",
+    "codex",
+    "ai-agents",
+    "security"
+  ],
+  "author": "AshlrAI",
+  "license": "MIT",
+  "homepage": "https://github.com/ashlrai/locus",
+  "bugs": {
+    "url": "https://github.com/ashlrai/locus/issues"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "files": [
+    "bin/",
+    "install.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "mcpName": "io.github.ashlrai/locus-mcp"
+}

@@ -1,11 +1,15 @@
 //! Local control-plane store under `~/.locus/` (or `LOCUS_HOME`).
 
+use crate::approval::{
+    args_digest, default_grant_ttl, mint_approval_id, ApprovalRecord, ApprovalStatus,
+};
 use crate::binding::{Binding, BindingSummary};
 use crate::error::{LocusError, Result};
 use crate::seal::SealKey;
 use crate::session::{parse_ttl, PinSource, Session};
 use crate::workspace::{find_workspace, WorkspaceConfig};
-use chrono::Duration;
+use chrono::{Duration, Utc};
+use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -18,6 +22,7 @@ use std::path::{Path, PathBuf};
 ///   sessions/active.json
 ///   workers/<session_id>/
 ///   audit/events.jsonl
+///   approvals/{id}.json
 /// ```
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -36,6 +41,7 @@ impl Store {
         fs::create_dir_all(home.join("sessions"))?;
         fs::create_dir_all(home.join("workers"))?;
         fs::create_dir_all(home.join("audit"))?;
+        fs::create_dir_all(home.join("approvals"))?;
         let s = Self { home };
         // Ensure seal key exists
         let _ = s.seal_key()?;
@@ -48,6 +54,10 @@ impl Store {
 
     pub fn bindings_dir(&self) -> PathBuf {
         self.home.join("bindings")
+    }
+
+    pub fn approvals_dir(&self) -> PathBuf {
+        self.home.join("approvals")
     }
 
     pub fn seal_key_path(&self) -> PathBuf {
@@ -439,28 +449,203 @@ impl Store {
         Ok(out)
     }
 
-    /// Pending tool calls blocked by `require_approval` policy (for `locus approve`).
+    // ── Approvals ─────────────────────────────────────────────────────────
+
+    fn approval_path(&self, id: &str) -> PathBuf {
+        self.approvals_dir().join(format!("{id}.json"))
+    }
+
+    fn write_approval(&self, rec: &ApprovalRecord) -> Result<()> {
+        fs::create_dir_all(self.approvals_dir())?;
+        let path = self.approval_path(&rec.id);
+        fs::write(&path, serde_json::to_string_pretty(rec)?)?;
+        Ok(())
+    }
+
+    /// Load a single approval by id (`appr_…`).
+    pub fn load_approval(&self, id: &str) -> Result<ApprovalRecord> {
+        let path = self.approval_path(id);
+        if !path.exists() {
+            return Err(LocusError::msg(format!("approval not found: {id}")));
+        }
+        let raw = fs::read_to_string(&path)?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+
+    /// All approval records on disk (any status). Corrupt files are skipped.
+    pub fn list_approvals(&self) -> Result<Vec<ApprovalRecord>> {
+        let dir = self.approvals_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let mut entries: Vec<_> = fs::read_dir(&dir)?.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for ent in entries {
+            let path = ent.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = match fs::read_to_string(&path) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            if let Ok(rec) = serde_json::from_str::<ApprovalRecord>(&raw) {
+                out.push(rec);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Pending tool calls blocked by `require_approval` (for `locus approve list`).
     ///
-    /// Phase 1 stub: lists `mcp.require_approval` events whose detail.status is
-    /// `"pending"` (or missing). Does not grant approval yet.
-    pub fn pending_approvals(&self) -> Result<Vec<AuditEvent>> {
-        let events = self.read_audit_events()?;
-        Ok(events
+    /// Reads `$LOCUS_HOME/approvals/*.json` with `status=pending`, newest first.
+    pub fn pending_approvals(&self) -> Result<Vec<ApprovalRecord>> {
+        let mut pending: Vec<_> = self
+            .list_approvals()?
             .into_iter()
-            .filter(|e| e.op == "mcp.require_approval")
-            .filter(|e| {
-                match e
-                    .detail
-                    .as_ref()
-                    .and_then(|d| d.get("status"))
-                    .and_then(|s| s.as_str())
-                {
-                    Some("pending") | None => true,
-                    Some("approved") | Some("denied") => false,
-                    _ => true,
-                }
-            })
-            .collect())
+            .filter(|r| r.status == ApprovalStatus::Pending)
+            .collect();
+        pending.sort_by_key(|b| std::cmp::Reverse(b.created_at));
+        Ok(pending)
+    }
+
+    /// Create or reuse a pending approval for this tool call fingerprint.
+    ///
+    /// If a pending record already exists for the same tool + binding +
+    /// args_digest, returns it (stable id across retries).
+    pub fn create_pending_approval(
+        &self,
+        tool: &str,
+        binding: &str,
+        args: &Value,
+        session_id: &str,
+    ) -> Result<ApprovalRecord> {
+        let digest = args_digest(args);
+        for rec in self.list_approvals()? {
+            if rec.status == ApprovalStatus::Pending
+                && rec.matches_call(tool, binding, &digest)
+            {
+                return Ok(rec);
+            }
+        }
+        let rec = ApprovalRecord {
+            id: mint_approval_id(),
+            tool: tool.into(),
+            binding: binding.into(),
+            args_digest: digest,
+            created_at: Utc::now(),
+            status: ApprovalStatus::Pending,
+            session_id: session_id.into(),
+            expires_at: None,
+            granted_at: None,
+        };
+        self.write_approval(&rec)?;
+        self.audit(
+            "approval.pending",
+            binding,
+            Some(serde_json::json!({
+                "id": rec.id,
+                "tool": rec.tool,
+                "args_digest": rec.args_digest,
+                "session_id": rec.session_id,
+                "status": "pending",
+            })),
+        )?;
+        Ok(rec)
+    }
+
+    /// Mark approval granted until `now + ttl` (default 15m).
+    pub fn grant_approval(&self, id: &str, ttl: Option<Duration>) -> Result<ApprovalRecord> {
+        let mut rec = self.load_approval(id)?;
+        if rec.status == ApprovalStatus::Denied {
+            return Err(LocusError::msg(format!(
+                "approval {id} was denied — request a new one"
+            )));
+        }
+        let ttl = ttl.unwrap_or_else(default_grant_ttl);
+        let now = Utc::now();
+        rec.status = ApprovalStatus::Approved;
+        rec.granted_at = Some(now);
+        rec.expires_at = Some(now + ttl);
+        self.write_approval(&rec)?;
+        self.audit(
+            "approval.grant",
+            &rec.binding,
+            Some(serde_json::json!({
+                "id": rec.id,
+                "tool": rec.tool,
+                "args_digest": rec.args_digest,
+                "expires_at": rec.expires_at.map(|t| t.to_rfc3339()),
+                "status": "approved",
+            })),
+        )?;
+        Ok(rec)
+    }
+
+    /// Mark approval denied (terminal).
+    pub fn deny_approval(&self, id: &str) -> Result<ApprovalRecord> {
+        let mut rec = self.load_approval(id)?;
+        rec.status = ApprovalStatus::Denied;
+        rec.expires_at = None;
+        rec.granted_at = None;
+        self.write_approval(&rec)?;
+        self.audit(
+            "approval.deny",
+            &rec.binding,
+            Some(serde_json::json!({
+                "id": rec.id,
+                "tool": rec.tool,
+                "status": "denied",
+            })),
+        )?;
+        Ok(rec)
+    }
+
+    /// Find a still-valid approved grant matching tool + binding + args_digest.
+    pub fn find_valid_grant(
+        &self,
+        tool: &str,
+        binding: &str,
+        args: &Value,
+    ) -> Result<Option<ApprovalRecord>> {
+        let digest = args_digest(args);
+        for rec in self.list_approvals()? {
+            if rec.is_valid_grant() && rec.matches_call(tool, binding, &digest) {
+                return Ok(Some(rec));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Validate an explicit `approval_id` for a gated call.
+    ///
+    /// Requires status=approved, unexpired, and tool+binding match.
+    /// Args digest must also match (grant is for that fingerprint).
+    pub fn check_approval_id(
+        &self,
+        id: &str,
+        tool: &str,
+        binding: &str,
+        args: &Value,
+    ) -> Result<ApprovalRecord> {
+        let rec = self.load_approval(id)?;
+        if !rec.is_valid_grant() {
+            return Err(LocusError::msg(format!(
+                "approval {id} is not a valid grant (status={}, expired={})",
+                rec.status.as_str(),
+                rec.expires_at
+                    .map(|e| (Utc::now() > e).to_string())
+                    .unwrap_or_else(|| "n/a".into())
+            )));
+        }
+        let digest = args_digest(args);
+        if !rec.matches_call(tool, binding, &digest) {
+            return Err(LocusError::msg(format!(
+                "approval {id} does not match this call (tool/binding/args_digest)"
+            )));
+        }
+        Ok(rec)
     }
 
     pub fn workspace_for(&self, cwd: &Path) -> Option<(PathBuf, WorkspaceConfig)> {
@@ -759,5 +944,170 @@ allowed_bindings = ["acme"]
         assert!(d.seal_ok);
         assert!(!d.binding_id_match);
         assert!(d.issues.iter().any(|i| i == "binding_id_drift"));
+    }
+
+    #[test]
+    fn approval_grant_flow() {
+        use crate::adapters::{call_tool_gated, ApprovalGate};
+        use crate::approval::ApprovalStatus;
+        use serde_json::json;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        b.policy.require_approval = vec!["*.delete*".into()];
+        store.save_binding(&b).unwrap();
+        let session = store.pin("acme", dir.path(), None, false).unwrap();
+        let binding = store.load_binding("acme").unwrap();
+        let args = json!({ "table": "users" });
+        let gate = ApprovalGate {
+            store: &store,
+            session_id: &session.session_id,
+        };
+
+        // 1) First call creates pending, blocks
+        let r1 = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        assert!(!r1.ok);
+        assert_eq!(
+            r1.content.get("error").and_then(|v| v.as_str()),
+            Some("requires_approval")
+        );
+        let approval_id = r1
+            .content
+            .get("approval_id")
+            .and_then(|v| v.as_str())
+            .expect("approval_id in response")
+            .to_string();
+        assert!(approval_id.starts_with("appr_"));
+
+        let pending = store.pending_approvals().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, approval_id);
+        assert_eq!(pending[0].status, ApprovalStatus::Pending);
+        assert_eq!(pending[0].tool, "supabase.table.delete");
+        assert_eq!(pending[0].binding, "acme");
+        assert!(!pending[0].args_digest.is_empty());
+
+        // 2) Retry without grant reuses same id
+        let r2 = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        assert!(!r2.ok);
+        assert_eq!(
+            r2.content.get("approval_id").and_then(|v| v.as_str()),
+            Some(approval_id.as_str())
+        );
+        assert_eq!(store.pending_approvals().unwrap().len(), 1);
+
+        // 3) confirm=true without grant still blocks
+        let r3 = call_tool_gated(
+            &binding,
+            "supabase.table.delete",
+            &json!({ "table": "users", "confirm": true }),
+            Some(gate),
+        )
+        .unwrap();
+        assert!(!r3.ok);
+
+        // 4) Grant
+        let granted = store.grant_approval(&approval_id, None).unwrap();
+        assert_eq!(granted.status, ApprovalStatus::Approved);
+        assert!(granted.expires_at.is_some());
+        assert!(granted.is_valid_grant());
+        assert!(store.pending_approvals().unwrap().is_empty());
+
+        // 5) Same args within TTL — allowed (no confirm needed)
+        let r5 = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        assert!(r5.ok, "expected allow after grant: {:?}", r5.content);
+
+        // 6) Different args still need approval
+        let r6 = call_tool_gated(
+            &binding,
+            "supabase.table.delete",
+            &json!({ "table": "orders" }),
+            Some(gate),
+        )
+        .unwrap();
+        assert!(!r6.ok);
+        let other_id = r6
+            .content
+            .get("approval_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        assert_ne!(other_id, approval_id);
+
+        // 7) deny
+        store.deny_approval(&other_id).unwrap();
+        let denied = store.load_approval(&other_id).unwrap();
+        assert_eq!(denied.status, ApprovalStatus::Denied);
+        assert!(store.grant_approval(&other_id, None).is_err());
+
+        // 8) confirm=true + approval_id path (new grant)
+        let r8 = call_tool_gated(
+            &binding,
+            "supabase.table.delete",
+            &json!({ "table": "payments" }),
+            Some(gate),
+        )
+        .unwrap();
+        let id8 = r8
+            .content
+            .get("approval_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        store.grant_approval(&id8, None).unwrap();
+        let r8b = call_tool_gated(
+            &binding,
+            "supabase.table.delete",
+            &json!({
+                "table": "payments",
+                "confirm": true,
+                "approval_id": id8,
+            }),
+            Some(gate),
+        )
+        .unwrap();
+        assert!(r8b.ok, "approval_id path: {:?}", r8b.content);
+    }
+
+    #[test]
+    fn approval_expired_grant_blocks() {
+        use crate::adapters::{call_tool_gated, ApprovalGate};
+        use serde_json::json;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        b.policy.require_approval = vec!["*.delete*".into()];
+        store.save_binding(&b).unwrap();
+        let session = store.pin("acme", dir.path(), None, false).unwrap();
+        let binding = store.load_binding("acme").unwrap();
+        let args = json!({ "table": "users" });
+        let gate = ApprovalGate {
+            store: &store,
+            session_id: &session.session_id,
+        };
+
+        let r = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        let id = r
+            .content
+            .get("approval_id")
+            .and_then(|v| v.as_str())
+            .unwrap()
+            .to_string();
+        // Grant then force expires_at into the past
+        let mut rec = store
+            .grant_approval(&id, Some(Duration::minutes(15)))
+            .unwrap();
+        rec.expires_at = Some(Utc::now() - Duration::seconds(5));
+        let path = store.approvals_dir().join(format!("{id}.json"));
+        fs::write(&path, serde_json::to_string_pretty(&rec).unwrap()).unwrap();
+
+        let r2 = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        assert!(!r2.ok);
+        assert_eq!(
+            r2.content.get("error").and_then(|v| v.as_str()),
+            Some("requires_approval")
+        );
     }
 }

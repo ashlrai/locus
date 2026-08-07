@@ -9,6 +9,7 @@
 //!   and resolved secrets inside worker env maps.
 
 pub mod adapters;
+pub mod approval;
 pub mod binding;
 pub mod credential;
 pub mod error;
@@ -20,7 +21,13 @@ pub mod store;
 pub mod workers;
 pub mod workspace;
 
-pub use adapters::{call_tool, control_tools, tools_for_binding, AdapterTool, ToolCallResult};
+pub use adapters::{
+    call_tool, call_tool_gated, control_tools, tools_for_binding, AdapterTool, ApprovalGate,
+    ToolCallResult,
+};
+pub use approval::{
+    args_digest, default_grant_ttl, mint_approval_id, ApprovalRecord, ApprovalStatus,
+};
 pub use binding::{Binding, BindingBody, BindingSummary, Policy, ProviderBinding, Scope};
 pub use credential::{inject_keys_for_provider, resolve, resolve_binding_secrets, CredentialRef};
 pub use error::{LocusError, Result};
@@ -33,8 +40,9 @@ pub use seal::SealKey;
 pub use session::{parse_ttl, PinSource, Session, SessionMode};
 pub use store::{locus_home, AuditEvent, ProviderView, RuntimeDrift, Store, Whoami};
 pub use workers::{
-    InMemoryWorkerManager, McpStdioBackend, McpStdioConfig, SyntheticBackend, WorkerBackend,
-    WorkerKey, WorkerManager, WorkerSlot, WorkerState, WorkerToolResult,
+    InMemoryWorkerManager, McpStdioBackend, McpStdioClient, McpStdioConfig, SyntheticBackend,
+    UpstreamTool, WorkerBackend, WorkerKey, WorkerManager, WorkerSlot, WorkerState,
+    WorkerToolResult,
 };
 pub use workspace::{find_workspace, WorkspaceConfig};
 

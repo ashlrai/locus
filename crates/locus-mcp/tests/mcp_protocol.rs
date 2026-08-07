@@ -333,7 +333,7 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
     assert!(is_err, "expected supabase freeze deny: {text}");
     assert!(text.contains("scope freeze") || text.contains("proj_evil"));
 
-    // require_approval path writes audit for locus approve
+    // require_approval path writes pending approval for locus approve
     let del = client.request(
         "tools/call",
         json!({
@@ -344,20 +344,37 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
     let (text, is_err) = McpClient::tool_text(&del);
     assert!(is_err);
     assert!(text.contains("requires_approval") || text.contains("approval"));
+    assert!(
+        text.contains("appr_"),
+        "expected approval_id in response: {text}"
+    );
 
     let pending = store.pending_approvals().unwrap();
     assert!(
         !pending.is_empty(),
-        "expected mcp.require_approval audit event"
+        "expected pending approval record under approvals/"
     );
-    assert!(pending.iter().any(|e| {
-        e.op == "mcp.require_approval"
-            && e.detail
-                .as_ref()
-                .and_then(|d| d.get("tool"))
-                .and_then(|t| t.as_str())
-                == Some("supabase.table.delete")
+    assert!(pending.iter().any(|r| {
+        r.tool == "supabase.table.delete" && r.binding == "acme" && r.id.starts_with("appr_")
     }));
+
+    // Grant then re-call with same args succeeds
+    let id = pending
+        .iter()
+        .find(|r| r.tool == "supabase.table.delete")
+        .unwrap()
+        .id
+        .clone();
+    store.grant_approval(&id, None).unwrap();
+    let del2 = client.request(
+        "tools/call",
+        json!({
+            "name": "supabase.table.delete",
+            "arguments": { "table": "users" }
+        }),
+    );
+    let (text2, is_err2) = McpClient::tool_text(&del2);
+    assert!(!is_err2, "expected allow after grant: {text2}");
 }
 
 #[test]

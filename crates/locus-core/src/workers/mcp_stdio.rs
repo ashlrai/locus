@@ -1,12 +1,9 @@
-//! MCP stdio child-process backend (scaffold).
+//! MCP stdio child-process backend with JSON-RPC fan-out.
 //!
-//! Builds a `std::process::Command` with:
-//! - isolated env from `build_isolated_env_opts` (scrubbed ambient identity)
-//! - private work dir under the session worker home
-//! - no requirement that the upstream binary exists when `spawn = false`
-//!
-//! Real JSON-RPC handshake / tools/list fan-out is intentionally deferred.
+//! Builds a `std::process::Command` with isolated env, optionally spawns the
+//! child, handshakes MCP, and routes `tools/call` to the upstream server.
 
+use super::stdio_client::{client_key, McpStdioClient};
 use super::{WorkerBackend, WorkerKey, WorkerSlot, WorkerState, WorkerToolResult};
 use crate::binding::{Binding, ProviderBinding};
 use crate::error::{LocusError, Result};
@@ -26,15 +23,19 @@ pub struct McpStdioConfig {
     pub args: Vec<String>,
     /// When false (default), `ensure` only prepares the slot + work dir.
     pub spawn: bool,
+    /// Resolve credential_refs into child env when spawning.
+    pub resolve_secrets: bool,
     /// Extra env layered after isolation (non-secret config only preferred).
     pub extra_env: BTreeMap<String, String>,
 }
 
-/// Stdio MCP backend. Child handles are held only when `spawn = true`.
+/// Stdio MCP backend with live JSON-RPC clients.
 pub struct McpStdioBackend {
     config: McpStdioConfig,
-    /// session_id:provider → Child (only when spawned).
+    /// session:provider → Child process
     children: Mutex<BTreeMap<WorkerKey, Child>>,
+    /// Live MCP clients (stdin/stdout taken from children)
+    clients: Mutex<BTreeMap<String, McpStdioClient>>,
 }
 
 impl McpStdioBackend {
@@ -42,12 +43,11 @@ impl McpStdioBackend {
         Self {
             config,
             children: Mutex::new(BTreeMap::new()),
+            clients: Mutex::new(BTreeMap::new()),
         }
     }
 
     /// Build a `Command` ready to spawn with isolated env.
-    ///
-    /// Does not start the process. Callers (or `ensure` with `spawn=true`) own lifecycle.
     pub fn build_command(
         &self,
         session: &Session,
@@ -55,7 +55,7 @@ impl McpStdioBackend {
         provider: &ProviderBinding,
         work_dir: &Path,
     ) -> Command {
-        let iso = build_isolated_env_opts(session, binding, false);
+        let iso = build_isolated_env_opts(session, binding, self.config.resolve_secrets);
 
         let mut cmd = Command::new(&self.config.command);
         cmd.args(&self.config.args)
@@ -68,7 +68,6 @@ impl McpStdioBackend {
         for (k, v) in &iso.vars {
             cmd.env(k, v);
         }
-        // Provider-specific markers (non-secret)
         cmd.env("LOCUS_WORKER_PROVIDER", &provider.provider);
         cmd.env("LOCUS_WORKER_ACCOUNT", &provider.account);
         cmd.env("LOCUS_WORKER_CREDENTIAL_REF", &provider.credential_ref);
@@ -79,6 +78,23 @@ impl McpStdioBackend {
         }
 
         cmd
+    }
+
+    /// List tools from a live upstream client (handshake if needed).
+    pub fn upstream_tools(&self, session_id: &str, provider: &str) -> Result<Vec<String>> {
+        let ck = client_key(session_id, provider);
+        let clients = self
+            .clients
+            .lock()
+            .map_err(|_| LocusError::msg("clients lock poisoned"))?;
+        let client = clients
+            .get(&ck)
+            .ok_or_else(|| LocusError::msg("no live mcp client for provider"))?;
+        Ok(client
+            .list_tools_cached()?
+            .into_iter()
+            .map(|t| t.name)
+            .collect())
     }
 }
 
@@ -108,14 +124,32 @@ impl WorkerBackend for McpStdioBackend {
             }
             let mut cmd = self.build_command(session, binding, provider, work_dir);
             match cmd.spawn() {
-                Ok(child) => {
+                Ok(mut child) => {
                     pid = Some(child.id());
-                    state = WorkerState::Running;
-                    let mut guard = self
-                        .children
-                        .lock()
-                        .map_err(|_| LocusError::msg("worker children lock poisoned"))?;
-                    guard.insert(key.clone(), child);
+                    // Handshake before storing as Running
+                    let client = McpStdioClient::from_child(&mut child)?;
+                    match client.handshake() {
+                        Ok(_tools) => {
+                            state = WorkerState::Running;
+                            let ck = client_key(&session.session_id, &provider.provider);
+                            self.clients
+                                .lock()
+                                .map_err(|_| LocusError::msg("clients lock poisoned"))?
+                                .insert(ck, client);
+                            self.children
+                                .lock()
+                                .map_err(|_| LocusError::msg("children lock poisoned"))?
+                                .insert(key.clone(), child);
+                        }
+                        Err(e) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(LocusError::msg(format!(
+                                "mcp handshake failed for {}: {e}",
+                                provider.provider
+                            )));
+                        }
+                    }
                 }
                 Err(e) => {
                     return Err(LocusError::msg(format!(
@@ -140,6 +174,12 @@ impl WorkerBackend for McpStdioBackend {
     }
 
     fn teardown(&self, slot: &WorkerSlot) -> Result<()> {
+        let ck = client_key(&slot.key.session_id, &slot.key.provider);
+        let _ = self
+            .clients
+            .lock()
+            .map_err(|_| LocusError::msg("clients lock poisoned"))?
+            .remove(&ck);
         let mut guard = self
             .children
             .lock()
@@ -158,19 +198,54 @@ impl WorkerBackend for McpStdioBackend {
         tool: &str,
         args: &Value,
     ) -> Result<WorkerToolResult> {
-        // Scaffold: no JSON-RPC yet. Report clearly so callers don't pretend success.
-        Ok(WorkerToolResult {
-            ok: false,
-            content: json!({
-                "error": "mcp_stdio_not_connected",
-                "detail": "Phase 2 scaffold: stdio JSON-RPC fan-out not implemented yet",
-                "tool": tool,
-                "args": args,
-                "provider": slot.key.provider,
-                "pid": slot.pid,
-                "backend": "mcp_stdio",
+        let ck = client_key(&slot.key.session_id, &slot.key.provider);
+        let clients = self
+            .clients
+            .lock()
+            .map_err(|_| LocusError::msg("clients lock poisoned"))?;
+
+        let Some(client) = clients.get(&ck) else {
+            return Ok(WorkerToolResult {
+                ok: false,
+                content: json!({
+                    "error": "mcp_stdio_not_connected",
+                    "detail": "No live MCP client — spawn=true required, or child exited",
+                    "tool": tool,
+                    "provider": slot.key.provider,
+                    "backend": "mcp_stdio",
+                }),
+                provider: slot.key.provider.clone(),
+            });
+        };
+
+        // Strip provider prefix if tools were namespaced as provider.tool
+        let upstream_name = tool
+            .strip_prefix(&format!("{}.", slot.key.provider))
+            .unwrap_or(tool);
+
+        match client.call_tool(upstream_name, args) {
+            Ok(result) => {
+                let is_error = result
+                    .get("isError")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                Ok(WorkerToolResult {
+                    ok: !is_error,
+                    content: result,
+                    provider: slot.key.provider.clone(),
+                })
+            }
+            Err(e) => Ok(WorkerToolResult {
+                ok: false,
+                content: json!({
+                    "error": "upstream_call_failed",
+                    "detail": e.to_string(),
+                    "tool": tool,
+                    "upstream_tool": upstream_name,
+                    "provider": slot.key.provider,
+                }),
+                provider: slot.key.provider.clone(),
             }),
-            provider: slot.key.provider.clone(),
-        })
+        }
     }
 }

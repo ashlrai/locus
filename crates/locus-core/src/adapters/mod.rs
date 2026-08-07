@@ -15,6 +15,7 @@ mod vercel;
 use crate::binding::{Binding, ProviderBinding};
 use crate::error::{LocusError, Result};
 use crate::policy::{evaluate, Decision, PolicyVerdict};
+use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -25,6 +26,13 @@ pub use resend::ResendAdapter;
 pub use stripe::StripeAdapter;
 pub use supabase::SupabaseAdapter;
 pub use vercel::VercelAdapter;
+
+/// Context for require_approval gating during tools/call.
+#[derive(Debug, Clone, Copy)]
+pub struct ApprovalGate<'a> {
+    pub store: &'a Store,
+    pub session_id: &'a str,
+}
 
 /// A tool exposed through locus-mcp for the active pin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,8 +119,26 @@ pub fn tools_for_binding(binding: &Binding) -> Vec<AdapterTool> {
     out
 }
 
-/// Dispatch a tool call against the pinned binding.
+/// Dispatch a tool call against the pinned binding (no approval store).
+///
+/// For `require_approval` tools this always blocks unless a matching grant
+/// would be checked via [`call_tool_gated`]. Prefer gated calls from MCP.
 pub fn call_tool(binding: &Binding, tool_name: &str, args: &Value) -> Result<ToolCallResult> {
+    call_tool_gated(binding, tool_name, args, None)
+}
+
+/// Dispatch a tool call with optional approval grant store.
+///
+/// When policy says `require_approval`:
+/// 1. If a still-valid grant exists for tool+binding+args_digest → allow
+/// 2. Else if `confirm=true` and `approval_id` names a valid matching grant → allow
+/// 3. Else create/reuse a pending approval record and block with `approval_id`
+pub fn call_tool_gated(
+    binding: &Binding,
+    tool_name: &str,
+    args: &Value,
+    gate: Option<ApprovalGate<'_>>,
+) -> Result<ToolCallResult> {
     // Policy gate
     let verdict = evaluate(&binding.policy, tool_name);
     match verdict.decision {
@@ -124,18 +150,42 @@ pub fn call_tool(binding: &Binding, tool_name: &str, args: &Value) -> Result<Too
             });
         }
         Decision::RequireApproval => {
-            // Phase 1: hard-block with clear message (approval UX in phase 2)
-            let confirm = args
-                .get("confirm")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !confirm {
+            if let Some(gate) = gate {
+                if check_require_approval(gate, &binding.alias, tool_name, args, &verdict)?
+                    .is_some()
+                {
+                    // Fall through to execute
+                } else {
+                    // Blocked — pending record created inside check
+                    let pending = gate.store.create_pending_approval(
+                        tool_name,
+                        &binding.alias,
+                        args,
+                        gate.session_id,
+                    )?;
+                    return Ok(ToolCallResult {
+                        ok: false,
+                        content: json!({
+                            "error": "requires_approval",
+                            "detail": verdict.reason,
+                            "approval_id": pending.id,
+                            "args_digest": pending.args_digest,
+                            "hint": format!(
+                                "Human: run `locus approve grant {}` then re-call (same args), or re-call with confirm=true and approval_id={}",
+                                pending.id, pending.id
+                            ),
+                        }),
+                        policy: Some(verdict),
+                    });
+                }
+            } else {
+                // No store: block with instructions (unit tests / synthetic without gate)
                 return Ok(ToolCallResult {
                     ok: false,
                     content: json!({
                         "error": "requires_approval",
                         "detail": verdict.reason,
-                        "hint": "Re-call with confirm=true after human approval, or adjust binding.policy.require_approval"
+                        "hint": "Re-call via locus-mcp after `locus approve grant <id>`, or adjust binding.policy.require_approval"
                     }),
                     policy: Some(verdict),
                 });
@@ -144,6 +194,70 @@ pub fn call_tool(binding: &Binding, tool_name: &str, args: &Value) -> Result<Too
         Decision::Allow => {}
     }
 
+    dispatch_tool(binding, tool_name, args, verdict)
+}
+
+/// Returns `Some(())` when the call is allowed through the approval gate.
+fn check_require_approval(
+    gate: ApprovalGate<'_>,
+    binding_alias: &str,
+    tool_name: &str,
+    args: &Value,
+    _verdict: &PolicyVerdict,
+) -> Result<Option<()>> {
+    // Path 1: matching approved grant within TTL (same tool+binding+args_digest)
+    if let Some(rec) = gate.store.find_valid_grant(tool_name, binding_alias, args)? {
+        let _ = gate.store.audit(
+            "approval.use",
+            binding_alias,
+            Some(json!({
+                "id": rec.id,
+                "tool": tool_name,
+                "via": "args_digest_match",
+            })),
+        );
+        return Ok(Some(()));
+    }
+
+    // Path 2: confirm=true AND valid approval_id
+    let confirm = args
+        .get("confirm")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if confirm {
+        if let Some(id) = args.get("approval_id").and_then(|v| v.as_str()) {
+            match gate
+                .store
+                .check_approval_id(id, tool_name, binding_alias, args)
+            {
+                Ok(rec) => {
+                    let _ = gate.store.audit(
+                        "approval.use",
+                        binding_alias,
+                        Some(json!({
+                            "id": rec.id,
+                            "tool": tool_name,
+                            "via": "approval_id",
+                        })),
+                    );
+                    return Ok(Some(()));
+                }
+                Err(_) => {
+                    // Invalid id — fall through to pending block
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn dispatch_tool(
+    binding: &Binding,
+    tool_name: &str,
+    args: &Value,
+    verdict: PolicyVerdict,
+) -> Result<ToolCallResult> {
     // Find owning provider by tool prefix `provider.`
     let provider_name = tool_name.split('.').next().unwrap_or("");
     let p = binding
@@ -290,6 +404,22 @@ mod tests {
     fn require_approval_blocks_delete() {
         let b = acme();
         let r = call_tool(&b, "supabase.table.delete", &json!({})).unwrap();
+        assert!(!r.ok);
+        assert_eq!(
+            r.content.get("error").and_then(|v| v.as_str()),
+            Some("requires_approval")
+        );
+    }
+
+    #[test]
+    fn confirm_alone_does_not_bypass_without_grant() {
+        let b = acme();
+        let r = call_tool(
+            &b,
+            "supabase.table.delete",
+            &json!({ "confirm": true }),
+        )
+        .unwrap();
         assert!(!r.ok);
         assert_eq!(
             r.content.get("error").and_then(|v| v.as_str()),

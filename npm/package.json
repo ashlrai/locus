@@ -1,0 +1,54 @@
+{
+  "name": "locus-cli",
+  "version": "0.1.0",
+  "description": "Locus CLI — identity plane for coding agents. Pin multi-account bindings so agents never act in the wrong tenant.",
+  "bin": {
+    "locus": "bin/locus.js",
+    "locus-cli": "bin/locus.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ashlrai/locus"
+  },
+  "keywords": [
+    "locus",
+    "identity",
+    "mcp",
+    "cli",
+    "multi-account",
+    "tenant",
+    "isolation",
+    "claude",
+    "cursor",
+    "codex",
+    "ai-agents",
+    "security"
+  ],
+  "author": "AshlrAI",
+  "license": "MIT",
+  "homepage": "https://github.com/ashlrai/locus",
+  "bugs": {
+    "url": "https://github.com/ashlrai/locus/issues"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "files": [
+    "bin/",
+    "install.js",
+    "README.md",
+    "LICENSE"
+  ]
+}

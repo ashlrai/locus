@@ -17,13 +17,35 @@ Identity plane for coding agents. Pin a client — every CLI command and MCP too
 
 ---
 
+## Install
+
+```bash
+brew install ashlrai/tap/locus  # when published
+
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo install --git https://github.com/ashlrai/locus --package locus-cli --locked
+cargo install --git https://github.com/ashlrai/locus --package locus-mcp --locked
+
+# npm / npx — downloads a release binary, or falls back to cargo install
+npx locus-cli --help
+npx locus-mcp   # MCP server for Claude Code / Cursor
+```
+
+Local checkout:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo install --path crates/locus-cli
+cargo install --path crates/locus-mcp
+```
+
+Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
+
+---
+
 ## Quick start
 
 ```bash
-# Build
-export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --path crates/locus-cli
-
 # Initialize with sample personal + acme bindings
 locus init --with-samples
 locus binding list
@@ -87,9 +109,7 @@ Never put raw secrets in binding files.
 ## MCP (Claude Code / Cursor)
 
 ```bash
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
-
+# after Install (cargo / brew / npm)
 locus pin acme
 locus setup --client claude    # writes/merges .mcp.json
 # restart Claude Code — tools: locus_whoami, supabase.scope, github.whoami, …

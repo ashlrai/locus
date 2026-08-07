@@ -1,13 +1,11 @@
 //! Worker slots — isolated process handles per Binding × Provider.
 //!
-//! Phase 2 scaffolding:
-//! - [`SyntheticBackend`] serves in-process adapter tools (current behavior).
-//! - [`McpStdioBackend`] builds a `Command` with isolated env for a future
-//!   upstream MCP child; spawn is optional and does not require a real binary.
-//!
-//! Real stdio JSON-RPC fan-out lands when locus-mcp wires the multiplexor.
+//! - [`SyntheticBackend`] serves in-process adapter tools (default).
+//! - [`McpStdioBackend`] spawns an upstream MCP child, handshakes, and
+//!   fans out `tools/call` over stdio JSON-RPC.
 
 mod mcp_stdio;
+mod stdio_client;
 mod synthetic;
 
 use crate::binding::{Binding, ProviderBinding};
@@ -19,6 +17,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub use mcp_stdio::{McpStdioBackend, McpStdioConfig};
+pub use stdio_client::{McpStdioClient, UpstreamTool};
 pub use synthetic::SyntheticBackend;
 
 /// Stable key for a worker slot: session + provider.
@@ -233,6 +232,7 @@ mod tests {
     use crate::seal::SealKey;
     use crate::session::PinSource;
     use chrono::Duration;
+    use std::process::Command;
     use tempfile::tempdir;
 
     fn sample_binding() -> Binding {
@@ -352,21 +352,73 @@ mod tests {
         std::fs::create_dir_all(&work_dir).unwrap();
 
         let backend = McpStdioBackend::new(McpStdioConfig {
-            command: "false".into(), // will not be spawned in ensure unless spawn=true
+            command: "false".into(),
             args: vec![],
             spawn: false,
+            resolve_secrets: false,
             extra_env: BTreeMap::new(),
         });
         let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();
         assert_eq!(slot.backend, "mcp_stdio");
         assert_eq!(slot.state, WorkerState::Ready);
         assert!(slot.pid.is_none());
+        let _ = backend.build_command(&session, &binding, pb, &work_dir);
+        backend.teardown(&slot).unwrap();
+    }
 
-        // Command builder is usable for later spawn
-        let cmd = backend.build_command(&session, &binding, pb, &work_dir);
-        // Isolated: should clear ambient and set LOCUS_* / private dirs
-        // We only assert the program name is set (Command has no public getter for env).
-        let _ = cmd;
+    #[test]
+    fn mcp_stdio_spawn_mock_and_call() {
+        // Requires python3 for mock server
+        if Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        std::fs::create_dir_all(&worker_home).unwrap();
+        let session = sample_session(&worker_home.display().to_string());
+        let binding = sample_binding();
+        let pb = binding.provider("github").unwrap();
+        let work_dir = worker_home.join("slots").join("github");
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        let script = r#"
+import sys, json
+def send(o):
+    sys.stdout.write(json.dumps(o)+"\n"); sys.stdout.flush()
+for line in sys.stdin:
+    line=line.strip()
+    if not line: continue
+    msg=json.loads(line)
+    mid=msg.get("id")
+    method=msg.get("method","")
+    if mid is None: continue
+    if method=="initialize":
+        send({"jsonrpc":"2.0","id":mid,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"mock","version":"0"}}})
+    elif method=="tools/list":
+        send({"jsonrpc":"2.0","id":mid,"result":{"tools":[{"name":"ping","description":"p","inputSchema":{"type":"object"}}]}})
+    elif method=="tools/call":
+        send({"jsonrpc":"2.0","id":mid,"result":{"content":[{"type":"text","text":"pong"}],"isError":False}})
+    else:
+        send({"jsonrpc":"2.0","id":mid,"error":{"code":-32601,"message":method}})
+"#;
+        let backend = McpStdioBackend::new(McpStdioConfig {
+            command: "python3".into(),
+            args: vec!["-u".into(), "-c".into(), script.into()],
+            spawn: true,
+            resolve_secrets: false,
+            extra_env: BTreeMap::new(),
+        });
+        let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();
+        assert_eq!(slot.state, WorkerState::Running);
+        assert!(slot.pid.is_some());
+        let names = backend
+            .upstream_tools(&session.session_id, "github")
+            .unwrap();
+        assert!(names.iter().any(|n| n == "ping"));
+        let r = backend
+            .call_tool(&slot, &binding, "ping", &serde_json::json!({}))
+            .unwrap();
+        assert!(r.ok);
         backend.teardown(&slot).unwrap();
     }
 }
