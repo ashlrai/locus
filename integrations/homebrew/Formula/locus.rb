@@ -1,12 +1,22 @@
 # Locus — Homebrew formula
 #
-# This formula is mirrored for review in the main repo. Ship it by copying
-# into ashlrai/homebrew-ashlr (or a dedicated ashlrai/homebrew-locus tap).
-# See integrations/homebrew/README.md.
+# Mirrored for review in the main repo. Ship by copying into
+# ashlrai/homebrew-ashlr (or ashlrai/homebrew-locus). See
+# integrations/homebrew/README.md and docs/RELEASE.md.
 #
-# Default: build from source (Rust). After the first tagged release with
-# prebuilt assets (locus-<target>.tar.gz from release.yml), you can switch
-# the body to the prebuilt URL block commented at the bottom.
+# === First release (v0.1.0) ===
+# 1. Tag:  git tag -a v0.1.0 -m "Locus v0.1.0" && git push origin v0.1.0
+# 2. Wait for .github/workflows/release.yml to attach locus-*.tar.gz assets.
+# 3. Source formula sha256 (this file's default install path):
+#      curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v0.1.0.tar.gz" | shasum -a 256
+#    Replace the placeholder sha256 below, then PR into the live tap.
+# 4. Optional: switch to prebuilt binary formula (commented block at bottom)
+#    once you have per-target digests of the release assets.
+#
+# Default body: build from source (Rust). Prebuilt assets from release.yml:
+#   locus-aarch64-apple-darwin.tar.gz
+#   locus-x86_64-apple-darwin.tar.gz
+#   locus-x86_64-unknown-linux-gnu.tar.gz
 
 class Locus < Formula
   desc "Identity plane for coding agents — wrong account, impossible"
@@ -15,7 +25,7 @@ class Locus < Formula
   license "MIT"
   head "https://github.com/ashlrai/locus.git", branch: "main"
 
-  # Stable source tarball — update sha256 when tagging vX.Y.Z:
+  # Stable source tarball — update sha256 after tagging v0.1.0 (first release):
   #   curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v#{version}.tar.gz" | shasum -a 256
   url "https://github.com/ashlrai/locus/archive/refs/tags/v#{version}.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
@@ -50,9 +60,14 @@ class Locus < Formula
   end
 end
 
-# --- Optional: prebuilt binary formula (after release assets exist) ---------
-# Replace the class body above with the following once release.yml publishes
-# locus-<triple>.tar.gz assets and you have real sha256 digests:
+# --- Optional: prebuilt binary formula (after first release assets exist) ---
+# After v0.1.0 (or later) is tagged and release.yml has published
+# locus-<triple>.tar.gz, replace the class body above with the following and
+# fill real sha256 digests:
+#
+#   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.1.0/locus-aarch64-apple-darwin.tar.gz" | shasum -a 256
+#   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.1.0/locus-x86_64-apple-darwin.tar.gz" | shasum -a 256
+#   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.1.0/locus-x86_64-unknown-linux-gnu.tar.gz" | shasum -a 256
 #
 # class Locus < Formula
 #   desc "Identity plane for coding agents — wrong account, impossible"

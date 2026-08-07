@@ -5,3 +5,9 @@
 .env.*
 !.env.example
 .locus-test/
+
+# local locus runtime (never commit)
+daemon.key
+.locus/
+sessions/
+approvals/

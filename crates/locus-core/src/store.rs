@@ -1303,6 +1303,24 @@ allowed_bindings = ["acme"]
         )
         .unwrap();
         assert!(r8b.ok, "approval_id path: {:?}", r8b.content);
+
+        // Path traversal / unsafe approval ids must never touch the filesystem
+        assert!(store.load_approval("../evil").is_err());
+        assert!(store
+            .grant_approval("appr/../../../x", None, "mason")
+            .is_err());
+        assert!(store.load_approval("appr_foo.json").is_err());
+    }
+
+    #[test]
+    fn approvals_health_reports_dir() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let h = store.approvals_health().unwrap();
+        assert!(h.exists);
+        assert!(h.writable);
+        assert!(h.ok);
+        assert_eq!(h.total, 0);
     }
 
     #[test]

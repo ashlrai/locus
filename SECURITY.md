@@ -47,6 +47,29 @@ We appreciate coordinated disclosure. Credit is given unless you ask otherwise.
 | Ambient CLI race (`gh auth switch`) | Private `GH_CONFIG_DIR` / scrubbed env in `locus exec` |
 | Ambient credential inheritance | Scrub known identity env vars; inject only resolved refs for the pin |
 | Seal forgery | HMAC over session fields with local seal key |
+| Approval id path traversal | Ids constrained to safe charset; joined path must stay under `approvals/` |
+| Confirm / approval_id injection into digests | `args_digest` strips control + secret-like keys before hashing |
+
+### Dual-control approvals
+
+Destructive tools can require **two distinct human principals** before a grant becomes active.
+
+| Policy field | Effect |
+|--------------|--------|
+| `require_approval = ["*.delete*", …]` | Tool blocked until a valid grant exists (single principal by default) |
+| `dual_control = ["vercel.deploy.prod", …]` | Matching tools need **two** distinct `--as` principals |
+| `dual_control_all_approvals = true` | Every `require_approval` match also needs two principals |
+
+Flow:
+
+1. Agent hits a gated tool → Locus creates `$LOCUS_HOME/approvals/appr_….json` with `status=pending` and an `args_digest` (raw args **never** stored).
+2. Human A: `locus approve grant appr_… --as alice`
+3. If dual-control: still pending until Human B: `locus approve grant appr_… --as bob` (same principal cannot grant twice).
+4. Once `status=approved`, re-call with the **same** args (digest match) within the grant TTL (default 15m), or pass `confirm=true` + `approval_id`.
+
+**Secrets never appear** in approval files, audit JSONL, or MCP tool results — only digests, ids, tool names, and principal labels. Principal names are restricted to `[A-Za-z0-9_-]` (no path separators).
+
+**Rate limiting:** Locus does not yet enforce request rate limits on `approve grant` / pending creation in process. Operators should treat approval files as sensitive control-plane state (filesystem permissions on `$LOCUS_HOME`), rotate seal keys if compromised, and use short grant TTLs for high-risk tools. Process-level rate limiting and OS attestation are roadmap.
 
 ### Explicit non-goals (out of scope)
 
@@ -83,3 +106,6 @@ When in doubt whether an issue is security-sensitive, use the private channel ab
 - Prefer workspace `require_pin = true` and tight `allowed_bindings` in client repos.
 - Use `locus doctor` and `locus whoami` before destructive agent work.
 - Keep Phantom (or your vault) and Locus updated together when using `phm:` refs.
+- For production-like deploys, set `dual_control` globs (or `dual_control_all_approvals = true`) so one laptop user cannot solo-approve high-risk tools.
+- Keep `$LOCUS_HOME` mode-restricted (seal key is `0600`); treat `approvals/` and `audit/` as sensitive.
+- Prefer short approval TTLs (`locus approve grant … --ttl 15m`) and review `locus approve list` regularly.

@@ -138,6 +138,7 @@ description = "Acme client engagement"
 [binding.policy]
 default = "allow"
 require_approval = ["*.delete*", "vercel.deploy.prod"]
+dual_control = ["*.delete*", "vercel.deploy.prod"]  # two distinct principals
 max_ttl = "8h"
 
 [[binding.providers]]
@@ -182,7 +183,7 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | **0** Daemon-less control plane, pin/whoami/exec, isolation tests | done |
 | **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | **you are here** |
 | **2** Real upstream MCP workers, AWS/CF/Resend, continuous whoami drift | next |
-| **3** Team binding graph, dual-control, offboard, audit export | |
+| **3** Team binding graph, remote dual-control, offboard, audit export | |
 
 See [PLAN.md](./PLAN.md) and [DESIGN.md](./DESIGN.md) for the full architecture.
 
@@ -238,9 +239,10 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 - `locus exec` scrubs ambient identity env vars; resolves secrets only into the child.
 - MCP never returns secret values; agents cannot pin (request only).
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
-- Policy `require_approval` blocks destructive tool stubs without `confirm=true`.
+- Policy `require_approval` blocks destructive tools until a human grants (`locus approve grant --as`).
+- Dual-control (`policy.dual_control` / `dual_control_all_approvals`) needs two distinct principals.
 
-Not in scope yet: real upstream Supabase/Vercel MCP fan-out, dual-control, team sync.
+Not in scope yet: team binding graph sync, multi-namespace sessions.
 
 Details and reporting: [SECURITY.md](./SECURITY.md). Full threat model: [DESIGN.md §9](./DESIGN.md).
 

@@ -343,6 +343,7 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
 }
 
 fn audit_tool_block(s: &Store, alias: &str, tool: &str, content: &Value) {
+    // Never log raw tool args — digests + meta only (secrets stay out of audit).
     if let Some(err) = content.get("error").and_then(|v| v.as_str()) {
         if err == "requires_approval" {
             let _ = s.audit(
@@ -353,6 +354,9 @@ fn audit_tool_block(s: &Store, alias: &str, tool: &str, content: &Value) {
                     "status": "pending",
                     "approval_id": content.get("approval_id"),
                     "args_digest": content.get("args_digest"),
+                    "dual_control": content.get("dual_control"),
+                    "grants": content.get("grants"),
+                    "required_grants": content.get("required_grants"),
                     "detail": content.get("detail"),
                 })),
             );
@@ -369,10 +373,15 @@ fn scope_or_err(
 ) -> Value {
     let msg = e.to_string();
     if msg.contains("scope freeze") {
+        // Digest only — raw args may contain secrets or PII
         let _ = s.audit(
             "mcp.scope_freeze",
             alias,
-            Some(json!({ "tool": tool, "error": msg, "args": args })),
+            Some(json!({
+                "tool": tool,
+                "error": msg,
+                "args_digest": locus_core::args_digest(args),
+            })),
         );
     }
     json!({ "error": msg })

@@ -167,16 +167,21 @@ enum ApproveCmd {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    /// Grant a pending approval (default TTL 15m)
+    /// Grant a pending approval as a principal (default TTL 15m)
     Grant {
         /// Approval id (`appr_…`)
         id: String,
-        /// Grant lifetime (e.g. 15m, 1h). Default: 15m
-        #[arg(long)]
-        ttl: Option<String>,
         /// Principal granting (default: LOCUS_PRINCIPAL or $USER)
         #[arg(long = "as")]
         as_principal: Option<String>,
+        /// Grant lifetime once fully approved (e.g. 15m, 1h). Default: 15m
+        #[arg(long)]
+        ttl: Option<String>,
+    },
+    /// Show status of one approval (grants, dual-control progress)
+    Status {
+        /// Approval id (`appr_…`)
+        id: String,
     },
     /// Deny a pending approval
     Deny {
@@ -1247,7 +1252,8 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 );
                 println!(
                     "   {}",
-                    "Grant: locus approve grant <id>   Deny: locus approve deny <id>".dimmed()
+                    "Grant: locus approve grant <id> --as <principal>   Deny: locus approve deny <id>"
+                        .dimmed()
                 );
                 return Ok(());
             }
@@ -1258,6 +1264,8 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 pending.len()
             );
             for rec in &pending {
+                let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
+                let required = if dual { 2 } else { 1 };
                 println!(
                     "  {}  {}  binding={}  tool={}",
                     rec.id.cyan().bold(),
@@ -1266,58 +1274,148 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                     rec.tool.yellow()
                 );
                 println!(
-                    "      digest={}  session={}",
+                    "      digest={}  session={}  requester={}  grants={}/{}{}",
                     rec.args_digest.dimmed(),
-                    rec.session_id.dimmed()
+                    rec.session_id.dimmed(),
+                    if rec.requester.is_empty() {
+                        "-"
+                    } else {
+                        rec.requester.as_str()
+                    },
+                    rec.grants.len(),
+                    required,
+                    if dual { " (dual_control)" } else { "" }
                 );
             }
             println!();
             println!(
                 "{}",
-                "Grant: locus approve grant <id>   then re-call tool (same args) or with confirm=true + approval_id".dimmed()
+                "Grant: locus approve grant <id> --as <principal>   status: locus approve status <id>"
+                    .dimmed()
             );
             Ok(())
         }
         ApproveCmd::Grant {
             id,
-            ttl,
             as_principal,
+            ttl,
         } => {
+            let principal = as_principal
+                .or_else(|| env::var("LOCUS_PRINCIPAL").ok().filter(|s| !s.is_empty()))
+                .or_else(|| env::var("USER").ok().filter(|s| !s.is_empty()))
+                .unwrap_or_else(|| "unknown".into());
             let ttl_dur = match ttl {
                 Some(ref t) => Some(parse_ttl(t)?),
                 None => None,
             };
-            let principal = as_principal
-                .or_else(|| env::var("LOCUS_PRINCIPAL").ok().filter(|s| !s.is_empty()))
-                .or_else(|| env::var("USER").ok().filter(|s| !s.is_empty()))
-                .unwrap_or_else(|| "local".into());
             let rec = s.grant_approval(&id, ttl_dur, &principal)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&rec)?);
-            } else {
+            } else if rec.status == locus_core::ApprovalStatus::Approved {
                 println!(
-                    "{} granted {}  tool={}  binding={}  as={}",
+                    "{} granted {} as {}  tool={}  binding={}",
                     "ok".green().bold(),
                     rec.id.cyan(),
+                    principal.yellow(),
                     rec.tool,
-                    rec.binding,
-                    principal.dimmed()
+                    rec.binding
+                );
+                println!(
+                    "   grants   {}",
+                    rec.grants
+                        .iter()
+                        .map(|g| g.principal.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
                 );
                 if let Some(exp) = rec.expires_at {
                     println!("   expires  {}", exp.to_rfc3339());
                 }
-                if rec.status == locus_core::ApprovalStatus::Pending {
-                    println!(
-                        "   {} still pending dual-control — need another principal",
-                        "partial".yellow()
-                    );
-                } else {
-                    println!(
-                        "   {}",
-                        "Re-call the tool with the same args (or confirm=true + approval_id)."
-                            .dimmed()
-                    );
+                println!(
+                    "   {}",
+                    "Re-call the tool with the same args (or confirm=true + approval_id)."
+                        .dimmed()
+                );
+            } else {
+                let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
+                let required = if dual { 2 } else { 1 };
+                println!(
+                    "{} partial grant {} as {}  ({}/{} principals)",
+                    "ok".yellow().bold(),
+                    rec.id.cyan(),
+                    principal.yellow(),
+                    rec.grants.len(),
+                    required
+                );
+                println!(
+                    "   grants   {}",
+                    rec.grants
+                        .iter()
+                        .map(|g| g.principal.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                println!(
+                    "   {}",
+                    format!(
+                        "Dual-control: need a second principal — run `locus approve grant {} --as <other>`",
+                        rec.id
+                    )
+                    .dimmed()
+                );
+            }
+            Ok(())
+        }
+        ApproveCmd::Status { id } => {
+            let rec = s.load_approval(&id)?;
+            let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
+            let required = if dual { 2 } else { 1 };
+            if json {
+                let mut v = serde_json::to_value(&rec)?;
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("dual_control".into(), json!(dual));
+                    obj.insert("required_grants".into(), json!(required));
                 }
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                println!(
+                    "{} {}  status={}",
+                    "approve".magenta().bold(),
+                    rec.id.cyan(),
+                    rec.status.as_str()
+                );
+                println!("   tool      {}", rec.tool);
+                println!("   binding   {}", rec.binding);
+                println!(
+                    "   requester {}",
+                    if rec.requester.is_empty() {
+                        "-"
+                    } else {
+                        &rec.requester
+                    }
+                );
+                println!(
+                    "   dual      {}  grants={}/{}",
+                    if dual { "yes" } else { "no" },
+                    rec.grants.len(),
+                    required
+                );
+                if rec.grants.is_empty() {
+                    println!("   grants    (none)");
+                } else {
+                    for g in &rec.grants {
+                        println!(
+                            "   grant     {} @ {}",
+                            g.principal.yellow(),
+                            g.granted_at.to_rfc3339().dimmed()
+                        );
+                    }
+                }
+                if let Some(exp) = rec.expires_at {
+                    println!("   expires   {}", exp.to_rfc3339());
+                }
+                println!("   digest    {}", rec.args_digest.dimmed());
+                println!("   session   {}", rec.session_id.dimmed());
             }
             Ok(())
         }
