@@ -29,9 +29,7 @@ impl WorkspaceConfig {
         if self.allowed_bindings.is_empty() {
             return true;
         }
-        self.allowed_bindings
-            .iter()
-            .any(|a| a == alias_or_id)
+        self.allowed_bindings.iter().any(|a| a == alias_or_id)
     }
 
     pub fn to_toml(&self) -> Result<String> {

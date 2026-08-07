@@ -303,14 +303,107 @@ impl Store {
         })
     }
 
+    /// Continuous identity check: re-load active session + binding and report drift.
+    ///
+    /// Intended for future whoami heartbeats (agents / prompt hooks). Never returns secrets.
+    /// Returns `Ok` with a populated [`RuntimeDrift`] even when unpinned (drift flags set).
+    pub fn verify_runtime(&self) -> Result<RuntimeDrift> {
+        let key = self.seal_key()?;
+        let mut drift = RuntimeDrift {
+            pinned: false,
+            seal_ok: false,
+            binding_present: false,
+            binding_id_match: false,
+            tenant_match: false,
+            expired: false,
+            session_id: None,
+            binding_alias: None,
+            binding_id_session: None,
+            binding_id_file: None,
+            tenant_session: None,
+            tenant_file: None,
+            providers: Vec::new(),
+            issues: Vec::new(),
+            ok: false,
+        };
+
+        let Some(session) = self.active_session()? else {
+            drift.issues.push("not_pinned".into());
+            return Ok(drift);
+        };
+
+        drift.pinned = true;
+        drift.session_id = Some(session.session_id.clone());
+        drift.binding_alias = Some(session.binding_alias.clone());
+        drift.binding_id_session = Some(session.binding_id.clone());
+        drift.tenant_session = Some(session.tenant.clone());
+        drift.expired = session.is_expired();
+
+        match session.verify(&key) {
+            Ok(()) => drift.seal_ok = true,
+            Err(LocusError::InvalidSeal) => {
+                drift.seal_ok = false;
+                drift.issues.push("invalid_seal".into());
+            }
+            Err(LocusError::SessionExpired(_)) => {
+                // verify() checks seal then expiry; if we got here seal was ok
+                drift.seal_ok = true;
+                drift.issues.push("session_expired".into());
+            }
+            Err(e) => {
+                drift.issues.push(format!("session_verify: {e}"));
+            }
+        }
+        if drift.expired && !drift.issues.iter().any(|i| i == "session_expired") {
+            drift.issues.push("session_expired".into());
+        }
+
+        match self.load_binding(&session.binding_alias) {
+            Ok(binding) => {
+                drift.binding_present = true;
+                drift.binding_id_file = Some(binding.id.clone());
+                drift.tenant_file = Some(binding.tenant.clone());
+                drift.binding_id_match = binding.id == session.binding_id;
+                drift.tenant_match = binding.tenant == session.tenant;
+                if !drift.binding_id_match {
+                    drift.issues.push("binding_id_drift".into());
+                }
+                if !drift.tenant_match {
+                    drift.issues.push("tenant_drift".into());
+                }
+                drift.providers = binding
+                    .providers
+                    .iter()
+                    .map(|p| ProviderView {
+                        provider: p.provider.clone(),
+                        account: p.account.clone(),
+                        credential_ref: p.credential_ref.clone(),
+                        project_ref: p.scope.project_ref.clone(),
+                        team_id: p.scope.team_id.clone(),
+                        account_id: p.scope.account_id.clone(),
+                        read_only: p.scope.read_only,
+                        orgs: p.scope.orgs.clone(),
+                    })
+                    .collect();
+            }
+            Err(_) => {
+                drift.issues.push("binding_missing".into());
+            }
+        }
+
+        drift.ok = drift.pinned
+            && drift.seal_ok
+            && drift.binding_present
+            && drift.binding_id_match
+            && drift.tenant_match
+            && !drift.expired
+            && drift.issues.is_empty();
+        Ok(drift)
+    }
+
     // ── Audit ─────────────────────────────────────────────────────────────
 
-    pub fn audit(
-        &self,
-        op: &str,
-        binding: &str,
-        detail: Option<serde_json::Value>,
-    ) -> Result<()> {
+    pub fn audit(&self, op: &str, binding: &str, detail: Option<serde_json::Value>) -> Result<()> {
         use std::io::Write;
         let event = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
@@ -326,9 +419,63 @@ impl Store {
         Ok(())
     }
 
+    /// Read all audit events (jsonl). Corrupt lines are skipped.
+    pub fn read_audit_events(&self) -> Result<Vec<AuditEvent>> {
+        let path = self.audit_path();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let raw = fs::read_to_string(path)?;
+        let mut out = Vec::new();
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(ev) = serde_json::from_str::<AuditEvent>(line) {
+                out.push(ev);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Pending tool calls blocked by `require_approval` policy (for `locus approve`).
+    ///
+    /// Phase 1 stub: lists `mcp.require_approval` events whose detail.status is
+    /// `"pending"` (or missing). Does not grant approval yet.
+    pub fn pending_approvals(&self) -> Result<Vec<AuditEvent>> {
+        let events = self.read_audit_events()?;
+        Ok(events
+            .into_iter()
+            .filter(|e| e.op == "mcp.require_approval")
+            .filter(|e| {
+                match e
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.get("status"))
+                    .and_then(|s| s.as_str())
+                {
+                    Some("pending") | None => true,
+                    Some("approved") | Some("denied") => false,
+                    _ => true,
+                }
+            })
+            .collect())
+    }
+
     pub fn workspace_for(&self, cwd: &Path) -> Option<(PathBuf, WorkspaceConfig)> {
         find_workspace(cwd)
     }
+}
+
+/// One line from `$LOCUS_HOME/audit/events.jsonl`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AuditEvent {
+    pub ts: String,
+    pub op: String,
+    pub binding: String,
+    #[serde(default)]
+    pub detail: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -342,6 +489,36 @@ pub struct Whoami {
     pub expires_at: String,
     pub worker_home: String,
     pub seal_ok: bool,
+}
+
+/// Result of [`Store::verify_runtime`] — continuous identity / drift check.
+///
+/// Never contains secret values. Safe for agent-facing heartbeats.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeDrift {
+    pub pinned: bool,
+    pub seal_ok: bool,
+    pub binding_present: bool,
+    pub binding_id_match: bool,
+    pub tenant_match: bool,
+    pub expired: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_id_session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding_id_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant_file: Option<String>,
+    pub providers: Vec<ProviderView>,
+    /// Machine-readable issue tags (e.g. `invalid_seal`, `tenant_drift`).
+    pub issues: Vec<String>,
+    /// True only when pin is present, sealed, unexpired, and binding matches.
+    pub ok: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -421,12 +598,16 @@ mod tests {
     fn isolation_pin_switches_providers() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        store.save_binding(&sample_binding("acme", "acme-corp", "proj_acme")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "proj_acme"))
+            .unwrap();
         store
             .save_binding(&sample_binding("personal", "personal", "proj_me"))
             .unwrap();
 
-        let s1 = store.pin("acme", dir.path(), Some("test".into()), false).unwrap();
+        let s1 = store
+            .pin("acme", dir.path(), Some("test".into()), false)
+            .unwrap();
         assert_eq!(s1.tenant, "acme-corp");
         let w1 = store.whoami().unwrap();
         assert_eq!(w1.binding_alias, "acme");
@@ -472,7 +653,9 @@ mod tests {
     fn workspace_allowlist_blocks() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path().join("locus-home")).unwrap();
-        store.save_binding(&sample_binding("acme", "acme-corp", "p1")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
         store
             .save_binding(&sample_binding("personal", "personal", "p2"))
             .unwrap();
@@ -500,7 +683,9 @@ allowed_bindings = ["acme"]
     fn leave_clears_pin() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        store.save_binding(&sample_binding("acme", "acme-corp", "p1")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
         store.pin("acme", dir.path(), None, false).unwrap();
         assert!(store.require_active().is_ok());
         store.leave().unwrap();
@@ -514,7 +699,9 @@ allowed_bindings = ["acme"]
     fn seal_rejects_tamper() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        store.save_binding(&sample_binding("acme", "acme-corp", "p1")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
         store.pin("acme", dir.path(), None, false).unwrap();
         // Tamper active session
         let path = store.active_session_path();
@@ -525,5 +712,52 @@ allowed_bindings = ["acme"]
             store.require_active().unwrap_err(),
             LocusError::InvalidSeal
         ));
+    }
+
+    #[test]
+    fn verify_runtime_ok_when_pinned() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let d = store.verify_runtime().unwrap();
+        assert!(d.ok);
+        assert!(d.pinned);
+        assert!(d.seal_ok);
+        assert!(d.binding_id_match);
+        assert!(d.tenant_match);
+        assert!(!d.expired);
+        assert!(d.issues.is_empty());
+        assert_eq!(d.binding_alias.as_deref(), Some("acme"));
+    }
+
+    #[test]
+    fn verify_runtime_detects_unpinned() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let d = store.verify_runtime().unwrap();
+        assert!(!d.ok);
+        assert!(!d.pinned);
+        assert!(d.issues.iter().any(|i| i == "not_pinned"));
+    }
+
+    #[test]
+    fn verify_runtime_detects_binding_id_drift() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        store.save_binding(&b).unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        // Rewrite binding file with a different id (alias same)
+        b.id = "bnd_mutated".into();
+        store.save_binding(&b).unwrap();
+        let d = store.verify_runtime().unwrap();
+        assert!(!d.ok);
+        assert!(d.pinned);
+        assert!(d.seal_ok);
+        assert!(!d.binding_id_match);
+        assert!(d.issues.iter().any(|i| i == "binding_id_drift"));
     }
 }

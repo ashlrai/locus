@@ -129,6 +129,17 @@ enum Commands {
         #[arg(long)]
         mcp_bin: Option<String>,
     },
+
+    /// List pending require_approval tool calls from the audit log (stub)
+    ///
+    /// Phase 1: read-only listing. Granting approval UX lands later — for now
+    /// re-call the tool with `confirm=true` after human review, or adjust
+    /// binding.policy.require_approval.
+    Approve {
+        /// Limit number of events shown (default: 50)
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -206,6 +217,7 @@ fn run() -> Result<()> {
             print,
             mcp_bin,
         } => cmd_setup(&client, print, mcp_bin),
+        Commands::Approve { limit } => cmd_approve(limit, cli.json),
     }
 }
 
@@ -292,10 +304,7 @@ fn write_sample_bindings(s: &Store) -> Result<()> {
         principal: None,
         description: Some("Acme client engagement".into()),
         policy: Policy {
-            require_approval: vec![
-                "*.delete*".into(),
-                "vercel.deploy.prod".into(),
-            ],
+            require_approval: vec!["*.delete*".into(), "vercel.deploy.prod".into()],
             max_ttl: Some("8h".into()),
             ..Policy::default()
         },
@@ -415,7 +424,10 @@ fn cmd_whoami(json: bool) -> Result<()> {
         println!("  principal {}", p);
     }
     println!("  expires   {}", w.expires_at);
-    println!("  seal      {}", if w.seal_ok { "ok".green() } else { "BAD".red() });
+    println!(
+        "  seal      {}",
+        if w.seal_ok { "ok".green() } else { "BAD".red() }
+    );
     println!("  providers");
     for p in &w.providers {
         let mut bits = vec![format!("account={}", p.account)];
@@ -604,7 +616,9 @@ fn cmd_mcp() -> Result<()> {
                     }
                 }
             }
-            bail!("locus-mcp not found on PATH — install with: cargo install --path crates/locus-mcp");
+            bail!(
+                "locus-mcp not found on PATH — install with: cargo install --path crates/locus-mcp"
+            );
         }
     }
 }
@@ -740,18 +754,59 @@ fn cmd_doctor(json: bool) -> Result<()> {
     let s = store()?;
     let bindings = s.list_bindings()?;
     let active = s.active_session()?;
-    let seal_ok = s.seal_key().is_ok();
+    let seal_key_ok = s.seal_key().is_ok();
+    let drift = s.verify_runtime()?;
     let mut issues: Vec<String> = Vec::new();
+
+    // Bindings count
     if bindings.is_empty() {
         issues.push("no bindings configured (locus init --with-samples)".into());
     }
-    if !seal_ok {
+
+    // Seal key file present
+    if !seal_key_ok {
         issues.push("seal key missing or unreadable".into());
     }
+
+    // Active pin seal (when pinned)
+    let mut pin_seal_ok: Option<bool> = None;
     if let Some(ref sess) = active {
-        if let Err(e) = sess.verify(&s.seal_key()?) {
-            issues.push(format!("active session invalid: {e}"));
+        match sess.verify(&s.seal_key()?) {
+            Ok(()) => pin_seal_ok = Some(true),
+            Err(e) => {
+                pin_seal_ok = Some(false);
+                issues.push(format!("active pin seal invalid: {e}"));
+            }
         }
+        if !drift.ok {
+            for tag in &drift.issues {
+                if tag != "not_pinned" {
+                    issues.push(format!("runtime drift: {tag}"));
+                }
+            }
+        }
+    }
+
+    // Phantom on PATH
+    let phantom_on_path = Command::new("phantom")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false);
+    if !phantom_on_path {
+        issues
+            .push("phantom not on PATH (install Phantom Secrets for phm: credential refs)".into());
+    }
+
+    // Unresolved phm: refs — names only via `phantom list` when available
+    let unresolved_phm = collect_unresolved_phm_refs(&s, phantom_on_path)?;
+    if !unresolved_phm.is_empty() {
+        issues.push(format!(
+            "unresolved phm refs (names only): {}",
+            unresolved_phm.join(", ")
+        ));
     }
 
     let report = serde_json::json!({
@@ -759,7 +814,11 @@ fn cmd_doctor(json: bool) -> Result<()> {
         "home": s.home().display().to_string(),
         "bindings": bindings.len(),
         "pinned": active.as_ref().map(|a| a.binding_alias.clone()),
-        "seal_ok": seal_ok,
+        "seal_ok": seal_key_ok,
+        "pin_seal_ok": pin_seal_ok,
+        "phantom_on_path": phantom_on_path,
+        "unresolved_phm": unresolved_phm,
+        "runtime": drift,
         "issues": issues,
         "ok": issues.is_empty(),
     });
@@ -779,12 +838,39 @@ fn cmd_doctor(json: bool) -> Result<()> {
         );
         println!(
             "  seal      {}",
-            if seal_ok {
+            if seal_key_ok {
                 "ok".green().to_string()
             } else {
                 "FAIL".red().to_string()
             }
         );
+        if let Some(ok) = pin_seal_ok {
+            println!(
+                "  pin seal  {}",
+                if ok {
+                    "ok".green().to_string()
+                } else {
+                    "FAIL".red().to_string()
+                }
+            );
+        }
+        println!(
+            "  phantom   {}",
+            if phantom_on_path {
+                "on PATH".green().to_string()
+            } else {
+                "missing".yellow().to_string()
+            }
+        );
+        if !unresolved_phm.is_empty() {
+            println!(
+                "  phm refs  {} unresolved: {}",
+                unresolved_phm.len(),
+                unresolved_phm.join(", ").dimmed()
+            );
+        } else if phantom_on_path {
+            println!("  phm refs  {}", "ok".green());
+        }
         if issues.is_empty() {
             println!("  {}", "all clear".green().bold());
         } else {
@@ -797,6 +883,84 @@ fn cmd_doctor(json: bool) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// Collect `phm:NAME` credential refs from all bindings that are not present
+/// in `phantom list` output. Returns secret **names only** (never values).
+fn collect_unresolved_phm_refs(s: &Store, phantom_on_path: bool) -> Result<Vec<String>> {
+    use locus_core::CredentialRef;
+
+    let summaries = s.list_bindings()?;
+    let mut needed: Vec<String> = Vec::new();
+    for sum in summaries {
+        let b = match s.load_binding(&sum.alias) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+        for p in &b.providers {
+            if let CredentialRef::Phantom { name } = CredentialRef::parse(&p.credential_ref) {
+                if !needed.iter().any(|n| n == &name) {
+                    needed.push(name);
+                }
+            }
+        }
+    }
+    if needed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !phantom_on_path {
+        // Cannot verify — report all as unresolved so doctor surfaces the gap.
+        return Ok(needed);
+    }
+
+    let known = phantom_list_names()?;
+    let mut unresolved: Vec<String> = needed
+        .into_iter()
+        .filter(|n| !known.iter().any(|k| k == n))
+        .collect();
+    unresolved.sort();
+    Ok(unresolved)
+}
+
+/// Parse secret names from `phantom list` (best-effort; stdout shape may vary).
+fn phantom_list_names() -> Result<Vec<String>> {
+    let output = Command::new("phantom")
+        .arg("list")
+        .output()
+        .context("run phantom list")?;
+    if !output.status.success() {
+        // Treat as empty known set — doctor will flag all phm refs.
+        return Ok(Vec::new());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut names = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Common formats: bare NAME, "NAME ...", "  NAME", JSON-ish "name": "NAME"
+        let token = line
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == ':');
+        if token.is_empty() || token.contains('=') {
+            continue;
+        }
+        // Skip table headers / chrome
+        let lower = token.to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "name" | "secret" | "secrets" | "key" | "---" | "total"
+        ) {
+            continue;
+        }
+        if !names.iter().any(|n| n == token) {
+            names.push(token.to_string());
+        }
+    }
+    Ok(names)
 }
 
 fn cmd_hook(shell: &str) -> Result<()> {
@@ -870,7 +1034,10 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
             let path = cwd().join(".mcp.json");
             merge_mcp_json(&path, "locus", &server_entry)?;
             println!("{} wrote/merged {}", "ok".green().bold(), path.display());
-            println!("   also pin before agent work: {}", "locus pin <alias>".cyan());
+            println!(
+                "   also pin before agent work: {}",
+                "locus pin <alias>".cyan()
+            );
             println!("   verify: locus whoami && claude");
         }
         "cursor" => {
@@ -921,6 +1088,77 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
     println!("Phantom pairing:");
     println!("  credential_ref = \"phm:MY_SECRET\"  # locus exec resolves via phantom reveal");
     println!("  Or env:VAR for CI. Never put raw secrets in binding files.");
+    Ok(())
+}
+
+/// List pending `mcp.require_approval` audit events (phase-1 stub — no grant).
+fn cmd_approve(limit: usize, json: bool) -> Result<()> {
+    let s = store()?;
+    let mut pending = s.pending_approvals()?;
+    // newest last in file — reverse for most-recent-first display
+    pending.reverse();
+    if pending.len() > limit {
+        pending.truncate(limit);
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pending)?);
+        return Ok(());
+    }
+
+    if pending.is_empty() {
+        println!(
+            "{} no pending require_approval events in {}",
+            "->".dimmed(),
+            s.audit_path().display()
+        );
+        println!(
+            "   {}",
+            "Blocked tool calls are recorded when agents hit policy.require_approval.".dimmed()
+        );
+        println!(
+            "   {}",
+            "After review: re-call with confirm=true, or edit binding.policy.require_approval."
+                .dimmed()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} {} pending approval event(s)  {}",
+        "approve".magenta().bold(),
+        pending.len(),
+        "(stub — list only)".dimmed()
+    );
+    for (i, ev) in pending.iter().enumerate() {
+        let tool = ev
+            .detail
+            .as_ref()
+            .and_then(|d| d.get("tool"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("?");
+        let detail = ev
+            .detail
+            .as_ref()
+            .and_then(|d| d.get("detail"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("");
+        println!(
+            "  {}. {}  binding={}  tool={}",
+            i + 1,
+            ev.ts.dimmed(),
+            ev.binding.cyan(),
+            tool.yellow()
+        );
+        if !detail.is_empty() {
+            println!("      {}", detail.dimmed());
+        }
+    }
+    println!();
+    println!(
+        "{}",
+        "Phase 1: granting is manual — re-call tool with confirm=true after human review.".dimmed()
+    );
     Ok(())
 }
 

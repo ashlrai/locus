@@ -106,11 +106,7 @@ pub fn build_isolated_env_opts(
     );
     vars.insert(
         "AWS_SHARED_CREDENTIALS_FILE".into(),
-        worker
-            .join("aws")
-            .join("credentials")
-            .display()
-            .to_string(),
+        worker.join("aws").join("credentials").display().to_string(),
     );
 
     // Provider surface — only this binding
@@ -214,10 +210,7 @@ pub fn build_isolated_env_opts(
 }
 
 /// Fallible variant that propagates resolve errors when soft mode is off.
-pub fn build_isolated_env_strict(
-    session: &Session,
-    binding: &Binding,
-) -> Result<IsolatedEnv> {
+pub fn build_isolated_env_strict(session: &Session, binding: &Binding) -> Result<IsolatedEnv> {
     std::env::set_var("LOCUS_SOFT_CREDS", "0");
     let env = build_isolated_env_opts(session, binding, true);
     if !env.secrets_failed.is_empty() && env.secrets_resolved == 0 {

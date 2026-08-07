@@ -1,0 +1,27 @@
+[binding]
+id = "bnd_personal"
+alias = "personal"
+tenant = "personal"
+description = "Personal projects and experiments"
+
+[binding.policy]
+default = "allow"
+max_ttl = "12h"
+
+[[binding.providers]]
+provider = "supabase"
+account = "personal"
+credential_ref = "phm:SUPABASE_PERSONAL"
+scope = { project_ref = "YOUR_PERSONAL_REF", read_only = false }
+
+[[binding.providers]]
+provider = "github"
+account = "personal"
+credential_ref = "phm:GH_TOKEN_PERSONAL"
+scope = { orgs = [], repos = [] }
+
+[[binding.providers]]
+provider = "vercel"
+account = "personal"
+credential_ref = "phm:VERCEL_TOKEN_PERSONAL"
+scope = { team_id = "team_personal", env = ["preview", "production"] }

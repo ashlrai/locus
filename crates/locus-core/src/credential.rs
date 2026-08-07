@@ -76,9 +76,8 @@ pub fn resolve(cred: &CredentialRef) -> Result<Zeroizing<String>> {
     match cred {
         CredentialRef::Phantom { name } => resolve_phantom(name),
         CredentialRef::Env { var } => {
-            let v = std::env::var(var).map_err(|_| {
-                LocusError::msg(format!("env credential not set: {var}"))
-            })?;
+            let v = std::env::var(var)
+                .map_err(|_| LocusError::msg(format!("env credential not set: {var}")))?;
             Ok(Zeroizing::new(v))
         }
         CredentialRef::Test { value } => {
@@ -163,7 +162,10 @@ pub fn resolve_binding_secrets(
             }
         };
         for key in inject_keys_for_provider(&p.provider) {
-            out.insert((*key).to_string(), Zeroizing::new(value.as_str().to_string()));
+            out.insert(
+                (*key).to_string(),
+                Zeroizing::new(value.as_str().to_string()),
+            );
         }
         // Also set LOCUS_<PROVIDER>_RESOLVED=1 (not the secret) for debugging
         let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());
@@ -181,15 +183,11 @@ mod tests {
     fn parse_formats() {
         assert_eq!(
             CredentialRef::parse("phm:FOO"),
-            CredentialRef::Phantom {
-                name: "FOO".into()
-            }
+            CredentialRef::Phantom { name: "FOO".into() }
         );
         assert_eq!(
             CredentialRef::parse("env:BAR"),
-            CredentialRef::Env {
-                var: "BAR".into()
-            }
+            CredentialRef::Env { var: "BAR".into() }
         );
         assert_eq!(
             CredentialRef::parse("BARE"),

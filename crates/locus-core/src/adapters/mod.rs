@@ -1,10 +1,14 @@
-//! Provider adapters — frozen scope + synthetic tools for Phase 1.
+//! Provider adapters — frozen scope + synthetic tools.
 //!
 //! Full upstream MCP fan-out lands when workers spawn; today each adapter
 //! exposes **safe read-only identity tools** that report the pinned scope
 //! and never call remote APIs with ambient credentials.
 
+mod aws;
+mod cloudflare;
 mod github;
+mod resend;
+mod stripe;
 mod supabase;
 mod vercel;
 
@@ -14,7 +18,11 @@ use crate::policy::{evaluate, Decision, PolicyVerdict};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub use aws::AwsAdapter;
+pub use cloudflare::CloudflareAdapter;
 pub use github::GithubAdapter;
+pub use resend::ResendAdapter;
+pub use stripe::StripeAdapter;
 pub use supabase::SupabaseAdapter;
 pub use vercel::VercelAdapter;
 
@@ -51,11 +59,7 @@ pub trait ProviderAdapter: Send + Sync {
 }
 
 /// Freeze: ignore model-supplied selectors that conflict with scope.
-pub fn freeze_string_arg(
-    args: &Value,
-    key: &str,
-    frozen: Option<&str>,
-) -> Result<Option<String>> {
+pub fn freeze_string_arg(args: &Value, key: &str, frozen: Option<&str>) -> Result<Option<String>> {
     let model_val = args.get(key).and_then(|v| v.as_str());
     match (frozen, model_val) {
         (Some(f), Some(m)) if m != f => Err(LocusError::msg(format!(
@@ -72,6 +76,10 @@ pub fn adapter_for(provider: &str) -> Option<Box<dyn ProviderAdapter>> {
         "supabase" => Some(Box::new(SupabaseAdapter)),
         "github" => Some(Box::new(GithubAdapter)),
         "vercel" => Some(Box::new(VercelAdapter)),
+        "cloudflare" => Some(Box::new(CloudflareAdapter)),
+        "aws" => Some(Box::new(AwsAdapter)),
+        "resend" => Some(Box::new(ResendAdapter)),
+        "stripe" => Some(Box::new(StripeAdapter)),
         _ => None,
     }
 }
@@ -262,11 +270,7 @@ mod tests {
     #[test]
     fn freeze_rejects_wrong_project() {
         let b = acme();
-        let err = call_tool(
-            &b,
-            "supabase.scope",
-            &json!({"project_ref": "proj_evil"}),
-        );
+        let err = call_tool(&b, "supabase.scope", &json!({"project_ref": "proj_evil"}));
         assert!(err.is_err(), "expected scope freeze deny, got {err:?}");
         let msg = err.unwrap_err().to_string();
         assert!(

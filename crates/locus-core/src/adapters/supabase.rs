@@ -11,11 +11,7 @@ impl ProviderAdapter for SupabaseAdapter {
     }
 
     fn tools(&self, provider: &ProviderBinding, binding: &Binding) -> Vec<AdapterTool> {
-        let proj = provider
-            .scope
-            .project_ref
-            .as_deref()
-            .unwrap_or("<unset>");
+        let proj = provider.scope.project_ref.as_deref().unwrap_or("<unset>");
         let ro = provider.scope.read_only.unwrap_or(false);
         vec![
             AdapterTool {

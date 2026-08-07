@@ -38,8 +38,7 @@ impl SealKey {
     }
 
     pub fn seal(&self, material: &str) -> String {
-        let mut mac =
-            HmacSha256::new_from_slice(&self.0).expect("HMAC accepts any key length");
+        let mut mac = HmacSha256::new_from_slice(&self.0).expect("HMAC accepts any key length");
         mac.update(material.as_bytes());
         let result = mac.finalize().into_bytes();
         format!("hmac-sha256:{}", hex::encode(result))

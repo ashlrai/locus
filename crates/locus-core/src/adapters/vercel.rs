@@ -31,7 +31,8 @@ impl ProviderAdapter for VercelAdapter {
             },
             AdapterTool {
                 name: "vercel.deploy.prod".into(),
-                description: "SYNTHETIC prod deploy stub — policy-gated. Does not deploy in phase 1.".into(),
+                description:
+                    "SYNTHETIC prod deploy stub — policy-gated. Does not deploy in phase 1.".into(),
                 input_schema: json!({
                     "type": "object",
                     "properties": {

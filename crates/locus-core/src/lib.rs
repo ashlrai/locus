@@ -17,11 +17,10 @@ pub mod policy;
 pub mod seal;
 pub mod session;
 pub mod store;
+pub mod workers;
 pub mod workspace;
 
-pub use adapters::{
-    call_tool, control_tools, tools_for_binding, AdapterTool, ToolCallResult,
-};
+pub use adapters::{call_tool, control_tools, tools_for_binding, AdapterTool, ToolCallResult};
 pub use binding::{Binding, BindingBody, BindingSummary, Policy, ProviderBinding, Scope};
 pub use credential::{inject_keys_for_provider, resolve, resolve_binding_secrets, CredentialRef};
 pub use error::{LocusError, Result};
@@ -32,7 +31,11 @@ pub use isolation::{
 pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
 pub use seal::SealKey;
 pub use session::{parse_ttl, PinSource, Session, SessionMode};
-pub use store::{locus_home, ProviderView, Store, Whoami};
+pub use store::{locus_home, AuditEvent, ProviderView, RuntimeDrift, Store, Whoami};
+pub use workers::{
+    InMemoryWorkerManager, McpStdioBackend, McpStdioConfig, SyntheticBackend, WorkerBackend,
+    WorkerKey, WorkerManager, WorkerSlot, WorkerState, WorkerToolResult,
+};
 pub use workspace::{find_workspace, WorkspaceConfig};
 
 /// Crate version for `locus --version` / doctor.

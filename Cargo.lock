@@ -464,6 +464,7 @@ dependencies = [
  "locus-core",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -1,0 +1,32 @@
+# Example binding — copy to ~/.locus/bindings/acme.toml and edit.
+# Never put raw secrets here; use phm: or env: refs.
+
+[binding]
+id = "bnd_acme"
+alias = "acme"
+tenant = "acme-corp"
+description = "Acme client engagement"
+
+[binding.policy]
+default = "allow"
+require_approval = ["*.delete*", "*.drop*", "vercel.deploy.prod"]
+max_ttl = "8h"
+parallel_sessions = 4
+
+[[binding.providers]]
+provider = "supabase"
+account = "acme-prod"
+credential_ref = "phm:SUPABASE_ACME"
+scope = { project_ref = "YOUR_PROJECT_REF", read_only = true }
+
+[[binding.providers]]
+provider = "github"
+account = "acme-corp"
+credential_ref = "phm:GH_TOKEN_ACME"
+scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
+
+[[binding.providers]]
+provider = "vercel"
+account = "acme-team"
+credential_ref = "phm:VERCEL_TOKEN_ACME"
+scope = { team_id = "team_xxx", projects = ["acme-web"], env = ["preview"] }
