@@ -1,8 +1,12 @@
 # Locus
 
+[![CI](https://github.com/ashlrai/locus/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](./rust-toolchain.toml)
+
 **Wrong account, impossible.**
 
-Identity plane for coding agents. Pin a client — every CLI command (and soon every MCP tool) is hard-scoped to that binding until you re-pin.
+Identity plane for coding agents. Pin a client — every CLI command and MCP tool is hard-scoped to that binding until you re-pin.
 
 | Product | Question it answers |
 |---------|---------------------|
@@ -173,6 +177,18 @@ cargo build --release
 ./target/release/locus --help
 ```
 
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test/lint and how to add adapters.
+
+### Docs
+
+| Doc | Topic |
+|-----|--------|
+| [docs/mcp.md](./docs/mcp.md) | `locus-mcp` with Claude Code / Cursor |
+| [docs/adapters.md](./docs/adapters.md) | Writing a provider adapter |
+| [SECURITY.md](./SECURITY.md) | Threat model summary & reporting |
+| [CHANGELOG.md](./CHANGELOG.md) | Release notes |
+| [DESIGN.md](./DESIGN.md) / [PLAN.md](./PLAN.md) | Full architecture & roadmap |
+
 ---
 
 ## Security model
@@ -186,8 +202,12 @@ cargo build --release
 
 Not in scope yet: real upstream Supabase/Vercel MCP fan-out, dual-control, team sync.
 
+Details and reporting: [SECURITY.md](./SECURITY.md). Full threat model: [DESIGN.md §9](./DESIGN.md).
+
 ---
 
 ## License
 
 MIT — see [LICENSE](./LICENSE).
+
+Code of Conduct: [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).
