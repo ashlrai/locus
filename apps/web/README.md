@@ -2,7 +2,8 @@
 
 Static landing page for [Locus](https://github.com/ashlrai/locus).
 
-- **Tagline:** Wrong account, impossible.
+- **Tagline:** AI-native identity plane · Wrong account, impossible.
+- **v0.2 surfaces:** local dashboard, forensics, HTTP MCP, goal status
 - **Stack:** pure HTML + CSS in `public/index.html` (no build step)
 - **Aesthetic:** dark monochrome terminal — sibling positioning vs [Phantom](https://phm.dev)
 

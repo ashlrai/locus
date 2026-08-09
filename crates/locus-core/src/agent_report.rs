@@ -3,7 +3,7 @@
 //! Hub JSON contract:
 //! ```json
 //! {
-//!   "version": "0.1.1",
+//!   "version": "0.2.0",
 //!   "ready": true,
 //!   "status": "unsafe|protected|ready",
 //!   "pin": { ... },
@@ -427,11 +427,12 @@ Pin a Binding; every CLI command and MCP tool is hard-scoped to that tenant unti
 
 ## Rules (agents)
 
-1. Call `locus_whoami` / `locus whoami` before infrastructure mutations if context is unclear.
+1. Call `locus_safe_next` (or `locus_whoami` / read `locus://session`) before infrastructure mutations if context is unclear.
 2. Treat the active pin as authoritative — do not invent `project_ref`, `team_id`, orgs, or repos.
-3. **You cannot re-pin.** Use `locus_request_pin` only; a human runs `locus pin` / `locus enter`.
+3. **You cannot re-pin.** Use `locus_request_pin` / `locus_enter_hint` only; a human runs `locus pin` / `locus enter`.
 4. If tools are missing or the wrong tenant: ask the human to pin. Do not claim you can switch accounts.
 5. Destructive tools may block on `require_approval` — human grants via `locus approve grant <id>`.
+6. Prefer `locus_safe_next` when stuck — it returns the single best human/agent action (enter, approve, doctor fix).
 
 ## Human commands
 
@@ -449,6 +450,20 @@ locus leave                 # clear pin
 | `LOCUS_AUTO_PIN` | `cwd` | Prefer workspace `.locus.toml` / autopin when supported |
 | `LOCUS_CLIENT` | claude\|cursor\|codex | Session label |
 | `LOCUS_NOTIFY` | **unset** | Desktop banners stay opt-in (`locus notify on`) |
+
+### MCP auto-pin kill switches
+
+`locus-mcp` may silently pin once at start from workspace `default_binding` / `require_pin` (never force past allowlist). Disable or force:
+
+| Signal | Effect |
+|--------|--------|
+| `LOCUS_MCP_AUTO_PIN=0` / `false` / `off` | **Kill switch** — never auto-pin |
+| `LOCUS_MCP_AUTO_PIN=1` / `true` / `on` | Explicit enable |
+| `LOCUS_AUTO_PIN=cwd` | Enable cwd-based auto-pin (also set by agent setup) |
+| `clients.auto_pin = "cwd"` in `$LOCUS_HOME/config.toml` | Same as cwd enable |
+| `.locus.toml` `default_binding` / `require_pin = true` | Preferred enable when cwd sees the workspace |
+
+Agents still **cannot** call pin — only the server may auto-pin, and only when unpinned.
 
 Sibling: [Phantom](https://phm.dev) answers *can this secret enter the model?* Locus answers *as whom, against which tenant?*
 "#
@@ -488,6 +503,239 @@ pub fn probe_agent_options(project_dir: &Path, user_home: Option<&Path>) -> Agen
         agent_md_present: agent_md_present(project_dir),
         workspace_present: workspace_present(project_dir),
     }
+}
+
+// ── Safe next action ────────────────────────────────────────────────────────
+
+/// Single best next human/agent action for identity readiness.
+///
+/// Machine `action` values: `init` | `enter` | `re_pin` | `approve` | `doctor_fix` | `ready`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafeNext {
+    /// Machine-readable action id.
+    pub action: String,
+    /// Human shell command when the next step is human-gated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Suggested agent MCP tool (if any).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_tool: Option<String>,
+    /// One-line instruction for the model / operator.
+    pub message: String,
+    /// True only when identity plane is safe to proceed under the pin.
+    pub ready: bool,
+    /// Pending approval id when `action == "approve"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    /// Active binding alias when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+    /// Active tenant when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+}
+
+/// Compute the single best next action from store state (fail closed, no secrets).
+///
+/// Priority: init → enter → re_pin → approve → doctor_fix → ready.
+pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
+    let seal_ok = store.seal_key().is_ok();
+    if !seal_ok {
+        return Ok(SafeNext {
+            action: "init".into(),
+            command: Some("locus init --with-samples".into()),
+            agent_tool: None,
+            message: "Locus home / seal key not ready. Human must run `locus init --with-samples`."
+                .into(),
+            ready: false,
+            approval_id: None,
+            binding: None,
+            tenant: None,
+        });
+    }
+
+    let bindings = store.list_bindings()?.len();
+    if bindings == 0 {
+        return Ok(SafeNext {
+            action: "init".into(),
+            command: Some("locus init --with-samples".into()),
+            agent_tool: Some("locus_list_bindings".into()),
+            message:
+                "No bindings configured. Human: `locus init --with-samples` or `locus binding add`."
+                    .into(),
+            ready: false,
+            approval_id: None,
+            binding: None,
+            tenant: None,
+        });
+    }
+
+    // Drift check freezes session when material changed — findings reflect that.
+    let runtime = store.check_drift_and_freeze()?;
+    let enter_cmd = enter_command_for_cwd(cwd);
+
+    if !runtime.pinned {
+        return Ok(SafeNext {
+            action: "enter".into(),
+            command: Some(enter_cmd.clone()),
+            agent_tool: Some("locus_enter_hint".into()),
+            message: format!(
+                "Not pinned. Agents cannot pin — ask the human to run `{enter_cmd}` (or `locus pin <alias>`)."
+            ),
+            ready: false,
+            approval_id: None,
+            binding: None,
+            tenant: None,
+        });
+    }
+
+    let binding = runtime.binding_alias.clone();
+    let tenant = runtime.tenant_session.clone();
+    let re_pin_cmd = binding
+        .as_ref()
+        .map(|a| format!("locus leave && locus pin {a}"))
+        .unwrap_or_else(|| "locus leave && locus pin <alias>".into());
+
+    if !runtime.seal_ok {
+        return Ok(SafeNext {
+            action: "re_pin".into(),
+            command: Some(re_pin_cmd),
+            agent_tool: Some("locus_request_pin".into()),
+            message:
+                "Session seal invalid. Human must re-pin (`locus leave` then `locus pin <alias>`)."
+                    .into(),
+            ready: false,
+            approval_id: None,
+            binding,
+            tenant,
+        });
+    }
+    if runtime.expired {
+        return Ok(SafeNext {
+            action: "re_pin".into(),
+            command: Some(
+                binding
+                    .as_ref()
+                    .map(|a| format!("locus pin {a}"))
+                    .unwrap_or_else(|| "locus pin <alias>".into()),
+            ),
+            agent_tool: Some("locus_request_pin".into()),
+            message: "Pin TTL expired. Human must re-pin.".into(),
+            ready: false,
+            approval_id: None,
+            binding,
+            tenant,
+        });
+    }
+    if runtime.frozen {
+        return Ok(SafeNext {
+            action: "re_pin".into(),
+            command: Some(re_pin_cmd),
+            agent_tool: Some("locus_heartbeat".into()),
+            message:
+                "Session frozen after binding drift. Human: `locus leave` then `locus pin <alias>`."
+                    .into(),
+            ready: false,
+            approval_id: None,
+            binding,
+            tenant,
+        });
+    }
+    if !runtime.ok {
+        return Ok(SafeNext {
+            action: "doctor_fix".into(),
+            command: Some("locus doctor".into()),
+            agent_tool: Some("locus_heartbeat".into()),
+            message: format!(
+                "Runtime unhealthy ({}). Human: `locus doctor`; agents: call locus_heartbeat.",
+                runtime.issues.join(", ")
+            ),
+            ready: false,
+            approval_id: None,
+            binding,
+            tenant,
+        });
+    }
+
+    // Pending approvals — human grant is the gate.
+    let pending = store.pending_approvals()?;
+    if let Some(rec) = pending.first() {
+        let grant = format!("locus approve grant {} --as <principal>", rec.id);
+        return Ok(SafeNext {
+            action: "approve".into(),
+            command: Some(grant),
+            agent_tool: None,
+            message: format!(
+                "Pending approval for `{}` on binding `{}`. Human: `locus approve grant {} --as <principal>` then re-call the tool.",
+                rec.tool, rec.binding, rec.id
+            ),
+            ready: false,
+            approval_id: Some(rec.id.clone()),
+            binding,
+            tenant,
+        });
+    }
+
+    // Doctor UNSAFE (beyond runtime already handled).
+    let doctor = build_doctor_report(
+        store,
+        DoctorExternal {
+            phantom_on_path: false,
+            unresolved_phm: Vec::new(),
+            cwd: Some(cwd.to_path_buf()),
+        },
+    )?;
+    if doctor.verdict == DoctorVerdict::Unsafe {
+        let codes: Vec<&str> = doctor
+            .findings
+            .iter()
+            .filter(|f| f.severity == IssueSeverity::Unsafe)
+            .map(|f| f.code.as_str())
+            .collect();
+        return Ok(SafeNext {
+            action: "doctor_fix".into(),
+            command: Some("locus doctor".into()),
+            agent_tool: Some("locus_heartbeat".into()),
+            message: format!(
+                "Doctor UNSAFE ({}). Human: `locus doctor` and fix findings before mutating infrastructure.",
+                if codes.is_empty() {
+                    "see locus doctor".into()
+                } else {
+                    codes.join(", ")
+                }
+            ),
+            ready: false,
+            approval_id: None,
+            binding,
+            tenant,
+        });
+    }
+
+    Ok(SafeNext {
+        action: "ready".into(),
+        command: None,
+        agent_tool: Some("locus_whoami".into()),
+        message: format!(
+            "Identity plane ready under pin `{}` (tenant `{}`). Proceed with provider tools; do not invent alternate scopes.",
+            binding.as_deref().unwrap_or("?"),
+            tenant.as_deref().unwrap_or("?")
+        ),
+        ready: true,
+        approval_id: None,
+        binding,
+        tenant,
+    })
+}
+
+fn enter_command_for_cwd(cwd: &Path) -> String {
+    if let Some((_, cfg)) = find_workspace(cwd) {
+        if let Some(ref def) = cfg.default_binding {
+            if !def.trim().is_empty() {
+                return format!("locus enter {def}");
+            }
+        }
+    }
+    "locus enter".into()
 }
 
 #[cfg(test)]
@@ -684,8 +932,60 @@ mod tests {
     #[test]
     fn agent_md_and_workspace_stub_nonempty() {
         assert!(agent_md_content().contains("locus_request_pin"));
+        assert!(agent_md_content().contains("LOCUS_MCP_AUTO_PIN"));
+        assert!(agent_md_content().contains("locus_safe_next"));
+        assert!(agent_md_content().contains("Kill switch"));
         assert!(workspace_stub_toml().contains("require_pin"));
         assert!(agent_md_path(Path::new("/tmp")).ends_with(".locus/AGENT.md"));
+    }
+
+    #[test]
+    fn safe_next_enter_when_unpinned() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        fs::write(
+            dir.path().join(".locus.toml"),
+            r#"
+version = 1
+default_binding = "acme"
+require_pin = true
+"#,
+        )
+        .unwrap();
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "enter");
+        assert!(!next.ready);
+        assert_eq!(next.command.as_deref(), Some("locus enter acme"));
+        assert_eq!(next.agent_tool.as_deref(), Some("locus_enter_hint"));
+    }
+
+    #[test]
+    fn safe_next_ready_when_pinned() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "ready");
+        assert!(next.ready);
+        assert_eq!(next.binding.as_deref(), Some("acme"));
+        assert_eq!(next.tenant.as_deref(), Some("acme-corp"));
+        assert!(next.command.is_none());
+    }
+
+    #[test]
+    fn safe_next_init_when_no_bindings() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "init");
+        assert!(!next.ready);
+        assert!(next.command.as_deref().unwrap_or("").contains("locus init"));
     }
 
     #[test]

@@ -16,9 +16,9 @@
 
 use anyhow::{bail, Context, Result};
 use locus_core::{
-    build_doctor_report, call_tool_gated, control_tools, enforce_policy, find_workspace,
-    load_config, split_namespaced_tool, tools_for_binding, AdapterTool, ApprovalGate, Binding,
-    DoctorExternal, Session, Store, VERSION,
+    build_doctor_report, call_tool_gated, compute_safe_next, control_tools, enforce_policy,
+    find_workspace, load_config, split_namespaced_tool, tools_for_binding, verify_claim,
+    AdapterTool, ApprovalGate, Binding, DoctorExternal, Session, Store, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -541,28 +541,49 @@ fn rpc_error(code: i64, message: String) -> Value {
 
 // ─── Initialize / agent instructions ────────────────────────────────────────
 
+/// Crisp agent rules for `initialize.instructions` — pin state is live after auto-pin.
 fn agent_instructions() -> String {
+    let pin_line = match store() {
+        Ok(s) => {
+            let _ = s.check_drift_and_freeze();
+            match s.whoami() {
+                Ok(w) => format!(
+                    "• Active pin: `{}` (tenant `{}`, mode {}). Catalog is exclusive to this binding — no ambient accounts.",
+                    w.binding_alias,
+                    w.tenant,
+                    w.mode
+                ),
+                Err(_) => "• Currently unpinned — only locus_* control tools are available. There is no ambient personal fallthrough.".into(),
+            }
+        }
+        Err(_) => "• Store unavailable — treat session as unpinned.".into(),
+    };
+
     [
-        "Locus identity plane — tools are hard-scoped to the active pin (no ambient accounts).",
-        "• Call locus_whoami (or read locus://session) before infrastructure work.",
-        "• You cannot pin — ask the human to run `locus pin <alias>` / `locus enter <alias>`, or use locus_request_pin / locus_enter_hint.",
-        "• Frozen scopes (project_ref, team_id, orgs/repos) cannot be overridden; scope freeze is expected on mismatch.",
-        "• Unpinned sessions expose only locus_* control tools. Resources: locus://session, locus://doctor, locus://bindings. Prompt: locus_context.",
+        "Locus identity plane — tools are hard-scoped to the active sealed pin.".into(),
+        pin_line,
+        "• ALWAYS call locus_whoami or locus_safe_next (or read locus://session) before infrastructure mutations when context is unclear.".into(),
+        "• You CANNOT pin or switch tenants. Use locus_request_pin / locus_enter_hint; surface the command so a human runs `locus pin <alias>` / `locus enter <alias>`.".into(),
+        "• When stuck, unpinned, approval-blocked, or doctor-unhealthy: call locus_safe_next — it returns the single best next action.".into(),
+        "• Frozen scopes (project_ref, team_id, orgs/repos) cannot be overridden; scope freeze on mismatch is expected and correct.".into(),
+        "• Resources always reflect current pin: locus://session, locus://doctor, locus://bindings. Prompt: locus_context. Re-read after pin changes.".into(),
+        "• Never invent alternate project_ref/team/org. Never claim you re-pinned. Never log or request raw secrets.".into(),
     ]
     .join("\n")
 }
 
 fn handle_initialize(_params: &Value) -> Value {
     // Prefer auto-pin once at MCP start when workspace has default_binding / require_pin
-    // or when explicitly enabled (see maybe_mcp_auto_pin).
+    // or when explicitly enabled (see maybe_mcp_auto_pin). Instructions then include pin state.
     let _ = maybe_mcp_auto_pin();
 
+    // listChanged=true: catalog may change after auto-pin / human pin/leave; clients should re-list.
     json!({
         "protocolVersion": "2024-11-05",
         "capabilities": {
-            "tools": { "listChanged": false },
-            "resources": { "subscribe": false, "listChanged": false },
-            "prompts": {}
+            "tools": { "listChanged": true },
+            "resources": { "subscribe": false, "listChanged": true },
+            "prompts": { "listChanged": true }
         },
         "serverInfo": {
             "name": "locus-mcp",
@@ -752,28 +773,51 @@ const RESOURCE_SESSION: &str = "locus://session";
 const RESOURCE_DOCTOR: &str = "locus://doctor";
 const RESOURCE_BINDINGS: &str = "locus://bindings";
 
+/// Live pin tag for resource/prompt descriptions (after optional auto-pin).
+fn pin_label_for_catalog() -> String {
+    match store() {
+        Ok(s) => {
+            let _ = s.check_drift_and_freeze();
+            match s.whoami() {
+                Ok(w) => format!("locus:{}", w.binding_alias),
+                Err(_) => "locus:unpinned".into(),
+            }
+        }
+        Err(_) => "locus:unpinned".into(),
+    }
+}
+
 fn handle_resources_list() -> std::result::Result<Value, Value> {
+    // Stay in sync with auto-pin: attempt once before describing resources.
+    let _ = maybe_mcp_auto_pin();
+    let pin = pin_label_for_catalog();
     Ok(json!({
         "resources": [
             {
                 "uri": RESOURCE_SESSION,
                 "name": "session",
                 "title": "Active Locus pin (whoami)",
-                "description": "Current pin whoami JSON: tenant, binding, providers, frozen scopes. Never includes secrets.",
+                "description": format!(
+                    "[{pin}] Current pin whoami JSON: tenant, binding, providers, frozen scopes. Live after auto-pin. Never includes secrets."
+                ),
                 "mimeType": "application/json"
             },
             {
                 "uri": RESOURCE_DOCTOR,
                 "name": "doctor",
                 "title": "Locus doctor lite",
-                "description": "Doctor-lite / runtime drift: pin health, seal, freeze, workspace. Never includes secrets.",
+                "description": format!(
+                    "[{pin}] Doctor-lite / runtime drift: pin health, seal, freeze, workspace. Never includes secrets."
+                ),
                 "mimeType": "application/json"
             },
             {
                 "uri": RESOURCE_BINDINGS,
                 "name": "bindings",
                 "title": "Configured bindings",
-                "description": "List of binding summaries (alias, tenant, providers). No secrets.",
+                "description": format!(
+                    "[{pin}] Binding summaries (alias, tenant, providers). No secrets."
+                ),
                 "mimeType": "application/json"
             }
         ]
@@ -781,6 +825,8 @@ fn handle_resources_list() -> std::result::Result<Value, Value> {
 }
 
 fn handle_resources_read(params: &Value) -> std::result::Result<Value, Value> {
+    // Re-sync with pin after auto-pin (or if initialize was skipped).
+    let _ = maybe_mcp_auto_pin();
     let uri = params
         .get("uri")
         .and_then(|u| u.as_str())
@@ -844,17 +890,22 @@ fn resource_bindings_json() -> std::result::Result<Value, Value> {
 // ─── Prompts ────────────────────────────────────────────────────────────────
 
 fn handle_prompts_list() -> std::result::Result<Value, Value> {
+    let _ = maybe_mcp_auto_pin();
+    let pin = pin_label_for_catalog();
     Ok(json!({
         "prompts": [{
             "name": "locus_context",
             "title": "Locus identity context",
-            "description": "System prompt fragment: active tenant, frozen scopes, and the rule that agents cannot pin.",
+            "description": format!(
+                "[{pin}] System prompt fragment: active tenant, frozen scopes, agents cannot pin. Re-fetch after pin changes."
+            ),
             "arguments": []
         }]
     }))
 }
 
 fn handle_prompts_get(params: &Value) -> std::result::Result<Value, Value> {
+    let _ = maybe_mcp_auto_pin();
     let name = params
         .get("name")
         .and_then(|n| n.as_str())
@@ -863,8 +914,9 @@ fn handle_prompts_get(params: &Value) -> std::result::Result<Value, Value> {
     match name {
         "locus_context" => {
             let text = build_locus_context_prompt();
+            let pin = pin_label_for_catalog();
             Ok(json!({
-                "description": "Locus identity context for the agent system prompt",
+                "description": format!("[{pin}] Locus identity context for the agent system prompt"),
                 "messages": [{
                     "role": "user",
                     "content": {
@@ -896,7 +948,8 @@ fn build_locus_context_prompt() -> String {
         String::new(),
         "### Hard rules".into(),
         "- You **cannot pin** or switch tenants. If the wrong account is active, ask the human to run `locus pin <alias>` / `locus enter <alias>` (or surface `locus_request_pin` / `locus_enter_hint`).".into(),
-        "- Call `locus_whoami` or read resource `locus://session` before infrastructure mutations.".into(),
+        "- Call `locus_whoami`, `locus_safe_next`, or read resource `locus://session` before infrastructure mutations.".into(),
+        "- When stuck (unpinned, approval-blocked, freeze, doctor issues): call `locus_safe_next` for the single best next action.".into(),
         "- Do **not** invent or override frozen `project_ref`, `team_id`, orgs, or repos.".into(),
         "- Unpinned sessions only expose `locus_*` control tools — there is no ambient personal fallthrough.".into(),
         String::new(),
@@ -1414,11 +1467,20 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
     // Heartbeat: detect drift and freeze when identity control tools are polled.
     if matches!(
         name,
-        "locus_whoami" | "locus_status" | "locus_providers" | "locus_heartbeat"
+        "locus_whoami" | "locus_status" | "locus_providers" | "locus_heartbeat" | "locus_safe_next"
     ) {
         let _ = s.check_drift_and_freeze();
     }
     match name {
+        "locus_safe_next" => {
+            let next =
+                compute_safe_next(&s, &cwd()).map_err(|e| rpc_error(-32000, e.to_string()))?;
+            // Informational: isError only when not ready so agents notice the gate.
+            Ok(tool_text(
+                serde_json::to_value(&next).unwrap_or(json!({})),
+                !next.ready,
+            ))
+        }
         "locus_whoami" => match s.whoami() {
             Ok(w) => Ok(tool_text(
                 serde_json::to_value(w).unwrap_or(json!({})),
@@ -1571,6 +1633,42 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
             Ok(w) => Ok(tool_text(json!({ "providers": w.providers }), false)),
             Err(e) => Ok(tool_text(json!({ "error": e.to_string() }), true)),
         },
+        "locus_verify_claim" => {
+            let text = args
+                .get("text")
+                .or_else(|| args.get("claim"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|t| !t.is_empty());
+            let Some(text) = text else {
+                return Ok(tool_text(
+                    json!({ "error": "text (or claim) required — free-text assertion to score" }),
+                    true,
+                ));
+            };
+            let who = s.whoami().ok();
+            let result = verify_claim(text, who.as_ref());
+            let binding = who
+                .as_ref()
+                .map(|w| w.binding_alias.as_str())
+                .unwrap_or("-");
+            let _ = s.audit(
+                "mcp.verify_claim",
+                binding,
+                Some(json!({
+                    "confidence": result.confidence.as_str(),
+                    "needs_tool": result.needs_tool,
+                    "signals": result.signals,
+                    // Truncate claim in audit — never store huge blobs.
+                    "claim_len": result.claim.len(),
+                    "claim_preview": result.claim.chars().take(120).collect::<String>(),
+                })),
+            );
+            Ok(tool_text(
+                serde_json::to_value(&result).unwrap_or(json!({})),
+                false,
+            ))
+        }
         other => Ok(tool_text(
             json!({ "error": format!("unknown control tool: {other}") }),
             true,

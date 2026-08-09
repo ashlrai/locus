@@ -9,11 +9,13 @@ Machine contract for **ashlr-hub** (and similar orchestrators) to shell out to L
 |----------|------|
 | Agent report schema | [`schema/agent-report.schema.json`](../schema/agent-report.schema.json) |
 | Doctor schema | [`schema/doctor.schema.json`](../schema/doctor.schema.json) |
+| Fleet gate schema | [`schema/hub-gate.schema.json`](../schema/hub-gate.schema.json) |
 | Hub drop-in + TS types | [`integrations/ashlr-hub/locus.ts`](../integrations/ashlr-hub/locus.ts) |
+| Fleet preflight | [`integrations/ashlr-hub/fleet-preflight.md`](../integrations/ashlr-hub/fleet-preflight.md) |
 | MCP gateway patch | [`integrations/ashlr-hub/mcp-gateway-snippet.md`](../integrations/ashlr-hub/mcp-gateway-snippet.md) |
 | Doctor `checkLocus` | [`integrations/ashlr-hub/doctor-check.md`](../integrations/ashlr-hub/doctor-check.md) |
 | Northstar | [`GOALS.md`](../GOALS.md) · `locus goal status` |
-| Smoke | [`scripts/hub-smoke.sh`](../scripts/hub-smoke.sh) |
+| Smoke | [`scripts/hub-smoke.sh`](../scripts/hub-smoke.sh), [`scripts/hub-integration-test.sh`](../scripts/hub-integration-test.sh) |
 
 ---
 
@@ -256,12 +258,30 @@ locus agent report --json   # resolves via LOCUS_SESSION_ID; env_session_id set
 
 ---
 
+## Fleet gate (hub pre-dispatch)
+
+```ts
+import { locusFleetGate, registerLocusInMcpConfig } from "../integrations/ashlr-hub/locus";
+
+const gate = locusFleetGate(); // { allowDispatch, blockers[], report }
+if (!gate.allowDispatch) {
+  // do not dispatch mutating agents
+}
+registerLocusInMcpConfig(".mcp.json"); // merge locus into MCP JSON
+```
+
+Schema: [`schema/hub-gate.schema.json`](../schema/hub-gate.schema.json).  
+Exact steps: [`integrations/ashlr-hub/fleet-preflight.md`](../integrations/ashlr-hub/fleet-preflight.md).
+
+---
+
 ## Validation
 
 ```bash
-# From repo root (jq required)
+# From repo root (jq + node required for composition smoke)
 export PATH="$HOME/.cargo/bin:$PATH"
 ./scripts/hub-smoke.sh
+./scripts/hub-integration-test.sh
 
 # Manual:
 export LOCUS_HOME=/tmp/locus-hub-smoke

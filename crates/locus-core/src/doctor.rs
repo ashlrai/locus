@@ -5,6 +5,10 @@
 
 use crate::config::{self, AutopinStatus, LocusConfig};
 use crate::store::{ApprovalsHealth, AuditEvent, RuntimeDrift, Store};
+use crate::verify::{
+    count_low_confidence_audit_signals, doctor_low_confidence_message,
+    DOCTOR_LOW_CONFIDENCE_AUDIT_SCAN,
+};
 use crate::VERSION;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -452,6 +456,13 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                 near_miss.scope_freeze, near_miss.require_approval
             ),
         ));
+    }
+    // Light M5 verification-plane signal: many recent audit details look ungrounded
+    // (numbers / URLs / versions). Optional WARN — never escalates to UNSAFE alone.
+    let low_conf_audit =
+        count_low_confidence_audit_signals(&all_events, DOCTOR_LOW_CONFIDENCE_AUDIT_SCAN);
+    if let Some(msg) = doctor_low_confidence_message(low_conf_audit) {
+        findings.push(issue(IssueSeverity::Warn, "ungrounded_claims", msg));
     }
 
     let mut verdict = DoctorVerdict::Safe;

@@ -27,13 +27,37 @@ provider = "github"
 account = "acme"
 credential_ref = "phm:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"] }
-upstream = { command = "npx", args = ["-y", "@modelcontextprotocol/server-github"], resolve_secrets = true }
+# Built-in recipe (recommended) — expands to command/args:
+upstream = { recipe = "github-mcp", resolve_secrets = true }
+
+# Explicit command/args (still supported):
+# upstream = { command = "npx", args = ["-y", "@modelcontextprotocol/server-github"], resolve_secrets = true }
 
 # Nested table form (applies to the most recent [[binding.providers]] entry):
 # [binding.providers.upstream]
 # command = "python3"
 # args = ["-u", "server.py"]
 ```
+
+### Built-in recipes
+
+| Recipe | Typical use |
+|--------|-------------|
+| `github-mcp` | Community `@modelcontextprotocol/server-github` via `npx` |
+| `github-official` | Official GitHub image via Docker + `GITHUB_PERSONAL_ACCESS_TOKEN` |
+| `supabase-mcp` | `@supabase/mcp-server-supabase` stdio (see notes for remote URL style) |
+| `filesystem-mcp` | Safe filesystem demo (override root path via `args`) |
+| `everything-mcp` | MCP test/echo server for wiring checks |
+
+```bash
+locus upstream list
+locus upstream suggest github
+locus upstream suggest supabase
+```
+
+Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` override recipe defaults when both are set.
+
+**Supabase remote URL (host MCP, not Locus workers):** `https://mcp.supabase.com/mcp` or `?project_ref=…`. Locus upstream workers are **stdio** only today.
 
 When `locus-mcp` is pinned:
 

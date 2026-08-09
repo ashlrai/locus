@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ashlrai/locus/schema/hub-gate.schema.json",
+  "title": "LocusFleetGate",
+  "description": "Fleet pre-dispatch gate result from locusFleetGate() / evaluateFleetGate(). Fail closed: allowDispatch is true only when blockers is empty. Never contains resolved secret values. Nested report follows schema/agent-report.schema.json.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["allowDispatch", "blockers", "report"],
+  "properties": {
+    "allowDispatch": {
+      "type": "boolean",
+      "description": "True only when every preflight check passes. Hub must not dispatch mutating agents when false."
+    },
+    "blockers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Human-readable reasons dispatch is blocked. Empty if and only if allowDispatch is true (when produced by evaluateFleetGate / locusFleetGate)."
+    },
+    "report": {
+      "description": "Full agent report when available; null if CLI missing or report parse failed.",
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "version",
+            "ready",
+            "status",
+            "status_oneline",
+            "home",
+            "required_servers",
+            "mcp_command"
+          ],
+          "properties": {
+            "version": { "type": "string" },
+            "ready": { "type": "boolean" },
+            "status": {
+              "type": "string",
+              "enum": ["ready", "protected", "unsafe"]
+            },
+            "status_oneline": { "type": "string" },
+            "home": { "type": "string" },
+            "required_servers": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "mcp_command": { "type": "string" },
+            "pin": {
+              "type": ["object", "null"],
+              "additionalProperties": true
+            },
+            "mcp_registered": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "doctor": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "commands": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "exit_code": {
+              "type": "integer",
+              "enum": [0, 1, 2]
+            },
+            "findings": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "next_steps": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "env_session_id": {
+              "type": ["string", "null"]
+            }
+          }
+        }
+      ]
+    },
+    "available": {
+      "type": "boolean",
+      "description": "Whether the locus CLI was found on PATH."
+    },
+    "gateOk": {
+      "type": "boolean",
+      "description": "ready + healthy status_oneline (may still fail contract checks)."
+    },
+    "status": {
+      "type": "string",
+      "description": "Echo of report.status when present."
+    },
+    "status_oneline": {
+      "type": "string",
+      "description": "Echo of report.status_oneline when present."
+    }
+  }
+}

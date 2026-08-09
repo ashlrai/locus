@@ -20,8 +20,12 @@ max_ttl = "2h"
 parallel_sessions = 2
 
 # ── Upstream mock (stdio MCP) ─────────────────────────────────────────────
-# Uses the public MCP "everything" server as a stand-in for a real provider
-# upstream. Requires network the first time `npx` fetches the package.
+# Prefer built-in recipes (`locus upstream list` / `locus upstream suggest`):
+#   upstream = { recipe = "everything-mcp" }
+#   upstream = { recipe = "github-mcp", resolve_secrets = true }
+#   upstream = { recipe = "filesystem-mcp", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/locus-demo"] }
+#   upstream = { recipe = "supabase-mcp", resolve_secrets = true }
+# Explicit command/args still work (and override recipe defaults when both set).
 #
 # resolve_secrets = true injects resolved credential_ref values into the child
 # only (never into MCP tool responses).
@@ -30,7 +34,7 @@ provider = "github"
 account = "demo-gh"
 credential_ref = "env:GH_TOKEN"
 scope = { orgs = ["demo-org"], repos = ["demo-org/*"] }
-upstream = { command = "npx", args = ["-y", "@modelcontextprotocol/server-everything"], resolve_secrets = true }
+upstream = { recipe = "everything-mcp" }
 
 # Nested-table form (equivalent style for a second provider):
 [[binding.providers]]
@@ -38,6 +42,9 @@ provider = "supabase"
 account = "demo-db"
 credential_ref = "phm:SUPABASE_DEMO"
 scope = { project_ref = "YOUR_PROJECT_REF", read_only = true }
+# Stdio package (legacy). Remote URL style for host MCP configs (not Locus workers):
+#   https://mcp.supabase.com/mcp?project_ref=YOUR_PROJECT_REF
+# upstream = { recipe = "supabase-mcp", resolve_secrets = true }
 
 # Optional: spawn a custom Python/Node mock instead of npx everything:
 # [[binding.providers]]

@@ -88,7 +88,7 @@ Any client that can spawn a stdio MCP server can use:
 - Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`  
 - **Never** log to stdout from the server — that breaks the protocol (errors go to stderr)  
 - Protocol version advertised: `2024-11-05`  
-- `initialize.instructions` carries crisp agent rules (whoami first, cannot pin, scope freeze, resources)
+- `initialize.instructions` carries crisp agent rules (whoami / `locus_safe_next` first, cannot pin, scope freeze, live pin state after auto-pin, resources)
 
 ## HTTP transport (CI / remote agents)
 
@@ -157,6 +157,7 @@ Every tool description is prefixed with **`[locus:<alias|unpinned>]`** so the mo
 | Tool | Behavior |
 |------|----------|
 | `locus_whoami` | Active pin: tenant, binding, providers, frozen scopes — **no secrets** |
+| `locus_safe_next` | **Single best next action** (enter / re-pin / approve / doctor fix / ready) — call when stuck |
 | `locus_status` | Short pinned/unpinned + seal status |
 | `locus_heartbeat` | Doctor-lite / runtime drift (seal, freeze, binding match) |
 | `locus_enter_hint` | Shell command for the human to pin (`locus enter …`) |
@@ -192,15 +193,27 @@ Use `resources/list` + `resources/read` with `{ "uri": "locus://session" }`.
 
 ## MCP auto-pin (cwd / workspace)
 
-Agents still **cannot** call pin. The **server** may silently pin once at MCP start (and at most once per process) from the workspace when policy allows:
+Agents still **cannot** call pin. The **server** may silently pin once at MCP start (and at most once per process) from the workspace when policy allows.
 
-| Enable signal | Effect |
-|---------------|--------|
+`locus agent setup --apply` writes `.locus/AGENT.md` with this table and sets `LOCUS_AUTO_PIN=cwd` on MCP client env.
+
+### Enable signals
+
+| Signal | Effect |
+|--------|--------|
 | `.locus.toml` has `default_binding` | **Preferred default** — auto-pin that binding on MCP start (cwd must see the workspace file) |
 | `.locus.toml` has `require_pin = true` | Enables auto-pin policy (still needs a resolvable default or autopin target) |
-| `LOCUS_MCP_AUTO_PIN=1` | Explicit enable |
+| `LOCUS_MCP_AUTO_PIN=1` / `true` / `on` | Explicit enable |
 | `LOCUS_AUTO_PIN=cwd` or `clients.auto_pin = "cwd"` in `$LOCUS_HOME/config.toml` | Enable cwd-based auto-pin |
-| `LOCUS_MCP_AUTO_PIN=0` / `false` / `off` | **Kill switch** — never auto-pin |
+
+### Kill switches
+
+| Signal | Effect |
+|--------|--------|
+| `LOCUS_MCP_AUTO_PIN=0` | **Kill switch** — never auto-pin (also `false` / `off` / `no`) |
+| Omit workspace `default_binding` / `require_pin` and leave enable signals unset | Auto-pin policy stays off |
+
+Kill switch **wins** over workspace `default_binding` and `LOCUS_AUTO_PIN=cwd`.
 
 Rules:
 
@@ -208,7 +221,8 @@ Rules:
 2. Only when workspace has `require_pin` or non-empty `default_binding`.  
 3. Uses `pin_auto` — **never `--force`**; workspace `allowed_bindings` always wins.  
 4. Audits **`session.auto_pin`** (plus normal `session.pin`).  
-5. Fail soft: if pin fails, stay unpinned and expose control tools only.
+5. Fail soft: if pin fails, stay unpinned and expose control tools only.  
+6. After auto-pin, **tools / resources / prompts** all re-read live pin state (`listChanged` advertised; re-read `locus://session` / `locus_context`).
 
 Example workspace:
 
@@ -233,7 +247,7 @@ export LOCUS_MCP_AUTO_PIN=0
 2. **Scope freeze** rejects args that conflict with frozen selectors (e.g. another Supabase `project_ref`).  
 3. Results are synthetic/identity-oriented in phase 1 — safe to explore without mutating cloud resources.
 
-Agent best practice: call `locus_whoami` before any infrastructure work. If unpinned or wrong tenant, ask the human to `locus pin <alias>`.
+Agent best practice: call `locus_whoami` or `locus_safe_next` before any infrastructure work. If unpinned or wrong tenant, ask the human to `locus pin <alias>`. When blocked (approval, freeze, doctor), prefer `locus_safe_next` for the single next action.
 
 ## Switching clients
 

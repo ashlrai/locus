@@ -310,12 +310,18 @@ fn unpinned_tools_list_only_control_tools_ndjson() {
         );
     }
     assert!(tools.iter().any(|t| t["name"] == "locus_whoami"));
+    assert!(tools.iter().any(|t| t["name"] == "locus_safe_next"));
     assert!(tools.iter().any(|t| t["name"] == "locus_request_pin"));
     assert!(tools.iter().any(|t| t["name"] == "locus_heartbeat"));
     assert!(tools.iter().any(|t| t["name"] == "locus_enter_hint"));
     // provider tools must be absent
     assert!(!tools.iter().any(|t| t["name"] == "github.scope"));
     assert!(!tools.iter().any(|t| t["name"] == "vercel.scope"));
+    // listChanged advertised so clients re-fetch after auto-pin / pin change
+    assert_eq!(
+        init["capabilities"]["tools"]["listChanged"], true,
+        "tools.listChanged should be true"
+    );
 }
 
 #[test]
@@ -1273,6 +1279,164 @@ auto_pin = "cwd"
     assert!(
         names.contains(&"github.scope"),
         "clients.auto_pin=cwd should enable auto-pin: {names:?}"
+    );
+    let _ = store;
+}
+
+#[test]
+fn locus_safe_next_unpinned_and_ready() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+
+    // Unpinned → action=enter, isError=true (not ready)
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    let list = client.request("tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().unwrap();
+    assert!(
+        tools.iter().any(|t| t["name"] == "locus_safe_next"),
+        "locus_safe_next must appear in control catalog"
+    );
+    let safe_desc = tools
+        .iter()
+        .find(|t| t["name"] == "locus_safe_next")
+        .and_then(|t| t["description"].as_str())
+        .unwrap_or("");
+    assert!(
+        safe_desc.contains("enter") || safe_desc.contains("approve"),
+        "description should mention next actions: {safe_desc}"
+    );
+
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "locus_safe_next", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&call);
+    assert!(is_err, "unpinned safe_next should isError: {text}");
+    let body: Value = serde_json::from_str(&text).expect("safe_next json");
+    assert_eq!(body["action"], "enter");
+    assert_eq!(body["ready"], false);
+    assert!(
+        body["command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("locus enter")
+            || body["command"].as_str().unwrap_or("").contains("locus pin"),
+        "command for human pin: {body}"
+    );
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("cannot pin")
+            || body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Not pinned"),
+        "message should explain gate: {body}"
+    );
+    // Never leak secret-looking material
+    let raw = text.to_lowercase();
+    assert!(!raw.contains("sk-"));
+    assert!(!raw.contains("ghp_"));
+    assert!(!raw.contains("phm_"));
+
+    // Pin → action=ready, isError=false
+    store
+        .pin("acme", dir.path(), Some("mcp-safe-next".into()), false)
+        .unwrap();
+    let call2 = client.request(
+        "tools/call",
+        json!({ "name": "locus_safe_next", "arguments": {} }),
+    );
+    let (text2, is_err2) = McpClient::tool_text(&call2);
+    assert!(!is_err2, "pinned safe_next should be ready: {text2}");
+    let body2: Value = serde_json::from_str(&text2).unwrap();
+    assert_eq!(body2["action"], "ready");
+    assert_eq!(body2["ready"], true);
+    assert_eq!(body2["binding"], "acme");
+    assert_eq!(body2["tenant"], "acme-corp");
+    assert!(body2.get("command").is_none() || body2["command"].is_null());
+}
+
+#[test]
+fn resources_and_prompts_reflect_auto_pin() {
+    // After MCP auto-pin, resources/prompts must show the new pin (not stale unpinned).
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("locus-home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Store::open(&home).unwrap();
+    sample_bindings(&store);
+    std::fs::write(
+        project.join(".locus.toml"),
+        r#"
+version = 1
+default_binding = "acme"
+allowed_bindings = ["acme"]
+require_pin = true
+"#,
+    )
+    .unwrap();
+
+    let mut client = McpClient::spawn_opts(
+        &home,
+        Framing::Ndjson,
+        Some(&project),
+        &[("LOCUS_MCP_AUTO_PIN", "1")],
+    );
+    let init = handshake(&mut client);
+    let instructions = init["instructions"].as_str().unwrap_or("");
+    assert!(
+        instructions.contains("acme") || instructions.contains("Active pin"),
+        "initialize.instructions should include pin after auto-pin: {instructions}"
+    );
+    assert!(
+        instructions.contains("locus_safe_next") || instructions.contains("locus_whoami"),
+        "instructions should point at compliance tools: {instructions}"
+    );
+
+    // resources/list descriptions tagged with live pin
+    let rlist = client.request("resources/list", json!({}));
+    let resources = rlist["result"]["resources"].as_array().unwrap();
+    for r in resources {
+        let desc = r["description"].as_str().unwrap_or("");
+        assert!(
+            desc.contains("[locus:acme]"),
+            "resource description after auto-pin: {desc}"
+        );
+    }
+
+    // resources/read locus://session is pinned
+    let sess = client.request("resources/read", json!({ "uri": "locus://session" }));
+    let text = parse_resource_text(&sess);
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["binding_alias"], "acme");
+    assert_eq!(body["tenant"], "acme-corp");
+
+    // prompts/list + get reflect pin
+    let plist = client.request("prompts/list", json!({}));
+    let pdesc = plist["result"]["prompts"][0]["description"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        pdesc.contains("[locus:acme]"),
+        "prompt list description after auto-pin: {pdesc}"
+    );
+
+    let pget = client.request("prompts/get", json!({ "name": "locus_context" }));
+    let ptext = pget["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        ptext.contains("acme") && ptext.contains("acme-corp"),
+        "locus_context after auto-pin: {ptext}"
+    );
+    assert!(
+        ptext.to_lowercase().contains("cannot pin"),
+        "still cannot pin: {ptext}"
     );
     let _ = store;
 }

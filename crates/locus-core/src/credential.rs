@@ -12,8 +12,30 @@
 use crate::error::{LocusError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use zeroize::Zeroizing;
+
+/// Process-lifetime cache of `phantom --version` success.
+///
+/// Doctor, agent report, forensics, and the dashboard all need to know whether
+/// Phantom is on PATH. Shelling out on every probe is slow (and dashboard polls
+/// `/api/doctor` often). Probe once per process; result is sticky for the life
+/// of the binary.
+pub fn phantom_on_path() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(probe_phantom_version)
+}
+
+fn probe_phantom_version() -> bool {
+    Command::new("phantom")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false)
+}
 
 /// Parsed credential reference (no secret material).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

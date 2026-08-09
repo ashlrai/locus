@@ -391,28 +391,35 @@ pub fn control_tools(pinned: bool) -> Vec<AdapterTool> {
     let mut tools = vec![
         AdapterTool {
             name: "locus_whoami".into(),
-            description: "Show the active Locus pin: tenant, binding, providers, frozen scopes. Never returns secrets.".into(),
+            description: "REQUIRED before infrastructure work when pin is unclear. Returns active pin: tenant, binding, providers, frozen scopes. Never secrets. If unpinned, ask human to pin — you cannot.".into(),
+            input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
+            provider: "locus".into(),
+            destructive: false,
+        },
+        AdapterTool {
+            name: "locus_safe_next".into(),
+            description: "Single best next human/agent action for identity safety (enter, re-pin, approve, doctor fix, or ready). Call when stuck, unpinned, blocked, or unsure what to do. Never secrets.".into(),
             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
             provider: "locus".into(),
             destructive: false,
         },
         AdapterTool {
             name: "locus_status".into(),
-            description: "Short pin status: pinned|unpinned, binding alias, tenant, seal ok.".into(),
+            description: "Short pin status: pinned|unpinned, binding alias, tenant, seal ok, frozen. Prefer locus_whoami or locus_safe_next for decisions.".into(),
             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
             provider: "locus".into(),
             destructive: false,
         },
         AdapterTool {
             name: "locus_heartbeat".into(),
-            description: "Continuous identity heartbeat: runtime drift / doctor-lite JSON (seal, freeze, binding match). Safe for agents — never secrets. Call when pin health is unclear.".into(),
+            description: "Identity heartbeat: runtime drift / doctor-lite (seal, freeze, binding match). Safe for agents — never secrets. Call when pin health is unclear or tools fail with freeze/seal errors.".into(),
             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
             provider: "locus".into(),
             destructive: false,
         },
         AdapterTool {
             name: "locus_enter_hint".into(),
-            description: "Return the shell command a human should run to enter/pin a binding. Agents cannot pin themselves — surface this command to the operator.".into(),
+            description: "Shell command for the HUMAN to enter/pin a binding. AGENTS CANNOT PIN — surface this command to the operator; do not claim you switched accounts.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -428,14 +435,14 @@ pub fn control_tools(pinned: bool) -> Vec<AdapterTool> {
         },
         AdapterTool {
             name: "locus_list_bindings".into(),
-            description: "List configured binding aliases and tenants (no secrets).".into(),
+            description: "List configured binding aliases and tenants (no secrets). Use to discover which alias to request via locus_request_pin.".into(),
             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
             provider: "locus".into(),
             destructive: false,
         },
         AdapterTool {
             name: "locus_request_pin".into(),
-            description: "Request the human to pin a binding. Agents cannot pin themselves — returns instructions. Pass alias.".into(),
+            description: "Request the HUMAN to pin a binding. AGENTS CANNOT PIN — records a request and returns the exact shell command. Pass alias from locus_list_bindings.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -447,11 +454,31 @@ pub fn control_tools(pinned: bool) -> Vec<AdapterTool> {
             provider: "locus".into(),
             destructive: false,
         },
+        AdapterTool {
+            name: "locus_verify_claim".into(),
+            description: "Verification plane (M5 stub): score a free-text claim before acting. Returns {claim, confidence: unknown|low|medium|high, needs_tool, suggestion, signals, grounding?}. Heuristic — numbers/URLs/versions ⇒ needs_tool + low; identity claims ground against whoami when pinned. Never secrets.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "Claim to score (factual assertion before acting)"
+                    },
+                    "claim": {
+                        "type": "string",
+                        "description": "Alias for text"
+                    }
+                },
+                "additionalProperties": false
+            }),
+            provider: "locus".into(),
+            destructive: false,
+        },
     ];
     if pinned {
         tools.push(AdapterTool {
             name: "locus_providers".into(),
-            description: "List providers and frozen scopes for the active pin.".into(),
+            description: "Providers and frozen scopes for the active pin only. Frozen project_ref/team_id/orgs cannot be overridden by tool args.".into(),
             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
             provider: "locus".into(),
             destructive: false,
@@ -921,12 +948,22 @@ mod tests {
         assert!(names.contains(&"locus_heartbeat"));
         assert!(names.contains(&"locus_enter_hint"));
         assert!(names.contains(&"locus_whoami"));
+        assert!(names.contains(&"locus_safe_next"));
+        assert!(names.contains(&"locus_verify_claim"));
         assert!(!names.contains(&"locus_providers"));
+        let safe = unbound
+            .iter()
+            .find(|t| t.name == "locus_safe_next")
+            .unwrap();
+        assert!(safe.description.to_lowercase().contains("enter"));
+        assert!(safe.description.to_lowercase().contains("approve"));
 
         let pinned = control_tools(true);
         let names: Vec<_> = pinned.iter().map(|t| t.name.as_str()).collect();
         assert!(names.contains(&"locus_heartbeat"));
         assert!(names.contains(&"locus_enter_hint"));
+        assert!(names.contains(&"locus_safe_next"));
+        assert!(names.contains(&"locus_verify_claim"));
         assert!(names.contains(&"locus_providers"));
     }
 }

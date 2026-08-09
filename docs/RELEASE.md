@@ -1,7 +1,7 @@
 # Releasing Locus
 
 Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
-`[workspace.package] version` (currently **0.1.1**). Crates inherit via
+`[workspace.package] version` (currently **0.2.0**). Crates inherit via
 `version.workspace = true`. npm packages under `npm/`, `npm-mcp/`, and
 `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
 `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
@@ -13,7 +13,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
-./scripts/e2e.sh   # 34 checks (0 skipped) on full 0.1.1 command set
+./scripts/e2e.sh   # pin/isolation/MCP + dashboard/forensics/goal (feature-detected)
 ```
 
 - [ ] `CHANGELOG.md` has a dated `## [X.Y.Z]` section with the full feature list
@@ -22,40 +22,40 @@ cargo fmt --all -- --check
 - [ ] CI green on `main`
 - [ ] e2e green locally (`scripts/e2e.sh`)
 
-## Checklist — v0.1.1
+## Checklist — v0.2.0
 
-1. [x] Bump version → **0.1.1** (Cargo workspace + npm + bin wrappers)
-2. [x] `CHANGELOG.md` section for 0.1.1 (notify off-by-default, firm UX, run/ns, doctor, e2e)
-3. [x] Homebrew formula comments: v0.1.0 source + asset sha256 recorded (see formula)
+1. [x] Bump version → **0.2.0** (Cargo workspace + npm + bin wrappers)
+2. [x] `CHANGELOG.md` section for 0.2.0 (dashboard, forensics, HTTP MCP, agent, goal, verify, …)
+3. [ ] Homebrew formula comments: prior source + asset sha256 recorded (see formula)
 4. [ ] Tag from clean `main` (parent / release owner — **do not force-push tags**):
 
    ```bash
-   git tag -a v0.1.1 -m "Locus v0.1.1"
+   git tag -a v0.2.0 -m "Locus v0.2.0"
    git push origin main
-   git push origin v0.1.1
+   git push origin v0.2.0
    ```
 
 5. [ ] Wait for [`.github/workflows/release.yml`](../.github/workflows/release.yml) assets
-6. [ ] Source tarball sha256 for **v0.1.1** → update formula + live tap:
+6. [ ] Source tarball sha256 for **v0.2.0** → update formula + live tap:
 
    ```bash
-   curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v0.1.1.tar.gz" | shasum -a 256
+   curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v0.2.0.tar.gz" | shasum -a 256
    ```
 
 7. [ ] Optional prebuilt digests (after assets land):
 
    ```bash
    for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
-     curl -sL "https://github.com/ashlrai/locus/releases/download/v0.1.1/locus-$t.tar.gz" | shasum -a 256
+     curl -sL "https://github.com/ashlrai/locus/releases/download/v0.2.0/locus-$t.tar.gz" | shasum -a 256
    done
    ```
 
-8. [ ] npm: publish `npm/` (`locus-cli`) and `npm-mcp/` (`locus-mcp`) at 0.1.1
+8. [ ] npm: publish `npm/` (`locus-cli`) and `npm-mcp/` (`locus-mcp`) at 0.2.0
 9. [ ] Verify:
 
    ```bash
-   gh release view v0.1.1
-   gh release download v0.1.1 -p 'locus-*.tar.gz' -D /tmp/locus-rel
+   gh release view v0.2.0
+   gh release download v0.2.0 -p 'locus-*.tar.gz' -D /tmp/locus-rel
    locus --version   # or extracted binary
    ```
 
@@ -65,8 +65,8 @@ Tags must match `v*` so [`.github/workflows/release.yml`](../.github/workflows/r
 
 ```bash
 # From a clean main at the release commit:
-git tag -a v0.1.1 -m "Locus v0.1.1"
-git push origin v0.1.1
+git tag -a v0.2.0 -m "Locus v0.2.0"
+git push origin v0.2.0
 ```
 
 Annotated tags are preferred (`-a`). Lightweight tags also trigger the workflow.

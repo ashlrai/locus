@@ -20,14 +20,18 @@ use std::time::{Duration, Instant};
 pub const ENV_WORKER_IDLE_SECS: &str = "LOCUS_WORKER_IDLE_SECS";
 
 /// Build MCP config from a binding's upstream spec (always spawn).
-pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> McpStdioConfig {
-    McpStdioConfig {
-        command: spec.command.clone(),
-        args: spec.args.clone(),
+///
+/// Expands built-in `recipe` fields when present. Fails if the recipe is
+/// unknown or neither recipe nor command is usable.
+pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
+    let expanded = spec.expand()?;
+    Ok(McpStdioConfig {
+        command: expanded.command,
+        args: expanded.args,
         spawn: true,
-        resolve_secrets: spec.resolve_secrets,
+        resolve_secrets: expanded.resolve_secrets,
         extra_env: BTreeMap::new(),
-    }
+    })
 }
 
 /// Parse idle timeout from `LOCUS_WORKER_IDLE_SECS` (seconds). `None` = disabled.
@@ -397,8 +401,9 @@ impl WorkerManager for CompositeWorkerManager {
         };
         std::fs::create_dir_all(&work_dir)?;
 
-        let slot = if let Some(spec) = pb.upstream.as_ref().filter(|u| !u.command.is_empty()) {
-            let backend = McpStdioBackend::new(mcp_config_from_upstream(spec));
+        let slot = if let Some(spec) = pb.upstream.as_ref().filter(|u| u.is_declared()) {
+            let cfg = mcp_config_from_upstream(spec)?;
+            let backend = McpStdioBackend::new(cfg);
             let slot = backend.ensure(session, binding, pb, &work_dir)?;
             self.mcp.insert(key.clone(), backend);
             slot
@@ -696,11 +701,20 @@ for line in sys.stdin:
         let spec = UpstreamSpec::new("npx")
             .with_args(["-y", "@pkg"])
             .resolve_secrets(true);
-        let cfg = mcp_config_from_upstream(&spec);
+        let cfg = mcp_config_from_upstream(&spec).unwrap();
         assert!(cfg.spawn);
         assert!(cfg.resolve_secrets);
         assert_eq!(cfg.command, "npx");
         assert_eq!(cfg.args, vec!["-y", "@pkg"]);
+    }
+
+    #[test]
+    fn mcp_config_from_recipe_expands() {
+        let spec = UpstreamSpec::from_recipe("everything-mcp");
+        let cfg = mcp_config_from_upstream(&spec).unwrap();
+        assert_eq!(cfg.command, "npx");
+        assert!(cfg.args.iter().any(|a| a.contains("server-everything")));
+        assert!(cfg.spawn);
     }
 
     #[test]

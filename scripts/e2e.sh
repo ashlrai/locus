@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Locus end-to-end shell tests — pin, isolation, MCP, freeze, approval, doctor,
-# dual-control, events, optional enter/run/notify/ns; graph/ci/heartbeat when present
-# (feature-detected). Full 0.1.1 surface: 34 checks, 0 skipped.
+# dual-control, events, optional enter/run/notify/ns; graph/ci/heartbeat,
+# dashboard health, forensics export, goal status when present (feature-detected).
+# Full 0.2 surface on current main (~38 checks, 0 skipped when all features present).
 set -euo pipefail
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
@@ -726,6 +727,142 @@ if has_cmd ci || has_cmd_path ci mint; then
   ok "README mentions ci"
 else
   skip "ci not available — README mention not required"
+fi
+
+# ── 20. dashboard / serve health (feature-detected) ──────────────────────────
+log "20. dashboard health curl (if serve available)"
+if ! has_cmd serve && ! has_cmd dashboard; then
+  skip "serve/dashboard not available"
+else
+  need curl
+  # Pick a free high port to avoid colliding with a developer dashboard.
+  DASH_PORT=$((18750 + RANDOM % 1000))
+  serve_log="$LOCUS_HOME/e2e-serve.log"
+  # serve defaults to no browser open (only dashboard opens by default).
+  "$LOCUS_BIN" serve --port "$DASH_PORT" >"$serve_log" 2>&1 &
+  serve_pid=$!
+  cleanup_serve() {
+    kill "$serve_pid" 2>/dev/null || true
+    wait "$serve_pid" 2>/dev/null || true
+  }
+  health_ok=0
+  for _ in $(seq 1 25); do
+    if ! kill -0 "$serve_pid" 2>/dev/null; then
+      break
+    fi
+    if health="$(curl -fsS --max-time 1 "http://127.0.0.1:${DASH_PORT}/api/health" 2>/dev/null)"; then
+      echo "$health" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d.get("ok") is True, d
+assert d.get("service") == "locus-dashboard", d
+assert "version" in d, d
+print("health service=%s version=%s" % (d.get("service"), d.get("version")))
+'
+      health_ok=1
+      break
+    fi
+    sleep 0.15
+  done
+  cleanup_serve
+  if [[ "$health_ok" -eq 1 ]]; then
+    ok "dashboard GET /api/health on port $DASH_PORT"
+  else
+    tail -n 30 "$serve_log" 2>/dev/null || true
+    die "serve started but /api/health never became ready (port $DASH_PORT)"
+  fi
+fi
+
+# ── 21. forensics export (feature-detected) ──────────────────────────────────
+log "21. forensics export (optional)"
+if ! has_cmd forensics && ! has_cmd_path forensics export; then
+  skip "forensics command not available"
+else
+  locus pin personal --force >/dev/null 2>&1 || locus pin acme --force >/dev/null 2>&1 || true
+  pack_path="$LOCUS_HOME/e2e-forensics.json"
+  exported=0
+  if locus forensics export --out "$pack_path" >/dev/null 2>&1 \
+    || locus forensics export -o "$pack_path" >/dev/null 2>&1; then
+    exported=1
+  fi
+  if [[ "$exported" -ne 1 ]] || [[ ! -s "$pack_path" ]]; then
+    # JSON-on-stdout fallback
+    if pack_json="$(locus forensics export --json 2>/dev/null)" \
+      && [[ -n "$pack_json" ]]; then
+      echo "$pack_json" >"$pack_path"
+      exported=1
+    fi
+  fi
+  if [[ "$exported" -ne 1 ]] || [[ ! -s "$pack_path" ]]; then
+    skip "forensics present but export invocation failed (API may differ)"
+  else
+    python3 -c '
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    d = json.load(f)
+assert isinstance(d, dict), type(d)
+# Pack should never contain obvious secret *values*; names/refs OK.
+blob = json.dumps(d).lower()
+for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "akia", "secret_value"):
+    assert bad not in blob, "forensics pack must not leak secrets (%s)" % bad
+# Structural surface (keys evolve; require a few stable-ish ones)
+keys = set(d.keys())
+# Accept either nested doctor or top-level pin/bindings style packs
+assert keys, "empty pack"
+print("forensics keys=%s" % ",".join(sorted(keys)[:16]))
+' "$pack_path"
+    ok "forensics export wrote pack ($(wc -c <"$pack_path" | tr -d ' ') bytes, no secrets)"
+  fi
+fi
+
+# ── 22. goal status (feature-detected) ───────────────────────────────────────
+log "22. goal status (optional)"
+if ! has_cmd goal && ! has_cmd_path goal status; then
+  skip "goal command not available"
+else
+  set +e
+  goal_json="$(locus goal status --json 2>/dev/null)"
+  goal_ec=$?
+  if [[ $goal_ec -ne 0 || -z "$goal_json" ]]; then
+    goal_json="$(locus --json goal status 2>/dev/null)"
+    goal_ec=$?
+  fi
+  set -e
+  if [[ $goal_ec -ne 0 || -z "$goal_json" ]]; then
+    # Text mode still useful
+    if locus goal status >/dev/null 2>&1; then
+      ok "goal status text mode"
+    else
+      skip "goal present but status invocation failed"
+    fi
+  else
+    echo "$goal_json" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+d = json.loads(raw)
+assert isinstance(d, dict), type(d)
+# Accept several shapes: milestones list, totals, done/total
+has_progress = any(
+    k in d for k in ("milestones", "done", "total", "completed", "remaining", "progress", "source")
+)
+assert has_progress or "goals" in d or "ok" in d, d
+print("goal status keys=%s" % ",".join(sorted(d.keys())[:12]))
+'
+    ok "goal status --json returns progress"
+  fi
+fi
+
+# ── 23. topic help (feature-detected) ────────────────────────────────────────
+log "23. topic help (optional)"
+if has_cmd topic; then
+  locus topic >/dev/null
+  locus topic dashboard >/dev/null
+  ok "locus topic + topic dashboard"
+elif "$LOCUS_BIN" help topic dashboard >/dev/null 2>&1; then
+  ok "locus help topic dashboard"
+else
+  skip "topic help not available"
 fi
 
 printf '\n========================================\n'

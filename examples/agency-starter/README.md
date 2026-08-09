@@ -9,7 +9,7 @@ Sibling deep-dive: [docs/agency-starter.md](../../docs/agency-starter.md) · [do
 ```
 examples/agency-starter/
   bindings/
-    personal.toml       # side projects
+    personal.toml       # side projects (+ filesystem upstream demo)
     client-a.toml       # Client A write / preview
     client-a-ro.toml    # Client A read-only
     client-b.toml       # Client B write
@@ -22,6 +22,24 @@ examples/agency-starter/
   config.example.toml   # optional $LOCUS_HOME/config.toml
   README.md             # this file
 ```
+
+### Upstream MCP demo (personal)
+
+`bindings/personal.toml` includes a `demo` provider with:
+
+```toml
+upstream = { recipe = "filesystem-mcp", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/locus-demo"] }
+```
+
+```bash
+mkdir -p /tmp/locus-demo
+locus pin personal
+# locus-mcp will spawn the filesystem MCP under this pin (tools namespaced demo.*)
+locus upstream list
+locus upstream suggest filesystem
+```
+
+For GitHub live tools on a pin, prefer `upstream = { recipe = "github-mcp", resolve_secrets = true }` (see `locus upstream suggest github`). Never reuse a personal PAT on a client binding.
 
 ## Install bindings
 

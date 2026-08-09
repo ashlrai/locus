@@ -7,39 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-08-09
+
+AI-native / hub-native identity plane polish on top of 0.1.1. Local dashboard,
+forensics packs, HTTP MCP, goal loop, agent report contract, verification stubs,
+upstream recipes, and faster doctor probes. **Wrong account, still impossible.**
+
 ### Added
 
-- **Local identity dashboard** (`apps/dashboard/` + CLI)
-  - **`locus serve [--port 8750] [--token] [--open]`** — loopback-only Axum server serving the UI and JSON API
-  - **`locus dashboard`** — same server + open browser (`--no-open` to skip)
-  - API: `GET /api/status|whoami|bindings|approvals|doctor|events`, `POST /api/approve/{id}/grant`
-  - Security: bind `127.0.0.1` only; no resolved secrets; optional `LOCUS_DASHBOARD_TOKEN`
-- **Adapter SDK** — `docs/adapter-sdk.md`, `examples/adapters/_template/`, `adapters/manifest.toml` (built-in providers + capabilities)
-- **`locus forensics export [--binding] [--out pack.json]`** — shareable pack: pin/session meta, binding summaries, audit tail, doctor snapshot, pending approvals, near-miss, chain tip (no secrets)
-- **`locus events export [--otlp] [--out file]`** — fleet-pulse JSON lines or OTLP Logs JSON; `docs/observability.md`
-- **Doctor `near_miss_count` / `near_miss`** — scope_freeze + require_approval blocks in the last 24h
+#### Local identity dashboard
 
-- **`locus quickstart`** — first-60s bootstrap: config + samples if empty, enter workspace default / sample pin, whoami + doctor verdict
-- **`locus completion <shell>`** — bash/zsh/fish/elvish/powershell via clap_complete
-- **`locus goal status`** — northstar progress from `GOALS.md` (checkbox parse) or embedded milestones; `--json` totals
-- **[GOALS.md](./GOALS.md)** — vision, goal tree (identity → firm → AI → hub → verification), milestone checklist, success metrics
-- **Hub drop-in maximal surface** ([`integrations/ashlr-hub/`](./integrations/ashlr-hub/))
-  - `locus.ts`: `withLocusSession` (`ci mint` ephemeral env), `ensureLocusReady`, `parseStatusOneline` / `canMutate`, `locusCiMint`
-  - `mcp-gateway-snippet.md` — REQUIRED_SERVERS + locus-first discovery patch
-  - `doctor-check.md` — `checkLocus` for ashlr doctor
-- **locus-mcp AI-native surface**
-  - Resources: `locus://session`, `locus://doctor`, `locus://bindings` (`resources/list` + `resources/read`)
-  - Prompt: `locus_context` system fragment (`prompts/list` + `prompts/get`)
-  - Tool descriptions tagged `[locus:<alias|unpinned>]`; `locus_whoami` always first in `tools/list`
-  - `initialize.instructions` agent rules; capabilities advertise tools + resources + prompts
-  - **MCP auto-pin** from workspace `default_binding` / `require_pin`, or `LOCUS_MCP_AUTO_PIN=1` / `LOCUS_AUTO_PIN=cwd` / `clients.auto_pin=cwd` — once per process, audit `session.auto_pin`, never force allowlist (`LOCUS_MCP_AUTO_PIN=0` kill switch)
-  - Protocol tests for resources, prompts, description tags, and auto-pin
+- **`locus serve [--port 8750] [--token] [--open]`** — loopback-only Axum server (UI + JSON API)
+- **`locus dashboard`** — same server + open browser (`--no-open` to skip)
+- API: `GET /api/health|status|whoami|bindings|approvals|doctor|events`, `POST /api/approve/{id}/grant`
+- Security: bind `127.0.0.1` only; no resolved secrets; optional `LOCUS_DASHBOARD_TOKEN`
+- UI: [`apps/dashboard/`](./apps/dashboard/) embedded in the CLI binary
+
+#### Forensics & observability
+
+- **`locus forensics export [--binding] [--out pack.json]`** — shareable pack: pin/session meta, binding summaries, audit tail, doctor snapshot, pending approvals, near-miss, chain tip (**no secrets**)
+- **`locus events export [--otlp] [--out file]`** — fleet-pulse JSON lines or OTLP Logs JSON; [`docs/observability.md`](./docs/observability.md)
+- Doctor **`near_miss_count` / `near_miss`** — scope_freeze + require_approval blocks in the last 24h
+
+#### AI-native agent surface
+
+- **`locus agent setup|doctor|report`** — wire MCP clients, readiness ladder, hub JSON contract
+- **locus-mcp resources** — `locus://session`, `locus://doctor`, `locus://bindings`
+- **Prompt** — `locus_context` system fragment (`prompts/list` + `prompts/get`)
+- Tool descriptions tagged `[locus:<alias|unpinned>]`; `locus_whoami` always first
+- `initialize.instructions` agent rules; capabilities advertise tools + resources + prompts
+- **MCP auto-pin** from workspace / `LOCUS_AUTO_PIN=cwd` / `LOCUS_MCP_AUTO_PIN` (kill switch `=0`); audit `session.auto_pin`; never force allowlist
+- **`locus_safe_next`** — single best next action (`enter` / `re_pin` / `approve` / `doctor_fix` / `ready`)
+- **HTTP MCP** — `locus-mcp --http 127.0.0.1:8742` or `LOCUS_MCP_HTTP=1`; `POST /mcp` + `GET /health`; requires `LOCUS_MCP_HTTP_TOKEN`; loopback by default
+
+#### Verification plane (M5 stubs)
+
+- **`locus verify claim --text "…"`** — heuristic claim scoring (`confidence`, `needs_tool`, `suggestion`, `signals`, optional pin grounding)
+- MCP **`locus_verify_claim`** — same shape (available unpinned)
+- Doctor may WARN on recent low-confidence claim signals; [`docs/verification-plane.md`](./docs/verification-plane.md)
+
+#### Upstream recipes
+
+- **`locus upstream list`** / **`locus upstream suggest <provider>`**
+- Binding TOML: `upstream = { recipe = "github-mcp", resolve_secrets = true }` (`adapters/recipes.toml`)
+- Recipes: `github-mcp`, `github-official`, `supabase-mcp`, `filesystem-mcp`, `everything-mcp`
+
+#### Goal loop & hub composition
+
+- **`locus goal status [--json]`** — northstar progress from [`GOALS.md`](./GOALS.md) or embedded milestones
+- **[GOALS.md](./GOALS.md)** — vision, goal tree, milestone checklist, success metrics
+- Hub drop-in [`integrations/ashlr-hub/`](./integrations/ashlr-hub/) — `locus.ts` (`locusFleetGate`, `withLocusSession`, `ensureLocusReady`, `registerLocusInMcpConfig`, pure parse helpers), gateway snippet, doctor-check, [`fleet-preflight.md`](./integrations/ashlr-hub/fleet-preflight.md)
+- Schemas: [`schema/agent-report.schema.json`](./schema/agent-report.schema.json), [`schema/doctor.schema.json`](./schema/doctor.schema.json), [`schema/hub-gate.schema.json`](./schema/hub-gate.schema.json)
+- [`scripts/hub-smoke.sh`](./scripts/hub-smoke.sh) + [`scripts/hub-integration-test.sh`](./scripts/hub-integration-test.sh) composition smoke
+
+#### DX
+
+- **`locus quickstart`** — first-60s bootstrap: samples → enter → whoami + doctor
+- **`locus completion <shell>`** — bash/zsh/fish/elvish/powershell
+- **`locus topic <name>`** / **`locus help topic <name>`** — product guides (`dashboard`, `forensics`, `serve`, `goal`, `verify`, `agent`, `mcp`, `http`, `upstream`)
+- **Adapter SDK** — [`docs/adapter-sdk.md`](./docs/adapter-sdk.md), `examples/adapters/_template/`, `adapters/manifest.toml`
 
 ### Changed
 
-- **`locus init`** — writes `config.toml` with `notify.enabled = false` when missing; AI-native next steps (`setup` · `enter` · `doctor`); annotated sample bindings
-- **Shell hook** — prompt shows `[locus:FROZEN]`, `[locus:enter!]` when unpinned in `require_pin` workspaces; status oneline token `require_pin`
-- Landing page / agent docs: prefer `locus enter` before tool use; hero **AI-native identity plane**; v0.1.1 graph + CI commands
+- **`phantom --version` process-cached** — doctor, agent report, forensics, and dashboard share one probe per process (faster hot paths)
+- Dashboard `/api/doctor` skips deep `phantom list` inventory (CLI doctor still full-checks)
+- **`locus init`** — `notify.enabled = false` by default; AI-native next steps; annotated samples
+- Shell hook — `[locus:FROZEN]`, `[locus:enter!]` / `require_pin` oneline token
+- CLI help regrouped: Setup · Daily use · CI · Approvals · Audit · Local UI · Maintenance
+- Landing page ([`apps/web/`](./apps/web/)) — AI-native identity plane hero, dashboard / forensics / HTTP MCP / goal status
+- Packaging version-aligned at **0.2.0** (Cargo workspace, npm `locus-cli` / `locus-mcp`, homebrew formula mirror)
+
+### Tests
+
+- Shell e2e (`scripts/e2e.sh`): prior 0.1.1 surface **plus** feature-detected dashboard `/api/health`, `forensics export`, `goal status`, `topic` — **38 checks** (0 skipped) on full 0.2 command set
+- MCP HTTP transport tests; agent report / forensics pack schema keys; protocol resources/prompts/auto-pin
+
+### Security
+
+- Same fail-closed invariants as 0.1.x (seal, exclusive catalog, scrub, scope freeze, agents cannot pin)
+- Dashboard and HTTP MCP bind loopback by default; token required for MCP HTTP; no resolved secrets in API or packs
+- Forensics / events export / agent report never include secret **values** (CredentialRef names only)
 
 ## [0.1.1] — 2026-08-09
 
@@ -196,6 +243,7 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 - Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
 - Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
 
-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/ashlrai/locus/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ashlrai/locus/releases/tag/v0.2.0
 [0.1.1]: https://github.com/ashlrai/locus/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ashlrai/locus/releases/tag/v0.1.0

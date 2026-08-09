@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Locus — Wrong account, impossible.</title>
-  <meta name="description" content="Identity plane for coding agents. Pin a client — every CLI command and MCP tool is hard-scoped to that binding." />
+  <title>Locus — AI-native identity plane</title>
+  <meta name="description" content="AI-native identity plane for coding agents. Pin a client — CLI, MCP, and the local dashboard are hard-scoped to that binding. Wrong account, impossible." />
   <meta name="theme-color" content="#0a0a0a" />
   <link rel="canonical" href="https://github.com/ashlrai/locus" />
   <style>
@@ -422,17 +422,19 @@
       <div class="brand"><span class="dot"></span> locus</div>
       <div class="nav-links">
         <a href="#install">install</a>
+        <a href="#surfaces">surfaces</a>
         <a href="#arch">arch</a>
         <a href="https://github.com/ashlrai/locus">github</a>
       </div>
     </nav>
 
     <header>
-      <p class="eyebrow">Identity plane · coding agents</p>
+      <p class="eyebrow">AI-native identity plane · v0.2</p>
       <h1>Wrong account,<br /><span class="dim">impossible.</span></h1>
       <p class="lede">
-        Pin a client — every CLI command and MCP tool is <strong>hard-scoped</strong>
-        to that binding until you re-pin. Contract work stops being a footgun.
+        Pin a client — every CLI command, MCP tool, and the <strong>local dashboard</strong>
+        is hard-scoped to that binding until you re-pin. Agents inherit a sealed session,
+        not ambient <code style="font-family:var(--mono);font-size:0.88em">gh auth</code>.
       </p>
       <div class="cta-row">
         <a class="btn primary" href="https://github.com/ashlrai/locus">View on GitHub →</a>
@@ -492,7 +494,7 @@
     </section>
 
     <section>
-      <div class="sec-label">Quick start · v0.1.1</div>
+      <div class="sec-label">Quick start · v0.2</div>
       <div class="term">
         <div class="term-bar">
           <span class="c"></span><span class="c"></span><span class="c"></span>
@@ -506,13 +508,44 @@
 <span class="out">ok  entered acme (acme-corp)</span>
 <span class="cmt"># previous identity is gone from the process env</span>
 
-<span class="cmd">locus exec -- env | grep LOCUS_</span>
-<span class="cmd">locus setup --client claude</span>  <span class="cmt"># wire locus-mcp</span>
+<span class="cmd">locus agent setup --apply</span>  <span class="cmt"># wire MCP + AGENT.md</span>
 <span class="cmd">locus doctor</span>  <span class="cmt"># SAFE | WARN | UNSAFE</span>
+<span class="cmd">locus dashboard</span>  <span class="cmt"># local identity UI · 127.0.0.1:8750</span>
+<span class="cmd">locus goal status</span>  <span class="cmt"># northstar from GOALS.md</span></pre>
+      </div>
+    </section>
 
-<span class="cmt"># graph share · CI pins (v0.1.1)</span>
-<span class="cmd">locus graph export --out team.locusgraph</span>
-<span class="cmd">locus ci mint -b acme --ttl 15m</span></pre>
+    <section id="surfaces">
+      <div class="sec-label">0.2 surfaces</div>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-n">UI</div>
+          <div>
+            <h3>Local dashboard</h3>
+            <p><code>locus dashboard</code> / <code>locus serve</code> — pin, whoami, approvals, doctor, audit on loopback. No secrets.</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">MCP</div>
+          <div>
+            <h3>Stdio + HTTP MCP</h3>
+            <p>Claude Code / Cursor via stdio. CI agents: <code>locus-mcp --http</code> with token auth on <code>POST /mcp</code>.</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">AUD</div>
+          <div>
+            <h3>Forensics pack</h3>
+            <p><code>locus forensics export</code> — shareable pin + doctor + audit snapshot (CredentialRefs only).</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">HUB</div>
+          <div>
+            <h3>Goal + agent report</h3>
+            <p><code>locus goal status</code> · <code>locus agent report --json</code> for hub gates (ready / protected / unsafe).</p>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -525,7 +558,9 @@
   Session sealed <span class="ok">(HMAC)</span> → binding <span class="hl">"acme"</span>
         <span class="dim">│</span>
         <span class="dim">├─►</span> <span class="hl">locus-mcp</span>   tools = this binding only (+ locus_whoami)
-        <span class="dim">│</span>             agents cannot pin · freeze denies wrong project_ref
+        <span class="dim">│</span>             agents cannot pin · freeze · resources/prompts
+        <span class="dim">│</span>
+        <span class="dim">├─►</span> <span class="hl">dashboard</span>  serve · whoami · doctor · approvals (127.0.0.1)
         <span class="dim">│</span>
         <span class="dim">└─►</span> <span class="hl">locus exec</span>  scrub ambient · resolve phm:/env: · private worker dirs
       </div>

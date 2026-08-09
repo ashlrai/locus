@@ -5,10 +5,11 @@ Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus wi
 | Artifact | Path |
 |----------|------|
 | Full contract | [`docs/hub-integration.md`](../../docs/hub-integration.md) |
-| TypeScript probe | [`locus.ts`](./locus.ts) — `locusAgentReport`, `ensureLocusReady`, `withLocusSession`, `parseStatusOneline` |
+| TypeScript probe | [`locus.ts`](./locus.ts) — `locusFleetGate`, `ensureLocusReady`, `withLocusSession`, `registerLocusInMcpConfig`, pure parsers |
+| Fleet preflight | [`fleet-preflight.md`](./fleet-preflight.md) — exact steps before agent dispatch |
 | MCP gateway patch | [`mcp-gateway-snippet.md`](./mcp-gateway-snippet.md) |
 | Doctor check | [`doctor-check.md`](./doctor-check.md) |
-| Schemas | [`schema/agent-report.schema.json`](../../schema/agent-report.schema.json), [`schema/doctor.schema.json`](../../schema/doctor.schema.json) |
+| Schemas | [`schema/agent-report.schema.json`](../../schema/agent-report.schema.json), [`schema/doctor.schema.json`](../../schema/doctor.schema.json), [`schema/hub-gate.schema.json`](../../schema/hub-gate.schema.json) |
 | Northstar | [`GOALS.md`](../../GOALS.md) · `locus goal status` |
 
 ---
@@ -16,8 +17,8 @@ Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus wi
 ## What hub should do
 
 1. Shell out to Locus CLI (or spawn `locus-mcp` stdio) — do not reimplement pin/seal.
-2. Prefer **`locus agent report --json`** as the single readiness probe (`ensureLocusReady()`).
-3. Register MCP servers from **`required_servers`** (`locus` + `phantom` only) — see [mcp-gateway-snippet.md](./mcp-gateway-snippet.md).
+2. Prefer **`locusFleetGate()`** (or `ensureLocusReady()`) before agent dispatch — see [fleet-preflight.md](./fleet-preflight.md).
+3. Register MCP servers from **`required_servers`** (`locus` + `phantom` only) — `registerLocusInMcpConfig` / [mcp-gateway-snippet.md](./mcp-gateway-snippet.md).
 4. Use **`withLocusSession(binding, fn)`** for ephemeral job pins (`ci mint`; no `active.json` mutation).
 5. Add **`checkLocus`** to ashlr doctor — see [doctor-check.md](./doctor-check.md).
 6. **Never** parse or store secret values from locus/phantom output.
@@ -217,19 +218,30 @@ export type StatusJson = StatusPinnedJson | StatusUnpinnedJson;
 import {
   REQUIRED_SERVERS,
   locusAgentReport,
+  locusFleetGate,
   ensureLocusReady,
   withLocusSession,
   parseStatusOneline,
   canMutate,
+  evaluateFleetGate,
+  registerLocusInMcpConfig,
   locusDoctorLine,
 } from "./locus"; // copy of integrations/ashlr-hub/locus.ts
 
-// Pre-mutate gate (throws LocusNotReadyError if unsafe / unpinned)
+// Fleet pre-dispatch gate (preferred)
+const gate = locusFleetGate(); // { allowDispatch, blockers[], report }
+if (!gate.allowDispatch) throw new Error(gate.blockers.join("; "));
+
+// Or throw-style pre-mutate gate
 ensureLocusReady();
+
+// Merge locus into project MCP JSON
+registerLocusInMcpConfig(".mcp.json", { client: "ashlr-hub" });
 
 // Ephemeral CI pin — does not touch human active.json
 await withLocusSession("acme", async ({ env, sessionId }) => {
-  ensureLocusReady(env);
+  const g = locusFleetGate(env);
+  if (!g.allowDispatch) throw new Error(g.blockers.join("; "));
   // spawn children with env (includes LOCUS_SESSION_ID)
   return sessionId;
 });
@@ -251,6 +263,7 @@ From the Locus repo:
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
 ./scripts/hub-smoke.sh
+./scripts/hub-integration-test.sh
 ```
 
 ---

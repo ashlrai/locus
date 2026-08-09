@@ -42,8 +42,8 @@ Northstar: wrong-account impossible · AI-native · hub-native
 ├─ 4. Hub composition
 │     agent-report contract · integrations/ashlr-hub · REQUIRED_SERVERS · doctor check
 │
-└─ 5. Verification plane (future)
-      continuous whoami in CI · isolation conformance pack · audit SIEM · bug bounty on seal
+└─ 5. Verification plane (partial)
+      claim verify stubs · continuous whoami in CI · isolation pack · audit SIEM · bounty
 ```
 
 ---
@@ -96,7 +96,8 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Tool description pin tags; `initialize.instructions`
 - [x] MCP auto-pin from workspace / `LOCUS_AUTO_PIN`
 - [x] `quickstart` + shell hook frozen/require_pin UX
-- [ ] Dogfood: agent report `ready` on real Claude Code + Cursor installs (personal + client)
+- [x] `scripts/dogfood.sh` — quickstart → agent setup → report → doctor → forensics; `DOGFOOD READY` when ready or protected+pin
+- [ ] Dogfood: agent report `ready` on real Claude Code + Cursor installs (personal + client) — local path exists; multi-client real installs still manual
 - [ ] Upstream MCP workers for top adapters (not only synthetic freeze tools)
 
 ### M4 — Hub composition · **in progress**
@@ -106,14 +107,23 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] `integrations/ashlr-hub/locus.ts` probe + `withLocusSession` / `ensureLocusReady`
 - [x] `integrations/ashlr-hub/mcp-gateway-snippet.md` (REQUIRED_SERVERS + discovery)
 - [x] `integrations/ashlr-hub/doctor-check.md` (`checkLocus`)
+- [x] `locusFleetGate()` + pure parse helpers (`evaluateFleetGate`, `parseStatusOneline`, `hasRequiredServers`)
+- [x] `registerLocusInMcpConfig` / `mergeLocusIntoMcpConfig` MCP merge helpers
+- [x] `integrations/ashlr-hub/fleet-preflight.md` — exact pre-dispatch preflight
+- [x] `schema/hub-gate.schema.json` fleet gate response contract
+- [x] `scripts/hub-integration-test.sh` composition smoke (required_servers + oneline + gate)
 - [ ] Land drop-in inside ashlr-hub: REQUIRED_SERVERS + locus-first discovery
 - [ ] `ashlr doctor` calls `checkLocus` in production path
-- [ ] Hub pre-mutate gate uses `ensureLocusReady` / `canMutate`
+- [ ] Hub pre-mutate gate uses `locusFleetGate` / `ensureLocusReady` / `canMutate`
 - [ ] CI jobs use `withLocusSession` (or `ci mint`) — no shared ambient pin races
 
-### M5 — Verification plane · **future**
+### M5 — Verification plane · **partial / in progress**
 
-- [ ] Conformance pack: automated INV-1…N isolation suite in CI matrix
+- [x] Architecture: [docs/verification-plane.md](./docs/verification-plane.md) (proposal → verify → act; confidence; tool grounding)
+- [x] `locus verify claim --text "…"` → `{ claim, confidence, needs_tool, suggestion, signals, grounding? }` (heuristics only)
+- [x] MCP `locus_verify_claim` (same shape; available unpinned)
+- [x] Doctor optional WARN `ungrounded_claims` when audit tail has many low-confidence patterns
+- [x] Conformance pack in CI: `.github/workflows/conformance.yml` — `invariants` + `locus-mcp` tests + `hub-smoke` + `e2e` (high timeout)
 - [ ] Continuous whoami / `watch` in long agent sessions as first-class hub heartbeat
 - [ ] Audit export → SIEM / remote append (team tier)
 - [ ] Adapter SDK + signed registry
@@ -161,4 +171,4 @@ locus init --with-samples && locus enter personal && locus doctor
 | M2 Firm UX | done |
 | M3 AI surface | mostly done |
 | M4 Hub composition | in progress |
-| M5 Verification plane | future |
+| M5 Verification plane | partial (claim verify stubs + conformance CI) |

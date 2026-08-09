@@ -23,10 +23,12 @@ pub mod forensics;
 pub mod graph;
 pub mod isolation;
 pub mod policy;
+pub mod recipes;
 pub mod seal;
 pub mod session;
 pub mod store;
 pub mod ticket;
+pub mod verify;
 pub mod workers;
 pub mod workspace;
 
@@ -36,9 +38,10 @@ pub use adapters::{
 };
 pub use agent_report::{
     agent_md_content, agent_md_path, agent_md_present, agent_report_from_doctor,
-    agent_report_json_has_stable_keys, build_agent_report, mcp_agent_env, probe_agent_options,
-    probe_mcp_registered, workspace_present, workspace_stub_toml, AgentCommands, AgentReport,
-    AgentReportOptions, AgentStatus, McpRegistered, AGENT_REPORT_JSON_KEYS, REQUIRED_SERVERS,
+    agent_report_json_has_stable_keys, build_agent_report, compute_safe_next, mcp_agent_env,
+    probe_agent_options, probe_mcp_registered, workspace_present, workspace_stub_toml,
+    AgentCommands, AgentReport, AgentReportOptions, AgentStatus, McpRegistered, SafeNext,
+    AGENT_REPORT_JSON_KEYS, REQUIRED_SERVERS,
 };
 pub use approval::notifications_enabled;
 pub use approval::{
@@ -54,7 +57,9 @@ pub use config::{
     load_config, save_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig,
     NotifyConfig,
 };
-pub use credential::{inject_keys_for_provider, resolve, resolve_binding_secrets, CredentialRef};
+pub use credential::{
+    inject_keys_for_provider, phantom_on_path, resolve, resolve_binding_secrets, CredentialRef,
+};
 pub use doctor::{
     build_doctor_report, count_near_misses, doctor_json_has_stable_keys, filter_audit_events,
     is_near_miss_op, AuditSummary, DoctorExternal, DoctorIssue, DoctorPin, DoctorReport,
@@ -81,6 +86,9 @@ pub use isolation::{
     ci_secrets_allowed, visible_credential_refs, IsolatedEnv,
 };
 pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
+pub use recipes::{
+    all_recipes, get_recipe, recipe_toml_snippet, suggest_for_provider, UpstreamRecipe,
+};
 pub use seal::SealKey;
 pub use session::{
     binding_fingerprint, namespace_tool, parse_ttl, split_namespaced_tool, PinSource, Session,
@@ -93,6 +101,11 @@ pub use store::{
 pub use ticket::{
     mint_ticket, verify_ticket, verify_ticket_parts, CapabilityTicket, DEFAULT_TICKET_TTL_SECS,
     TICKET_ID_PREFIX,
+};
+pub use verify::{
+    count_low_confidence_audit_signals, doctor_low_confidence_message, verify_claim,
+    ClaimConfidence, ClaimGrounding, ClaimVerification, DOCTOR_LOW_CONFIDENCE_AUDIT_SCAN,
+    DOCTOR_LOW_CONFIDENCE_AUDIT_THRESHOLD,
 };
 pub use workers::{
     idle_timeout_from_env, mcp_config_from_upstream, namespace_upstream_tool,

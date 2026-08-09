@@ -7,14 +7,14 @@
 **AI-native identity plane for coding agents.**  
 **Wrong account, impossible.**
 
-Pin a client — every CLI command and MCP tool is hard-scoped to that binding until you re-pin. Agents inherit a sealed session, not ambient `gh auth` / last Vercel team.
+Pin a client — every CLI command, MCP tool, and the **local dashboard** is hard-scoped to that binding until you re-pin. Agents inherit a sealed session, not ambient `gh auth` / last Vercel team.
 
 | Product | Question it answers |
 |---------|---------------------|
 | **[Phantom](https://phm.dev)** | Can this secret enter the model? |
 | **Locus** | As whom, against which tenant, right now? |
 
-> Agents inherit ambient identity: global `gh auth`, one Supabase MCP token, last Vercel team. Contract work makes that lethal. Locus makes wrong-account action **mechanically impossible** — not merely discouraged. AI-native (`locus agent`, MCP resources/prompts) and hub-native (`agent report` · `REQUIRED_SERVERS`).
+> Agents inherit ambient identity: global `gh auth`, one Supabase MCP token, last Vercel team. Contract work makes that lethal. Locus makes wrong-account action **mechanically impossible** — not merely discouraged. AI-native (`locus agent`, MCP resources/prompts), hub-native (`agent report` · `REQUIRED_SERVERS`), and operator-visible (`locus dashboard` · `forensics` · `goal status`).
 
 ---
 
@@ -47,21 +47,25 @@ Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
 ## Quick start
 
 ```bash
-# Initialize with sample personal + acme bindings
-locus init --with-samples
-locus binding list
+# First 60 seconds
+locus quickstart                 # samples · enter · whoami · doctor
 
-# Pin and prove who you are
-locus pin personal
-locus whoami
+# Or explicit pin
+locus init --with-samples
+locus enter personal && locus whoami
 
 # Switch client — previous identity is gone from the process env
-locus pin acme
-locus whoami
+locus enter acme && locus whoami
+
+# Local identity dashboard (loopback UI + API)
+locus dashboard                  # http://127.0.0.1:8750
 
 # Run any command with only the pinned binding's surface
 locus exec -- env | grep LOCUS_
-locus exec -- env | grep SUPABASE_PROJECT_REF
+
+# Wire AI clients + hub readiness
+locus agent setup --apply
+locus agent report --json        # ready | protected | unsafe
 
 # Directory-local default
 cd ~/clients/acme
@@ -111,9 +115,13 @@ Never put raw secrets in binding files.
 
 ```bash
 # after Install (cargo / brew / npm)
-locus pin acme
-locus setup --client claude    # writes/merges .mcp.json
-# restart Claude Code — tools: locus_whoami, supabase.scope, github.whoami, …
+locus enter acme
+locus agent setup --apply      # MCP configs + AGENT.md (or: locus setup --client claude)
+# restart Claude Code — tools: locus_whoami, supabase.scope, … + resources/prompts
+
+# Optional: HTTP MCP for CI agents (loopback + token)
+LOCUS_MCP_HTTP_TOKEN=secret locus-mcp --http 127.0.0.1:8742
+# POST /mcp  ·  GET /health
 ```
 
 ---
@@ -160,7 +168,7 @@ scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 ## CLI
 
 ```
-locus init [--with-samples]
+locus init [--with-samples] · quickstart
 locus pin [alias] [--force] [--client claude] [--ns a,b]
 locus enter <alias>                   # firm workflow pin
 locus leave
@@ -171,15 +179,18 @@ locus run -b <alias> -- <command>     # one-shot; global pin unchanged
 locus binding list|show|add|rm
 locus workspace --default <alias> [--allow a,b] [--require-pin]
 locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2)
+locus dashboard · serve               # local identity UI + API (127.0.0.1)
+locus forensics export                # shareable pack (no secrets)
 locus approve list|grant|status|deny  # require_approval / dual-control
 locus notify status|on|off            # desktop banners OFF by default
-locus events --last N [--op …] [--binding …] [--json]
+locus events --last N · events export # audit tail / fleet pulse / OTLP
 locus graph list|export|import        # encrypted binding graph share (no secrets)
 locus ci mint|env|run                 # short-lived sealed sessions for pipelines
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex
 locus agent report|setup|doctor       # AI-native readiness (hub JSON)
 locus goal status                     # northstar progress from GOALS.md
+locus topic <name>                    # dashboard · forensics · serve · goal · verify · …
 ```
 
 **Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
@@ -224,7 +235,8 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 |-------|--------|
 | **0** Daemon-less control plane, pin/whoami/exec, isolation tests | done |
 | **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | done |
-| **2** Firm UX, doctor pane, run/ns, notify, local `locus graph`, `locus ci` | **you are here (0.1.1)** |
+| **2** Firm UX, doctor pane, run/ns, notify, local `locus graph`, `locus ci` | done (0.1.1) |
+| **2.x / 0.2** Dashboard, forensics, HTTP MCP, agent report, goal loop | **you are here (0.2.0)** |
 | **3** Remote binding graph sync, dual-control packs, offboard, SIEM export | next |
 | **4** Adapter SDK, broader prebuilt platforms | later |
 
@@ -240,19 +252,24 @@ cargo test --workspace
 cargo build --release
 ./target/release/locus --help
 
-# Full shell e2e (34 checks: pin, isolation, MCP freeze/approval, dual-control,
-# doctor, events, enter/run, notify, graph, ci, heartbeat — feature-detected)
+# Full shell e2e (pin, isolation, MCP freeze/approval, dual-control,
+# doctor, events, enter/run, notify, graph, ci, heartbeat, dashboard health,
+# forensics, goal status — feature-detected)
 ./scripts/e2e.sh
 ```
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test/lint and how to add adapters. Agent-oriented rules: [AGENTS.md](./AGENTS.md). Short IDE guide: [CLAUDE.md](./CLAUDE.md).
 
-### Landing page
+### Landing page & dashboard
 
-Static site under [`apps/web/`](./apps/web) — dark monochrome terminal aesthetic, sibling positioning vs Phantom.
+| App | Role |
+|-----|------|
+| [`apps/web/`](./apps/web) | Marketing landing — AI-native identity plane hero |
+| [`apps/dashboard/`](./apps/dashboard) | Operator UI embedded by `locus serve` / `dashboard` |
 
 ```bash
 cd apps/web && npm start   # http://localhost:3000
+locus dashboard            # http://127.0.0.1:8750 (needs built CLI)
 ```
 
 Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README.md).
@@ -264,6 +281,8 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [AGENTS.md](./AGENTS.md) | AI coding agents: build, test, invariants, secrets |
 | [CLAUDE.md](./CLAUDE.md) | Short development guide |
 | [apps/web/](./apps/web) | Landing page (static HTML) |
+| [apps/dashboard/](./apps/dashboard) | Local identity dashboard UI |
+| [GOALS.md](./GOALS.md) | Northstar goal loop |
 | [scripts/e2e.sh](./scripts/e2e.sh) | End-to-end shell suite |
 | [docs/architecture.md](./docs/architecture.md) | System diagram (DESIGN distilled) |
 | [docs/agency-certainty.md](./docs/agency-certainty.md) | Identity vs epistemic certainty (Ashlr stack) |

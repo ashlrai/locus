@@ -1,0 +1,48 @@
+# Isolation + hub contract conformance (beyond unit CI).
+# INV suite, MCP protocol, hub-smoke, and full e2e shell pack.
+name: Conformance
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  conformance:
+    name: invariants · mcp · hub-smoke · e2e
+    runs-on: ubuntu-latest
+    # e2e builds release binaries and runs the full shell pack
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: conformance
+
+      - name: Install jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+
+      - name: Invariant suite (locus-core)
+        run: cargo test -p locus-core --test invariants --locked
+
+      - name: MCP protocol + transport (locus-mcp)
+        run: cargo test -p locus-mcp --locked
+
+      - name: Hub contract smoke
+        run: ./scripts/hub-smoke.sh
+
+      - name: End-to-end shell pack
+        run: ./scripts/e2e.sh
+        timeout-minutes: 60

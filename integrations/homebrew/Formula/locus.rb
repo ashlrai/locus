@@ -4,12 +4,12 @@
 # ashlrai/homebrew-ashlr (or ashlrai/homebrew-locus). See
 # integrations/homebrew/README.md and docs/RELEASE.md.
 #
-# === v0.1.1 (this formula version) ===
-# 1. Tag:  git tag -a v0.1.1 -m "Locus v0.1.1" && git push origin v0.1.1
+# === v0.2.0 (this formula version) ===
+# 1. Tag:  git tag -a v0.2.0 -m "Locus v0.2.0" && git push origin v0.2.0
 #    (do not force-push tags)
 # 2. Wait for .github/workflows/release.yml to attach locus-*.tar.gz assets.
 # 3. Source formula sha256 (this file's default install path):
-#      curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v0.1.1.tar.gz" | shasum -a 256
+#      curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v0.2.0.tar.gz" | shasum -a 256
 #    Replace the placeholder sha256 below, then PR into the live tap.
 # 4. Optional: switch to prebuilt binary formula (commented block at bottom)
 #    once you have per-target digests of the release assets.
@@ -34,11 +34,11 @@
 class Locus < Formula
   desc "Identity plane for coding agents — wrong account, impossible"
   homepage "https://github.com/ashlrai/locus"
-  version "0.1.1"
+  version "0.2.0"
   license "MIT"
   head "https://github.com/ashlrai/locus.git", branch: "main"
 
-  # Stable source tarball — replace placeholder after tagging v0.1.1:
+  # Stable source tarball — replace placeholder after tagging v0.2.0:
   #   curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v#{version}.tar.gz" | shasum -a 256
   # v0.1.0 source sha256 (reference): a0a8e9e14bd9b3322faca27d2efe42a2dcc473d84a40aab3497a4296b8d68cce
   url "https://github.com/ashlrai/locus/archive/refs/tags/v#{version}.tar.gz"

@@ -52,6 +52,11 @@ pub struct Scope {
 /// upstream = { command = "npx", args = ["-y", "@pkg"] }
 /// ```
 ///
+/// Built-in recipe (expands to command/args — see `locus upstream list`):
+/// ```toml
+/// upstream = { recipe = "github-mcp", resolve_secrets = true }
+/// ```
+///
 /// Nested table (applies to the most recent `[[binding.providers]]` entry):
 /// ```toml
 /// [binding.providers.upstream]
@@ -61,7 +66,15 @@ pub struct Scope {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct UpstreamSpec {
+    /// Optional built-in recipe id (e.g. `github-mcp`, `filesystem-mcp`).
+    /// When set and `command` is empty, Locus fills command/args from the
+    /// recipe table (`adapters/recipes.toml`). Explicit `command` / `args`
+    /// override the recipe defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<String>,
     /// Executable (e.g. `npx`, `python3`, path to MCP binary).
+    /// Optional when `recipe` is set — filled by [`Self::expand`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
@@ -73,7 +86,18 @@ pub struct UpstreamSpec {
 impl UpstreamSpec {
     pub fn new(command: impl Into<String>) -> Self {
         Self {
+            recipe: None,
             command: command.into(),
+            args: Vec::new(),
+            resolve_secrets: false,
+        }
+    }
+
+    /// Spec that expands a built-in recipe at validate / spawn time.
+    pub fn from_recipe(recipe: impl Into<String>) -> Self {
+        Self {
+            recipe: Some(recipe.into()),
+            command: String::new(),
             args: Vec::new(),
             resolve_secrets: false,
         }
@@ -84,13 +108,91 @@ impl UpstreamSpec {
         self
     }
 
+    pub fn with_recipe(mut self, recipe: impl Into<String>) -> Self {
+        self.recipe = Some(recipe.into());
+        self
+    }
+
     pub fn resolve_secrets(mut self, yes: bool) -> Self {
         self.resolve_secrets = yes;
         self
     }
 
+    /// True when this table declares an upstream (recipe and/or command).
+    pub fn is_declared(&self) -> bool {
+        !self.command.trim().is_empty()
+            || self.recipe.as_ref().is_some_and(|r| !r.trim().is_empty())
+    }
+
+    /// Expand a recipe into concrete `command` / `args` when needed.
+    ///
+    /// - No recipe → requires non-empty `command`.
+    /// - Recipe set → look up builtins; empty `command`/`args` take recipe
+    ///   defaults; non-empty fields win (full override, not merge).
+    /// - `resolve_secrets`: if still false and the recipe defaults to true,
+    ///   adopt the recipe default (binding can force false only by setting
+    ///   command explicitly without recipe, or we keep user false when they
+    ///   wrote `resolve_secrets = false` — see note below).
+    ///
+    /// Note: TOML bool default is false, so `resolve_secrets` omitted means
+    /// false. Recipes that need secrets should be used with
+    /// `resolve_secrets = true` in the binding (CLI snippets include it).
+    /// We only auto-enable `default_resolve_secrets` when the user did not
+    /// set command/args (pure recipe expansion path) *and* resolve_secrets
+    /// is still false — actually we always leave resolve_secrets as written
+    /// so explicit `false` is honored.
+    pub fn expand(&self) -> crate::Result<Self> {
+        let recipe_name = self
+            .recipe
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+
+        let Some(name) = recipe_name else {
+            if self.command.trim().is_empty() {
+                return Err(crate::LocusError::msg(
+                    "provider.upstream.command must be non-empty when upstream is set (or set recipe)",
+                ));
+            }
+            return Ok(self.clone());
+        };
+
+        let recipe = crate::recipes::get_recipe(name)?;
+        let command = if self.command.trim().is_empty() {
+            recipe.command.clone()
+        } else {
+            self.command.clone()
+        };
+        let args = if self.args.is_empty() {
+            recipe.args.clone()
+        } else {
+            self.args.clone()
+        };
+        if command.trim().is_empty() {
+            return Err(crate::LocusError::msg(format!(
+                "upstream recipe `{name}` resolved to an empty command"
+            )));
+        }
+        // Pure recipe path: adopt recommended resolve_secrets when the binding
+        // did not set command (recipe-only). If the user wrote an explicit
+        // command, keep resolve_secrets as given.
+        let resolve_secrets = if self.command.trim().is_empty() && self.args.is_empty() {
+            self.resolve_secrets || recipe.default_resolve_secrets
+        } else {
+            self.resolve_secrets
+        };
+
+        Ok(Self {
+            recipe: self.recipe.clone(),
+            command,
+            args,
+            resolve_secrets,
+        })
+    }
+
     pub fn validate(&self) -> crate::Result<()> {
-        if self.command.trim().is_empty() {
+        let expanded = self.expand()?;
+        if expanded.command.trim().is_empty() {
             return Err(crate::LocusError::msg(
                 "provider.upstream.command must be non-empty when upstream is set",
             ));
@@ -141,9 +243,7 @@ impl ProviderBinding {
 
     /// True when this provider should spawn an MCP stdio worker.
     pub fn has_upstream(&self) -> bool {
-        self.upstream
-            .as_ref()
-            .is_some_and(|u| !u.command.is_empty())
+        self.upstream.as_ref().is_some_and(|u| u.is_declared())
     }
 }
 
@@ -532,6 +632,70 @@ scope = { project_ref = "abcdefghij", read_only = true }
         assert_eq!(up.args, vec!["-y", "@github/mcp"]);
         assert!(up.resolve_secrets);
         assert!(!b.provider("supabase").unwrap().has_upstream());
+    }
+
+    #[test]
+    fn parse_upstream_recipe_only() {
+        let toml = r#"
+[binding]
+id = "bnd_x"
+alias = "x"
+tenant = "t"
+
+[[binding.providers]]
+provider = "github"
+account = "a"
+credential_ref = "phm:GH"
+upstream = { recipe = "github-mcp" }
+"#;
+        let b = Binding::parse_toml(toml).unwrap();
+        b.validate().unwrap();
+        let up = b.provider("github").unwrap().upstream.as_ref().unwrap();
+        assert_eq!(up.recipe.as_deref(), Some("github-mcp"));
+        assert!(up.command.is_empty(), "raw parse keeps command empty");
+        let expanded = up.expand().unwrap();
+        assert_eq!(expanded.command, "npx");
+        assert!(expanded.args.iter().any(|a| a.contains("server-github")));
+        assert!(expanded.resolve_secrets, "recipe default_resolve_secrets");
+        assert!(b.provider("github").unwrap().has_upstream());
+    }
+
+    #[test]
+    fn recipe_args_override() {
+        let up = UpstreamSpec::from_recipe("filesystem-mcp").with_args([
+            "-y",
+            "@modelcontextprotocol/server-filesystem",
+            "/tmp/locus-demo",
+        ]);
+        let expanded = up.expand().unwrap();
+        assert_eq!(expanded.command, "npx");
+        assert_eq!(
+            expanded.args,
+            vec![
+                "-y",
+                "@modelcontextprotocol/server-filesystem",
+                "/tmp/locus-demo"
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_recipe_fails_validate() {
+        let toml = r#"
+[binding]
+id = "bnd_x"
+alias = "x"
+tenant = "t"
+
+[[binding.providers]]
+provider = "github"
+account = "a"
+credential_ref = "env:X"
+upstream = { recipe = "not-a-real-recipe" }
+"#;
+        let b = Binding::parse_toml(toml).unwrap();
+        let err = b.validate().unwrap_err().to_string();
+        assert!(err.contains("unknown") || err.contains("recipe"), "{err}");
     }
 
     #[test]

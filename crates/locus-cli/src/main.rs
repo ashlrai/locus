@@ -14,12 +14,13 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use locus_core::{
-    agent_md_content, agent_md_path, agent_report_from_doctor, build_ci_env_map,
+    agent_md_content, agent_md_path, agent_report_from_doctor, all_recipes, build_ci_env_map,
     build_doctor_report, build_isolated_env_opts, ci_secrets_allowed, default_export_filename,
     export_events, export_forensics_pack, filter_audit_events, find_workspace, mcp_agent_env,
-    parse_ttl, probe_agent_options, resolve_passphrase, workspace_stub_toml, AgentStatus, Binding,
-    BindingBody, DoctorExternal, DoctorVerdict, EventsExportFormat, EventsExportOptions,
-    ForensicsExportOptions, Policy, ProviderBinding, Scope, Store, WorkspaceConfig, VERSION,
+    parse_ttl, phantom_on_path, probe_agent_options, recipe_toml_snippet, resolve_passphrase,
+    suggest_for_provider, verify_claim, workspace_stub_toml, AgentStatus, Binding, BindingBody,
+    DoctorExternal, DoctorVerdict, EventsExportFormat, EventsExportOptions, ForensicsExportOptions,
+    Policy, ProviderBinding, Scope, Store, WorkspaceConfig, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -37,13 +38,15 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · quickstart · setup · agent · doctor · watch · workspace · hook · mcp · engagement · graph · goal\n  \
-  Daily use     enter · pin · leave · whoami · status · exec · run · binding · dashboard\n  \
+  Setup         init · quickstart · setup · agent · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream\n  \
+  Daily use     enter · pin · leave · whoami · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
   Audit         events · forensics\n  \
   Local UI      serve · dashboard\n  \
-  Maintenance   completion · version"
+  Maintenance   completion · topic · version\n\n\
+Topic help:  locus topic <name>  or  locus help topic <name>\n  \
+  Topics: dashboard · forensics · serve · goal · verify · agent · mcp · http · upstream"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -195,6 +198,14 @@ enum Commands {
     #[command(next_help_heading = "Setup", subcommand)]
     Goal(GoalCmd),
 
+    /// Verification plane — score claims before acting (M5 heuristic stubs)
+    ///
+    /// `locus verify claim --text "…"` returns
+    /// `{ claim, confidence, needs_tool, suggestion, signals, grounding? }`.
+    /// No ML — pure heuristics for hub/agent extension. See docs/verification-plane.md.
+    #[command(next_help_heading = "Setup", subcommand)]
+    Verify(VerifyCmd),
+
     /// Run a command with only the pinned binding's identity surface
     #[command(next_help_heading = "Daily use")]
     Exec {
@@ -235,6 +246,13 @@ enum Commands {
     /// Manage bindings
     #[command(next_help_heading = "Daily use", subcommand)]
     Binding(BindingCmd),
+
+    /// Built-in upstream MCP recipes (command/args for common servers)
+    ///
+    /// Bindings may set `upstream = { recipe = "github-mcp" }` instead of
+    /// hand-writing command/args. See also `docs/workers.md`.
+    #[command(next_help_heading = "Setup", subcommand)]
+    Upstream(UpstreamCmd),
 
     /// CI / ephemeral pin minting (short-lived sealed sessions)
     ///
@@ -322,6 +340,15 @@ enum Commands {
         shell: Shell,
     },
 
+    /// Extended help for product surfaces (dashboard, forensics, serve, goal, verify, …)
+    ///
+    /// Also available as `locus help topic <name>`.
+    #[command(next_help_heading = "Maintenance", visible_alias = "help-topic")]
+    Topic {
+        /// Topic name (omit to list topics)
+        name: Option<String>,
+    },
+
     /// Print version (also available as `locus --version`)
     #[command(next_help_heading = "Maintenance")]
     Version,
@@ -335,6 +362,19 @@ enum GoalCmd {
     /// under milestone sections, and prints done/remaining counts. Falls back
     /// to an embedded summary when no file is found.
     Status,
+}
+
+#[derive(Subcommand, Debug)]
+enum VerifyCmd {
+    /// Score a free-text claim for tool grounding / confidence
+    ///
+    /// Heuristic stub (no ML): numbers, URLs, or versions ⇒ needs_tool + low
+    /// confidence. Identity language + active pin attaches whoami grounding.
+    Claim {
+        /// Claim text to score
+        #[arg(long)]
+        text: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -583,6 +623,17 @@ enum NotifyCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum UpstreamCmd {
+    /// List built-in upstream MCP recipes
+    List,
+    /// Suggest recipes for a provider (e.g. github, supabase, filesystem)
+    Suggest {
+        /// Provider id (github, supabase, demo, …)
+        provider: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum BindingCmd {
     /// List configured bindings
     List,
@@ -626,6 +677,15 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    // Support `locus help topic <name>` without fighting clap's built-in help.
+    {
+        let argv: Vec<String> = env::args().collect();
+        if argv.len() >= 3 && argv[1] == "help" && argv[2] == "topic" {
+            let name = argv.get(3).cloned();
+            return cmd_topic(name.as_deref());
+        }
+    }
+
     let cli = Cli::parse();
     match cli.command {
         Commands::Init { with_samples } => cmd_init(with_samples, cli.json),
@@ -649,6 +709,7 @@ fn run() -> Result<()> {
         Commands::Status { oneline } => cmd_status(oneline, cli.json),
         Commands::Agent(sub) => cmd_agent(sub, cli.json),
         Commands::Goal(sub) => cmd_goal(sub, cli.json),
+        Commands::Verify(sub) => cmd_verify(sub, cli.json),
         Commands::Exec {
             no_resolve,
             strict_creds,
@@ -665,6 +726,7 @@ fn run() -> Result<()> {
         Commands::Ci(sub) => cmd_ci(sub, cli.json),
         Commands::Mcp => cmd_mcp(),
         Commands::Binding(sub) => cmd_binding(sub, cli.json),
+        Commands::Upstream(sub) => cmd_upstream(sub, cli.json),
         Commands::Workspace {
             default,
             allow,
@@ -709,6 +771,7 @@ fn run() -> Result<()> {
             generate(shell, &mut cmd, "locus", &mut io::stdout());
             Ok(())
         }
+        Commands::Topic { name } => cmd_topic(name.as_deref()),
         Commands::Version => {
             if cli.json {
                 println!(
@@ -719,6 +782,166 @@ fn run() -> Result<()> {
                 println!("locus {VERSION}");
             }
             Ok(())
+        }
+    }
+}
+
+/// Extended product-surface help (`locus topic <name>` / `locus help topic <name>`).
+fn cmd_topic(name: Option<&str>) -> Result<()> {
+    let topics: &[(&str, &str)] = &[
+        (
+            "dashboard",
+            "Local identity dashboard — active pin, whoami, bindings, pending approvals,\n\
+             doctor verdict, and recent audit. Loopback-only; never returns secrets.\n\n\
+             Commands:\n\
+               locus dashboard [--port 8750] [--token …] [--no-open]\n\
+               locus serve [--port 8750] [--token …] [--open]\n\n\
+             API (127.0.0.1):\n\
+               GET  /api/health | /api/status | /api/whoami | /api/bindings\n\
+               GET  /api/approvals | /api/doctor | /api/events\n\
+               POST /api/approve/{id}/grant\n\n\
+             Auth: LOCUS_DASHBOARD_TOKEN or --token (Bearer / X-Locus-Token).\n\
+             UI: apps/dashboard/public/index.html (embedded in the binary).",
+        ),
+        (
+            "forensics",
+            "Shareable forensics pack — pin/session meta, binding summaries, audit tail,\n\
+             doctor snapshot, pending approvals, near-miss, chain tip. No secret values.\n\n\
+             Commands:\n\
+               locus forensics export [--binding <alias>] [--last N] [--out pack.json]\n\
+               locus forensics export --json            # stdout JSON\n\n\
+             Pair with:\n\
+               locus events --last N [--op …] [--binding …]\n\
+               locus events export [--otlp] [--out file]  # fleet pulse / OTLP logs",
+        ),
+        (
+            "serve",
+            "HTTP server for the local identity dashboard + JSON API.\n\
+             Binds 127.0.0.1 only. Blocks until Ctrl-C.\n\n\
+             Commands:\n\
+               locus serve [--port 8750] [--token …] [--open]\n\
+               locus dashboard   # serve + open browser (use --no-open to skip)\n\n\
+             Health probe:\n\
+               curl -s http://127.0.0.1:8750/api/health\n\n\
+             See also: locus topic dashboard",
+        ),
+        (
+            "goal",
+            "Northstar goal loop — progress against GOALS.md milestones.\n\n\
+             Commands:\n\
+               locus goal status [--json]\n\n\
+             Walks parents of cwd for GOALS.md, parses - [x] / - [ ] checkboxes under\n\
+             milestone sections, prints done/remaining. Falls back to embedded milestones\n\
+             when no file is found.\n\n\
+             Related: GOALS.md · PLAN.md · docs/hub-integration.md",
+        ),
+        (
+            "verify",
+            "Verification plane — certain reasoning/action gates (M5 stubs).\n\n\
+             Claim scoring (heuristic, no ML):\n\
+               locus verify claim --text \"Deploy hits https://api.x/v2\" [--json]\n\
+               → { claim, confidence, needs_tool, suggestion, signals, grounding? }\n\
+               MCP: locus_verify_claim  { \"text\": \"…\" }\n\n\
+             Identity gate checks:\n\
+               locus whoami [--json]           # active pin + seal\n\
+               locus doctor [--json]           # SAFE|WARN|UNSAFE (exit 0/1/2)\n\
+               locus agent report --json       # hub contract (ready|protected|unsafe)\n\
+               locus status --oneline          # unpinned | alias:tenant | frozen\n\n\
+             Doctor may WARN (ungrounded_claims) when recent audit details look\n\
+             like low-confidence factual claims (numbers/URLs/versions).\n\n\
+             Docs: docs/verification-plane.md · schema/doctor.schema.json\n\
+             Isolation smoke: export LOCUS_HOME=/tmp/locus-verify && locus init --with-samples",
+        ),
+        (
+            "agent",
+            "AI-native setup + hub readiness.\n\n\
+             Commands:\n\
+               locus agent setup --apply|--dry-run [--client all|claude|cursor|codex]\n\
+               locus agent report --json       # hub gate (exit ready=0 protected=1 unsafe=2)\n\
+               locus agent doctor              # human-readable ladder\n\n\
+             MCP (when pinned):\n\
+               resources: locus://session · locus://doctor · locus://bindings\n\
+               prompt:    locus_context\n\
+               tools:     locus_whoami first; descriptions tagged [locus:<alias|unpinned>]\n\n\
+             REQUIRED_SERVERS = locus + phantom (integrations/ashlr-hub/).",
+        ),
+        (
+            "mcp",
+            "locus-mcp multiplexor — tools hard-scoped to the active pin.\n\n\
+             Stdio (default for Claude Code / Cursor):\n\
+               locus mcp\n\
+               locus-mcp\n\
+               locus setup --client claude|cursor|codex\n\
+               locus agent setup --apply\n\n\
+             HTTP (CI / remote agents, loopback by default):\n\
+               LOCUS_MCP_HTTP_TOKEN=… locus-mcp --http 127.0.0.1:8742\n\
+               LOCUS_MCP_HTTP=1 LOCUS_MCP_HTTP_TOKEN=… locus-mcp\n\
+               POST /mcp  (JSON-RPC) · GET /health\n\n\
+             Upstream recipes (per-provider MCP children):\n\
+               locus upstream list\n\
+               locus upstream suggest github\n\
+               upstream = { recipe = \"github-mcp\", resolve_secrets = true }\n\n\
+             Invariants: agents cannot pin; unpinned ⇒ control tools only; no secrets in results.\n\
+             Docs: docs/mcp.md · docs/workers.md",
+        ),
+        (
+            "upstream",
+            "Built-in upstream MCP recipes for binding TOML.\n\n\
+             Commands:\n\
+               locus upstream list [--json]\n\
+               locus upstream suggest <provider> [--json]\n\n\
+             In a binding:\n\
+               upstream = { recipe = \"github-mcp\", resolve_secrets = true }\n\
+               upstream = { recipe = \"filesystem-mcp\", args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/tmp/demo\"] }\n\
+               upstream = { command = \"npx\", args = [\"-y\", \"@pkg\"] }  # explicit still works\n\n\
+             Recipes: github-mcp · github-official · supabase-mcp · filesystem-mcp · everything-mcp\n\
+             Source: adapters/recipes.toml · Docs: docs/workers.md · examples/upstream.binding.toml",
+        ),
+        (
+            "http",
+            "HTTP transports for Locus surfaces.\n\n\
+             Dashboard API:\n\
+               locus serve --port 8750\n\
+               curl -s http://127.0.0.1:8750/api/health\n\n\
+             MCP over HTTP (JSON-RPC POST /mcp):\n\
+               LOCUS_MCP_HTTP_TOKEN=secret locus-mcp --http 127.0.0.1:8742\n\
+               curl -s -H \"Authorization: Bearer secret\" \\\n\
+                 -H 'Content-Type: application/json' \\\n\
+                 -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{…}}' \\\n\
+                 http://127.0.0.1:8742/mcp\n\n\
+             Env: LOCUS_MCP_HTTP · LOCUS_MCP_HTTP_ADDR · LOCUS_MCP_HTTP_TOKEN\n\
+                    LOCUS_MCP_HTTP_ALLOW_REMOTE=1 (non-loopback; default refuses)\n\
+                    LOCUS_DASHBOARD_TOKEN (optional dashboard /api gate)",
+        ),
+    ];
+
+    match name.map(str::trim).filter(|s| !s.is_empty()) {
+        None => {
+            println!("{}", "locus topic — product surface guides".bold());
+            println!();
+            println!("Usage:  locus topic <name>");
+            println!("        locus help topic <name>");
+            println!();
+            println!("{}", "Topics:".bold());
+            for (n, body) in topics {
+                let first = body.lines().next().unwrap_or("");
+                println!("  {:12} {}", n.cyan(), first);
+            }
+            println!();
+            println!("Also: locus help <command>  for clap flag help.");
+            Ok(())
+        }
+        Some(n) => {
+            let key = n.to_ascii_lowercase();
+            if let Some((_, body)) = topics.iter().find(|(k, _)| *k == key) {
+                println!("{} {}", "topic".magenta().bold(), key.cyan().bold());
+                println!();
+                println!("{body}");
+                Ok(())
+            } else {
+                let names: Vec<&str> = topics.iter().map(|(k, _)| *k).collect();
+                bail!("unknown topic '{n}'. Available: {}", names.join(", "));
+            }
         }
     }
 }
@@ -1013,18 +1236,12 @@ fn cmd_quickstart(json: bool) -> Result<()> {
     let whoami = s.whoami().ok();
 
     // Doctor (do not hard-exit here — quickstart should finish printing)
-    let phantom_on_path = Command::new("phantom")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|st| st.success())
-        .unwrap_or(false);
-    let unresolved_phm = collect_unresolved_phm_refs(&s, phantom_on_path).unwrap_or_default();
+    let phantom = phantom_on_path();
+    let unresolved_phm = collect_unresolved_phm_refs(&s, phantom).unwrap_or_default();
     let report = build_doctor_report(
         &s,
         DoctorExternal {
-            phantom_on_path,
+            phantom_on_path: phantom,
             unresolved_phm,
             cwd: Some(cwd()),
         },
@@ -2205,6 +2422,101 @@ fn cmd_mcp() -> Result<()> {
     }
 }
 
+fn cmd_upstream(sub: UpstreamCmd, json: bool) -> Result<()> {
+    match sub {
+        UpstreamCmd::List => {
+            let recipes = all_recipes().context("load built-in upstream recipes")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&recipes)?);
+                return Ok(());
+            }
+            if recipes.is_empty() {
+                println!("{} no built-in recipes", "->".dimmed());
+                return Ok(());
+            }
+            println!(
+                "{} built-in upstream recipes (use in binding TOML):\n",
+                "locus upstream".cyan().bold()
+            );
+            for r in &recipes {
+                let providers = if r.providers.is_empty() {
+                    "—".into()
+                } else {
+                    r.providers.join(", ")
+                };
+                println!(
+                    "  {}  {}",
+                    r.id.green().bold(),
+                    if r.title.is_empty() {
+                        "".into()
+                    } else {
+                        r.title.clone()
+                    }
+                    .dimmed()
+                );
+                println!(
+                    "      providers: {}  ·  {} {}",
+                    providers.yellow(),
+                    r.command.cyan(),
+                    r.args.join(" ").dimmed()
+                );
+                println!("      {}", recipe_toml_snippet(r).dimmed());
+                if !r.notes.trim().is_empty() {
+                    let first = r.notes.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                    if !first.is_empty() {
+                        println!("      note: {}", first.trim().dimmed());
+                    }
+                }
+                println!();
+            }
+            println!(
+                "{}",
+                "Suggest for a provider:  locus upstream suggest github".dimmed()
+            );
+            Ok(())
+        }
+        UpstreamCmd::Suggest { provider } => {
+            let recipes = suggest_for_provider(&provider)
+                .with_context(|| format!("suggest recipes for `{provider}`"))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&recipes)?);
+                return Ok(());
+            }
+            if recipes.is_empty() {
+                println!(
+                    "{} no recipes tagged for provider `{}`\n  try `locus upstream list`",
+                    "->".dimmed(),
+                    provider.yellow()
+                );
+                return Ok(());
+            }
+            println!(
+                "{} recipes for provider {}:\n",
+                "suggest".cyan().bold(),
+                provider.yellow().bold()
+            );
+            for r in &recipes {
+                println!("  {}  {}", r.id.green().bold(), r.title.dimmed());
+                println!("      {} {}", r.command.cyan(), r.args.join(" ").dimmed());
+                println!("      copy: {}", recipe_toml_snippet(r));
+                if !r.env_hints.is_empty() {
+                    println!("      env hints: {}", r.env_hints.join(", ").dimmed());
+                }
+                if !r.notes.trim().is_empty() {
+                    for line in r.notes.lines().take(6) {
+                        let t = line.trim();
+                        if !t.is_empty() {
+                            println!("      {}", t.dimmed());
+                        }
+                    }
+                }
+                println!();
+            }
+            Ok(())
+        }
+    }
+}
+
 fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
     let s = store()?;
     match sub {
@@ -2374,6 +2686,82 @@ fn cmd_goal(sub: GoalCmd, json: bool) -> Result<()> {
     match sub {
         GoalCmd::Status => cmd_goal_status(json),
     }
+}
+
+fn cmd_verify(sub: VerifyCmd, json: bool) -> Result<()> {
+    match sub {
+        VerifyCmd::Claim { text } => cmd_verify_claim(&text, json),
+    }
+}
+
+fn cmd_verify_claim(text: &str, json: bool) -> Result<()> {
+    let s = store()?;
+    let _ = s.check_drift_and_freeze();
+    let who = s.whoami().ok();
+    let result = verify_claim(text, who.as_ref());
+    let binding = who
+        .as_ref()
+        .map(|w| w.binding_alias.as_str())
+        .unwrap_or("-");
+    let _ = s.audit(
+        "verify.claim",
+        binding,
+        Some(json!({
+            "confidence": result.confidence.as_str(),
+            "needs_tool": result.needs_tool,
+            "signals": result.signals,
+            "claim_len": result.claim.len(),
+            "claim_preview": result.claim.chars().take(120).collect::<String>(),
+        })),
+    );
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    // Structured human view — same fields as the JSON contract.
+    println!(
+        "{} verify claim  confidence={}  needs_tool={}",
+        "locus".magenta().bold(),
+        match result.confidence.as_str() {
+            "high" => result.confidence.as_str().green().to_string(),
+            "medium" => result.confidence.as_str().cyan().to_string(),
+            "low" => result.confidence.as_str().yellow().to_string(),
+            _ => result.confidence.as_str().dimmed().to_string(),
+        },
+        if result.needs_tool {
+            "true".yellow().to_string()
+        } else {
+            "false".dimmed().to_string()
+        }
+    );
+    println!("  claim       {}", result.claim);
+    if !result.signals.is_empty() {
+        println!("  signals     {}", result.signals.join(", ").dimmed());
+    }
+    if let Some(ref g) = result.grounding {
+        println!(
+            "  grounding   {}  pin={}  tenant={}  seal={}{}",
+            g.kind.cyan(),
+            g.binding_alias.cyan().bold(),
+            g.tenant.yellow(),
+            if g.seal_ok {
+                "ok".green().to_string()
+            } else {
+                "BAD".red().to_string()
+            },
+            if g.frozen {
+                format!("  {}", "FROZEN".red().bold())
+            } else {
+                String::new()
+            }
+        );
+    }
+    println!("  suggestion  {}", result.suggestion);
+    // Always emit machine JSON line for pipelines that ignore human formatting.
+    println!("{}", serde_json::to_string(&result)?);
+    Ok(())
 }
 
 fn cmd_goal_status(json: bool) -> Result<()> {
@@ -2604,26 +2992,21 @@ fn embedded_goal_milestones() -> Vec<GoalMilestone> {
         GoalMilestone {
             id: "M5".into(),
             title: "M5 — Verification plane".into(),
-            state: "future".into(),
-            done: 0,
-            total: 6,
+            state: "partial".into(),
+            done: 5,
+            total: 10,
         },
     ]
 }
 
 fn gather_doctor_report(s: &Store) -> Result<locus_core::DoctorReport> {
-    let phantom_on_path = Command::new("phantom")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|st| st.success())
-        .unwrap_or(false);
-    let unresolved_phm = collect_unresolved_phm_refs(s, phantom_on_path)?;
+    // phantom --version is process-cached (locus_core::phantom_on_path).
+    let phantom = phantom_on_path();
+    let unresolved_phm = collect_unresolved_phm_refs(s, phantom)?;
     build_doctor_report(
         s,
         DoctorExternal {
-            phantom_on_path,
+            phantom_on_path: phantom,
             unresolved_phm,
             cwd: Some(cwd()),
         },
@@ -2910,6 +3293,10 @@ fn cmd_agent_setup(
             println!();
             println!(
                 "  {} MCP env: LOCUS_AUTO_PIN=cwd + LOCUS_CLIENT — never LOCUS_NOTIFY by default",
+                "note:".dimmed()
+            );
+            println!(
+                "  {} auto-pin kill switch: LOCUS_MCP_AUTO_PIN=0 (see .locus/AGENT.md)",
                 "note:".dimmed()
             );
         }
@@ -3580,21 +3967,15 @@ fn cmd_forensics(sub: ForensicsCmd, json: bool) -> Result<()> {
     match sub {
         ForensicsCmd::Export { binding, last, out } => {
             let s = store()?;
-            let phantom_on_path = Command::new("phantom")
-                .arg("--version")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|st| st.success())
-                .unwrap_or(false);
-            let unresolved = collect_unresolved_phm_refs(&s, phantom_on_path).unwrap_or_default();
+            let phantom = phantom_on_path();
+            let unresolved = collect_unresolved_phm_refs(&s, phantom).unwrap_or_default();
             let pack = export_forensics_pack(
                 &s,
                 ForensicsExportOptions {
                     binding: binding.clone(),
                     audit_last: Some(last),
                     doctor_external: Some(DoctorExternal {
-                        phantom_on_path,
+                        phantom_on_path: phantom,
                         unresolved_phm: unresolved,
                         cwd: std::env::current_dir().ok(),
                     }),

@@ -126,7 +126,7 @@ check_json "agent report unpinned" \
   '.status_oneline == "unpinned" and .ready == false'
 
 # Schema files present
-for f in agent-report.schema.json doctor.schema.json; do
+for f in agent-report.schema.json doctor.schema.json hub-gate.schema.json; do
   if [[ -f "$ROOT/schema/$f" ]]; then
     echo "ok    schema/$f present"
   else
@@ -136,7 +136,7 @@ for f in agent-report.schema.json doctor.schema.json; do
 done
 
 # Docs present
-for f in docs/hub-integration.md integrations/ashlr-hub/README.md; do
+for f in docs/hub-integration.md integrations/ashlr-hub/README.md integrations/ashlr-hub/fleet-preflight.md; do
   if [[ -f "$ROOT/$f" ]]; then
     echo "ok    $f present"
   else

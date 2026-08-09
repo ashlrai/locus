@@ -13,14 +13,14 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use locus_core::{
-    build_doctor_report, filter_audit_events, find_workspace, parse_ttl, DoctorExternal, Store,
-    VERSION,
+    build_doctor_report, filter_audit_events, find_workspace, parse_ttl, phantom_on_path,
+    DoctorExternal, Store, VERSION,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use tower_http::set_header::SetResponseHeaderLayer;
 
@@ -462,20 +462,12 @@ async fn api_grant(
 }
 
 fn gather_doctor(s: &Store) -> locus_core::Result<locus_core::DoctorReport> {
-    // Best-effort: do not spawn long probes. PATH check only.
-    let phantom_on_path = Command::new("phantom")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|st| st.success())
-        .unwrap_or(false);
-    // Skip deep unresolved_phm enumeration in the hot dashboard path — doctor
-    // CLI does the full Phantom inventory; here we report path presence only.
+    // Process-cached phantom --version; skip unresolved_phm inventory on the
+    // hot dashboard path (full inventory is for `locus doctor` / forensics).
     build_doctor_report(
         s,
         DoctorExternal {
-            phantom_on_path,
+            phantom_on_path: phantom_on_path(),
             unresolved_phm: Vec::new(),
             cwd: Some(cwd()),
         },

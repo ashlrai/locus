@@ -120,6 +120,7 @@ fn inv_unbound_tools_subset_locus_star_only() {
     }
     let names: HashSet<_> = unbound.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains("locus_whoami"));
+    assert!(names.contains("locus_safe_next"));
     assert!(names.contains("locus_request_pin"));
     assert!(names.contains("locus_enter_hint"));
     // Agents never get a pin primitive
@@ -132,6 +133,7 @@ fn inv_unbound_tools_subset_locus_star_only() {
     assert!(!names.contains("locus_providers"));
     let pinned = control_tools(true);
     assert!(pinned.iter().any(|t| t.name == "locus_providers"));
+    assert!(pinned.iter().any(|t| t.name == "locus_safe_next"));
     for t in &pinned {
         assert!(t.name.starts_with("locus_"));
     }

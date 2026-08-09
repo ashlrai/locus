@@ -1,0 +1,100 @@
+# Built-in upstream MCP recipes for Locus bindings.
+#
+# Use in a binding as:
+#   upstream = { recipe = "github-mcp", resolve_secrets = true }
+#
+# Or expand with `locus upstream list` / `locus upstream suggest <provider>`.
+# Recipes fill command + args when those fields are omitted. Explicit
+# command/args in the binding override the recipe defaults.
+#
+# Source of truth for `locus-core` (embedded via include_str). Keep ids stable.
+
+version = 1
+
+[[recipes]]
+id = "github-mcp"
+title = "GitHub (community reference)"
+providers = ["github"]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+default_resolve_secrets = true
+env_hints = ["GITHUB_PERSONAL_ACCESS_TOKEN", "GH_TOKEN"]
+notes = """
+Community MCP reference server (Anthropic / modelcontextprotocol).
+Injects the binding credential via resolve_secrets into the child env.
+Prefer a fine-scoped PAT (phm:…) per tenant — never a personal token on a client binding.
+Official GitHub-maintained local server: recipe `github-official` (Docker).
+"""
+
+[[recipes]]
+id = "github-official"
+title = "GitHub (official Docker)"
+providers = ["github"]
+command = "docker"
+args = [
+  "run",
+  "-i",
+  "--rm",
+  "-e",
+  "GITHUB_PERSONAL_ACCESS_TOKEN",
+  "ghcr.io/github/github-mcp-server",
+]
+default_resolve_secrets = true
+env_hints = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+notes = """
+Official GitHub MCP server image. Requires Docker.
+With resolve_secrets = true, Locus injects the binding's credential_ref as
+GITHUB_PERSONAL_ACCESS_TOKEN for the child only.
+Remote hosted option (not stdio): https://api.githubcopilot.com/mcp/ — use
+host-native remote MCP when available; Locus workers today are stdio only.
+"""
+
+[[recipes]]
+id = "supabase-mcp"
+title = "Supabase (stdio package)"
+providers = ["supabase"]
+command = "npx"
+args = ["-y", "@supabase/mcp-server-supabase@latest", "--read-only"]
+default_resolve_secrets = true
+env_hints = ["SUPABASE_ACCESS_TOKEN"]
+notes = """
+Legacy / local stdio package. Prefer project-scoped tokens and --read-only
+unless the binding is intentionally write-capable.
+
+Remote URL style (not stdio — host config, not Locus upstream workers):
+  https://mcp.supabase.com/mcp
+  https://mcp.supabase.com/mcp?project_ref=YOUR_REF
+Local Supabase CLI MCP often exposes http://localhost:54321/mcp.
+
+Locus freezes project_ref on the synthetic adapter; when spawning this
+stdio package, pin credentials per binding and keep resolve_secrets on.
+"""
+
+[[recipes]]
+id = "filesystem-mcp"
+title = "Filesystem (safe demo)"
+providers = ["filesystem", "demo", "local"]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+default_resolve_secrets = false
+env_hints = []
+notes = """
+Reference filesystem MCP — good offline demo. Default root is cwd (`.`).
+Override args to lock the root, e.g.:
+  upstream = { recipe = \"filesystem-mcp\", args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/tmp/locus-demo\"] }
+Never point at $HOME or secrets dirs on a client pin. No credentials needed.
+"""
+
+[[recipes]]
+id = "everything-mcp"
+title = "Everything (MCP test suite)"
+providers = ["github", "demo", "mock", "everything"]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-everything"]
+default_resolve_secrets = false
+env_hints = []
+notes = """
+Public MCP “everything” server — echo/test tools for wiring checks.
+Useful when you want an upstream MCP child without real provider APIs.
+Requires network the first time npx fetches the package.
+"""

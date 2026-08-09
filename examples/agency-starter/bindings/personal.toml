@@ -25,9 +25,22 @@ provider = "github"
 account = "personal"
 credential_ref = "phm:GH_TOKEN_PERSONAL"
 scope = { orgs = [], repos = [] }
+# Optional live upstream (community GitHub MCP). Uncomment when you want
+# real MCP tools under this pin (requires network + node/npx once):
+# upstream = { recipe = "github-mcp", resolve_secrets = true }
 
 [[binding.providers]]
 provider = "vercel"
 account = "personal"
 credential_ref = "phm:VERCEL_TOKEN_PERSONAL"
 scope = { team_id = "team_personal", env = ["preview", "production"] }
+
+# Safe offline-ish upstream demo — filesystem MCP rooted at /tmp/locus-demo.
+# Creates no secrets; override the path before using on real data.
+# After pin: tools appear as demo.* from the upstream server (plus synthetic).
+# List recipes: `locus upstream list` · suggest: `locus upstream suggest filesystem`
+[[binding.providers]]
+provider = "demo"
+account = "local-fs"
+credential_ref = "env:LOCUS_DEMO_UNUSED"
+upstream = { recipe = "filesystem-mcp", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/locus-demo"] }
