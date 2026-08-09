@@ -66,6 +66,12 @@ When `locus-mcp` is pinned:
 3. Upstream tools are namespaced as `provider.toolname` (e.g. `github.list_issues`).
 4. Synthetic tools (e.g. `github.scope`) stay available; name collisions prefer synthetic.
 
+Worker children start from a positive runtime environment allowlist. Locus then
+adds frozen binding metadata and only the provider credential keys resolved for
+that binding. `McpStdioConfig::extra_env` remains for source compatibility but
+is intentionally ignored; arbitrary caller or parent environment cannot cross
+the worker boundary.
+
 ## API sketch
 
 ```rust

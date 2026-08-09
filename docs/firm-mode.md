@@ -120,7 +120,7 @@ locus whoami
 
 **Do not** put `personal` on a client repo allowlist. Personal repos get their own `.locus.toml` with `default_binding = "personal"`.
 
-Walk behavior: nearest `.locus.toml` walking toward filesystem root wins (child overrides parent).
+Walk behavior: nearest `.locus.toml` walking toward filesystem root wins (child overrides parent). If that file is unreadable or malformed, Locus does not fall back to a parent policy or no policy: pin/autopin fail and doctor reports `UNSAFE`.
 
 ## Daily loop
 

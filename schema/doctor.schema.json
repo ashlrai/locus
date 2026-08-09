@@ -72,8 +72,8 @@
     },
     "unresolved_phm": {
       "type": "array",
-      "items": { "type": "string" },
-      "description": "Phantom secret names only — never values."
+      "items": { "$ref": "#/$defs/credentialResolutionIssue" },
+      "description": "Safe resolution issues. Credential locator names, values, and provider stderr are absent."
     },
     "autopin": {
       "$ref": "#/$defs/autopinStatus"
@@ -177,14 +177,11 @@
     "providerView": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["provider", "account", "credential_ref", "orgs"],
+      "required": ["provider", "account", "credential", "orgs"],
       "properties": {
         "provider": { "type": "string" },
         "account": { "type": "string" },
-        "credential_ref": {
-          "type": "string",
-          "description": "CredentialRef name only — never resolved secret."
-        },
+        "credential": { "$ref": "#/$defs/credentialMetadata" },
         "project_ref": { "type": ["string", "null"] },
         "team_id": { "type": ["string", "null"] },
         "account_id": { "type": ["string", "null"] },
@@ -193,6 +190,25 @@
           "type": "array",
           "items": { "type": "string" }
         }
+      }
+    },
+    "credentialMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["present", "source"],
+      "properties": {
+        "present": { "type": "boolean" },
+        "source": { "type": "string" }
+      }
+    },
+    "credentialResolutionIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "source", "code"],
+      "properties": {
+        "provider": { "type": "string" },
+        "source": { "type": "string" },
+        "code": { "type": "string" }
       }
     },
     "approvalsHealth": {

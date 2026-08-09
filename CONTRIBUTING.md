@@ -98,7 +98,7 @@ Short checklist:
 
 - **Fail closed** — invalid seals, unknown providers without a safe path, scope mismatches → deny/error, not soft allow.
 - **No ambient identity** — do not read global `gh auth` / default AWS profile as the source of truth for a pin.
-- **CredentialRefs only** — bindings store `phm:NAME` / `env:VAR` / (dev) `test:VALUE`, never raw tokens.
+- **CredentialRefs only** — bindings store `phm:NAME` / `env:VAR`, never raw tokens; production binaries reject `test:`.
 - **MCP stdout is sacred** — `locus-mcp` must not print logs to stdout (protocol is newline-delimited JSON-RPC on stdio).
 - Prefer small, tested modules over large control-flow in `main`.
 

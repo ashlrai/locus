@@ -124,7 +124,7 @@ pub fn alias_allowed_in_workspace(cfg: Option<&WorkspaceConfig>, alias: &str) ->
 /// Order: workspace `default_binding`, then (if enabled) git remote match.
 /// Git remote matches that fail the workspace allowlist are skipped (never force).
 pub fn resolve_auto_pin(cwd: &Path, home: &Path) -> Result<AutoPinTarget> {
-    let ws = find_workspace(cwd);
+    let ws = find_workspace(cwd)?;
     let ws_cfg = ws.as_ref().map(|(_, c)| c);
 
     if let Some((ref path, ref cfg)) = ws {
@@ -358,5 +358,74 @@ allowed_bindings = ["other"]
         fs::create_dir_all(&project).unwrap();
         let err = resolve_auto_pin(&project, &home).unwrap_err();
         assert!(err.to_string().contains("no binding specified"));
+    }
+
+    #[test]
+    fn malformed_workspace_blocks_remote_autopin() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("locus-home");
+        fs::create_dir_all(&home).unwrap();
+        let cfg = LocusConfig {
+            autopin: AutopinConfig {
+                enabled: true,
+                remotes: vec![AutopinRemote {
+                    match_pattern: "github.com/acme-corp".into(),
+                    binding: "acme".into(),
+                }],
+            },
+            ..Default::default()
+        };
+        save_config(&home, &cfg).unwrap();
+
+        let project = dir.path().join("repo");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join(".locus.toml"), "allowed_bindings = [").unwrap();
+        let init = Command::new("git")
+            .args(["init"])
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        assert!(init.status.success());
+        let add = Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "git@github.com:acme-corp/app.git",
+            ])
+            .current_dir(&project)
+            .output()
+            .unwrap();
+        assert!(add.status.success());
+
+        let err = resolve_auto_pin(&project, &home).unwrap_err().to_string();
+        assert!(err.contains("workspace policy malformed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_workspace_link_blocks_remote_autopin() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("locus-home");
+        fs::create_dir_all(&home).unwrap();
+        let cfg = LocusConfig {
+            autopin: AutopinConfig {
+                enabled: true,
+                remotes: vec![AutopinRemote {
+                    match_pattern: "github.com/acme-corp".into(),
+                    binding: "acme".into(),
+                }],
+            },
+            ..Default::default()
+        };
+        save_config(&home, &cfg).unwrap();
+        let project = dir.path().join("repo");
+        fs::create_dir_all(&project).unwrap();
+        symlink("missing-policy.toml", project.join(".locus.toml")).unwrap();
+
+        let error = resolve_auto_pin(&project, &home).unwrap_err().to_string();
+        assert!(error.contains("broken or unreadable"), "{error}");
     }
 }

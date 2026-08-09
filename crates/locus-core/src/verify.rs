@@ -374,7 +374,7 @@ mod tests {
             providers: vec![ProviderView {
                 provider: "github".into(),
                 account: "acme".into(),
-                credential_ref: "phm:GH".into(),
+                credential: crate::credential::credential_metadata("phm:GH"),
                 project_ref: None,
                 team_id: None,
                 account_id: None,

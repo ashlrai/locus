@@ -3,8 +3,7 @@
 //! Formats:
 //! - `phm:NAME`     — resolve via `phantom reveal --yes NAME` (value never logged)
 //! - `env:VAR`      — read from process environment
-//! - `keychain:…`   — reserved (phase 2)
-//! - `test:VALUE`   — only when `LOCUS_ALLOW_TEST_CREDS=1` (unit tests)
+//! - `test:VALUE`   — compiled unit tests only; release binaries always reject it
 //!
 //! Values are held in `Zeroizing<String>` and must only be injected into
 //! worker env maps — never returned over MCP or printed to agent-facing stdout.
@@ -12,6 +11,7 @@
 use crate::error::{LocusError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use zeroize::Zeroizing;
@@ -69,24 +69,119 @@ impl CredentialRef {
                 value: rest.to_string(),
             };
         }
-        // Bare names default to Phantom for DX (`SUPABASE_ACME` ≈ `phm:SUPABASE_ACME`)
-        if !raw.contains(':') && !raw.is_empty() {
-            return Self::Phantom {
-                name: raw.to_string(),
-            };
-        }
         Self::Unknown {
             raw: raw.to_string(),
         }
     }
 
-    pub fn display(&self) -> String {
-        match self {
-            Self::Phantom { name } => format!("phm:{name}"),
-            Self::Env { var } => format!("env:{var}"),
-            Self::Test { .. } => "test:***".into(),
-            Self::Unknown { raw } => raw.clone(),
+    /// Parse and validate a reference accepted in a binding.
+    ///
+    /// Only explicit supported schemes are accepted. `test:` is compiled out
+    /// of production acceptance and cannot be enabled by environment.
+    pub fn validate(raw: &str) -> Result<Self> {
+        if raw != raw.trim() {
+            return Err(invalid_ref());
         }
+        let parsed = Self::parse(raw);
+        match &parsed {
+            Self::Phantom { name } if valid_phantom_name(name) => Ok(parsed),
+            Self::Env { var } if valid_env_name(var) => Ok(parsed),
+            Self::Test { value } if value.is_empty() => Err(invalid_ref()),
+            Self::Test { .. } if cfg!(test) => Ok(parsed),
+            _ => Err(invalid_ref()),
+        }
+    }
+
+    /// Safe source label for agent-facing metadata. Never includes the ref name.
+    pub fn source(&self) -> &'static str {
+        match self {
+            Self::Phantom { .. } => "phantom",
+            Self::Env { .. } => "environment",
+            Self::Test { .. } => "test",
+            Self::Unknown { .. } => "unsupported",
+        }
+    }
+}
+
+/// Agent-safe credential metadata. The reference name/value is intentionally absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialMetadata {
+    pub present: bool,
+    pub source: String,
+}
+
+pub fn credential_metadata(raw: &str) -> CredentialMetadata {
+    let parsed = CredentialRef::parse(raw);
+    CredentialMetadata {
+        present: !raw.trim().is_empty(),
+        source: parsed.source().to_string(),
+    }
+}
+
+/// Safe resolution failure metadata. Locator names and provider stderr are absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialResolutionIssue {
+    pub provider: String,
+    pub source: String,
+    pub code: String,
+}
+
+impl fmt::Display for CredentialResolutionIssue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "provider={} source={} code={}",
+            self.provider, self.source, self.code
+        )
+    }
+}
+
+#[derive(Debug)]
+pub struct ResolvedBindingSecrets {
+    pub env: BTreeMap<String, Zeroizing<String>>,
+    pub issues: Vec<CredentialResolutionIssue>,
+}
+
+fn safe_provider_label(provider: &str) -> String {
+    if !provider.is_empty()
+        && provider.len() <= 64
+        && provider
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        provider.to_ascii_lowercase()
+    } else {
+        "unknown".into()
+    }
+}
+
+fn valid_phantom_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphanumeric())
+        && chars.all(|c| c == '_' || c == '-' || c == '.' || c.is_ascii_alphanumeric())
+}
+
+fn valid_env_name(var: &str) -> bool {
+    let mut chars = var.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+fn invalid_ref() -> LocusError {
+    LocusError::msg("invalid credential_ref: use explicit phm:NAME or env:VAR")
+}
+
+/// Convert only a conservative legacy bare Phantom name. Unsafe input is never returned.
+pub fn migrate_legacy_phantom_ref(raw: &str) -> Option<String> {
+    let mut chars = raw.chars();
+    let conservative_name = matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_uppercase())
+        && chars.all(|c| {
+            c == '_' || c == '-' || c == '.' || c.is_ascii_uppercase() || c.is_ascii_digit()
+        });
+    if raw == raw.trim() && !raw.contains(':') && conservative_name {
+        Some(format!("phm:{raw}"))
+    } else {
+        None
     }
 }
 
@@ -99,20 +194,16 @@ pub fn resolve(cred: &CredentialRef) -> Result<Zeroizing<String>> {
         CredentialRef::Phantom { name } => resolve_phantom(name),
         CredentialRef::Env { var } => {
             let v = std::env::var(var)
-                .map_err(|_| LocusError::msg(format!("env credential not set: {var}")))?;
+                .map_err(|_| LocusError::msg("credential unavailable (source=environment)"))?;
             Ok(Zeroizing::new(v))
         }
         CredentialRef::Test { value } => {
-            if std::env::var("LOCUS_ALLOW_TEST_CREDS").ok().as_deref() != Some("1") {
-                return Err(LocusError::msg(
-                    "test: credentials require LOCUS_ALLOW_TEST_CREDS=1",
-                ));
+            if !cfg!(test) {
+                return Err(LocusError::msg("credential source unsupported"));
             }
             Ok(Zeroizing::new(value.clone()))
         }
-        CredentialRef::Unknown { raw } => Err(LocusError::msg(format!(
-            "unsupported credential_ref: {raw} (use phm:NAME or env:VAR)"
-        ))),
+        CredentialRef::Unknown { .. } => Err(invalid_ref()),
     }
 }
 
@@ -123,23 +214,16 @@ fn resolve_phantom(name: &str) -> Result<Zeroizing<String>> {
     if let Ok(dir) = std::env::var("LOCUS_PHANTOM_PROJECT") {
         cmd.current_dir(dir);
     }
-    let output = cmd.output().map_err(|e| {
-        LocusError::msg(format!(
-            "failed to run `phantom reveal` (is phantom installed?): {e}"
-        ))
-    })?;
+    let output = cmd
+        .output()
+        .map_err(|_| LocusError::msg("credential unavailable (source=phantom)"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // Never include stdout (may have partial secrets) in the error if failed
-        return Err(LocusError::msg(format!(
-            "phantom reveal failed for secret '{name}': {stderr}"
-        )));
+        // Both streams are untrusted and may contain locator names or secret material.
+        return Err(LocusError::msg("credential unavailable (source=phantom)"));
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if value.is_empty() {
-        return Err(LocusError::msg(format!(
-            "phantom reveal returned empty value for '{name}'"
-        )));
+        return Err(LocusError::msg("credential unavailable (source=phantom)"));
     }
     Ok(Zeroizing::new(value))
 }
@@ -163,24 +247,20 @@ pub fn inject_keys_for_provider(provider: &str) -> &'static [&'static str] {
 
 /// Resolve all provider credentials for a binding into env var injections.
 /// Returns map of env_key → secret. Values must not be logged.
-pub fn resolve_binding_secrets(
-    binding: &crate::binding::Binding,
-) -> Result<BTreeMap<String, Zeroizing<String>>> {
+pub fn resolve_binding_secrets(binding: &crate::binding::Binding) -> ResolvedBindingSecrets {
     let mut out = BTreeMap::new();
+    let mut issues = Vec::new();
     for p in &binding.providers {
         let cred = CredentialRef::parse(&p.credential_ref);
         let value = match resolve(&cred) {
             Ok(v) => v,
-            Err(e) => {
-                // Soft-fail individual providers when LOCUS_SOFT_CREDS=1
-                if std::env::var("LOCUS_SOFT_CREDS").ok().as_deref() == Some("1") {
-                    continue;
-                }
-                return Err(LocusError::msg(format!(
-                    "resolve {} ({}): {e}",
-                    p.provider,
-                    cred.display()
-                )));
+            Err(_) => {
+                issues.push(CredentialResolutionIssue {
+                    provider: safe_provider_label(&p.provider),
+                    source: cred.source().into(),
+                    code: "unavailable".into(),
+                });
+                continue;
             }
         };
         for key in inject_keys_for_provider(&p.provider) {
@@ -194,7 +274,7 @@ pub fn resolve_binding_secrets(
         // Don't put secrets in out under flag — use empty marker via separate path
         let _ = flag;
     }
-    Ok(out)
+    ResolvedBindingSecrets { env: out, issues }
 }
 
 #[cfg(test)]
@@ -211,12 +291,30 @@ mod tests {
             CredentialRef::parse("env:BAR"),
             CredentialRef::Env { var: "BAR".into() }
         );
-        assert_eq!(
+        assert!(matches!(
             CredentialRef::parse("BARE"),
-            CredentialRef::Phantom {
-                name: "BARE".into()
-            }
-        );
+            CredentialRef::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn validation_rejects_bare_tokens_and_bad_explicit_refs_without_echoing_them() {
+        for raw in ["sk_live_canary_secret", "ghp_canary_secret", "oauth:token"] {
+            let err = CredentialRef::validate(raw).unwrap_err().to_string();
+            assert!(!err.contains(raw), "validation error leaked candidate ref");
+        }
+        for raw in ["phm:", "env:NOT-A-VAR", " env:GOOD"] {
+            assert!(CredentialRef::validate(raw).is_err());
+        }
+    }
+
+    #[test]
+    fn metadata_never_contains_reference_name_or_value() {
+        let metadata = credential_metadata("phm:TOP_SECRET_CANARY");
+        let json = serde_json::to_string(&metadata).unwrap();
+        assert_eq!(metadata.source, "phantom");
+        assert!(metadata.present);
+        assert!(!json.contains("TOP_SECRET_CANARY"));
     }
 
     #[test]
@@ -229,17 +327,29 @@ mod tests {
         assert_eq!(v.as_str(), "s3cret");
         std::env::remove_var("LOCUS_TEST_SECRET_XYZ");
 
-        std::env::set_var("LOCUS_ALLOW_TEST_CREDS", "1");
+        assert!(CredentialRef::validate("test:tval").is_ok());
         let v = resolve(&CredentialRef::Test {
             value: "tval".into(),
         })
         .unwrap();
         assert_eq!(v.as_str(), "tval");
-        std::env::remove_var("LOCUS_ALLOW_TEST_CREDS");
-        assert!(resolve(&CredentialRef::Test {
-            value: "tval".into()
-        })
-        .is_err());
+    }
+
+    #[test]
+    fn legacy_migration_accepts_only_conservative_bare_names() {
+        assert_eq!(
+            migrate_legacy_phantom_ref("GH_TOKEN_ACME").as_deref(),
+            Some("phm:GH_TOKEN_ACME")
+        );
+        for unsafe_raw in [
+            "ghp_secret_value",
+            "ghp_secret/value",
+            " name",
+            "name:other",
+            "name\nnext",
+        ] {
+            assert!(migrate_legacy_phantom_ref(unsafe_raw).is_none());
+        }
     }
 
     #[test]

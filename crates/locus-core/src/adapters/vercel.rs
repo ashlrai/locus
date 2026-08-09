@@ -126,7 +126,7 @@ impl ProviderAdapter for VercelAdapter {
                     "projects": provider.scope.projects,
                     "env": provider.scope.env,
                     "env_target": env_target,
-                    "credential_ref": provider.credential_ref,
+                    "credential": crate::credential::credential_metadata(&provider.credential_ref),
                     "tenant": binding.tenant,
                     "binding": binding.alias,
                     "frozen_selectors": ["team_id", "env", "projects"],

@@ -371,7 +371,7 @@ fn dispatch_tool(
             content: json!({
                 "provider": p.provider,
                 "account": p.account,
-                "credential_ref": p.credential_ref,
+                "credential": crate::credential::credential_metadata(&p.credential_ref),
                 "scope": p.scope,
                 "tenant": binding.tenant,
                 "binding": binding.alias,
@@ -904,7 +904,9 @@ mod tests {
                 r.content.get("tenant").and_then(|v| v.as_str()),
                 Some("acme-corp")
             );
-            assert!(r.content.get("credential_ref").is_some());
+            assert!(r.content.get("credential_ref").is_none());
+            assert_eq!(r.content["credential"]["present"], true);
+            assert_eq!(r.content["credential"]["source"], "phantom");
         }
 
         // stripe mode label
@@ -965,5 +967,59 @@ mod tests {
         assert!(names.contains(&"locus_safe_next"));
         assert!(names.contains(&"locus_verify_claim"));
         assert!(names.contains(&"locus_providers"));
+    }
+
+    #[test]
+    fn provider_scope_responses_never_disclose_credential_refs() {
+        let canary = "phm:DO_NOT_DISCLOSE_CREDENTIAL_REF_CANARY";
+        let providers = [
+            "supabase",
+            "github",
+            "vercel",
+            "cloudflare",
+            "stripe",
+            "aws",
+            "resend",
+            "custom",
+        ]
+        .into_iter()
+        .map(|provider| ProviderBinding {
+            provider: provider.into(),
+            account: format!("{provider}-account"),
+            credential_ref: canary.into(),
+            scope: Scope::default(),
+            upstream: None,
+        })
+        .collect();
+        let binding = Binding::from_body(BindingBody {
+            id: "bnd_redaction".into(),
+            alias: "redaction".into(),
+            tenant: "redaction-tenant".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers,
+        });
+
+        for tool in [
+            "supabase.scope",
+            "github.scope",
+            "vercel.scope",
+            "cloudflare.scope",
+            "stripe.scope",
+            "aws.scope",
+            "resend.scope",
+            "custom.scope",
+        ] {
+            let result = call_tool(&binding, tool, &json!({})).unwrap();
+            let serialized = serde_json::to_string(&result.content).unwrap();
+            assert!(!serialized.contains(canary), "{tool} leaked credential ref");
+            assert!(
+                result.content.get("credential_ref").is_none(),
+                "{tool} retained credential_ref field"
+            );
+            assert_eq!(result.content["credential"]["present"], true);
+            assert_eq!(result.content["credential"]["source"], "phantom");
+        }
     }
 }

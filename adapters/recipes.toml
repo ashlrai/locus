@@ -22,7 +22,7 @@ env_hints = ["GITHUB_PERSONAL_ACCESS_TOKEN", "GH_TOKEN"]
 notes = """
 Community MCP reference server (Anthropic / modelcontextprotocol).
 Injects the binding credential via resolve_secrets into the child env.
-Prefer a fine-scoped PAT (phm:…) per tenant — never a personal token on a client binding.
+Prefer a fine-scoped, vault-backed PAT per tenant — never a personal token on a client binding.
 Official GitHub-maintained local server: recipe `github-official` (Docker).
 """
 
@@ -43,8 +43,8 @@ default_resolve_secrets = true
 env_hints = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
 notes = """
 Official GitHub MCP server image. Requires Docker.
-With resolve_secrets = true, Locus injects the binding's credential_ref as
-GITHUB_PERSONAL_ACCESS_TOKEN for the child only.
+With resolve_secrets = true, Locus resolves private binding configuration and
+injects GITHUB_PERSONAL_ACCESS_TOKEN into the child only.
 Remote hosted option (not stdio): https://api.githubcopilot.com/mcp/ — use
 host-native remote MCP when available; Locus workers today are stdio only.
 """

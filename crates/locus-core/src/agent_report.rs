@@ -175,10 +175,13 @@ pub struct AgentReportOptions {
     pub home_ready: bool,
     pub agent_md_present: bool,
     pub workspace_present: bool,
+    /// Discovery found a workspace entry that could not be trusted.
+    pub workspace_error: bool,
 }
 
 /// Build the hub agent report from a doctor report + MCP probe.
 pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) -> AgentReport {
+    let workspace_error = opts.workspace_error;
     let mcp = opts.mcp;
     let pin = doctor.pin.clone();
 
@@ -205,7 +208,11 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
                 .into(),
         );
     }
-    if !opts.workspace_present {
+    if workspace_error {
+        findings.push(
+            "workspace policy is invalid or unreadable — do not act; run `locus doctor`".into(),
+        );
+    } else if !opts.workspace_present {
         findings.push(
             "no .locus.toml in project tree — optional: `locus agent setup --apply --workspace`"
                 .into(),
@@ -229,7 +236,11 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
         ));
     }
 
-    let status = compute_status(&doctor, &mcp, &pin);
+    let status = if workspace_error {
+        AgentStatus::Unsafe
+    } else {
+        compute_status(&doctor, &mcp, &pin)
+    };
     let ready = status == AgentStatus::Ready;
     let commands = build_commands(opts.project_dir.as_deref(), pin.as_ref());
 
@@ -312,34 +323,30 @@ fn compute_status(
 }
 
 fn build_commands(project_dir: Option<&Path>, pin: Option<&DoctorPin>) -> AgentCommands {
-    let enter = if let Some(dir) = project_dir {
-        if let Some((_, cfg)) = find_workspace(dir) {
-            if let Some(ref def) = cfg.default_binding {
-                format!("locus enter {def}")
-            } else {
-                "locus enter".into()
-            }
-        } else {
-            "locus enter".into()
-        }
+    let workspace = project_dir.map(find_workspace);
+    let workspace_invalid = matches!(workspace, Some(Err(_)));
+    let workspace_default = workspace
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(|workspace| workspace.as_ref())
+        .and_then(|(_, cfg)| cfg.default_binding.clone());
+    let enter = if workspace_invalid {
+        "locus doctor".into()
+    } else if let Some(default) = &workspace_default {
+        format!("locus enter {default}")
     } else {
         "locus enter".into()
     };
 
     let pin_cmd = pin
         .map(|p| format!("locus pin {}", p.alias))
-        .or_else(|| {
-            project_dir.and_then(|dir| {
-                find_workspace(dir)
-                    .and_then(|(_, cfg)| cfg.default_binding.map(|a| format!("locus pin {a}")))
-            })
-        })
-        .unwrap_or_else(|| "locus pin <alias>".into());
+        .or_else(|| workspace_default.map(|alias| format!("locus pin {alias}")))
+        .or_else(|| (!workspace_invalid).then(|| "locus pin <alias>".into()));
 
     AgentCommands {
         enter,
         whoami: "locus whoami".into(),
-        pin: Some(pin_cmd),
+        pin: pin_cmd,
         doctor: Some("locus agent doctor".into()),
         setup: Some("locus agent setup --client all --apply".into()),
     }
@@ -490,18 +497,24 @@ pub fn agent_md_present(project_dir: &Path) -> bool {
 }
 
 /// Whether a workspace config is found from project_dir.
+/// Default options probed from the filesystem for a project dir.
 pub fn workspace_present(project_dir: &Path) -> bool {
-    find_workspace(project_dir).is_some()
+    matches!(find_workspace(project_dir), Ok(Some(_)))
 }
 
 /// Default options probed from the filesystem for a project dir.
 pub fn probe_agent_options(project_dir: &Path, user_home: Option<&Path>) -> AgentReportOptions {
+    let (workspace_present, workspace_error) = match find_workspace(project_dir) {
+        Ok(workspace) => (workspace.is_some(), false),
+        Err(_) => (false, true),
+    };
     AgentReportOptions {
         mcp: probe_mcp_registered(project_dir, user_home),
         project_dir: Some(project_dir.to_path_buf()),
         home_ready: true,
         agent_md_present: agent_md_present(project_dir),
-        workspace_present: workspace_present(project_dir),
+        workspace_present,
+        workspace_error,
     }
 }
 
@@ -572,7 +585,21 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
 
     // Drift check freezes session when material changed — findings reflect that.
     let runtime = store.check_drift_and_freeze()?;
-    let enter_cmd = enter_command_for_cwd(cwd);
+    let enter_cmd = match enter_command_for_cwd(cwd) {
+        Ok(command) => command,
+        Err(_) => {
+            return Ok(SafeNext {
+                action: "doctor_fix".into(),
+                command: Some("locus doctor".into()),
+                agent_tool: Some("locus_heartbeat".into()),
+                message: "Workspace policy is invalid or unreadable. Do not dispatch or use provider tools; run `locus doctor`.".into(),
+                ready: false,
+                approval_id: None,
+                binding: runtime.binding_alias,
+                tenant: runtime.tenant_session,
+            });
+        }
+    };
 
     if !runtime.pinned {
         return Ok(SafeNext {
@@ -727,15 +754,15 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
     })
 }
 
-fn enter_command_for_cwd(cwd: &Path) -> String {
-    if let Some((_, cfg)) = find_workspace(cwd) {
+fn enter_command_for_cwd(cwd: &Path) -> crate::Result<String> {
+    if let Some((_, cfg)) = find_workspace(cwd)? {
         if let Some(ref def) = cfg.default_binding {
             if !def.trim().is_empty() {
-                return format!("locus enter {def}");
+                return Ok(format!("locus enter {def}"));
             }
         }
     }
-    "locus enter".into()
+    Ok("locus enter".into())
 }
 
 #[cfg(test)]
@@ -790,6 +817,7 @@ mod tests {
                 home_ready: true,
                 agent_md_present: false,
                 workspace_present: false,
+                workspace_error: false,
             },
         );
         assert_eq!(report.status, AgentStatus::Protected);
@@ -838,6 +866,7 @@ mod tests {
                 home_ready: true,
                 agent_md_present: true,
                 workspace_present: true,
+                workspace_error: false,
             },
         );
         assert_eq!(report.status, AgentStatus::Ready);
@@ -876,6 +905,7 @@ mod tests {
                 home_ready: true,
                 agent_md_present: true,
                 workspace_present: true,
+                workspace_error: false,
             },
         );
         assert_eq!(report.status, AgentStatus::Unsafe);
@@ -1011,9 +1041,32 @@ require_pin = true
                 project_dir: Some(dir.path().to_path_buf()),
                 home_ready: true,
                 workspace_present: true,
+                workspace_error: false,
                 ..Default::default()
             },
         );
         assert_eq!(report.commands.enter, "locus enter acme");
+    }
+
+    #[test]
+    fn malformed_workspace_makes_agent_report_unsafe_and_non_actionable() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join(".locus.toml"), "allowed_bindings = [").unwrap();
+        let store = Store::open(dir.path().join("home")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        let doctor = doctor_for(&store, dir.path());
+        let opts = probe_agent_options(dir.path(), None);
+        assert!(opts.workspace_error);
+        let report = agent_report_from_doctor(doctor, opts);
+        assert_eq!(report.status, AgentStatus::Unsafe);
+        assert!(!report.ready);
+        assert_eq!(report.commands.enter, "locus doctor");
+        assert!(report.commands.pin.is_none());
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.contains("workspace policy is invalid")));
     }
 }

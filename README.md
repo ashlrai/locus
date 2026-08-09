@@ -107,9 +107,12 @@ locus pin acme
 |-----|------------|
 | `phm:NAME` | `phantom reveal --yes NAME` (values only in child env) |
 | `env:VAR` | parent process env (CI / tests) |
-| `test:VALUE` | only if `LOCUS_ALLOW_TEST_CREDS=1` |
 
-Never put raw secrets in binding files.
+`test:` credentials are compiled-test-only and are always rejected by production binaries, regardless of environment.
+
+Schemes are mandatory: bare names, raw tokens, empty refs, and unsupported schemes are rejected when bindings are saved or loaded. Never put raw secrets in binding files.
+
+Legacy bare Phantom names are never silently skipped. Inspect the safe dry run with `locus binding migrate-credential-refs <alias>`, then persist conservative conversions with `--write`. Unsafe values require manual editing and are never printed.
 
 ## MCP (Claude Code / Cursor)
 
@@ -124,6 +127,8 @@ LOCUS_MCP_HTTP_TOKEN=secret locus-mcp --http 127.0.0.1:8742
 # POST /mcp  ·  GET /health
 ```
 
+MCP identity and provider-scope responses report only credential presence and source (`phantom` or `environment`); they never return `credential_ref` values or resolved secrets.
+
 ---
 
 ## Core concepts
@@ -134,6 +139,8 @@ LOCUS_MCP_HTTP_TOKEN=secret locus-mcp --http 127.0.0.1:8742
 | **Session** | Live pin sealed to exactly one Binding |
 | **Workspace** | `.locus.toml` — default pin + allowlist for a repo tree |
 | **CredentialRef** | `phm:NAME` / vault pointer — never the secret itself |
+
+Workspace policy discovery is fail closed: if the nearest `.locus.toml` exists but is unreadable or malformed, explicit pin, autopin, and `--force` pin stop with an error, while `locus doctor` reports `UNSAFE`.
 
 Example binding (`~/.locus/bindings/acme.toml`):
 

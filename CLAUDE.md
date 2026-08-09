@@ -55,7 +55,7 @@ Clients → data plane (locus-mcp / exec)
 - CredentialRefs in bindings — never raw secrets in TOML or git
 - Scope freeze on every account selector (`freeze_string_arg`)
 - MCP stdout is protocol-only (no logging)
-- `LOCUS_HOME` for tests; `LOCUS_ALLOW_TEST_CREDS=1` only for `test:` refs in unit tests
+- `LOCUS_HOME` for tests; production binaries reject `test:` refs regardless of environment
 - fmt + clippy `-D warnings` must pass (CI)
 - Adapters live in `crates/locus-core/src/adapters/`; guide: [docs/adapters.md](./docs/adapters.md)
 

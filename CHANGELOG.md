@@ -86,7 +86,13 @@ upstream recipes, and faster doctor probes. **Wrong account, still impossible.**
 
 - Same fail-closed invariants as 0.1.x (seal, exclusive catalog, scrub, scope freeze, agents cannot pin)
 - Dashboard and HTTP MCP bind loopback by default; token required for MCP HTTP; no resolved secrets in API or packs
-- Forensics / events export / agent report never include secret **values** (CredentialRef names only)
+- Forensics / events export / agent report expose credential presence/source metadata only, never secret values or locator names.
+- Bindings require explicit supported credential refs (`phm:` or `env:`); release binaries reject `test:` regardless of environment, and bare/raw/unsupported values fail closed without being echoed in errors.
+- MCP, CI, CLI, audit, worker, dashboard, and child-process surfaces never expose locator names or provider stderr.
+- Malformed, unreadable, broken-link, or non-file nearest `.locus.toml` blocks pin/autopin/run (including forced pin), and doctor reports `UNSAFE`.
+- Legacy bare Phantom names are surfaced as invalid and can be converted only through explicit `binding migrate-credential-refs ... --write`; unsafe values require manual repair.
+- Credential-ref migration uses a locked, fsynced intent/completion journal and no-clobber staged replacement; exact retries reconcile crashes, concurrent replacements, and pending audit writes without locator disclosure.
+- Hub ephemeral-session helpers scrub ambient credentials and accept only validated identity/scope metadata from `ci mint`; the dogfood gate now requires the same strict `ready` dispatch contract as Fleet preflight.
 
 ## [0.1.1] — 2026-08-09
 
@@ -164,7 +170,7 @@ Initial public release of **Locus** — identity plane for coding agents.
 - `locus exec` — scrub ambient identity env, resolve CredentialRefs into child only
 - Private worker dirs under `~/.locus/workers/<session>/` (GH/AWS config isolation)
 - Shell hooks: `locus hook zsh|bash|fish`
-- Credential refs: `phm:NAME`, `env:VAR`, `test:VALUE` (test only with `LOCUS_ALLOW_TEST_CREDS=1`)
+- Credential refs: `phm:NAME` and `env:VAR`; production binaries always reject `test:`
 - Continuous identity check: `Store::verify_runtime` / drift surface (seal, binding id, tenant, expiry)
 - Path-safe binding/approval ids (`validate_name_component`, `validate_approval_id`)
 

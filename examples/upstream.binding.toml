@@ -50,7 +50,7 @@ scope = { project_ref = "YOUR_PROJECT_REF", read_only = true }
 # [[binding.providers]]
 # provider = "mock"
 # account = "local"
-# credential_ref = "test:unused"
+# Production accepts only explicit phm:NAME or env:VAR references.
 # [binding.providers.upstream]
 # command = "python3"
 # args = ["-u", "path/to/mock_mcp_server.py"]

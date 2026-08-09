@@ -183,7 +183,7 @@ if (!gateOk || !canMutate(report!.status, report!.status_oneline)) {
 - [ ] `LOCUS_SESSION_ID` forwarded for CI children from `ci mint` / `withLocusSession`
 - [ ] Pre-mutate gate calls `ensureLocusReady` or equivalent
 - [ ] Agent report consumed for status (`ready|protected|unsafe`) — never soft-allow `unsafe`
-- [ ] Logs store alias/tenant/`credential_ref` **names** only — never resolved secrets
+- [ ] Logs store alias/tenant and credential presence/source metadata only — never locators or resolved secrets
 - [ ] Doctor includes `checkLocus` (see [doctor-check.md](./doctor-check.md))
 
 ---

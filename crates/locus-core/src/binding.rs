@@ -206,7 +206,8 @@ impl UpstreamSpec {
 pub struct ProviderBinding {
     pub provider: String,
     pub account: String,
-    /// Opaque pointer: `phm:NAME`, `keychain:…`, `env:VAR` — never the secret.
+    /// Explicit pointer: `phm:NAME` or `env:VAR` — never the secret.
+    /// `test:` is accepted only when this crate is compiled for unit tests.
     pub credential_ref: String,
     #[serde(default)]
     pub scope: Scope,
@@ -462,14 +463,6 @@ impl Binding {
         self.providers.iter().map(|p| p.provider.as_str()).collect()
     }
 
-    /// Credential refs visible under this binding only (isolation surface).
-    pub fn credential_refs(&self) -> Vec<&str> {
-        self.providers
-            .iter()
-            .map(|p| p.credential_ref.as_str())
-            .collect()
-    }
-
     pub fn validate(&self) -> crate::Result<()> {
         if self.id.is_empty() || self.alias.is_empty() || self.tenant.is_empty() {
             return Err(crate::LocusError::msg(
@@ -493,6 +486,7 @@ impl Binding {
                     "each provider needs provider, account, and credential_ref",
                 ));
             }
+            crate::credential::CredentialRef::validate(&p.credential_ref)?;
             if let Some(up) = &p.upstream {
                 up.validate()?;
             }
@@ -826,6 +820,24 @@ credential_ref = "phm:X"
             err.contains("provider") || err.contains("account") || err.contains("credential_ref"),
             "unexpected: {err}"
         );
+    }
+
+    #[test]
+    fn validate_rejects_raw_and_unsupported_credential_refs() {
+        let mut b = Binding::parse_toml(SAMPLE).unwrap();
+        for raw in [
+            "ghp_raw_token_canary",
+            "sk-live-raw-token-canary",
+            "oauth:provider:token",
+        ] {
+            b.providers[0].credential_ref = raw.into();
+            let err = b.validate().unwrap_err().to_string();
+            assert!(!err.contains(raw), "validation error leaked candidate ref");
+        }
+        for raw in ["phm:", "env:BAD-NAME"] {
+            b.providers[0].credential_ref = raw.into();
+            assert!(b.validate().is_err());
+        }
     }
 
     #[test]

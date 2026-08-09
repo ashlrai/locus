@@ -102,8 +102,9 @@ When in doubt whether an issue is security-sensitive, use the private channel ab
 
 ## Hardening tips for operators
 
-- Store secrets as **CredentialRefs** (`phm:NAME` / vault), never raw tokens in binding TOML.
+- Store secrets as explicit **CredentialRefs** (`phm:NAME` or `env:VAR`), never bare names or raw tokens in binding TOML. Production binaries reject `test:` regardless of environment.
 - Prefer workspace `require_pin = true` and tight `allowed_bindings` in client repos.
+- Treat malformed `.locus.toml` as an `UNSAFE` doctor finding; pin and autopin refuse to continue, including with `--force`.
 - Use `locus doctor` and `locus whoami` before destructive agent work.
 - Keep Phantom (or your vault) and Locus updated together when using `phm:` refs.
 - For production-like deploys, set `dual_control` globs (or `dual_control_all_approvals = true`) so one laptop user cannot solo-approve high-risk tools.

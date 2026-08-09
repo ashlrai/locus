@@ -76,9 +76,9 @@ else
     printf '%s\n' "$REPORT" | jq -c '{status,ready,required_servers,mcp_command,status_oneline}' 2>/dev/null || true
   fi
 
-  # Secret hygiene
-  if printf '%s' "$REPORT" | grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-'; then
-    bad "possible secret material in agent report"
+  # Secret and credential-locator hygiene
+  if printf '%s' "$REPORT" | grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|"credential_ref"|phm:|env:|test:'; then
+    bad "possible secret or credential locator material in agent report"
   else
     ok "agent report secret hygiene"
   fi
@@ -140,6 +140,22 @@ if ! jq -e '.required | index("allowDispatch") and index("blockers") and index("
   bad "hub-gate.schema.json missing required keys"
 else
   ok "hub-gate.schema.json required keys"
+fi
+
+if jq -e '.. | objects | has("credential_ref")' "$ROOT/schema/doctor.schema.json" >/dev/null 2>&1; then
+  bad "doctor schema still exposes credential_ref"
+elif ! jq -e '.properties.unresolved_phm.items["$ref"] == "#/$defs/credentialResolutionIssue"' \
+  "$ROOT/schema/doctor.schema.json" >/dev/null 2>&1; then
+  bad "doctor schema missing safe credential resolution issue contract"
+else
+  ok "doctor schema credential metadata only"
+fi
+
+if printf '%s' '{"required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"findings":[{"code":"credential_migration_incomplete"}]}}' \
+  | jq -e -f "$ROOT/scripts/dogfood-ready.jq" >/dev/null 2>&1; then
+  bad "dogfood gate allowed incomplete credential migration"
+else
+  ok "dogfood gate blocks incomplete credential migration"
 fi
 
 # ---------------------------------------------------------------------------
@@ -216,6 +232,10 @@ function blockersFromAgentReport(report) {
   else if (status !== "ready") blockers.push(`status=${status} (not ready)`);
   if (report.ready !== true) blockers.push("ready=false");
   if (!parsed.healthy) blockers.push(`pin unhealthy: ${parsed.kind} (${parsed.raw})`);
+  const findings = Array.isArray(report.doctor?.findings) ? report.doctor.findings : [];
+  if (findings.some((finding) => finding?.code === "credential_migration_incomplete")) {
+    blockers.push("credential migration reconciliation incomplete");
+  }
   const servers = Array.isArray(report.required_servers) ? report.required_servers : [];
   if (!hasRequiredServers(servers)) {
     blockers.push("required_servers missing locus and/or phantom");
@@ -257,6 +277,58 @@ const noPhantom = evaluateFleetGate({
   mcp_command: "locus-mcp",
 });
 assert(noPhantom.allowDispatch === false, "fleet gate block missing phantom");
+
+const incompleteMigration = evaluateFleetGate({
+  ...readyReport,
+  doctor: {
+    verdict: "UNSAFE",
+    findings: [{ severity: "unsafe", code: "credential_migration_incomplete" }],
+  },
+});
+assert(
+  incompleteMigration.allowDispatch === false &&
+    incompleteMigration.blockers.includes("credential migration reconciliation incomplete"),
+  "fleet gate blocks incomplete credential migration even with stale ready status",
+);
+
+// --- scrubbedChildEnv + validateMintEnv ---
+const CHILD_RUNTIME_ENV = new Set(["PATH", "HOME", "TMPDIR", "LANG"]);
+function scrubbedChildEnv(parent, explicit = {}) {
+  const clean = {};
+  for (const [key, value] of Object.entries(parent)) {
+    if (CHILD_RUNTIME_ENV.has(key) || key.startsWith("LC_")) clean[key] = value;
+  }
+  return { ...clean, ...explicit };
+}
+const child = scrubbedChildEnv(
+  { PATH: "/bin", LANG: "C", GITHUB_TOKEN: "ambient-canary" },
+  { JOB_ID: "explicit" },
+);
+assert(child.PATH === "/bin" && child.JOB_ID === "explicit", "child env keeps runtime + explicit");
+assert(!("GITHUB_TOKEN" in child), "child env scrubs ambient credentials");
+
+const MINT_SCOPE_ENV = new Set(["GH_CONFIG_DIR", "SUPABASE_PROJECT_REF"]);
+const MINT_IDENTITY_ENV = new Set(["LOCUS_SESSION_ID", "LOCUS_TENANT"]);
+function isAllowedMintEnvKey(key) {
+  return MINT_IDENTITY_ENV.has(key) || MINT_SCOPE_ENV.has(key) || /^LOCUS_[A-Z0-9_]+_(?:ACCOUNT|CREDENTIAL_RESOLVED|PROJECT_REF|TEAM_ID|ACCOUNT_ID|READ_ONLY|ORGS|REPOS|PROJECTS)$/.test(key);
+}
+function validateMintEnv(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid env");
+  const clean = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!isAllowedMintEnvKey(key) || typeof value !== "string" || /(?:phm|env|test):/i.test(value)) {
+      throw new Error("disallowed env metadata");
+    }
+    clean[key] = value;
+  }
+  return clean;
+}
+assert(validateMintEnv({ LOCUS_SESSION_ID: "ses_1", SUPABASE_PROJECT_REF: "project" }).LOCUS_SESSION_ID === "ses_1", "mint env accepts identity + scope");
+for (const badEnv of [{ GITHUB_TOKEN: "token" }, { LOCUS_SECRET: "token" }, { LOCUS_TENANT: "phm:LOCATOR" }]) {
+  let rejected = false;
+  try { validateMintEnv(badEnv); } catch { rejected = true; }
+  assert(rejected, "mint env rejects secrets and locators");
+}
 
 // --- mergeLocusIntoMcpConfig ---
 function mergeLocusIntoMcpConfig(config, opts = {}) {
@@ -427,7 +499,7 @@ do
 done
 
 # locus.ts exports (static grep)
-for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers; do
+for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv; do
   if grep -q "export function $sym" "$ROOT/integrations/ashlr-hub/locus.ts"; then
     ok "locus.ts exports $sym"
   else

@@ -182,8 +182,8 @@ Never point CI doctor at the developer's real `~/.locus` when tests mint/teardow
 | Safe in doctor detail | Never |
 |-----------------------|--------|
 | status, status_oneline, ready | API keys, PATs, tokens |
-| alias, tenant, binding_id | Resolved `phm:` values |
-| `credential_ref` **names** | Worker env secret maps |
+| alias, tenant, binding_id | Credential locator names or values |
+| Credential presence/source metadata | Worker env secret maps |
 | finding codes / next_steps | Approval digests as secrets |
 
 ---

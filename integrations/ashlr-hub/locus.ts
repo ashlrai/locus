@@ -5,7 +5,7 @@
  *
  * SECURITY:
  *   - Never parse or persist secret VALUES from locus/phantom output.
- *   - credential_ref names (phm:NAME) are safe; resolved tokens are not.
+ *   - Credential locators are private configuration; consume only presence/source metadata.
  *   - Prefer REQUIRED_SERVERS = ["locus","phantom"] — never ambient supabase MCP.
  *   - withLocusSession uses `ci mint` (ephemeral); does not mutate active.json.
  *
@@ -152,7 +152,7 @@ export interface WithLocusSessionOptions {
   ttl?: string;
   /** Allow bindings outside workspace allowlist. */
   force?: boolean;
-  /** Extra env merged into the child handle (mint LOCUS_* wins on conflict). */
+  /** Explicitly authorized env merged into the scrubbed child handle. */
   env?: NodeJS.ProcessEnv;
   /** Override LOCUS_HOME for mint + handle. */
   home?: string;
@@ -260,6 +260,91 @@ function locusEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     LOCUS_QUIET: "1",
     ...extra,
   };
+}
+
+const CHILD_RUNTIME_ENV = new Set([
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "TERM",
+  "SystemRoot",
+  "WINDIR",
+  "PATHEXT",
+  "ComSpec",
+]);
+
+const MINT_SCOPE_ENV = new Set([
+  "GH_CONFIG_DIR",
+  "AWS_CONFIG_FILE",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_ACCOUNT_ID",
+  "CLOUDFLARE_ACCOUNT_ID",
+  "SUPABASE_PROJECT_ID",
+  "SUPABASE_PROJECT_REF",
+  "VERCEL_ORG_ID",
+  "VERCEL_PROJECT_ID",
+  "VERCEL_TEAM_ID",
+]);
+
+const MINT_IDENTITY_ENV = new Set([
+  "LOCUS_SESSION_ID",
+  "LOCUS_BINDING",
+  "LOCUS_BINDING_ID",
+  "LOCUS_TENANT",
+  "LOCUS_PRINCIPAL",
+  "LOCUS_SEAL",
+  "LOCUS_WORKER_HOME",
+  "LOCUS_EXPIRES_AT",
+  "LOCUS_PROVIDERS",
+]);
+
+function isAllowedMintEnvKey(key: string): boolean {
+  return (
+    MINT_IDENTITY_ENV.has(key) ||
+    MINT_SCOPE_ENV.has(key) ||
+    /^LOCUS_[A-Z0-9_]+_(?:ACCOUNT|CREDENTIAL_RESOLVED|PROJECT_REF|TEAM_ID|ACCOUNT_ID|READ_ONLY|ORGS|REPOS|PROJECTS)$/.test(
+      key,
+    )
+  );
+}
+
+/** Build a child baseline without inheriting ambient credentials. */
+export function scrubbedChildEnv(
+  parent: NodeJS.ProcessEnv = process.env,
+  explicit?: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const clean: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(parent)) {
+    if (CHILD_RUNTIME_ENV.has(key) || key.startsWith("LC_")) {
+      clean[key] = value;
+    }
+  }
+  return { ...clean, ...explicit };
+}
+
+/** Validate the non-secret identity/scope environment emitted by `ci mint`. */
+export function validateMintEnv(raw: unknown): Record<string, string> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new LocusMintError("ci mint JSON has invalid env map");
+  }
+  const clean: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (
+      !isAllowedMintEnvKey(key) ||
+      typeof value !== "string" ||
+      /(?:phm|env|test):/i.test(value)
+    ) {
+      throw new LocusMintError("ci mint JSON contains disallowed env metadata");
+    }
+    clean[key] = value;
+  }
+  return clean;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,6 +523,22 @@ export function blockersFromAgentReport(
 
   if (report.ready !== true) {
     blockers.push("ready=false");
+  }
+
+  const doctor =
+    report.doctor && typeof report.doctor === "object"
+      ? (report.doctor as { findings?: unknown })
+      : null;
+  const doctorFindings = Array.isArray(doctor?.findings) ? doctor.findings : [];
+  if (
+    doctorFindings.some(
+      (finding) =>
+        finding !== null &&
+        typeof finding === "object" &&
+        (finding as { code?: unknown }).code === "credential_migration_incomplete",
+    )
+  ) {
+    blockers.push("credential migration reconciliation incomplete");
   }
 
   if (!parsed.healthy) {
@@ -711,6 +812,10 @@ export function locusCiMint(
   if (!mint.session_id || !mint.env) {
     throw new LocusMintError("ci mint JSON missing session_id or env");
   }
+  if (mint.secrets_resolved) {
+    throw new LocusMintError("ci mint unexpectedly returned resolved secrets");
+  }
+  mint.env = validateMintEnv(mint.env);
   return mint;
 }
 
@@ -718,8 +823,8 @@ export function locusCiMint(
  * Run `fn` under an ephemeral Locus pin (`ci mint` → LOCUS_SESSION_ID).
  *
  * Use for hub job isolation so parallel agents do not share/mutate the human
- * shell pin (`active.json`). The mint env map is merged into `handle.env`
- * (scopes + LOCUS_* only — this helper never passes `--resolve`).
+ * shell pin (`active.json`). Parent credentials are scrubbed; the handle gets
+ * runtime basics, caller-explicit env, and validated identity/scope metadata.
  *
  * @example
  * ```ts
@@ -743,7 +848,7 @@ export async function withLocusSession<T>(
     join(homedir(), ".locus");
 
   const env: NodeJS.ProcessEnv = {
-    ...locusEnv(opts?.env),
+    ...scrubbedChildEnv(process.env, opts?.env),
     ...mint.env,
     LOCUS_HOME: home,
     LOCUS_SESSION_ID: mint.session_id,

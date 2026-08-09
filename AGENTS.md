@@ -96,7 +96,7 @@ These are load-bearing. Prefer a failing test over a soft allow.
 5. **Private CLI config dirs** — `GH_CONFIG_DIR` / AWS config paths under session worker home; never `gh auth switch` on user home.
 6. **Scope freeze** — frozen `project_ref`, `team_id`, orgs/repos cannot be overridden by model args.
 7. **Agents cannot pin** — MCP exposes `locus_request_pin` only; pin state changes require human CLI (or audited force).
-8. **CredentialRefs only** — bindings store `phm:NAME` / `env:VAR` / (dev) `test:VALUE`, never raw tokens.
+8. **CredentialRefs only** — bindings store `phm:NAME` / `env:VAR`, never raw tokens; production rejects `test:`.
 9. **MCP never returns secrets** — tool results may show scopes and aliases, never resolved credential values.
 10. **Fail closed** — invalid seal, unknown binding, scope mismatch, policy deny → error/deny, not soft allow.
 11. **MCP stdout is sacred** — `locus-mcp` speaks JSON-RPC on stdout; no logs there (breaks the protocol).
@@ -112,7 +112,7 @@ Test surface lives primarily in `locus-core` unit tests + `crates/locus-core/tes
 - Prefer small modules over control-flow in `main`.
 - Errors: `thiserror` in core, `anyhow` in CLI/MCP binaries.
 - Secrets: zeroize where held; never log values; digests only in approval/audit records.
-- Env overrides for tests: `LOCUS_HOME`, `LOCUS_ALLOW_TEST_CREDS=1`, `LOCUS_SOFT_CREDS=1` — never enable test creds in production paths by default.
+- Test isolation uses `LOCUS_HOME`; no environment variable can enable `test:` credentials in production.
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/adapters.md](./docs/adapters.md).
 
@@ -127,7 +127,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/adapters.md](./docs/adapters.
 
 - Do **not** paste secrets into chat, commits, issues, or MCP tool args.
 - Prefer Phantom (`phm:NAME`) for real credentials; use `env:` only for CI bootstrap.
-- `test:VALUE` requires `LOCUS_ALLOW_TEST_CREDS=1` and is for unit tests only.
+- `test:VALUE` is available only inside compiled unit tests and is rejected by production binaries.
 - If a secret lands in git history, rotate it; do not only delete the file.
 
 ## Agent / MCP behavior when using Locus as a product

@@ -189,7 +189,7 @@ impl ProviderAdapter for GithubAdapter {
                     "account": provider.account,
                     "orgs": provider.scope.orgs,
                     "repos": provider.scope.repos,
-                    "credential_ref": provider.credential_ref,
+                    "credential": crate::credential::credential_metadata(&provider.credential_ref),
                     "tenant": binding.tenant,
                     "binding": binding.alias,
                     "frozen_selectors": ["orgs", "repos"],

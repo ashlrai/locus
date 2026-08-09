@@ -8,10 +8,10 @@
 #   4. locus doctor
 #   5. locus forensics export --out /tmp/pack.json (or $DOGFOOD_PACK)
 #
-# Prints "DOGFOOD READY" when agent report status is `ready`, or `protected` with an active pin.
+# Prints "DOGFOOD READY" only when the same fail-closed contract as Hub dispatch passes.
 #
 # Safe by default: uses a throwaway LOCUS_HOME unless DOGFOOD_USE_REAL_HOME=1.
-# Never prints secret values.
+# Never prints secret values or credential locators.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -85,9 +85,9 @@ if ! printf '%s' "$REPORT" | jq -e . >/dev/null 2>&1; then
   die "agent report did not emit JSON (exit=${REPORT_RC})"
 fi
 
-# Secret hygiene
-if printf '%s' "$REPORT" | grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-'; then
-  die "possible secret material in agent report JSON"
+# Secret and credential-locator hygiene
+if printf '%s' "$REPORT" | grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|"credential_ref"|phm:|env:|test:'; then
+  die "possible secret or credential locator material in agent report JSON"
 fi
 
 STATUS="$(printf '%s' "$REPORT" | jq -r '.status')"
@@ -113,27 +113,20 @@ locus forensics export --out "${PACK_OUT}"
 if ! jq -e . "${PACK_OUT}" >/dev/null 2>&1; then
   die "forensics pack is not valid JSON"
 fi
-# Never allow obvious secrets in the pack
-if grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-' "${PACK_OUT}"; then
-  die "possible secret material in forensics pack"
+# Never allow secrets or credential locators in the pack
+if grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|"credential_ref"|phm:|env:|test:' "${PACK_OUT}"; then
+  die "possible secret or credential locator material in forensics pack"
 fi
 ok "forensics pack → ${PACK_OUT} ($(wc -c <"${PACK_OUT}" | tr -d ' ') bytes)"
 
 # ── Ready gate ───────────────────────────────────────────────────────────────
 log "dogfood gate"
-case "$STATUS" in
-  ready)
-    echo "DOGFOOD READY"
-    exit 0
-    ;;
-  protected)
-    if [[ "$HAS_PIN" == "true" ]]; then
-      echo "DOGFOOD READY"
-      exit 0
-    fi
-    die "status=protected but no pin — not dogfood-ready"
-    ;;
-  *)
-    die "status=${STATUS} (need ready, or protected with pin)"
-    ;;
-esac
+if [[ "$REPORT_RC" -ne 0 ]] \
+  || [[ "$STATUS" != "ready" ]] \
+  || [[ "$READY" != "true" ]] \
+  || [[ "$HAS_PIN" != "true" ]] \
+  || [[ "$ONELINE" != *:* ]] \
+  || ! printf '%s' "$REPORT" | jq -e -f "$ROOT/scripts/dogfood-ready.jq" >/dev/null 2>&1; then
+  die "dispatch contract blocked (status=${STATUS} ready=${READY} pin=${HAS_PIN} oneline=${ONELINE} exit=${REPORT_RC})"
+fi
+echo "DOGFOOD READY"

@@ -97,7 +97,7 @@ pub struct WorkerSlot {
     pub binding_id: String,
     pub binding_alias: String,
     pub account: String,
-    pub credential_ref: String,
+    pub credential: crate::credential::CredentialMetadata,
     pub state: WorkerState,
     /// Private work dir under session worker_home.
     pub work_dir: PathBuf,
@@ -391,19 +391,43 @@ mod tests {
         let work_dir = worker_home.join("slots").join("github");
         std::fs::create_dir_all(&work_dir).unwrap();
 
+        std::env::set_var("MCP_UNLISTED_SECRET_CANARY", "ambient-mcp-secret");
         let backend = McpStdioBackend::new(McpStdioConfig {
             command: "false".into(),
             args: vec![],
             spawn: false,
             resolve_secrets: false,
-            extra_env: BTreeMap::new(),
+            extra_env: BTreeMap::from([(
+                "ARBITRARY_EXTRA_SECRET".into(),
+                "configured-mcp-secret".into(),
+            )]),
         });
         let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();
         assert_eq!(slot.backend, "mcp_stdio");
         assert_eq!(slot.state, WorkerState::Ready);
         assert!(slot.pid.is_none());
-        let _ = backend.build_command(&session, &binding, pb, &work_dir);
+        let command = backend.build_command(&session, &binding, pb, &work_dir);
+        let env = command
+            .get_envs()
+            .filter_map(|(key, value)| value.map(|value| (key, value)))
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert!(!env.keys().any(|key| key.contains("CREDENTIAL_REF")));
+        assert!(!env.values().any(|value| value.contains("GH_ACME")));
+        assert!(!env.contains_key("MCP_UNLISTED_SECRET_CANARY"));
+        assert!(!env.contains_key("ARBITRARY_EXTRA_SECRET"));
+        assert!(!env.values().any(|value| value == "ambient-mcp-secret"));
+        assert!(!env.values().any(|value| value == "configured-mcp-secret"));
+        let slot_json = serde_json::to_string(&slot).unwrap();
+        assert!(!slot_json.contains("GH_ACME"));
+        assert!(!slot_json.contains("credential_ref"));
         backend.teardown(&slot).unwrap();
+        std::env::remove_var("MCP_UNLISTED_SECRET_CANARY");
     }
 
     #[test]
