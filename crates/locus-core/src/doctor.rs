@@ -6,6 +6,7 @@
 use crate::config::{self, AutopinStatus, LocusConfig};
 use crate::store::{ApprovalsHealth, AuditEvent, RuntimeDrift, Store};
 use crate::VERSION;
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -109,6 +110,71 @@ pub struct AuditSummary {
     pub deny: usize,
 }
 
+/// Near-miss counters (scope freeze + require_approval blocks) over a time window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NearMissSummary {
+    pub window_hours: u32,
+    pub count: usize,
+    pub scope_freeze: usize,
+    pub require_approval: usize,
+}
+
+/// Whether an audit op is a "near miss" (scope freeze or require_approval block).
+pub fn is_near_miss_op(op: &str) -> bool {
+    is_scope_freeze_near_miss(op) || is_require_approval_near_miss(op)
+}
+
+pub fn is_scope_freeze_near_miss(op: &str) -> bool {
+    op.contains("scope_freeze")
+}
+
+pub fn is_require_approval_near_miss(op: &str) -> bool {
+    op.contains("require_approval")
+        || op == "mcp.require_approval"
+        || op.ends_with(".require_approval")
+}
+
+/// Count near-miss events in the last `window_hours` hours.
+pub fn count_near_misses(
+    events: &[AuditEvent],
+    window_hours: u32,
+    binding: Option<&str>,
+) -> NearMissSummary {
+    let cutoff = Utc::now() - Duration::hours(i64::from(window_hours));
+    let mut scope_freeze = 0usize;
+    let mut require_approval = 0usize;
+    for ev in events {
+        if let Some(b) = binding {
+            if ev.binding != b {
+                continue;
+            }
+        }
+        if !event_in_near_miss_window(&ev.ts, cutoff) {
+            continue;
+        }
+        if is_scope_freeze_near_miss(&ev.op) {
+            scope_freeze += 1;
+        }
+        if is_require_approval_near_miss(&ev.op) {
+            require_approval += 1;
+        }
+    }
+    NearMissSummary {
+        window_hours,
+        count: scope_freeze + require_approval,
+        scope_freeze,
+        require_approval,
+    }
+}
+
+fn event_in_near_miss_window(ts: &str, cutoff: DateTime<Utc>) -> bool {
+    match DateTime::parse_from_rfc3339(ts) {
+        Ok(dt) => dt.with_timezone(&Utc) >= cutoff,
+        // Unparseable timestamps: exclude from windowed counts.
+        Err(_) => false,
+    }
+}
+
 /// External facts the CLI gathers (Phantom is out-of-process).
 #[derive(Debug, Clone, Default)]
 pub struct DoctorExternal {
@@ -143,6 +209,10 @@ pub struct DoctorReport {
     pub autopin: AutopinStatus,
     pub workspace: WorkspaceStatus,
     pub audit: AuditSummary,
+    /// Near-miss count (scope_freeze + require_approval blocks) in the last 24h.
+    pub near_miss_count: usize,
+    /// Structured near-miss breakdown (same window as `near_miss_count`).
+    pub near_miss: NearMissSummary,
     /// Structured issues with severity.
     pub findings: Vec<DoctorIssue>,
     /// Flat message list (same order as findings) for older consumers.
@@ -201,6 +271,9 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     );
 
     let audit = audit_summary(store, 5, 50)?;
+    let all_events = store.read_audit_events()?;
+    let near_miss = count_near_misses(&all_events, 24, None);
+    let near_miss_count = near_miss.count;
 
     let mut findings: Vec<DoctorIssue> = Vec::new();
 
@@ -370,6 +443,16 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
             format!("{} deny event(s) in recent audit tail", audit.deny),
         ));
     }
+    if near_miss_count > 0 {
+        findings.push(issue(
+            IssueSeverity::Warn,
+            "near_miss",
+            format!(
+                "{near_miss_count} near-miss event(s) in last 24h (scope_freeze={}, require_approval={})",
+                near_miss.scope_freeze, near_miss.require_approval
+            ),
+        ));
+    }
 
     let mut verdict = DoctorVerdict::Safe;
     for f in &findings {
@@ -399,6 +482,8 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
         autopin,
         workspace,
         audit,
+        near_miss_count,
+        near_miss,
         findings,
         issues,
         verdict,
@@ -532,6 +617,8 @@ pub const DOCTOR_JSON_KEYS: &[&str] = &[
     "autopin",
     "workspace",
     "audit",
+    "near_miss_count",
+    "near_miss",
     "findings",
     "issues",
     "verdict",
@@ -561,6 +648,13 @@ pub fn doctor_json_has_stable_keys(value: &serde_json::Value) -> Result<(), Vec<
         for k in ["path", "total", "last", "scope_freeze", "deny"] {
             if au.get(k).is_none() {
                 missing.push(format!("audit.{k}"));
+            }
+        }
+    }
+    if let Some(nm) = obj.get("near_miss") {
+        for k in ["window_hours", "count", "scope_freeze", "require_approval"] {
+            if nm.get(k).is_none() {
+                missing.push(format!("near_miss.{k}"));
             }
         }
     }
@@ -634,6 +728,8 @@ mod tests {
         assert!(report.pin.is_none());
         assert_eq!(report.pending_approvals, 0);
         assert_eq!(report.dual_control_waiting, 0);
+        assert_eq!(report.near_miss_count, 0);
+        assert_eq!(report.near_miss.count, 0);
     }
 
     #[test]
@@ -808,6 +904,45 @@ require_pin = true
         let f3 = filter_audit_events(&events, 10, None, Some("b"));
         assert_eq!(f3.len(), 1);
         assert_eq!(f3[0].binding, "b");
+    }
+
+    #[test]
+    fn near_miss_count_last_24h() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        store
+            .audit(
+                "mcp.scope_freeze",
+                "acme",
+                Some(serde_json::json!({"tool": "x"})),
+            )
+            .unwrap();
+        store
+            .audit(
+                "mcp.require_approval",
+                "acme",
+                Some(serde_json::json!({"tool": "y"})),
+            )
+            .unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        assert!(report.near_miss_count >= 2);
+        assert!(report.near_miss.scope_freeze >= 1);
+        assert!(report.near_miss.require_approval >= 1);
+        assert!(report.findings.iter().any(|f| f.code == "near_miss"));
+        assert_eq!(report.verdict, DoctorVerdict::Warn);
     }
 
     #[test]

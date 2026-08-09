@@ -18,12 +18,15 @@ pub mod credential;
 pub mod doctor;
 pub mod engagement;
 pub mod error;
+pub mod events;
+pub mod forensics;
 pub mod graph;
 pub mod isolation;
 pub mod policy;
 pub mod seal;
 pub mod session;
 pub mod store;
+pub mod ticket;
 pub mod workers;
 pub mod workspace;
 
@@ -53,15 +56,21 @@ pub use config::{
 };
 pub use credential::{inject_keys_for_provider, resolve, resolve_binding_secrets, CredentialRef};
 pub use doctor::{
-    build_doctor_report, doctor_json_has_stable_keys, filter_audit_events, AuditSummary,
-    DoctorExternal, DoctorIssue, DoctorPin, DoctorReport, DoctorVerdict, IssueSeverity,
-    WorkspaceStatus as DoctorWorkspaceStatus, DOCTOR_JSON_KEYS,
+    build_doctor_report, count_near_misses, doctor_json_has_stable_keys, filter_audit_events,
+    is_near_miss_op, AuditSummary, DoctorExternal, DoctorIssue, DoctorPin, DoctorReport,
+    DoctorVerdict, IssueSeverity, NearMissSummary, WorkspaceStatus as DoctorWorkspaceStatus,
+    DOCTOR_JSON_KEYS,
 };
 pub use engagement::{
     client_binding_template, close_checklist, engagement_readme, EngagementCloseResult,
     EngagementMeta,
 };
 pub use error::{LocusError, Result};
+pub use events::{export_events, EventsExportFormat, EventsExportOptions, FleetPulseEvent};
+pub use forensics::{
+    export_forensics_pack, forensics_pack_json_has_stable_keys, AuditChainTip,
+    ForensicsExportOptions, ForensicsPack, DEFAULT_AUDIT_LAST, FORENSICS_PACK_JSON_KEYS,
+};
 pub use graph::{
     decrypt_graph, default_export_filename, encrypt_graph, resolve_passphrase, source_host,
     GraphEnvelope, GraphExportResult, GraphImportResult, GraphListEntry, GraphMeta,
@@ -81,11 +90,15 @@ pub use store::{
     locus_home, ApprovalsHealth, AuditEvent, EngagementInitResult, ProviderView, RuntimeDrift,
     Store, Whoami,
 };
+pub use ticket::{
+    mint_ticket, verify_ticket, verify_ticket_parts, CapabilityTicket, DEFAULT_TICKET_TTL_SECS,
+    TICKET_ID_PREFIX,
+};
 pub use workers::{
-    mcp_config_from_upstream, namespace_upstream_tool, provider_from_tool_name,
-    strip_provider_prefix, CompositeWorkerManager, InMemoryWorkerManager, McpStdioBackend,
-    McpStdioClient, McpStdioConfig, SyntheticBackend, UpstreamTool, WorkerBackend, WorkerKey,
-    WorkerManager, WorkerSlot, WorkerState, WorkerToolResult,
+    idle_timeout_from_env, mcp_config_from_upstream, namespace_upstream_tool,
+    provider_from_tool_name, strip_provider_prefix, CompositeWorkerManager, InMemoryWorkerManager,
+    McpStdioBackend, McpStdioClient, McpStdioConfig, SyntheticBackend, UpstreamTool, WorkerBackend,
+    WorkerKey, WorkerManager, WorkerSlot, WorkerState, WorkerToolResult, ENV_WORKER_IDLE_SECS,
 };
 pub use workspace::{find_workspace, WorkspaceConfig};
 

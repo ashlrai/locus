@@ -14,6 +14,10 @@ use crate::session::Session;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+/// Env var: idle seconds before upstream workers are torn down (0 / unset = never).
+pub const ENV_WORKER_IDLE_SECS: &str = "LOCUS_WORKER_IDLE_SECS";
 
 /// Build MCP config from a binding's upstream spec (always spawn).
 pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> McpStdioConfig {
@@ -24,6 +28,21 @@ pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> McpStdioConfig {
         resolve_secrets: spec.resolve_secrets,
         extra_env: BTreeMap::new(),
     }
+}
+
+/// Parse idle timeout from `LOCUS_WORKER_IDLE_SECS` (seconds). `None` = disabled.
+pub fn idle_timeout_from_env() -> Option<Duration> {
+    let Ok(raw) = std::env::var(ENV_WORKER_IDLE_SECS) else {
+        return None;
+    };
+    let raw = raw.trim();
+    if raw.is_empty() || raw == "0" {
+        return None;
+    }
+    raw.parse::<u64>()
+        .ok()
+        .filter(|&s| s > 0)
+        .map(Duration::from_secs)
 }
 
 /// Namespace an upstream tool as `provider.toolname` (matches synthetic style).
@@ -48,11 +67,22 @@ pub fn provider_from_tool_name(tool: &str) -> Option<&str> {
 }
 
 /// Per-provider routing: synthetic adapters and/or auto-spawned MCP children.
+///
+/// **Reuse:** `ensure` returns an existing Ready/Running/Pending slot for the
+/// same `WorkerKey` without respawning. Upstream MCP children stay live across
+/// `tools/list` and `tools/call` for the session until teardown or idle reap.
+///
+/// **Idle timeout (optional):** set `LOCUS_WORKER_IDLE_SECS` or call
+/// [`Self::with_idle_timeout`] / [`Self::reap_idle`]. Touches on ensure + call.
 pub struct CompositeWorkerManager {
     synthetic: SyntheticBackend,
     /// Live MCP backends for providers that declared `upstream`.
     mcp: BTreeMap<WorkerKey, McpStdioBackend>,
     slots: BTreeMap<WorkerKey, WorkerSlot>,
+    /// Last use time per slot (for idle reap). Not serialized.
+    last_used: BTreeMap<WorkerKey, Instant>,
+    /// When set, `ensure*` / `call_tool` paths may reap idle workers first.
+    idle_timeout: Option<Duration>,
 }
 
 impl Default for CompositeWorkerManager {
@@ -67,7 +97,65 @@ impl CompositeWorkerManager {
             synthetic: SyntheticBackend,
             mcp: BTreeMap::new(),
             slots: BTreeMap::new(),
+            last_used: BTreeMap::new(),
+            idle_timeout: idle_timeout_from_env(),
         }
+    }
+
+    /// Construct with an explicit idle timeout (overrides env for this instance).
+    pub fn with_idle_timeout(timeout: Option<Duration>) -> Self {
+        let mut m = Self::new();
+        m.idle_timeout = timeout;
+        m
+    }
+
+    /// Configure idle timeout after construction.
+    pub fn set_idle_timeout(&mut self, timeout: Option<Duration>) {
+        self.idle_timeout = timeout;
+    }
+
+    pub fn idle_timeout(&self) -> Option<Duration> {
+        self.idle_timeout
+    }
+
+    fn touch(&mut self, key: &WorkerKey) {
+        self.last_used.insert(key.clone(), Instant::now());
+    }
+
+    /// Tear down slots whose last use exceeds `timeout` (or configured idle).
+    ///
+    /// Returns the number of slots reaped. Synthetic-only slots are cheap but
+    /// still dropped so the pool stays accurate.
+    pub fn reap_idle(&mut self, timeout: Option<Duration>) -> Result<usize> {
+        let Some(limit) = timeout.or(self.idle_timeout) else {
+            return Ok(0);
+        };
+        if limit.is_zero() {
+            return Ok(0);
+        }
+        let now = Instant::now();
+        let stale: Vec<WorkerKey> = self
+            .slots
+            .keys()
+            .filter(|k| {
+                self.last_used
+                    .get(k)
+                    .map(|t| now.duration_since(*t) >= limit)
+                    // Never used / missing timestamp → treat as idle past limit.
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+        let n = stale.len();
+        for k in stale {
+            self.teardown(&k)?;
+        }
+        Ok(n)
+    }
+
+    /// Reap using configured idle timeout (no-op when unset).
+    pub fn reap_idle_configured(&mut self) -> Result<usize> {
+        self.reap_idle(self.idle_timeout)
     }
 
     /// Tear down any slots not belonging to `session_id` (pin switch).
@@ -90,6 +178,7 @@ impl CompositeWorkerManager {
         session: &Session,
         binding: &Binding,
     ) -> Result<Vec<WorkerSlot>> {
+        let _ = self.reap_idle_configured()?;
         self.focus_session(&session.session_id)?;
         self.ensure_all(session, binding)
     }
@@ -208,6 +297,7 @@ impl CompositeWorkerManager {
         session: &Session,
         bindings: &[(String, Binding)],
     ) -> Result<Vec<WorkerSlot>> {
+        let _ = self.reap_idle_configured()?;
         self.focus_session(&session.session_id)?;
         let mut out = Vec::new();
         for (_, binding) in bindings {
@@ -218,8 +308,10 @@ impl CompositeWorkerManager {
 
     /// Route a tool call: upstream MCP when the tool is not a synthetic adapter
     /// tool and the provider has an upstream worker; otherwise synthetic.
+    ///
+    /// Touches the slot's last-used time for idle pool reuse accounting.
     pub fn call_tool(
-        &self,
+        &mut self,
         session: &Session,
         binding: &Binding,
         tool: &str,
@@ -241,6 +333,7 @@ impl CompositeWorkerManager {
                 ))
             })?
             .clone();
+        self.touch(&key);
 
         // Prefer synthetic when the tool is owned by an in-process adapter.
         let synthetic_names: Vec<String> = adapters::tools_for_binding(binding)
@@ -276,8 +369,13 @@ impl WorkerManager for CompositeWorkerManager {
                 existing.state,
                 WorkerState::Ready | WorkerState::Running | WorkerState::Pending
             ) {
-                return Ok(existing.clone());
+                // Reuse live worker — do not respawn upstream children.
+                let out = existing.clone();
+                self.touch(&key);
+                return Ok(out);
             }
+            // Stopped / Failed — tear down before recreating.
+            let _ = self.teardown(&key);
         }
 
         let pb = binding.provider(provider).ok_or_else(|| {
@@ -308,7 +406,8 @@ impl WorkerManager for CompositeWorkerManager {
             self.synthetic.ensure(session, binding, pb, &work_dir)?
         };
 
-        self.slots.insert(key, slot.clone());
+        self.slots.insert(key.clone(), slot.clone());
+        self.touch(&key);
         Ok(slot)
     }
 
@@ -321,6 +420,7 @@ impl WorkerManager for CompositeWorkerManager {
     }
 
     fn teardown(&mut self, key: &WorkerKey) -> Result<()> {
+        self.last_used.remove(key);
         if let Some(slot) = self.slots.remove(key) {
             if let Some(backend) = self.mcp.remove(key) {
                 backend.teardown(&slot)?;
@@ -371,8 +471,9 @@ mod tests {
     use crate::binding::{BindingBody, Policy, ProviderBinding, Scope};
     use crate::seal::SealKey;
     use crate::session::PinSource;
-    use chrono::Duration;
+    use chrono::Duration as ChronoDuration;
     use std::process::Command;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn mock_script() -> &'static str {
@@ -454,7 +555,7 @@ for line in sys.stdin:
             None,
             PinSource::Explicit,
             Some("test".into()),
-            Duration::hours(1),
+            ChronoDuration::hours(1),
             worker_home.into(),
             &key,
         )
@@ -600,6 +701,43 @@ for line in sys.stdin:
         assert!(cfg.resolve_secrets);
         assert_eq!(cfg.command, "npx");
         assert_eq!(cfg.args, vec!["-y", "@pkg"]);
+    }
+
+    #[test]
+    fn ensure_reuses_same_slot_without_respawn() {
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        std::fs::create_dir_all(&worker_home).unwrap();
+        let session = session_at(&worker_home.display().to_string());
+        let binding = binding_mixed(false);
+
+        let mut mgr = CompositeWorkerManager::new();
+        let a = mgr.ensure(&session, &binding, "supabase").unwrap();
+        let b = mgr.ensure(&session, &binding, "supabase").unwrap();
+        assert_eq!(a.key, b.key);
+        assert_eq!(mgr.list().len(), 1);
+        // Second ensure is reuse — same work_dir
+        assert_eq!(a.work_dir, b.work_dir);
+    }
+
+    #[test]
+    fn reap_idle_tears_down_after_timeout() {
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        std::fs::create_dir_all(&worker_home).unwrap();
+        let session = session_at(&worker_home.display().to_string());
+        let binding = binding_mixed(false);
+
+        let mut mgr = CompositeWorkerManager::with_idle_timeout(Some(Duration::from_millis(30)));
+        mgr.ensure_binding(&session, &binding).unwrap();
+        assert_eq!(mgr.list().len(), 2);
+        // Immediate reap: last_used is fresh → keep
+        assert_eq!(mgr.reap_idle(Some(Duration::from_secs(60))).unwrap(), 0);
+        assert_eq!(mgr.list().len(), 2);
+        std::thread::sleep(Duration::from_millis(40));
+        let n = mgr.reap_idle(Some(Duration::from_millis(20))).unwrap();
+        assert_eq!(n, 2);
+        assert!(mgr.list().is_empty());
     }
 
     #[test]

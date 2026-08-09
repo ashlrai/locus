@@ -7,6 +7,8 @@
 //! locus leave
 //! ```
 
+mod serve;
+
 use anyhow::{bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -14,9 +16,10 @@ use colored::Colorize;
 use locus_core::{
     agent_md_content, agent_md_path, agent_report_from_doctor, build_ci_env_map,
     build_doctor_report, build_isolated_env_opts, ci_secrets_allowed, default_export_filename,
-    filter_audit_events, find_workspace, mcp_agent_env, parse_ttl, probe_agent_options,
-    resolve_passphrase, workspace_stub_toml, AgentStatus, Binding, BindingBody, DoctorExternal,
-    DoctorVerdict, Policy, ProviderBinding, Scope, Store, WorkspaceConfig, VERSION,
+    export_events, export_forensics_pack, filter_audit_events, find_workspace, mcp_agent_env,
+    parse_ttl, probe_agent_options, resolve_passphrase, workspace_stub_toml, AgentStatus, Binding,
+    BindingBody, DoctorExternal, DoctorVerdict, EventsExportFormat, EventsExportOptions,
+    ForensicsExportOptions, Policy, ProviderBinding, Scope, Store, WorkspaceConfig, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -34,11 +37,12 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · quickstart · setup · agent · doctor · watch · workspace · hook · mcp · engagement · graph\n  \
-  Daily use     enter · pin · leave · whoami · status · exec · run · binding\n  \
+  Setup         init · quickstart · setup · agent · doctor · watch · workspace · hook · mcp · engagement · graph · goal\n  \
+  Daily use     enter · pin · leave · whoami · status · exec · run · binding · dashboard\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
-  Audit         events\n  \
+  Audit         events · forensics\n  \
+  Local UI      serve · dashboard\n  \
   Maintenance   completion · version"
 )]
 struct Cli {
@@ -187,6 +191,10 @@ enum Commands {
     #[command(next_help_heading = "Setup", subcommand)]
     Agent(AgentCmd),
 
+    /// Northstar goal progress (`GOALS.md` or embedded milestones)
+    #[command(next_help_heading = "Setup", subcommand)]
+    Goal(GoalCmd),
+
     /// Run a command with only the pinned binding's identity surface
     #[command(next_help_heading = "Daily use")]
     Exec {
@@ -248,6 +256,9 @@ enum Commands {
 
     // ──────────────────────────── Audit ──────────────────────────────
     /// Read recent local audit events (`$LOCUS_HOME/audit/events.jsonl`)
+    ///
+    /// Subcommand: `locus events export [--otlp] [--out file]` for fleet pulse /
+    /// OTLP-compatible log export. See docs/observability.md.
     #[command(next_help_heading = "Audit")]
     Events {
         /// Max events from the end of the log
@@ -259,6 +270,48 @@ enum Commands {
         /// Filter by binding alias
         #[arg(long)]
         binding: Option<String>,
+        #[command(subcommand)]
+        action: Option<EventsAction>,
+    },
+
+    /// Export a shareable forensics pack (no secrets)
+    #[command(next_help_heading = "Audit", subcommand)]
+    Forensics(ForensicsCmd),
+
+    // ────────────────────────── Local UI ─────────────────────────────
+    /// Serve the local identity dashboard + JSON API (127.0.0.1 only)
+    ///
+    /// Endpoints: GET /api/status|whoami|bindings|approvals|doctor|events
+    /// and POST /api/approve/{id}/grant. Never returns resolved secrets.
+    /// Optional auth: LOCUS_DASHBOARD_TOKEN or --token.
+    #[command(next_help_heading = "Local UI")]
+    Serve {
+        /// TCP port (bound to 127.0.0.1 only)
+        #[arg(long, default_value_t = serve::DEFAULT_PORT)]
+        port: u16,
+        /// Shared secret for /api/* (env: LOCUS_DASHBOARD_TOKEN)
+        #[arg(long, env = "LOCUS_DASHBOARD_TOKEN")]
+        token: Option<String>,
+        /// Open the default browser after bind
+        #[arg(long)]
+        open: bool,
+    },
+
+    /// Open the local identity dashboard (serve + browser)
+    ///
+    /// Shortcut for `locus serve --open`. Shows active pin, whoami, bindings,
+    /// pending approvals, doctor verdict, and recent audit.
+    #[command(next_help_heading = "Local UI")]
+    Dashboard {
+        /// TCP port (bound to 127.0.0.1 only)
+        #[arg(long, default_value_t = serve::DEFAULT_PORT)]
+        port: u16,
+        /// Shared secret for /api/* (env: LOCUS_DASHBOARD_TOKEN)
+        #[arg(long, env = "LOCUS_DASHBOARD_TOKEN")]
+        token: Option<String>,
+        /// Do not open a browser (just print the URL and serve)
+        #[arg(long)]
+        no_open: bool,
     },
 
     // ───────────────────────── Maintenance ───────────────────────────
@@ -272,6 +325,16 @@ enum Commands {
     /// Print version (also available as `locus --version`)
     #[command(next_help_heading = "Maintenance")]
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum GoalCmd {
+    /// Print northstar progress from GOALS.md (or embedded milestones)
+    ///
+    /// Walks parents of cwd for `GOALS.md`, parses `- [x]` / `- [ ]` checkboxes
+    /// under milestone sections, and prints done/remaining counts. Falls back
+    /// to an embedded summary when no file is found.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -427,6 +490,47 @@ enum EngagementCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum EventsAction {
+    /// Export audit events as JSON lines (fleet pulse) or OTLP logs JSON
+    Export {
+        /// Max events from the end of the log
+        #[arg(long, default_value_t = 200)]
+        last: usize,
+        /// Filter by op (exact or substring)
+        #[arg(long)]
+        op: Option<String>,
+        /// Filter by binding alias
+        #[arg(long)]
+        binding: Option<String>,
+        /// Emit OTLP-compatible Logs JSON instead of fleet-pulse JSON lines
+        #[arg(long)]
+        otlp: bool,
+        /// Write to file (default: stdout)
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+        /// OTLP service.name attribute (default: locus)
+        #[arg(long, default_value = "locus")]
+        service_name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ForensicsCmd {
+    /// Export pin, bindings, audit tail, doctor, pending approvals (no secrets)
+    Export {
+        /// Filter audit / approvals / bindings to this alias
+        #[arg(long)]
+        binding: Option<String>,
+        /// Max audit events to include (default: 200)
+        #[arg(long, default_value_t = 200)]
+        last: usize,
+        /// Write pack JSON to this path (default: stdout when --json, else pack.json)
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum ApproveCmd {
     /// List pending approval requests
     List {
@@ -544,6 +648,7 @@ fn run() -> Result<()> {
         Commands::Whoami => cmd_whoami(cli.json),
         Commands::Status { oneline } => cmd_status(oneline, cli.json),
         Commands::Agent(sub) => cmd_agent(sub, cli.json),
+        Commands::Goal(sub) => cmd_goal(sub, cli.json),
         Commands::Exec {
             no_resolve,
             strict_creds,
@@ -576,7 +681,29 @@ fn run() -> Result<()> {
         } => cmd_setup(&client, print, mcp_bin),
         Commands::Approve(sub) => cmd_approve(sub, cli.json),
         Commands::Notify(sub) => cmd_notify(sub, cli.json),
-        Commands::Events { last, op, binding } => cmd_events(last, op, binding, cli.json),
+        Commands::Events {
+            last,
+            op,
+            binding,
+            action,
+        } => match action {
+            Some(EventsAction::Export {
+                last,
+                op,
+                binding,
+                otlp,
+                out,
+                service_name,
+            }) => cmd_events_export(last, op, binding, otlp, out, service_name, cli.json),
+            None => cmd_events(last, op, binding, cli.json),
+        },
+        Commands::Forensics(sub) => cmd_forensics(sub, cli.json),
+        Commands::Serve { port, token, open } => cmd_serve(port, token, open),
+        Commands::Dashboard {
+            port,
+            token,
+            no_open,
+        } => cmd_serve(port, token, !no_open),
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
             generate(shell, &mut cmd, "locus", &mut io::stdout());
@@ -602,6 +729,17 @@ fn store() -> Result<Store> {
 
 fn cwd() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Local identity dashboard HTTP server (blocks until Ctrl-C).
+fn cmd_serve(port: u16, token: Option<String>, open_browser: bool) -> Result<()> {
+    // Fail early if home is unreadable so users get a clear error before bind.
+    let _ = store()?;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("tokio runtime")?;
+    rt.block_on(serve::run_serve(port, token, open_browser))
 }
 
 fn cmd_init(with_samples: bool, json: bool) -> Result<()> {
@@ -2231,6 +2369,248 @@ fn cmd_agent(sub: AgentCmd, json: bool) -> Result<()> {
     }
 }
 
+/// Northstar goal progress from `GOALS.md` (or embedded fallback).
+fn cmd_goal(sub: GoalCmd, json: bool) -> Result<()> {
+    match sub {
+        GoalCmd::Status => cmd_goal_status(json),
+    }
+}
+
+fn cmd_goal_status(json: bool) -> Result<()> {
+    let found = find_goals_md();
+    let (source, path, milestones) = match &found {
+        Some(p) => {
+            let body =
+                std::fs::read_to_string(p).with_context(|| format!("read {}", p.display()))?;
+            (
+                "goals_md",
+                Some(p.display().to_string()),
+                parse_goals_milestones(&body),
+            )
+        }
+        None => ("embedded", None, embedded_goal_milestones()),
+    };
+
+    let total_done: usize = milestones.iter().map(|m| m.done).sum();
+    let total_items: usize = milestones.iter().map(|m| m.total).sum();
+    let total_remaining = total_items.saturating_sub(total_done);
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "version": VERSION,
+                "vision": "wrong-account impossible · AI-native · hub-native",
+                "source": source,
+                "path": path,
+                "metrics": {
+                    "wrong_account_incidents": "0 / dogfood quarter",
+                    "time_to_safe_context": "<15s",
+                    "agent_report_ready": "status=ready before mutate",
+                },
+                "milestones": milestones.iter().map(|m| json!({
+                    "id": m.id,
+                    "title": m.title,
+                    "state": m.state,
+                    "done": m.done,
+                    "total": m.total,
+                    "remaining": m.total.saturating_sub(m.done),
+                })).collect::<Vec<_>>(),
+                "totals": {
+                    "done": total_done,
+                    "total": total_items,
+                    "remaining": total_remaining,
+                },
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{}  {}",
+        "locus goal".bold(),
+        "wrong-account impossible · AI-native · hub-native".dimmed()
+    );
+    match &path {
+        Some(p) => println!("  source   GOALS.md  {}", p.dimmed()),
+        None => println!(
+            "  source   embedded milestones  {}",
+            "(no GOALS.md in cwd/parents)".dimmed()
+        ),
+    }
+    println!();
+    println!(
+        "  {}  0 wrong-account  ·  <15s enter  ·  agent report ready",
+        "metrics".bold()
+    );
+    println!();
+
+    for m in &milestones {
+        let mark = match m.state.as_str() {
+            "done" => "✓".green().bold(),
+            "in_progress" | "mostly_done" => "…".yellow().bold(),
+            _ => "·".dimmed(),
+        };
+        let counts = if m.total > 0 {
+            format!("{}/{}", m.done, m.total)
+        } else {
+            "—".into()
+        };
+        println!(
+            "  {} {}  {:<14}  {}  {}",
+            mark,
+            m.id.bold(),
+            m.state,
+            counts.dimmed(),
+            m.title
+        );
+    }
+
+    println!();
+    println!(
+        "  progress  {} done · {} remaining · {} total",
+        total_done.to_string().green(),
+        total_remaining.to_string().yellow(),
+        total_items
+    );
+    println!();
+    println!(
+        "  {}  edit checkboxes in GOALS.md  ·  hub: locus agent report --json",
+        "next".dimmed()
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct GoalMilestone {
+    id: String,
+    title: String,
+    state: String,
+    done: usize,
+    total: usize,
+}
+
+/// Walk cwd → parents for `GOALS.md` (cap 12 levels).
+fn find_goals_md() -> Option<PathBuf> {
+    let mut dir = cwd();
+    for _ in 0..12 {
+        let candidate = dir.join("GOALS.md");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    None
+}
+
+/// Parse `### M1 — Title · **state**` sections and `- [x]` / `- [ ]` items.
+fn parse_goals_milestones(body: &str) -> Vec<GoalMilestone> {
+    let mut out: Vec<GoalMilestone> = Vec::new();
+    let mut current: Option<GoalMilestone> = None;
+
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("### ") {
+            if let Some(m) = current.take() {
+                out.push(m);
+            }
+            // e.g. "M1 — Identity plane (core) · **done** (v0.1.0)"
+            let id = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("M?")
+                .trim_end_matches(['.', ':'])
+                .to_string();
+            let title = rest.split('·').next().unwrap_or(rest).trim().to_string();
+            let lower = rest.to_ascii_lowercase();
+            let state = if lower.contains("**done**") && !lower.contains("mostly") {
+                "done".into()
+            } else if lower.contains("mostly done") || lower.contains("mostly_done") {
+                "mostly_done".into()
+            } else if lower.contains("in progress") || lower.contains("in_progress") {
+                "in_progress".into()
+            } else if lower.contains("future") {
+                "future".into()
+            } else {
+                "unknown".into()
+            };
+            current = Some(GoalMilestone {
+                id,
+                title,
+                state,
+                done: 0,
+                total: 0,
+            });
+            continue;
+        }
+
+        if let Some(m) = current.as_mut() {
+            let lower = trimmed.to_ascii_lowercase();
+            // Markdown task list: - [x] / - [ ] / * [X]
+            if lower.starts_with("- [x]")
+                || lower.starts_with("* [x]")
+                || lower.starts_with("- [X]")
+                || lower.starts_with("* [X]")
+            {
+                m.done += 1;
+                m.total += 1;
+            } else if lower.starts_with("- [ ]") || lower.starts_with("* [ ]") {
+                m.total += 1;
+            }
+        }
+    }
+    if let Some(m) = current.take() {
+        out.push(m);
+    }
+
+    if out.is_empty() {
+        return embedded_goal_milestones();
+    }
+    out
+}
+
+fn embedded_goal_milestones() -> Vec<GoalMilestone> {
+    vec![
+        GoalMilestone {
+            id: "M1".into(),
+            title: "M1 — Identity plane (core)".into(),
+            state: "done".into(),
+            done: 9,
+            total: 9,
+        },
+        GoalMilestone {
+            id: "M2".into(),
+            title: "M2 — Firm UX".into(),
+            state: "done".into(),
+            done: 7,
+            total: 7,
+        },
+        GoalMilestone {
+            id: "M3".into(),
+            title: "M3 — AI surface".into(),
+            state: "mostly_done".into(),
+            done: 7,
+            total: 9,
+        },
+        GoalMilestone {
+            id: "M4".into(),
+            title: "M4 — Hub composition".into(),
+            state: "in_progress".into(),
+            done: 5,
+            total: 9,
+        },
+        GoalMilestone {
+            id: "M5".into(),
+            title: "M5 — Verification plane".into(),
+            state: "future".into(),
+            done: 0,
+            total: 6,
+        },
+    ]
+}
+
 fn gather_doctor_report(s: &Store) -> Result<locus_core::DoctorReport> {
     let phantom_on_path = Command::new("phantom")
         .arg("--version")
@@ -2782,11 +3162,15 @@ fn print_doctor_human(report: &locus_core::DoctorReport) {
         println!("  workspace {}", "none".dimmed());
     }
 
-    // Recent audit
+    // Recent audit + near-miss (24h)
     let au = &report.audit;
     println!(
         "  audit     total={}  recent_scope_freeze={}  recent_deny={}",
         au.total, au.scope_freeze, au.deny
+    );
+    println!(
+        "  near_miss last_24h={}  (scope_freeze={} require_approval={})",
+        report.near_miss_count, report.near_miss.scope_freeze, report.near_miss.require_approval
     );
     for ev in au.last.iter().take(5) {
         println!(
@@ -3143,6 +3527,134 @@ fn cmd_events(last: usize, op: Option<String>, binding: Option<String>, json: bo
         );
     }
     Ok(())
+}
+
+/// Export audit events as fleet-pulse JSON lines or OTLP logs JSON.
+fn cmd_events_export(
+    last: usize,
+    op: Option<String>,
+    binding: Option<String>,
+    otlp: bool,
+    out: Option<PathBuf>,
+    service_name: String,
+    _json: bool,
+) -> Result<()> {
+    let s = store()?;
+    let all = s.read_audit_events()?;
+    let format = if otlp {
+        EventsExportFormat::Otlp
+    } else {
+        EventsExportFormat::JsonLines
+    };
+    let body = export_events(
+        &all,
+        &EventsExportOptions {
+            last: Some(last),
+            op,
+            binding,
+            format,
+            service_name: Some(service_name),
+        },
+    )?;
+
+    if let Some(path) = out {
+        if let Some(parent) = path.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+        std::fs::write(&path, &body)?;
+        eprintln!(
+            "{} wrote {} ({} bytes)",
+            "events export".magenta().bold(),
+            path.display(),
+            body.len()
+        );
+    } else {
+        print!("{body}");
+    }
+    Ok(())
+}
+
+fn cmd_forensics(sub: ForensicsCmd, json: bool) -> Result<()> {
+    match sub {
+        ForensicsCmd::Export { binding, last, out } => {
+            let s = store()?;
+            let phantom_on_path = Command::new("phantom")
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|st| st.success())
+                .unwrap_or(false);
+            let unresolved = collect_unresolved_phm_refs(&s, phantom_on_path).unwrap_or_default();
+            let pack = export_forensics_pack(
+                &s,
+                ForensicsExportOptions {
+                    binding: binding.clone(),
+                    audit_last: Some(last),
+                    doctor_external: Some(DoctorExternal {
+                        phantom_on_path,
+                        unresolved_phm: unresolved,
+                        cwd: std::env::current_dir().ok(),
+                    }),
+                },
+            )?;
+
+            let pretty = serde_json::to_string_pretty(&pack)?;
+            let target = out.or_else(|| {
+                if json {
+                    None
+                } else {
+                    Some(PathBuf::from("pack.json"))
+                }
+            });
+
+            if let Some(path) = target {
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                }
+                std::fs::write(&path, &pretty)?;
+                if json {
+                    // Still emit path metadata as JSON for machine consumers.
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "ok": true,
+                            "path": path.display().to_string(),
+                            "pack_version": pack.pack_version,
+                            "near_miss_count": pack.near_miss.count,
+                            "audit_event_count": pack.audit_event_count,
+                            "verdict": pack.doctor.verdict,
+                        })
+                    );
+                } else {
+                    println!("{} wrote {}", "forensics".magenta().bold(), path.display());
+                    println!(
+                        "  bindings={}  audit_events={}  pending_approvals={}  near_miss_24h={}  doctor={}",
+                        pack.bindings.len(),
+                        pack.audit_event_count,
+                        pack.pending_approvals.len(),
+                        pack.near_miss.count,
+                        pack.doctor.verdict.as_str()
+                    );
+                    if let Some(ref tip) = pack.chain_tip.last_event_digest {
+                        println!(
+                            "  chain_tip events={} digest={}…",
+                            pack.chain_tip.event_count,
+                            tip.chars().take(12).collect::<String>()
+                        );
+                    }
+                }
+            } else {
+                // --json with no --out: full pack on stdout
+                println!("{pretty}");
+            }
+            Ok(())
+        }
+    }
 }
 
 fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {

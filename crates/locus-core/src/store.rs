@@ -18,6 +18,7 @@ use crate::graph::{
 };
 use crate::seal::SealKey;
 use crate::session::{binding_fingerprint, parse_ttl, PinSource, Session, SessionMode};
+use crate::ticket::{self, CapabilityTicket};
 use crate::workspace::{find_workspace, WorkspaceConfig};
 use chrono::{Duration, Utc};
 use serde_json::Value;
@@ -1395,6 +1396,53 @@ impl Store {
             }
         }
         Ok(drift)
+    }
+
+    // ── Capability tickets ────────────────────────────────────────────────
+
+    /// Mint a short-lived capability ticket (HMAC over session|binding|tool|exp).
+    ///
+    /// The returned `ticket_id` is safe for audit logs — it is not raw credential
+    /// material. Default TTL is 30s ([`crate::ticket::DEFAULT_TICKET_TTL_SECS`]).
+    pub fn mint_capability_ticket(
+        &self,
+        session_id: &str,
+        binding_id: &str,
+        tool: &str,
+    ) -> Result<CapabilityTicket> {
+        let key = self.seal_key()?;
+        ticket::mint_ticket(&key, session_id, binding_id, tool, None)
+    }
+
+    /// Mint with an explicit TTL (tests / longer CI windows).
+    pub fn mint_capability_ticket_ttl(
+        &self,
+        session_id: &str,
+        binding_id: &str,
+        tool: &str,
+        ttl: Duration,
+    ) -> Result<CapabilityTicket> {
+        let key = self.seal_key()?;
+        ticket::mint_ticket(&key, session_id, binding_id, tool, Some(ttl))
+    }
+
+    /// Verify a capability ticket against the daemon seal key (HMAC + TTL).
+    pub fn verify_capability_ticket(&self, ticket: &CapabilityTicket) -> Result<()> {
+        let key = self.seal_key()?;
+        ticket::verify_ticket(&key, ticket)
+    }
+
+    /// Verify from discrete fields (e.g. reconstructed from audit).
+    pub fn verify_capability_ticket_parts(
+        &self,
+        ticket_id: &str,
+        session_id: &str,
+        binding_id: &str,
+        tool: &str,
+        exp: i64,
+    ) -> Result<()> {
+        let key = self.seal_key()?;
+        ticket::verify_ticket_parts(&key, ticket_id, session_id, binding_id, tool, exp)
     }
 
     // ── Audit ─────────────────────────────────────────────────────────────
@@ -3232,5 +3280,53 @@ allowed_bindings = ["acme"]
             err.to_string().contains("decrypt") || err.to_string().contains("passphrase"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn capability_ticket_mint_and_verify() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let t = store
+            .mint_capability_ticket("ses_1", "bnd_acme", "github.scope")
+            .unwrap();
+        assert!(t.ticket_id.starts_with("cap_"));
+        store.verify_capability_ticket(&t).unwrap();
+        store
+            .verify_capability_ticket_parts(
+                &t.ticket_id,
+                &t.session_id,
+                &t.binding_id,
+                &t.tool,
+                t.exp,
+            )
+            .unwrap();
+
+        // Wrong tool fails
+        let err = store
+            .verify_capability_ticket_parts(
+                &t.ticket_id,
+                &t.session_id,
+                &t.binding_id,
+                "other.tool",
+                t.exp,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("HMAC") || err.to_string().contains("mismatch"));
+
+        // Cross-store with different daemon key fails
+        let other = Store::open(dir.path().join("other-home")).unwrap();
+        assert!(other.verify_capability_ticket(&t).is_err());
+    }
+
+    #[test]
+    fn capability_ticket_ttl_override() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let t = store
+            .mint_capability_ticket_ttl("ses", "bnd", "tool.x", Duration::seconds(120))
+            .unwrap();
+        let now = Utc::now().timestamp();
+        assert!(t.exp >= now + 100);
+        store.verify_capability_ticket(&t).unwrap();
     }
 }

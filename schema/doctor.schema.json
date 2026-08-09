@@ -19,6 +19,8 @@
     "autopin",
     "workspace",
     "audit",
+    "near_miss_count",
+    "near_miss",
     "findings",
     "issues",
     "verdict",
@@ -81,6 +83,14 @@
     },
     "audit": {
       "$ref": "#/$defs/auditSummary"
+    },
+    "near_miss_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Count of scope_freeze + require_approval audit events in the last 24 hours."
+    },
+    "near_miss": {
+      "$ref": "#/$defs/nearMiss"
     },
     "findings": {
       "type": "array",
@@ -262,6 +272,17 @@
         },
         "scope_freeze": { "type": "integer", "minimum": 0 },
         "deny": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "nearMiss": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["window_hours", "count", "scope_freeze", "require_approval"],
+      "properties": {
+        "window_hours": { "type": "integer", "minimum": 0 },
+        "count": { "type": "integer", "minimum": 0 },
+        "scope_freeze": { "type": "integer", "minimum": 0 },
+        "require_approval": { "type": "integer", "minimum": 0 }
       }
     },
     "auditEvent": {

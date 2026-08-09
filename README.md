@@ -4,16 +4,17 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](./rust-toolchain.toml)
 
+**AI-native identity plane for coding agents.**  
 **Wrong account, impossible.**
 
-Identity plane for coding agents. Pin a client — every CLI command and MCP tool is hard-scoped to that binding until you re-pin.
+Pin a client — every CLI command and MCP tool is hard-scoped to that binding until you re-pin. Agents inherit a sealed session, not ambient `gh auth` / last Vercel team.
 
 | Product | Question it answers |
 |---------|---------------------|
 | **[Phantom](https://phm.dev)** | Can this secret enter the model? |
 | **Locus** | As whom, against which tenant, right now? |
 
-> Agents inherit ambient identity: global `gh auth`, one Supabase MCP token, last Vercel team. Contract work makes that lethal. Locus makes wrong-account action **mechanically impossible** — not merely discouraged.
+> Agents inherit ambient identity: global `gh auth`, one Supabase MCP token, last Vercel team. Contract work makes that lethal. Locus makes wrong-account action **mechanically impossible** — not merely discouraged. AI-native (`locus agent`, MCP resources/prompts) and hub-native (`agent report` · `REQUIRED_SERVERS`).
 
 ---
 
@@ -177,9 +178,13 @@ locus graph list|export|import        # encrypted binding graph share (no secret
 locus ci mint|env|run                 # short-lived sealed sessions for pipelines
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex
+locus agent report|setup|doctor       # AI-native readiness (hub JSON)
+locus goal status                     # northstar progress from GOALS.md
 ```
 
 **Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
+
+**Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/ashlr-hub/](./integrations/ashlr-hub/)
 
 Approvals:
 
@@ -223,7 +228,7 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | **3** Remote binding graph sync, dual-control packs, offboard, SIEM export | next |
 | **4** Adapter SDK, broader prebuilt platforms | later |
 
-See [PLAN.md](./PLAN.md) and [DESIGN.md](./DESIGN.md) for the full architecture.
+See [GOALS.md](./GOALS.md) (living milestones), [PLAN.md](./PLAN.md), and [DESIGN.md](./DESIGN.md).
 
 ---
 

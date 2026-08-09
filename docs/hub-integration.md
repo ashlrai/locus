@@ -9,7 +9,10 @@ Machine contract for **ashlr-hub** (and similar orchestrators) to shell out to L
 |----------|------|
 | Agent report schema | [`schema/agent-report.schema.json`](../schema/agent-report.schema.json) |
 | Doctor schema | [`schema/doctor.schema.json`](../schema/doctor.schema.json) |
-| Hub drop-in + TS types | [`integrations/ashlr-hub/`](../integrations/ashlr-hub/) |
+| Hub drop-in + TS types | [`integrations/ashlr-hub/locus.ts`](../integrations/ashlr-hub/locus.ts) |
+| MCP gateway patch | [`integrations/ashlr-hub/mcp-gateway-snippet.md`](../integrations/ashlr-hub/mcp-gateway-snippet.md) |
+| Doctor `checkLocus` | [`integrations/ashlr-hub/doctor-check.md`](../integrations/ashlr-hub/doctor-check.md) |
+| Northstar | [`GOALS.md`](../GOALS.md) · `locus goal status` |
 | Smoke | [`scripts/hub-smoke.sh`](../scripts/hub-smoke.sh) |
 
 ---

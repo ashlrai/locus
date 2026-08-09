@@ -1,4 +1,4 @@
-//! locus-mcp — stdio MCP multiplexor hard-scoped to the active Locus pin.
+//! locus-mcp — MCP multiplexor hard-scoped to the active Locus pin.
 //!
 //! Agents see only control tools when unpinned, and control + provider tools
 //! when pinned. Agents cannot pin themselves (`locus_request_pin` only).
@@ -9,12 +9,12 @@
 //! - **Prompts** — `locus_context` system fragment
 //! - **Auto-pin** — optional silent pin from workspace `default_binding` (never force)
 //!
-//! Protocol: JSON-RPC 2.0 over stdio.
-//! Framing: **Content-Length** (MCP standard; Claude Code / Cursor) and
-//! **NDJSON** (newline-delimited JSON) for simple clients/tests. Responses
-//! use the same framing as the request that triggered them.
+//! Transports:
+//! - **stdio** (default) — Content-Length or NDJSON for Claude Code / Cursor
+//! - **HTTP** — `locus-mcp --http 127.0.0.1:8742` or `LOCUS_MCP_HTTP=1`
+//!   JSON-RPC POST `/mcp` (CI agents); requires `LOCUS_MCP_HTTP_TOKEN`
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use locus_core::{
     build_doctor_report, call_tool_gated, control_tools, enforce_policy, find_workspace,
     load_config, split_namespaced_tool, tools_for_binding, AdapterTool, ApprovalGate, Binding,
@@ -22,9 +22,12 @@ use locus_core::{
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::Duration;
 
 /// Process-wide worker manager (synthetic + per-provider upstream MCP).
 fn worker_manager() -> &'static Mutex<CompositeWorkerManagerGuard> {
@@ -38,6 +41,9 @@ type CompositeWorkerManagerGuard = locus_core::CompositeWorkerManager;
 /// MCP auto-pin attempted once per process (start / first tools/list).
 static AUTO_PIN_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
+/// Default HTTP bind when `--http` / `LOCUS_MCP_HTTP=1` without an address.
+const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:8742";
+
 /// Wire framing chosen per message so mixed clients stay happy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Framing {
@@ -47,8 +53,14 @@ enum Framing {
     Ndjson,
 }
 
+#[derive(Debug, Clone)]
+struct RunMode {
+    /// When set, serve HTTP JSON-RPC instead of stdio.
+    http_addr: Option<SocketAddr>,
+}
+
 fn main() {
-    // MCP servers must not pollute stdout with logs
+    // MCP servers must not pollute stdout with logs (stdio mode).
     if let Err(e) = run() {
         eprintln!("locus-mcp error: {e:#}");
         std::process::exit(1);
@@ -56,6 +68,96 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    let mode = parse_run_mode(std::env::args().skip(1))?;
+    match mode.http_addr {
+        Some(addr) => run_http(addr),
+        None => run_stdio(),
+    }
+}
+
+/// Parse CLI + env for transport selection.
+///
+/// ```text
+/// locus-mcp                         # stdio (default)
+/// locus-mcp --http                  # 127.0.0.1:8742
+/// locus-mcp --http 127.0.0.1:9000
+/// LOCUS_MCP_HTTP=1 locus-mcp        # same as --http
+/// LOCUS_MCP_HTTP_ADDR=127.0.0.1:9…  # address when HTTP enabled via env
+/// ```
+fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
+    let args: Vec<String> = args.into_iter().collect();
+    let mut http_flag = false;
+    let mut http_arg: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        match a.as_str() {
+            "--http" | "-H" => {
+                http_flag = true;
+                if let Some(next) = args.get(i + 1) {
+                    if !next.starts_with('-') && next.contains(':') {
+                        http_arg = Some(next.clone());
+                        i += 1;
+                    }
+                }
+            }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            other if other.starts_with("--http=") => {
+                http_flag = true;
+                http_arg = Some(other.trim_start_matches("--http=").to_string());
+            }
+            other => {
+                bail!("unknown argument: {other} (try --help)");
+            }
+        }
+        i += 1;
+    }
+
+    let env_http = env_truthy("LOCUS_MCP_HTTP");
+    if !http_flag && !env_http {
+        return Ok(RunMode { http_addr: None });
+    }
+
+    let addr_str = http_arg
+        .or_else(|| std::env::var("LOCUS_MCP_HTTP_ADDR").ok())
+        .unwrap_or_else(|| DEFAULT_HTTP_ADDR.to_string());
+    let addr: SocketAddr = addr_str
+        .parse()
+        .with_context(|| format!("invalid HTTP bind address: {addr_str}"))?;
+    Ok(RunMode {
+        http_addr: Some(addr),
+    })
+}
+
+fn print_help() {
+    eprintln!(
+        "locus-mcp {VERSION} — MCP multiplexor (pin-scoped tools)\n\n\
+         Usage:\n\
+           locus-mcp                 stdio MCP (Claude Code / Cursor default)\n\
+           locus-mcp --http [ADDR]   JSON-RPC HTTP on ADDR (default {DEFAULT_HTTP_ADDR})\n\n\
+         Env:\n\
+           LOCUS_MCP_HTTP=1            enable HTTP (same as --http)\n\
+           LOCUS_MCP_HTTP_ADDR         bind address when HTTP enabled\n\
+           LOCUS_MCP_HTTP_TOKEN        required bearer/token for HTTP auth\n\
+           LOCUS_MCP_HTTP_ALLOW_REMOTE=1  allow non-loopback bind (default: loopback only)\n\
+           LOCUS_HOME                  store root\n\
+           LOCUS_WORKER_IDLE_SECS      optional idle teardown for upstream workers\n"
+    );
+}
+
+fn env_truthy(key: &str) -> bool {
+    std::env::var(key)
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "on" | "yes")
+        })
+        .unwrap_or(false)
+}
+
+fn run_stdio() -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = stdin.lock();
@@ -65,42 +167,281 @@ fn run() -> Result<()> {
             break; // EOF
         };
 
-        // Notifications have no id — handle then continue without a response.
-        let id = msg.get("id").cloned();
-        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = msg.get("params").cloned().unwrap_or(json!({}));
-
-        if id.is_none() {
-            handle_notification(method, &params);
-            continue;
+        if let Some(response) = dispatch_rpc(&msg) {
+            write_message(&mut stdout, &response, framing)?;
         }
-
-        let result = match method {
-            "initialize" => Ok(handle_initialize(&params)),
-            "ping" => Ok(json!({})),
-            "tools/list" => handle_tools_list(),
-            "tools/call" => handle_tools_call(&params),
-            "resources/list" => handle_resources_list(),
-            "resources/read" => handle_resources_read(&params),
-            "prompts/list" => handle_prompts_list(),
-            "prompts/get" => handle_prompts_get(&params),
-            other => Err(rpc_error(-32601, format!("method not found: {other}"))),
-        };
-
-        let response = match result {
-            Ok(r) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": r,
-            }),
-            Err(err) => json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": err,
-            }),
-        };
-        write_message(&mut stdout, &response, framing)?;
     }
+    Ok(())
+}
+
+/// Dispatch one JSON-RPC request/notification.
+/// Returns `None` for notifications (no response).
+fn dispatch_rpc(msg: &Value) -> Option<Value> {
+    let id = msg.get("id").cloned();
+    let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = msg.get("params").cloned().unwrap_or(json!({}));
+
+    if id.is_none() {
+        handle_notification(method, &params);
+        return None;
+    }
+
+    let result = match method {
+        "initialize" => Ok(handle_initialize(&params)),
+        "ping" => Ok(json!({})),
+        "tools/list" => handle_tools_list(),
+        "tools/call" => handle_tools_call(&params),
+        "resources/list" => handle_resources_list(),
+        "resources/read" => handle_resources_read(&params),
+        "prompts/list" => handle_prompts_list(),
+        "prompts/get" => handle_prompts_get(&params),
+        other => Err(rpc_error(-32601, format!("method not found: {other}"))),
+    };
+
+    Some(match result {
+        Ok(r) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": r,
+        }),
+        Err(err) => json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": err,
+        }),
+    })
+}
+
+// ─── HTTP transport (JSON-RPC POST /mcp) ────────────────────────────────────
+
+fn run_http(addr: SocketAddr) -> Result<()> {
+    if !addr.ip().is_loopback() && !env_truthy("LOCUS_MCP_HTTP_ALLOW_REMOTE") {
+        bail!(
+            "refusing non-loopback bind {addr} — use 127.0.0.1 or set LOCUS_MCP_HTTP_ALLOW_REMOTE=1"
+        );
+    }
+    // Prefer explicit loopback default even if caller passed IPv6 localhost only via env.
+    if matches!(addr.ip(), IpAddr::V4(ip) if ip == Ipv4Addr::UNSPECIFIED)
+        && !env_truthy("LOCUS_MCP_HTTP_ALLOW_REMOTE")
+    {
+        bail!("refusing 0.0.0.0 bind without LOCUS_MCP_HTTP_ALLOW_REMOTE=1");
+    }
+
+    let token = std::env::var("LOCUS_MCP_HTTP_TOKEN").unwrap_or_default();
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        bail!("LOCUS_MCP_HTTP_TOKEN is required for HTTP mode (set a non-empty shared secret)");
+    }
+
+    let listener = TcpListener::bind(addr).with_context(|| format!("bind {addr}"))?;
+    eprintln!(
+        "locus-mcp: HTTP listening on http://{addr}  (POST /mcp, GET /health)  token auth required"
+    );
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let token = token.clone();
+                // Detach per connection so health checks aren't blocked by tools/call.
+                thread::spawn(move || {
+                    if let Err(e) = handle_http_connection(stream, &token) {
+                        eprintln!("locus-mcp http: {e:#}");
+                    }
+                });
+            }
+            Err(e) => eprintln!("locus-mcp http accept: {e}"),
+        }
+    }
+    Ok(())
+}
+
+fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result<()> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
+
+    let mut reader = io::BufReader::new(stream.try_clone().context("clone stream")?);
+    let (method, path, headers, body) = read_http_request(&mut reader)?;
+
+    let path_only = path.split('?').next().unwrap_or(path.as_str());
+
+    // Health is unauthenticated so orchestrators can probe liveness without the token.
+    if method.eq_ignore_ascii_case("GET")
+        && (path_only == "/health" || path_only == "/healthz" || path_only == "/")
+    {
+        let body = json!({
+            "ok": true,
+            "service": "locus-mcp",
+            "version": VERSION,
+            "transport": "http",
+        });
+        return write_http_json(&mut stream, 200, &body, None);
+    }
+
+    if !http_token_ok(&headers, expected_token) {
+        let body = json!({
+            "error": "unauthorized",
+            "hint": "set Authorization: Bearer <LOCUS_MCP_HTTP_TOKEN> or X-Locus-Token header",
+        });
+        return write_http_json(&mut stream, 401, &body, Some("unauthorized"));
+    }
+
+    if method.eq_ignore_ascii_case("POST")
+        && (path_only == "/mcp" || path_only == "/mcp/" || path_only == "/jsonrpc")
+    {
+        let msg: Value = serde_json::from_slice(&body).context("json-rpc body")?;
+        match dispatch_rpc(&msg) {
+            Some(response) => write_http_json(&mut stream, 200, &response, None),
+            None => {
+                // Notification — 202 Accepted, empty body.
+                write_http_response(&mut stream, 202, "application/json", b"{}", None)
+            }
+        }
+    } else if method.eq_ignore_ascii_case("OPTIONS") {
+        // Minimal CORS preflight for local browser tools (CI usually doesn't need it).
+        write_http_response(
+            &mut stream,
+            204,
+            "text/plain",
+            b"",
+            Some(vec![
+                ("Access-Control-Allow-Origin", "*"),
+                (
+                    "Access-Control-Allow-Headers",
+                    "Authorization, Content-Type, X-Locus-Token",
+                ),
+                ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+            ]),
+        )
+    } else {
+        let body = json!({
+            "error": "not_found",
+            "hint": "GET /health or POST /mcp (JSON-RPC 2.0)",
+        });
+        write_http_json(&mut stream, 404, &body, None)
+    }
+}
+
+fn http_token_ok(headers: &[(String, String)], expected: &str) -> bool {
+    for (k, v) in headers {
+        let k = k.to_ascii_lowercase();
+        if (k == "x-locus-token" || k == "x-locus-mcp-token")
+            && constant_time_eq(v.trim(), expected)
+        {
+            return true;
+        }
+        if k == "authorization" {
+            let v = v.trim();
+            if let Some(rest) = v
+                .strip_prefix("Bearer ")
+                .or_else(|| v.strip_prefix("bearer "))
+            {
+                if constant_time_eq(rest.trim(), expected) {
+                    return true;
+                }
+            }
+            // Also accept raw token in Authorization (some CI helpers).
+            if constant_time_eq(v, expected) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+#[allow(clippy::type_complexity)]
+fn read_http_request<R: BufRead>(
+    reader: &mut R,
+) -> Result<(String, String, Vec<(String, String)>, Vec<u8>)> {
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .context("read request line")?;
+    if request_line.is_empty() {
+        bail!("empty HTTP request");
+    }
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        bail!("malformed request line: {request_line:?}");
+    }
+    let method = parts[0].to_string();
+    let path = parts[1].to_string();
+
+    let mut headers = Vec::new();
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).context("read header")?;
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = trimmed.split_once(':') {
+            let key = k.trim().to_string();
+            let val = v.trim().to_string();
+            if key.eq_ignore_ascii_case("content-length") {
+                content_length = val.parse().unwrap_or(0);
+            }
+            headers.push((key, val));
+        }
+    }
+
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body).context("read HTTP body")?;
+    }
+    Ok((method, path, headers, body))
+}
+
+fn write_http_json(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &Value,
+    _reason: Option<&str>,
+) -> Result<()> {
+    let bytes = serde_json::to_vec(body)?;
+    write_http_response(stream, status, "application/json", &bytes, None)
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra_headers: Option<Vec<(&str, &str)>>,
+) -> Result<()> {
+    let reason = match status {
+        200 => "OK",
+        202 => "Accepted",
+        204 => "No Content",
+        401 => "Unauthorized",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    if let Some(extra) = extra_headers {
+        for (k, v) in extra {
+            head.push_str(&format!("{k}: {v}\r\n"));
+        }
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(body)?;
+    stream.flush()?;
     Ok(())
 }
 
@@ -943,10 +1284,24 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
     let synthetic = tools_for_binding(binding);
     let is_synthetic = synthetic.iter().any(|t| t.name == tool_name);
 
+    // Mint short-lived capability ticket before fan-out (audit ticket_id only).
+    let ticket = s
+        .mint_capability_ticket(&session.session_id, &binding.id, tool_name)
+        .ok();
+    let ticket_id = ticket.as_ref().map(|t| t.ticket_id.clone());
+
     if is_synthetic {
         match call_tool_gated(binding, tool_name, &args, Some(gate)) {
             Ok(r) => {
                 audit_tool_block(&s, &binding.alias, tool_name, &r.content);
+                audit_tool_call(
+                    &s,
+                    &binding.alias,
+                    tool_name,
+                    &session.session_id,
+                    ticket_id.as_deref(),
+                    r.ok,
+                );
                 Ok(tool_text(r.content, !r.ok))
             }
             Err(e) => Ok(tool_text(
@@ -962,11 +1317,21 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
                 Ok(tool_text(blocked.content, true))
             }
             Ok(None) => {
-                let mgr = worker_manager()
+                let mut mgr = worker_manager()
                     .lock()
                     .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
                 match mgr.call_tool(&session, binding, tool_name, &args) {
-                    Ok(r) => Ok(tool_text(r.content, !r.ok)),
+                    Ok(r) => {
+                        audit_tool_call(
+                            &s,
+                            &binding.alias,
+                            tool_name,
+                            &session.session_id,
+                            ticket_id.as_deref(),
+                            r.ok,
+                        );
+                        Ok(tool_text(r.content, !r.ok))
+                    }
                     Err(e) => Ok(tool_text(
                         json!({ "error": e.to_string(), "tool": name }),
                         true,
@@ -976,6 +1341,27 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
             Err(e) => Ok(tool_text(json!({ "error": e.to_string() }), true)),
         }
     }
+}
+
+/// Audit successful tools/call path with optional capability `ticket_id` (not a secret).
+fn audit_tool_call(
+    s: &Store,
+    alias: &str,
+    tool: &str,
+    session_id: &str,
+    ticket_id: Option<&str>,
+    ok: bool,
+) {
+    let _ = s.audit(
+        "mcp.tools_call",
+        alias,
+        Some(json!({
+            "tool": tool,
+            "session_id": session_id,
+            "ticket_id": ticket_id,
+            "ok": ok,
+        })),
+    );
 }
 
 fn audit_tool_block(s: &Store, alias: &str, tool: &str, content: &Value) {

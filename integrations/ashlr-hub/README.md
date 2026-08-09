@@ -2,17 +2,25 @@
 
 Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus without forking this repo.
 
-Full contract: [`docs/hub-integration.md`](../../docs/hub-integration.md)  
-Schemas: [`schema/agent-report.schema.json`](../../schema/agent-report.schema.json), [`schema/doctor.schema.json`](../../schema/doctor.schema.json)
+| Artifact | Path |
+|----------|------|
+| Full contract | [`docs/hub-integration.md`](../../docs/hub-integration.md) |
+| TypeScript probe | [`locus.ts`](./locus.ts) — `locusAgentReport`, `ensureLocusReady`, `withLocusSession`, `parseStatusOneline` |
+| MCP gateway patch | [`mcp-gateway-snippet.md`](./mcp-gateway-snippet.md) |
+| Doctor check | [`doctor-check.md`](./doctor-check.md) |
+| Schemas | [`schema/agent-report.schema.json`](../../schema/agent-report.schema.json), [`schema/doctor.schema.json`](../../schema/doctor.schema.json) |
+| Northstar | [`GOALS.md`](../../GOALS.md) · `locus goal status` |
 
 ---
 
 ## What hub should do
 
 1. Shell out to Locus CLI (or spawn `locus-mcp` stdio) — do not reimplement pin/seal.
-2. Prefer **`locus agent report --json`** as the single readiness probe.
-3. Register MCP servers from **`required_servers`** (`locus` + `phantom` only).
-4. **Never** parse or store secret values from locus/phantom output.
+2. Prefer **`locus agent report --json`** as the single readiness probe (`ensureLocusReady()`).
+3. Register MCP servers from **`required_servers`** (`locus` + `phantom` only) — see [mcp-gateway-snippet.md](./mcp-gateway-snippet.md).
+4. Use **`withLocusSession(binding, fn)`** for ephemeral job pins (`ci mint`; no `active.json` mutation).
+5. Add **`checkLocus`** to ashlr doctor — see [doctor-check.md](./doctor-check.md).
+6. **Never** parse or store secret values from locus/phantom output.
 
 ## What hub must not do
 
@@ -203,37 +211,35 @@ export interface StatusUnpinnedJson {
 export type StatusJson = StatusPinnedJson | StatusUnpinnedJson;
 ```
 
-### Minimal hub probe helper
+### Drop-in helpers ([`locus.ts`](./locus.ts))
 
 ```ts
-import { spawnSync } from "node:child_process";
-import type { AgentReport, AgentStatus, LocusAgentExitCode } from "./types"; // your copy
+import {
+  REQUIRED_SERVERS,
+  locusAgentReport,
+  ensureLocusReady,
+  withLocusSession,
+  parseStatusOneline,
+  canMutate,
+  locusDoctorLine,
+} from "./locus"; // copy of integrations/ashlr-hub/locus.ts
 
-export const REQUIRED_SERVERS = ["locus", "phantom"] as const;
+// Pre-mutate gate (throws LocusNotReadyError if unsafe / unpinned)
+ensureLocusReady();
 
-export function locusAgentReport(env: NodeJS.ProcessEnv = process.env): {
-  report: AgentReport;
-  exitCode: LocusAgentExitCode;
-} {
-  const r = spawnSync("locus", ["agent", "report", "--json"], {
-    encoding: "utf8",
-    env,
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  const exitCode = (r.status ?? 1) as LocusAgentExitCode;
-  if (!r.stdout?.trim()) {
-    throw new Error(`locus agent report failed: ${r.stderr || r.error}`);
-  }
-  const report = JSON.parse(r.stdout) as AgentReport;
-  // Hard rule: never treat credential_ref as a secret to inject into prompts.
-  return { report, exitCode };
-}
+// Ephemeral CI pin — does not touch human active.json
+await withLocusSession("acme", async ({ env, sessionId }) => {
+  ensureLocusReady(env);
+  // spawn children with env (includes LOCUS_SESSION_ID)
+  return sessionId;
+});
 
-export function canMutate(status: AgentStatus, statusOneline: string): boolean {
-  if (status === "unsafe") return false;
-  if (["unpinned", "frozen", "invalid"].includes(statusOneline)) return false;
-  return status === "ready";
-}
+const { report, gateOk } = locusAgentReport();
+const pin = parseStatusOneline(report?.status_oneline ?? "unpinned");
+// pin.healthy && canMutate(report!.status, report!.status_oneline)
+
+// ashlr doctor line
+const line = locusDoctorLine(); // { id, ok, detail, fix? }
 ```
 
 ---

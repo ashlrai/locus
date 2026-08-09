@@ -20,3 +20,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 colored = { workspace = true }
 dirs = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tower = { workspace = true, features = ["util"] }

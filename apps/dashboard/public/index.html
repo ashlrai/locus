@@ -1,0 +1,1024 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Locus — Identity Dashboard</title>
+  <meta name="description" content="Local identity plane dashboard. Pin, whoami, approvals, doctor, audit — no secrets." />
+  <meta name="theme-color" content="#0a0a0a" />
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --bg-elev: #111111;
+      --bg-panel: #0e0e0e;
+      --bg-hover: #161616;
+      --fg: #e8e8e8;
+      --muted: #8a8a8a;
+      --dim: #555555;
+      --line: #222222;
+      --line-strong: #333333;
+      --accent: #f0f0f0;
+      --ok: #a8ffb0;
+      --warn: #ffd28a;
+      --err: #ff9a9a;
+      --cyan: #9ad4ff;
+      --yellow: #ffe08a;
+      --magenta: #e0b0ff;
+      --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+      --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      --max: 1100px;
+      --radius: 6px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: var(--sans);
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+      background-size: 48px 48px;
+      mask-image: radial-gradient(ellipse 70% 45% at 50% 0%, #000 15%, transparent 70%);
+      z-index: 0;
+    }
+
+    .wrap {
+      position: relative;
+      z-index: 1;
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 0 1.25rem 3.5rem;
+    }
+
+    /* ── header ─────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+      padding: 1.15rem 0;
+      border-bottom: 1px solid var(--line);
+      margin-bottom: 1.5rem;
+    }
+
+    .brand {
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+    }
+
+    .brand .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--fg);
+      box-shadow: 0 0 0 3px rgba(255,255,255,0.08);
+    }
+
+    .brand .dot.live {
+      background: var(--ok);
+      box-shadow: 0 0 0 3px rgba(168,255,176,0.15);
+    }
+
+    .brand .dot.err {
+      background: var(--err);
+      box-shadow: 0 0 0 3px rgba(255,154,154,0.15);
+    }
+
+    .brand span.sub {
+      color: var(--dim);
+      font-weight: 400;
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .hdr-actions {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      flex-wrap: wrap;
+    }
+
+    .meta {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      color: var(--dim);
+    }
+
+    .meta strong { color: var(--muted); font-weight: 500; }
+
+    /* ── buttons ────────────────────────────────────────── */
+    .btn {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      padding: 0.45rem 0.75rem;
+      border: 1px solid var(--line-strong);
+      border-radius: 4px;
+      background: var(--bg-elev);
+      color: var(--fg);
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    .btn:hover { border-color: #555; background: var(--bg-hover); }
+    .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    .btn.primary {
+      background: var(--fg);
+      color: var(--bg);
+      border-color: var(--fg);
+      font-weight: 600;
+    }
+
+    .btn.primary:hover { background: #fff; border-color: #fff; }
+
+    .btn.danger {
+      border-color: #4a2a2a;
+      color: var(--err);
+    }
+
+    .btn.danger:hover { border-color: var(--err); background: #1a1010; }
+
+    .btn.sm { padding: 0.3rem 0.55rem; font-size: 0.66rem; }
+
+    /* ── verdict banner ─────────────────────────────────── */
+    .verdict {
+      font-family: var(--mono);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+      padding: 0.9rem 1.1rem;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--bg-panel);
+      margin-bottom: 1.25rem;
+    }
+
+    .verdict .left {
+      display: flex;
+      align-items: baseline;
+      gap: 0.85rem;
+      flex-wrap: wrap;
+    }
+
+    .verdict .label {
+      font-size: 0.65rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--dim);
+    }
+
+    .verdict .value {
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+    }
+
+    .verdict.SAFE .value { color: var(--ok); }
+    .verdict.WARN .value { color: var(--warn); }
+    .verdict.UNSAFE .value { color: var(--err); }
+    .verdict.OFFLINE .value { color: var(--dim); }
+
+    .verdict .detail {
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+
+    /* ── grid ───────────────────────────────────────────── */
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+
+    @media (max-width: 820px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+
+    .panel {
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    .panel.wide { grid-column: 1 / -1; }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+      padding: 0.7rem 0.95rem;
+      border-bottom: 1px solid var(--line);
+      background: #0c0c0c;
+    }
+
+    .panel-title {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--dim);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .panel-title .count {
+      color: var(--muted);
+      letter-spacing: 0;
+      text-transform: none;
+    }
+
+    .panel-body {
+      padding: 0.85rem 0.95rem 1rem;
+      flex: 1;
+      overflow: auto;
+    }
+
+    /* ── kv rows ────────────────────────────────────────── */
+    .kv {
+      display: grid;
+      grid-template-columns: 7.5rem 1fr;
+      gap: 0.25rem 0.75rem;
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      margin-bottom: 0.15rem;
+    }
+
+    .kv .k { color: var(--dim); }
+    .kv .v { color: var(--fg); word-break: break-all; }
+    .kv .v.muted { color: var(--muted); }
+    .kv .v.ok { color: var(--ok); }
+    .kv .v.warn { color: var(--warn); }
+    .kv .v.err { color: var(--err); }
+    .kv .v.cyan { color: var(--cyan); }
+    .kv .v.yellow { color: var(--yellow); }
+
+    .empty {
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      color: var(--dim);
+      padding: 0.5rem 0;
+    }
+
+    /* ── badges / chips ─────────────────────────────────── */
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      font-family: var(--mono);
+      font-size: 0.65rem;
+      padding: 0.15rem 0.45rem;
+      border-radius: 3px;
+      border: 1px solid var(--line-strong);
+      color: var(--muted);
+      background: var(--bg-elev);
+      margin: 0.1rem 0.2rem 0.1rem 0;
+    }
+
+    .chip.ok { color: var(--ok); border-color: #2a4a2e; }
+    .chip.warn { color: var(--warn); border-color: #4a3a1a; }
+    .chip.err { color: var(--err); border-color: #4a2a2a; }
+    .chip.cyan { color: var(--cyan); border-color: #1a3a4a; }
+
+    /* ── lists ──────────────────────────────────────────── */
+    .row {
+      padding: 0.65rem 0;
+      border-bottom: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+    }
+
+    .row:last-child { border-bottom: none; }
+
+    .row-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.25rem;
+    }
+
+    .row-top .id { color: var(--cyan); font-weight: 600; }
+    .row-top .alias { color: var(--cyan); font-weight: 600; }
+    .row-top .ts { color: var(--dim); font-size: 0.68rem; }
+    .row-meta { color: var(--muted); font-size: 0.7rem; }
+    .row-meta .y { color: var(--yellow); }
+
+    .row-actions {
+      display: flex;
+      gap: 0.4rem;
+      margin-top: 0.45rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    input[type="text"] {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      background: var(--bg);
+      border: 1px solid var(--line-strong);
+      color: var(--fg);
+      border-radius: 4px;
+      padding: 0.35rem 0.5rem;
+      min-width: 8rem;
+    }
+
+    input[type="text"]:focus {
+      outline: none;
+      border-color: #555;
+    }
+
+    /* ── findings ───────────────────────────────────────── */
+    .finding {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      padding: 0.45rem 0;
+      border-bottom: 1px solid var(--line);
+      display: grid;
+      grid-template-columns: 4.5rem 1fr;
+      gap: 0.5rem;
+    }
+
+    .finding:last-child { border-bottom: none; }
+    .finding .sev { text-transform: uppercase; letter-spacing: 0.06em; font-size: 0.65rem; }
+    .finding .sev.warn { color: var(--warn); }
+    .finding .sev.unsafe { color: var(--err); }
+    .finding .msg { color: var(--muted); }
+    .finding .code { color: var(--dim); font-size: 0.65rem; margin-top: 0.15rem; }
+
+    /* ── commands ───────────────────────────────────────── */
+    .cmd {
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      background: var(--bg-elev);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 0.45rem 0.65rem;
+      color: var(--fg);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      margin-bottom: 0.4rem;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+
+    .cmd:hover { border-color: #444; }
+    .cmd code { color: var(--fg); }
+    .cmd .hint { color: var(--dim); font-size: 0.65rem; white-space: nowrap; }
+
+    /* ── toast ──────────────────────────────────────────── */
+    #toast {
+      position: fixed;
+      bottom: 1.25rem;
+      right: 1.25rem;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      background: var(--bg-elev);
+      border: 1px solid var(--line-strong);
+      color: var(--fg);
+      padding: 0.55rem 0.85rem;
+      border-radius: 4px;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.2s, transform 0.2s;
+      z-index: 50;
+      pointer-events: none;
+      max-width: 22rem;
+    }
+
+    #toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    #toast.err { border-color: #4a2a2a; color: var(--err); }
+
+    /* ── token gate ─────────────────────────────────────── */
+    #token-gate {
+      display: none;
+      max-width: 420px;
+      margin: 4rem auto;
+      padding: 1.5rem;
+      background: var(--bg-panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+    }
+
+    #token-gate h2 {
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      margin-bottom: 0.5rem;
+    }
+
+    #token-gate p {
+      color: var(--muted);
+      font-size: 0.85rem;
+      margin-bottom: 1rem;
+    }
+
+    #token-gate .row-actions { margin-top: 0.75rem; }
+
+    footer {
+      margin-top: 2rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--line);
+      font-family: var(--mono);
+      font-size: 0.65rem;
+      color: var(--dim);
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    footer a { color: var(--muted); text-decoration: none; }
+    footer a:hover { color: var(--fg); }
+  </style>
+</head>
+<body>
+  <div class="wrap" id="app">
+    <header>
+      <div class="brand">
+        <span class="dot" id="live-dot"></span>
+        locus
+        <span class="sub">dashboard</span>
+      </div>
+      <div class="hdr-actions">
+        <span class="meta" id="clock">—</span>
+        <button class="btn" id="btn-refresh" type="button" title="Refresh all">↻ refresh</button>
+        <label class="meta" style="display:flex;align-items:center;gap:0.35rem;cursor:pointer;">
+          <input type="checkbox" id="auto-refresh" checked style="accent-color:#a8ffb0;" />
+          auto 5s
+        </label>
+      </div>
+    </header>
+
+    <div id="token-gate">
+      <h2>auth required</h2>
+      <p>This dashboard is protected by <code style="color:var(--fg)">LOCUS_DASHBOARD_TOKEN</code>. Enter the token to continue.</p>
+      <input type="text" id="token-input" placeholder="dashboard token" autocomplete="off" spellcheck="false" style="width:100%" />
+      <div class="row-actions">
+        <button class="btn primary" id="token-save" type="button">continue</button>
+      </div>
+    </div>
+
+    <div id="main">
+      <div class="verdict OFFLINE" id="verdict">
+        <div class="left">
+          <div>
+            <div class="label">doctor</div>
+            <div class="value" id="verdict-value">…</div>
+          </div>
+          <div class="detail" id="verdict-detail">loading identity plane…</div>
+        </div>
+        <div class="detail" id="verdict-home"></div>
+      </div>
+
+      <div class="grid">
+        <!-- pin / status -->
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">active pin</div>
+            <button class="btn sm" type="button" data-copy="locus whoami">copy whoami</button>
+          </div>
+          <div class="panel-body" id="pin-body">
+            <div class="empty">loading…</div>
+          </div>
+        </section>
+
+        <!-- whoami providers -->
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">whoami · providers</div>
+          </div>
+          <div class="panel-body" id="whoami-body">
+            <div class="empty">loading…</div>
+          </div>
+        </section>
+
+        <!-- bindings -->
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">bindings <span class="count" id="bindings-count"></span></div>
+            <button class="btn sm" type="button" data-copy="locus binding list">copy list</button>
+          </div>
+          <div class="panel-body" id="bindings-body">
+            <div class="empty">loading…</div>
+          </div>
+        </section>
+
+        <!-- approvals -->
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">pending approvals <span class="count" id="approvals-count"></span></div>
+            <button class="btn sm" type="button" data-copy="locus approve list">copy list</button>
+          </div>
+          <div class="panel-body" id="approvals-body">
+            <div class="empty">loading…</div>
+          </div>
+        </section>
+
+        <!-- doctor findings -->
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">doctor findings</div>
+            <button class="btn sm" type="button" data-copy="locus doctor --json">copy doctor</button>
+          </div>
+          <div class="panel-body" id="doctor-body">
+            <div class="empty">loading…</div>
+          </div>
+        </section>
+
+        <!-- commands -->
+        <section class="panel">
+          <div class="panel-head">
+            <div class="panel-title">cli · copy-paste</div>
+          </div>
+          <div class="panel-body" id="cmds-body">
+            <div class="cmd" data-copy="locus enter personal"><code>locus enter personal</code><span class="hint">copy</span></div>
+            <div class="cmd" data-copy="locus leave"><code>locus leave</code><span class="hint">copy</span></div>
+            <div class="cmd" data-copy="locus whoami"><code>locus whoami</code><span class="hint">copy</span></div>
+            <div class="cmd" data-copy="locus doctor"><code>locus doctor</code><span class="hint">copy</span></div>
+            <div class="cmd" data-copy="locus approve list"><code>locus approve list</code><span class="hint">copy</span></div>
+            <div class="cmd" data-copy="locus events --last 20"><code>locus events --last 20</code><span class="hint">copy</span></div>
+          </div>
+        </section>
+
+        <!-- audit -->
+        <section class="panel wide">
+          <div class="panel-head">
+            <div class="panel-title">recent audit <span class="count" id="events-count"></span></div>
+            <button class="btn sm" type="button" data-copy="locus events --last 30 --json">copy events</button>
+          </div>
+          <div class="panel-body" id="events-body">
+            <div class="empty">loading…</div>
+          </div>
+        </section>
+      </div>
+
+      <footer>
+        <span>127.0.0.1 only · no secrets in API · credential_ref aliases only</span>
+        <span>
+          <a href="https://github.com/ashlrai/locus" target="_blank" rel="noopener">locus</a>
+          · sibling
+          <a href="https://phm.dev" target="_blank" rel="noopener">phantom</a>
+        </span>
+      </footer>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script>
+    (function () {
+      "use strict";
+
+      const TOKEN_KEY = "locus_dashboard_token";
+      let token = loadToken();
+      let timer = null;
+      let busy = false;
+
+      const $ = (id) => document.getElementById(id);
+
+      function loadToken() {
+        const q = new URLSearchParams(location.search).get("token");
+        if (q) {
+          try { localStorage.setItem(TOKEN_KEY, q); } catch (_) {}
+          // scrub token from address bar without reload
+          const u = new URL(location.href);
+          u.searchParams.delete("token");
+          history.replaceState({}, "", u.pathname + u.search + u.hash);
+          return q;
+        }
+        try { return localStorage.getItem(TOKEN_KEY) || ""; } catch (_) { return ""; }
+      }
+
+      function authHeaders() {
+        const h = { "Accept": "application/json" };
+        if (token) h["Authorization"] = "Bearer " + token;
+        return h;
+      }
+
+      function toast(msg, isErr) {
+        const el = $("toast");
+        el.textContent = msg;
+        el.className = isErr ? "show err" : "show";
+        clearTimeout(el._t);
+        el._t = setTimeout(() => { el.className = ""; }, 2200);
+      }
+
+      async function copyText(text) {
+        try {
+          await navigator.clipboard.writeText(text);
+          toast("copied: " + text);
+        } catch (_) {
+          toast("copy failed", true);
+        }
+      }
+
+      document.querySelectorAll("[data-copy]").forEach((el) => {
+        el.addEventListener("click", () => copyText(el.getAttribute("data-copy")));
+      });
+
+      async function api(path, opts) {
+        const res = await fetch(path, {
+          ...opts,
+          headers: { ...authHeaders(), ...(opts && opts.headers || {}) },
+        });
+        if (res.status === 401) {
+          showTokenGate(true);
+          const err = new Error("unauthorized");
+          err.status = 401;
+          throw err;
+        }
+        const ct = res.headers.get("content-type") || "";
+        const body = ct.includes("json") ? await res.json() : await res.text();
+        if (!res.ok) {
+          const msg = (body && body.error) || res.statusText || "request failed";
+          const err = new Error(msg);
+          err.status = res.status;
+          err.body = body;
+          throw err;
+        }
+        return body;
+      }
+
+      function showTokenGate(on) {
+        $("token-gate").style.display = on ? "block" : "none";
+        $("main").style.display = on ? "none" : "block";
+      }
+
+      $("token-save").addEventListener("click", () => {
+        token = ($("token-input").value || "").trim();
+        try { localStorage.setItem(TOKEN_KEY, token); } catch (_) {}
+        showTokenGate(false);
+        refresh();
+      });
+
+      $("token-input").addEventListener("keydown", (e) => {
+        if (e.key === "Enter") $("token-save").click();
+      });
+
+      $("btn-refresh").addEventListener("click", () => refresh());
+      $("auto-refresh").addEventListener("change", () => schedule());
+
+      function schedule() {
+        if (timer) clearInterval(timer);
+        if ($("auto-refresh").checked) {
+          timer = setInterval(() => refresh(), 5000);
+        }
+      }
+
+      function esc(s) {
+        return String(s == null ? "" : s)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      function kv(k, v, cls) {
+        return `<div class="kv"><span class="k">${esc(k)}</span><span class="v ${cls || ""}">${v}</span></div>`;
+      }
+
+      function shortId(id) {
+        if (!id) return "—";
+        if (id.length <= 18) return id;
+        return id.slice(0, 10) + "…" + id.slice(-4);
+      }
+
+      function renderPin(status, whoami) {
+        const el = $("pin-body");
+        if (!status || !status.pinned) {
+          el.innerHTML =
+            `<div class="empty">unpinned` +
+            (status && status.require_pin ? ` · workspace <span class="chip warn">require_pin</span>` : "") +
+            `</div>` +
+            `<div class="cmd" data-copy="locus enter personal"><code>locus enter &lt;alias&gt;</code><span class="hint">copy</span></div>`;
+          el.querySelectorAll("[data-copy]").forEach((n) =>
+            n.addEventListener("click", () => copyText(n.getAttribute("data-copy")))
+          );
+          return;
+        }
+        const seal = status.seal_ok ? `<span class="ok">ok</span>` : `<span class="err">BAD</span>`;
+        const frozen = status.frozen
+          ? `<span class="err">YES</span> ${esc(status.frozen_reason || "re-pin")}`
+          : `<span class="muted">no</span>`;
+        let html = "";
+        html += kv("binding", `<span class="cyan">${esc(status.binding)}</span>`);
+        html += kv("tenant", `<span class="yellow">${esc(status.tenant)}</span>`);
+        html += kv("session", `<span class="muted">${esc(shortId(status.session_id))}</span>`);
+        html += kv("seal", seal);
+        html += kv("frozen", frozen);
+        if (status.expired) html += kv("expired", `<span class="err">yes</span>`);
+        html += kv("mode", esc(status.mode || "exclusive"));
+        if (status.namespaces && status.namespaces.length) {
+          html += kv("namespaces", esc(status.namespaces.join(", ")));
+        }
+        if (whoami && whoami.expires_at) {
+          html += kv("expires", `<span class="muted">${esc(whoami.expires_at)}</span>`);
+        }
+        if (whoami && whoami.principal) {
+          html += kv("principal", esc(whoami.principal));
+        }
+        el.innerHTML = html;
+      }
+
+      function renderWhoami(whoami, status) {
+        const el = $("whoami-body");
+        if (!status || !status.pinned || !whoami) {
+          el.innerHTML = `<div class="empty">no active pin — providers hidden until enter</div>`;
+          return;
+        }
+        if (!whoami.providers || !whoami.providers.length) {
+          el.innerHTML = `<div class="empty">no providers on binding</div>`;
+          return;
+        }
+        let html = "";
+        for (const p of whoami.providers) {
+          html += `<div class="row">`;
+          html += `<div class="row-top"><span class="alias">${esc(p.provider)}</span>`;
+          if (p.read_only) html += `<span class="chip">read_only</span>`;
+          html += `</div>`;
+          html += `<div class="row-meta">account=<span class="y">${esc(p.account)}</span>`;
+          if (p.project_ref) html += ` · project_ref=${esc(p.project_ref)}`;
+          if (p.team_id) html += ` · team_id=${esc(p.team_id)}`;
+          if (p.account_id) html += ` · account_id=${esc(p.account_id)}`;
+          html += `</div>`;
+          html += `<div class="row-meta" style="margin-top:0.15rem;color:var(--dim)">${esc(p.credential_ref)}</div>`;
+          html += `</div>`;
+        }
+        el.innerHTML = html;
+      }
+
+      function renderBindings(list, status) {
+        const el = $("bindings-body");
+        const items = list || [];
+        $("bindings-count").textContent = items.length ? `(${items.length})` : "";
+        if (!items.length) {
+          el.innerHTML = `<div class="empty">no bindings — locus init --with-samples</div>`;
+          return;
+        }
+        const active = status && status.pinned ? status.binding : null;
+        let html = "";
+        for (const b of items) {
+          const isActive = active && b.alias === active;
+          html += `<div class="row">`;
+          html += `<div class="row-top">`;
+          html += `<span class="alias">${esc(b.alias)}</span>`;
+          html += `<span>`;
+          if (isActive) html += `<span class="chip ok">pinned</span>`;
+          html += `<span class="chip">${esc(b.tenant)}</span>`;
+          html += `</span></div>`;
+          html += `<div class="row-meta">${(b.providers || []).map((p) => `<span class="chip cyan">${esc(p)}</span>`).join("")}`;
+          if (b.description) html += ` <span style="color:var(--dim)">${esc(b.description)}</span>`;
+          html += `</div>`;
+          html += `<div class="row-actions">`;
+          html += `<button class="btn sm" type="button" data-copy="locus enter ${esc(b.alias)}">enter</button>`;
+          html += `</div></div>`;
+        }
+        el.innerHTML = html;
+        el.querySelectorAll("[data-copy]").forEach((n) =>
+          n.addEventListener("click", () => copyText(n.getAttribute("data-copy")))
+        );
+      }
+
+      function renderApprovals(list) {
+        const el = $("approvals-body");
+        const items = list || [];
+        $("approvals-count").textContent = items.length ? `(${items.length})` : "";
+        if (!items.length) {
+          el.innerHTML = `<div class="empty">no pending approvals</div>`;
+          return;
+        }
+        let html = "";
+        for (const a of items) {
+          const dual = !!a.dual_control;
+          const required = a.required_grants || (dual ? 2 : 1);
+          const grants = (a.grants || []).length;
+          html += `<div class="row" data-id="${esc(a.id)}">`;
+          html += `<div class="row-top"><span class="id">${esc(a.id)}</span><span class="ts">${esc(a.created_at || "")}</span></div>`;
+          html += `<div class="row-meta">tool=<span class="y">${esc(a.tool)}</span> · binding=<span class="y">${esc(a.binding)}</span></div>`;
+          html += `<div class="row-meta">grants ${grants}/${required}${dual ? " · dual_control" : ""}`;
+          if (a.requester) html += ` · requester=${esc(a.requester)}`;
+          html += `</div>`;
+          html += `<div class="row-actions">`;
+          html += `<input type="text" class="principal" placeholder="principal" value="" />`;
+          html += `<button class="btn sm primary grant-btn" type="button">grant</button>`;
+          html += `<button class="btn sm" type="button" data-copy="locus approve grant ${esc(a.id)} --as $USER">cli</button>`;
+          html += `</div></div>`;
+        }
+        el.innerHTML = html;
+        el.querySelectorAll("[data-copy]").forEach((n) =>
+          n.addEventListener("click", () => copyText(n.getAttribute("data-copy")))
+        );
+        el.querySelectorAll(".grant-btn").forEach((btn) => {
+          btn.addEventListener("click", async () => {
+            const row = btn.closest(".row");
+            const id = row.getAttribute("data-id");
+            const principal = (row.querySelector(".principal").value || "").trim();
+            if (!principal) {
+              toast("principal required", true);
+              return;
+            }
+            btn.disabled = true;
+            try {
+              await api(`/api/approve/${encodeURIComponent(id)}/grant`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ principal }),
+              });
+              toast("granted " + id);
+              refresh();
+            } catch (e) {
+              toast(e.message || "grant failed", true);
+              btn.disabled = false;
+            }
+          });
+        });
+      }
+
+      function renderDoctor(doc) {
+        const el = $("doctor-body");
+        if (!doc) {
+          el.innerHTML = `<div class="empty">doctor unavailable</div>`;
+          return;
+        }
+        let html = "";
+        html += kv("seal", doc.seal_ok ? `<span class="ok">ok</span>` : `<span class="err">BAD</span>`);
+        html += kv("bindings", String(doc.bindings ?? 0));
+        html += kv("pending", String(doc.pending_approvals ?? 0));
+        html += kv("dual wait", String(doc.dual_control_waiting ?? 0));
+        html += kv("phantom", doc.phantom_on_path ? `<span class="ok">on PATH</span>` : `<span class="warn">missing</span>`);
+        if (doc.workspace) {
+          html += kv(
+            "workspace",
+            doc.workspace.found
+              ? `<span class="ok">found</span>${doc.workspace.require_pin ? ' <span class="chip warn">require_pin</span>' : ""}`
+              : `<span class="muted">none</span>`
+          );
+        }
+        if (doc.runtime) {
+          const r = doc.runtime;
+          html += kv(
+            "runtime",
+            r.ok
+              ? `<span class="ok">ok</span>`
+              : `<span class="err">${esc((r.issues || []).join(", ") || "drift")}</span>`
+          );
+        }
+        const findings = doc.findings || [];
+        if (findings.length) {
+          html += `<div style="margin-top:0.75rem;border-top:1px solid var(--line);padding-top:0.5rem">`;
+          for (const f of findings) {
+            const sev = (f.severity || "warn").toLowerCase();
+            html += `<div class="finding">`;
+            html += `<span class="sev ${sev === "unsafe" ? "unsafe" : "warn"}">${esc(sev)}</span>`;
+            html += `<div><div class="msg">${esc(f.message)}</div><div class="code">${esc(f.code)}</div></div>`;
+            html += `</div>`;
+          }
+          html += `</div>`;
+        } else {
+          html += `<div class="empty" style="margin-top:0.5rem">no findings</div>`;
+        }
+        el.innerHTML = html;
+      }
+
+      function renderEvents(events) {
+        const el = $("events-body");
+        const items = events || [];
+        $("events-count").textContent = items.length ? `(${items.length})` : "";
+        if (!items.length) {
+          el.innerHTML = `<div class="empty">no audit events yet</div>`;
+          return;
+        }
+        // newest last in filter_audit_events; reverse for display newest first
+        const ordered = items.slice().reverse();
+        let html = "";
+        for (const e of ordered) {
+          html += `<div class="row">`;
+          html += `<div class="row-top"><span class="id" style="color:var(--fg)">${esc(e.op)}</span><span class="ts">${esc(e.ts || "")}</span></div>`;
+          html += `<div class="row-meta">binding=<span class="y">${esc(e.binding || "-")}</span>`;
+          if (e.detail && typeof e.detail === "object") {
+            const bits = [];
+            for (const k of Object.keys(e.detail).slice(0, 6)) {
+              const v = e.detail[k];
+              if (v == null || typeof v === "object") continue;
+              bits.push(`${k}=${v}`);
+            }
+            if (bits.length) html += ` · ${esc(bits.join(" · "))}`;
+          }
+          html += `</div></div>`;
+        }
+        el.innerHTML = html;
+      }
+
+      function setVerdict(doc, online) {
+        const box = $("verdict");
+        const val = $("verdict-value");
+        const detail = $("verdict-detail");
+        const home = $("verdict-home");
+        const dot = $("live-dot");
+
+        if (!online) {
+          box.className = "verdict OFFLINE";
+          val.textContent = "OFFLINE";
+          detail.textContent = "cannot reach local API — is locus serve running?";
+          home.textContent = "";
+          dot.className = "dot err";
+          return;
+        }
+
+        const v = (doc && doc.verdict) || "WARN";
+        box.className = "verdict " + v;
+        val.textContent = v;
+        const parts = [];
+        if (doc.pinned) parts.push("pin=" + doc.pinned);
+        else parts.push("unpinned");
+        parts.push("bindings=" + (doc.bindings ?? 0));
+        parts.push("pending=" + (doc.pending_approvals ?? 0));
+        if (doc.findings && doc.findings.length) parts.push("findings=" + doc.findings.length);
+        detail.textContent = parts.join(" · ");
+        home.textContent = doc.home || "";
+        dot.className = v === "UNSAFE" ? "dot err" : "dot live";
+      }
+
+      async function refresh() {
+        if (busy) return;
+        busy = true;
+        $("btn-refresh").disabled = true;
+        $("clock").textContent = new Date().toLocaleTimeString();
+        try {
+          const [status, bindings, approvals, doctor, events] = await Promise.all([
+            api("/api/status"),
+            api("/api/bindings"),
+            api("/api/approvals"),
+            api("/api/doctor"),
+            api("/api/events?last=30"),
+          ]);
+
+          let whoami = null;
+          if (status.pinned) {
+            try { whoami = await api("/api/whoami"); } catch (_) { whoami = null; }
+          }
+
+          showTokenGate(false);
+          setVerdict(doctor, true);
+          renderPin(status, whoami);
+          renderWhoami(whoami, status);
+          renderBindings(bindings.bindings || bindings, status);
+          renderApprovals(approvals.approvals || approvals);
+          renderDoctor(doctor);
+          renderEvents(events.events || events);
+        } catch (e) {
+          if (e.status === 401) {
+            // gate already shown
+          } else {
+            setVerdict(null, false);
+            toast(e.message || "refresh failed", true);
+          }
+        } finally {
+          busy = false;
+          $("btn-refresh").disabled = false;
+        }
+      }
+
+      // boot
+      refresh();
+      schedule();
+    })();
+  </script>
+</body>
+</html>

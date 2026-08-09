@@ -90,6 +90,64 @@ Any client that can spawn a stdio MCP server can use:
 - Protocol version advertised: `2024-11-05`  
 - `initialize.instructions` carries crisp agent rules (whoami first, cannot pin, scope freeze, resources)
 
+## HTTP transport (CI / remote agents)
+
+Stdio remains the default for Claude Code and Cursor. For CI runners and agents that prefer HTTP, enable the local JSON-RPC server:
+
+```bash
+export LOCUS_MCP_HTTP_TOKEN="$(openssl rand -hex 16)"   # required shared secret
+locus-mcp --http                    # binds 127.0.0.1:8742
+# or:
+locus-mcp --http 127.0.0.1:9000
+# or:
+LOCUS_MCP_HTTP=1 LOCUS_MCP_HTTP_ADDR=127.0.0.1:8742 locus-mcp
+```
+
+| Endpoint | Auth | Behavior |
+|----------|------|----------|
+| `GET /health` (`/healthz`, `/`) | none | Liveness JSON: `{ ok, service, version, transport }` |
+| `POST /mcp` (also `/jsonrpc`) | **required** | One JSON-RPC 2.0 request body → JSON-RPC response |
+| `OPTIONS /mcp` | none | Minimal CORS preflight for local tooling |
+
+Auth headers (any one):
+
+- `Authorization: Bearer <LOCUS_MCP_HTTP_TOKEN>`
+- `X-Locus-Token: <token>`
+- `X-Locus-Mcp-Token: <token>`
+
+**Hard rules:**
+
+1. **Loopback only by default** — non-`127.0.0.1` / non-loopback binds refuse unless `LOCUS_MCP_HTTP_ALLOW_REMOTE=1`.
+2. **Token required** — HTTP mode will not start without a non-empty `LOCUS_MCP_HTTP_TOKEN`.
+3. Missing/wrong token → **401**; never soft-allow.
+4. Same pin/policy/seal gate as stdio — HTTP is only a transport.
+
+Example (CI):
+
+```bash
+curl -sS http://127.0.0.1:8742/health
+curl -sS -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+  http://127.0.0.1:8742/mcp
+```
+
+### Capability tickets
+
+On each provider `tools/call` path, locus-mcp mints a short-lived **capability ticket**:
+
+```text
+material = session_id|binding_id|tool|exp
+ticket_id = cap_ + hex(HMAC-SHA256(daemon_key, material))
+TTL       = 30s (default)
+```
+
+- `ticket_id` is written to the audit event `mcp.tools_call` — it is **not** a secret and is safe in logs.
+- Verify with the store: `Store::verify_capability_ticket` / `verify_capability_ticket_parts` (same daemon key under `LOCUS_HOME`).
+- Tickets do not replace the seal or policy; they correlate a call for forensics / future worker side-channels.
+
+See also [docs/workers.md](./workers.md) for worker pool reuse and idle teardown.
+
 ## Tools the agent sees
 
 Every tool description is prefixed with **`[locus:<alias|unpinned>]`** so the model always sees which tenant the catalog belongs to. **`locus_whoami` is always first** in `tools/list`.

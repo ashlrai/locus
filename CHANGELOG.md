@@ -9,8 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Local identity dashboard** (`apps/dashboard/` + CLI)
+  - **`locus serve [--port 8750] [--token] [--open]`** — loopback-only Axum server serving the UI and JSON API
+  - **`locus dashboard`** — same server + open browser (`--no-open` to skip)
+  - API: `GET /api/status|whoami|bindings|approvals|doctor|events`, `POST /api/approve/{id}/grant`
+  - Security: bind `127.0.0.1` only; no resolved secrets; optional `LOCUS_DASHBOARD_TOKEN`
+- **Adapter SDK** — `docs/adapter-sdk.md`, `examples/adapters/_template/`, `adapters/manifest.toml` (built-in providers + capabilities)
+- **`locus forensics export [--binding] [--out pack.json]`** — shareable pack: pin/session meta, binding summaries, audit tail, doctor snapshot, pending approvals, near-miss, chain tip (no secrets)
+- **`locus events export [--otlp] [--out file]`** — fleet-pulse JSON lines or OTLP Logs JSON; `docs/observability.md`
+- **Doctor `near_miss_count` / `near_miss`** — scope_freeze + require_approval blocks in the last 24h
+
 - **`locus quickstart`** — first-60s bootstrap: config + samples if empty, enter workspace default / sample pin, whoami + doctor verdict
 - **`locus completion <shell>`** — bash/zsh/fish/elvish/powershell via clap_complete
+- **`locus goal status`** — northstar progress from `GOALS.md` (checkbox parse) or embedded milestones; `--json` totals
+- **[GOALS.md](./GOALS.md)** — vision, goal tree (identity → firm → AI → hub → verification), milestone checklist, success metrics
+- **Hub drop-in maximal surface** ([`integrations/ashlr-hub/`](./integrations/ashlr-hub/))
+  - `locus.ts`: `withLocusSession` (`ci mint` ephemeral env), `ensureLocusReady`, `parseStatusOneline` / `canMutate`, `locusCiMint`
+  - `mcp-gateway-snippet.md` — REQUIRED_SERVERS + locus-first discovery patch
+  - `doctor-check.md` — `checkLocus` for ashlr doctor
 - **locus-mcp AI-native surface**
   - Resources: `locus://session`, `locus://doctor`, `locus://bindings` (`resources/list` + `resources/read`)
   - Prompt: `locus_context` system fragment (`prompts/list` + `prompts/get`)
@@ -23,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`locus init`** — writes `config.toml` with `notify.enabled = false` when missing; AI-native next steps (`setup` · `enter` · `doctor`); annotated sample bindings
 - **Shell hook** — prompt shows `[locus:FROZEN]`, `[locus:enter!]` when unpinned in `require_pin` workspaces; status oneline token `require_pin`
-- Landing page / agent docs: prefer `locus enter` before tool use; v0.1.1 graph + CI commands
+- Landing page / agent docs: prefer `locus enter` before tool use; hero **AI-native identity plane**; v0.1.1 graph + CI commands
 
 ## [0.1.1] — 2026-08-09
 

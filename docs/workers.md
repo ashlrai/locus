@@ -72,8 +72,42 @@ let mut mgr = InMemoryWorkerManager::new(Box::new(backend));
 let slot = mgr.ensure(&session, &binding, "github")?;
 ```
 
+## Worker pool reuse
+
+`CompositeWorkerManager` is process-wide inside `locus-mcp`. For a given pin:
+
+1. `tools/list` / `tools/call` call `ensure_session` / `ensure_binding`.
+2. Existing slots in `Ready` / `Running` / `Pending` are **reused** — upstream MCP children are **not** respawned per list/call.
+3. Pin switch (`focus_session`) tears down slots for other `session_id`s.
+4. Process exit / `Drop` tears down all remaining children.
+
+### Optional idle timeout
+
+```bash
+export LOCUS_WORKER_IDLE_SECS=300   # tear down workers idle for 5 minutes
+```
+
+- Unset or `0` → never idle-reap (default).
+- On `ensure_*`, the manager reaps slots whose last use exceeds the timeout, then ensures the active pin.
+- `call_tool` and successful `ensure` **touch** last-used time so busy workers stay alive.
+- Programmatic: `CompositeWorkerManager::with_idle_timeout`, `reap_idle`, `set_idle_timeout`.
+
+## Capability tickets
+
+Before provider fan-out, the multiplexor mints an HMAC capability ticket
+(`session_id|binding_id|tool|exp`, 30s TTL). The audit field is `ticket_id`
+(`cap_<hex>`) only — never resolved credentials. Store helpers:
+
+```rust
+let t = store.mint_capability_ticket(&session.session_id, &binding.id, "github.scope")?;
+store.verify_capability_ticket(&t)?;
+```
+
 ## Tests
 
 - Unit: ensure/teardown, synthetic call, TOML `upstream` parse
 - Integration: mock Python NDJSON MCP server → handshake + `tools/call`
 - Composite: mixed synthetic + upstream on one binding; session focus tears down old workers
+- Pool: ensure reuses same slot; `reap_idle` after timeout
+- Tickets: mint/verify unit tests; store cross-key reject
+- HTTP: `GET /health` unauthenticated; `POST /mcp` token reject + JSON-RPC ping

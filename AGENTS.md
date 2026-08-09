@@ -154,6 +154,9 @@ Firm / multi-client workflow: [docs/firm-mode.md](./docs/firm-mode.md).
 | [docs/mcp.md](./docs/mcp.md) | Wire `locus-mcp` into clients |
 | [docs/adapters.md](./docs/adapters.md) | Write a provider adapter |
 | [docs/workers.md](./docs/workers.md) | Synthetic vs MCP stdio workers |
+| [docs/hub-integration.md](./docs/hub-integration.md) | ashlr-hub contract + agent report |
+| [integrations/ashlr-hub/](./integrations/ashlr-hub/) | Hub drop-in TS + gateway/doctor snippets |
+| [GOALS.md](./GOALS.md) | Northstar goal loop (`locus goal status`) |
 | [DESIGN.md](./DESIGN.md) | Full design + threat model |
 | [PLAN.md](./PLAN.md) | Roadmap |
 | [SECURITY.md](./SECURITY.md) | Vulnerability reporting |

@@ -1,0 +1,82 @@
+# Built-in Locus provider adapters and capabilities.
+# Source of truth for docs / hub discovery. Implementations live under
+# crates/locus-core/src/adapters/. See docs/adapter-sdk.md.
+
+version = 1
+
+[[providers]]
+id = "supabase"
+name = "Supabase"
+status = "built-in"
+synthetic = true
+capabilities = ["scope", "identity", "destructive_stubs"]
+frozen_selectors = ["project_ref", "read_only"]
+tools = ["supabase.scope", "supabase.project_ref", "supabase.table.delete"]
+destructive_tools = ["supabase.table.delete"]
+description = "Frozen project_ref identity tools; synthetic table.delete stub for policy/approval tests."
+
+[[providers]]
+id = "github"
+name = "GitHub"
+status = "built-in"
+synthetic = true
+capabilities = ["scope", "identity", "repo_allowlist"]
+frozen_selectors = ["orgs", "repos"]
+tools = ["github.scope", "github.whoami", "github.check_repo"]
+destructive_tools = []
+description = "Org/repo allowlist freeze; check_repo validates model-supplied full_name against binding scope."
+
+[[providers]]
+id = "vercel"
+name = "Vercel"
+status = "built-in"
+synthetic = true
+capabilities = ["scope", "identity", "destructive_stubs", "env_allowlist"]
+frozen_selectors = ["team_id", "projects", "env"]
+tools = ["vercel.scope", "vercel.deploy.prod"]
+destructive_tools = ["vercel.deploy.prod"]
+description = "team_id + env target freeze; synthetic prod deploy stub."
+
+[[providers]]
+id = "cloudflare"
+name = "Cloudflare"
+status = "built-in"
+synthetic = true
+capabilities = ["scope", "identity"]
+frozen_selectors = ["account_id", "zones"]
+tools = ["cloudflare.scope", "cloudflare.whoami"]
+destructive_tools = []
+description = "account_id freeze; optional zones via scope.projects or scope.extra.zones."
+
+[[providers]]
+id = "aws"
+name = "AWS"
+status = "built-in"
+synthetic = true
+capabilities = ["scope", "identity", "cli_isolation"]
+frozen_selectors = ["account_id", "profile", "region", "role_arn"]
+tools = ["aws.scope", "aws.whoami"]
+destructive_tools = []
+description = "account_id / profile / region freeze; private AWS config dir under session worker home."
+
+[[providers]]
+id = "stripe"
+name = "Stripe"
+status = "built-in"
+synthetic = true
+capabilities = ["scope", "identity"]
+frozen_selectors = ["account_id", "livemode"]
+tools = ["stripe.scope", "stripe.whoami"]
+destructive_tools = []
+description = "account_id + livemode freeze (test vs live)."
+
+[[providers]]
+id = "resend"
+name = "Resend"
+status = "built-in"
+synthetic = true
+capabilities = ["scope", "identity", "domain_allowlist"]
+frozen_selectors = ["domains"]
+tools = ["resend.scope", "resend.whoami"]
+destructive_tools = []
+description = "Domain allowlist freeze (scope.projects or scope.extra.domains)."

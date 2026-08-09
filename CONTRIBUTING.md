@@ -82,15 +82,17 @@ cargo fmt --all
 
 Adapters are the **only** place provider-specific knowledge should live. Phase 1 adapters expose **safe identity / scope tools** and enforce **scope freeze** (model cannot override frozen `project_ref`, `team_id`, orgs, etc.). Full upstream MCP workers come later.
 
-See **[docs/adapters.md](./docs/adapters.md)** for the full guide. Short checklist:
+See **[docs/adapter-sdk.md](./docs/adapter-sdk.md)** (preferred) and **[docs/adapters.md](./docs/adapters.md)**. Template: `examples/adapters/_template/`. Catalog: `adapters/manifest.toml`.
 
-1. Add `crates/locus-core/src/adapters/<provider>.rs` implementing `ProviderAdapter`.
+Short checklist:
+
+1. Add `crates/locus-core/src/adapters/<provider>.rs` implementing `ProviderAdapter` (or start from the template skeleton).
 2. Register in `adapter_for()` in `adapters/mod.rs`.
 3. Use `freeze_string_arg` (or equivalent) for every account selector the model might smuggle.
 4. Never return secret values from tool results.
 5. Mark destructive tools with `destructive: true` and rely on policy `require_approval`.
 6. Add unit tests for freeze deny + happy path identity tools.
-7. Document hard scope knobs in `docs/adapters.md` and, if user-facing, the README binding example.
+7. Document hard scope knobs in `docs/adapters.md` / adapter-sdk and update `adapters/manifest.toml`.
 
 ## Coding guidelines
 

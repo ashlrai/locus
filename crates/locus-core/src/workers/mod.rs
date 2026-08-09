@@ -19,8 +19,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub use composite::{
-    mcp_config_from_upstream, namespace_upstream_tool, provider_from_tool_name,
-    strip_provider_prefix, CompositeWorkerManager,
+    idle_timeout_from_env, mcp_config_from_upstream, namespace_upstream_tool,
+    provider_from_tool_name, strip_provider_prefix, CompositeWorkerManager, ENV_WORKER_IDLE_SECS,
 };
 pub use mcp_stdio::{McpStdioBackend, McpStdioConfig};
 pub use stdio_client::{McpStdioClient, UpstreamTool};
