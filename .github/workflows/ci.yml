@@ -23,11 +23,29 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Format
         run: cargo fmt --all -- --check
+
+      - name: Validate distribution wrappers
+        run: |
+          node --check npm/install.js
+          node --check npm/bin/locus.js
+          node --check npm-mcp/install.js
+          node --check npm-mcp/bin/locus-mcp.js
+          ruby -c integrations/homebrew/Formula/locus.rb
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
