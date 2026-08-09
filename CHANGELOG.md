@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`locus doctor` single pane** — home/seal/bindings, active pin (alias/tenant/expires/seal), runtime drift, pending approvals + dual-control waiting, phantom + unresolved phm refs, autopin/`config.toml`, workspace allowlist, last 5 audit ops; verdict **SAFE|WARN|UNSAFE** (exit 0/1/2); stable mission-control JSON schema (tested)
+- **`locus events --last N [--op] [--binding] [--json]`** — audit JSONL tail with filters
+- **Agency starter kit** — [`examples/agency-starter/`](./examples/agency-starter/) (personal, client-a, client-a-ro, client-b, workspaces, dual-control policy) + [`docs/agency-starter.md`](./docs/agency-starter.md)
+- [docs/agency-certainty.md](./docs/agency-certainty.md) — identity vs epistemic certainty (Ashlr stack)
+- e2e: dual-control two-principal grant, doctor exit codes, optional enter/run feature detection
+
 ## [0.1.0] — 2026-08-06
 
 Initial public release of **Locus** — identity plane for coding agents.

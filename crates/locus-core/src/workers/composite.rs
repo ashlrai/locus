@@ -99,18 +99,41 @@ impl CompositeWorkerManager {
         binding.provider(provider).is_some_and(|p| p.has_upstream())
     }
 
-    /// Cached upstream tool definitions (namespaced names not applied).
+    fn worker_key(session: &Session, binding: &Binding, provider: &str) -> WorkerKey {
+        // Always key by binding alias when namespaced (or when multiple bindings
+        // share the session) so provider slots never collide.
+        if session.is_namespaced() {
+            WorkerKey::namespaced(
+                &session.session_id,
+                &binding.alias,
+                provider.to_ascii_lowercase(),
+            )
+        } else {
+            WorkerKey::new(&session.session_id, provider.to_ascii_lowercase())
+        }
+    }
+
+    /// Cached upstream tool definitions (provider-level names not alias-prefixed).
     pub fn list_upstream_tools(
         &self,
-        session_id: &str,
+        session: &Session,
+        binding: &Binding,
         provider: &str,
     ) -> Result<Vec<UpstreamTool>> {
-        let key = WorkerKey::new(session_id, provider.to_ascii_lowercase());
+        let key = Self::worker_key(session, binding, provider);
         let backend = self
             .mcp
             .get(&key)
             .ok_or_else(|| LocusError::msg(format!("no mcp worker for provider '{provider}'")))?;
-        backend.list_upstream_tools(session_id, provider)
+        backend.list_upstream_tools_for(
+            &session.session_id,
+            if session.is_namespaced() {
+                Some(binding.alias.as_str())
+            } else {
+                None
+            },
+            provider,
+        )
     }
 
     /// Synthetic adapter tools + namespaced upstream tools for the binding.
@@ -126,7 +149,7 @@ impl CompositeWorkerManager {
             if !p.has_upstream() {
                 continue;
             }
-            let Ok(upstream) = self.list_upstream_tools(&session.session_id, &p.provider) else {
+            let Ok(upstream) = self.list_upstream_tools(session, binding, &p.provider) else {
                 continue;
             };
             let prov = p.provider.to_ascii_lowercase();
@@ -155,6 +178,44 @@ impl CompositeWorkerManager {
         tools
     }
 
+    /// Tools for every binding in the session. Exclusive: single binding tools.
+    /// Namespaced: each tool name prefixed with `alias__`.
+    pub fn tools_for_session(
+        &self,
+        session: &Session,
+        bindings: &[(String, Binding)],
+    ) -> Vec<AdapterTool> {
+        if !session.is_namespaced() {
+            if let Some((_, b)) = bindings.first() {
+                return self.tools_for_pin(session, b);
+            }
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for (alias, binding) in bindings {
+            for mut t in self.tools_for_pin(session, binding) {
+                t.name = crate::session::namespace_tool(alias, &t.name);
+                t.description = format!("[{alias}] {}", t.description);
+                out.push(t);
+            }
+        }
+        out
+    }
+
+    /// Ensure workers for every binding in a (possibly namespaced) session.
+    pub fn ensure_session(
+        &mut self,
+        session: &Session,
+        bindings: &[(String, Binding)],
+    ) -> Result<Vec<WorkerSlot>> {
+        self.focus_session(&session.session_id)?;
+        let mut out = Vec::new();
+        for (_, binding) in bindings {
+            out.extend(self.ensure_all(session, binding)?);
+        }
+        Ok(out)
+    }
+
     /// Route a tool call: upstream MCP when the tool is not a synthetic adapter
     /// tool and the provider has an upstream worker; otherwise synthetic.
     pub fn call_tool(
@@ -170,7 +231,7 @@ impl CompositeWorkerManager {
             )));
         };
 
-        let key = WorkerKey::new(&session.session_id, provider.to_ascii_lowercase());
+        let key = Self::worker_key(session, binding, provider);
         let slot = self
             .slots
             .get(&key)
@@ -209,7 +270,7 @@ impl WorkerManager for CompositeWorkerManager {
         binding: &Binding,
         provider: &str,
     ) -> Result<WorkerSlot> {
-        let key = WorkerKey::new(&session.session_id, provider.to_ascii_lowercase());
+        let key = Self::worker_key(session, binding, provider);
         if let Some(existing) = self.slots.get(&key) {
             if matches!(
                 existing.state,
@@ -226,9 +287,16 @@ impl WorkerManager for CompositeWorkerManager {
             ))
         })?;
 
-        let work_dir = PathBuf::from(&session.worker_home)
-            .join("slots")
-            .join(provider.to_ascii_lowercase());
+        let work_dir = if session.is_namespaced() {
+            PathBuf::from(&session.worker_home)
+                .join("slots")
+                .join(&binding.alias)
+                .join(provider.to_ascii_lowercase())
+        } else {
+            PathBuf::from(&session.worker_home)
+                .join("slots")
+                .join(provider.to_ascii_lowercase())
+        };
         std::fs::create_dir_all(&work_dir)?;
 
         let slot = if let Some(spec) = pb.upstream.as_ref().filter(|u| !u.command.is_empty()) {
@@ -532,5 +600,45 @@ for line in sys.stdin:
         assert!(cfg.resolve_secrets);
         assert_eq!(cfg.command, "npx");
         assert_eq!(cfg.args, vec!["-y", "@pkg"]);
+    }
+
+    #[test]
+    fn namespaced_tools_prefix_alias() {
+        let dir = tempdir().unwrap();
+        let wh = dir.path().join("worker");
+        std::fs::create_dir_all(&wh).unwrap();
+        let mut session = session_at(&wh.display().to_string());
+        session.mode = crate::session::SessionMode::Namespaced;
+        session.namespaces = vec!["personal".into()];
+        session.namespace_fps = vec!["fp".into()];
+
+        let acme = binding_mixed(false);
+        let personal = Binding::from_body(BindingBody {
+            id: "bnd_personal".into(),
+            alias: "personal".into(),
+            tenant: "personal".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "github".into(),
+                account: "me".into(),
+                credential_ref: "phm:GH_ME".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        });
+
+        let mut mgr = CompositeWorkerManager::new();
+        let bindings = vec![("acme".into(), acme), ("personal".into(), personal)];
+        // Primary binding_alias on session is acme
+        session.binding_alias = "acme".into();
+        mgr.ensure_session(&session, &bindings).unwrap();
+        let tools = mgr.tools_for_session(&session, &bindings);
+        assert!(tools.iter().any(|t| t.name == "acme__supabase.scope"));
+        assert!(tools.iter().any(|t| t.name == "acme__github.scope"));
+        assert!(tools.iter().any(|t| t.name == "personal__github.scope"));
+        // Unprefixed tools must not appear in namespaced mode
+        assert!(!tools.iter().any(|t| t.name == "github.scope"));
     }
 }

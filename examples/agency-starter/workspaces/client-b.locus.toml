@@ -1,0 +1,6 @@
+# Commit as `.locus.toml` at the root of Client B's monorepo.
+
+version = 1
+default_binding = "client-b"
+allowed_bindings = ["client-b"]
+require_pin = true

@@ -1,0 +1,21 @@
+# Optional: copy to $LOCUS_HOME/config.toml
+# Docs: docs/agency-starter.md
+
+[clients]
+# Shell/hook preference: cwd | none | last
+auto_pin = "cwd"
+
+[autopin]
+enabled = false
+
+# When enabled, bare `locus pin` can match git remotes (never --force):
+# [[autopin.remotes]]
+# match = "github.com/client-a-corp"
+# binding = "client-a"
+# [[autopin.remotes]]
+# match = "github.com/client-b-corp"
+# binding = "client-b"
+
+[daemon]
+default_ttl = "8h"
+agent_can_pin = false

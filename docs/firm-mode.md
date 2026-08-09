@@ -42,10 +42,21 @@ description = "Acme client engagement"
 
 [binding.policy]
 default = "allow"
-require_approval = ["*.delete*", "*.drop*", "vercel.deploy.prod"]
-dual_control = ["*.delete*", "vercel.deploy.prod"]
 max_ttl = "8h"
 parallel_sessions = 4
+# Structured rules (first match wins) — see docs/policy.md
+[[binding.policy.rules]]
+match = "*.delete*"
+action = "dual_control"
+[[binding.policy.rules]]
+match = "*.drop*"
+action = "require_approval"
+[[binding.policy.rules]]
+match = "vercel.deploy.prod"
+action = "dual_control"
+# Legacy globs still work alongside rules:
+# require_approval = ["*.delete*", "*.drop*", "vercel.deploy.prod"]
+# dual_control = ["*.delete*", "vercel.deploy.prod"]
 
 [[binding.providers]]
 provider = "supabase"
@@ -114,10 +125,12 @@ Walk behavior: nearest `.locus.toml` walking toward filesystem root wins (child 
 ## Daily loop
 
 ```bash
-# Enter client
+# Enter client (<30s)
 cd ~/clients/acme
-locus pin                 # or: locus pin acme
-eval "$(locus hook zsh)"  # prompt: [locus:acme:acme-corp]
+locus enter               # pin + friendly status (or: locus enter acme)
+#   → ok entered acme (acme-corp)
+#   → prompt   [locus:acme:acme-corp]
+eval "$(locus hook zsh)"  # prompt: [locus:enter] | [locus:acme:acme-corp]
 locus whoami
 
 # Agent / IDE — after locus setup --client claude|cursor
@@ -127,8 +140,46 @@ locus whoami
 locus exec -- gh pr list
 locus exec -- env | grep LOCUS_
 
-# Leave
-locus leave               # or: locus pin personal for side work
+# Leave (clears identity; suggests re-pin)
+locus leave               # or: locus enter personal for side work
+```
+
+### Shell auto-enter (`LOCUS_AUTO_ENTER=1`)
+
+```bash
+eval "$(locus hook zsh)"
+export LOCUS_AUTO_ENTER=1
+# On cd into a repo with .locus.toml (or matching git remote autopin),
+# the hook runs `locus enter` best-effort. Never forces allowlist.
+```
+
+### Git remote autopin (opt-in)
+
+`$LOCUS_HOME/config.toml`:
+
+```toml
+[autopin]
+enabled = true
+
+[[autopin.remotes]]
+match = "github.com/acme-corp"
+binding = "acme"
+```
+
+`locus pin` / `locus enter` with no alias: workspace `default_binding` first, then remote match. Never auto-pins through a blocked allowlist; never uses `--force` for remote matches.
+
+### Fast engagement onboarding / offboard
+
+```bash
+# New client unit (binding + optional .locus.toml + .locus/README.md)
+locus engagement init acme --tenant acme-corp --workspace
+# edit ~/.locus/bindings/acme.toml scopes; create phm: refs in Phantom
+locus enter acme
+
+# Engagement ends
+locus engagement close acme --archive
+# → checklist: rotate Phantom secrets, revoke GH/Vercel/Supabase access
+# Does NOT delete vault secrets (Phantom owns those)
 ```
 
 Parallel agents: separate MCP processes each with their own pin. Do not share a global `gh auth switch`. Locus uses private `GH_CONFIG_DIR` / scrubbed env per session.
@@ -213,12 +264,20 @@ If an agent “needs” another tenant: human re-pins. Prompt injection cannot j
 
 When engagement ends, remove the **unit** of access — not one token at a time in random places:
 
-1. `locus leave` / ensure no live pin to that alias.
-2. Delete or archive `~/.locus/bindings/acme.toml` (`locus binding rm` when available).
-3. Rotate/revoke provider tokens that backed `phm:…_ACME` (Phantom + provider consoles).
+```bash
+locus engagement close acme --archive
+# archives audit slice → ~/.locus/archives/acme-YYYYMMDD.jsonl
+# marks ~/.locus/engagements/acme.json closed_at
+```
+
+Then finish the human checklist printed by the command:
+
+1. `locus leave` if still pinned (close does this when the active pin matches).
+2. Binding file is **kept** by default — `locus binding rm acme --yes` only when you intend to drop it.
+3. Rotate/revoke provider tokens that backed `phm:…_ACME` (Phantom + provider consoles). Locus never deletes vault secrets.
 4. Remove client repo access (GH org, Vercel team, Supabase project invites).
 5. Strip or rewrite `.locus.toml` if the repo leaves your custody.
-6. Export/retain audit for the engagement window if required (audit export is roadmap-hardening; keep CLI history / your process notes until then).
+6. Retain the archive under `~/.locus/archives/` for the engagement window if required.
 
 ## Compose with Phantom
 
@@ -246,6 +305,8 @@ Never put service role keys in binding files. Never commit `.locus` seal keys or
 
 ## Related
 
+- [agency-starter.md](./agency-starter.md) — copy-paste kit (personal ↔ A ↔ B + offboard)  
+- [../examples/agency-starter/](../examples/agency-starter/) — bindings + workspace templates  
 - [architecture.md](./architecture.md) — system diagram  
 - [mcp.md](./mcp.md) — wire agents  
 - [../examples/](../examples/) — sample binding + workspace  

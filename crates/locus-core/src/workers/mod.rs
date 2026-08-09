@@ -26,10 +26,16 @@ pub use mcp_stdio::{McpStdioBackend, McpStdioConfig};
 pub use stdio_client::{McpStdioClient, UpstreamTool};
 pub use synthetic::SyntheticBackend;
 
-/// Stable key for a worker slot: session + provider.
+/// Stable key for a worker slot: session (+ optional binding alias) + provider.
+///
+/// `binding_alias` is empty in exclusive mode. Namespaced multi-bind fills it so
+/// two bindings that both declare `github` do not collide.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct WorkerKey {
     pub session_id: String,
+    /// Empty string for exclusive pins; binding alias when namespaced.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub binding_alias: String,
     pub provider: String,
 }
 
@@ -37,7 +43,33 @@ impl WorkerKey {
     pub fn new(session_id: impl Into<String>, provider: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
+            binding_alias: String::new(),
             provider: provider.into(),
+        }
+    }
+
+    pub fn namespaced(
+        session_id: impl Into<String>,
+        binding_alias: impl Into<String>,
+        provider: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            binding_alias: binding_alias.into(),
+            provider: provider.into(),
+        }
+    }
+
+    /// Key for a binding: namespaced when `binding_alias` is non-empty and
+    /// differs from a pure exclusive slot, or when caller opts in.
+    pub fn for_binding(
+        session_id: impl Into<String>,
+        binding_alias: Option<&str>,
+        provider: impl Into<String>,
+    ) -> Self {
+        match binding_alias {
+            Some(a) if !a.is_empty() => Self::namespaced(session_id, a, provider),
+            _ => Self::new(session_id, provider),
         }
     }
 }

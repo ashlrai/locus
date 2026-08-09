@@ -28,8 +28,17 @@ impl WorkerBackend for SyntheticBackend {
         work_dir: &Path,
     ) -> Result<WorkerSlot> {
         std::fs::create_dir_all(work_dir)?;
+        let key = if session.is_namespaced() {
+            WorkerKey::namespaced(
+                &session.session_id,
+                &binding.alias,
+                provider.provider.to_ascii_lowercase(),
+            )
+        } else {
+            WorkerKey::new(&session.session_id, provider.provider.to_ascii_lowercase())
+        };
         Ok(WorkerSlot {
-            key: WorkerKey::new(&session.session_id, provider.provider.to_ascii_lowercase()),
+            key,
             binding_id: binding.id.clone(),
             binding_alias: binding.alias.clone(),
             account: provider.account.clone(),

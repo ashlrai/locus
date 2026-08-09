@@ -1,0 +1,7 @@
+# Optional: personal projects repo fence.
+# Omitting allowed_bindings would allow any pin — keep the list tight.
+
+version = 1
+default_binding = "personal"
+allowed_bindings = ["personal"]
+require_pin = false

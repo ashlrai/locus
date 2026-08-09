@@ -147,24 +147,63 @@ impl ProviderBinding {
     }
 }
 
+/// One ordered structured policy rule (`[[binding.policy.rules]]`).
+///
+/// First matching rule wins during evaluation (see [`crate::policy::evaluate`]).
+///
+/// ```toml
+/// [[binding.policy.rules]]
+/// match = "supabase.*"
+/// action = "allow"
+/// [[binding.policy.rules]]
+/// match = "*.delete*"
+/// action = "require_approval"
+/// [[binding.policy.rules]]
+/// match = "vercel.deploy.prod"
+/// action = "dual_control"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PolicyRule {
+    /// Tool-name glob (`*` greedy). Field name in TOML/JSON is `match`.
+    #[serde(rename = "match")]
+    pub match_glob: String,
+    /// `allow` | `deny` | `require_approval` | `dual_control`
+    pub action: String,
+}
+
+impl PolicyRule {
+    pub fn new(match_glob: impl Into<String>, action: impl Into<String>) -> Self {
+        Self {
+            match_glob: match_glob.into(),
+            action: action.into(),
+        }
+    }
+}
+
 /// Session / tool-call policy for a Binding.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Policy {
     #[serde(default = "default_allow")]
     pub default: String, // "allow" | "deny"
 
+    /// Ordered structured rules. First match wins before legacy globs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<PolicyRule>,
+
+    /// Legacy: tool globs that require a human grant before execution.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub require_approval: Vec<String>,
 
-    /// Tool globs that need two distinct principal grants before approval.
+    /// Legacy: tool globs that need two distinct principal grants before approval.
     ///
     /// Matching tools also go through the require_approval gate even if they
     /// are not listed in `require_approval`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dual_control: Vec<String>,
 
-    /// When true, every tool matched by `require_approval` needs dual-control
-    /// (two distinct principals). Combined with explicit `dual_control` globs.
+    /// When true, every tool matched by `require_approval` (legacy globs or
+    /// structured `require_approval` rules) needs dual-control (two distinct
+    /// principals). Combined with explicit `dual_control` globs/rules.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dual_control_all_approvals: bool,
 
@@ -186,6 +225,7 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             default: default_allow(),
+            rules: Vec::new(),
             require_approval: Vec::new(),
             dual_control: Vec::new(),
             dual_control_all_approvals: false,
@@ -198,14 +238,34 @@ impl Default for Policy {
 impl Policy {
     /// Whether this tool needs two distinct principal grants.
     ///
-    /// True when `dual_control_all_approvals` and the tool matches
-    /// `require_approval`, or when the tool matches a `dual_control` glob.
+    /// True when:
+    /// - a structured rule with `action = "dual_control"` matches, or
+    /// - a legacy `dual_control` glob matches, or
+    /// - `dual_control_all_approvals` and the tool is gated by
+    ///   `require_approval` (legacy glob or structured rule).
     pub fn requires_dual_control(&self, tool: &str) -> bool {
         use crate::policy::glob_match;
+
+        // Structured dual_control rules (any match — dual is additive even if
+        // a higher-priority rule already decided require_approval).
+        for rule in &self.rules {
+            if rule.action.eq_ignore_ascii_case("dual_control")
+                && glob_match(&rule.match_glob, tool)
+            {
+                return true;
+            }
+        }
 
         if self.dual_control_all_approvals {
             for pat in &self.require_approval {
                 if glob_match(pat, tool) {
+                    return true;
+                }
+            }
+            for rule in &self.rules {
+                if rule.action.eq_ignore_ascii_case("require_approval")
+                    && glob_match(&rule.match_glob, tool)
+                {
                     return true;
                 }
             }

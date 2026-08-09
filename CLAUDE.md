@@ -76,7 +76,9 @@ Clients → data plane (locus-mcp / exec)
 |-----|--------|
 | [AGENTS.md](./AGENTS.md) | Full agent instructions |
 | [docs/architecture.md](./docs/architecture.md) | System diagram |
+| [docs/policy.md](./docs/policy.md) | Policy rules + approval CLI |
 | [docs/firm-mode.md](./docs/firm-mode.md) | Multi-client / dual-control ops |
+| [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
 | [docs/mcp.md](./docs/mcp.md) | Client wiring |
 | [docs/workers.md](./docs/workers.md) | Worker backends |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | PR + adapter checklist |

@@ -116,6 +116,134 @@ pub fn required_grant_count(dual_control: bool) -> usize {
     }
 }
 
+/// Whether desktop notifications are enabled.
+///
+/// **Default: OFF** — approval spam during agent/MCP use is worse than silence.
+/// Enable with any of:
+/// - env `LOCUS_NOTIFY=1` (or `true` / `yes`)
+/// - `~/.locus/config.toml` → `[notify] enabled = true`
+///
+/// Always suppressed when `CI=true`, `LOCUS_QUIET=1`, or `LOCUS_NOTIFY=0`.
+pub fn notifications_enabled() -> bool {
+    // Explicit kill switch always wins
+    if env_truthy("LOCUS_QUIET") || env_falsy("LOCUS_NOTIFY") {
+        return false;
+    }
+    if std::env::var("CI")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    // Explicit enable
+    if env_truthy("LOCUS_NOTIFY") {
+        return true;
+    }
+    // Config opt-in (best-effort; never fail)
+    if let Ok(home) = crate::store::locus_home() {
+        let path = home.join("config.toml");
+        if let Ok(Some(cfg)) = crate::config::LocusConfig::load(&path) {
+            if cfg.notify.enabled {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn env_truthy(key: &str) -> bool {
+    matches!(
+        std::env::var(key).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES") | Ok("on") | Ok("ON")
+    )
+}
+
+fn env_falsy(key: &str) -> bool {
+    matches!(
+        std::env::var(key).as_deref(),
+        Ok("0") | Ok("false") | Ok("FALSE") | Ok("no") | Ok("NO") | Ok("off") | Ok("OFF")
+    )
+}
+
+/// Best-effort desktop notification when a **new** pending approval is created.
+///
+/// Opt-in only (see [`notifications_enabled`]). Rate-limited to one banner
+/// per tool+binding every 60s. **No sound** (avoids notification fatigue).
+pub fn try_notify_pending_approval(rec: &ApprovalRecord) {
+    if !notifications_enabled() {
+        return;
+    }
+    if !rate_limit_allow(&rec.tool, &rec.binding) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        notify_macos_pending(rec);
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = rec;
+    }
+}
+
+/// Simple process-local rate limit (plus optional file stamp under LOCUS_HOME).
+fn rate_limit_allow(tool: &str, binding: &str) -> bool {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    static LAST: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
+    let key = format!("{binding}::{tool}");
+    let mut guard = match LAST.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    let map = guard.get_or_insert_with(HashMap::new);
+    let now = Instant::now();
+    if let Some(prev) = map.get(&key) {
+        if now.duration_since(*prev) < Duration::from_secs(60) {
+            return false;
+        }
+    }
+    map.insert(key, now);
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn notify_macos_pending(rec: &ApprovalRecord) {
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    let osascript = Path::new("/usr/bin/osascript");
+    if !osascript.is_file() {
+        return;
+    }
+
+    let title = "Locus approval";
+    let body = format!("{} on {} — run: locus approve list", rec.tool, rec.binding);
+    // No sound name — silent banner only when user opted in
+    let script = format!(
+        "display notification \"{}\" with title \"{}\"",
+        escape_applescript(&body),
+        escape_applescript(title)
+    );
+    let _ = Command::new(osascript)
+        .arg("-e")
+        .arg(script)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(target_os = "macos")]
+fn escape_applescript(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
 /// Mint a stable approval id: `appr_<24 hex chars>`.
 pub fn mint_approval_id() -> String {
     let mut buf = [0u8; 12];

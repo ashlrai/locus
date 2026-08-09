@@ -17,6 +17,10 @@ pub enum LocusError {
     #[error("session expired at {0}")]
     SessionExpired(String),
 
+    /// Active pin was frozen after binding drift — human must re-pin.
+    #[error("session_frozen: re-pin ({0})")]
+    SessionFrozen(String),
+
     #[error("binding `{0}` is not allowed in this workspace")]
     BindingNotAllowed(String),
 

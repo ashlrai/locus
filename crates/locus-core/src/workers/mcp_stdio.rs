@@ -15,6 +15,17 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
+fn slot_client_key(slot: &WorkerSlot) -> String {
+    if slot.key.binding_alias.is_empty() {
+        client_key(&slot.key.session_id, &slot.key.provider)
+    } else {
+        format!(
+            "{}:{}:{}",
+            slot.key.session_id, slot.key.binding_alias, slot.key.provider
+        )
+    }
+}
+
 /// Configuration for an MCP stdio worker spawn.
 #[derive(Debug, Clone, Default)]
 pub struct McpStdioConfig {
@@ -86,14 +97,33 @@ impl McpStdioBackend {
         session_id: &str,
         provider: &str,
     ) -> Result<Vec<super::UpstreamTool>> {
-        let ck = client_key(session_id, provider);
+        self.list_upstream_tools_for(session_id, None, provider)
+    }
+
+    /// List tools; `binding_alias` disambiguates namespaced multi-bind clients.
+    pub fn list_upstream_tools_for(
+        &self,
+        session_id: &str,
+        binding_alias: Option<&str>,
+        provider: &str,
+    ) -> Result<Vec<super::UpstreamTool>> {
         let clients = self
             .clients
             .lock()
             .map_err(|_| LocusError::msg("clients lock poisoned"))?;
-        let client = clients
-            .get(&ck)
-            .ok_or_else(|| LocusError::msg("no live mcp client for provider"))?;
+        let ck = match binding_alias {
+            Some(a) if !a.is_empty() => format!("{session_id}:{a}:{provider}"),
+            _ => client_key(session_id, provider),
+        };
+        let client = clients.get(&ck).or_else(|| {
+            // Fallback: single-client backends (one slot per backend instance)
+            if clients.len() == 1 {
+                clients.values().next()
+            } else {
+                None
+            }
+        });
+        let client = client.ok_or_else(|| LocusError::msg("no live mcp client for provider"))?;
         client.list_tools_cached()
     }
 
@@ -120,7 +150,15 @@ impl WorkerBackend for McpStdioBackend {
         work_dir: &Path,
     ) -> Result<WorkerSlot> {
         std::fs::create_dir_all(work_dir)?;
-        let key = WorkerKey::new(&session.session_id, provider.provider.to_ascii_lowercase());
+        let key = if session.is_namespaced() {
+            WorkerKey::namespaced(
+                &session.session_id,
+                &binding.alias,
+                provider.provider.to_ascii_lowercase(),
+            )
+        } else {
+            WorkerKey::new(&session.session_id, provider.provider.to_ascii_lowercase())
+        };
 
         let mut pid = None;
         let mut state = WorkerState::Ready;
@@ -140,7 +178,15 @@ impl WorkerBackend for McpStdioBackend {
                     match client.handshake() {
                         Ok(_tools) => {
                             state = WorkerState::Running;
-                            let ck = client_key(&session.session_id, &provider.provider);
+                            // Disambiguate client map when namespaced multi-bind
+                            let ck = if session.is_namespaced() {
+                                format!(
+                                    "{}:{}:{}",
+                                    session.session_id, binding.alias, provider.provider
+                                )
+                            } else {
+                                client_key(&session.session_id, &provider.provider)
+                            };
                             self.clients
                                 .lock()
                                 .map_err(|_| LocusError::msg("clients lock poisoned"))?
@@ -183,12 +229,18 @@ impl WorkerBackend for McpStdioBackend {
     }
 
     fn teardown(&self, slot: &WorkerSlot) -> Result<()> {
-        let ck = client_key(&slot.key.session_id, &slot.key.provider);
+        let ck = slot_client_key(slot);
         let _ = self
             .clients
             .lock()
             .map_err(|_| LocusError::msg("clients lock poisoned"))?
             .remove(&ck);
+        // Also try exclusive-form key for legacy slots
+        let _ = self
+            .clients
+            .lock()
+            .ok()
+            .and_then(|mut g| g.remove(&client_key(&slot.key.session_id, &slot.key.provider)));
         let mut guard = self
             .children
             .lock()
@@ -207,13 +259,16 @@ impl WorkerBackend for McpStdioBackend {
         tool: &str,
         args: &Value,
     ) -> Result<WorkerToolResult> {
-        let ck = client_key(&slot.key.session_id, &slot.key.provider);
+        let ck = slot_client_key(slot);
         let clients = self
             .clients
             .lock()
             .map_err(|_| LocusError::msg("clients lock poisoned"))?;
 
-        let Some(client) = clients.get(&ck) else {
+        let client = clients
+            .get(&ck)
+            .or_else(|| clients.get(&client_key(&slot.key.session_id, &slot.key.provider)));
+        let Some(client) = client else {
             return Ok(WorkerToolResult {
                 ok: false,
                 content: json!({

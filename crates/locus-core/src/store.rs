@@ -4,10 +4,16 @@ use crate::approval::{
     args_digest, default_grant_ttl, mint_approval_id, validate_approval_id, ApprovalRecord,
     ApprovalStatus,
 };
+use crate::autopin::{self, AutoPinTarget};
 use crate::binding::{validate_name_component, Binding, BindingSummary};
+use crate::config::{self, LocusConfig};
+use crate::engagement::{
+    self, client_binding_template, close_checklist, engagement_readme, EngagementCloseResult,
+    EngagementMeta,
+};
 use crate::error::{LocusError, Result};
 use crate::seal::SealKey;
-use crate::session::{parse_ttl, PinSource, Session};
+use crate::session::{binding_fingerprint, parse_ttl, PinSource, Session, SessionMode};
 use crate::workspace::{find_workspace, WorkspaceConfig};
 use chrono::{Duration, Utc};
 use serde_json::Value;
@@ -24,6 +30,8 @@ use std::path::{Path, PathBuf};
 ///   workers/<session_id>/
 ///   audit/events.jsonl
 ///   approvals/{id}.json
+///   engagements/<alias>.json
+///   archives/<alias>-<date>.jsonl
 /// ```
 #[derive(Debug, Clone)]
 pub struct Store {
@@ -43,6 +51,8 @@ impl Store {
         fs::create_dir_all(home.join("workers"))?;
         fs::create_dir_all(home.join("audit"))?;
         fs::create_dir_all(home.join("approvals"))?;
+        fs::create_dir_all(home.join("engagements"))?;
+        fs::create_dir_all(home.join("archives"))?;
         let s = Self { home };
         // Ensure seal key exists
         let _ = s.seal_key()?;
@@ -61,6 +71,18 @@ impl Store {
         self.home.join("approvals")
     }
 
+    pub fn engagements_dir(&self) -> PathBuf {
+        self.home.join("engagements")
+    }
+
+    pub fn archives_dir(&self) -> PathBuf {
+        self.home.join("archives")
+    }
+
+    pub fn config_path(&self) -> PathBuf {
+        self.home.join("config.toml")
+    }
+
     pub fn seal_key_path(&self) -> PathBuf {
         self.home.join("daemon.key")
     }
@@ -71,6 +93,16 @@ impl Store {
 
     pub fn audit_path(&self) -> PathBuf {
         self.home.join("audit").join("events.jsonl")
+    }
+
+    /// Load `$LOCUS_HOME/config.toml` (defaults if missing).
+    pub fn load_config(&self) -> LocusConfig {
+        config::load_config(&self.home)
+    }
+
+    /// Persist config.toml.
+    pub fn save_config(&self, cfg: &LocusConfig) -> Result<PathBuf> {
+        config::save_config(&self.home, cfg)
     }
 
     pub fn seal_key(&self) -> Result<SealKey> {
@@ -171,6 +203,154 @@ impl Store {
         client: Option<String>,
         force: bool,
     ) -> Result<Session> {
+        self.pin_with_opts(alias_or_id, cwd, client, force, None, true)
+    }
+
+    /// Experimental namespaced multi-binding pin.
+    ///
+    /// `aliases` must contain at least two distinct binding aliases. Tools are
+    /// exposed as `alias__toolname` in locus-mcp. Primary (first) alias owns
+    /// whoami tenant display and seal binding_id.
+    pub fn pin_namespaced(
+        &self,
+        aliases: &[String],
+        cwd: &Path,
+        client: Option<String>,
+        force: bool,
+    ) -> Result<Session> {
+        if aliases.len() < 2 {
+            return Err(LocusError::msg(
+                "namespaced pin requires at least two bindings (e.g. `locus pin --ns a,b`)",
+            ));
+        }
+        let mut seen = Vec::new();
+        for a in aliases {
+            let t = a.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if !seen.iter().any(|x: &String| x == t) {
+                seen.push(t.to_string());
+            }
+        }
+        if seen.len() < 2 {
+            return Err(LocusError::msg(
+                "namespaced pin requires at least two distinct bindings",
+            ));
+        }
+        let primary = seen[0].clone();
+        let rest = seen[1..].to_vec();
+        self.pin_with_opts(&primary, cwd, client, force, Some(rest), true)
+    }
+
+    /// Create a session for `locus run` — sealed temporary pin that does **not**
+    /// overwrite `active.json` unless `share_pin` is true.
+    ///
+    /// Session file is written to `sessions/run-<suffix>.json` (caller supplies
+    /// a unique suffix, typically process pid).
+    pub fn create_run_session(
+        &self,
+        alias_or_id: &str,
+        cwd: &Path,
+        client: Option<String>,
+        force: bool,
+        share_pin: bool,
+        run_suffix: &str,
+    ) -> Result<(Session, PathBuf)> {
+        let session = self.pin_with_opts(
+            alias_or_id,
+            cwd,
+            client.or_else(|| Some("run".into())),
+            force,
+            None,
+            share_pin,
+        )?;
+        // When share_pin is false, pin_with_opts still built the session but did
+        // not write active.json — write run session file.
+        let run_path = self.run_session_path(run_suffix);
+        self.write_session_file(&run_path, &session)?;
+        if share_pin {
+            // Also ensure active.json (pin_with_opts already wrote it when share_pin).
+            // Re-write so source reflects Run when desired.
+        }
+        self.audit(
+            "session.run",
+            &session.binding_alias,
+            Some(serde_json::json!({
+                "session_id": session.session_id,
+                "share_pin": share_pin,
+                "run_path": run_path.display().to_string(),
+            })),
+        )?;
+        Ok((session, run_path))
+    }
+
+    pub fn run_session_path(&self, suffix: &str) -> PathBuf {
+        // Sanitize suffix to a single path component
+        let safe: String = suffix
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.home.join("sessions").join(format!("run-{safe}.json"))
+    }
+
+    /// Remove a temporary run session file (best-effort worker cleanup).
+    pub fn cleanup_run_session(&self, path: &Path, session: &Session) -> Result<()> {
+        let wh = PathBuf::from(&session.worker_home);
+        if wh.exists() && wh.starts_with(self.home.join("workers")) {
+            let _ = fs::remove_dir_all(&wh);
+        }
+        if path.exists()
+            && path.starts_with(self.home.join("sessions"))
+            && path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("run-"))
+        {
+            let _ = fs::remove_file(path);
+        }
+        Ok(())
+    }
+
+    /// Internal pin builder. When `write_active` is false, builds a sealed
+    /// session + worker home but leaves `active.json` untouched.
+    fn pin_with_opts(
+        &self,
+        alias_or_id: &str,
+        cwd: &Path,
+        client: Option<String>,
+        force: bool,
+        extra_namespaces: Option<Vec<String>>,
+        write_active: bool,
+    ) -> Result<Session> {
+        self.pin_with_opts_source(
+            alias_or_id,
+            cwd,
+            client,
+            force,
+            extra_namespaces,
+            write_active,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pin_with_opts_source(
+        &self,
+        alias_or_id: &str,
+        cwd: &Path,
+        client: Option<String>,
+        force: bool,
+        extra_namespaces: Option<Vec<String>>,
+        write_active: bool,
+        source_override: Option<PinSource>,
+    ) -> Result<Session> {
         let binding = self.load_binding(alias_or_id)?;
         let ws = find_workspace(cwd);
 
@@ -180,7 +360,30 @@ impl Store {
             }
         }
 
-        let source = if let Some((ref path, ref cfg)) = ws {
+        // Validate + fingerprint extra namespaces (namespaced mode).
+        let mut ns_aliases = Vec::new();
+        let mut ns_fps = Vec::new();
+        if let Some(extra) = extra_namespaces {
+            for alias in extra {
+                let b = self.load_binding(&alias)?;
+                if let Some((_, ref cfg)) = ws {
+                    if !cfg.allows(&b.alias) && !cfg.allows(&b.id) && !force {
+                        return Err(LocusError::BindingNotAllowed(b.alias.clone()));
+                    }
+                }
+                if b.alias == binding.alias {
+                    continue;
+                }
+                ns_aliases.push(b.alias.clone());
+                ns_fps.push(binding_fingerprint(&b));
+            }
+        }
+
+        let source = if let Some(src) = source_override {
+            src
+        } else if client.as_deref() == Some("run") {
+            PinSource::Run
+        } else if let Some((ref path, ref cfg)) = ws {
             if cfg.default_binding.as_deref() == Some(binding.alias.as_str())
                 || cfg.default_binding.as_deref() == Some(binding.id.as_str())
             {
@@ -207,7 +410,6 @@ impl Store {
             .home
             .join("workers")
             .join(format!("pending-{}", binding.alias));
-        // session id not known yet — create after
         let mut session = Session::new(
             &binding.id,
             &binding.alias,
@@ -219,40 +421,76 @@ impl Store {
             worker_home.display().to_string(),
             &key,
         );
-        // Fix worker home to real session id
         let worker_home = self.home.join("workers").join(&session.session_id);
         fs::create_dir_all(&worker_home)?;
-        // Private CLI config dirs (never touch global ~/.config/gh etc.)
         fs::create_dir_all(worker_home.join("gh"))?;
         fs::create_dir_all(worker_home.join("aws"))?;
         session.worker_home = worker_home.display().to_string();
+        session.binding_fp = Some(binding_fingerprint(&binding));
 
-        // Re-seal is not needed — worker_home not in seal material. Good.
+        if !ns_aliases.is_empty() {
+            session.mode = SessionMode::Namespaced;
+            session.namespaces = ns_aliases;
+            session.namespace_fps = ns_fps;
+        }
 
-        let path = self.active_session_path();
-        fs::write(&path, serde_json::to_string_pretty(&session)?)?;
-        self.audit(
-            "session.pin",
-            &binding.alias,
-            Some(serde_json::json!({
-                "session_id": session.session_id,
-                "tenant": session.tenant,
-                "cwd": cwd.display().to_string(),
-            })),
-        )?;
+        if write_active {
+            let path = self.active_session_path();
+            self.write_session_file(&path, &session)?;
+            self.audit(
+                "session.pin",
+                &binding.alias,
+                Some(serde_json::json!({
+                    "session_id": session.session_id,
+                    "tenant": session.tenant,
+                    "cwd": cwd.display().to_string(),
+                    "mode": match session.mode {
+                        SessionMode::Exclusive => "exclusive",
+                        SessionMode::Namespaced => "namespaced",
+                    },
+                    "namespaces": session.namespaces,
+                })),
+            )?;
+        }
         Ok(session)
     }
 
-    /// Pin using workspace default if no alias given.
+    fn write_session_file(&self, path: &Path, session: &Session) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(session)?)?;
+        Ok(())
+    }
+
+    /// Persist an updated session to `active.json` (e.g. freeze flag).
+    pub fn save_active_session(&self, session: &Session) -> Result<()> {
+        self.write_session_file(&self.active_session_path(), session)
+    }
+
+    /// Resolve bare pin target: workspace `default_binding`, then opt-in git remote autopin.
+    pub fn resolve_auto_pin(&self, cwd: &Path) -> Result<AutoPinTarget> {
+        autopin::resolve_auto_pin(cwd, &self.home)
+    }
+
+    /// Pin using workspace default or (if enabled) git remote autopin.
+    ///
+    /// Autopin never uses `force` — allowlist blocks are skipped at resolve time.
     pub fn pin_auto(&self, cwd: &Path, client: Option<String>, force: bool) -> Result<Session> {
-        let alias = find_workspace(cwd)
-            .and_then(|(_, c)| c.default_binding)
-            .ok_or_else(|| {
-                LocusError::msg(
-                    "no binding specified and no default_binding in .locus.toml — try `locus pin <alias>`",
-                )
-            })?;
-        self.pin(&alias, cwd, client, force)
+        let target = self.resolve_auto_pin(cwd)?;
+        let use_force = match &target.source {
+            PinSource::Autopin { .. } => false,
+            _ => force,
+        };
+        self.pin_with_opts_source(
+            &target.alias,
+            cwd,
+            client,
+            use_force,
+            None,
+            true,
+            Some(target.source),
+        )
     }
 
     pub fn active_session(&self) -> Result<Option<Session>> {
@@ -271,6 +509,19 @@ impl Store {
             None => Err(LocusError::NotPinned),
             Some(s) => {
                 s.verify(&key)?;
+                Ok(s)
+            }
+        }
+    }
+
+    /// Like [`require_active`] but ignores freeze (seal + expiry only).
+    /// Used by doctor / whoami reporting so frozen pins remain inspectable.
+    pub fn require_active_allow_frozen(&self) -> Result<Session> {
+        let key = self.seal_key()?;
+        match self.active_session()? {
+            None => Err(LocusError::NotPinned),
+            Some(s) => {
+                s.verify_seal(&key)?;
                 Ok(s)
             }
         }
@@ -298,11 +549,193 @@ impl Store {
         Ok(session)
     }
 
+    // ── Engagements ───────────────────────────────────────────────────────
+
+    /// Create a client engagement: binding template + sidecar meta + optional workspace/README.
+    ///
+    /// Does not resolve or store secrets — `phm:` stubs only. Fast path for firm onboarding.
+    pub fn engagement_init(
+        &self,
+        alias: &str,
+        tenant: &str,
+        cwd: &Path,
+        write_workspace: bool,
+        write_readme: bool,
+        force: bool,
+    ) -> Result<EngagementInitResult> {
+        validate_name_component("alias", alias)?;
+        if tenant.trim().is_empty() {
+            return Err(LocusError::msg("tenant must be non-empty"));
+        }
+
+        let binding_path = self.bindings_dir().join(format!("{alias}.toml"));
+        if binding_path.exists() && !force {
+            return Err(LocusError::msg(format!(
+                "binding '{alias}' already exists — use --force to overwrite"
+            )));
+        }
+
+        let binding = client_binding_template(alias, tenant);
+        let path = self.save_binding(&binding)?;
+
+        let mut meta = EngagementMeta::open(alias, tenant);
+        meta.description = Some(format!("{tenant} client engagement"));
+        engagement::write_meta(&self.engagements_dir(), &meta)?;
+
+        let mut workspace_path = None;
+        if write_workspace {
+            let wp = cwd.join(".locus.toml");
+            if wp.exists() && !force {
+                return Err(LocusError::msg(
+                    ".locus.toml already exists — use --force or skip --workspace",
+                ));
+            }
+            let cfg = WorkspaceConfig {
+                version: 1,
+                default_binding: Some(alias.to_string()),
+                allowed_bindings: vec![alias.to_string()],
+                require_pin: true,
+            };
+            fs::write(&wp, cfg.to_toml()?)?;
+            workspace_path = Some(wp);
+        }
+
+        let mut readme_path = None;
+        if write_readme {
+            let locus_dir = cwd.join(".locus");
+            fs::create_dir_all(&locus_dir)?;
+            let rp = locus_dir.join("README.md");
+            if rp.exists() && !force {
+                // Non-fatal: binding already created
+            } else {
+                fs::write(&rp, engagement_readme(alias, tenant))?;
+                readme_path = Some(rp);
+            }
+        }
+
+        self.audit(
+            "engagement.init",
+            alias,
+            Some(serde_json::json!({
+                "tenant": tenant,
+                "binding_path": path.display().to_string(),
+                "workspace": workspace_path.as_ref().map(|p| p.display().to_string()),
+            })),
+        )?;
+
+        Ok(EngagementInitResult {
+            alias: alias.to_string(),
+            tenant: tenant.to_string(),
+            binding_path: path,
+            workspace_path,
+            readme_path,
+            credential_refs: binding
+                .providers
+                .iter()
+                .map(|p| p.credential_ref.clone())
+                .collect(),
+        })
+    }
+
+    /// Close an engagement: leave if active, mark closed_at, optional audit archive.
+    ///
+    /// Does **not** delete Phantom vault secrets or the binding file.
+    pub fn engagement_close(&self, alias: &str, archive: bool) -> Result<EngagementCloseResult> {
+        validate_name_component("alias", alias)?;
+        // Ensure binding exists (or meta-only close of known alias)
+        let binding = self.load_binding(alias).ok();
+        let tenant = binding
+            .as_ref()
+            .map(|b| b.tenant.clone())
+            .or_else(|| {
+                engagement::read_meta(&self.engagements_dir(), alias)
+                    .ok()
+                    .flatten()
+                    .map(|m| m.tenant)
+            })
+            .unwrap_or_else(|| alias.to_string());
+
+        if binding.is_none() && engagement::read_meta(&self.engagements_dir(), alias)?.is_none() {
+            return Err(LocusError::BindingNotFound(alias.into()));
+        }
+
+        let mut left_session = false;
+        if let Some(session) = self.active_session()? {
+            if session.binding_alias == alias {
+                let _ = self.leave()?;
+                left_session = true;
+            }
+        }
+
+        let mut archive_path = None;
+        if archive {
+            let ap = self.archive_audit_for_binding(alias)?;
+            archive_path = Some(ap.display().to_string());
+        }
+
+        let mut meta = engagement::read_meta(&self.engagements_dir(), alias)?
+            .unwrap_or_else(|| EngagementMeta::open(alias, &tenant));
+        meta.mark_closed(archive_path.clone());
+        engagement::write_meta(&self.engagements_dir(), &meta)?;
+
+        self.audit(
+            "engagement.close",
+            alias,
+            Some(serde_json::json!({
+                "tenant": tenant,
+                "archive": archive_path,
+                "left_session": left_session,
+            })),
+        )?;
+
+        Ok(EngagementCloseResult {
+            alias: alias.to_string(),
+            tenant,
+            closed_at: meta.closed_at.clone().unwrap_or_default(),
+            left_session,
+            archive_path,
+            checklist: close_checklist(alias),
+        })
+    }
+
+    /// Filter audit events for a binding into `$LOCUS_HOME/archives/<alias>-<date>.jsonl`.
+    pub fn archive_audit_for_binding(&self, alias: &str) -> Result<PathBuf> {
+        validate_name_component("alias", alias)?;
+        let events = self.read_audit_events()?;
+        let matched: Vec<_> = events.into_iter().filter(|e| e.binding == alias).collect();
+        fs::create_dir_all(self.archives_dir())?;
+        let date = Utc::now().format("%Y%m%d");
+        let path = self.archives_dir().join(format!("{alias}-{date}.jsonl"));
+        ensure_under_dir(&self.archives_dir(), &path)?;
+        let mut lines = String::new();
+        for e in &matched {
+            lines.push_str(&serde_json::to_string(e)?);
+            lines.push('\n');
+        }
+        fs::write(&path, lines)?;
+        self.audit(
+            "engagement.archive",
+            alias,
+            Some(serde_json::json!({
+                "path": path.display().to_string(),
+                "events": matched.len(),
+            })),
+        )?;
+        Ok(path)
+    }
+
+    pub fn load_engagement_meta(&self, alias: &str) -> Result<Option<EngagementMeta>> {
+        engagement::read_meta(&self.engagements_dir(), alias)
+    }
+
     // ── Whoami / isolation surface ────────────────────────────────────────
 
     /// Public identity snapshot for the active pin — never secrets.
+    ///
+    /// Frozen sessions are still reported (with `frozen=true`) so operators can
+    /// diagnose drift without a hard error.
     pub fn whoami(&self) -> Result<Whoami> {
-        let session = self.require_active()?;
+        let session = self.require_active_allow_frozen()?;
         let binding = self.load_binding(&session.binding_alias)?;
         Ok(Whoami {
             session_id: session.session_id,
@@ -327,13 +760,21 @@ impl Store {
             expires_at: session.expires_at.to_rfc3339(),
             worker_home: session.worker_home,
             seal_ok: true,
+            frozen: session.frozen,
+            frozen_reason: session.frozen_reason,
+            mode: match session.mode {
+                SessionMode::Exclusive => "exclusive".into(),
+                SessionMode::Namespaced => "namespaced".into(),
+            },
+            namespaces: session.namespaces,
         })
     }
 
     /// Continuous identity check: re-load active session + binding and report drift.
     ///
-    /// Intended for future whoami heartbeats (agents / prompt hooks). Never returns secrets.
-    /// Returns `Ok` with a populated [`RuntimeDrift`] even when unpinned (drift flags set).
+    /// Never returns secrets. Returns `Ok` with a populated [`RuntimeDrift`] even
+    /// when unpinned (drift flags set). Does **not** mutate the session (see
+    /// [`check_drift_and_freeze`]).
     pub fn verify_runtime(&self) -> Result<RuntimeDrift> {
         let key = self.seal_key()?;
         let mut drift = RuntimeDrift {
@@ -342,6 +783,8 @@ impl Store {
             binding_present: false,
             binding_id_match: false,
             tenant_match: false,
+            providers_match: true,
+            frozen: false,
             expired: false,
             session_id: None,
             binding_alias: None,
@@ -365,15 +808,16 @@ impl Store {
         drift.binding_id_session = Some(session.binding_id.clone());
         drift.tenant_session = Some(session.tenant.clone());
         drift.expired = session.is_expired();
+        drift.frozen = session.frozen;
 
-        match session.verify(&key) {
+        // Use seal-only verify so we still detect material drift on frozen pins.
+        match session.verify_seal(&key) {
             Ok(()) => drift.seal_ok = true,
             Err(LocusError::InvalidSeal) => {
                 drift.seal_ok = false;
                 drift.issues.push("invalid_seal".into());
             }
             Err(LocusError::SessionExpired(_)) => {
-                // verify() checks seal then expiry; if we got here seal was ok
                 drift.seal_ok = true;
                 drift.issues.push("session_expired".into());
             }
@@ -383,6 +827,9 @@ impl Store {
         }
         if drift.expired && !drift.issues.iter().any(|i| i == "session_expired") {
             drift.issues.push("session_expired".into());
+        }
+        if drift.frozen {
+            drift.issues.push("session_frozen".into());
         }
 
         match self.load_binding(&session.binding_alias) {
@@ -398,6 +845,21 @@ impl Store {
                 if !drift.tenant_match {
                     drift.issues.push("tenant_drift".into());
                 }
+
+                // Provider / full material fingerprint
+                let fp_now = binding_fingerprint(&binding);
+                if let Some(ref fp_pin) = session.binding_fp {
+                    if fp_now != *fp_pin {
+                        drift.providers_match = false;
+                        if !drift.issues.iter().any(|i| i == "providers_drift") {
+                            drift.issues.push("providers_drift".into());
+                        }
+                    }
+                } else if !drift.binding_id_match || !drift.tenant_match {
+                    // Legacy sessions without fp: id/tenant already covered
+                    drift.providers_match = drift.binding_id_match && drift.tenant_match;
+                }
+
                 drift.providers = binding
                     .providers
                     .iter()
@@ -418,13 +880,111 @@ impl Store {
             }
         }
 
+        // Namespaced secondary bindings
+        for (i, alias) in session.namespaces.iter().enumerate() {
+            match self.load_binding(alias) {
+                Ok(b) => {
+                    let fp_now = binding_fingerprint(&b);
+                    let fp_pin = session.namespace_fps.get(i);
+                    if fp_pin.is_some_and(|fp| fp != &fp_now) {
+                        drift.providers_match = false;
+                        if !drift.issues.iter().any(|i| i == "providers_drift") {
+                            drift.issues.push("providers_drift".into());
+                        }
+                        if !drift.issues.iter().any(|i| i == "namespace_drift") {
+                            drift.issues.push("namespace_drift".into());
+                        }
+                    }
+                }
+                Err(_) => {
+                    drift
+                        .issues
+                        .push(format!("namespace_binding_missing:{alias}"));
+                    drift.providers_match = false;
+                }
+            }
+        }
+
+        // ok only when healthy and not frozen and no drift issues
+        let blocking: Vec<&str> = drift
+            .issues
+            .iter()
+            .filter(|i| {
+                *i != "session_frozen" // frozen alone means not ok, but listed separately
+            })
+            .map(|s| s.as_str())
+            .collect();
         drift.ok = drift.pinned
             && drift.seal_ok
             && drift.binding_present
             && drift.binding_id_match
             && drift.tenant_match
+            && drift.providers_match
             && !drift.expired
-            && drift.issues.is_empty();
+            && !drift.frozen
+            && blocking.is_empty();
+        Ok(drift)
+    }
+
+    /// Verify runtime identity and, if binding material drifted under the
+    /// active pin, mark the session **frozen** and persist it.
+    ///
+    /// Frozen sessions cause privileged ops (exec, tools/call) to fail with
+    /// `session_frozen: re-pin` until a human re-pins.
+    pub fn check_drift_and_freeze(&self) -> Result<RuntimeDrift> {
+        let mut drift = self.verify_runtime()?;
+        if !drift.pinned {
+            return Ok(drift);
+        }
+
+        let should_freeze = drift.issues.iter().any(|i| {
+            matches!(
+                i.as_str(),
+                "binding_id_drift"
+                    | "tenant_drift"
+                    | "providers_drift"
+                    | "namespace_drift"
+                    | "binding_missing"
+            ) || i.starts_with("namespace_binding_missing:")
+        });
+
+        if should_freeze {
+            if let Some(mut session) = self.active_session()? {
+                if !session.frozen {
+                    let reason = drift
+                        .issues
+                        .iter()
+                        .find(|i| {
+                            matches!(
+                                i.as_str(),
+                                "binding_id_drift"
+                                    | "tenant_drift"
+                                    | "providers_drift"
+                                    | "namespace_drift"
+                                    | "binding_missing"
+                            ) || i.starts_with("namespace_binding_missing:")
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| "binding_drift".into());
+                    session.freeze(reason.clone());
+                    self.save_active_session(&session)?;
+                    self.audit(
+                        "session.freeze",
+                        &session.binding_alias,
+                        Some(serde_json::json!({
+                            "session_id": session.session_id,
+                            "reason": reason,
+                            "issues": drift.issues,
+                        })),
+                    )?;
+                    drift.frozen = true;
+                    if !drift.issues.iter().any(|i| i == "session_frozen") {
+                        drift.issues.push("session_frozen".into());
+                    }
+                    drift.ok = false;
+                }
+            }
+        }
         Ok(drift)
     }
 
@@ -537,6 +1097,10 @@ impl Store {
     ///
     /// If a pending record already exists for the same tool + binding +
     /// args_digest, returns it (stable id across retries).
+    ///
+    /// On **new** pending records, optional desktop notification may fire when
+    /// the user has opted in (`LOCUS_NOTIFY=1` or `[notify] enabled = true`).
+    /// Default is silent — agents create many pending approvals.
     pub fn create_pending_approval(
         &self,
         tool: &str,
@@ -577,6 +1141,8 @@ impl Store {
                 "status": "pending",
             })),
         )?;
+        // Best-effort UX only — never surface notify errors to the agent path.
+        crate::approval::try_notify_pending_approval(&rec);
         Ok(rec)
     }
 
@@ -883,13 +1449,26 @@ pub struct ApprovalsHealth {
 }
 
 /// One line from `$LOCUS_HOME/audit/events.jsonl`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AuditEvent {
     pub ts: String,
     pub op: String,
     pub binding: String,
     #[serde(default)]
     pub detail: Option<serde_json::Value>,
+}
+
+/// Result of [`Store::engagement_init`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EngagementInitResult {
+    pub alias: String,
+    pub tenant: String,
+    pub binding_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readme_path: Option<PathBuf>,
+    pub credential_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -903,6 +1482,18 @@ pub struct Whoami {
     pub expires_at: String,
     pub worker_home: String,
     pub seal_ok: bool,
+    #[serde(default)]
+    pub frozen: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_reason: Option<String>,
+    #[serde(default = "default_mode_exclusive")]
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub namespaces: Vec<String>,
+}
+
+fn default_mode_exclusive() -> String {
+    "exclusive".into()
 }
 
 /// Result of [`Store::verify_runtime`] — continuous identity / drift check.
@@ -915,6 +1506,12 @@ pub struct RuntimeDrift {
     pub binding_present: bool,
     pub binding_id_match: bool,
     pub tenant_match: bool,
+    /// True when binding fingerprint (providers/scopes) still matches pin time.
+    #[serde(default = "default_true")]
+    pub providers_match: bool,
+    /// Session has been frozen after detected drift.
+    #[serde(default)]
+    pub frozen: bool,
     pub expired: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
@@ -929,10 +1526,14 @@ pub struct RuntimeDrift {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tenant_file: Option<String>,
     pub providers: Vec<ProviderView>,
-    /// Machine-readable issue tags (e.g. `invalid_seal`, `tenant_drift`).
+    /// Machine-readable issue tags (e.g. `invalid_seal`, `tenant_drift`, `providers_drift`).
     pub issues: Vec<String>,
-    /// True only when pin is present, sealed, unexpired, and binding matches.
+    /// True only when pin is present, sealed, unexpired, unfrozen, and binding matches.
     pub ok: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1632,5 +2233,248 @@ allowed_bindings = ["acme"]
             }],
         });
         assert!(store.save_binding(&bad_alias).is_err());
+    }
+
+    #[test]
+    fn engagement_init_and_close_archives_audit() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("locus-home");
+        let project = dir.path().join("client");
+        fs::create_dir_all(&project).unwrap();
+        let store = Store::open(&home).unwrap();
+
+        let init = store
+            .engagement_init("acme", "acme-corp", &project, true, true, false)
+            .unwrap();
+        assert_eq!(init.alias, "acme");
+        assert!(init.binding_path.exists());
+        assert!(init.workspace_path.as_ref().unwrap().exists());
+        assert!(init.readme_path.as_ref().unwrap().exists());
+        for r in &init.credential_refs {
+            assert!(r.starts_with("phm:"));
+        }
+
+        // Pin and generate audit, then close with archive
+        store.pin("acme", &project, None, false).unwrap();
+        assert!(store.require_active().is_ok());
+        let closed = store.engagement_close("acme", true).unwrap();
+        assert!(closed.left_session);
+        assert!(closed.archive_path.is_some());
+        let ap = PathBuf::from(closed.archive_path.as_ref().unwrap());
+        assert!(ap.exists());
+        let meta = store.load_engagement_meta("acme").unwrap().unwrap();
+        assert!(meta.is_closed());
+        // Binding file kept; vault secrets untouched
+        assert!(store.load_binding("acme").is_ok());
+        assert!(matches!(
+            store.require_active().unwrap_err(),
+            LocusError::NotPinned
+        ));
+    }
+
+    #[test]
+    fn pin_auto_uses_workspace_default() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("home")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let project = dir.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join(".locus.toml"),
+            r#"
+version = 1
+default_binding = "acme"
+"#,
+        )
+        .unwrap();
+        let s = store.pin_auto(&project, None, false).unwrap();
+        assert_eq!(s.binding_alias, "acme");
+        assert!(matches!(s.source, PinSource::Dir { .. }));
+    }
+
+    #[test]
+    fn create_run_session_does_not_overwrite_active_pin() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+
+        let active = store.pin("acme", dir.path(), None, false).unwrap();
+        let active_id = active.session_id.clone();
+
+        let (run_sess, run_path) = store
+            .create_run_session("personal", dir.path(), None, false, false, "12345")
+            .unwrap();
+        assert_eq!(run_sess.binding_alias, "personal");
+        assert!(run_path.exists());
+        assert!(run_path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("run-"));
+
+        // Global pin unchanged
+        let still = store.active_session().unwrap().unwrap();
+        assert_eq!(still.session_id, active_id);
+        assert_eq!(still.binding_alias, "acme");
+
+        // Run session has LOCUS-ready identity
+        assert!(!run_sess.seal.is_empty());
+        assert!(run_sess.binding_fp.is_some());
+        assert!(matches!(run_sess.source, PinSource::Run));
+
+        store.cleanup_run_session(&run_path, &run_sess).unwrap();
+        assert!(!run_path.exists());
+        // Active still fine
+        assert_eq!(
+            store.active_session().unwrap().unwrap().session_id,
+            active_id
+        );
+    }
+
+    #[test]
+    fn create_run_session_works_without_global_pin() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        assert!(store.active_session().unwrap().is_none());
+
+        let (run_sess, run_path) = store
+            .create_run_session("acme", dir.path(), None, false, false, "pid99")
+            .unwrap();
+        assert_eq!(run_sess.binding_alias, "acme");
+        assert!(store.active_session().unwrap().is_none());
+        assert!(run_path.exists());
+        store.cleanup_run_session(&run_path, &run_sess).unwrap();
+    }
+
+    #[test]
+    fn create_run_session_share_pin_updates_active() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        let (run_sess, _) = store
+            .create_run_session("personal", dir.path(), None, false, true, "share1")
+            .unwrap();
+        let active = store.active_session().unwrap().unwrap();
+        assert_eq!(active.session_id, run_sess.session_id);
+        assert_eq!(active.binding_alias, "personal");
+    }
+
+    #[test]
+    fn check_drift_and_freeze_on_providers_change() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        store.save_binding(&b).unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        assert!(store.verify_runtime().unwrap().ok);
+
+        // Mutate provider scope under the pin
+        b.providers[0].scope.project_ref = Some("mutated_ref".into());
+        store.save_binding(&b).unwrap();
+
+        let d = store.check_drift_and_freeze().unwrap();
+        assert!(!d.ok);
+        assert!(d.frozen);
+        assert!(d.issues.iter().any(|i| i == "providers_drift"));
+        assert!(d.issues.iter().any(|i| i == "session_frozen"));
+
+        let sess = store.active_session().unwrap().unwrap();
+        assert!(sess.frozen);
+        assert!(matches!(
+            store.require_active().unwrap_err(),
+            LocusError::SessionFrozen(_)
+        ));
+
+        // Re-pin clears freeze
+        store.leave().unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        assert!(store.verify_runtime().unwrap().ok);
+        assert!(!store.active_session().unwrap().unwrap().frozen);
+    }
+
+    #[test]
+    fn check_drift_and_freeze_on_tenant_change() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        store.save_binding(&b).unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        b.tenant = "evil-corp".into();
+        store.save_binding(&b).unwrap();
+        let d = store.check_drift_and_freeze().unwrap();
+        assert!(d.frozen);
+        assert!(d.issues.iter().any(|i| i == "tenant_drift"));
+    }
+
+    #[test]
+    fn pin_namespaced_two_bindings() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+
+        let s = store
+            .pin_namespaced(
+                &["acme".into(), "personal".into()],
+                dir.path(),
+                Some("cli".into()),
+                false,
+            )
+            .unwrap();
+        assert!(s.is_namespaced());
+        assert_eq!(s.binding_alias, "acme");
+        assert_eq!(s.namespaces, vec!["personal".to_string()]);
+        assert_eq!(s.all_aliases(), vec!["acme", "personal"]);
+        assert_eq!(s.namespace_fps.len(), 1);
+        assert!(s.binding_fp.is_some());
+
+        let d = store.verify_runtime().unwrap();
+        assert!(d.ok);
+
+        // Drift on secondary freezes
+        let mut personal = store.load_binding("personal").unwrap();
+        personal.providers[0].account = "mutated".into();
+        store.save_binding(&personal).unwrap();
+        let d2 = store.check_drift_and_freeze().unwrap();
+        assert!(d2.frozen);
+        assert!(d2
+            .issues
+            .iter()
+            .any(|i| i == "namespace_drift" || i == "providers_drift"));
+    }
+
+    #[test]
+    fn pin_namespaced_requires_two() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        assert!(store
+            .pin_namespaced(&["acme".into()], dir.path(), None, false)
+            .is_err());
     }
 }

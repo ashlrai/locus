@@ -11,8 +11,9 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use locus_core::{
-    build_isolated_env_opts, parse_ttl, Binding, BindingBody, Policy, ProviderBinding, Scope,
-    Store, WorkspaceConfig, VERSION,
+    build_doctor_report, build_isolated_env_opts, filter_audit_events, parse_ttl, Binding,
+    BindingBody, DoctorExternal, DoctorVerdict, Policy, ProviderBinding, Scope, Store,
+    WorkspaceConfig, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -29,9 +30,10 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · setup · doctor · workspace · hook · mcp\n  \
-  Daily use     pin · leave · whoami · status · exec · binding\n  \
-  Approvals     approve\n  \
+  Setup         init · setup · doctor · watch · workspace · hook · mcp · engagement\n  \
+  Daily use     enter · pin · leave · whoami · status · exec · run · binding\n  \
+  Approvals     approve · notify\n  \
+  Audit         events\n  \
   Maintenance   version"
 )]
 struct Cli {
@@ -72,6 +74,17 @@ enum Commands {
     #[command(next_help_heading = "Setup")]
     Doctor,
 
+    /// Continuously check active pin for binding drift (freezes on change)
+    #[command(next_help_heading = "Setup")]
+    Watch {
+        /// Poll interval (e.g. 5s, 30s, 1m). Default: 5s
+        #[arg(long, default_value = "5s")]
+        interval: String,
+        /// Exit after one check
+        #[arg(long)]
+        once: bool,
+    },
+
     /// Write a .locus.toml in the current directory
     #[command(next_help_heading = "Setup")]
     Workspace {
@@ -101,10 +114,13 @@ enum Commands {
     Mcp,
 
     // ─────────────────────────── Daily use ───────────────────────────
-    /// Pin the current session to a binding
+    /// Enter a client context (pin + shell-friendly status)
+    ///
+    /// Same resolution as `pin`: explicit alias, else workspace default, else
+    /// opt-in git-remote autopin (`[autopin]` in config.toml).
     #[command(next_help_heading = "Daily use")]
-    Pin {
-        /// Binding alias or id (default: .locus.toml default_binding)
+    Enter {
+        /// Binding alias or id (default: workspace / autopin)
         alias: Option<String>,
         /// Allow bindings outside workspace allowlist
         #[arg(long)]
@@ -112,11 +128,35 @@ enum Commands {
         /// Client label recorded on the session (claude, cursor, cli)
         #[arg(long)]
         client: Option<String>,
+        /// Print `export LOCUS_*=…` lines for eval
+        #[arg(long)]
+        exports: bool,
     },
 
-    /// Clear the active pin and tear down worker dirs
+    /// Pin the current session to a binding
+    #[command(next_help_heading = "Daily use")]
+    Pin {
+        /// Binding alias or id (default: .locus.toml default_binding, then autopin)
+        alias: Option<String>,
+        /// Allow bindings outside workspace allowlist
+        #[arg(long)]
+        force: bool,
+        /// Client label recorded on the session (claude, cursor, cli)
+        #[arg(long)]
+        client: Option<String>,
+        /// Experimental namespaced multi-binding (comma-separated aliases).
+        /// Tools appear as `alias__tool` in locus-mcp. e.g. `--ns personal,acme`
+        #[arg(long = "ns")]
+        ns: Option<String>,
+    },
+
+    /// Leave the active pin (clear identity) and suggest re-enter
     #[command(next_help_heading = "Daily use")]
     Leave,
+
+    /// Manage client engagements (init / close)
+    #[command(next_help_heading = "Setup", subcommand)]
+    Engagement(EngagementCmd),
 
     /// Show who you are acting as (active pin)
     #[command(next_help_heading = "Daily use")]
@@ -144,6 +184,29 @@ enum Commands {
         cmd: Vec<String>,
     },
 
+    /// One-shot: run a command under a temporary pin (global pin unchanged)
+    #[command(next_help_heading = "Daily use")]
+    Run {
+        /// Binding alias to pin for this child only
+        #[arg(short = 'b', long = "binding")]
+        binding: String,
+        /// Also update active.json (default: temporary session only)
+        #[arg(long)]
+        share_pin: bool,
+        /// Do not resolve phm:/env: credential refs into secret env vars
+        #[arg(long)]
+        no_resolve: bool,
+        /// Fail if any credential_ref cannot be resolved
+        #[arg(long)]
+        strict_creds: bool,
+        /// Allow bindings outside workspace allowlist
+        #[arg(long)]
+        force: bool,
+        /// Command and args (after `--`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
+    },
+
     /// Manage bindings
     #[command(next_help_heading = "Daily use", subcommand)]
     Binding(BindingCmd),
@@ -153,10 +216,58 @@ enum Commands {
     #[command(next_help_heading = "Approvals", subcommand)]
     Approve(ApproveCmd),
 
+    /// Desktop approval banners (OFF by default — opt in explicitly)
+    #[command(next_help_heading = "Approvals", subcommand)]
+    Notify(NotifyCmd),
+
+    // ──────────────────────────── Audit ──────────────────────────────
+    /// Read recent local audit events (`$LOCUS_HOME/audit/events.jsonl`)
+    #[command(next_help_heading = "Audit")]
+    Events {
+        /// Max events from the end of the log
+        #[arg(long, default_value_t = 50)]
+        last: usize,
+        /// Filter by op (exact or substring, e.g. `session.pin`, `scope_freeze`)
+        #[arg(long)]
+        op: Option<String>,
+        /// Filter by binding alias
+        #[arg(long)]
+        binding: Option<String>,
+    },
+
     // ───────────────────────── Maintenance ───────────────────────────
     /// Print version (also available as `locus --version`)
     #[command(next_help_heading = "Maintenance")]
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum EngagementCmd {
+    /// Create a client binding + optional workspace/README (phm: stubs only)
+    Init {
+        /// Binding alias (e.g. acme)
+        alias: String,
+        /// Tenant name (e.g. acme-corp)
+        #[arg(long)]
+        tenant: String,
+        /// Write `.locus.toml` in cwd with allowlist + require_pin
+        #[arg(long)]
+        workspace: bool,
+        /// Skip writing `.locus/README.md`
+        #[arg(long)]
+        no_readme: bool,
+        /// Overwrite existing binding / workspace
+        #[arg(long)]
+        force: bool,
+    },
+    /// Close an engagement (metadata + optional audit archive; never deletes vault secrets)
+    Close {
+        /// Binding alias
+        alias: String,
+        /// Archive audit events for this binding to `$LOCUS_HOME/archives/`
+        #[arg(long)]
+        archive: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -183,11 +294,32 @@ enum ApproveCmd {
         /// Approval id (`appr_…`)
         id: String,
     },
+    /// Poll until approved, denied, or timeout (for scripts / CI)
+    Wait {
+        /// Approval id (`appr_…`)
+        id: String,
+        /// Seconds to wait (default: 120)
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
+        /// Poll interval in milliseconds (default: 500)
+        #[arg(long, default_value_t = 500)]
+        interval_ms: u64,
+    },
     /// Deny a pending approval
     Deny {
         /// Approval id (`appr_…`)
         id: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum NotifyCmd {
+    /// Show whether desktop banners are enabled (default: off)
+    Status,
+    /// Enable silent macOS banners for *new* pending approvals
+    On,
+    /// Disable desktop banners (default)
+    Off,
 }
 
 #[derive(Subcommand, Debug)]
@@ -237,12 +369,20 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init { with_samples } => cmd_init(with_samples, cli.json),
+        Commands::Enter {
+            alias,
+            force,
+            client,
+            exports,
+        } => cmd_enter(alias, force, client, exports, cli.json),
         Commands::Pin {
             alias,
             force,
             client,
-        } => cmd_pin(alias, force, client, cli.json),
+            ns,
+        } => cmd_pin(alias, force, client, ns, cli.json),
         Commands::Leave => cmd_leave(cli.json),
+        Commands::Engagement(sub) => cmd_engagement(sub, cli.json),
         Commands::Whoami => cmd_whoami(cli.json),
         Commands::Status { oneline } => cmd_status(oneline, cli.json),
         Commands::Exec {
@@ -250,6 +390,14 @@ fn run() -> Result<()> {
             strict_creds,
             cmd,
         } => cmd_exec(cmd, !no_resolve, strict_creds),
+        Commands::Run {
+            binding,
+            share_pin,
+            no_resolve,
+            strict_creds,
+            force,
+            cmd,
+        } => cmd_run(binding, share_pin, cmd, !no_resolve, strict_creds, force),
         Commands::Mcp => cmd_mcp(),
         Commands::Binding(sub) => cmd_binding(sub, cli.json),
         Commands::Workspace {
@@ -259,6 +407,7 @@ fn run() -> Result<()> {
             force,
         } => cmd_workspace(default, allow, require_pin, force),
         Commands::Doctor => cmd_doctor(cli.json),
+        Commands::Watch { interval, once } => cmd_watch(&interval, once, cli.json),
         Commands::Hook { shell } => cmd_hook(&shell),
         Commands::Setup {
             client,
@@ -266,6 +415,8 @@ fn run() -> Result<()> {
             mcp_bin,
         } => cmd_setup(&client, print, mcp_bin),
         Commands::Approve(sub) => cmd_approve(sub, cli.json),
+        Commands::Notify(sub) => cmd_notify(sub, cli.json),
+        Commands::Events { last, op, binding } => cmd_events(last, op, binding, cli.json),
         Commands::Version => {
             if cli.json {
                 println!(
@@ -412,17 +563,103 @@ fn write_sample_bindings(s: &Store) -> Result<()> {
     Ok(())
 }
 
-fn cmd_pin(alias: Option<String>, force: bool, client: Option<String>, json: bool) -> Result<()> {
+fn cmd_enter(
+    alias: Option<String>,
+    force: bool,
+    client: Option<String>,
+    exports: bool,
+    json: bool,
+) -> Result<()> {
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let session = match alias {
         Some(a) => s.pin(&a, &cwd(), client, force)?,
         None => s.pin_auto(&cwd(), client, force)?,
     };
+    let binding = s.load_binding(&session.binding_alias)?;
+    let providers_n = binding.providers.len();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "entered": true,
+                "binding": session.binding_alias,
+                "tenant": session.tenant,
+                "session_id": session.session_id,
+                "expires_at": session.expires_at.to_rfc3339(),
+                "providers": providers_n,
+                "prompt": format!("[locus:{}:{}]", session.binding_alias, session.tenant),
+            })
+        );
+        return Ok(());
+    }
+
+    if exports {
+        println!("export LOCUS_BINDING={}", session.binding_alias);
+        println!("export LOCUS_TENANT={}", session.tenant);
+        println!("export LOCUS_SESSION={}", session.session_id);
+        return Ok(());
+    }
+
+    println!(
+        "{} entered {} ({})",
+        "ok".green().bold(),
+        session.binding_alias.cyan().bold(),
+        session.tenant.yellow()
+    );
+    println!(
+        "   prompt   {}",
+        format!("[locus:{}:{}]", session.binding_alias, session.tenant).cyan()
+    );
+    println!("   session  {}", session.session_id.dimmed());
+    println!("   expires  {}", session.expires_at.to_rfc3339().dimmed());
+    println!("   providers {}", providers_n);
+    println!();
+    println!(
+        "   {}  ·  {}  ·  {}",
+        "locus whoami".dimmed(),
+        "locus exec -- <cmd>".dimmed(),
+        "locus leave".dimmed()
+    );
+    Ok(())
+}
+
+fn cmd_pin(
+    alias: Option<String>,
+    force: bool,
+    client: Option<String>,
+    ns: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let s = store()?;
+    let client = client.or_else(|| Some("cli".into()));
+    let session = if let Some(ns_raw) = ns {
+        let mut aliases: Vec<String> = Vec::new();
+        if let Some(a) = alias {
+            aliases.push(a);
+        }
+        for part in ns_raw.split(',') {
+            let p = part.trim();
+            if !p.is_empty() && !aliases.iter().any(|x| x == p) {
+                aliases.push(p.into());
+            }
+        }
+        if aliases.len() < 2 {
+            bail!("--ns requires at least two distinct bindings (e.g. --ns personal,acme)");
+        }
+        s.pin_namespaced(&aliases, &cwd(), client, force)?
+    } else {
+        match alias {
+            Some(a) => s.pin(&a, &cwd(), client, force)?,
+            None => s.pin_auto(&cwd(), client, force)?,
+        }
+    };
     // Policy surface for the pinned binding (counts only — never secrets)
     let binding = s.load_binding(&session.binding_alias)?;
     let require_approval_n = binding.policy.require_approval.len();
     let dual_control_n = binding.policy.dual_control.len();
+    let rules_n = binding.policy.rules.len();
     let dual_control_all = binding.policy.dual_control_all_approvals;
     let providers_n = binding.providers.len();
 
@@ -432,6 +669,7 @@ fn cmd_pin(alias: Option<String>, force: bool, client: Option<String>, json: boo
             obj.insert(
                 "policy".into(),
                 json!({
+                    "rules": rules_n,
                     "require_approval": require_approval_n,
                     "dual_control": dual_control_n,
                     "dual_control_all_approvals": dual_control_all,
@@ -450,8 +688,16 @@ fn cmd_pin(alias: Option<String>, force: bool, client: Option<String>, json: boo
         println!("   session  {}", session.session_id);
         println!("   expires  {}", session.expires_at.to_rfc3339());
         println!("   worker   {}", session.worker_home);
+        if session.is_namespaced() {
+            println!(
+                "   mode     {}  namespaces={}",
+                "namespaced".yellow(),
+                session.all_aliases().join(",")
+            );
+        }
         println!(
-            "   policy   require_approval={}  dual_control={}{}",
+            "   policy   rules={}  require_approval={}  dual_control={}{}",
+            rules_n,
             require_approval_n,
             dual_control_n,
             if dual_control_all {
@@ -464,6 +710,12 @@ fn cmd_pin(alias: Option<String>, force: bool, client: Option<String>, json: boo
         println!();
         println!("   {}", "locus whoami".dimmed());
         println!("   {}", "locus exec -- <cmd>".dimmed());
+        if session.is_namespaced() {
+            println!(
+                "   {}",
+                "tools: alias__tool (e.g. acme__github.scope)".dimmed()
+            );
+        }
     }
     Ok(())
 }
@@ -475,7 +727,12 @@ fn cmd_leave(json: bool) -> Result<()> {
             if json {
                 println!("{}", serde_json::json!({ "left": false }));
             } else {
-                println!("{} no active pin", "->".dimmed());
+                println!("{} no active pin — already clear", "->".dimmed());
+                println!(
+                    "   re-pin: {}  or  {}",
+                    "locus enter <alias>".cyan(),
+                    "locus pin personal".cyan()
+                );
             }
         }
         Some(session) => {
@@ -485,6 +742,7 @@ fn cmd_leave(json: bool) -> Result<()> {
                     serde_json::json!({
                         "left": true,
                         "binding": session.binding_alias,
+                        "tenant": session.tenant,
                         "session_id": session.session_id,
                     })
                 );
@@ -492,8 +750,17 @@ fn cmd_leave(json: bool) -> Result<()> {
                 println!(
                     "{} left {} ({})",
                     "ok".green().bold(),
-                    session.binding_alias,
-                    session.session_id
+                    session.binding_alias.cyan().bold(),
+                    session.session_id.dimmed()
+                );
+                println!(
+                    "   identity cleared — no residual pin  {}",
+                    "[locus:leave]".dimmed()
+                );
+                println!(
+                    "   re-pin: {}  or  {}",
+                    "locus enter <alias>".cyan(),
+                    "locus pin personal".cyan()
                 );
             }
         }
@@ -501,8 +768,96 @@ fn cmd_leave(json: bool) -> Result<()> {
     Ok(())
 }
 
+fn cmd_engagement(sub: EngagementCmd, json: bool) -> Result<()> {
+    let s = store()?;
+    match sub {
+        EngagementCmd::Init {
+            alias,
+            tenant,
+            workspace,
+            no_readme,
+            force,
+        } => {
+            let result =
+                s.engagement_init(&alias, &tenant, &cwd(), workspace, !no_readme, force)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "alias": result.alias,
+                        "tenant": result.tenant,
+                        "binding_path": result.binding_path.display().to_string(),
+                        "workspace_path": result.workspace_path.as_ref().map(|p| p.display().to_string()),
+                        "readme_path": result.readme_path.as_ref().map(|p| p.display().to_string()),
+                        "credential_refs": result.credential_refs,
+                    })
+                );
+            } else {
+                println!(
+                    "{} engagement {} ({})",
+                    "ok".green().bold(),
+                    result.alias.cyan().bold(),
+                    result.tenant.yellow()
+                );
+                println!("   binding   {}", result.binding_path.display());
+                if let Some(wp) = &result.workspace_path {
+                    println!("   workspace {}", wp.display());
+                }
+                if let Some(rp) = &result.readme_path {
+                    println!("   readme    {}", rp.display());
+                }
+                println!("   phm refs  (create in Phantom — never commit values)");
+                for r in &result.credential_refs {
+                    println!("      {}", r.dimmed());
+                }
+                println!();
+                println!("next:");
+                println!(
+                    "  edit scopes in {}",
+                    result.binding_path.display().to_string().dimmed()
+                );
+                println!("  {}", format!("locus enter {}", result.alias).cyan());
+                println!("  {}", "locus whoami".dimmed());
+            }
+            Ok(())
+        }
+        EngagementCmd::Close { alias, archive } => {
+            let result = s.engagement_close(&alias, archive)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!(
+                    "{} closed {} ({})",
+                    "ok".green().bold(),
+                    result.alias.cyan().bold(),
+                    result.tenant.yellow()
+                );
+                println!("   closed_at {}", result.closed_at.dimmed());
+                if result.left_session {
+                    println!("   pin       left active session for this binding");
+                }
+                if let Some(ap) = &result.archive_path {
+                    println!("   archive   {ap}");
+                }
+                println!();
+                println!(
+                    "{}",
+                    "checklist (manual — Locus does not delete vault secrets):".bold()
+                );
+                for (i, item) in result.checklist.iter().enumerate() {
+                    println!("   {}. {item}", i + 1);
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 fn cmd_whoami(json: bool) -> Result<()> {
     let s = store()?;
+    // Detect drift before reporting
+    let _ = s.check_drift_and_freeze();
     let w = s.whoami()?;
     if json {
         println!("{}", serde_json::to_string_pretty(&w)?);
@@ -523,6 +878,26 @@ fn cmd_whoami(json: bool) -> Result<()> {
         "  seal      {}",
         if w.seal_ok { "ok".green() } else { "BAD".red() }
     );
+    if w.frozen {
+        println!(
+            "  frozen    {}  reason={}",
+            "YES".red().bold(),
+            w.frozen_reason.as_deref().unwrap_or("re-pin")
+        );
+        println!(
+            "            {}",
+            "session_frozen: re-pin — run `locus leave` then `locus pin <alias>`".yellow()
+        );
+    }
+    if w.mode == "namespaced" || !w.namespaces.is_empty() {
+        let mut all = vec![w.binding_alias.clone()];
+        all.extend(w.namespaces.iter().cloned());
+        println!(
+            "  mode      {}  namespaces={}",
+            "namespaced".yellow(),
+            all.join(",")
+        );
+    }
     println!("  providers");
     for p in &w.providers {
         let mut bits = vec![format!("account={}", p.account)];
@@ -553,6 +928,7 @@ fn cmd_whoami(json: bool) -> Result<()> {
 
 fn cmd_status(oneline: bool, json: bool) -> Result<()> {
     let s = store()?;
+    let _ = s.check_drift_and_freeze();
     match s.active_session()? {
         None => {
             if json {
@@ -565,7 +941,9 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
         }
         Some(session) => {
             let key = s.seal_key()?;
-            let ok = session.verify(&key).is_ok();
+            let seal_ok = session.verify_seal(&key).is_ok();
+            let frozen = session.frozen;
+            let ok = seal_ok && !frozen && !session.is_expired();
             if json {
                 println!(
                     "{}",
@@ -574,18 +952,30 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                         "binding": session.binding_alias,
                         "tenant": session.tenant,
                         "session_id": session.session_id,
-                        "seal_ok": ok,
+                        "seal_ok": seal_ok,
+                        "frozen": frozen,
+                        "frozen_reason": session.frozen_reason,
                         "expired": session.is_expired(),
+                        "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
+                        "namespaces": session.all_aliases(),
                     })
                 );
             } else if oneline {
-                if !ok {
+                if frozen {
+                    println!("frozen");
+                } else if !ok {
                     println!("invalid");
                 } else {
                     println!("{}:{}", session.binding_alias, session.tenant);
                 }
             } else {
-                let mark = if ok { "ok".green() } else { "INVALID".red() };
+                let mark = if frozen {
+                    "FROZEN".red()
+                } else if ok {
+                    "ok".green()
+                } else {
+                    "INVALID".red()
+                };
                 println!(
                     "{} {} ({})  {}",
                     mark,
@@ -593,6 +983,12 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                     session.tenant,
                     session.session_id.dimmed()
                 );
+                if frozen {
+                    println!(
+                        "  session_frozen: re-pin ({})",
+                        session.frozen_reason.as_deref().unwrap_or("binding_drift")
+                    );
+                }
             }
             if !ok {
                 std::process::exit(2);
@@ -616,6 +1012,14 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     }
 
     let s = store()?;
+    // Drift check before privileged exec
+    let drift = s.check_drift_and_freeze()?;
+    if drift.frozen {
+        bail!(
+            "session_frozen: re-pin — binding drifted under active pin ({})",
+            drift.issues.join(", ")
+        );
+    }
     let session = s.require_active().context("need active pin for exec")?;
     let binding = s.load_binding(&session.binding_alias)?;
     if strict_creds {
@@ -673,6 +1077,151 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
             "secrets_failed": iso.secrets_failed,
         })),
     )?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+/// One-shot temporary pin for a child command. Does not overwrite active.json
+/// unless `--share-pin` is set.
+fn cmd_run(
+    binding_alias: String,
+    share_pin: bool,
+    cmd: Vec<String>,
+    resolve_secrets: bool,
+    strict_creds: bool,
+    force: bool,
+) -> Result<()> {
+    if cmd.is_empty() {
+        bail!("usage: locus run -b <alias> -- <command> [args...]");
+    }
+    let mut args = cmd;
+    if args.first().map(|s| s.as_str()) == Some("--") {
+        args.remove(0);
+    }
+    if args.is_empty() {
+        bail!("usage: locus run -b <alias> -- <command> [args...]");
+    }
+
+    let s = store()?;
+    // Capture parent pin (if any) so we can prove it is unchanged after run
+    // when share_pin is false.
+    let parent_before = s.active_session()?;
+
+    let suffix = format!("{}", std::process::id());
+    let (session, run_path) = s
+        .create_run_session(
+            &binding_alias,
+            &cwd(),
+            Some("run".into()),
+            force,
+            share_pin,
+            &suffix,
+        )
+        .with_context(|| format!("create run session for `{binding_alias}`"))?;
+
+    if !share_pin {
+        // Parent pin must remain intact
+        let parent_after = s.active_session()?;
+        match (&parent_before, &parent_after) {
+            (None, None) => {}
+            (Some(a), Some(b)) if a.session_id == b.session_id => {}
+            _ if parent_before.is_none() && parent_after.is_none() => {}
+            _ => {
+                // Should not happen — fail closed and cleanup
+                let _ = s.cleanup_run_session(&run_path, &session);
+                bail!("internal: run session mutated global pin unexpectedly");
+            }
+        }
+    }
+
+    let binding = s.load_binding(&session.binding_alias)?;
+    if strict_creds {
+        std::env::set_var("LOCUS_SOFT_CREDS", "0");
+    } else {
+        std::env::set_var("LOCUS_SOFT_CREDS", "1");
+    }
+    let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
+    if strict_creds && !iso.secrets_failed.is_empty() {
+        let _ = s.cleanup_run_session(&run_path, &session);
+        bail!(
+            "credential resolve failed: {}",
+            iso.secrets_failed.join("; ")
+        );
+    }
+
+    // Ensure composite workers when upstream is present (best-effort for CLI run).
+    // Child process gets LOCUS_* env; upstream MCP is primarily for locus-mcp.
+    {
+        use locus_core::CompositeWorkerManager;
+        if binding.providers.iter().any(|p| p.has_upstream()) {
+            let mut mgr = CompositeWorkerManager::new();
+            if let Err(e) = mgr.ensure_binding(&session, &binding) {
+                eprintln!(
+                    "{} worker ensure (upstream) soft-failed: {e}",
+                    "warn".yellow()
+                );
+            }
+            // Drop tears down children after ensure probe; child cmd uses env only.
+            drop(mgr);
+        }
+    }
+
+    let program = &args[0];
+    let rest = &args[1..];
+
+    let mut child = Command::new(program);
+    child
+        .args(rest)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .env_clear();
+    for (k, v) in &iso.vars {
+        child.env(k, v);
+    }
+
+    eprintln!(
+        "{} run as {} ({}) — temporary={} · scrubbed {} · resolved {} secret(s)",
+        "->".dimmed(),
+        session.binding_alias.cyan(),
+        session.tenant.dimmed(),
+        if share_pin {
+            "false(--share-pin)"
+        } else {
+            "true"
+        },
+        iso.scrubbed.len(),
+        iso.secrets_resolved
+    );
+    if !iso.secrets_failed.is_empty() {
+        eprintln!(
+            "{} unresolved credential_refs: {}",
+            "warn".yellow(),
+            iso.secrets_failed.join(", ")
+        );
+    }
+
+    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    s.audit(
+        "session.run",
+        &session.binding_alias,
+        Some(serde_json::json!({
+            "cmd": args,
+            "exit": status.code(),
+            "share_pin": share_pin,
+            "session_id": session.session_id,
+            "secrets_resolved": iso.secrets_resolved,
+            "secrets_failed": iso.secrets_failed,
+        })),
+    )?;
+
+    // Cleanup temporary run session (and worker home) unless share_pin (active owns it).
+    if !share_pin {
+        let _ = s.cleanup_run_session(&run_path, &session);
+    }
+
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
@@ -848,42 +1397,11 @@ fn cmd_workspace(
 
 fn cmd_doctor(json: bool) -> Result<()> {
     let s = store()?;
-    let bindings = s.list_bindings()?;
-    let active = s.active_session()?;
-    let seal_key_ok = s.seal_key().is_ok();
-    let drift = s.verify_runtime()?;
-    let mut issues: Vec<String> = Vec::new();
 
-    // Bindings count
-    if bindings.is_empty() {
-        issues.push("no bindings configured (locus init --with-samples)".into());
-    }
+    // Continuous whoami: freeze session if binding material drifted under pin
+    let _ = s.check_drift_and_freeze()?;
 
-    // Seal key file present
-    if !seal_key_ok {
-        issues.push("seal key missing or unreadable".into());
-    }
-
-    // Active pin seal (when pinned)
-    let mut pin_seal_ok: Option<bool> = None;
-    if let Some(ref sess) = active {
-        match sess.verify(&s.seal_key()?) {
-            Ok(()) => pin_seal_ok = Some(true),
-            Err(e) => {
-                pin_seal_ok = Some(false);
-                issues.push(format!("active pin seal invalid: {e}"));
-            }
-        }
-        if !drift.ok {
-            for tag in &drift.issues {
-                if tag != "not_pinned" {
-                    issues.push(format!("runtime drift: {tag}"));
-                }
-            }
-        }
-    }
-
-    // Phantom on PATH
+    // Phantom on PATH (external)
     let phantom_on_path = Command::new("phantom")
         .arg("--version")
         .stdout(Stdio::null())
@@ -891,134 +1409,273 @@ fn cmd_doctor(json: bool) -> Result<()> {
         .status()
         .map(|st| st.success())
         .unwrap_or(false);
-    if !phantom_on_path {
-        issues
-            .push("phantom not on PATH (install Phantom Secrets for phm: credential refs)".into());
-    }
-
-    // Unresolved phm: refs — names only via `phantom list` when available
     let unresolved_phm = collect_unresolved_phm_refs(&s, phantom_on_path)?;
-    if !unresolved_phm.is_empty() {
-        issues.push(format!(
-            "unresolved phm refs (names only): {}",
-            unresolved_phm.join(", ")
-        ));
-    }
 
-    // Approvals directory health (path, writable, counts — never raw args)
-    let approvals = s.approvals_health()?;
-    if !approvals.exists {
-        issues.push(format!(
-            "approvals dir missing: {} (will be created on first require_approval block)",
-            approvals.dir
-        ));
-    } else if !approvals.writable {
-        issues.push(format!("approvals dir not writable: {}", approvals.dir));
-    }
-    if approvals.corrupt > 0 {
-        issues.push(format!(
-            "approvals: {} corrupt record(s) in {}",
-            approvals.corrupt, approvals.dir
-        ));
-    }
-
-    let report = serde_json::json!({
-        "version": VERSION,
-        "home": s.home().display().to_string(),
-        "bindings": bindings.len(),
-        "pinned": active.as_ref().map(|a| a.binding_alias.clone()),
-        "seal_ok": seal_key_ok,
-        "pin_seal_ok": pin_seal_ok,
-        "phantom_on_path": phantom_on_path,
-        "unresolved_phm": unresolved_phm,
-        "approvals": approvals,
-        "runtime": drift,
-        "issues": issues,
-        "ok": issues.is_empty(),
-    });
+    let report = build_doctor_report(
+        &s,
+        DoctorExternal {
+            phantom_on_path,
+            unresolved_phm,
+            cwd: Some(cwd()),
+        },
+    )?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("{} locus {}", "doctor".magenta().bold(), VERSION);
-        println!("  home      {}", s.home().display());
-        println!("  bindings  {}", bindings.len());
+        print_doctor_human(&report);
+    }
+
+    match report.verdict {
+        DoctorVerdict::Safe => Ok(()),
+        DoctorVerdict::Warn => std::process::exit(1),
+        DoctorVerdict::Unsafe => std::process::exit(2),
+    }
+}
+
+/// Poll `check_drift_and_freeze` until interrupted (or once with `--once`).
+fn cmd_watch(interval: &str, once: bool, json: bool) -> Result<()> {
+    let s = store()?;
+    let sleep_dur = parse_watch_interval(interval)?;
+
+    loop {
+        let drift = s.check_drift_and_freeze()?;
+        if json {
+            println!("{}", serde_json::to_string(&drift)?);
+        } else if !drift.pinned {
+            println!(
+                "{} watch  {}",
+                "locus".magenta().bold(),
+                "not_pinned".dimmed()
+            );
+        } else if drift.frozen {
+            println!(
+                "{} watch  {}  {}  issues={}",
+                "locus".magenta().bold(),
+                "FROZEN".red().bold(),
+                drift.binding_alias.as_deref().unwrap_or("?"),
+                drift.issues.join(",")
+            );
+        } else if drift.ok {
+            println!(
+                "{} watch  {}  {}  ok",
+                "locus".magenta().bold(),
+                "ok".green().bold(),
+                drift.binding_alias.as_deref().unwrap_or("?")
+            );
+        } else {
+            println!(
+                "{} watch  {}  {}  issues={}",
+                "locus".magenta().bold(),
+                "drift".yellow().bold(),
+                drift.binding_alias.as_deref().unwrap_or("?"),
+                drift.issues.join(",")
+            );
+        }
+        if once {
+            if drift.frozen || (!drift.ok && drift.pinned) {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+        std::thread::sleep(sleep_dur);
+    }
+}
+
+fn parse_watch_interval(s: &str) -> Result<std::time::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Ok(std::time::Duration::from_secs(5));
+    }
+    let (num, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: u64 = num
+        .parse()
+        .or_else(|_| s.parse())
+        .context("invalid watch interval")?;
+    match unit {
+        "s" | "S" => Ok(std::time::Duration::from_secs(n)),
+        "m" | "M" => Ok(std::time::Duration::from_secs(n.saturating_mul(60))),
+        "h" | "H" => Ok(std::time::Duration::from_secs(n.saturating_mul(3600))),
+        _ if s.chars().all(|c| c.is_ascii_digit()) => Ok(std::time::Duration::from_secs(n)),
+        _ => bail!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)"),
+    }
+}
+
+fn print_doctor_human(report: &locus_core::DoctorReport) {
+    let verdict_colored = match report.verdict {
+        DoctorVerdict::Safe => "SAFE".green().bold().to_string(),
+        DoctorVerdict::Warn => "WARN".yellow().bold().to_string(),
+        DoctorVerdict::Unsafe => "UNSAFE".red().bold().to_string(),
+    };
+
+    println!("{} locus {}", "doctor".magenta().bold(), report.version);
+    println!("  verdict   {verdict_colored}");
+    println!("  home      {}", report.home);
+    println!("  bindings  {}", report.bindings);
+    println!(
+        "  seal      {}",
+        if report.seal_ok {
+            "ok".green().to_string()
+        } else {
+            "FAIL".red().to_string()
+        }
+    );
+
+    // Active pin
+    if let Some(ref pin) = report.pin {
         println!(
-            "  pin       {}",
-            active
-                .as_ref()
-                .map(|a| a.binding_alias.as_str())
-                .unwrap_or("none")
+            "  pin       {}  tenant={}  expires={}",
+            pin.alias.cyan().bold(),
+            pin.tenant.yellow(),
+            pin.expires_at.dimmed()
         );
         println!(
-            "  seal      {}",
-            if seal_key_ok {
+            "  pin seal  {}",
+            if pin.seal_ok {
                 "ok".green().to_string()
             } else {
                 "FAIL".red().to_string()
             }
         );
-        if let Some(ok) = pin_seal_ok {
-            println!(
-                "  pin seal  {}",
-                if ok {
-                    "ok".green().to_string()
-                } else {
-                    "FAIL".red().to_string()
-                }
-            );
+        if pin.expired {
+            println!("  pin age   {}", "EXPIRED".red().bold());
         }
-        println!(
-            "  phantom   {}",
-            if phantom_on_path {
-                "on PATH".green().to_string()
-            } else {
-                "missing".yellow().to_string()
-            }
-        );
-        if !unresolved_phm.is_empty() {
-            println!(
-                "  phm refs  {} unresolved: {}",
-                unresolved_phm.len(),
-                unresolved_phm.join(", ").dimmed()
-            );
-        } else if phantom_on_path {
-            println!("  phm refs  {}", "ok".green());
-        }
-        // Approvals dir health
-        let appr_status = if !approvals.exists {
-            "missing".red().to_string()
-        } else if !approvals.writable {
-            "not writable".red().to_string()
-        } else if approvals.corrupt > 0 {
-            format!("{} corrupt", approvals.corrupt)
+    } else {
+        println!("  pin       {}", "none".dimmed());
+    }
+
+    // Runtime drift
+    let rt = &report.runtime;
+    if rt.pinned {
+        let drift_s = if rt.ok {
+            "ok".green().to_string()
+        } else {
+            format!("issues={}", rt.issues.join(","))
                 .yellow()
                 .to_string()
-        } else {
-            "ok".green().to_string()
         };
         println!(
-            "  approvals {}  pending={} approved={} expired={} denied={} total={}",
-            appr_status,
-            approvals.pending,
-            approvals.approved_valid,
-            approvals.expired_grants,
-            approvals.denied,
-            approvals.total
+            "  runtime   {}  seal={} id_match={} tenant_match={} expired={}",
+            drift_s, rt.seal_ok, rt.binding_id_match, rt.tenant_match, rt.expired
         );
-        println!("            {}", approvals.dir.dimmed());
-        if issues.is_empty() {
-            println!("  {}", "all clear".green().bold());
+    } else {
+        println!("  runtime   {}", "not_pinned".dimmed());
+    }
+
+    // Approvals + dual-control
+    let appr = &report.approvals;
+    let appr_status = if !appr.exists {
+        "missing".red().to_string()
+    } else if !appr.writable {
+        "not writable".red().to_string()
+    } else if appr.corrupt > 0 {
+        format!("{} corrupt", appr.corrupt).yellow().to_string()
+    } else {
+        "ok".green().to_string()
+    };
+    println!(
+        "  approvals {}  pending={} dual_control_waiting={} approved={} expired={} denied={}",
+        appr_status,
+        report.pending_approvals,
+        report.dual_control_waiting,
+        appr.approved_valid,
+        appr.expired_grants,
+        appr.denied
+    );
+
+    // Phantom
+    println!(
+        "  phantom   {}",
+        if report.phantom_on_path {
+            "on PATH".green().to_string()
         } else {
-            for i in &issues {
-                println!("  {} {i}", "!".yellow());
-            }
+            "missing".yellow().to_string()
+        }
+    );
+    if !report.unresolved_phm.is_empty() {
+        println!(
+            "  phm refs  {} unresolved: {}",
+            report.unresolved_phm.len(),
+            report.unresolved_phm.join(", ").dimmed()
+        );
+    } else if report.phantom_on_path {
+        println!("  phm refs  {}", "ok".green());
+    }
+
+    // Autopin / config.toml
+    let ap = &report.autopin;
+    let ap_s = if !ap.present {
+        "no config.toml".dimmed().to_string()
+    } else if !ap.ok {
+        "invalid".yellow().to_string()
+    } else if ap.remote_autopin_enabled {
+        format!(
+            "remote=on rules={} auto_pin={}",
+            ap.remote_rules,
+            ap.auto_pin.as_deref().unwrap_or("-")
+        )
+        .green()
+        .to_string()
+    } else {
+        format!(
+            "remote=off auto_pin={}",
+            ap.auto_pin.as_deref().unwrap_or("-")
+        )
+        .dimmed()
+        .to_string()
+    };
+    println!("  autopin   {ap_s}");
+    if let Some(ref note) = ap.note {
+        println!("            {}", note.dimmed());
+    }
+
+    // Workspace
+    let ws = &report.workspace;
+    if ws.found {
+        println!(
+            "  workspace {}  default={} require_pin={} allow=[{}]",
+            "found".green(),
+            ws.default_binding.as_deref().unwrap_or("-"),
+            ws.require_pin,
+            ws.allowed_bindings.join(", ")
+        );
+        if let Some(ref p) = ws.path {
+            println!("            {}", p.dimmed());
+        }
+    } else {
+        println!("  workspace {}", "none".dimmed());
+    }
+
+    // Recent audit
+    let au = &report.audit;
+    println!(
+        "  audit     total={}  recent_scope_freeze={}  recent_deny={}",
+        au.total, au.scope_freeze, au.deny
+    );
+    for ev in au.last.iter().take(5) {
+        println!(
+            "            {}  {}  {}",
+            ev.ts.dimmed(),
+            ev.op.cyan(),
+            ev.binding.yellow()
+        );
+    }
+
+    // Findings + verdict
+    if report.findings.is_empty() {
+        println!(
+            "  {}",
+            "all clear — SAFE to act under current pin".green().bold()
+        );
+    } else {
+        for f in &report.findings {
+            let mark = match f.severity {
+                locus_core::IssueSeverity::Unsafe => "!".red().bold().to_string(),
+                locus_core::IssueSeverity::Warn => "!".yellow().to_string(),
+            };
+            println!("  {mark} [{}] {}", f.code, f.message);
         }
     }
-    if !issues.is_empty() {
-        std::process::exit(1);
-    }
-    Ok(())
 }
 
 /// Collect `phm:NAME` credential refs from all bindings that are not present
@@ -1103,26 +1760,57 @@ fn cmd_hook(shell: &str) -> Result<()> {
     match shell {
         "zsh" | "bash" => {
             println!(
-                r#"# Locus prompt helper — eval "$(locus hook zsh)"
+                r#"# Locus prompt + optional auto-enter — eval "$(locus hook zsh)"
+# Prompt shows [locus:enter] when unpinned, [locus:alias:tenant] when pinned.
+# LOCUS_AUTO_ENTER=1 → on directory change, try `locus enter` (workspace default / autopin).
+# Never forces allowlist; never overrides with secrets.
 _locus_prompt() {{
   local s
   s="$(locus status --oneline 2>/dev/null)" || s="unpinned"
-  if [[ "$s" == "unpinned" || "$s" == "invalid" ]]; then
-    echo "%F{{red}}[locus:$s]%f"
+  if [[ "$s" == "unpinned" ]]; then
+    echo "%F{{red}}[locus:enter]%f"
+  elif [[ "$s" == "invalid" ]]; then
+    echo "%F{{red}}[locus:invalid]%f"
   else
     echo "%F{{cyan}}[locus:$s]%f"
   fi
 }}
+_locus_auto_enter() {{
+  [[ "${{LOCUS_AUTO_ENTER:-0}}" == "1" ]] || return 0
+  locus enter >/dev/null 2>&1 || true
+}}
+if [[ -n "$ZSH_VERSION" ]]; then
+  autoload -Uz add-zsh-hook 2>/dev/null
+  add-zsh-hook chpwd _locus_auto_enter 2>/dev/null || true
+elif [[ -n "$BASH_VERSION" ]]; then
+  # bash: run on PROMPT_COMMAND (best-effort)
+  if [[ -z "$_LOCUS_PROMPT_CMD" ]]; then
+    _LOCUS_PROMPT_CMD=1
+    PROMPT_COMMAND="_locus_auto_enter${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
+  fi
+fi
 # Optional: add to PROMPT via: PROMPT='$(_locus_prompt) '"$PROMPT
 "#
             );
         }
         "fish" => {
             println!(
-                r#"# Locus prompt helper for fish
+                r#"# Locus prompt helper for fish — [locus:enter] | [locus:alias:tenant]
+# LOCUS_AUTO_ENTER=1 → try enter when changing directories
 function locus_prompt
   set -l s (locus status --oneline 2>/dev/null; or echo unpinned)
-  echo "[locus:$s]"
+  if test "$s" = "unpinned"
+    echo "[locus:enter]"
+  else if test "$s" = "invalid"
+    echo "[locus:invalid]"
+  else
+    echo "[locus:$s]"
+  end
+end
+function _locus_auto_enter --on-variable PWD
+  if test "$LOCUS_AUTO_ENTER" = "1"
+    locus enter >/dev/null 2>&1; or true
+  end
 end
 "#
             );
@@ -1227,6 +1915,159 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
     Ok(())
 }
 
+/// Thin audit reader: last N events from `$LOCUS_HOME/audit/events.jsonl`.
+/// Never resolves credentials; ops/details only.
+fn cmd_events(last: usize, op: Option<String>, binding: Option<String>, json: bool) -> Result<()> {
+    let s = store()?;
+    let all = s.read_audit_events()?;
+    let events = filter_audit_events(&all, last, op.as_deref(), binding.as_deref());
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&events)?);
+        return Ok(());
+    }
+
+    if events.is_empty() {
+        let mut filt = String::new();
+        if let Some(ref o) = op {
+            filt.push_str(&format!(" op={o}"));
+        }
+        if let Some(ref b) = binding {
+            filt.push_str(&format!(" binding={b}"));
+        }
+        println!(
+            "{} no audit events{}",
+            "->".dimmed(),
+            if filt.is_empty() {
+                String::new()
+            } else {
+                format!(" matching{filt}")
+            }
+        );
+        println!("   {}", s.audit_path().display().to_string().dimmed());
+        return Ok(());
+    }
+
+    println!(
+        "{} {} event(s){}{}  {}",
+        "events".magenta().bold(),
+        events.len(),
+        op.as_ref().map(|o| format!("  op={o}")).unwrap_or_default(),
+        binding
+            .as_ref()
+            .map(|b| format!("  binding={b}"))
+            .unwrap_or_default(),
+        s.audit_path().display().to_string().dimmed()
+    );
+    for e in &events {
+        let detail = e
+            .detail
+            .as_ref()
+            .map(|d| {
+                // Compact single-line detail for terminals
+                serde_json::to_string(d).unwrap_or_else(|_| "{}".into())
+            })
+            .unwrap_or_default();
+        println!(
+            "  {}  {}  binding={}{}",
+            e.ts.dimmed(),
+            e.op.cyan(),
+            e.binding.yellow(),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!("  {detail}")
+            }
+        );
+    }
+    Ok(())
+}
+
+fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {
+    use locus_core::{load_config, notifications_enabled, save_config};
+
+    let s = store()?;
+    let home = s.home();
+    match sub {
+        NotifyCmd::Status => {
+            let cfg = load_config(home);
+            let effective = notifications_enabled();
+            if json {
+                println!(
+                    "{}",
+                    json!({
+                        "config_enabled": cfg.notify.enabled,
+                        "effective": effective,
+                        "default": "off",
+                        "env_LOCUS_NOTIFY": std::env::var("LOCUS_NOTIFY").ok(),
+                        "hint": "Banners are opt-in. Enable with `locus notify on` or LOCUS_NOTIFY=1.",
+                    })
+                );
+            } else {
+                println!(
+                    "{} desktop notifications: {} (config={})",
+                    if effective {
+                        "on".green().bold()
+                    } else {
+                        "off".yellow().bold()
+                    },
+                    if effective { "enabled" } else { "disabled" },
+                    if cfg.notify.enabled { "true" } else { "false" }
+                );
+                if !effective {
+                    println!(
+                        "   {}",
+                        "default is off so agents don't spam Notification Center".dimmed()
+                    );
+                    println!(
+                        "   enable: {}  or  {}",
+                        "locus notify on".cyan(),
+                        "LOCUS_NOTIFY=1".cyan()
+                    );
+                }
+            }
+        }
+        NotifyCmd::On => {
+            let mut cfg = load_config(home);
+            cfg.notify.enabled = true;
+            let path = save_config(home, &cfg)?;
+            if json {
+                println!(
+                    "{}",
+                    json!({ "ok": true, "enabled": true, "path": path.display().to_string() })
+                );
+            } else {
+                println!(
+                    "{} notifications enabled (silent banners, rate-limited)",
+                    "ok".green().bold()
+                );
+                println!("   wrote {}", path.display());
+            }
+        }
+        NotifyCmd::Off => {
+            let mut cfg = load_config(home);
+            cfg.notify.enabled = false;
+            let path = save_config(home, &cfg)?;
+            if json {
+                println!(
+                    "{}",
+                    json!({ "ok": true, "enabled": false, "path": path.display().to_string() })
+                );
+            } else {
+                println!("{} notifications disabled", "ok".green().bold());
+                println!("   wrote {}", path.display());
+                if std::env::var("LOCUS_NOTIFY").is_ok() {
+                    println!(
+                        "   {}",
+                        "note: unset LOCUS_NOTIFY in your shell if it is set".yellow()
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
     let s = store()?;
     match sub {
@@ -1249,7 +2090,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 );
                 println!(
                     "   {}",
-                    "Blocked tool calls write appr_*.json when agents hit policy.require_approval."
+                    "Blocked tool calls write appr_*.json when agents hit policy.require_approval / rules."
                         .dimmed()
                 );
                 println!(
@@ -1268,6 +2109,12 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             for rec in &pending {
                 let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
                 let required = if dual { 2 } else { 1 };
+                let grants_n = format!("grants {}/{}", rec.grants.len(), required);
+                let progress = if dual {
+                    format!("{grants_n} (dual_control)")
+                } else {
+                    grants_n
+                };
                 println!(
                     "  {}  {}  binding={}  tool={}",
                     rec.id.cyan().bold(),
@@ -1276,23 +2123,20 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                     rec.tool.yellow()
                 );
                 println!(
-                    "      digest={}  session={}  requester={}  grants={}/{}{}",
-                    rec.args_digest.dimmed(),
-                    rec.session_id.dimmed(),
+                    "      {}  requester={}  session={}",
+                    progress,
                     if rec.requester.is_empty() {
                         "-"
                     } else {
                         rec.requester.as_str()
                     },
-                    rec.grants.len(),
-                    required,
-                    if dual { " (dual_control)" } else { "" }
+                    rec.session_id.dimmed()
                 );
             }
             println!();
             println!(
                 "{}",
-                "Grant: locus approve grant <id> --as <principal>   status: locus approve status <id>"
+                "Grant: locus approve grant <id> --as <principal>   status: locus approve status <id>   wait: locus approve wait <id>"
                     .dimmed()
             );
             Ok(())
@@ -1311,59 +2155,21 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 None => None,
             };
             let rec = s.grant_approval(&id, ttl_dur, &principal)?;
+            let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
+            let required = if dual { 2 } else { 1 };
             if json {
-                println!("{}", serde_json::to_string_pretty(&rec)?);
-            } else if rec.status == locus_core::ApprovalStatus::Approved {
-                println!(
-                    "{} granted {} as {}  tool={}  binding={}",
-                    "ok".green().bold(),
-                    rec.id.cyan(),
-                    principal.yellow(),
-                    rec.tool,
-                    rec.binding
-                );
-                println!(
-                    "   grants   {}",
-                    rec.grants
-                        .iter()
-                        .map(|g| g.principal.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                if let Some(exp) = rec.expires_at {
-                    println!("   expires  {}", exp.to_rfc3339());
+                let mut v = serde_json::to_value(&rec)?;
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("dual_control".into(), json!(dual));
+                    obj.insert("required_grants".into(), json!(required));
+                    obj.insert(
+                        "grants_progress".into(),
+                        json!(format!("{}/{}", rec.grants.len(), required)),
+                    );
                 }
-                println!(
-                    "   {}",
-                    "Re-call the tool with the same args (or confirm=true + approval_id).".dimmed()
-                );
+                println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
-                let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
-                let required = if dual { 2 } else { 1 };
-                println!(
-                    "{} partial grant {} as {}  ({}/{} principals)",
-                    "ok".yellow().bold(),
-                    rec.id.cyan(),
-                    principal.yellow(),
-                    rec.grants.len(),
-                    required
-                );
-                println!(
-                    "   grants   {}",
-                    rec.grants
-                        .iter()
-                        .map(|g| g.principal.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-                println!(
-                    "   {}",
-                    format!(
-                        "Dual-control: need a second principal — run `locus approve grant {} --as <other>`",
-                        rec.id
-                    )
-                    .dimmed()
-                );
+                print_grant_summary(&rec, &principal, dual, required, ttl.as_deref());
             }
             Ok(())
         }
@@ -1376,6 +2182,10 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("dual_control".into(), json!(dual));
                     obj.insert("required_grants".into(), json!(required));
+                    obj.insert(
+                        "grants_progress".into(),
+                        json!(format!("{}/{}", rec.grants.len(), required)),
+                    );
                 }
                 println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
@@ -1396,7 +2206,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                     }
                 );
                 println!(
-                    "   dual      {}  grants={}/{}",
+                    "   dual      {}  grants {}/{}",
                     if dual { "yes" } else { "no" },
                     rec.grants.len(),
                     required
@@ -1420,6 +2230,89 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             }
             Ok(())
         }
+        ApproveCmd::Wait {
+            id,
+            timeout,
+            interval_ms,
+        } => {
+            use locus_core::ApprovalStatus;
+            use std::thread;
+            use std::time::{Duration as StdDuration, Instant};
+
+            let deadline = Instant::now() + StdDuration::from_secs(timeout);
+            let interval = StdDuration::from_millis(interval_ms.max(50));
+            loop {
+                let rec = s.load_approval(&id)?;
+                let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
+                let required = if dual { 2 } else { 1 };
+                match rec.status {
+                    ApprovalStatus::Approved => {
+                        if json {
+                            let mut v = serde_json::to_value(&rec)?;
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert("wait_result".into(), json!("approved"));
+                                obj.insert("dual_control".into(), json!(dual));
+                                obj.insert("required_grants".into(), json!(required));
+                            }
+                            println!("{}", serde_json::to_string_pretty(&v)?);
+                        } else {
+                            println!(
+                                "{} {} approved  tool={}  binding={}  grants {}/{}",
+                                "ok".green().bold(),
+                                rec.id.cyan(),
+                                rec.tool,
+                                rec.binding,
+                                rec.grants.len(),
+                                required
+                            );
+                            if let Some(exp) = rec.expires_at {
+                                println!("   expires  {}", exp.to_rfc3339());
+                            }
+                        }
+                        return Ok(());
+                    }
+                    ApprovalStatus::Denied => {
+                        if json {
+                            let mut v = serde_json::to_value(&rec)?;
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert("wait_result".into(), json!("denied"));
+                            }
+                            println!("{}", serde_json::to_string_pretty(&v)?);
+                        }
+                        bail!(
+                            "approval {} denied (tool={} binding={})",
+                            rec.id,
+                            rec.tool,
+                            rec.binding
+                        );
+                    }
+                    ApprovalStatus::Pending => {
+                        if Instant::now() >= deadline {
+                            if json {
+                                let mut v = serde_json::to_value(&rec)?;
+                                if let Some(obj) = v.as_object_mut() {
+                                    obj.insert("wait_result".into(), json!("timeout"));
+                                    obj.insert("timeout_secs".into(), json!(timeout));
+                                    obj.insert(
+                                        "grants_progress".into(),
+                                        json!(format!("{}/{}", rec.grants.len(), required)),
+                                    );
+                                }
+                                println!("{}", serde_json::to_string_pretty(&v)?);
+                            }
+                            bail!(
+                                "timeout after {}s waiting for approval {} (status=pending, grants {}/{})",
+                                timeout,
+                                rec.id,
+                                rec.grants.len(),
+                                required
+                            );
+                        }
+                        thread::sleep(interval);
+                    }
+                }
+            }
+        }
         ApproveCmd::Deny { id } => {
             let rec = s.deny_approval(&id)?;
             if json {
@@ -1435,6 +2328,86 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             }
             Ok(())
         }
+    }
+}
+
+/// Human-readable summary after `locus approve grant`.
+fn print_grant_summary(
+    rec: &locus_core::ApprovalRecord,
+    principal: &str,
+    dual: bool,
+    required: usize,
+    ttl_flag: Option<&str>,
+) {
+    let principals: String = rec
+        .grants
+        .iter()
+        .map(|g| g.principal.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let grants_progress = format!("{}/{}", rec.grants.len(), required);
+
+    if rec.status == locus_core::ApprovalStatus::Approved {
+        println!(
+            "{} granted {} as {}",
+            "ok".green().bold(),
+            rec.id.cyan(),
+            principal.yellow()
+        );
+        println!("   tool      {}", rec.tool.yellow());
+        println!("   binding   {}", rec.binding.yellow());
+        println!(
+            "   grants    {}  ({})",
+            grants_progress.bold(),
+            if principals.is_empty() {
+                "-"
+            } else {
+                &principals
+            }
+        );
+        if dual {
+            println!("   dual      yes (fully approved)");
+        }
+        if let Some(exp) = rec.expires_at {
+            let ttl_note = ttl_flag.unwrap_or("15m");
+            println!("   ttl       {}  expires {}", ttl_note, exp.to_rfc3339());
+        }
+        println!(
+            "   {}",
+            "Re-call the tool with the same args (or confirm=true + approval_id).".dimmed()
+        );
+    } else {
+        println!(
+            "{} partial grant {} as {}",
+            "ok".yellow().bold(),
+            rec.id.cyan(),
+            principal.yellow()
+        );
+        println!("   tool      {}", rec.tool.yellow());
+        println!("   binding   {}", rec.binding.yellow());
+        println!(
+            "   grants    {}  ({}){}",
+            grants_progress.bold(),
+            if principals.is_empty() {
+                "-"
+            } else {
+                &principals
+            },
+            if dual { "  dual_control" } else { "" }
+        );
+        let remaining = required.saturating_sub(rec.grants.len());
+        println!(
+            "   {}",
+            format!(
+                "Need {remaining} more distinct principal(s) — run `locus approve grant {} --as <other>`",
+                rec.id
+            )
+            .dimmed()
+        );
+        println!(
+            "   {}",
+            format!("Or wait: locus approve wait {} --timeout 120", rec.id).dimmed()
+        );
     }
 }
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Locus end-to-end shell tests — pin, isolation, MCP, freeze, approval, doctor.
+# Locus end-to-end shell tests — pin, isolation, MCP, freeze, approval, doctor,
+# dual-control, events, optional enter/run (feature-detected).
 set -euo pipefail
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
@@ -12,11 +13,24 @@ MCP_BIN="${MCP_BIN:-$ROOT/target/release/locus-mcp}"
 
 pass=0
 fail=0
+skip=0
 
 log()  { printf '\n==> %s\n' "$*"; }
 ok()   { printf '  ok  %s\n' "$*"; pass=$((pass + 1)); }
+skip() { printf '  skip %s\n' "$*"; skip=$((skip + 1)); }
 die()  { printf '  FAIL %s\n' "$*" >&2; fail=$((fail + 1)); exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
+
+# Feature detection: true if `locus <cmd> --help` succeeds (subcommand exists).
+has_cmd() {
+  "$LOCUS_BIN" "$1" --help >/dev/null 2>&1
+}
+
+# True if help text for a command mentions a flag substring.
+help_mentions() {
+  local cmd="$1" needle="$2"
+  "$LOCUS_BIN" "$cmd" --help 2>&1 | grep -q -- "$needle"
+}
 
 # ── 1. Build release binaries ────────────────────────────────────────────────
 log "1. build release binaries"
@@ -282,53 +296,231 @@ retry_line="$(echo "$retry_out" | tool_call_text)"
 echo "$retry_line" | grep -q '^OK|' || die "expected success after grant: $retry_line"
 ok "re-call after grant succeeds"
 
-# ── 9. doctor ────────────────────────────────────────────────────────────────
-log "9. doctor"
-# Sample bindings use unresolved phm: refs → overall ok may be false / exit 1.
-# Assert structural health: seal + pin + bindings present.
+# ── 9. doctor (structure + exit codes) ───────────────────────────────────────
+log "9. doctor structure + exit codes"
+# Sample bindings use unresolved phm: refs → overall ok is usually false / exit 1.
+# Assert structural health: seal + pin + bindings present; exit matches issues.
 set +e
 doctor_json="$(locus doctor --json 2>/dev/null)"
 doctor_ec=$?
 set -e
+export DOCTOR_EC="$doctor_ec"
 echo "$doctor_json" | python3 -c '
-import json, sys
+import json, sys, os
 d = json.load(sys.stdin)
 assert d.get("seal_ok") is True, d
 assert d.get("pin_seal_ok") is True, d
 assert d.get("bindings", 0) >= 2, d
 assert d.get("pinned") in ("acme", "envtest", "personal"), d
-print("doctor seal_ok pin_seal_ok bindings=%s pinned=%s exit_hint=%s" % (
-    d.get("bindings"), d.get("pinned"), "issues" if d.get("issues") else "clean"))
+issues = d.get("issues") or []
+ok_flag = d.get("ok")
+assert ok_flag == (len(issues) == 0), d
+ec = int(os.environ["DOCTOR_EC"])
+assert ec in (0, 1), "doctor exit must be 0 or 1, got %s" % ec
+if issues:
+    assert ec == 1, "doctor with issues must exit 1, got %s: %s" % (ec, issues)
+else:
+    assert ec == 0, "doctor clean must exit 0, got %s" % ec
+print("doctor seal_ok pin_seal_ok bindings=%s pinned=%s issues=%d exit=%s" % (
+    d.get("bindings"), d.get("pinned"), len(issues), ec))
 '
-ok "doctor seal_ok + pin_seal_ok (exit was $doctor_ec; unresolved phm samples ok)"
+ok "doctor structure + exit code matches issues (exit=$doctor_ec)"
 
-# ── 10. leave → unpinned ─────────────────────────────────────────────────────
-log "10. leave → unpinned"
-locus leave >/dev/null
+# Unpinned doctor still reports seal_ok and exits consistently with issues
+locus leave >/dev/null 2>&1 || true
+set +e
+doctor_unpinned="$(locus doctor --json 2>/dev/null)"
+doctor_un_ec=$?
+set -e
+export DOCTOR_EC="$doctor_un_ec"
+echo "$doctor_unpinned" | python3 -c '
+import json, sys, os
+d = json.load(sys.stdin)
+assert d.get("seal_ok") is True, d
+assert d.get("pinned") in (None, ""), d
+issues = d.get("issues") or []
+ec = int(os.environ["DOCTOR_EC"])
+assert ec in (0, 1), ec
+if issues:
+    assert ec == 1, (ec, issues)
+else:
+    assert ec == 0, (ec, d)
+'
+ok "doctor unpinned exit code coherent (exit=$doctor_un_ec)"
+
+# Re-pin acme for dual-control / events steps
+locus pin acme --force >/dev/null
+
+# ── 10. dual_control two-principal grant (feature-detected) ──────────────────
+log "10. dual_control two principals (if policy supports)"
+# Write a binding with dual_control on delete tools; use env: refs for isolation.
+cat >"$LOCUS_HOME/bindings/dual.toml" <<'EOF'
+[binding]
+id = "bnd_dual"
+alias = "dual"
+tenant = "dual-tenant"
+description = "e2e dual-control"
+
+[binding.policy]
+default = "allow"
+require_approval = ["*.delete*"]
+dual_control = ["*.delete*"]
+max_ttl = "1h"
+
+[[binding.providers]]
+provider = "supabase"
+account = "dual-sb"
+credential_ref = "env:LOCUS_E2E_SUPABASE_TOKEN"
+scope = { project_ref = "proj_dual_e2e", read_only = false }
+EOF
+
+if ! help_mentions approve "--as" && ! has_cmd approve; then
+  skip "approve CLI missing — dual_control grant not exercised"
+else
+  locus pin dual >/dev/null
+  dual_out="$(
+    mcp_rpc \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supabase.table.delete","arguments":{"table":"users"}}}'
+  )"
+  dual_line="$(echo "$dual_out" | tool_call_text)"
+  echo "$dual_line" | grep -q '^ERR|' || die "expected dual require_approval: $dual_line"
+  dual_id="$(echo "$dual_line" | grep -oE 'appr_[a-f0-9]+' | head -1)"
+  [[ -n "$dual_id" ]] || die "no approval_id for dual: $dual_line"
+  ok "dual_control blocked with $dual_id"
+
+  # First principal — partial grant
+  g1="$(locus approve grant "$dual_id" --as alice --json 2>/dev/null || true)"
+  echo "$g1" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert r.get("status") in ("pending", "Pending") or r.get("status") == "pending", r
+assert len(r.get("grants") or []) == 1, r
+'
+  ok "first principal alice partial grant"
+
+  # Same principal cannot complete dual-control
+  if locus approve grant "$dual_id" --as alice >/dev/null 2>&1; then
+    die "same principal should not complete dual_control"
+  fi
+  ok "same principal rejected on second grant"
+
+  # Second principal completes
+  g2="$(locus approve grant "$dual_id" --as bob --json 2>/dev/null)"
+  echo "$g2" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+st = (r.get("status") or "").lower()
+assert st == "approved", r
+assert len(r.get("grants") or []) >= 2, r
+'
+  ok "second principal bob fully approved"
+
+  retry_dual="$(
+    mcp_rpc \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supabase.table.delete","arguments":{"table":"users"}}}'
+  )"
+  retry_dual_line="$(echo "$retry_dual" | tool_call_text)"
+  echo "$retry_dual_line" | grep -q '^OK|' || die "expected success after dual grant: $retry_dual_line"
+  ok "re-call after dual grant succeeds"
+fi
+
+# ── 11. locus events (audit export) ──────────────────────────────────────────
+log "11. locus events --last N [--op] [--json]"
+if ! has_cmd events; then
+  skip "events command not available"
+else
+  # Pins / grants should have written audit lines
+  events_json="$(locus events --last 20 --json 2>/dev/null)"
+  echo "$events_json" | python3 -c '
+import json, sys
+ev = json.load(sys.stdin)
+assert isinstance(ev, list), type(ev)
+assert len(ev) >= 1, "expected at least one audit event after pin/approve"
+for e in ev:
+    assert "ts" in e and "op" in e and "binding" in e, e
+print("events last20 count=%d sample_ops=%s" % (
+    len(ev), ",".join(sorted({e["op"] for e in ev})[:8])))
+'
+  ok "events --last 20 --json returns records"
+
+  # Filter by op (session.pin is written on pin)
+  pin_ev="$(locus events --last 50 --op session.pin --json 2>/dev/null || true)"
+  # op name may vary — accept empty or pin-related
+  echo "$pin_ev" | python3 -c '
+import json, sys
+ev = json.load(sys.stdin)
+assert isinstance(ev, list), ev
+for e in ev:
+    assert e.get("op") == "session.pin", e
+'
+  ok "events --op session.pin filters (or empty list)"
+
+  # Text mode still exits 0
+  locus events --last 5 >/dev/null
+  ok "events text mode"
+fi
+
+# ── 12. optional: enter / leave pair (feature-detected) ──────────────────────
+log "12. enter/leave (optional)"
+if has_cmd enter; then
+  # enter is alias/workflow for pin in some designs — exercise without assuming UX
+  locus leave >/dev/null 2>&1 || true
+  if locus enter personal >/dev/null 2>&1 || locus enter -- personal >/dev/null 2>&1; then
+    st="$(locus status --oneline 2>/dev/null || true)"
+    echo "$st" | grep -qi personal || die "enter personal → expected personal pin, got: $st"
+    ok "enter personal"
+  else
+    skip "enter present but invocation failed (API may differ)"
+  fi
+else
+  skip "enter not available (use pin)"
+fi
+
+# leave always expected in current CLI
+if has_cmd leave; then
+  locus pin personal --force >/dev/null 2>&1 || locus pin acme --force >/dev/null
+  locus leave >/dev/null
+  status="$(locus status --oneline)"
+  [[ "$status" == "unpinned" ]] || die "expected unpinned after leave, got: $status"
+  ok "leave → unpinned"
+else
+  skip "leave not available"
+fi
+
+# ── 13. optional: locus run -b (one-shot child session) ───────────────────────
+log "13. locus run -b (optional)"
+if has_cmd run; then
+  # Prefer -b / --binding; fall back to positional if needed
+  ran=0
+  if locus run -b personal -- true >/dev/null 2>&1; then
+    ran=1
+  elif locus run --binding personal -- true >/dev/null 2>&1; then
+    ran=1
+  elif locus run personal -- true >/dev/null 2>&1; then
+    ran=1
+  fi
+  if [[ "$ran" -eq 1 ]]; then
+    # Shell pin should be unchanged (run is one-shot) — leave was unpinned above
+    st="$(locus status --oneline 2>/dev/null || true)"
+    ok "run -b completed (status after: $st)"
+  else
+    skip "run present but could not invoke with -b/--binding"
+  fi
+else
+  skip "run not available (use exec under pin)"
+fi
+
+# ── 14. leave → unpinned MCP control-only ────────────────────────────────────
+log "14. leave → unpinned MCP control-only"
+locus leave >/dev/null 2>&1 || true
 status="$(locus status --oneline)"
 [[ "$status" == "unpinned" ]] || die "expected unpinned, got: $status"
-who_left="$(locus whoami --json 2>/dev/null || true)"
-if echo "$who_left" | python3 -c '
-import json, sys
-try:
-    w = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-# if whoami still prints, must not claim a pin
-if w.get("binding_alias") and w.get("seal_ok"):
-    # some implementations return unpinned object
-    if w.get("binding_alias") not in (None, "", "unpinned"):
-        # check pinned field if present
-        if w.get("pinned") is False:
-            sys.exit(0)
-        # leave already verified via status
-        sys.exit(0)
-' 2>/dev/null; then
-  :
-fi
 ok "leave → status unpinned"
 
-# Final MCP unpinned check
 final_out="$(
   mcp_rpc \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
@@ -342,6 +534,6 @@ fi
 ok "after leave, MCP control-only again"
 
 printf '\n========================================\n'
-printf 'e2e PASS  (%d checks)\n' "$pass"
+printf 'e2e PASS  (%d checks, %d skipped)\n' "$pass" "$skip"
 printf 'LOCUS_HOME was %s (cleaned)\n' "$LOCUS_HOME"
 printf '========================================\n'

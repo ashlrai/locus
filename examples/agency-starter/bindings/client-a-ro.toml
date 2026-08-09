@@ -1,0 +1,27 @@
+# Client A — read-only surface (audit / schema review).
+# Prefer this alias when you do not need deploy or mutate tools.
+
+[binding]
+id = "bnd_client_a_ro"
+alias = "client-a-ro"
+tenant = "client-a-corp"
+description = "Client A read-only (audit / review)"
+
+[binding.policy]
+default = "allow"
+max_ttl = "8h"
+parallel_sessions = 2
+# Block destructive names even if an adapter exposes them
+require_approval = ["*.delete*", "*.drop*", "*.write*", "vercel.deploy*"]
+
+[[binding.providers]]
+provider = "supabase"
+account = "client-a-prod"
+credential_ref = "phm:SUPABASE_CLIENT_A_RO"
+scope = { project_ref = "CLIENT_A_PROJECT_REF", read_only = true }
+
+[[binding.providers]]
+provider = "github"
+account = "client-a-corp"
+credential_ref = "phm:GH_TOKEN_CLIENT_A_RO"
+scope = { orgs = ["client-a-corp"], repos = ["client-a-corp/*"] }

@@ -1,0 +1,7 @@
+# Commit as `.locus.toml` at the root of Client A's monorepo.
+# Blocks accidental `locus pin personal` without --force.
+
+version = 1
+default_binding = "client-a"
+allowed_bindings = ["client-a", "client-a-ro"]
+require_pin = true

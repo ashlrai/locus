@@ -58,7 +58,7 @@ Agents inherit **ambient identity**: global `gh auth`, one Supabase MCP token, l
 | **Workspace** | `.locus.toml` — default pin + allowlist for a directory tree |
 | **CredentialRef** | Opaque pointer (`phm:…` / `env:…`) — never the secret |
 | **Worker** | Process or in-process adapter scoped to one Binding × Provider |
-| **Policy** | `default` allow/deny + `require_approval` globs evaluated before tools/call |
+| **Policy** | Ordered `rules` + legacy `require_approval` / `dual_control` globs + `default` (see [policy.md](./policy.md)) |
 
 Store root: `~/.locus/` (override with `LOCUS_HOME`).
 

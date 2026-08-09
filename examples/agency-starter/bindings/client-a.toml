@@ -1,0 +1,36 @@
+# Client A — day-to-day write surface (preview + scoped write).
+# Copy: cp examples/agency-starter/bindings/client-a.toml ~/.locus/bindings/client-a.toml
+# Pair with client-a-ro for audit-only work.
+
+[binding]
+id = "bnd_client_a"
+alias = "client-a"
+tenant = "client-a-corp"
+description = "Client A engagement (write / preview)"
+
+[binding.policy]
+default = "allow"
+max_ttl = "8h"
+parallel_sessions = 4
+require_approval = ["*.delete*", "*.drop*", "vercel.deploy.prod"]
+# Firm mode: two distinct principals for high-blast tools
+dual_control = ["*.delete*", "vercel.deploy.prod"]
+# dual_control_all_approvals = true
+
+[[binding.providers]]
+provider = "supabase"
+account = "client-a-prod"
+credential_ref = "phm:SUPABASE_CLIENT_A"
+scope = { project_ref = "CLIENT_A_PROJECT_REF", read_only = false }
+
+[[binding.providers]]
+provider = "github"
+account = "client-a-corp"
+credential_ref = "phm:GH_TOKEN_CLIENT_A"
+scope = { orgs = ["client-a-corp"], repos = ["client-a-corp/*"] }
+
+[[binding.providers]]
+provider = "vercel"
+account = "client-a-team"
+credential_ref = "phm:VERCEL_TOKEN_CLIENT_A"
+scope = { team_id = "team_client_a", projects = ["client-a-web"], env = ["preview"] }

@@ -181,10 +181,13 @@ require_pin = true
 2. Tool's provider in binding?        else DENY
 3. Tool matches scope allowlist?      else DENY
 4. Adapter hard-constraints pass?     else DENY  (e.g. project_ref mismatch)
-5. require_approval match?            else queue human approval
-6. policy.default                     ALLOW or DENY
-7. Emit audit event (always)
+5. Structured [[binding.policy.rules]] first matching rule (allow|deny|require_approval|dual_control)
+6. Legacy require_approval / dual_control globs → queue human approval when matched
+7. policy.default                     ALLOW or DENY
+8. Emit audit event (always)
 ```
+
+See [docs/policy.md](./docs/policy.md) for rule syntax, dual-control, and `locus approve` UX.
 
 There is **no** “if unsure, use personal account” path. Unbound = empty tool list.
 

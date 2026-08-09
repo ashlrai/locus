@@ -1,0 +1,32 @@
+# Client B — separate tenant; never share CredentialRefs with client-a or personal.
+
+[binding]
+id = "bnd_client_b"
+alias = "client-b"
+tenant = "client-b-corp"
+description = "Client B engagement"
+
+[binding.policy]
+default = "allow"
+max_ttl = "8h"
+parallel_sessions = 4
+require_approval = ["*.delete*", "*.drop*", "vercel.deploy.prod"]
+dual_control = ["*.delete*", "vercel.deploy.prod"]
+
+[[binding.providers]]
+provider = "supabase"
+account = "client-b-prod"
+credential_ref = "phm:SUPABASE_CLIENT_B"
+scope = { project_ref = "CLIENT_B_PROJECT_REF", read_only = false }
+
+[[binding.providers]]
+provider = "github"
+account = "client-b-corp"
+credential_ref = "phm:GH_TOKEN_CLIENT_B"
+scope = { orgs = ["client-b-corp"], repos = ["client-b-corp/*"] }
+
+[[binding.providers]]
+provider = "vercel"
+account = "client-b-team"
+credential_ref = "phm:VERCEL_TOKEN_CLIENT_B"
+scope = { team_id = "team_client_b", projects = ["client-b-web"], env = ["preview"] }

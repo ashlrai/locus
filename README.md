@@ -167,9 +167,31 @@ locus status [--oneline] [--json]
 locus exec -- <command> [args...]
 locus binding list|show|add|rm
 locus workspace --default <alias> [--allow a,b] [--require-pin]
-locus doctor
+locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2)
+locus approve list|grant|status|deny  # require_approval / dual-control
+locus events --last N [--op …] [--binding …] [--json]
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex
+```
+
+**Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
+
+Approvals:
+
+```bash
+# After an agent hits require_approval (MCP returns appr_…)
+locus approve list
+locus approve grant appr_… --as alice
+# dual_control tools need a second distinct principal:
+locus approve grant appr_… --as bob
+locus events --last 20 --op approval.grant --json
+```
+
+Planned (not in CLI yet; e2e skips until present):
+
+```
+locus enter <alias>            # firm workflow alias for pin (see docs/firm-mode.md)
+locus run -b <alias> -- <cmd>  # one-shot child session without changing shell pin
 ```
 
 Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
@@ -183,7 +205,7 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | **0** Daemon-less control plane, pin/whoami/exec, isolation tests | done |
 | **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | **you are here** |
 | **2** Real upstream MCP workers, AWS/CF/Resend, continuous whoami drift | next |
-| **3** Team binding graph, remote dual-control, offboard, audit export | |
+| **3** Team binding graph, remote dual-control, offboard, SIEM export | partial (`locus events`) |
 
 See [PLAN.md](./PLAN.md) and [DESIGN.md](./DESIGN.md) for the full architecture.
 
@@ -197,7 +219,7 @@ cargo test --workspace
 cargo build --release
 ./target/release/locus --help
 
-# Full shell e2e (build, pin, isolation, MCP freeze/approval, doctor, leave)
+# Full shell e2e (build, pin, isolation, MCP freeze/approval, dual-control, events, doctor)
 ./scripts/e2e.sh
 ```
 
@@ -222,7 +244,10 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [apps/web/](./apps/web) | Landing page (static HTML) |
 | [scripts/e2e.sh](./scripts/e2e.sh) | End-to-end shell suite |
 | [docs/architecture.md](./docs/architecture.md) | System diagram (DESIGN distilled) |
+| [docs/agency-certainty.md](./docs/agency-certainty.md) | Identity vs epistemic certainty (Ashlr stack) |
 | [docs/firm-mode.md](./docs/firm-mode.md) | Agencies: bindings, dual-control, workspaces |
+| [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
+| [examples/agency-starter/](./examples/agency-starter/) | Bindings, workspaces, dual-control, offboarding |
 | [docs/mcp.md](./docs/mcp.md) | `locus-mcp` with Claude Code / Cursor |
 | [docs/adapters.md](./docs/adapters.md) | Writing a provider adapter |
 | [docs/workers.md](./docs/workers.md) | Synthetic vs MCP stdio workers |
@@ -232,19 +257,38 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 
 ---
 
+## Daily firm workflow
+
+```bash
+locus engagement init acme --tenant acme-corp --workspace
+locus enter acme
+locus whoami
+locus exec -- gh pr list
+locus run -b personal -- npm test    # one-shot; global pin unchanged
+locus leave
+
+locus approve list
+locus approve grant appr_… --as mason
+locus notify status                  # OFF by default (no spam)
+locus doctor                         # SAFE | WARN | UNSAFE
+```
+
+**Desktop notifications are off by default.** Agents create many pending
+approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
+(silent, rate-limited). Kill switch: `locus notify off` / `LOCUS_QUIET=1`.
+
 ## Security model
 
 - Session pins are **HMAC-sealed**; tampering fails closed.
 - Workspace `allowed_bindings` blocks wrong-tenant pins (unless `--force`, audited).
-- `locus exec` scrubs ambient identity env vars; resolves secrets only into the child.
+- `locus exec` / `locus run` scrub ambient identity; secrets only in the child.
 - MCP never returns secret values; agents cannot pin (request only).
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
-- Policy `require_approval` blocks destructive tools until a human grants (`locus approve grant --as`).
-- Dual-control (`policy.dual_control` / `dual_control_all_approvals`) needs two distinct principals.
+- Policy: globs + structured `[[rules]]`, `require_approval`, dual-control (2 principals).
+- Upstream MCP workers auto-spawn per-binding when `upstream = { command, args }` is set.
+- Drift freeze: `locus watch` / doctor re-pin if binding changes under a session.
 
-Not in scope yet: team binding graph sync, multi-namespace sessions.
-
-Details and reporting: [SECURITY.md](./SECURITY.md). Full threat model: [DESIGN.md §9](./DESIGN.md).
+Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md §9](./DESIGN.md).
 
 ---
 

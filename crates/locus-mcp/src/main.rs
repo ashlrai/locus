@@ -10,8 +10,8 @@
 
 use anyhow::{Context, Result};
 use locus_core::{
-    call_tool_gated, control_tools, enforce_policy, tools_for_binding, AdapterTool, ApprovalGate,
-    CompositeWorkerManager, Store, VERSION,
+    call_tool_gated, control_tools, enforce_policy, split_namespaced_tool, tools_for_binding,
+    AdapterTool, ApprovalGate, Binding, CompositeWorkerManager, Session, Store, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -199,36 +199,63 @@ fn store() -> Result<Store> {
     Store::open_default().context("open locus store")
 }
 
-fn active_binding() -> Result<Option<(locus_core::Session, locus_core::Binding)>> {
+/// Active pin plus resolved bindings (alias, Binding) for exclusive or namespaced mode.
+type ActiveBindings = (Session, Vec<(String, Binding)>);
+
+/// Load active pin + all bindings (exclusive: one; namespaced: many).
+/// Fails closed on invalid seal / expiry. Frozen is reported but still returned
+/// so callers can emit `session_frozen` tool errors (list may still work for
+/// control tools).
+fn active_session_bindings() -> Result<Option<ActiveBindings>> {
     let s = store()?;
     match s.active_session()? {
         None => Ok(None),
         Some(session) => {
             let key = s.seal_key()?;
-            session.verify(&key)?;
-            let binding = s.load_binding(&session.binding_alias)?;
-            Ok(Some((session, binding)))
+            // Seal + expiry only here; freeze checked at tools/call.
+            session.verify_seal(&key)?;
+            let mut bindings = Vec::new();
+            for alias in session.all_aliases() {
+                let b = s.load_binding(&alias)?;
+                bindings.push((alias, b));
+            }
+            Ok(Some((session, bindings)))
         }
     }
 }
 
+fn primary_binding(bindings: &[(String, Binding)]) -> Option<&Binding> {
+    bindings.first().map(|(_, b)| b)
+}
+
 /// Unpinned ⇒ only locus_* control tools. Pinned ⇒ control + provider tools
 /// (synthetic adapters + namespaced upstream MCP tools when declared).
+/// Namespaced multi-bind prefixes tools as `alias__tool`.
 fn handle_tools_list() -> std::result::Result<Value, Value> {
-    let pinned = active_binding().map_err(|e| rpc_error(-32000, e.to_string()))?;
+    let pinned = active_session_bindings().map_err(|e| rpc_error(-32000, e.to_string()))?;
     let mut tools: Vec<AdapterTool> = control_tools(pinned.is_some());
-    if let Some((ref session, ref binding)) = pinned {
+    if let Some((ref session, ref bindings)) = pinned {
         let mut mgr = worker_manager()
             .lock()
             .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
-        match mgr.ensure_binding(session, binding) {
+        match mgr.ensure_session(session, bindings) {
             Ok(_) => {
-                tools.extend(mgr.tools_for_pin(session, binding));
+                tools.extend(mgr.tools_for_session(session, bindings));
             }
             Err(e) => {
                 // Soft-fail spawn: still expose synthetic adapter tools.
                 eprintln!("locus-mcp: worker ensure failed (listing synthetic only): {e}");
-                tools.extend(tools_for_binding(binding));
+                if session.is_namespaced() {
+                    for (alias, binding) in bindings {
+                        for mut t in tools_for_binding(binding) {
+                            t.name = locus_core::namespace_tool(alias, &t.name);
+                            t.description = format!("[{alias}] {}", t.description);
+                            tools.push(t);
+                        }
+                    }
+                } else if let Some(b) = primary_binding(bindings) {
+                    tools.extend(tools_for_binding(b));
+                }
             }
         }
     }
@@ -256,15 +283,31 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
         .ok_or_else(|| rpc_error(-32602, "missing tool name".into()))?;
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    // Control tools
+    // Control tools (allowed even when frozen — whoami/status report freeze)
     if name.starts_with("locus_") {
         return call_control(name, &args);
     }
 
     // Provider tools require pin
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
-    let pinned = active_binding().map_err(|e| rpc_error(-32000, e.to_string()))?;
-    let Some((session, binding)) = pinned else {
+
+    // Continuous drift check — freezes session if binding file mutated.
+    let drift = s
+        .check_drift_and_freeze()
+        .map_err(|e| rpc_error(-32000, e.to_string()))?;
+    if drift.frozen {
+        return Ok(tool_text(
+            json!({
+                "error": "session_frozen: re-pin",
+                "reason": drift.issues,
+                "hint": "Binding changed under the active pin. Human must run `locus leave` then `locus pin <alias>`.",
+            }),
+            true,
+        ));
+    }
+
+    let pinned = active_session_bindings().map_err(|e| rpc_error(-32000, e.to_string()))?;
+    let Some((session, bindings)) = pinned else {
         return Ok(tool_text(
             json!({
                 "error": "not_pinned",
@@ -272,6 +315,62 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
             }),
             true,
         ));
+    };
+
+    if session.is_frozen() {
+        return Ok(tool_text(
+            json!({
+                "error": "session_frozen: re-pin",
+                "reason": session.frozen_reason,
+                "hint": "Human must re-pin after binding drift."
+            }),
+            true,
+        ));
+    }
+
+    // Resolve target binding + un-prefixed tool name for namespaced sessions.
+    let (binding, tool_name): (&Binding, &str) = if session.is_namespaced() {
+        match split_namespaced_tool(name) {
+            Some((alias, rest)) => {
+                let b = bindings
+                    .iter()
+                    .find(|(a, _)| a == alias)
+                    .map(|(_, b)| b)
+                    .ok_or_else(|| {
+                        rpc_error(
+                            -32602,
+                            format!("unknown namespace alias `{alias}` for tool `{name}`"),
+                        )
+                    })?;
+                // Alias must be in this session
+                if !session.all_aliases().iter().any(|a| a == alias) {
+                    return Ok(tool_text(
+                        json!({
+                            "error": "namespace_not_in_session",
+                            "alias": alias,
+                            "tool": name,
+                        }),
+                        true,
+                    ));
+                }
+                (b, rest)
+            }
+            None => {
+                return Ok(tool_text(
+                    json!({
+                        "error": "namespaced_tool_required",
+                        "detail": "This session is namespaced; call tools as `alias__tool` (e.g. acme__github.scope).",
+                        "tool": name,
+                        "namespaces": session.all_aliases(),
+                    }),
+                    true,
+                ));
+            }
+        }
+    } else {
+        let b = primary_binding(&bindings)
+            .ok_or_else(|| rpc_error(-32000, "pinned session has no bindings".into()))?;
+        (b, name)
     };
 
     let principal_owned = session.principal.clone();
@@ -286,10 +385,9 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
         let mut mgr = worker_manager()
             .lock()
             .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
-        if let Err(e) = mgr.ensure_binding(&session, &binding) {
-            // Only hard-fail when the tool targets an upstream-only provider.
-            let synthetic = tools_for_binding(&binding);
-            let is_synthetic = synthetic.iter().any(|t| t.name == name);
+        if let Err(e) = mgr.ensure_session(&session, &bindings) {
+            let synthetic = tools_for_binding(binding);
+            let is_synthetic = synthetic.iter().any(|t| t.name == tool_name);
             if !is_synthetic {
                 return Ok(tool_text(
                     json!({
@@ -304,32 +402,32 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
         }
     }
 
-    let synthetic = tools_for_binding(&binding);
-    let is_synthetic = synthetic.iter().any(|t| t.name == name);
+    let synthetic = tools_for_binding(binding);
+    let is_synthetic = synthetic.iter().any(|t| t.name == tool_name);
 
     if is_synthetic {
-        match call_tool_gated(&binding, name, &args, Some(gate)) {
+        match call_tool_gated(binding, tool_name, &args, Some(gate)) {
             Ok(r) => {
-                audit_tool_block(&s, &binding.alias, name, &r.content);
+                audit_tool_block(&s, &binding.alias, tool_name, &r.content);
                 Ok(tool_text(r.content, !r.ok))
             }
             Err(e) => Ok(tool_text(
-                scope_or_err(&s, &binding.alias, name, &args, e),
+                scope_or_err(&s, &binding.alias, tool_name, &args, e),
                 true,
             )),
         }
     } else {
         // Upstream (or unknown) tool: policy + worker fan-out.
-        match enforce_policy(&binding, name, &args, Some(gate)) {
+        match enforce_policy(binding, tool_name, &args, Some(gate)) {
             Ok(Some(blocked)) => {
-                audit_tool_block(&s, &binding.alias, name, &blocked.content);
+                audit_tool_block(&s, &binding.alias, tool_name, &blocked.content);
                 Ok(tool_text(blocked.content, true))
             }
             Ok(None) => {
                 let mgr = worker_manager()
                     .lock()
                     .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
-                match mgr.call_tool(&session, &binding, name, &args) {
+                match mgr.call_tool(&session, binding, tool_name, &args) {
                     Ok(r) => Ok(tool_text(r.content, !r.ok)),
                     Err(e) => Ok(tool_text(
                         json!({ "error": e.to_string(), "tool": name }),
@@ -389,6 +487,10 @@ fn scope_or_err(
 
 fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
+    // Heartbeat: detect drift and freeze when control tools are polled.
+    if matches!(name, "locus_whoami" | "locus_status" | "locus_providers") {
+        let _ = s.check_drift_and_freeze();
+    }
     match name {
         "locus_whoami" => match s.whoami() {
             Ok(w) => Ok(tool_text(
@@ -415,7 +517,7 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
                 )),
                 Some(session) => {
                     let key = s.seal_key().map_err(|e| rpc_error(-32000, e.to_string()))?;
-                    let seal_ok = session.verify(&key).is_ok();
+                    let seal_ok = session.verify_seal(&key).is_ok();
                     Ok(tool_text(
                         json!({
                             "pinned": true,
@@ -424,6 +526,10 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
                             "session_id": session.session_id,
                             "seal_ok": seal_ok,
                             "expired": session.is_expired(),
+                            "frozen": session.frozen,
+                            "frozen_reason": session.frozen_reason,
+                            "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
+                            "namespaces": session.all_aliases(),
                         }),
                         false,
                     ))
