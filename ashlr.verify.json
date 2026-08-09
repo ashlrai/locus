@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "mode": "replace-detected",
+  "authorityFiles": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "rust-toolchain.toml",
+    ".github/workflows/ci.yml"
+  ],
+  "commands": [
+    {
+      "id": "check",
+      "kind": "typecheck",
+      "cmd": ["cargo", "check", "--workspace"],
+      "cwd": ".",
+      "timeoutMs": 300000,
+      "required": true,
+      "profiles": ["quick", "merge", "deep"]
+    },
+    {
+      "id": "format",
+      "kind": "lint",
+      "cmd": ["cargo", "fmt", "--all", "--", "--check"],
+      "cwd": ".",
+      "timeoutMs": 180000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    },
+    {
+      "id": "npm-cli-installer-syntax",
+      "kind": "typecheck",
+      "cmd": ["node", "--check", "npm/install.js"],
+      "cwd": ".",
+      "timeoutMs": 180000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    },
+    {
+      "id": "npm-cli-launcher-syntax",
+      "kind": "typecheck",
+      "cmd": ["node", "--check", "npm/bin/locus.js"],
+      "cwd": ".",
+      "timeoutMs": 180000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    },
+    {
+      "id": "npm-mcp-installer-syntax",
+      "kind": "typecheck",
+      "cmd": ["node", "--check", "npm-mcp/install.js"],
+      "cwd": ".",
+      "timeoutMs": 180000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    },
+    {
+      "id": "npm-mcp-launcher-syntax",
+      "kind": "typecheck",
+      "cmd": ["node", "--check", "npm-mcp/bin/locus-mcp.js"],
+      "cwd": ".",
+      "timeoutMs": 180000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    },
+    {
+      "id": "homebrew-formula-syntax",
+      "kind": "typecheck",
+      "cmd": ["ruby", "-c", "integrations/homebrew/Formula/locus.rb"],
+      "cwd": ".",
+      "timeoutMs": 180000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    },
+    {
+      "id": "clippy",
+      "kind": "lint",
+      "cmd": ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    },
+    {
+      "id": "test",
+      "kind": "test",
+      "cmd": ["cargo", "test", "--workspace"],
+      "cwd": ".",
+      "timeoutMs": 600000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    },
+    {
+      "id": "release-build",
+      "kind": "build",
+      "cmd": ["cargo", "build", "--workspace", "--release"],
+      "cwd": ".",
+      "timeoutMs": 900000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    }
+  ]
+}
