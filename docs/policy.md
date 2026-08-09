@@ -34,9 +34,9 @@ dual_control = []
 | Field | Role |
 |-------|------|
 | `rules` | Ordered list of `{ match, action }`. **First matching rule wins.** |
-| `require_approval` | Legacy tool-name globs → single (or dual) human grant |
-| `dual_control` | Legacy globs that always need two distinct principals |
-| `dual_control_all_approvals` | Every `require_approval` match (rule or legacy) needs two principals |
+| `require_approval` | Legacy tool-name globs → fail-closed external authority gate |
+| `dual_control` | Legacy globs that require two externally authenticated identities |
+| `dual_control_all_approvals` | Every `require_approval` match (rule or legacy) needs two externally authenticated identities |
 | `default` | When nothing matches: `"allow"` or `"deny"` |
 
 ### Rule actions
@@ -45,8 +45,8 @@ dual_control = []
 |----------|--------|
 | `allow` | Proceed (no approval) |
 | `deny` | Hard deny (`denied_by_policy`) |
-| `require_approval` | Block until human grant(s) |
-| `dual_control` | Block until **two** distinct principals grant |
+| `require_approval` | Block until independently authenticated external authority exists |
+| `dual_control` | Block until **two** distinct externally authenticated identities approve |
 | anything else | Fail closed → deny |
 
 ### Evaluation order
@@ -99,18 +99,14 @@ Because rules are ordered, a more-specific `allow` listed **above** a broader `r
    When dual-control reaches a **partial** grant (1/2), an opt-in banner asks for
    the second principal (separate rate limit per approval id).
    Disable anytime: `locus notify off` or `LOCUS_NOTIFY=0` / `LOCUS_QUIET=1`.
-3. Human grants:
+3. A local operator may record advisory evidence:
    ```bash
    locus approve list
    locus approve grant appr_… --as alice
-   # dual_control: second principal
+   # another unverified local label (still not dual-control authority)
    locus approve grant appr_… --as bob
    ```
-4. Scripts can block until the gate clears:
-   ```bash
-   locus approve wait appr_… --timeout 120
-   ```
-5. Agent re-calls with the **same args** (digest match) within the grant TTL (default 15m), or passes `confirm=true` + `approval_id`.
+4. The record remains pending and provider execution remains blocked. `approve wait` cannot succeed without a future external authenticated envelope.
 
 Deny:
 
@@ -122,23 +118,23 @@ locus approve deny appr_…
 
 | Command | Purpose |
 |---------|---------|
-| `locus approve list` / `pending` | Pending rows; shows **`grants 1/2`** for dual-control progress |
-| `locus approve grant <id> [--as P] [--ttl 15m] [--touchid]` | Progress summary (n/required); `--touchid` = macOS confirm (fail closed) |
-| `locus approve status <id>` | Full record + dual-control progress |
+| `locus approve list` | Pending rows; shows authoritative `0/N` and advisory assertion count |
+| `locus approve grant <id> [--as P] [--touchid]` | Records an untrusted local advisory label only; confirmation is not identity authority |
+| `locus approve status <id>` | Full record with explicit trust and disabled authority state |
 | `locus approve wait <id> [--timeout 120]` | Poll until approved / denied / timeout (exit non-zero on deny/timeout) |
 | `locus approve deny <id>` | Terminal deny |
 
-Principal default: `--as` → `LOCUS_PRINCIPAL` → `$USER`.
+Label default: `--as` → `LOCUS_PRINCIPAL` → `$USER`. These are caller-controlled strings, not authenticated identities.
 
 ### Dual-control
 
-Tools matching `action = "dual_control"`, legacy `dual_control` globs, or `require_approval` when `dual_control_all_approvals = true` need **two distinct** principals. Same principal cannot grant twice. One grant leaves `status=pending` with `grants 1/2`.
+Tools matching `action = "dual_control"`, legacy `dual_control` globs, or `require_approval` when `dual_control_all_approvals = true` need two distinct externally authenticated identities. Local labels never count, so authority remains `0/2`.
 
 ### Security notes
 
 - Approval files store digests and labels only — never raw args or secrets.
 - Approval ids are constrained (`[A-Za-z0-9_-]+`); path traversal is rejected.
-- Prefer short TTLs for high-risk tools: `locus approve grant … --ttl 15m`.
+- External authority is not implemented; all gated provider calls fail closed.
 - See [SECURITY.md](../SECURITY.md) and [docs/firm-mode.md](./firm-mode.md).
 
 ## Related

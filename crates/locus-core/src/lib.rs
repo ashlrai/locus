@@ -46,10 +46,11 @@ pub use agent_report::{
 };
 pub use approval::notifications_enabled;
 pub use approval::{
-    agent_approval_hint, args_digest, default_grant_ttl, format_dual_control_progress,
-    format_grants_progress, mint_approval_id, next_grant_command, notification_body,
-    partial_grant_notification_body, required_grant_count, validate_approval_id, ApprovalGrant,
-    ApprovalRecord, ApprovalStatus,
+    agent_approval_hint, args_digest, default_grant_ttl, external_approval_authority_enabled,
+    format_dual_control_progress, format_grants_progress, mint_approval_id, next_grant_command,
+    notification_body, partial_grant_notification_body, required_grant_count, validate_approval_id,
+    ApprovalAuthority, ApprovalGrant, ApprovalRecord, ApprovalStatus, ExternalApprovalEnvelope,
+    EXTERNAL_APPROVAL_AUTHORITY_BLOCKER,
 };
 pub use autopin::{match_remote_binding, resolve_auto_pin, AutoPinTarget};
 pub use binding::{

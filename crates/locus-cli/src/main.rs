@@ -587,18 +587,18 @@ enum ApproveCmd {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    /// Grant a pending approval as a principal (default TTL 15m)
+    /// Record a non-authoritative local advisory label
     Grant {
         /// Approval id (`appr_…`)
         id: String,
-        /// Principal granting (default: LOCUS_PRINCIPAL or $USER)
+        /// Local review label (default: LOCUS_PRINCIPAL or $USER)
         #[arg(long = "as")]
         as_principal: Option<String>,
-        /// Grant lifetime once fully approved (e.g. 15m, 1h). Default: 15m
+        /// Reserved external-authority TTL; local advisory records ignore it
         #[arg(long)]
         ttl: Option<String>,
-        /// macOS: blocking confirm dialog before grant (fail closed on cancel).
-        /// Not a real biometric API — `osascript` "Confirm grant as $USER?".
+        /// macOS: blocking confirmation before recording advisory evidence.
+        /// Not a biometric or identity API and never establishes authority.
         /// Tests: set `LOCUS_TOUCHID_MOCK=ok` or `cancel`.
         #[arg(long)]
         touchid: bool,
@@ -4314,7 +4314,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 );
                 println!(
                     "   {}",
-                    "Grant: locus approve grant <id> --as <principal> [--touchid]   Deny: locus approve deny <id>"
+                    "Advisory: locus approve grant <id> --as <label> [--touchid]   Deny: locus approve deny <id>"
                         .dimmed()
                 );
                 return Ok(());
@@ -4355,7 +4355,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             println!();
             println!(
                 "{}",
-                "Grant: locus approve grant <id> --as <principal> [--touchid]   status: locus approve status <id>   wait: locus approve wait <id>"
+                "Advisory: locus approve grant <id> --as <label> [--touchid]   status: locus approve status <id>   wait: locus approve wait <id>"
                     .dimmed()
             );
             Ok(())
@@ -4387,25 +4387,15 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("dual_control".into(), json!(dual));
                     obj.insert("required_grants".into(), json!(required));
+                    obj.insert("approval_authority".into(), json!("local_advisory"));
+                    obj.insert("authoritative_grants".into(), json!(0));
+                    obj.insert("required_authoritative_grants".into(), json!(required));
+                    obj.insert("authoritative_path_enabled".into(), json!(false));
+                    obj.insert("grants_progress".into(), json!(format!("0/{required}")));
+                    obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
                     obj.insert(
-                        "grants_progress".into(),
-                        json!(locus_core::format_grants_progress(
-                            rec.grants.len(),
-                            required
-                        )),
-                    );
-                    obj.insert(
-                        "progress".into(),
-                        json!(locus_core::format_dual_control_progress(
-                            rec.grants.len(),
-                            required,
-                            &rec.grants
-                                .iter()
-                                .map(|g| g.principal.clone())
-                                .collect::<Vec<_>>(),
-                            dual,
-                            rec.status == locus_core::ApprovalStatus::Approved,
-                        )),
+                        "authority_blocker".into(),
+                        json!(locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER),
                     );
                 }
                 println!("{}", serde_json::to_string_pretty(&v)?);
@@ -4423,9 +4413,15 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("dual_control".into(), json!(dual));
                     obj.insert("required_grants".into(), json!(required));
+                    obj.insert("approval_authority".into(), json!("local_advisory"));
+                    obj.insert("authoritative_grants".into(), json!(0));
+                    obj.insert("required_authoritative_grants".into(), json!(required));
+                    obj.insert("authoritative_path_enabled".into(), json!(false));
+                    obj.insert("grants_progress".into(), json!(format!("0/{required}")));
+                    obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
                     obj.insert(
-                        "grants_progress".into(),
-                        json!(format!("{}/{}", rec.grants.len(), required)),
+                        "authority_blocker".into(),
+                        json!(locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER),
                     );
                 }
                 println!("{}", serde_json::to_string_pretty(&v)?);
@@ -4447,10 +4443,10 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                     }
                 );
                 println!(
-                    "   dual      {}  grants {}/{}",
+                    "   dual      {}  authoritative 0/{}  advisory {}",
                     if dual { "yes" } else { "no" },
-                    rec.grants.len(),
-                    required
+                    required,
+                    rec.grants.len()
                 );
                 if rec.grants.is_empty() {
                     println!("   grants    (none)");
@@ -4488,6 +4484,13 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 let required = if dual { 2 } else { 1 };
                 match rec.status {
                     ApprovalStatus::Approved => {
+                        if !rec.is_valid_grant() {
+                            bail!(
+                                "approval {} is not authoritative: {}",
+                                rec.id,
+                                locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER
+                            );
+                        }
                         if json {
                             let mut v = serde_json::to_value(&rec)?;
                             if let Some(obj) = v.as_object_mut() {
@@ -4578,75 +4581,35 @@ fn print_grant_summary(
     principal: &str,
     dual: bool,
     required: usize,
-    ttl_flag: Option<&str>,
+    _ttl_flag: Option<&str>,
 ) {
     let principals: Vec<String> = rec.grants.iter().map(|g| g.principal.clone()).collect();
-    let fully = rec.status == locus_core::ApprovalStatus::Approved;
     let progress = locus_core::format_dual_control_progress(
         rec.grants.len(),
         required,
         &principals,
         dual,
-        fully,
+        false,
     );
-    let grants_progress = locus_core::format_grants_progress(rec.grants.len(), required);
-
-    if fully {
-        println!(
-            "{} granted {} as {}",
-            "ok".green().bold(),
-            rec.id.cyan(),
-            principal.yellow()
-        );
-        println!("   tool      {}", rec.tool.yellow());
-        println!("   binding   {}", rec.binding.yellow());
-        println!("   progress  {}", progress.bold());
-        println!(
-            "   grants    {}  of {} required",
-            grants_progress.bold(),
-            required
-        );
-        if dual {
-            println!("   dual      yes (fully approved)");
-        }
-        if let Some(exp) = rec.expires_at {
-            let ttl_note = ttl_flag.unwrap_or("15m");
-            println!("   ttl       {}  expires {}", ttl_note, exp.to_rfc3339());
-        }
-        println!(
-            "   {}",
-            locus_core::next_grant_command(&rec.id, true).dimmed()
-        );
-    } else {
-        let remaining = required.saturating_sub(rec.grants.len());
-        println!(
-            "{} partial grant {} as {}  (dual-control {}/{})",
-            "ok".yellow().bold(),
-            rec.id.cyan(),
-            principal.yellow(),
-            rec.grants.len(),
-            required
-        );
-        println!("   tool      {}", rec.tool.yellow());
-        println!("   binding   {}", rec.binding.yellow());
-        println!("   progress  {}", progress.bold());
-        println!(
-            "   grants    {}  need {} more distinct principal(s)",
-            grants_progress.bold(),
-            remaining
-        );
-        println!(
-            "   next      {}",
-            locus_core::next_grant_command(&rec.id, false).yellow()
-        );
-        println!(
-            "   {}",
-            format!("Or wait: locus approve wait {} --timeout 120", rec.id).dimmed()
-        );
-    }
+    println!(
+        "{} recorded local advisory {} as {}",
+        "ok".yellow().bold(),
+        rec.id.cyan(),
+        principal.yellow()
+    );
+    println!("   tool          {}", rec.tool.yellow());
+    println!("   binding       {}", rec.binding.yellow());
+    println!("   advisory      {}", progress);
+    println!("   authoritative 0/{required}");
+    println!("   status        pending");
+    println!(
+        "   blocker       {}",
+        locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER
+    );
+    println!("   local labels and Touch ID confirmation never authorize provider execution");
 }
 
-/// Blocking confirmation before `locus approve grant --touchid`.
+/// Local UI confirmation before recording an advisory assertion.
 ///
 /// Fail closed: cancel / non-confirm / missing osascript aborts the grant.
 /// Test hooks: `LOCUS_TOUCHID_MOCK=ok` | `cancel` (any OS).
@@ -4675,7 +4638,7 @@ fn confirm_grant_touchid(principal: &str, id: &str, tool: &str, binding: &str) -
         }
         // Blocking dialog — not real biometrics; user must click Confirm.
         let prompt = format!(
-            "Confirm grant as {principal}?\n\nApproval: {id}\nTool: {tool}\nBinding: {binding}"
+            "Record local advisory as {principal}?\n\nApproval: {id}\nTool: {tool}\nBinding: {binding}\n\nThis does not authorize provider execution."
         );
         let script = format!(
             r#"display dialog "{}" with title "Locus approve grant" buttons {{"Cancel", "Confirm"}} default button "Confirm" cancel button "Cancel" with icon caution"#,

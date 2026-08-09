@@ -121,7 +121,7 @@ let project_ref = freeze_string_arg(args, "project_ref", frozen)?;
    - happy path returns frozen scope
    - policy blocks a destructive tool without `confirm`
 7. **Docs**: one row in the matrix below; binding example if user-facing.
-8. **CLI isolation** (if the provider has a CLI): ensure `locus exec` maps credential_ref → env and private config dirs (see `isolation` / `credential` modules).
+8. **Credential confinement**: provider credentials resolve only inside the policy-gated MCP worker. Do not expose them through `locus exec`, CI env maps, or arbitrary subprocesses.
 
 ### Minimal skeleton
 

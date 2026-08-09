@@ -284,8 +284,8 @@ echo "$freeze_line" | grep -qiE 'scope freeze|proj_evil' \
   || die "unexpected freeze message: $freeze_line"
 ok "scope freeze denies wrong project_ref"
 
-# ── 8. require_approval → grant → re-call success ────────────────────────────
-log "8. require_approval → approve grant → re-call success"
+# ── 8. require_approval → advisory → still blocked ───────────────────────────
+log "8. require_approval → local advisory → authority remains blocked"
 appr_out="$(
   mcp_rpc \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
@@ -301,7 +301,7 @@ appr_id="$(echo "$appr_line" | grep -oE 'appr_[a-f0-9]+' | head -1)"
 ok "require_approval blocked with $appr_id"
 
 locus approve grant "$appr_id" >/dev/null
-ok "approve grant $appr_id"
+ok "local advisory recorded for $appr_id"
 
 retry_out="$(
   mcp_rpc \
@@ -310,8 +310,9 @@ retry_out="$(
     '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supabase.table.delete","arguments":{"table":"users"}}}'
 )"
 retry_line="$(echo "$retry_out" | tool_call_text)"
-echo "$retry_line" | grep -q '^OK|' || die "expected success after grant: $retry_line"
-ok "re-call after grant succeeds"
+echo "$retry_line" | grep -q '^ERR|' || die "local advisory must not authorize: $retry_line"
+echo "$retry_line" | grep -q 'local_advisory' || die "missing advisory authority label: $retry_line"
+ok "re-call remains blocked after local advisory"
 
 # ── 9. doctor (structure + exit codes) ───────────────────────────────────────
 log "9. doctor structure + exit codes"
@@ -368,8 +369,8 @@ ok "doctor unpinned exit code coherent (exit=$doctor_un_ec)"
 # Re-pin acme for dual-control / events steps
 locus pin acme --force >/dev/null
 
-# ── 10. dual_control two-principal grant (feature-detected) ──────────────────
-log "10. dual_control two principals (if policy supports)"
+# ── 10. dual_control local labels never satisfy authority ────────────────────
+log "10. dual_control local advisory labels remain untrusted"
 # Write a binding with dual_control on delete tools; use env: refs for isolation.
 cat >"$LOCUS_HOME/bindings/dual.toml" <<'EOF'
 [binding]
@@ -413,32 +414,38 @@ else
   fi
   ok "touchid mock cancel fails closed"
 
-  # First principal — partial grant (Touch ID mock ok)
+  # A caller-controlled successful mock can only record advisory evidence.
   g1="$(LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json 2>/dev/null || true)"
   echo "$g1" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
 assert r.get("status") in ("pending", "Pending") or r.get("status") == "pending", r
 assert len(r.get("grants") or []) == 1, r
+assert r.get("approval_authority") == "local_advisory", r
+assert r.get("authoritative_path_enabled") is False, r
+assert r.get("authoritative_grants") == 0, r
 '
-  ok "first principal alice partial grant (touchid mock ok)"
+  ok "LOCUS_TOUCHID_MOCK=ok records advisory only"
 
-  # Same principal cannot complete dual-control
+  # Duplicate local label is rejected.
   if locus approve grant "$dual_id" --as alice >/dev/null 2>&1; then
-    die "same principal should not complete dual_control"
+    die "duplicate advisory label should be rejected"
   fi
-  ok "same principal rejected on second grant"
+  ok "duplicate advisory label rejected"
 
-  # Second principal completes
+  # A second local label still cannot establish identity or dual-control authority.
   g2="$(locus approve grant "$dual_id" --as bob --json 2>/dev/null)"
   echo "$g2" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
 st = (r.get("status") or "").lower()
-assert st == "approved", r
+assert st == "pending", r
 assert len(r.get("grants") or []) >= 2, r
+assert r.get("approval_authority") == "local_advisory", r
+assert r.get("authoritative_path_enabled") is False, r
+assert r.get("authoritative_grants") == 0, r
 '
-  ok "second principal bob fully approved"
+  ok "second local label remains advisory"
 
   retry_dual="$(
     mcp_rpc \
@@ -447,8 +454,42 @@ assert len(r.get("grants") or []) >= 2, r
       '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supabase.table.delete","arguments":{"table":"users"}}}'
   )"
   retry_dual_line="$(echo "$retry_dual" | tool_call_text)"
-  echo "$retry_dual_line" | grep -q '^OK|' || die "expected success after dual grant: $retry_dual_line"
-  ok "re-call after dual grant succeeds"
+  echo "$retry_dual_line" | grep -q '^ERR|' || die "local labels must not satisfy dual control: $retry_dual_line"
+  echo "$retry_dual_line" | grep -q 'local_advisory' || die "missing advisory authority label: $retry_dual_line"
+  ok "dual-control call remains blocked after two local labels"
+
+  # Forge the strongest same-user JSON record after a caller-controlled
+  # Touch ID mock. Persisted status and authority strings are never proof.
+  export DUAL_APPROVAL_ID="$dual_id"
+  python3 - <<'PY'
+import datetime
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["LOCUS_HOME"]) / "approvals" / f'{os.environ["DUAL_APPROVAL_ID"]}.json'
+record = json.loads(path.read_text())
+record["status"] = "approved"
+record["granted_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+record["expires_at"] = "2099-01-01T00:00:00Z"
+for index, grant in enumerate(record.get("grants") or []):
+    grant["authority"] = "external_authenticated"
+    grant["envelope_id"] = f"unsigned-same-user-{index}"
+path.write_text(json.dumps(record, indent=2) + "\n")
+PY
+
+  forged_retry="$(
+    mcp_rpc \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supabase.table.delete","arguments":{"table":"users"}}}'
+  )"
+  forged_retry_line="$(echo "$forged_retry" | tool_call_text)"
+  echo "$forged_retry_line" | grep -q '^ERR|' \
+    || die "forged same-user approval JSON authorized provider execution: $forged_retry_line"
+  echo "$forged_retry_line" | grep -q '"authoritative_grants":0' \
+    || die "forged record did not surface zero authority: $forged_retry_line"
+  ok "forged future-dated external labels remain non-authoritative"
 fi
 
 # ── 11. locus events (audit export) ──────────────────────────────────────────

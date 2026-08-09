@@ -10,7 +10,7 @@ description = "Acme client engagement"
 [binding.policy]
 default = "allow"
 require_approval = ["*.delete*", "*.drop*", "vercel.deploy.prod"]
-# Firm mode: these tools need two distinct principals (`locus approve grant --as`)
+# Firm mode: these tools require two externally authenticated identities.
 dual_control = ["*.delete*", "vercel.deploy.prod"]
 # dual_control_all_approvals = true
 max_ttl = "8h"

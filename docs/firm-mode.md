@@ -136,9 +136,9 @@ locus whoami
 # Agent / IDE — after locus setup --client claude|cursor
 # tools are only Acme; agent cannot re-pin
 
-# CLI under the pin
-locus exec -- gh pr list
-locus exec -- env | grep LOCUS_
+# Manual identity diagnostics under the pin (no provider credentials)
+locus exec --no-resolve -- env | grep LOCUS_
+# Provider actions use typed locus-mcp tools behind scope and policy checks.
 
 # Leave (clears identity; suggests re-pin)
 locus leave               # or: locus enter personal for side work
@@ -186,7 +186,7 @@ Parallel agents: separate MCP processes each with their own pin. Do not share a 
 
 ## Dual-control (destructive actions)
 
-**Shipped today:** `require_approval` + optional **two-principal dual-control** under `$LOCUS_HOME/approvals/`.
+**Shipped today:** fail-closed `require_approval` policy plus local advisory review records under `$LOCUS_HOME/approvals/`. Production-grade human identity and dual-control authority are not shipped.
 
 ```toml
 [binding.policy]
@@ -195,7 +195,7 @@ require_approval = [
   "*.drop*",
   "vercel.deploy.prod",
 ]
-# Firm mode: these tools need two distinct principals
+# Firm mode declaration: these tools require two externally authenticated identities
 dual_control = ["*.delete*", "vercel.deploy.prod"]
 # Or: dual_control_all_approvals = true  # every require_approval tool needs 2
 ```
@@ -208,24 +208,21 @@ dual_control = ["*.delete*", "vercel.deploy.prod"]
         ▼
 2. Policy → RequireApproval (+ dual_control)
         │ write approvals/appr_….json (args_digest only — no secrets)
-        │ MCP error includes required_grants=2 + hint:
-        │   "ask human: locus approve grant appr_… --as <principal> (needs 2 grants)"
-        │ Optional: locus notify on → banner body names the grant command
+        │ MCP error includes required_authoritative_grants=2 + hint:
+        │   "locus approve grant appr_… records local advisory evidence only"
+        │ Optional: locus notify on → banner names the non-authoritative review
         ▼
-3. Human A (or partner):
-     locus approve pending                  # alias for `approve list`
-     locus approve grant appr_… --as alice
-     # optional macOS confirm dialog (fail closed on Cancel):
-     # locus approve grant appr_… --as alice --touchid
-        │  → still pending  grants 1/2  (alice)
-        │  → prints next: locus approve grant appr_… --as <other-principal>
+ Agent sees blocked + approval_id + authority 0/required
+        │
+ Local A: locus approve grant <id> --as alice
+        │  → records untrusted advisory label; status remains pending
+ Local B: locus approve grant <id> --as bob
+        │  → second advisory label; external authority remains 0/2
         ▼
-4. Human B (different principal):
-     locus approve grant appr_… --as bob
-        │  → status=approved  grants 2/2  TTL starts (default ~15m)
-        ▼
-5. Agent re-calls with the **same** args (or confirm=true + approval_id)
-        │  → allowed until grant expires
+ Provider execution remains blocked
+        │
+        └─ Only a peer-authenticated OS broker may verify a scoped,
+           non-agent-accessible issue capability. No such verifier ships yet.
 ```
 
 CLI:
@@ -244,14 +241,13 @@ After each grant, the CLI prints **dual-control progress** clearly (`grants 1/2`
 
 **Mechanisms:**
 
-- Approval records store **tool + binding + args_digest + grants[]**, never raw secrets.
-- Dual-control needs **two distinct principals**; the same principal cannot grant twice.
-- Single-control tools still approve on the first grant.
-- Grants are **time-bounded** — forgotten elevation expires.
-- Agents do not approve themselves; MCP cannot mint a valid grant without the control plane.
-- `--touchid` is a blocking confirm dialog (not a biometric API); cancel **fails closed** (no grant written).
+- Approval records store **tool + binding + args_digest + advisory labels**, never raw secrets.
+- Local labels are caller-controlled and cannot establish identity, including self-approval or two different strings from one user.
+- `--touchid` and `LOCUS_TOUCHID_MOCK` only confirm recording local advisory evidence; neither authenticates a principal.
+- Authoritative envelopes require a peer-authenticated OS broker, a non-agent-accessible issue capability, nonce/replay and idempotency state, exact scope/proposal binding, expiry, and requester/approver separation.
+- That adapter is absent, so authoritative approval and dual control remain disabled.
 
-**Roadmap (Phase 3):** shared binding graph, policy packs, engagement offboard as a unit, remote dual-control (team sync).
+**Roadmap (Phase 3):** shared binding graph, policy packs, engagement offboard as a unit, and authenticated remote dual-control with an independent trust root.
 
 Recommended firm defaults:
 

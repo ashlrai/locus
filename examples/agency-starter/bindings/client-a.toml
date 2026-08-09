@@ -13,7 +13,7 @@ default = "allow"
 max_ttl = "8h"
 parallel_sessions = 4
 require_approval = ["*.delete*", "*.drop*", "vercel.deploy.prod"]
-# Firm mode: two distinct principals for high-blast tools
+# Firm mode: two externally authenticated identities for high-blast tools
 dual_control = ["*.delete*", "vercel.deploy.prod"]
 # dual_control_all_approvals = true
 

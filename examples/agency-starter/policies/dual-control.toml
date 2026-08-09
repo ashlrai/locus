@@ -1,9 +1,9 @@
 # Snippet: dual-control policy for firm-mode client write bindings.
 # Merge under [binding.policy] in the client binding file.
 #
-# Grant path:
+# Advisory review path (never execution authority):
 #   locus approve grant <id> --as engineer
-#   locus approve grant <id> --as partner   # second distinct principal
+#   locus approve grant <id> --as partner
 
 default = "allow"
 max_ttl = "8h"
@@ -15,7 +15,7 @@ require_approval = [
   "vercel.deploy.prod",
 ]
 
-# Tools that need two distinct `locus approve grant --as` principals.
+# Tools that require two externally authenticated identities.
 dual_control = [
   "*.delete*",
   "vercel.deploy.prod",

@@ -13,8 +13,8 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use locus_core::{
-    build_doctor_report, filter_audit_events, find_workspace, parse_ttl, phantom_on_path,
-    DoctorExternal, Store, VERSION,
+    build_doctor_report, external_approval_authority_enabled, filter_audit_events, find_workspace,
+    parse_ttl, phantom_on_path, DoctorExternal, Store, VERSION,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -352,14 +352,23 @@ async fn api_approvals(
         if let Some(obj) = v.as_object_mut() {
             obj.insert("dual_control".into(), json!(dual));
             obj.insert("required_grants".into(), json!(required));
-            obj.insert(
-                "grants_progress".into(),
-                json!(format!("{}/{}", rec.grants.len(), required)),
-            );
+            obj.insert("approval_authority".into(), json!("local_advisory"));
+            obj.insert("authoritative_grants".into(), json!(0));
+            obj.insert("required_authoritative_grants".into(), json!(required));
+            obj.insert("authoritative_path_enabled".into(), json!(false));
+            obj.insert("grants_progress".into(), json!(format!("0/{required}")));
+            obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
         }
         out.push(v);
     }
-    Ok(Json(json!({ "approvals": out })))
+    Ok(Json(json!({
+        "approvals": out,
+        "approval_authority": "local_advisory",
+        "authoritative_path_enabled": external_approval_authority_enabled(),
+        "authority_blocker": locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER,
+        "peer_authenticated_os_broker_required": true,
+        "non_agent_issue_capability_required": true
+    })))
 }
 
 async fn api_doctor(
@@ -453,11 +462,23 @@ async fn api_grant(
     if let Some(obj) = v.as_object_mut() {
         obj.insert("dual_control".into(), json!(dual));
         obj.insert("required_grants".into(), json!(required));
+        obj.insert("approval_authority".into(), json!("local_advisory"));
+        obj.insert("authoritative_grants".into(), json!(0));
+        obj.insert("required_authoritative_grants".into(), json!(required));
+        obj.insert("authoritative_path_enabled".into(), json!(false));
+        obj.insert("grants_progress".into(), json!(format!("0/{required}")));
+        obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
+        obj.insert("recorded_label".into(), json!(principal));
         obj.insert(
-            "grants_progress".into(),
-            json!(format!("{}/{}", rec.grants.len(), required)),
+            "authority_blocker".into(),
+            json!(locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER),
         );
-        obj.insert("granted_as".into(), json!(principal));
+        obj.insert("peer_authenticated_os_broker_required".into(), json!(true));
+        obj.insert("non_agent_issue_capability_required".into(), json!(true));
+        obj.insert(
+            "detail".into(),
+            json!("Advisory evidence recorded; provider execution remains blocked."),
+        );
     }
     Ok(Json(v))
 }
@@ -583,7 +604,9 @@ mod tests {
     #[tokio::test]
     async fn health_is_public_and_status_works() {
         let (_dir, s, state) = temp_store();
-        let b = sample_binding("acme", "acme-corp");
+        let mut b = sample_binding("acme", "acme-corp");
+        b.policy.require_approval = vec!["github.delete_repo".into()];
+        b.policy.dual_control = vec!["github.delete_repo".into()];
         s.save_binding(&b).unwrap();
 
         let app = build_router(state);
@@ -677,7 +700,8 @@ mod tests {
     #[tokio::test]
     async fn bindings_and_grant_no_secrets() {
         let (_dir, s, state) = temp_store();
-        let b = sample_binding("acme", "acme-corp");
+        let mut b = sample_binding("acme", "acme-corp");
+        b.policy.dual_control = vec!["github.delete_repo".into()];
         s.save_binding(&b).unwrap();
 
         let rec = s
@@ -727,11 +751,46 @@ mod tests {
             .await
             .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["status"], "approved");
-        assert_eq!(v["granted_as"], "mason");
+        assert_eq!(v["status"], "pending");
+        assert_eq!(v["recorded_label"], "mason");
+        assert_eq!(v["approval_authority"], "local_advisory");
+        assert_eq!(v["authoritative_grants"], 0);
+        assert_eq!(v["required_authoritative_grants"], 2);
+        assert_eq!(v["authoritative_path_enabled"], false);
+        assert_eq!(v["peer_authenticated_os_broker_required"], true);
+        assert_eq!(v["non_agent_issue_capability_required"], true);
+        assert_eq!(
+            v["authority_blocker"],
+            locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER
+        );
         let text = String::from_utf8_lossy(&body);
         assert!(!text.contains("ghp_"));
         assert!(!text.contains("sk-live"));
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/approve/{}/grant", rec.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"principal":"company_ceo"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "pending");
+        assert_eq!(v["advisory_assertions"], 2);
+        assert_eq!(v["authoritative_grants"], 0);
+
+        let persisted = s.load_approval(&rec.id).unwrap();
+        assert_eq!(persisted.status, locus_core::ApprovalStatus::Pending);
+        assert!(!persisted.is_valid_grant());
     }
 
     #[tokio::test]

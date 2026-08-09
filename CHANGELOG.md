@@ -30,6 +30,11 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 - Core unit `inv_notify_default_false` + e2e step 15/27 keep desktop notifications **OFF**
   by default under clean `LOCUS_HOME`
 
+### Security
+
+- Local CLI/dashboard approval assertions are now explicit `local_advisory` evidence and can no longer unlock provider execution or satisfy dual control. Stdio MCP, HTTP MCP, dashboard, doctor, and forensics expose the disabled external-authority state; gated calls fail closed until an independent cryptographic verifier exists.
+- Caller-controlled principal strings, Touch ID mocks, dashboard mutations, and unsigned same-user JSON never count as human authority. Provider execution remains blocked until a peer-authenticated OS broker verifies a non-agent-accessible issue capability.
+
 ## [0.2.0] — 2026-08-09
 
 AI-native / hub-native identity plane polish on top of 0.1.1. Local dashboard,
@@ -79,7 +84,7 @@ upstream recipes, and faster doctor probes. **Wrong account, still impossible.**
 
 - **`locus goal status [--json]`** — northstar progress from [`GOALS.md`](./GOALS.md) or embedded milestones
 - **[GOALS.md](./GOALS.md)** — vision, goal tree, milestone checklist, success metrics
-- Hub drop-in [`integrations/ashlr-hub/`](./integrations/ashlr-hub/) — `locus.ts` (`locusFleetGate`, `withLocusSession`, `ensureLocusReady`, `registerLocusInMcpConfig`, pure parse helpers), gateway snippet, doctor-check, [`fleet-preflight.md`](./integrations/ashlr-hub/fleet-preflight.md)
+- Hub drop-in [`integrations/ashlr-hub/`](./integrations/ashlr-hub/) — `locus.ts` (attested parent-broker gate, env-free `withLocusSession`, `registerLocusInMcpConfig`, pure parse helpers), gateway snippet, doctor-check, [`fleet-preflight.md`](./integrations/ashlr-hub/fleet-preflight.md)
 - Schemas: [`schema/agent-report.schema.json`](./schema/agent-report.schema.json), [`schema/doctor.schema.json`](./schema/doctor.schema.json), [`schema/hub-gate.schema.json`](./schema/hub-gate.schema.json)
 - [`scripts/hub-smoke.sh`](./scripts/hub-smoke.sh) + [`scripts/hub-integration-test.sh`](./scripts/hub-integration-test.sh) composition smoke
 
@@ -190,7 +195,7 @@ Initial public release of **Locus** — identity plane for coding agents.
 - CLI: `locus init`, `pin`, `leave`, `whoami`, `status`, `binding list|show|add|rm`
 - HMAC-sealed session pins (tampering fails closed; seal verified on privileged paths)
 - Workspace `.locus.toml` — default binding, allowlist, `require-pin`
-- `locus exec` — scrub ambient identity env, resolve CredentialRefs into child only
+- `locus exec --no-resolve` — manual identity diagnostics only; provider credentials stay inside policy-gated MCP workers
 - Private worker dirs under `~/.locus/workers/<session>/` (GH/AWS config isolation)
 - Shell hooks: `locus hook zsh|bash|fish`
 - Credential refs: `phm:NAME` and `env:VAR`; production binaries always reject `test:`
@@ -226,11 +231,11 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 #### Policy & human approvals
 
 - Policy defaults: `allow` / `deny` + `require_approval` globs
-- Dual-control: `policy.dual_control` / `dual_control_all_approvals` — two distinct principals
+- Dual-control policy declarations (external authority adapter still required)
 - Approval store under `~/.locus/approvals/{id}.json` (args never stored raw — `args_digest` only)
-- Stable `approval_id` (`appr_<24 hex>`); grant via `locus approve grant <id> --as <principal>`
+- Stable `approval_id` (`appr_<24 hex>`); local advisory evidence via `locus approve grant <id> --as <label>`
 - Canonical `args_digest`: key-order independent, nested secret keys stripped
-- Grant TTL (default 15m); deny is terminal; expired grants re-block
+- Advisory records remain pending; deny is terminal; authoritative TTL path is disabled
 
 #### Workers & upstream MCP
 

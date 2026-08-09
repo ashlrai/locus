@@ -96,7 +96,12 @@ pub struct ForensicsApprovalSummary {
     pub session_id: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub requester: String,
+    /// Legacy compatibility count; all entries are local advisory assertions.
     pub grants: usize,
+    pub advisory_assertions: usize,
+    pub authoritative_grants: usize,
+    pub approval_authority: String,
+    pub authoritative_path_enabled: bool,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
@@ -113,6 +118,10 @@ impl From<&ApprovalRecord> for ForensicsApprovalSummary {
             session_id: r.session_id.clone(),
             requester: r.requester.clone(),
             grants: r.grants.len(),
+            advisory_assertions: r.grants.len(),
+            authoritative_grants: 0,
+            approval_authority: "local_advisory".into(),
+            authoritative_path_enabled: crate::external_approval_authority_enabled(),
             created_at: r.created_at.to_rfc3339(),
             expires_at: r.expires_at.map(|t| t.to_rfc3339()),
         }
@@ -425,6 +434,15 @@ mod tests {
             Some(serde_json::json!({"tool": "x.delete"})),
         );
         let _ = store.audit("pin", "personal", None);
+        store
+            .create_pending_approval(
+                "github.repo.delete",
+                "acme",
+                &serde_json::json!({"repo": "acme/widget"}),
+                "ses_forensics",
+                "agent",
+            )
+            .unwrap();
 
         let pack = export_forensics_pack(
             &store,
@@ -442,6 +460,13 @@ mod tests {
 
         let v = serde_json::to_value(&pack).unwrap();
         forensics_pack_json_has_stable_keys(&v).expect("stable keys");
+        assert_eq!(pack.pending_approvals.len(), 1);
+        assert_eq!(
+            pack.pending_approvals[0].approval_authority,
+            "local_advisory"
+        );
+        assert!(!pack.pending_approvals[0].authoritative_path_enabled);
+        assert_eq!(pack.pending_approvals[0].authoritative_grants, 0);
 
         assert_eq!(pack.filter_binding.as_deref(), Some("acme"));
         assert_eq!(pack.bindings.len(), 1);

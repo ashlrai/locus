@@ -1452,6 +1452,8 @@ fn audit_tool_block(s: &Store, alias: &str, tool: &str, content: &Value) {
                     "dual_control": content.get("dual_control"),
                     "grants": content.get("grants"),
                     "required_grants": content.get("required_grants"),
+                    "approval_authority": content.get("approval_authority"),
+                    "authoritative_path_enabled": content.get("authoritative_path_enabled"),
                     "detail": content.get("detail"),
                 })),
             );

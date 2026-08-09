@@ -1,7 +1,7 @@
 //! Local control-plane store under `~/.locus/` (or `LOCUS_HOME`).
 
 use crate::approval::{
-    args_digest, default_grant_ttl, mint_approval_id, validate_approval_id, ApprovalRecord,
+    args_digest, mint_approval_id, validate_approval_id, ApprovalAuthority, ApprovalRecord,
     ApprovalStatus,
 };
 use crate::autopin::{self, AutoPinTarget};
@@ -1643,14 +1643,15 @@ impl Store {
             .unwrap_or(false)
     }
 
-    /// Add a principal grant. Single-control → Approved immediately.
-    /// Dual-control needs two distinct principals; one grant leaves status=Pending.
+    /// Record a caller-controlled local advisory label.
     ///
-    /// `principal` must be non-empty. The same principal cannot grant twice.
+    /// CLI, environment, Touch ID, and dashboard callers cannot establish
+    /// human-principal authority. This method therefore never transitions a
+    /// record to approved, regardless of the number of distinct strings.
     pub fn grant_approval(
         &self,
         id: &str,
-        ttl: Option<Duration>,
+        _ttl: Option<Duration>,
         principal: &str,
     ) -> Result<ApprovalRecord> {
         validate_approval_id(id)?;
@@ -1669,18 +1670,15 @@ impl Store {
                 "approval {id} was denied — request a new one"
             )));
         }
-        if rec.status == ApprovalStatus::Approved && rec.is_valid_grant() {
+        if rec.status == ApprovalStatus::Approved {
             return Err(LocusError::msg(format!(
-                "approval {id} is already fully approved (expires {})",
-                rec.expires_at
-                    .map(|t| t.to_rfc3339())
-                    .unwrap_or_else(|| "n/a".into())
+                "approval {id} is marked approved but no peer-authenticated external authority verifier is available"
             )));
         }
 
         if rec.has_grant_from(principal) {
             return Err(LocusError::msg(format!(
-                "principal '{principal}' already granted approval {id} — dual-control needs a different principal"
+                "local advisory label '{principal}' is already recorded for approval {id}"
             )));
         }
 
@@ -1691,58 +1689,32 @@ impl Store {
         rec.grants.push(crate::approval::ApprovalGrant {
             principal: principal.into(),
             granted_at: now,
+            authority: ApprovalAuthority::LocalAdvisory,
+            envelope_id: None,
         });
-
-        if rec.grants.len() >= required {
-            let ttl = ttl.unwrap_or_else(default_grant_ttl);
-            rec.status = ApprovalStatus::Approved;
-            rec.granted_at = Some(now);
-            rec.expires_at = Some(now + ttl);
-            self.write_approval(&rec)?;
-            self.audit(
-                "approval.grant",
-                &rec.binding,
-                Some(serde_json::json!({
-                    "id": rec.id,
-                    "tool": rec.tool,
-                    "args_digest": rec.args_digest,
-                    "principal": principal,
-                    "grants": rec.grants.len(),
-                    "required": required,
-                    "dual_control": dual,
-                    "expires_at": rec.expires_at.map(|t| t.to_rfc3339()),
-                    "status": "approved",
-                })),
-            )?;
-        } else {
-            // Partial dual-control grant — stay pending
-            rec.status = ApprovalStatus::Pending;
-            rec.granted_at = None;
-            rec.expires_at = None;
-            self.write_approval(&rec)?;
-            self.audit(
-                "approval.grant_partial",
-                &rec.binding,
-                Some(serde_json::json!({
-                    "id": rec.id,
-                    "tool": rec.tool,
-                    "principal": principal,
-                    "grants": rec.grants.len(),
-                    "required": required,
-                    "dual_control": true,
-                    "status": "pending",
-                    "hint": crate::approval::agent_approval_hint(
-                        &rec.id,
-                        true,
-                        required,
-                        rec.grants.len(),
-                    ),
-                })),
-            )?;
-            // Best-effort UX only — never surface notify errors to the grant path.
-            // Opt-in (LOCUS_NOTIFY / [notify] enabled); default OFF.
-            crate::approval::try_notify_partial_grant(&rec);
-        }
+        rec.status = ApprovalStatus::Pending;
+        rec.granted_at = None;
+        rec.expires_at = None;
+        self.write_approval(&rec)?;
+        self.audit(
+            "approval.advisory",
+            &rec.binding,
+            Some(serde_json::json!({
+                "id": rec.id,
+                "tool": rec.tool,
+                "args_digest": rec.args_digest,
+                "principal_label": principal,
+                "authority": ApprovalAuthority::LocalAdvisory.as_str(),
+                "advisory_assertions": rec.grants.len(),
+                "required_authoritative_grants": required,
+                "dual_control": dual,
+                "authoritative_path_enabled": false,
+                "authority_blocker": crate::approval::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER,
+                "peer_authenticated_os_broker_required": true,
+                "non_agent_issue_capability_required": true,
+                "status": "pending",
+            })),
+        )?;
         Ok(rec)
     }
 
@@ -1786,8 +1758,9 @@ impl Store {
 
     /// Validate an explicit `approval_id` for a gated call.
     ///
-    /// Requires status=approved, unexpired, and tool+binding match.
-    /// Args digest must also match (grant is for that fingerprint).
+    /// Requires independently verified external authority plus an unexpired,
+    /// exact tool, binding, and argument fingerprint. This release ships no
+    /// external verifier, so even an edited `status=approved` record is denied.
     pub fn check_approval_id(
         &self,
         id: &str,
@@ -1823,6 +1796,7 @@ impl Store {
         let exists = dir.exists();
         let mut pending = 0usize;
         let mut approved = 0usize;
+        let mut untrusted_approved = 0usize;
         let mut denied = 0usize;
         let mut expired_grants = 0usize;
         let mut corrupt = 0usize;
@@ -1857,6 +1831,7 @@ impl Store {
                                 if rec.is_valid_grant() {
                                     approved += 1;
                                 } else {
+                                    untrusted_approved += 1;
                                     expired_grants += 1;
                                 }
                             }
@@ -1874,10 +1849,11 @@ impl Store {
             total,
             pending,
             approved_valid: approved,
+            untrusted_approved,
             expired_grants,
             denied,
             corrupt,
-            ok: exists && writable && corrupt == 0,
+            ok: exists && writable && corrupt == 0 && untrusted_approved == 0,
         })
     }
 
@@ -1985,6 +1961,8 @@ pub struct ApprovalsHealth {
     pub total: usize,
     pub pending: usize,
     pub approved_valid: usize,
+    /// Approved-looking files that lack independently verified authority.
+    pub untrusted_approved: usize,
     pub expired_grants: usize,
     pub denied: usize,
     pub corrupt: usize,
@@ -2637,18 +2615,23 @@ credential_ref = "ghp_UNSAFE/CANARY"
         .unwrap();
         assert!(!r3.ok);
 
-        // 4) Grant (single-control → approved)
+        // 4) A caller-controlled principal label remains advisory.
         let granted = store.grant_approval(&approval_id, None, "alice").unwrap();
-        assert_eq!(granted.status, ApprovalStatus::Approved);
-        assert!(granted.expires_at.is_some());
-        assert!(granted.is_valid_grant());
+        assert_eq!(granted.status, ApprovalStatus::Pending);
+        assert!(granted.expires_at.is_none());
+        assert!(!granted.is_valid_grant());
         assert_eq!(granted.grants.len(), 1);
         assert_eq!(granted.grants[0].principal, "alice");
-        assert!(store.pending_approvals().unwrap().is_empty());
+        assert_eq!(
+            granted.grants[0].authority,
+            ApprovalAuthority::LocalAdvisory
+        );
+        assert_eq!(store.pending_approvals().unwrap().len(), 1);
 
-        // 5) Same args within TTL — allowed (no confirm needed)
+        // 5) Same args remain blocked.
         let r5 = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
-        assert!(r5.ok, "expected allow after grant: {:?}", r5.content);
+        assert!(!r5.ok, "local advisory must not allow: {:?}", r5.content);
+        assert_eq!(r5.content["authoritative_grants"], 0);
 
         // 6) Different args still need approval
         let r6 = call_tool_gated(
@@ -2699,7 +2682,11 @@ credential_ref = "ghp_UNSAFE/CANARY"
             Some(gate),
         )
         .unwrap();
-        assert!(r8b.ok, "approval_id path: {:?}", r8b.content);
+        assert!(
+            !r8b.ok,
+            "approval_id path must remain blocked: {:?}",
+            r8b.content
+        );
 
         // Path traversal / unsafe approval ids must never touch the filesystem
         assert!(store.load_approval("../evil").is_err());
@@ -2759,8 +2746,9 @@ credential_ref = "ghp_UNSAFE/CANARY"
             .to_string();
         let hint = r.content.get("hint").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            hint.contains("ask human: locus approve grant") && hint.contains("needs 2 grants"),
-            "agent hint should tell human to grant with dual count: {hint}"
+            hint.contains("records local advisory evidence only")
+                && hint.contains("requires 2 externally authenticated approvers"),
+            "agent hint must distinguish advisory labels from authority: {hint}"
         );
         assert!(hint.contains(&id), "hint must include approval id: {hint}");
 
@@ -2795,13 +2783,14 @@ credential_ref = "ghp_UNSAFE/CANARY"
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert!(
-            hint2.contains("have 1") || hint2.contains("needs 2 grants"),
-            "partial dual-control hint: {hint2}"
+            hint2.contains("records local advisory evidence only")
+                && hint2.contains("provider execution remains blocked"),
+            "advisory dual-control hint: {hint2}"
         );
     }
 
     #[test]
-    fn dual_control_two_grants_allow() {
+    fn dual_control_two_local_labels_never_authorize() {
         use crate::adapters::{call_tool_gated, ApprovalGate};
         use crate::approval::ApprovalStatus;
         use serde_json::json;
@@ -2831,16 +2820,22 @@ credential_ref = "ghp_UNSAFE/CANARY"
 
         store.grant_approval(&id, None, "alice").unwrap();
         let full = store.grant_approval(&id, None, "bob").unwrap();
-        assert_eq!(full.status, ApprovalStatus::Approved);
+        assert_eq!(full.status, ApprovalStatus::Pending);
         assert_eq!(full.grants.len(), 2);
-        assert!(full.is_valid_grant());
+        assert!(!full.is_valid_grant());
         assert!(full.has_grant_from("alice"));
         assert!(full.has_grant_from("bob"));
-        assert!(store.pending_approvals().unwrap().is_empty());
+        assert_eq!(store.pending_approvals().unwrap().len(), 1);
 
-        let allowed =
+        let blocked =
             call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
-        assert!(allowed.ok, "two grants should allow: {:?}", allowed.content);
+        assert!(
+            !blocked.ok,
+            "two labels must not allow: {:?}",
+            blocked.content
+        );
+        assert_eq!(blocked.content["authoritative_grants"], 0);
+        assert_eq!(blocked.content["required_authoritative_grants"], 2);
     }
 
     #[test]
@@ -2878,10 +2873,7 @@ credential_ref = "ghp_UNSAFE/CANARY"
 
         let err = store.grant_approval(&id, None, "alice").unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("already granted") || msg.contains("different principal"),
-            "unexpected: {msg}"
-        );
+        assert!(msg.contains("already recorded"), "unexpected: {msg}");
 
         // Still only one grant
         let rec = store.load_approval(&id).unwrap();
@@ -2933,6 +2925,76 @@ credential_ref = "ghp_UNSAFE/CANARY"
             r2.content.get("error").and_then(|v| v.as_str()),
             Some("requires_approval")
         );
+    }
+
+    #[test]
+    fn forged_same_user_approval_json_and_spoofed_principals_fail_closed() {
+        use crate::adapters::{call_tool_gated, ApprovalGate};
+        use serde_json::json;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut binding = sample_binding("acme", "acme-corp", "p1");
+        binding.policy.require_approval = vec!["*.delete*".into()];
+        binding.policy.dual_control = vec!["*.delete*".into()];
+        store.save_binding(&binding).unwrap();
+        let session = store.pin("acme", dir.path(), None, false).unwrap();
+        let binding = store.load_binding("acme").unwrap();
+        let args = json!({"table": "users", "project_ref": "p1"});
+        let gate = ApprovalGate {
+            store: &store,
+            session_id: &session.session_id,
+            principal: Some("agent"),
+        };
+
+        let first = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        let id = first.content["approval_id"].as_str().unwrap().to_string();
+        for label in ["agent", "company_ceo"] {
+            let record = store.grant_approval(&id, None, label).unwrap();
+            assert_eq!(record.status, ApprovalStatus::Pending);
+            assert!(record.grants.iter().all(|grant| {
+                grant.authority == ApprovalAuthority::LocalAdvisory && grant.envelope_id.is_none()
+            }));
+        }
+
+        let mut forged = store.load_approval(&id).unwrap();
+        forged.status = ApprovalStatus::Approved;
+        forged.granted_at = Some(Utc::now());
+        forged.expires_at = Some(Utc::now() + Duration::minutes(15));
+        for (index, grant) in forged.grants.iter_mut().enumerate() {
+            grant.authority = ApprovalAuthority::ExternalAuthenticated;
+            grant.envelope_id = Some(format!("unsigned-same-user-{index}"));
+        }
+        fs::write(
+            store.approvals_dir().join(format!("{id}.json")),
+            serde_json::to_string_pretty(&forged).unwrap(),
+        )
+        .unwrap();
+
+        assert!(!crate::approval::external_approval_authority_enabled());
+        assert!(!store.load_approval(&id).unwrap().is_valid_grant());
+        for _ in 0..2 {
+            assert!(store
+                .find_valid_grant("supabase.table.delete", "acme", &args)
+                .unwrap()
+                .is_none());
+        }
+        let blocked =
+            call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        assert!(!blocked.ok);
+        assert_eq!(blocked.content["authoritative_grants"], 0);
+
+        let health = store.approvals_health().unwrap();
+        assert_eq!(health.approved_valid, 0);
+        assert_eq!(health.untrusted_approved, 1);
+        assert!(!health.ok);
+
+        assert!(!forged.matches_call("supabase.table.delete", "other", &args_digest(&args)));
+        assert!(!forged.matches_call(
+            "supabase.table.delete",
+            "acme",
+            &args_digest(&json!({"table": "payments", "project_ref": "p1"}))
+        ));
     }
 
     /// Sequential stress: many pin/leave cycles must not leave a sticky pin

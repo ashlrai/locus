@@ -66,7 +66,7 @@ Confidence is a **label**, not a calibrated probability. Hub may map bands to al
 
 When `needs_tool` is true, the suggestion points at grounding actions:
 
-- **Factual claims** (versions, URLs, quantities) → provider read tools (`*.list`, `*.get`, `*.status`, CLI under `locus exec`)
+- **Factual claims** (versions, URLs, quantities) → policy-gated provider read tools (`*.list`, `*.get`, `*.status`)
 - **Identity claims** without pin → human `locus enter` / `locus pin`; agents use `locus_request_pin` / `locus_enter_hint`
 - **Identity claims** with pin → attach whoami grounding; re-check with `locus_whoami` / `locus_heartbeat` if drift is possible
 

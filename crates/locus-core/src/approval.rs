@@ -1,11 +1,12 @@
-//! Human approval grants for `policy.require_approval` tools.
+//! Approval records for `policy.require_approval` tools.
 //!
 //! Records live under `$LOCUS_HOME/approvals/{id}.json`. Agents blocked by
-//! policy receive a stable `approval_id`; a human runs `locus approve grant`
-//! and the next matching tools/call is allowed for the grant TTL.
+//! policy receive a stable `approval_id`. Local CLI assertions are advisory:
+//! they are useful review evidence, but they never establish human identity or
+//! authorize provider execution.
 //!
-//! Dual-control tools (`policy.dual_control` / `dual_control_all_approvals`)
-//! require two distinct principals before `status` becomes `approved`.
+//! Authoritative approval is reserved for independently authenticated external
+//! envelopes. No external verifier is shipped yet, so that path fails closed.
 
 use chrono::{DateTime, Duration, Utc};
 use rand::RngCore;
@@ -13,7 +14,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-/// Default grant lifetime after a fully-approved grant (15 minutes).
+pub const EXTERNAL_APPROVAL_AUTHORITY_BLOCKER: &str =
+    "peer_authenticated_os_broker_and_non_agent_issue_capability_required";
+
+/// Reserved external-grant lifetime (15 minutes).
+///
+/// Local advisory assertions never start this clock.
 pub fn default_grant_ttl() -> Duration {
     Duration::minutes(15)
 }
@@ -25,6 +31,39 @@ pub enum ApprovalStatus {
     Pending,
     Approved,
     Denied,
+}
+
+/// Trust level carried by an approval assertion.
+///
+/// `LocalAdvisory` is the only level this release can create. The
+/// `ExternalAuthenticated` variant reserves the persisted schema for a future
+/// verifier, but cannot authorize while [`external_approval_authority_enabled`]
+/// is false.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalAuthority {
+    #[default]
+    LocalAdvisory,
+    ExternalAuthenticated,
+}
+
+impl ApprovalAuthority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalAdvisory => "local_advisory",
+            Self::ExternalAuthenticated => "external_authenticated",
+        }
+    }
+}
+
+/// The external identity/signature verifier is intentionally unavailable.
+///
+/// This constant is an authority fence, not a feature flag. Enabling external
+/// approvals requires a separately reviewed verifier with an independent trust
+/// root, identity binding, nonce replay store, idempotency, expiry, scope, and
+/// proposal-digest checks.
+pub const fn external_approval_authority_enabled() -> bool {
+    false
 }
 
 impl ApprovalStatus {
@@ -42,6 +81,49 @@ impl ApprovalStatus {
 pub struct ApprovalGrant {
     pub principal: String,
     pub granted_at: DateTime<Utc>,
+    /// Local assertions default to advisory for legacy record compatibility.
+    #[serde(default)]
+    pub authority: ApprovalAuthority,
+    /// Reserved for a verified external envelope. Local grants never set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub envelope_id: Option<String>,
+}
+
+/// Closed schema required from a future external approval authority.
+///
+/// Persisting or editing this data is not verification. An authoritative
+/// adapter must authenticate the signature with a trust root independent from
+/// the Locus daemon key and atomically consume `(issuer, nonce)` before a grant
+/// can be used.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalApprovalEnvelope {
+    pub schema_version: u32,
+    pub issuer: String,
+    pub key_id: String,
+    pub signature_algorithm: String,
+    /// Peer-authenticated broker identity, separate from the agent process.
+    pub broker_id: String,
+    /// Digest of the broker's OS-isolation attestation.
+    pub broker_attestation_sha256: String,
+    /// Opaque capability issued through a channel inaccessible to the agent.
+    pub issue_capability_id: String,
+    /// Digest only; the issue capability itself must never enter Locus JSON.
+    pub issue_capability_sha256: String,
+    pub issue_capability_audience: String,
+    pub envelope_id: String,
+    pub idempotency_key: String,
+    pub nonce: String,
+    pub approval_id: String,
+    pub approver_id: String,
+    pub requester_id: String,
+    pub tool: String,
+    pub binding: String,
+    pub session_id: String,
+    pub args_digest: String,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub signature: String,
 }
 
 /// One approval file under `$LOCUS_HOME/approvals/{id}.json`.
@@ -60,7 +142,7 @@ pub struct ApprovalRecord {
     /// Principal/session label that requested the tool call (best-effort).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub requester: String,
-    /// Accumulated principal grants. Dual-control needs two distinct principals.
+    /// Accumulated local advisory labels. They never satisfy dual control.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub grants: Vec<ApprovalGrant>,
     /// Set when status becomes `approved`. Grant is valid until this instant.
@@ -76,22 +158,19 @@ impl ApprovalRecord {
         self.status == ApprovalStatus::Pending
     }
 
-    /// True when granted and not past `expires_at`.
+    /// True only for a cryptographically authenticated external grant.
+    ///
+    /// The external verifier is not implemented in this release, so no local
+    /// or edited approval record can become valid execution authority.
     pub fn is_valid_grant(&self) -> bool {
-        if self.status != ApprovalStatus::Approved {
-            return false;
-        }
-        match self.expires_at {
-            Some(exp) => Utc::now() <= exp,
-            None => false,
-        }
+        false
     }
 
     pub fn matches_call(&self, tool: &str, binding: &str, args_digest: &str) -> bool {
         self.tool == tool && self.binding == binding && self.args_digest == args_digest
     }
 
-    /// Distinct principals that have already granted.
+    /// Distinct local advisory labels that have been recorded.
     pub fn grant_principals(&self) -> Vec<&str> {
         self.grants.iter().map(|g| g.principal.as_str()).collect()
     }
@@ -101,7 +180,7 @@ impl ApprovalRecord {
         self.grants.iter().any(|g| g.principal == principal)
     }
 
-    /// How many distinct principal grants are still needed.
+    /// How many distinct advisory labels are still needed for display only.
     pub fn grants_remaining(&self, required: usize) -> usize {
         required.saturating_sub(self.grants.len())
     }
@@ -123,45 +202,39 @@ pub fn format_grants_progress(grants: usize, required: usize) -> String {
 
 /// Agent-facing hint when a tool is blocked pending approval (MCP / policy gate).
 ///
-/// Dual-control always names the grant command and required principal count so
-/// agents surface a clear human action instead of looping the tool call.
+/// The legacy `grant` command only records local review evidence. It is named
+/// here so operators can inspect that evidence without confusing it with the
+/// independently authenticated authority required for provider execution.
 pub fn agent_approval_hint(
     approval_id: &str,
     dual_control: bool,
     required: usize,
     grants: usize,
 ) -> String {
-    if dual_control {
-        if grants == 0 {
-            format!(
-                "ask human: locus approve grant {approval_id} --as <principal> (needs {required} grants)"
-            )
-        } else {
-            format!(
-                "ask human: locus approve grant {approval_id} --as <other-principal> \
-                 (needs {required} grants; have {grants} — dual-control)"
-            )
-        }
+    let mode = if dual_control {
+        "dual-control"
     } else {
-        format!(
-            "ask human: locus approve grant {approval_id} --as <principal> then re-call \
-             (same args, or confirm=true + approval_id={approval_id})"
-        )
-    }
+        "single-approval"
+    };
+    format!(
+        "locus approve grant {approval_id} --as <principal> records local advisory evidence only \
+         ({grants} advisory labels observed; {mode} requires {required} externally authenticated \
+         approver(s)); provider execution remains blocked: {EXTERNAL_APPROVAL_AUTHORITY_BLOCKER}"
+    )
 }
 
 /// CLI / status line for dual-control progress after a grant.
 ///
 /// Examples:
-/// - fully approved dual: `"dual_control  grants 2/2  (alice, bob)  fully approved"`
+/// - externally verified dual: `"dual_control  grants 2/2  (alice, bob)  externally authenticated"`
 /// - partial: `"dual_control  grants 1/2  (alice)  need 1 more distinct principal"`
-/// - single: `"grants 1/1  (alice)  fully approved"`
+/// - single: `"grants 1/1  (alice)  externally authenticated"`
 pub fn format_dual_control_progress(
     grants: usize,
     required: usize,
     principals: &[String],
     dual_control: bool,
-    fully_approved: bool,
+    externally_authenticated: bool,
 ) -> String {
     let progress = format_grants_progress(grants, required);
     let who = if principals.is_empty() {
@@ -174,34 +247,40 @@ pub fn format_dual_control_progress(
     } else {
         format!("grants {progress}  ({who})")
     };
-    if fully_approved {
-        format!("{prefix}  fully approved")
+    if externally_authenticated {
+        format!("{prefix}  externally authenticated")
     } else {
         let remaining = required.saturating_sub(grants);
-        format!("{prefix}  need {remaining} more distinct principal(s)")
+        format!(
+            "{prefix}  local advisory only; {remaining} more label(s) for review display; external authority required"
+        )
     }
 }
 
-/// Next human command after a partial (or full) grant.
-pub fn next_grant_command(approval_id: &str, fully_approved: bool) -> String {
-    if fully_approved {
-        format!("Re-call the tool with the same args (or confirm=true + approval_id={approval_id})")
+/// Next review action after a local advisory assertion.
+pub fn next_grant_command(approval_id: &str, externally_authenticated: bool) -> String {
+    if externally_authenticated {
+        format!(
+            "External authority for {approval_id} must be verified by the peer-authenticated broker before provider execution"
+        )
     } else {
-        format!("locus approve grant {approval_id} --as <other-principal>")
+        format!(
+            "locus approve grant {approval_id} --as <other-principal> records another local advisory only; external authority remains required"
+        )
     }
 }
 
 /// Desktop notification body for a **new** pending approval (opt-in notify).
 pub fn notification_body(rec: &ApprovalRecord) -> String {
     format!(
-        "{} on {} — locus approve grant {}",
+        "{} on {} — review advisory {} (external broker authority still required)",
         rec.tool, rec.binding, rec.id
     )
 }
 
 /// Desktop notification body after a **partial** dual-control grant (opt-in notify).
 ///
-/// Tells the second principal that one grant is in and another is still required.
+/// Reports local review activity without claiming it satisfies human authority.
 pub fn partial_grant_notification_body(rec: &ApprovalRecord) -> String {
     let who = if rec.grants.is_empty() {
         "-".to_string()
@@ -209,7 +288,7 @@ pub fn partial_grant_notification_body(rec: &ApprovalRecord) -> String {
         rec.grant_principals().join(", ")
     };
     format!(
-        "{} on {} — need second principal (grants {}/2, granted: {}) — locus approve grant {} --as <other-principal>",
+        "{} on {} — local advisory labels {}/2 ({}) — peer-authenticated broker authority still required for {}",
         rec.tool,
         rec.binding,
         rec.grants.len(),
@@ -341,7 +420,6 @@ fn rate_limit_allow(key: &str) -> bool {
 #[cfg(target_os = "macos")]
 fn notify_macos(title: &str, body: &str) {
     use std::path::Path;
-    use std::process::{Command, Stdio};
 
     let osascript = Path::new("/usr/bin/osascript");
     if !osascript.is_file() {
@@ -354,12 +432,24 @@ fn notify_macos(title: &str, body: &str) {
         escape_applescript(body),
         escape_applescript(title)
     );
-    let _ = Command::new(osascript)
-        .arg("-e")
-        .arg(script)
+    spawn_and_reap_notification(osascript, &["-e".to_string(), script]);
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_and_reap_notification(program: &std::path::Path, args: &[String]) {
+    use std::process::{Command, Stdio};
+
+    let child = Command::new(program)
+        .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .spawn();
+    if let Ok(mut child) = child {
+        // Never let desktop notification delivery stall a persisted mutation.
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -672,21 +762,91 @@ mod tests {
                 ApprovalGrant {
                     principal: "alice".into(),
                     granted_at: Utc::now(),
+                    authority: ApprovalAuthority::ExternalAuthenticated,
+                    envelope_id: Some("env_alice".into()),
                 },
                 ApprovalGrant {
                     principal: "bob".into(),
                     granted_at: Utc::now(),
+                    authority: ApprovalAuthority::ExternalAuthenticated,
+                    envelope_id: Some("env_bob".into()),
                 },
             ],
             expires_at: Some(Utc::now() + Duration::minutes(5)),
             granted_at: Some(Utc::now()),
         };
-        assert!(rec.is_valid_grant());
+        assert!(!rec.is_valid_grant(), "external verifier is disabled");
         rec.expires_at = Some(Utc::now() - Duration::minutes(1));
         assert!(!rec.is_valid_grant());
         rec.status = ApprovalStatus::Pending;
         rec.expires_at = Some(Utc::now() + Duration::minutes(5));
         assert!(!rec.is_valid_grant());
+    }
+
+    #[test]
+    fn external_envelope_requires_closed_broker_and_capability_provenance() {
+        let complete = json!({
+            "schema_version": 1,
+            "issuer": "locus-human-broker",
+            "key_id": "broker-key-1",
+            "signature_algorithm": "ed25519",
+            "broker_id": "peer-broker-1",
+            "broker_attestation_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "issue_capability_id": "cap-1",
+            "issue_capability_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "issue_capability_audience": "locus-approval",
+            "envelope_id": "env-1",
+            "idempotency_key": "idem-1",
+            "nonce": "nonce-1",
+            "approval_id": "appr_test",
+            "approver_id": "human-1",
+            "requester_id": "agent-1",
+            "tool": "supabase.table.delete",
+            "binding": "acme",
+            "session_id": "ses-1",
+            "args_digest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "issued_at": "2026-08-09T00:00:00Z",
+            "expires_at": "2026-08-09T00:05:00Z",
+            "signature": "base64-signature"
+        });
+        assert!(serde_json::from_value::<ExternalApprovalEnvelope>(complete.clone()).is_ok());
+
+        let mut absent_attestation = complete.clone();
+        absent_attestation
+            .as_object_mut()
+            .unwrap()
+            .remove("broker_attestation_sha256");
+        assert!(
+            serde_json::from_value::<ExternalApprovalEnvelope>(absent_attestation).is_err(),
+            "missing OS-broker attestation must fail closed"
+        );
+
+        let mut substituted_capability = complete;
+        let fields = substituted_capability.as_object_mut().unwrap();
+        fields.remove("issue_capability_sha256");
+        fields.insert(
+            "issue_capability".into(),
+            json!("caller-controlled-raw-capability"),
+        );
+        assert!(
+            serde_json::from_value::<ExternalApprovalEnvelope>(substituted_capability).is_err(),
+            "raw or substituted issue capability must not satisfy the closed envelope"
+        );
+
+        let duplicate_broker = r#"{
+            "schema_version":1,"issuer":"i","key_id":"k","signature_algorithm":"ed25519",
+            "broker_id":"a","broker_id":"b","broker_attestation_sha256":"sha256:a",
+            "issue_capability_id":"c","issue_capability_sha256":"sha256:b",
+            "issue_capability_audience":"locus-approval","envelope_id":"e",
+            "idempotency_key":"i","nonce":"n","approval_id":"a","approver_id":"h",
+            "requester_id":"r","tool":"t","binding":"b","session_id":"s",
+            "args_digest":"sha256:c","issued_at":"2026-08-09T00:00:00Z",
+            "expires_at":"2026-08-09T00:05:00Z","signature":"s"
+        }"#;
+        assert!(
+            serde_json::from_str::<ExternalApprovalEnvelope>(duplicate_broker).is_err(),
+            "duplicate broker identity must fail closed"
+        );
     }
 
     #[test]
@@ -709,6 +869,8 @@ mod tests {
             grants: vec![ApprovalGrant {
                 principal: "alice".into(),
                 granted_at: Utc::now(),
+                authority: ApprovalAuthority::LocalAdvisory,
+                envelope_id: None,
             }],
             expires_at: None,
             granted_at: None,
@@ -723,30 +885,27 @@ mod tests {
     fn agent_approval_hint_dual_control() {
         let id = "appr_aabbccddeeff001122334455";
         let zero = agent_approval_hint(id, true, 2, 0);
-        assert!(
-            zero.contains("ask human: locus approve grant"),
-            "expected agent-facing ask human: {zero}"
-        );
+        assert!(zero.contains("locus approve grant"));
         assert!(zero.contains(id));
         assert!(zero.contains("--as"));
-        assert!(
-            zero.contains("needs 2 grants"),
-            "expected needs 2 grants: {zero}"
-        );
+        assert!(zero.contains("records local advisory evidence only"));
+        assert!(zero.contains("requires 2 externally authenticated"));
+        assert!(zero.contains(EXTERNAL_APPROVAL_AUTHORITY_BLOCKER));
 
         let partial = agent_approval_hint(id, true, 2, 1);
-        assert!(partial.contains("needs 2 grants"));
-        assert!(partial.contains("have 1"));
-        assert!(partial.contains("dual-control") || partial.contains("other-principal"));
+        assert!(partial.contains("1 advisory labels observed"));
+        assert!(partial.contains("dual-control"));
+        assert!(partial.contains("provider execution remains blocked"));
     }
 
     #[test]
     fn agent_approval_hint_single() {
         let id = "appr_aabbccddeeff001122334455";
         let h = agent_approval_hint(id, false, 1, 0);
-        assert!(h.contains("ask human: locus approve grant"));
+        assert!(h.contains("locus approve grant"));
         assert!(h.contains(id));
-        assert!(!h.contains("needs 2 grants"));
+        assert!(h.contains("single-approval requires 1 externally authenticated"));
+        assert!(h.contains("records local advisory evidence only"));
     }
 
     #[test]
@@ -755,29 +914,29 @@ mod tests {
         assert!(partial.contains("dual_control"));
         assert!(partial.contains("1/2"));
         assert!(partial.contains("alice"));
-        assert!(partial.contains("need 1 more"));
+        assert!(partial.contains("1 more label"));
+        assert!(partial.contains("external authority required"));
 
         let full = format_dual_control_progress(2, 2, &["alice".into(), "bob".into()], true, true);
         assert!(full.contains("2/2"));
-        assert!(full.contains("fully approved"));
+        assert!(full.contains("externally authenticated"));
         assert!(full.contains("bob"));
 
         let single = format_dual_control_progress(1, 1, &["mason".into()], false, true);
         assert!(single.contains("grants 1/1"));
         assert!(!single.contains("dual_control"));
-        assert!(single.contains("fully approved"));
+        assert!(single.contains("externally authenticated"));
     }
 
     #[test]
     fn next_grant_command_and_notification_body() {
         let id = "appr_aabbccddeeff001122334455";
         let next = next_grant_command(id, false);
-        assert_eq!(
-            next,
-            format!("locus approve grant {id} --as <other-principal>")
-        );
+        assert!(next.contains(&format!("locus approve grant {id}")));
+        assert!(next.contains("another local advisory only"));
+        assert!(next.contains("external authority remains required"));
         let done = next_grant_command(id, true);
-        assert!(done.contains("Re-call"));
+        assert!(done.contains("peer-authenticated broker"));
         assert!(done.contains(id));
 
         let rec = ApprovalRecord {
@@ -797,14 +956,14 @@ mod tests {
         assert!(body.contains("vercel.deploy.prod"));
         assert!(body.contains("acme"));
         assert!(
-            body.contains(&format!("locus approve grant {id}")),
-            "notify body must name grant command: {body}"
+            body.contains(id) && body.contains("external broker authority still required"),
+            "notify body must be explicit that local review is non-authoritative: {body}"
         );
         assert!(!body.contains("locus approve list"));
     }
 
     #[test]
-    fn partial_grant_notification_body_names_second_principal() {
+    fn partial_grant_notification_body_stays_advisory() {
         let id = "appr_aabbccddeeff001122334455";
         let rec = ApprovalRecord {
             id: id.into(),
@@ -818,14 +977,16 @@ mod tests {
             grants: vec![ApprovalGrant {
                 principal: "alice".into(),
                 granted_at: Utc::now(),
+                authority: ApprovalAuthority::LocalAdvisory,
+                envelope_id: None,
             }],
             expires_at: None,
             granted_at: None,
         };
         let body = partial_grant_notification_body(&rec);
         assert!(
-            body.contains("need second principal"),
-            "partial body must ask for second principal: {body}"
+            body.contains("peer-authenticated broker authority still required"),
+            "partial body must not claim local authority: {body}"
         );
         assert!(
             body.contains("1/2"),
@@ -839,11 +1000,7 @@ mod tests {
             body.contains("supabase.table.delete") && body.contains("acme"),
             "partial body must name tool/binding: {body}"
         );
-        assert!(
-            body.contains(&format!("locus approve grant {id}"))
-                && body.contains("--as <other-principal>"),
-            "partial body must name next grant command: {body}"
-        );
+        assert!(body.contains(id), "partial body must name approval: {body}");
     }
 
     #[test]
@@ -872,6 +1029,8 @@ mod tests {
             grants: vec![ApprovalGrant {
                 principal: "alice".into(),
                 granted_at: Utc::now(),
+                authority: ApprovalAuthority::LocalAdvisory,
+                envelope_id: None,
             }],
             expires_at: None,
             granted_at: None,
@@ -888,6 +1047,20 @@ mod tests {
             Some(v) => std::env::set_var("LOCUS_QUIET", v),
             None => std::env::remove_var("LOCUS_QUIET"),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn notification_child_cannot_stall_mutation_caller() {
+        use std::path::Path;
+        use std::time::{Duration, Instant};
+
+        let started = Instant::now();
+        spawn_and_reap_notification(Path::new("/bin/sh"), &["-c".into(), "sleep 1".into()]);
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "notification spawn blocked the mutation caller"
+        );
     }
 
     #[test]

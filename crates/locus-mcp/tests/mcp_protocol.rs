@@ -457,6 +457,14 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
         text.contains("appr_"),
         "expected approval_id in response: {text}"
     );
+    assert!(
+        text.contains("local_advisory"),
+        "missing trust label: {text}"
+    );
+    assert!(
+        text.contains("authoritative_path_enabled"),
+        "missing authority state: {text}"
+    );
 
     let pending = store.pending_approvals().unwrap();
     assert!(
@@ -467,7 +475,7 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
         r.tool == "supabase.table.delete" && r.binding == "acme" && r.id.starts_with("appr_")
     }));
 
-    // Grant then re-call with same args succeeds
+    // A local assertion remains advisory and cannot unlock provider execution.
     let id = pending
         .iter()
         .find(|r| r.tool == "supabase.table.delete")
@@ -483,7 +491,9 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
         }),
     );
     let (text2, is_err2) = McpClient::tool_text(&del2);
-    assert!(!is_err2, "expected allow after grant: {text2}");
+    assert!(is_err2, "local advisory must remain blocked: {text2}");
+    assert!(text2.contains("local_advisory"));
+    assert!(text2.contains("authoritative_path_enabled"));
 }
 
 #[test]
