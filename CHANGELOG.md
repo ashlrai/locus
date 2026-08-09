@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Host-executed upstream MCP workers now fail closed by default and require explicit `unsafe_host_execution = true`; this is an unsafe development opt-in because same-user workers are not OS-confined and can read `LOCUS_HOME/daemon.key`.
+- Upstream MCP tools require a closed capability manifest. Undeclared tools/arguments deny, and account/org/project/team selectors are frozen before worker invocation.
+- Upstream workers start from a minimal runtime environment. Binding `env:` targets and provider injection keys are removed before only the selected provider credential and metadata are added.
+- Upstream metadata, results, and errors matching the selected injected credential are discarded before crossing MCP.
+- Adversarial protocol coverage proves alternate selectors do not reach the worker and injected credential canaries do not return.
+
 ## [0.1.1] — 2026-08-09
 
 Firm UX polish on top of the initial public release. Notifications stay quiet by

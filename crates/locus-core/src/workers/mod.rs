@@ -9,6 +9,7 @@ mod composite;
 mod mcp_stdio;
 mod stdio_client;
 mod synthetic;
+mod upstream_boundary;
 
 use crate::binding::{Binding, ProviderBinding};
 use crate::error::{LocusError, Result};
@@ -266,7 +267,7 @@ impl WorkerManager for InMemoryWorkerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::binding::{BindingBody, Policy, Scope};
+    use crate::binding::{BindingBody, Policy, Scope, UpstreamSpec, UpstreamToolCapability};
     use crate::seal::SealKey;
     use crate::session::PinSource;
     use chrono::Duration;
@@ -396,6 +397,7 @@ mod tests {
             args: vec![],
             spawn: false,
             resolve_secrets: false,
+            unsafe_host_execution: false,
             extra_env: BTreeMap::new(),
         });
         let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();
@@ -404,6 +406,171 @@ mod tests {
         assert!(slot.pid.is_none());
         let _ = backend.build_command(&session, &binding, pb, &work_dir);
         backend.teardown(&slot).unwrap();
+    }
+
+    #[test]
+    fn mcp_stdio_env_contains_only_selected_provider_surface() {
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        let work_dir = worker_home.join("slots").join("github");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let session = sample_session(&worker_home.display().to_string());
+        let mut binding = sample_binding();
+        binding.providers[0].credential_ref = "env:PROVIDER_B_PRIVATE_TOKEN".into();
+        binding.providers[0].account = "provider-b-account".into();
+        binding.providers[0].scope.project_ref = Some("provider-b-project".into());
+        binding.providers[0].scope.team_id = Some("provider-b-team".into());
+        binding.providers[0].scope.env = vec!["provider-b-env".into()];
+        binding.providers[1].credential_ref = "env:PROVIDER_A_PRIVATE_TOKEN".into();
+        binding.providers[1].scope = Scope {
+            project_ref: Some("provider-a-project".into()),
+            team_id: Some("provider-a-team".into()),
+            orgs: vec!["provider-a-org".into()],
+            env: vec!["provider-a-env".into()],
+            ..Scope::default()
+        };
+        let provider = binding.provider("github").unwrap();
+
+        let selected_canary = "selected-provider-canary-a91c";
+        let other_canary = "other-provider-canary-b72d";
+        std::env::set_var("PROVIDER_A_PRIVATE_TOKEN", selected_canary);
+        std::env::set_var("PROVIDER_B_PRIVATE_TOKEN", other_canary);
+        let backend = McpStdioBackend::new(McpStdioConfig {
+            command: "false".into(),
+            args: vec![],
+            spawn: false,
+            resolve_secrets: true,
+            unsafe_host_execution: true,
+            extra_env: BTreeMap::from([
+                ("PROVIDER_B_PRIVATE_TOKEN".into(), other_canary.into()),
+                ("SUPABASE_ACCESS_TOKEN".into(), other_canary.into()),
+                (
+                    "LOCUS_SUPABASE_CREDENTIAL_REF".into(),
+                    "env:PROVIDER_B_PRIVATE_TOKEN".into(),
+                ),
+            ]),
+        });
+
+        let command = backend.build_command(&session, &binding, provider, &work_dir);
+        std::env::remove_var("PROVIDER_A_PRIVATE_TOKEN");
+        std::env::remove_var("PROVIDER_B_PRIVATE_TOKEN");
+        let env: BTreeMap<String, String> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((key.to_str()?.to_string(), value?.to_str()?.to_string()))
+            })
+            .collect();
+
+        assert_eq!(
+            env.get("LOCUS_WORKER_PROVIDER").map(String::as_str),
+            Some("github")
+        );
+        assert_eq!(
+            env.get("LOCUS_GITHUB_ACCOUNT").map(String::as_str),
+            Some("acme-gh")
+        );
+        assert_eq!(
+            env.get("LOCUS_GITHUB_PROJECT_REF").map(String::as_str),
+            Some("provider-a-project")
+        );
+        assert_eq!(
+            env.get("LOCUS_GITHUB_CREDENTIAL_REF").map(String::as_str),
+            Some("env:PROVIDER_A_PRIVATE_TOKEN")
+        );
+        for key in ["GH_TOKEN", "GITHUB_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"] {
+            assert_eq!(env.get(key).map(String::as_str), Some(selected_canary));
+        }
+
+        for key in [
+            "PROVIDER_A_PRIVATE_TOKEN",
+            "PROVIDER_B_PRIVATE_TOKEN",
+            "SUPABASE_ACCESS_TOKEN",
+            "LOCUS_SUPABASE_ACCOUNT",
+            "LOCUS_SUPABASE_CREDENTIAL_REF",
+            "LOCUS_SUPABASE_PROJECT_REF",
+            "LOCUS_SUPABASE_TEAM_ID",
+            "LOCUS_SUPABASE_ENV",
+            "SUPABASE_PROJECT_REF",
+            "SUPABASE_PROJECT_ID",
+            "LOCUS_PROVIDERS",
+            "LOCUS_SEAL",
+        ] {
+            assert!(
+                !env.contains_key(key),
+                "cross-provider env key survived: {key}"
+            );
+        }
+        for forbidden in [
+            other_canary,
+            "env:PROVIDER_B_PRIVATE_TOKEN",
+            "provider-b-account",
+            "provider-b-project",
+            "provider-b-team",
+            "provider-b-env",
+        ] {
+            assert!(
+                env.values().all(|value| !value.contains(forbidden)),
+                "cross-provider env value survived: {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_stdio_host_spawn_is_denied_without_unsafe_opt_in() {
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        std::fs::create_dir_all(&worker_home).unwrap();
+        let session = sample_session(&worker_home.display().to_string());
+        let binding = sample_binding();
+        let provider = binding.provider("github").unwrap();
+        let backend = McpStdioBackend::new(McpStdioConfig {
+            command: "this-command-must-never-run".into(),
+            args: vec![],
+            spawn: true,
+            resolve_secrets: false,
+            unsafe_host_execution: false,
+            extra_env: BTreeMap::new(),
+        });
+
+        let error = backend
+            .ensure(&session, &binding, provider, &worker_home)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("upstream_host_execution_denied"));
+        assert!(error.contains("daemon.key"));
+    }
+
+    #[test]
+    fn mcp_stdio_spawn_denies_failed_credential_resolution() {
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        std::fs::create_dir_all(&worker_home).unwrap();
+        let session = sample_session(&worker_home.display().to_string());
+        let mut binding = sample_binding();
+        let provider = {
+            let provider = binding
+                .providers
+                .iter_mut()
+                .find(|provider| provider.provider == "github")
+                .unwrap();
+            provider.credential_ref = "env:LOCUS_MISSING_UPSTREAM_TEST_CREDENTIAL".into();
+            provider.clone()
+        };
+        let backend = McpStdioBackend::new(McpStdioConfig {
+            command: "this-command-must-never-run".into(),
+            args: vec![],
+            spawn: true,
+            resolve_secrets: true,
+            unsafe_host_execution: true,
+            extra_env: BTreeMap::new(),
+        });
+
+        let error = backend
+            .ensure(&session, &binding, &provider, &worker_home)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("upstream_credential_resolution_denied"));
+        assert!(error.contains("LOCUS_MISSING_UPSTREAM_TEST_CREDENTIAL"));
     }
 
     #[test]
@@ -416,7 +583,17 @@ mod tests {
         let worker_home = dir.path().join("worker");
         std::fs::create_dir_all(&worker_home).unwrap();
         let session = sample_session(&worker_home.display().to_string());
-        let binding = sample_binding();
+        let mut binding = sample_binding();
+        binding
+            .providers
+            .iter_mut()
+            .find(|provider| provider.provider == "github")
+            .unwrap()
+            .upstream = Some(
+            UpstreamSpec::new("python3")
+                .unsafe_host_execution(true)
+                .with_capability("ping", UpstreamToolCapability::new()),
+        );
         let pb = binding.provider("github").unwrap();
         let work_dir = worker_home.join("slots").join("github");
         std::fs::create_dir_all(&work_dir).unwrap();
@@ -446,6 +623,7 @@ for line in sys.stdin:
             args: vec!["-u".into(), "-c".into(), script.into()],
             spawn: true,
             resolve_secrets: false,
+            unsafe_host_execution: true,
             extra_env: BTreeMap::new(),
         });
         let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();

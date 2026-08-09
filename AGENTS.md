@@ -92,13 +92,14 @@ These are load-bearing. Prefer a failing test over a soft allow.
 3. **No cross-binding credentials** — exec/worker env for A must not contain secret material for B.
 4. **Scrub ambient identity** — `AWS_PROFILE`, `GH_TOKEN`, `SUPABASE_*`, `VERCEL_*`, etc. do not leak into isolated children.
 5. **Private CLI config dirs** — `GH_CONFIG_DIR` / AWS config paths under session worker home; never `gh auth switch` on user home.
-6. **Scope freeze** — frozen `project_ref`, `team_id`, orgs/repos cannot be overridden by model args.
+6. **Scope freeze** — frozen `project_ref`, `team_id`, orgs/repos cannot be overridden by model args; upstream calls require a closed tool/argument capability manifest.
 7. **Agents cannot pin** — MCP exposes `locus_request_pin` only; pin state changes require human CLI (or audited force).
 8. **CredentialRefs only** — bindings store `phm:NAME` / `env:VAR` / (dev) `test:VALUE`, never raw tokens.
-9. **MCP never returns secrets** — tool results may show scopes and aliases, never resolved credential values.
+9. **MCP credential boundary** — Locus-generated results never contain resolved credentials; opted-in upstream results matching injected credential values are discarded. This does not contain arbitrary same-user filesystem reads.
 10. **Fail closed** — invalid seal, unknown binding, scope mismatch, policy deny → error/deny, not soft allow.
 11. **MCP stdout is sacred** — `locus-mcp` speaks JSON-RPC on stdout; no logs there (breaks the protocol).
 12. **Workspace allowlist** — `.locus.toml` `allowed_bindings` blocks wrong-tenant pins unless `--force` (audited).
+13. **Host workers default off** — upstream MCP processes require explicit `unsafe_host_execution = true`; this is not OS confinement and same-user workers can read `LOCUS_HOME/daemon.key`.
 
 Test surface lives primarily in `locus-core` unit tests + `crates/locus-core/tests/isolation.rs` + `crates/locus-mcp/tests/mcp_protocol.rs`.
 

@@ -23,14 +23,23 @@ parallel_sessions = 2
 # Uses the public MCP "everything" server as a stand-in for a real provider
 # upstream. Requires network the first time `npx` fetches the package.
 #
-# resolve_secrets = true injects resolved credential_ref values into the child
-# only (never into MCP tool responses).
+# Host execution is unsafe and disabled below. Same-user workers are not
+# sandboxed and can read LOCUS_HOME/daemon.key. Use synthetic adapters unless
+# you deliberately accept that development-only risk.
 [[binding.providers]]
 provider = "github"
 account = "demo-gh"
 credential_ref = "env:GH_TOKEN"
-scope = { orgs = ["demo-org"], repos = ["demo-org/*"] }
-upstream = { command = "npx", args = ["-y", "@modelcontextprotocol/server-everything"], resolve_secrets = true }
+scope = { orgs = ["demo-org"], repos = ["demo-org/demo-repo"] }
+
+[binding.providers.upstream]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-everything"]
+resolve_secrets = true
+unsafe_host_execution = false
+
+[binding.providers.upstream.capabilities.echo.arguments]
+message = "passthrough"
 
 # Nested-table form (equivalent style for a second provider):
 [[binding.providers]]
@@ -48,6 +57,9 @@ scope = { project_ref = "YOUR_PROJECT_REF", read_only = true }
 # command = "python3"
 # args = ["-u", "path/to/mock_mcp_server.py"]
 # resolve_secrets = false
+# unsafe_host_execution = false
+# [binding.providers.upstream.capabilities.ping]
+# arguments = {}
 
 [[binding.providers]]
 provider = "stripe"

@@ -6,6 +6,7 @@
 use super::mcp_stdio::{McpStdioBackend, McpStdioConfig};
 use super::stdio_client::UpstreamTool;
 use super::synthetic::SyntheticBackend;
+use super::upstream_boundary::constrain_input_schema;
 use super::{WorkerBackend, WorkerKey, WorkerManager, WorkerSlot, WorkerState, WorkerToolResult};
 use crate::adapters::{self, AdapterTool};
 use crate::binding::{Binding, UpstreamSpec};
@@ -22,6 +23,7 @@ pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> McpStdioConfig {
         args: spec.args.clone(),
         spawn: true,
         resolve_secrets: spec.resolve_secrets,
+        unsafe_host_execution: spec.unsafe_host_execution,
         extra_env: BTreeMap::new(),
     }
 }
@@ -152,8 +154,14 @@ impl CompositeWorkerManager {
             let Ok(upstream) = self.list_upstream_tools(session, binding, &p.provider) else {
                 continue;
             };
+            let Some(manifest) = p.upstream.as_ref().map(|spec| &spec.capabilities) else {
+                continue;
+            };
             let prov = p.provider.to_ascii_lowercase();
             for t in upstream {
+                let Some(capability) = manifest.get(&t.name) else {
+                    continue;
+                };
                 let name = namespace_upstream_tool(&prov, &t.name);
                 if synthetic_names.contains(&name) {
                     // Prefer synthetic identity/scope tools on name collision.
@@ -169,7 +177,7 @@ impl CompositeWorkerManager {
                     } else {
                         t.description
                     },
-                    input_schema: t.input_schema,
+                    input_schema: constrain_input_schema(&t.input_schema, capability),
                     provider: p.provider.clone(),
                     destructive: false,
                 });
@@ -368,7 +376,7 @@ impl Drop for CompositeWorkerManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::binding::{BindingBody, Policy, ProviderBinding, Scope};
+    use crate::binding::{BindingBody, Policy, ProviderBinding, Scope, UpstreamToolCapability};
     use crate::seal::SealKey;
     use crate::session::PinSource;
     use chrono::Duration;
@@ -420,7 +428,16 @@ for line in sys.stdin:
             upstream: None,
         };
         if with_upstream {
-            gh.upstream = Some(UpstreamSpec::new("python3").with_args(["-u", "-c", mock_script()]));
+            gh.upstream = Some(
+                UpstreamSpec::new("python3")
+                    .with_args(["-u", "-c", mock_script()])
+                    .unsafe_host_execution(true)
+                    .with_capability("ping", UpstreamToolCapability::new())
+                    .with_capability(
+                        "echo",
+                        UpstreamToolCapability::new().with_argument("text", "passthrough"),
+                    ),
+            );
         }
         Binding::from_body(BindingBody {
             id: "bnd_acme".into(),
@@ -594,10 +611,13 @@ for line in sys.stdin:
     fn mcp_config_from_upstream_spawns() {
         let spec = UpstreamSpec::new("npx")
             .with_args(["-y", "@pkg"])
-            .resolve_secrets(true);
+            .resolve_secrets(true)
+            .unsafe_host_execution(true)
+            .with_capability("ping", UpstreamToolCapability::new());
         let cfg = mcp_config_from_upstream(&spec);
         assert!(cfg.spawn);
         assert!(cfg.resolve_secrets);
+        assert!(cfg.unsafe_host_execution);
         assert_eq!(cfg.command, "npx");
         assert_eq!(cfg.args, vec!["-y", "@pkg"]);
     }

@@ -51,7 +51,8 @@ Clients → data plane (locus-mcp / exec)
 
 - Fail closed: bad seal, scope mismatch, unknown provider path → deny/error
 - CredentialRefs in bindings — never raw secrets in TOML or git
-- Scope freeze on every account selector (`freeze_string_arg`)
+- Scope freeze on every account selector (`freeze_string_arg`; closed capability manifests for upstream MCP)
+- Host upstream MCP execution fails closed unless the binding explicitly opts into unsafe same-user execution
 - MCP stdout is protocol-only (no logging)
 - `LOCUS_HOME` for tests; `LOCUS_ALLOW_TEST_CREDS=1` only for `test:` refs in unit tests
 - fmt + clippy `-D warnings` must pass (CI)

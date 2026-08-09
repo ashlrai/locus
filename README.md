@@ -223,6 +223,9 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | **3** Remote binding graph sync, dual-control packs, offboard, SIEM export | next |
 | **4** Adapter SDK, broader prebuilt platforms | later |
 
+Host-executed upstream MCP workers are experimental, fail closed by default,
+and are not OS-confined; see [docs/workers.md](./docs/workers.md).
+
 See [PLAN.md](./PLAN.md) and [DESIGN.md](./DESIGN.md) for the full architecture.
 
 ---
@@ -307,10 +310,10 @@ approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
 - Session pins are **HMAC-sealed**; tampering fails closed.
 - Workspace `allowed_bindings` blocks wrong-tenant pins (unless `--force`, audited).
 - `locus exec` / `locus run` scrub ambient identity; secrets only in the child.
-- MCP never returns secret values; agents cannot pin (request only).
+- Locus-generated MCP results never include resolved credentials; opted-in upstream results matching the injected provider credential are discarded. Unsafe host workers can still read and exfiltrate unrelated same-user files, which is why they are disabled by default. Agents cannot pin (request only).
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
 - Policy: globs + structured `[[rules]]`, `require_approval`, dual-control (2 principals).
-- Upstream MCP workers auto-spawn per-binding when `upstream = { command, args }` is set.
+- Upstream MCP workers require a closed capability manifest plus explicit `unsafe_host_execution = true`. Their child environment is minimal and selected-provider-only, but they are not OS-confined and can read same-user files including `LOCUS_HOME/daemon.key`; keep them disabled for untrusted or production-capable workloads.
 - Drift freeze: `locus watch` / doctor re-pin if binding changes under a session.
 
 Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md §9](./DESIGN.md).

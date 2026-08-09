@@ -31,7 +31,7 @@ We appreciate coordinated disclosure. Credit is given unless you ask otherwise.
 
 | Asset | Intent |
 |-------|--------|
-| **Provider credentials** | Resolved only into worker/child env; never returned by MCP tools |
+| **Provider credentials** | Resolved only into the selected provider child env; matching material in upstream MCP responses is discarded |
 | **Tenant / account selection** | Session sealed to one Binding; tools catalog is exclusive |
 | **Scope freezes** | `project_ref`, `team_id`, org/repo allowlists cannot be overridden by the model |
 | **Session integrity** | Pins are HMAC-sealed; tampering fails closed |
@@ -43,9 +43,10 @@ We appreciate coordinated disclosure. Credit is given unless you ask otherwise.
 |--------|---------------------|
 | Confused deputy (agent on A affects B) | Separate pin/catalog; no cross-binding tools |
 | Prompt injection → re-pin | Agents cannot pin; `locus_request_pin` only |
-| Arg smuggling (`project_ref` swap) | Adapter scope freeze |
+| Arg smuggling (`project_ref` swap) | Synthetic adapter freeze; closed per-tool capability manifest for upstream MCP |
 | Ambient CLI race (`gh auth switch`) | Private `GH_CONFIG_DIR` / scrubbed env in `locus exec` |
-| Ambient credential inheritance | Scrub known identity env vars; inject only resolved refs for the pin |
+| Ambient credential inheritance | `locus exec` scrubs known identity vars; upstream workers start from a minimal allowlist and receive only selected-provider metadata and credentials |
+| Unconfined same-user upstream process | Host execution denied by default; explicit `unsafe_host_execution = true` development opt-in |
 | Seal forgery | HMAC over session fields with local seal key |
 | Approval id path traversal | Ids constrained to safe charset; joined path must stay under `approvals/` |
 | Confirm / approval_id injection into digests | `args_digest` strips control + secret-like keys before hashing |
@@ -67,7 +68,7 @@ Flow:
 3. If dual-control: still pending until Human B: `locus approve grant appr_… --as bob` (same principal cannot grant twice).
 4. Once `status=approved`, re-call with the **same** args (digest match) within the grant TTL (default 15m), or pass `confirm=true` + `approval_id`.
 
-**Secrets never appear** in approval files, audit JSONL, or MCP tool results — only digests, ids, tool names, and principal labels. Principal names are restricted to `[A-Za-z0-9_-]` (no path separators).
+Locus-generated approval files, audit JSONL, and synthetic MCP results do not contain resolved credential values; they use digests, ids, tool names, principal labels, scopes, and CredentialRefs. Upstream responses matching the credential Locus injected are discarded, but an explicitly enabled unconfined worker can read or transform unrelated filesystem secrets beyond that filter. Principal names are restricted to `[A-Za-z0-9_-]` (no path separators).
 
 **Rate limiting:** Locus does not yet enforce request rate limits on `approve grant` / pending creation in process. Operators should treat approval files as sensitive control-plane state (filesystem permissions on `$LOCUS_HOME`), rotate seal keys if compromised, and use short grant TTLs for high-risk tools. Process-level rate limiting and OS attestation are roadmap.
 
@@ -76,8 +77,8 @@ Flow:
 - **Root / malware on the developer machine** — if the OS is fully compromised, all local tools are in scope for the attacker.
 - **A human who deliberately pins the wrong client** (`locus pin personal --force`) — Locus does not second-guess intentional human pin switches beyond workspace allowlists and audit hooks.
 - **Replacing cloud IAM / SSO** — Locus complements provider IAM; it does not replace org SSO policies.
-- **Malicious code inside a worker that already holds that binding’s credentials** — blast radius is intentionally one binding; deeper sandboxing is future work.
-- **Phase 1 synthetic adapters** — current Supabase/GitHub/Vercel tools are identity/scope stubs and policy demos; they do **not** yet fan out to real upstream MCP APIs. Remote-call isolation for live workers is roadmap (see PLAN / DESIGN).
+- **Unsafe host-executed upstream MCP workers.** Locus does not currently provide OS confinement. A child runs as the same user and can read any user-readable path, including `LOCUS_HOME/daemon.key`, binding files, source trees, and unrelated credentials. It can also use its injected provider credential directly without returning data through MCP. Host execution therefore fails closed by default and is only available with explicit `unsafe_host_execution = true`; do not enable it for untrusted code or production authority.
+- The upstream capability manifest and response credential blocker constrain the MCP request/response boundary after that unsafe opt-in. They do not prevent filesystem reads, network exfiltration, process inspection, or direct provider actions by the worker.
 
 ### Invariants we care about (testable)
 
@@ -87,6 +88,10 @@ From DESIGN.md:
 - Worker/exec env for binding A must not contain credential material for B  
 - Unbound session ⇒ tool catalog is only control tools (`locus_*`)  
 - Agent-initiated pin must not change state without human action  
+- Undeclared upstream tools/arguments/selectors never reach a worker
+- Host-executed upstream workers do not spawn without explicit unsafe opt-in
+- An upstream worker environment contains no other binding provider's credential locator, injection key, account, or scope metadata
+- Upstream results/errors containing an injected credential value are discarded
 
 See also the Security model section in [README.md](./README.md).
 
@@ -108,4 +113,5 @@ When in doubt whether an issue is security-sensitive, use the private channel ab
 - Keep Phantom (or your vault) and Locus updated together when using `phm:` refs.
 - For production-like deploys, set `dual_control` globs (or `dual_control_all_approvals = true`) so one laptop user cannot solo-approve high-risk tools.
 - Keep `$LOCUS_HOME` mode-restricted (seal key is `0600`); treat `approvals/` and `audit/` as sensitive.
+- Keep upstream host execution disabled. `0600` does not protect `daemon.key` from another process running as the same user.
 - Prefer short approval TTLs (`locus approve grant … --ttl 15m`) and review `locus approve list` regularly.

@@ -113,7 +113,7 @@ Tool names are **not** multi-tenant namespaced under exclusive pin — the catal
 
 1. **Policy** (`binding.policy`) may deny or require approval (`confirm=true`) before the adapter runs.  
 2. **Scope freeze** rejects args that conflict with frozen selectors (e.g. another Supabase `project_ref`).  
-3. Results are synthetic/identity-oriented in phase 1 — safe to explore without mutating cloud resources.
+3. Synthetic results are identity-oriented. Host-executed upstream tools are disabled by default; enabling the explicit unsafe development opt-in can perform real provider actions.
 
 Agent best practice: call `locus_whoami` before any infrastructure work. If unpinned or wrong tenant, ask the human to `locus pin <alias>`.
 
@@ -145,6 +145,7 @@ Do **not** also register unrestricted personal Supabase/GitHub MCP servers along
 | `locus-mcp` not found | PATH for GUI vs terminal; reinstall; absolute path in MCP config |
 | Wrong tenant tools | `locus whoami`; re-pin; inspect binding providers |
 | Scope freeze errors | Model tried to override frozen `project_ref` / team / org — expected |
+| Upstream tool absent | Host execution is disabled, the tool is not in the closed capability manifest, or worker startup failed; synthetic tools remain available |
 | Setup didn’t stick | Re-run `locus setup --client …`; confirm config file path for your client version |
 
 ```bash

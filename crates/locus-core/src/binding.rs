@@ -68,6 +68,38 @@ pub struct UpstreamSpec {
     /// Resolve `phm:` / `env:` credential_refs into the child env when spawning.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resolve_secrets: bool,
+    /// Explicit acknowledgement that this child runs as the current OS user.
+    ///
+    /// Host execution is disabled by default because a same-user process can
+    /// read Locus control-plane files, including `LOCUS_HOME/daemon.key`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsafe_host_execution: bool,
+    /// Closed tool/argument manifest enforced before forwarding to upstream.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub capabilities: BTreeMap<String, UpstreamToolCapability>,
+}
+
+/// One explicitly admitted upstream tool and its top-level argument semantics.
+///
+/// Argument values are `passthrough`, `account`, or a frozen scope source:
+/// `scope.project_ref`, `scope.team_id`, `scope.account_id`, `scope.orgs`,
+/// `scope.repos`, `scope.projects`, `scope.env`. Any undeclared tool, argument,
+/// or semantic is denied before the worker receives a JSON-RPC call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct UpstreamToolCapability {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arguments: BTreeMap<String, String>,
+}
+
+impl UpstreamToolCapability {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_argument(mut self, name: impl Into<String>, semantics: impl Into<String>) -> Self {
+        self.arguments.insert(name.into(), semantics.into());
+        self
+    }
 }
 
 impl UpstreamSpec {
@@ -76,6 +108,8 @@ impl UpstreamSpec {
             command: command.into(),
             args: Vec::new(),
             resolve_secrets: false,
+            unsafe_host_execution: false,
+            capabilities: BTreeMap::new(),
         }
     }
 
@@ -89,11 +123,60 @@ impl UpstreamSpec {
         self
     }
 
+    pub fn unsafe_host_execution(mut self, yes: bool) -> Self {
+        self.unsafe_host_execution = yes;
+        self
+    }
+
+    pub fn with_capability(
+        mut self,
+        tool: impl Into<String>,
+        capability: UpstreamToolCapability,
+    ) -> Self {
+        self.capabilities.insert(tool.into(), capability);
+        self
+    }
+
     pub fn validate(&self) -> crate::Result<()> {
         if self.command.trim().is_empty() {
             return Err(crate::LocusError::msg(
                 "provider.upstream.command must be non-empty when upstream is set",
             ));
+        }
+        if self.capabilities.is_empty() {
+            return Err(crate::LocusError::msg(
+                "provider.upstream.capabilities must explicitly declare every admitted tool",
+            ));
+        }
+        for (tool, capability) in &self.capabilities {
+            if tool.trim().is_empty() {
+                return Err(crate::LocusError::msg(
+                    "provider.upstream.capabilities tool names must be non-empty",
+                ));
+            }
+            for (argument, semantics) in &capability.arguments {
+                if argument.trim().is_empty() {
+                    return Err(crate::LocusError::msg(format!(
+                        "provider.upstream.capabilities.{tool} contains an empty argument name"
+                    )));
+                }
+                if !matches!(
+                    semantics.as_str(),
+                    "passthrough"
+                        | "account"
+                        | "scope.project_ref"
+                        | "scope.team_id"
+                        | "scope.account_id"
+                        | "scope.orgs"
+                        | "scope.repos"
+                        | "scope.projects"
+                        | "scope.env"
+                ) {
+                    return Err(crate::LocusError::msg(format!(
+                        "provider.upstream.capabilities.{tool}.{argument} has unknown semantics `{semantics}`"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -512,7 +595,7 @@ provider = "github"
 account = "acme"
 credential_ref = "phm:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"] }
-upstream = { command = "npx", args = ["-y", "@github/mcp"], resolve_secrets = true }
+upstream = { command = "npx", args = ["-y", "@github/mcp"], resolve_secrets = true, capabilities = { ping = { arguments = {} } } }
 
 [[binding.providers]]
 provider = "supabase"
@@ -531,6 +614,8 @@ scope = { project_ref = "abcdefghij", read_only = true }
         assert_eq!(up.command, "npx");
         assert_eq!(up.args, vec!["-y", "@github/mcp"]);
         assert!(up.resolve_secrets);
+        assert!(!up.unsafe_host_execution);
+        assert!(up.capabilities.contains_key("ping"));
         assert!(!b.provider("supabase").unwrap().has_upstream());
     }
 
@@ -552,6 +637,9 @@ scope = { orgs = ["o"] }
 command = "python3"
 args = ["-u", "-c", "print(1)"]
 resolve_secrets = false
+
+[binding.providers.upstream.capabilities.ping]
+arguments = {}
 "#;
         let b = Binding::parse_toml(toml).unwrap();
         b.validate().unwrap();
@@ -580,12 +668,46 @@ upstream = { command = "" }
     }
 
     #[test]
+    fn upstream_requires_closed_capability_manifest() {
+        let mut b = Binding::parse_toml(SAMPLE_WITH_UPSTREAM).unwrap();
+        b.providers[0]
+            .upstream
+            .as_mut()
+            .unwrap()
+            .capabilities
+            .clear();
+        let error = b.validate().unwrap_err().to_string();
+        assert!(error.contains("capabilities"), "unexpected: {error}");
+
+        b.providers[0]
+            .upstream
+            .as_mut()
+            .unwrap()
+            .capabilities
+            .insert(
+                "ping".into(),
+                UpstreamToolCapability::new().with_argument("target", "guessed_selector"),
+            );
+        let error = b.validate().unwrap_err().to_string();
+        assert!(error.contains("unknown semantics"), "unexpected: {error}");
+    }
+
+    #[test]
     fn roundtrip_preserves_upstream() {
         let b = Binding::parse_toml(SAMPLE_WITH_UPSTREAM).unwrap();
         let s = b.to_toml().unwrap();
         let b2 = Binding::parse_toml(&s).unwrap();
         assert_eq!(b, b2);
         assert!(b2.provider("github").unwrap().has_upstream());
+    }
+
+    #[test]
+    fn upstream_example_is_valid() {
+        let binding = Binding::parse_toml(include_str!("../../../examples/upstream.binding.toml"))
+            .expect("parse examples/upstream.binding.toml");
+        binding
+            .validate()
+            .expect("validate examples/upstream.binding.toml");
     }
 
     #[test]

@@ -822,7 +822,7 @@ hard_constraints = ["project_ref_immutable"]
 | **Approval fatigue** | User auto-approves | TTL on approvals; Touch ID; batch display of risk |
 | **Audit tampering** | Hide wrong-account action | HMAC chain; optional remote append (team tier) |
 | **Daemon compromise** | Malware reads all CredentialRefs | Same as Phantom: OS keychain, short-lived worker plaintext, future split daemons |
-| **Supply chain adapter** | Malicious adapter exfiltrates** | Signed adapters registry; hash pin; sandbox workers |
+| **Supply chain adapter** | Malicious adapter or upstream exfiltrates | Host upstream disabled by default; closed request manifest and response credential blocker after unsafe opt-in; signed registry and OS sandbox remain roadmap |
 | **Cross-binding proxy path guess** | Hit `/bind/{other}/` | Binding id high-entropy; require session seal header; localhost only |
 
 ### 9.3 Non-goals (honest)
@@ -830,7 +830,7 @@ hard_constraints = ["project_ref_immutable"]
 - Protecting against root on the developer machine
 - Preventing a human who runs `locus pin personal --force` from acting as personal
 - Replacing cloud IAM / SSO for enterprises (complement, don’t replace)
-- Stopping malicious upstream MCP code inside a worker from misusing **that binding’s** credentials (sandbox helps later; blast radius is still one binding)
+- Stopping an explicitly enabled host upstream from reading same-user files or directly misusing its provider credential. There is no OS confinement today; it can read `LOCUS_HOME/daemon.key`, so host execution is denied by default.
 
 ### 9.4 Invariants (testable)
 
@@ -841,6 +841,9 @@ INV-3  parallel sessions A,B ⇒ disjoint GH_CONFIG_DIR / AWS_CONFIG_FILE paths
 INV-4  unbound session ⇒ tools/list is only locus_* control tools (or empty)
 INV-5  agent-initiated pin change ⇒ no state change without human approval record
 INV-6  audit chain verifies after every N events in CI
+INV-7  upstream host process starts ⇒ binding explicitly acknowledges unsafe same-user execution
+INV-8  upstream call forwarded ⇒ tool and every top-level argument have declared semantics
+INV-9  upstream MCP response crosses boundary ⇒ no injected credential value matched
 ```
 
 Conformance suite: `locus test isolation` runs these as integration tests.

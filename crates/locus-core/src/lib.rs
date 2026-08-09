@@ -5,8 +5,8 @@
 //! - A session is sealed to exactly one Binding (exclusive mode).
 //! - Unbound sessions have no provider surface.
 //! - Isolated exec env contains only the pinned binding's providers.
-//! - Credential **values** never live in MCP responses — only CredentialRefs
-//!   and resolved secrets inside worker env maps.
+//! - Locus-resolved credential **values** are blocked from MCP responses; only
+//!   CredentialRefs and resolved secrets inside worker env maps are retained.
 
 pub mod adapters;
 pub mod approval;
@@ -38,7 +38,7 @@ pub use approval::{
 pub use autopin::{match_remote_binding, resolve_auto_pin, AutoPinTarget};
 pub use binding::{
     validate_name_component, Binding, BindingBody, BindingSummary, Policy, PolicyRule,
-    ProviderBinding, Scope, UpstreamSpec,
+    ProviderBinding, Scope, UpstreamSpec, UpstreamToolCapability,
 };
 pub use config::{
     load_config, save_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig,

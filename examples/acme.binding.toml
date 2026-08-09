@@ -27,8 +27,8 @@ provider = "github"
 account = "acme-corp"
 credential_ref = "phm:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
-# Optional: auto-spawn upstream MCP for this provider when pinned.
-# upstream = { command = "npx", args = ["-y", "@modelcontextprotocol/server-github"], resolve_secrets = true }
+# Optional host upstreams are unsafe, disabled by default, and require a closed
+# capability manifest. See examples/upstream.binding.toml and docs/workers.md.
 
 [[binding.providers]]
 provider = "vercel"

@@ -22,7 +22,7 @@ pub struct McpStdioClient {
     initialized: Mutex<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct UpstreamTool {
     pub name: String,
     pub description: String,
