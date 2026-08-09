@@ -160,16 +160,21 @@ scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 
 ```
 locus init [--with-samples]
-locus pin [alias] [--force] [--client claude]
+locus pin [alias] [--force] [--client claude] [--ns a,b]
+locus enter <alias>                   # firm workflow pin
 locus leave
 locus whoami [--json]
 locus status [--oneline] [--json]
 locus exec -- <command> [args...]
+locus run -b <alias> -- <command>     # one-shot; global pin unchanged
 locus binding list|show|add|rm
 locus workspace --default <alias> [--allow a,b] [--require-pin]
 locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2)
 locus approve list|grant|status|deny  # require_approval / dual-control
+locus notify status|on|off            # desktop banners OFF by default
 locus events --last N [--op …] [--binding …] [--json]
+locus graph list|export|import        # encrypted binding graph share (no secrets)
+locus ci mint|env|run                 # short-lived sealed sessions for pipelines
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex
 ```
@@ -187,11 +192,21 @@ locus approve grant appr_… --as bob
 locus events --last 20 --op approval.grant --json
 ```
 
-Planned (not in CLI yet; e2e skips until present):
+Graph share (bindings + workspace templates only — CredentialRefs, never secret values):
 
+```bash
+export LOCUS_GRAPH_PASSPHRASE='…'   # required for encrypt/decrypt
+locus graph list
+locus graph export --out team.locusgraph
+locus graph import team.locusgraph
 ```
-locus enter <alias>            # firm workflow alias for pin (see docs/firm-mode.md)
-locus run -b <alias> -- <cmd>  # one-shot child session without changing shell pin
+
+CI ephemeral pins (do not touch `active.json`):
+
+```bash
+locus ci mint -b acme --json          # short-lived sealed session
+eval "$(locus ci env -b acme)"        # export LOCUS_SESSION_ID + env
+locus ci run -b acme -- npm test      # mint → run → cleanup
 ```
 
 Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
@@ -203,9 +218,10 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | Phase | Status |
 |-------|--------|
 | **0** Daemon-less control plane, pin/whoami/exec, isolation tests | done |
-| **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | **you are here** |
-| **2** Real upstream MCP workers, AWS/CF/Resend, continuous whoami drift | next |
-| **3** Team binding graph, remote dual-control, offboard, SIEM export | partial (`locus events`) |
+| **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | done |
+| **2** Firm UX, doctor pane, run/ns, notify, local `locus graph`, `locus ci` | **you are here (0.1.1)** |
+| **3** Remote binding graph sync, dual-control packs, offboard, SIEM export | next |
+| **4** Adapter SDK, broader prebuilt platforms | later |
 
 See [PLAN.md](./PLAN.md) and [DESIGN.md](./DESIGN.md) for the full architecture.
 
@@ -219,7 +235,8 @@ cargo test --workspace
 cargo build --release
 ./target/release/locus --help
 
-# Full shell e2e (build, pin, isolation, MCP freeze/approval, dual-control, events, doctor)
+# Full shell e2e (34 checks: pin, isolation, MCP freeze/approval, dual-control,
+# doctor, events, enter/run, notify, graph, ci, heartbeat — feature-detected)
 ./scripts/e2e.sh
 ```
 
@@ -271,6 +288,14 @@ locus approve list
 locus approve grant appr_… --as mason
 locus notify status                  # OFF by default (no spam)
 locus doctor                         # SAFE | WARN | UNSAFE
+
+# Encrypted binding-graph share (CredentialRefs only — never secret values)
+export LOCUS_GRAPH_PASSPHRASE='…'    # or interactive TTY prompt
+locus graph export --out team.locusgraph
+locus graph import team.locusgraph
+
+# CI / ephemeral sealed pin (does not touch active.json)
+locus ci mint -b acme --json         # session_id + env map; no secrets by default
 ```
 
 **Desktop notifications are off by default.** Agents create many pending

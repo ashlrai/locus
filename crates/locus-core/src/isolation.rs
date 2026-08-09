@@ -231,6 +231,126 @@ pub fn visible_credential_refs(binding: &Binding) -> Vec<String> {
         .collect()
 }
 
+/// Build the **export surface** for CI mint JSON / `locus ci env`.
+///
+/// Contains only LOCUS_* identity vars and provider frozen scopes (project_ref,
+/// team_id, orgs, …). Never inherits the parent process env.
+///
+/// Secrets are **never** included unless `resolve_secrets` is true **and**
+/// `LOCUS_CI_ALLOW_SECRETS=1` is set in the environment.
+pub fn build_ci_env_map(
+    session: &Session,
+    binding: &Binding,
+    resolve_secrets: bool,
+) -> BTreeMap<String, String> {
+    let allow_secrets =
+        resolve_secrets && std::env::var("LOCUS_CI_ALLOW_SECRETS").ok().as_deref() == Some("1");
+
+    // Start empty — no parent env.
+    let mut vars = BTreeMap::new();
+
+    vars.insert("LOCUS_SESSION_ID".into(), session.session_id.clone());
+    vars.insert("LOCUS_BINDING".into(), session.binding_alias.clone());
+    vars.insert("LOCUS_BINDING_ID".into(), session.binding_id.clone());
+    vars.insert("LOCUS_TENANT".into(), session.tenant.clone());
+    if let Some(ref p) = session.principal {
+        vars.insert("LOCUS_PRINCIPAL".into(), p.clone());
+    }
+    vars.insert("LOCUS_SEAL".into(), session.seal.clone());
+    vars.insert("LOCUS_WORKER_HOME".into(), session.worker_home.clone());
+    vars.insert("LOCUS_EXPIRES_AT".into(), session.expires_at.to_rfc3339());
+
+    let worker = Path::new(&session.worker_home);
+    vars.insert(
+        "GH_CONFIG_DIR".into(),
+        worker.join("gh").display().to_string(),
+    );
+    vars.insert(
+        "AWS_CONFIG_FILE".into(),
+        worker.join("aws").join("config").display().to_string(),
+    );
+    vars.insert(
+        "AWS_SHARED_CREDENTIALS_FILE".into(),
+        worker.join("aws").join("credentials").display().to_string(),
+    );
+
+    let names: Vec<&str> = binding.provider_names();
+    vars.insert("LOCUS_PROVIDERS".into(), names.join(","));
+
+    for p in &binding.providers {
+        let prefix = format!("LOCUS_{}", p.provider.to_uppercase());
+        vars.insert(format!("{prefix}_ACCOUNT"), p.account.clone());
+        vars.insert(format!("{prefix}_CREDENTIAL_REF"), p.credential_ref.clone());
+        vars.insert(format!("{prefix}_CREDENTIAL_RESOLVED"), "0".into());
+
+        if let Some(ref r) = p.scope.project_ref {
+            vars.insert(format!("{prefix}_PROJECT_REF"), r.clone());
+            if p.provider.eq_ignore_ascii_case("supabase") {
+                vars.insert("SUPABASE_PROJECT_REF".into(), r.clone());
+                vars.insert("SUPABASE_PROJECT_ID".into(), r.clone());
+            }
+        }
+        if let Some(ref t) = p.scope.team_id {
+            vars.insert(format!("{prefix}_TEAM_ID"), t.clone());
+            if p.provider.eq_ignore_ascii_case("vercel") {
+                vars.insert("VERCEL_ORG_ID".into(), t.clone());
+                vars.insert("VERCEL_TEAM_ID".into(), t.clone());
+            }
+        }
+        if let Some(ref a) = p.scope.account_id {
+            vars.insert(format!("{prefix}_ACCOUNT_ID"), a.clone());
+            if p.provider.eq_ignore_ascii_case("cloudflare") {
+                vars.insert("CLOUDFLARE_ACCOUNT_ID".into(), a.clone());
+            }
+            if p.provider.eq_ignore_ascii_case("aws") {
+                vars.insert("AWS_ACCOUNT_ID".into(), a.clone());
+            }
+        }
+        if let Some(ro) = p.scope.read_only {
+            vars.insert(format!("{prefix}_READ_ONLY"), ro.to_string());
+        }
+        if !p.scope.orgs.is_empty() {
+            vars.insert(format!("{prefix}_ORGS"), p.scope.orgs.join(","));
+        }
+        if !p.scope.repos.is_empty() {
+            vars.insert(format!("{prefix}_REPOS"), p.scope.repos.join(","));
+        }
+        if !p.scope.projects.is_empty() {
+            vars.insert(format!("{prefix}_PROJECTS"), p.scope.projects.join(","));
+            if p.provider.eq_ignore_ascii_case("vercel") {
+                if let Some(first) = p.scope.projects.first() {
+                    vars.insert("VERCEL_PROJECT_ID".into(), first.clone());
+                }
+            }
+        }
+    }
+
+    if allow_secrets {
+        let soft = std::env::var("LOCUS_SOFT_CREDS").ok().as_deref() != Some("0");
+        if soft {
+            std::env::set_var("LOCUS_SOFT_CREDS", "1");
+        }
+        if let Ok(secrets) = resolve_binding_secrets(binding) {
+            for (k, v) in secrets {
+                vars.insert(k, v.as_str().to_string());
+            }
+            for p in &binding.providers {
+                let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());
+                let keys = crate::credential::inject_keys_for_provider(&p.provider);
+                let ok = keys.iter().any(|k| vars.contains_key(*k));
+                vars.insert(flag, if ok { "1".into() } else { "0".into() });
+            }
+        }
+    }
+
+    vars
+}
+
+/// True when CI mint/env is allowed to emit resolved secrets.
+pub fn ci_secrets_allowed() -> bool {
+    std::env::var("LOCUS_CI_ALLOW_SECRETS").ok().as_deref() == Some("1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +479,68 @@ mod tests {
         );
         assert!(iso.secrets_resolved >= 1);
         std::env::remove_var("LOCUS_ISOLATION_TEST_TOKEN");
+    }
+
+    #[test]
+    fn ci_env_map_never_includes_secrets_by_default() {
+        std::env::set_var("LOCUS_CI_SECRET_TOKEN", "super-secret-ci");
+        std::env::remove_var("LOCUS_CI_ALLOW_SECRETS");
+        let acme = Binding::from_body(BindingBody {
+            id: "bnd_acme".into(),
+            alias: "acme".into(),
+            tenant: "acme-corp".into(),
+            principal: Some("ci".into()),
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "supabase".into(),
+                account: "acme".into(),
+                credential_ref: "env:LOCUS_CI_SECRET_TOKEN".into(),
+                scope: Scope {
+                    project_ref: Some("proj_acme".into()),
+                    ..Scope::default()
+                },
+                upstream: None,
+            }],
+        });
+        let key = SealKey::generate();
+        let session = Session::new(
+            &acme.id,
+            &acme.alias,
+            &acme.tenant,
+            Some("ci".into()),
+            PinSource::Ci,
+            Some("ci".into()),
+            Duration::minutes(15),
+            "/tmp/locus-ci-worker".into(),
+            &key,
+        );
+
+        // Even with resolve_secrets=true, without LOCUS_CI_ALLOW_SECRETS secrets stay out
+        let map = build_ci_env_map(&session, &acme, true);
+        assert_eq!(
+            map.get("LOCUS_SESSION_ID").map(String::as_str),
+            Some(session.session_id.as_str())
+        );
+        assert_eq!(
+            map.get("SUPABASE_PROJECT_REF").map(String::as_str),
+            Some("proj_acme")
+        );
+        assert_eq!(
+            map.get("LOCUS_SUPABASE_CREDENTIAL_REF").map(String::as_str),
+            Some("env:LOCUS_CI_SECRET_TOKEN")
+        );
+        assert!(!map.values().any(|v| v == "super-secret-ci"));
+        assert!(!map.contains_key("SUPABASE_ACCESS_TOKEN"));
+
+        // With allow flag, secrets may resolve
+        std::env::set_var("LOCUS_CI_ALLOW_SECRETS", "1");
+        let map2 = build_ci_env_map(&session, &acme, true);
+        assert_eq!(
+            map2.get("SUPABASE_ACCESS_TOKEN").map(String::as_str),
+            Some("super-secret-ci")
+        );
+        std::env::remove_var("LOCUS_CI_ALLOW_SECRETS");
+        std::env::remove_var("LOCUS_CI_SECRET_TOKEN");
     }
 }

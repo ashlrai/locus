@@ -254,6 +254,8 @@ fn unpinned_tools_list_only_control_tools_ndjson() {
     }
     assert!(tools.iter().any(|t| t["name"] == "locus_whoami"));
     assert!(tools.iter().any(|t| t["name"] == "locus_request_pin"));
+    assert!(tools.iter().any(|t| t["name"] == "locus_heartbeat"));
+    assert!(tools.iter().any(|t| t["name"] == "locus_enter_hint"));
     // provider tools must be absent
     assert!(!tools.iter().any(|t| t["name"] == "github.scope"));
     assert!(!tools.iter().any(|t| t["name"] == "vercel.scope"));
@@ -276,7 +278,10 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
     let tools = list["result"]["tools"].as_array().expect("tools");
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(names.contains(&"locus_whoami"));
+    assert!(names.contains(&"locus_heartbeat"));
+    assert!(names.contains(&"locus_enter_hint"));
     assert!(names.contains(&"github.scope"));
+    assert!(names.contains(&"github.check_repo"));
     assert!(names.contains(&"vercel.scope"));
     assert!(names.contains(&"supabase.scope"));
 
@@ -531,4 +536,229 @@ fn pinned_upstream_auto_spawn_list_and_call() {
     let (text, is_err) = McpClient::tool_text(&scope);
     assert!(!is_err, "github.scope failed: {text}");
     assert!(text.contains("phm:GH_TOKEN_ACME") || text.contains("acme"));
+}
+
+#[test]
+fn locus_heartbeat_and_enter_hint() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+
+    // Unpinned heartbeat
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    let hb = client.request(
+        "tools/call",
+        json!({ "name": "locus_heartbeat", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&hb);
+    assert!(is_err, "unpinned heartbeat should flag unhealthy: {text}");
+    let body: Value = serde_json::from_str(&text).expect("heartbeat json");
+    assert_eq!(body["pinned"], false);
+    assert_eq!(body["ok"], false);
+    assert!(body.get("runtime").is_some());
+    assert!(body.get("issues").is_some());
+
+    let hint = client.request(
+        "tools/call",
+        json!({
+            "name": "locus_enter_hint",
+            "arguments": { "alias": "acme" }
+        }),
+    );
+    let (text, is_err) = McpClient::tool_text(&hint);
+    assert!(!is_err, "enter_hint error: {text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["agents_cannot_pin"], true);
+    assert_eq!(body["command"], "locus enter acme");
+    assert_eq!(body["pin_command"], "locus pin acme");
+    assert_eq!(body["binding_exists"], true);
+
+    // Pinned healthy heartbeat
+    store
+        .pin("acme", dir.path(), Some("mcp-hb".into()), false)
+        .unwrap();
+    // New client so it sees the pin (store is shared via LOCUS_HOME)
+    drop(client);
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    let hb2 = client.request(
+        "tools/call",
+        json!({ "name": "locus_heartbeat", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&hb2);
+    assert!(!is_err, "healthy heartbeat should not error: {text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["pinned"], true);
+    assert_eq!(body["seal_ok"], true);
+    assert_eq!(body["frozen"], false);
+    assert_eq!(body["binding"], "acme");
+}
+
+#[test]
+fn frozen_session_tools_list_control_only_and_call_errors() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    store
+        .pin("acme", dir.path(), Some("mcp-freeze".into()), false)
+        .unwrap();
+
+    // Mutate binding under pin → drift freeze
+    let mut b = store.load_binding("acme").unwrap();
+    b.providers[0].scope.orgs = vec!["mutated-org".into()];
+    store.save_binding(&b).unwrap();
+    let drift = store.check_drift_and_freeze().unwrap();
+    assert!(drift.frozen || !drift.ok, "expected drift after mutation");
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    // tools/list must not expose provider tools when frozen/unhealthy
+    let list = client.request("tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().expect("tools");
+    for t in tools {
+        let name = t["name"].as_str().unwrap();
+        assert!(
+            name.starts_with("locus_"),
+            "frozen tools/list must be control-only, got {name}"
+        );
+    }
+    assert!(tools.iter().any(|t| t["name"] == "locus_heartbeat"));
+
+    // Provider tools/call must fail closed with clear error
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&call);
+    assert!(is_err, "expected frozen/unhealthy error: {text}");
+    assert!(
+        text.contains("session_frozen")
+            || text.contains("runtime_unhealthy")
+            || text.contains("frozen")
+            || text.contains("re-pin"),
+        "unexpected error body: {text}"
+    );
+
+    // Heartbeat reports freeze / issues
+    let hb = client.request(
+        "tools/call",
+        json!({ "name": "locus_heartbeat", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&hb);
+    assert!(is_err);
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["ok"], false);
+    assert!(
+        body["frozen"].as_bool().unwrap_or(false)
+            || body["issues"]
+                .as_array()
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+    );
+}
+
+#[test]
+fn github_check_repo_and_vercel_env_freeze_over_mcp() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    // Binding with repo allowlist + vercel env freeze
+    let acme = Binding::from_body(BindingBody {
+        id: "bnd_acme".into(),
+        alias: "acme".into(),
+        tenant: "acme-corp".into(),
+        principal: None,
+        description: None,
+        policy: Policy::default(),
+        providers: vec![
+            ProviderBinding {
+                provider: "github".into(),
+                account: "acme-gh".into(),
+                credential_ref: "phm:GH_TOKEN_ACME".into(),
+                scope: Scope {
+                    orgs: vec!["acme-corp".into()],
+                    repos: vec!["acme-corp/web".into()],
+                    ..Scope::default()
+                },
+                upstream: None,
+            },
+            ProviderBinding {
+                provider: "vercel".into(),
+                account: "acme-vc".into(),
+                credential_ref: "phm:VERCEL_TOKEN_ACME".into(),
+                scope: Scope {
+                    team_id: Some("team_acme".into()),
+                    env: vec!["preview".into()],
+                    ..Scope::default()
+                },
+                upstream: None,
+            },
+            ProviderBinding {
+                provider: "supabase".into(),
+                account: "acme-db".into(),
+                credential_ref: "phm:SUPABASE_ACME".into(),
+                scope: Scope {
+                    project_ref: Some("proj_acme".into()),
+                    ..Scope::default()
+                },
+                upstream: None,
+            },
+        ],
+    });
+    store.save_binding(&acme).unwrap();
+    store
+        .pin("acme", dir.path(), Some("mcp-freeze-tools".into()), false)
+        .unwrap();
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    let ok = client.request(
+        "tools/call",
+        json!({
+            "name": "github.check_repo",
+            "arguments": { "full_name": "acme-corp/web" }
+        }),
+    );
+    let (text, is_err) = McpClient::tool_text(&ok);
+    assert!(!is_err, "check_repo allow: {text}");
+    assert!(text.contains("\"allowed\":true") || text.contains("acme-corp/web"));
+
+    let deny = client.request(
+        "tools/call",
+        json!({
+            "name": "github.check_repo",
+            "arguments": { "full_name": "evil/other" }
+        }),
+    );
+    let (text, is_err) = McpClient::tool_text(&deny);
+    assert!(is_err, "expected org/repo deny: {text}");
+    assert!(text.contains("scope freeze") || text.contains("refusing"));
+
+    let env_deny = client.request(
+        "tools/call",
+        json!({
+            "name": "vercel.scope",
+            "arguments": { "env": "production" }
+        }),
+    );
+    let (text, is_err) = McpClient::tool_text(&env_deny);
+    assert!(is_err, "expected vercel env freeze: {text}");
+    assert!(text.contains("scope freeze") || text.contains("production"));
+
+    // supabase project_ref freeze still holds
+    let sb = client.request(
+        "tools/call",
+        json!({
+            "name": "supabase.scope",
+            "arguments": { "project_ref": "proj_evil" }
+        }),
+    );
+    let (text, is_err) = McpClient::tool_text(&sb);
+    assert!(is_err);
+    assert!(text.contains("scope freeze") || text.contains("proj_evil"));
 }

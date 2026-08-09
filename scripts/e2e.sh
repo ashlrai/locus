@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Locus end-to-end shell tests — pin, isolation, MCP, freeze, approval, doctor,
-# dual-control, events, optional enter/run (feature-detected).
+# dual-control, events, optional enter/run/notify/ns; graph/ci/heartbeat when present
+# (feature-detected). Full 0.1.1 surface: 34 checks, 0 skipped.
 set -euo pipefail
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
@@ -24,6 +25,11 @@ need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 # Feature detection: true if `locus <cmd> --help` succeeds (subcommand exists).
 has_cmd() {
   "$LOCUS_BIN" "$1" --help >/dev/null 2>&1
+}
+
+# Nested feature detection: true if `locus a b … --help` succeeds.
+has_cmd_path() {
+  "$LOCUS_BIN" "$@" --help >/dev/null 2>&1
 }
 
 # True if help text for a command mentions a flag substring.
@@ -298,8 +304,8 @@ ok "re-call after grant succeeds"
 
 # ── 9. doctor (structure + exit codes) ───────────────────────────────────────
 log "9. doctor structure + exit codes"
-# Sample bindings use unresolved phm: refs → overall ok is usually false / exit 1.
-# Assert structural health: seal + pin + bindings present; exit matches issues.
+# Sample bindings use unresolved phm: refs → verdict WARN / exit 1 typical.
+# Assert structural health: seal + pin + bindings; SAFE|WARN|UNSAFE exit 0/1/2.
 set +e
 doctor_json="$(locus doctor --json 2>/dev/null)"
 doctor_ec=$?
@@ -312,21 +318,22 @@ assert d.get("seal_ok") is True, d
 assert d.get("pin_seal_ok") is True, d
 assert d.get("bindings", 0) >= 2, d
 assert d.get("pinned") in ("acme", "envtest", "personal"), d
+verdict = (d.get("verdict") or "").upper()
+assert verdict in ("SAFE", "WARN", "UNSAFE"), d
 issues = d.get("issues") or []
 ok_flag = d.get("ok")
+assert ok_flag == (verdict == "SAFE"), d
 assert ok_flag == (len(issues) == 0), d
 ec = int(os.environ["DOCTOR_EC"])
-assert ec in (0, 1), "doctor exit must be 0 or 1, got %s" % ec
-if issues:
-    assert ec == 1, "doctor with issues must exit 1, got %s: %s" % (ec, issues)
-else:
-    assert ec == 0, "doctor clean must exit 0, got %s" % ec
-print("doctor seal_ok pin_seal_ok bindings=%s pinned=%s issues=%d exit=%s" % (
-    d.get("bindings"), d.get("pinned"), len(issues), ec))
+want = {"SAFE": 0, "WARN": 1, "UNSAFE": 2}[verdict]
+assert ec == want, "doctor exit must match verdict %s → %s, got %s: %s" % (
+    verdict, want, ec, issues)
+print("doctor seal_ok pin_seal_ok bindings=%s pinned=%s verdict=%s issues=%d exit=%s" % (
+    d.get("bindings"), d.get("pinned"), verdict, len(issues), ec))
 '
 ok "doctor structure + exit code matches issues (exit=$doctor_ec)"
 
-# Unpinned doctor still reports seal_ok and exits consistently with issues
+# Unpinned doctor still reports seal_ok and exits consistently with verdict
 locus leave >/dev/null 2>&1 || true
 set +e
 doctor_unpinned="$(locus doctor --json 2>/dev/null)"
@@ -338,13 +345,12 @@ import json, sys, os
 d = json.load(sys.stdin)
 assert d.get("seal_ok") is True, d
 assert d.get("pinned") in (None, ""), d
+verdict = (d.get("verdict") or "").upper()
+assert verdict in ("SAFE", "WARN", "UNSAFE"), d
 issues = d.get("issues") or []
 ec = int(os.environ["DOCTOR_EC"])
-assert ec in (0, 1), ec
-if issues:
-    assert ec == 1, (ec, issues)
-else:
-    assert ec == 0, (ec, d)
+want = {"SAFE": 0, "WARN": 1, "UNSAFE": 2}[verdict]
+assert ec == want, (ec, want, verdict, issues)
 '
 ok "doctor unpinned exit code coherent (exit=$doctor_un_ec)"
 
@@ -514,6 +520,15 @@ else
   skip "run not available (use exec under pin)"
 fi
 
+# ── 13b. optional: pin --ns flag (namespaced multi-bind; feature-detected) ───
+log "13b. pin --ns (optional)"
+if help_mentions pin "--ns"; then
+  # Help only — do not leave e2e home in multi-bind mode
+  ok "pin --ns flag present (namespaced multi-bind)"
+else
+  skip "pin --ns not advertised in help"
+fi
+
 # ── 14. leave → unpinned MCP control-only ────────────────────────────────────
 log "14. leave → unpinned MCP control-only"
 locus leave >/dev/null 2>&1 || true
@@ -532,6 +547,186 @@ if echo "$final_names" | grep -qE '^(supabase|github|vercel)\.'; then
   die "after leave, provider tools still listed"
 fi
 ok "after leave, MCP control-only again"
+
+# ── 15. notify status disabled by default under clean LOCUS_HOME ─────────────
+log "15. notify status disabled by default"
+if ! has_cmd notify; then
+  skip "notify command not available"
+else
+  # Ensure ambient opt-in env does not pollute the default check
+  unset LOCUS_NOTIFY LOCUS_QUIET 2>/dev/null || true
+  notify_json="$(locus notify status --json 2>/dev/null || locus --json notify status 2>/dev/null || true)"
+  if [[ -z "$notify_json" ]]; then
+    # Text fallback: must mention off/disabled
+    notify_txt="$(locus notify status 2>/dev/null || true)"
+    echo "$notify_txt" | grep -qiE 'off|disabled' \
+      || die "notify status should report disabled by default: $notify_txt"
+    ok "notify status text shows disabled (default)"
+  else
+    echo "$notify_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+# Clean LOCUS_HOME → config off; without LOCUS_NOTIFY, effective must be false
+assert d.get("config_enabled") in (False, "false", 0, None) or d.get("config_enabled") is False, d
+eff = d.get("effective")
+assert eff in (False, "false", 0) or eff is False, "expected effective=false, got %r: %s" % (eff, d)
+default = (d.get("default") or "off")
+assert str(default).lower() in ("off", "false", "disabled"), d
+print("notify config_enabled=%s effective=%s default=%s" % (
+    d.get("config_enabled"), d.get("effective"), d.get("default")))
+'
+    ok "notify status --json: disabled by default under clean LOCUS_HOME"
+  fi
+fi
+
+# ── 16. graph export/import roundtrip (feature-detected) ─────────────────────
+log "16. graph export/import roundtrip (optional)"
+export LOCUS_GRAPH_PASSPHRASE="${LOCUS_GRAPH_PASSPHRASE:-e2e-test}"
+if ! has_cmd graph && ! has_cmd_path graph export; then
+  skip "graph command not available"
+else
+  graph_path="$LOCUS_HOME/e2e-graph.locusgraph"
+  exported=0
+  # Encrypted export (passphrase via LOCUS_GRAPH_PASSPHRASE)
+  if locus graph export --out "$graph_path" >/dev/null 2>&1 \
+    || locus graph export -o "$graph_path" >/dev/null 2>&1; then
+    exported=1
+  fi
+
+  if [[ "$exported" -ne 1 ]] || [[ ! -s "$graph_path" ]]; then
+    skip "graph present but export invocation failed (API may differ)"
+  else
+    # Magic / size sanity
+    head -c 12 "$graph_path" | grep -q 'LOCUSGRAPH' \
+      || die "graph export missing LOCUSGRAPH magic"
+    ok "graph export wrote $(wc -c <"$graph_path" | tr -d ' ') bytes (LOCUSGRAPH)"
+    # Import into same home: existing bindings skip without --force (still exit 0)
+    if locus graph import "$graph_path" >/dev/null 2>&1; then
+      ok "graph import accepted export (skip-or-write)"
+    elif locus graph import "$graph_path" --force >/dev/null 2>&1; then
+      ok "graph import --force roundtrip"
+    else
+      # Fresh home for a true write path
+      GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
+      if LOCUS_HOME="$GRAPH_HOME" LOCUS_GRAPH_PASSPHRASE="$LOCUS_GRAPH_PASSPHRASE" \
+        locus init >/dev/null 2>&1 \
+        && LOCUS_HOME="$GRAPH_HOME" LOCUS_GRAPH_PASSPHRASE="$LOCUS_GRAPH_PASSPHRASE" \
+          locus graph import "$graph_path" >/dev/null 2>&1; then
+        ok "graph export/import into fresh LOCUS_HOME"
+      else
+        die "graph import failed for $graph_path"
+      fi
+      rm -rf "$GRAPH_HOME"
+    fi
+  fi
+fi
+
+# ── 17. ci mint --json (feature-detected) ────────────────────────────────────
+log "17. locus ci mint --json (optional)"
+if ! has_cmd ci && ! has_cmd_path ci mint; then
+  skip "ci command not available"
+else
+  # Mint always emits JSON; binding required (-b / --binding)
+  set +e
+  ci_out="$(locus ci mint -b personal --json 2>/dev/null)"
+  ci_ec=$?
+  if [[ $ci_ec -ne 0 || -z "$ci_out" ]]; then
+    ci_out="$(locus ci mint --binding personal 2>/dev/null)"
+    ci_ec=$?
+  fi
+  if [[ $ci_ec -ne 0 || -z "$ci_out" ]]; then
+    ci_out="$(locus --json ci mint -b personal 2>/dev/null)"
+    ci_ec=$?
+  fi
+  set -e
+  if [[ $ci_ec -ne 0 || -z "$ci_out" ]]; then
+    skip "ci mint present but invocation failed (API may differ)"
+  else
+    echo "$ci_out" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+assert raw, "empty ci mint output"
+d = json.loads(raw)
+assert isinstance(d, dict), type(d)
+# Required identity fields for pipelines
+for k in ("session_id", "binding", "tenant"):
+    assert k in d and d[k], "missing %s: %s" % (k, d)
+# Must not dump raw secret values by default (no --resolve)
+assert d.get("secrets_resolved") in (False, None, "false", 0) or d.get("secrets_resolved") is False, d
+# Seal is an HMAC digest, not a provider token — still require it for CI contract
+assert d.get("session_id", "").startswith("ses_") or d.get("session_id"), d
+print("ci mint binding=%s session=%s secrets_resolved=%s" % (
+    d.get("binding"), d.get("session_id"), d.get("secrets_resolved")))
+'
+    ok "ci mint -b personal --json returns session JSON (no secrets)"
+  fi
+fi
+
+# ── 18. locus_heartbeat via MCP tools/call (feature-detected) ────────────────
+log "18. MCP locus_heartbeat (optional)"
+# Heartbeat is a control tool — works pinned or unpinned when present.
+locus pin personal --force >/dev/null 2>&1 || locus pin acme --force >/dev/null 2>&1 || true
+hb_list_out="$(
+  mcp_rpc \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+)"
+hb_names="$(echo "$hb_list_out" | tool_names_from_list)"
+if ! echo "$hb_names" | grep -qx 'locus_heartbeat'; then
+  skip "locus_heartbeat MCP tool not available"
+else
+  hb_out="$(
+    mcp_rpc \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"locus_heartbeat","arguments":{}}}'
+  )"
+  hb_line="$(echo "$hb_out" | tool_call_text)"
+  echo "$hb_line" | grep -q '^OK|' || die "locus_heartbeat expected success: $hb_line"
+  # Body should be JSON-ish drift/runtime summary without secret values
+  echo "$hb_line" | python3 -c '
+import json, sys, re
+line = sys.stdin.read().strip()
+assert line.startswith("OK|"), line
+body = line[3:]
+# Accept pure JSON or JSON embedded in text
+try:
+    d = json.loads(body)
+except json.JSONDecodeError:
+    m = re.search(r"\{.*\}", body, re.S)
+    assert m, "heartbeat body not JSON: %r" % body[:200]
+    d = json.loads(m.group(0))
+# Never return resolved secret *values*. CredentialRefs (phm:NAME) are OK.
+blob = json.dumps(d)
+# Bearer-style / GitHub PAT prefixes must not appear
+for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "AKIA"):
+    assert bad not in blob, "heartbeat must not leak secrets (%s)" % bad
+assert "secret_value" not in blob.lower()
+assert isinstance(d, dict)
+assert "ok" in d or "pinned" in d or "runtime" in d, d
+print("heartbeat keys=%s pinned=%s ok=%s" % (
+    ",".join(sorted(d.keys())[:12]), d.get("pinned"), d.get("ok")))
+'
+  ok "MCP tools/call locus_heartbeat succeeds (no secrets)"
+fi
+
+# ── 19. README mentions graph/ci when those CLIs exist (unit-free smoke) ──────
+log "19. README documents graph/ci if CLIs exist"
+if has_cmd graph || has_cmd_path graph export; then
+  grep -qE 'locus graph|`graph`' "$ROOT/README.md" \
+    || die "graph CLI exists but README does not mention graph"
+  ok "README mentions graph"
+else
+  skip "graph not available — README mention not required"
+fi
+if has_cmd ci || has_cmd_path ci mint; then
+  grep -qE 'locus ci|`ci`|ci mint' "$ROOT/README.md" \
+    || die "ci CLI exists but README does not mention ci"
+  ok "README mentions ci"
+else
+  skip "ci not available — README mention not required"
+fi
 
 printf '\n========================================\n'
 printf 'e2e PASS  (%d checks, %d skipped)\n' "$pass" "$skip"

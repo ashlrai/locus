@@ -12,6 +12,10 @@ use crate::engagement::{
     EngagementMeta,
 };
 use crate::error::{LocusError, Result};
+use crate::graph::{
+    decrypt_graph, encrypt_graph, source_host, GraphEnvelope, GraphExportResult, GraphImportResult,
+    GraphListEntry, GraphMeta, WorkspaceTemplate,
+};
 use crate::seal::SealKey;
 use crate::session::{binding_fingerprint, parse_ttl, PinSource, Session, SessionMode};
 use crate::workspace::{find_workspace, WorkspaceConfig};
@@ -26,6 +30,7 @@ use std::path::{Path, PathBuf};
 ///   config.toml
 ///   daemon.key          # seal key hex (0600)
 ///   bindings/*.toml
+///   workspaces/*.toml   # workspace templates for graph share
 ///   sessions/active.json
 ///   workers/<session_id>/
 ///   audit/events.jsonl
@@ -47,6 +52,7 @@ impl Store {
     pub fn open(home: impl Into<PathBuf>) -> Result<Self> {
         let home = home.into();
         fs::create_dir_all(home.join("bindings"))?;
+        fs::create_dir_all(home.join("workspaces"))?;
         fs::create_dir_all(home.join("sessions"))?;
         fs::create_dir_all(home.join("workers"))?;
         fs::create_dir_all(home.join("audit"))?;
@@ -65,6 +71,10 @@ impl Store {
 
     pub fn bindings_dir(&self) -> PathBuf {
         self.home.join("bindings")
+    }
+
+    pub fn workspaces_dir(&self) -> PathBuf {
+        self.home.join("workspaces")
     }
 
     pub fn approvals_dir(&self) -> PathBuf {
@@ -194,6 +204,269 @@ impl Store {
         Ok(())
     }
 
+    // ── Workspace templates (graph share surface) ─────────────────────────
+
+    /// Persist a named workspace template under `$LOCUS_HOME/workspaces/`.
+    pub fn save_workspace_template(&self, name: &str, cfg: &WorkspaceConfig) -> Result<PathBuf> {
+        validate_name_component("workspace name", name)?;
+        fs::create_dir_all(self.workspaces_dir())?;
+        let path = self.workspaces_dir().join(format!("{name}.toml"));
+        ensure_under_dir(&self.workspaces_dir(), &path)?;
+        fs::write(&path, cfg.to_toml()?)?;
+        Ok(path)
+    }
+
+    /// Load one workspace template by name.
+    pub fn load_workspace_template(&self, name: &str) -> Result<WorkspaceConfig> {
+        validate_name_component("workspace name", name)?;
+        let path = self.workspaces_dir().join(format!("{name}.toml"));
+        ensure_under_dir(&self.workspaces_dir(), &path)?;
+        if !path.exists() {
+            return Err(LocusError::msg(format!(
+                "workspace template not found: {name}"
+            )));
+        }
+        let raw = fs::read_to_string(&path)?;
+        WorkspaceConfig::parse(&raw)
+    }
+
+    /// List workspace templates as `(name, config)`.
+    pub fn list_workspace_templates(&self) -> Result<Vec<WorkspaceTemplate>> {
+        let mut out = Vec::new();
+        let dir = self.workspaces_dir();
+        if !dir.exists() {
+            return Ok(out);
+        }
+        let mut entries: Vec<_> = fs::read_dir(&dir)?.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for ent in entries {
+            let path = ent.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let raw = fs::read_to_string(&path)?;
+            match WorkspaceConfig::parse(&raw) {
+                Ok(config) => out.push(WorkspaceTemplate { name, config }),
+                Err(_) => continue,
+            }
+        }
+        Ok(out)
+    }
+
+    // ── Binding graph export / import ─────────────────────────────────────
+
+    /// List the shareable local graph surface (bindings + workspace templates).
+    pub fn graph_list(&self) -> Result<Vec<GraphListEntry>> {
+        let mut out = Vec::new();
+        for summary in self.list_bindings()? {
+            let binding = self.load_binding(&summary.alias)?;
+            out.push(GraphListEntry {
+                kind: "binding".into(),
+                name: binding.alias.clone(),
+                tenant: Some(binding.tenant.clone()),
+                description: binding.description.clone(),
+                providers: binding
+                    .providers
+                    .iter()
+                    .map(|p| p.provider.clone())
+                    .collect(),
+                credential_refs: binding
+                    .providers
+                    .iter()
+                    .map(|p| p.credential_ref.clone())
+                    .collect(),
+                default_binding: None,
+                allowed_bindings: Vec::new(),
+            });
+        }
+        for ws in self.list_workspace_templates()? {
+            out.push(GraphListEntry {
+                kind: "workspace".into(),
+                name: ws.name,
+                tenant: None,
+                description: None,
+                providers: Vec::new(),
+                credential_refs: Vec::new(),
+                default_binding: ws.config.default_binding,
+                allowed_bindings: ws.config.allowed_bindings,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Export selected (or all) bindings + workspace templates to an encrypted `.locusgraph` file.
+    ///
+    /// Only CredentialRefs are written — never resolved secret values.
+    pub fn graph_export(
+        &self,
+        aliases: Option<&[String]>,
+        out: &Path,
+        passphrase: &str,
+    ) -> Result<GraphExportResult> {
+        let summaries = self.list_bindings()?;
+        let wanted: Vec<String> = match aliases {
+            None | Some([]) => summaries.iter().map(|s| s.alias.clone()).collect(),
+            Some(list) => list.to_vec(),
+        };
+
+        let mut bindings = Vec::new();
+        for alias in &wanted {
+            let b = self.load_binding(alias)?;
+            bindings.push(b);
+        }
+        if bindings.is_empty() {
+            return Err(LocusError::msg(
+                "no bindings to export — add bindings first or pass --bindings",
+            ));
+        }
+
+        // Include workspace templates that reference any exported alias (or all if exporting everything)
+        let export_all = aliases.map(|a| a.is_empty()).unwrap_or(true) || aliases.is_none();
+        let exported_aliases: std::collections::BTreeSet<_> =
+            bindings.iter().map(|b| b.alias.as_str()).collect();
+        let mut workspaces = Vec::new();
+        for ws in self.list_workspace_templates()? {
+            let include = export_all
+                || ws
+                    .config
+                    .default_binding
+                    .as_deref()
+                    .is_some_and(|d| exported_aliases.contains(d))
+                || ws
+                    .config
+                    .allowed_bindings
+                    .iter()
+                    .any(|a| exported_aliases.contains(a.as_str()))
+                || exported_aliases.contains(ws.name.as_str());
+            if include {
+                workspaces.push(ws);
+            }
+        }
+
+        let meta = GraphMeta {
+            source_host: source_host(),
+            locus_version: Some(crate::VERSION.into()),
+        };
+        let envelope = GraphEnvelope::build(bindings, workspaces, meta)?;
+        let plain = envelope.to_json_bytes()?;
+        let encrypted = encrypt_graph(&plain, passphrase)?;
+
+        if let Some(parent) = out.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(out, &encrypted)?;
+
+        let binding_aliases: Vec<String> =
+            envelope.bindings.iter().map(|b| b.alias.clone()).collect();
+        let workspace_names: Vec<String> =
+            envelope.workspaces.iter().map(|w| w.name.clone()).collect();
+
+        self.audit(
+            "graph.export",
+            binding_aliases.first().map(|s| s.as_str()).unwrap_or("-"),
+            Some(serde_json::json!({
+                "path": out.display().to_string(),
+                "bindings": binding_aliases,
+                "workspaces": workspace_names,
+                "exported_at": envelope.exported_at,
+            })),
+        )?;
+
+        Ok(GraphExportResult {
+            path: out.display().to_string(),
+            binding_aliases,
+            workspace_names,
+            exported_at: envelope.exported_at,
+        })
+    }
+
+    /// Import an encrypted `.locusgraph` file: validate + `save_binding` each entry.
+    ///
+    /// Without `force`, existing bindings / workspace templates are skipped (reported).
+    /// With `force`, they are overwritten.
+    pub fn graph_import(
+        &self,
+        path: &Path,
+        passphrase: &str,
+        force: bool,
+    ) -> Result<GraphImportResult> {
+        let file_bytes = fs::read(path)
+            .map_err(|e| LocusError::msg(format!("read graph file {}: {e}", path.display())))?;
+        let plain = decrypt_graph(&file_bytes, passphrase)?;
+        let envelope = GraphEnvelope::from_json_bytes(&plain)?;
+
+        let mut bindings_imported = Vec::new();
+        let mut bindings_skipped = Vec::new();
+        for body in &envelope.bindings {
+            let binding = Binding::from_body(body.clone());
+            binding.validate()?;
+            let exists = self
+                .bindings_dir()
+                .join(format!("{}.toml", binding.alias))
+                .exists();
+            if exists && !force {
+                bindings_skipped.push(binding.alias.clone());
+                continue;
+            }
+            // save_binding audits binding.save — also track graph.import at end
+            self.save_binding(&binding)?;
+            bindings_imported.push(binding.alias.clone());
+        }
+
+        let mut workspaces_imported = Vec::new();
+        let mut workspaces_skipped = Vec::new();
+        for ws in &envelope.workspaces {
+            validate_name_component("workspace name", &ws.name)?;
+            let exists = self
+                .workspaces_dir()
+                .join(format!("{}.toml", ws.name))
+                .exists();
+            if exists && !force {
+                workspaces_skipped.push(ws.name.clone());
+                continue;
+            }
+            self.save_workspace_template(&ws.name, &ws.config)?;
+            workspaces_imported.push(ws.name.clone());
+        }
+
+        self.audit(
+            "graph.import",
+            bindings_imported
+                .first()
+                .or(bindings_skipped.first())
+                .map(|s| s.as_str())
+                .unwrap_or("-"),
+            Some(serde_json::json!({
+                "path": path.display().to_string(),
+                "bindings_imported": bindings_imported,
+                "bindings_skipped": bindings_skipped,
+                "workspaces_imported": workspaces_imported,
+                "workspaces_skipped": workspaces_skipped,
+                "force": force,
+                "source_exported_at": envelope.exported_at,
+            })),
+        )?;
+
+        Ok(GraphImportResult {
+            bindings_imported,
+            bindings_skipped,
+            workspaces_imported,
+            workspaces_skipped,
+            source_host: envelope.meta.source_host,
+            exported_at: Some(envelope.exported_at),
+        })
+    }
+
     // ── Sessions ──────────────────────────────────────────────────────────
 
     pub fn pin(
@@ -203,7 +476,7 @@ impl Store {
         client: Option<String>,
         force: bool,
     ) -> Result<Session> {
-        self.pin_with_opts(alias_or_id, cwd, client, force, None, true)
+        self.pin_with_opts(alias_or_id, cwd, client, force, None, true, None)
     }
 
     /// Experimental namespaced multi-binding pin.
@@ -240,7 +513,7 @@ impl Store {
         }
         let primary = seen[0].clone();
         let rest = seen[1..].to_vec();
-        self.pin_with_opts(&primary, cwd, client, force, Some(rest), true)
+        self.pin_with_opts(&primary, cwd, client, force, Some(rest), true, None)
     }
 
     /// Create a session for `locus run` — sealed temporary pin that does **not**
@@ -264,6 +537,7 @@ impl Store {
             force,
             None,
             share_pin,
+            None,
         )?;
         // When share_pin is false, pin_with_opts still built the session but did
         // not write active.json — write run session file.
@@ -286,22 +560,70 @@ impl Store {
     }
 
     pub fn run_session_path(&self, suffix: &str) -> PathBuf {
-        // Sanitize suffix to a single path component
-        let safe: String = suffix
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        self.home.join("sessions").join(format!("run-{safe}.json"))
+        self.home
+            .join("sessions")
+            .join(format!("run-{}.json", sanitize_session_suffix(suffix)))
     }
 
     /// Remove a temporary run session file (best-effort worker cleanup).
     pub fn cleanup_run_session(&self, path: &Path, session: &Session) -> Result<()> {
+        self.cleanup_named_session(path, session, "run-")
+    }
+
+    /// Create a CI / ephemeral sealed session under `sessions/ci-<id>.json`.
+    ///
+    /// Does **not** touch `active.json`. Workspace allowlist is enforced unless
+    /// `force`. TTL is capped by the binding's `policy.max_ttl` when set.
+    ///
+    /// Audit op: `ci.mint`.
+    pub fn create_ci_session(
+        &self,
+        alias_or_id: &str,
+        cwd: &Path,
+        force: bool,
+        ttl: Option<Duration>,
+    ) -> Result<(Session, PathBuf)> {
+        let session = self.pin_with_opts_source(
+            alias_or_id,
+            cwd,
+            Some("ci".into()),
+            force,
+            None,
+            false, // never write active.json
+            Some(PinSource::Ci),
+            ttl,
+        )?;
+        // Prefer session_id tail as file suffix so LOCUS_SESSION_ID can find it.
+        let suffix = session
+            .session_id
+            .strip_prefix("ses_")
+            .unwrap_or(&session.session_id);
+        let ci_path = self.ci_session_path(suffix);
+        self.write_session_file(&ci_path, &session)?;
+        self.audit(
+            "ci.mint",
+            &session.binding_alias,
+            Some(serde_json::json!({
+                "session_id": session.session_id,
+                "expires_at": session.expires_at.to_rfc3339(),
+                "path": ci_path.display().to_string(),
+            })),
+        )?;
+        Ok((session, ci_path))
+    }
+
+    pub fn ci_session_path(&self, suffix: &str) -> PathBuf {
+        self.home
+            .join("sessions")
+            .join(format!("ci-{}.json", sanitize_session_suffix(suffix)))
+    }
+
+    /// Remove a temporary CI session file (best-effort worker cleanup).
+    pub fn cleanup_ci_session(&self, path: &Path, session: &Session) -> Result<()> {
+        self.cleanup_named_session(path, session, "ci-")
+    }
+
+    fn cleanup_named_session(&self, path: &Path, session: &Session, prefix: &str) -> Result<()> {
         let wh = PathBuf::from(&session.worker_home);
         if wh.exists() && wh.starts_with(self.home.join("workers")) {
             let _ = fs::remove_dir_all(&wh);
@@ -311,15 +633,66 @@ impl Store {
             && path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("run-"))
+                .is_some_and(|n| n.starts_with(prefix))
         {
             let _ = fs::remove_file(path);
         }
         Ok(())
     }
 
+    /// Load a session by `session_id` from `sessions/*.json` (active, run-*, ci-*).
+    pub fn load_session_by_id(&self, session_id: &str) -> Result<Option<Session>> {
+        if session_id.is_empty()
+            || session_id.contains('/')
+            || session_id.contains('\\')
+            || session_id.contains("..")
+            || session_id.contains('\0')
+        {
+            return Ok(None);
+        }
+        let dir = self.home.join("sessions");
+        if !dir.exists() {
+            return Ok(None);
+        }
+        // Fast path: ci-<id without ses_>
+        if let Some(tail) = session_id.strip_prefix("ses_") {
+            let ci = self.ci_session_path(tail);
+            if ci.exists() {
+                let raw = fs::read_to_string(&ci)?;
+                let s: Session = serde_json::from_str(&raw)?;
+                if s.session_id == session_id {
+                    return Ok(Some(s));
+                }
+            }
+        }
+        // active.json
+        if let Some(s) = self.read_active_session_file()? {
+            if s.session_id == session_id {
+                return Ok(Some(s));
+            }
+        }
+        // Scan remaining session files
+        for ent in fs::read_dir(&dir)?.filter_map(|e| e.ok()) {
+            let path = ent.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = match fs::read_to_string(&path) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            if let Ok(s) = serde_json::from_str::<Session>(&raw) {
+                if s.session_id == session_id {
+                    return Ok(Some(s));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Internal pin builder. When `write_active` is false, builds a sealed
     /// session + worker home but leaves `active.json` untouched.
+    #[allow(clippy::too_many_arguments)]
     fn pin_with_opts(
         &self,
         alias_or_id: &str,
@@ -328,6 +701,7 @@ impl Store {
         force: bool,
         extra_namespaces: Option<Vec<String>>,
         write_active: bool,
+        ttl_override: Option<Duration>,
     ) -> Result<Session> {
         self.pin_with_opts_source(
             alias_or_id,
@@ -337,6 +711,7 @@ impl Store {
             extra_namespaces,
             write_active,
             None,
+            ttl_override,
         )
     }
 
@@ -350,6 +725,7 @@ impl Store {
         extra_namespaces: Option<Vec<String>>,
         write_active: bool,
         source_override: Option<PinSource>,
+        ttl_override: Option<Duration>,
     ) -> Result<Session> {
         let binding = self.load_binding(alias_or_id)?;
         let ws = find_workspace(cwd);
@@ -383,6 +759,8 @@ impl Store {
             src
         } else if client.as_deref() == Some("run") {
             PinSource::Run
+        } else if client.as_deref() == Some("ci") {
+            PinSource::Ci
         } else if let Some((ref path, ref cfg)) = ws {
             if cfg.default_binding.as_deref() == Some(binding.alias.as_str())
                 || cfg.default_binding.as_deref() == Some(binding.id.as_str())
@@ -397,13 +775,19 @@ impl Store {
             PinSource::Explicit
         };
 
-        let ttl = binding
+        let max_ttl = binding
             .policy
             .max_ttl
             .as_deref()
             .map(parse_ttl)
             .transpose()?
             .unwrap_or_else(|| Duration::hours(8));
+        // Requested TTL is capped by binding max_ttl (fail closed on over-long CI pins).
+        let ttl = match ttl_override {
+            Some(req) if req <= max_ttl => req,
+            Some(_) => max_ttl,
+            None => max_ttl,
+        };
 
         let key = self.seal_key()?;
         let worker_home = self
@@ -490,10 +874,12 @@ impl Store {
             None,
             true,
             Some(target.source),
+            None,
         )
     }
 
-    pub fn active_session(&self) -> Result<Option<Session>> {
+    /// Read `sessions/active.json` only (ignores `LOCUS_SESSION_ID`).
+    fn read_active_session_file(&self) -> Result<Option<Session>> {
         let path = self.active_session_path();
         if !path.exists() {
             return Ok(None);
@@ -501,6 +887,26 @@ impl Store {
         let raw = fs::read_to_string(&path)?;
         let session: Session = serde_json::from_str(&raw)?;
         Ok(Some(session))
+    }
+
+    /// Resolve the current pin.
+    ///
+    /// When `LOCUS_SESSION_ID` is set (CI mint / child of `ci run`), that
+    /// session is used **exclusively** — fail closed if missing (no fallthrough
+    /// to `active.json`). Otherwise load `sessions/active.json`.
+    pub fn active_session(&self) -> Result<Option<Session>> {
+        // In tests, serialize with cases that mutate LOCUS_SESSION_ID
+        // (re-entrant for the same thread so holders can call require_active).
+        #[cfg(test)]
+        let _env_guard = tests::SessionEnvLock::acquire();
+
+        if let Ok(id) = std::env::var("LOCUS_SESSION_ID") {
+            let id = id.trim();
+            if !id.is_empty() {
+                return self.load_session_by_id(id);
+            }
+        }
+        self.read_active_session_file()
     }
 
     pub fn require_active(&self) -> Result<Session> {
@@ -528,11 +934,12 @@ impl Store {
     }
 
     pub fn leave(&self) -> Result<Option<Session>> {
+        // Always operates on active.json — not LOCUS_SESSION_ID overrides.
         let path = self.active_session_path();
         if !path.exists() {
             return Ok(None);
         }
-        let session = self.active_session()?;
+        let session = self.read_active_session_file()?;
         if let Some(ref s) = session {
             // Best-effort cleanup of worker home
             let wh = PathBuf::from(&s.worker_home);
@@ -1392,6 +1799,20 @@ impl Store {
     }
 }
 
+/// Sanitize a session file suffix to a single path component.
+fn sanitize_session_suffix(suffix: &str) -> String {
+    suffix
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Ensure `path` resolves under `base` (no path traversal escapes).
 fn ensure_under_dir(base: &Path, path: &Path) -> Result<()> {
     // Lexical check: no parent components after join
@@ -1572,7 +1993,47 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::binding::{BindingBody, Policy, ProviderBinding, Scope};
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::tempdir;
+
+    /// Process-global env (`LOCUS_SESSION_ID`) must not race across parallel tests.
+    static LOCUS_SESSION_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    thread_local! {
+        static HOLDING_SESSION_ENV_LOCK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// Re-entrant (per-thread) guard for LOCUS_SESSION_ID mutations + reads.
+    pub(super) struct SessionEnvLock {
+        _guard: Option<MutexGuard<'static, ()>>,
+    }
+
+    impl SessionEnvLock {
+        pub(super) fn acquire() -> Self {
+            if HOLDING_SESSION_ENV_LOCK.with(|h| h.get()) {
+                return Self { _guard: None };
+            }
+            let guard = LOCUS_SESSION_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            HOLDING_SESSION_ENV_LOCK.with(|h| h.set(true));
+            Self {
+                _guard: Some(guard),
+            }
+        }
+    }
+
+    impl Drop for SessionEnvLock {
+        fn drop(&mut self) {
+            if self._guard.is_some() {
+                HOLDING_SESSION_ENV_LOCK.with(|h| h.set(false));
+            }
+        }
+    }
+
+    pub(super) fn lock_session_env() -> SessionEnvLock {
+        SessionEnvLock::acquire()
+    }
 
     fn sample_binding(alias: &str, tenant: &str, project: &str) -> Binding {
         Binding::from_body(BindingBody {
@@ -2378,6 +2839,148 @@ default_binding = "acme"
     }
 
     #[test]
+    fn create_ci_session_does_not_touch_active() {
+        let _env_guard = lock_session_env();
+        std::env::remove_var("LOCUS_SESSION_ID");
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+
+        let active = store.pin("acme", dir.path(), None, false).unwrap();
+        let active_id = active.session_id.clone();
+
+        let (ci, path) = store
+            .create_ci_session("personal", dir.path(), false, Some(Duration::minutes(15)))
+            .unwrap();
+        assert_eq!(ci.binding_alias, "personal");
+        assert!(matches!(ci.source, PinSource::Ci));
+        assert!(path.exists());
+        assert!(path
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("ci-"));
+        // TTL should be ~15m (binding max is 1h)
+        let span = ci.expires_at - ci.pinned_at;
+        assert!(span <= Duration::minutes(16));
+        assert!(span >= Duration::minutes(14));
+
+        // Global pin unchanged
+        assert_eq!(
+            store.active_session().unwrap().unwrap().session_id,
+            active_id
+        );
+
+        // LOCUS_SESSION_ID resolves the CI session
+        std::env::set_var("LOCUS_SESSION_ID", &ci.session_id);
+        let resolved = store.require_active().unwrap();
+        assert_eq!(resolved.session_id, ci.session_id);
+        assert_eq!(resolved.binding_alias, "personal");
+        std::env::remove_var("LOCUS_SESSION_ID");
+
+        // After clearing env, active is still acme
+        assert_eq!(
+            store.active_session().unwrap().unwrap().binding_alias,
+            "acme"
+        );
+
+        store.cleanup_ci_session(&path, &ci).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn create_ci_session_ttl_capped_by_max_ttl() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        // sample_binding has max_ttl = 1h
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let (ci, path) = store
+            .create_ci_session("acme", dir.path(), false, Some(Duration::hours(48)))
+            .unwrap();
+        let span = ci.expires_at - ci.pinned_at;
+        assert!(span <= Duration::hours(1) + Duration::seconds(5));
+        store.cleanup_ci_session(&path, &ci).unwrap();
+    }
+
+    #[test]
+    fn create_ci_session_respects_workspace_allowlist() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+        let project = dir.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join(".locus.toml"),
+            r#"
+version = 1
+default_binding = "acme"
+allowed_bindings = ["acme"]
+"#,
+        )
+        .unwrap();
+
+        let err = store
+            .create_ci_session("personal", &project, false, Some(Duration::minutes(5)))
+            .unwrap_err();
+        assert!(matches!(err, LocusError::BindingNotAllowed(_)));
+
+        // --force bypasses
+        let (ci, path) = store
+            .create_ci_session("personal", &project, true, Some(Duration::minutes(5)))
+            .unwrap();
+        assert_eq!(ci.binding_alias, "personal");
+        store.cleanup_ci_session(&path, &ci).unwrap();
+    }
+
+    #[test]
+    fn create_ci_session_audits_mint() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let (ci, path) = store
+            .create_ci_session("acme", dir.path(), false, Some(Duration::minutes(10)))
+            .unwrap();
+        let events = store.read_audit_events().unwrap();
+        assert!(events.iter().any(|e| e.op == "ci.mint"));
+        store.cleanup_ci_session(&path, &ci).unwrap();
+    }
+
+    #[test]
+    fn locus_session_id_missing_does_not_fallthrough() {
+        let _env_guard = lock_session_env();
+        std::env::remove_var("LOCUS_SESSION_ID");
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        std::env::set_var("LOCUS_SESSION_ID", "ses_doesnotexist0000");
+        // Fail closed: env points at missing session → NotPinned, not active.json
+        assert!(store.require_active().is_err());
+        std::env::remove_var("LOCUS_SESSION_ID");
+        assert!(store.require_active().is_ok());
+    }
+
+    #[test]
     fn check_drift_and_freeze_on_providers_change() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -2476,5 +3079,154 @@ default_binding = "acme"
         assert!(store
             .pin_namespaced(&["acme".into()], dir.path(), None, false)
             .is_err());
+    }
+
+    #[test]
+    fn graph_export_import_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("src")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "proj_acme"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "proj_me"))
+            .unwrap();
+        store
+            .save_workspace_template(
+                "acme",
+                &WorkspaceConfig {
+                    version: 1,
+                    default_binding: Some("acme".into()),
+                    allowed_bindings: vec!["acme".into()],
+                    require_pin: true,
+                },
+            )
+            .unwrap();
+
+        let out = dir.path().join("team.locusgraph");
+        let exp = store.graph_export(None, &out, "test").expect("export");
+        assert_eq!(exp.binding_aliases.len(), 2);
+        assert!(exp.workspace_names.contains(&"acme".to_string()));
+        assert!(out.exists());
+
+        // Ciphertext must not contain plaintext credential refs or alias secrets
+        let raw = fs::read(&out).unwrap();
+        assert!(raw.starts_with(crate::graph::MAGIC));
+        let as_str = String::from_utf8_lossy(&raw);
+        assert!(
+            !as_str.contains("phm:SUPABASE_ACME"),
+            "encrypted file must not leak cleartext credential_refs"
+        );
+        assert!(!as_str.contains("proj_acme"));
+
+        // Import into a fresh home
+        let dest = Store::open(dir.path().join("dst")).unwrap();
+        let imp = dest.graph_import(&out, "test", false).expect("import");
+        assert_eq!(imp.bindings_imported.len(), 2);
+        assert!(imp.bindings_skipped.is_empty());
+        assert_eq!(imp.workspaces_imported, vec!["acme".to_string()]);
+
+        let acme = dest.load_binding("acme").unwrap();
+        assert_eq!(acme.tenant, "acme-corp");
+        assert_eq!(
+            acme.provider("supabase").unwrap().credential_ref,
+            "phm:SUPABASE_ACME"
+        );
+        assert_eq!(
+            acme.provider("supabase")
+                .unwrap()
+                .scope
+                .project_ref
+                .as_deref(),
+            Some("proj_acme")
+        );
+        let ws = dest.load_workspace_template("acme").unwrap();
+        assert_eq!(ws.default_binding.as_deref(), Some("acme"));
+        assert!(ws.require_pin);
+
+        // Re-import without force skips existing
+        let imp2 = dest.graph_import(&out, "test", false).unwrap();
+        assert!(imp2.bindings_imported.is_empty());
+        assert_eq!(imp2.bindings_skipped.len(), 2);
+
+        // force overwrites
+        let imp3 = dest.graph_import(&out, "test", true).unwrap();
+        assert_eq!(imp3.bindings_imported.len(), 2);
+
+        // Audit events recorded
+        let events = store.read_audit_events().unwrap();
+        assert!(events.iter().any(|e| e.op == "graph.export"));
+        let events_d = dest.read_audit_events().unwrap();
+        assert!(events_d.iter().any(|e| e.op == "graph.import"));
+    }
+
+    #[test]
+    fn graph_export_filter_bindings() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+        let out = dir.path().join("partial.locusgraph");
+        let exp = store
+            .graph_export(Some(&["acme".into()]), &out, "test")
+            .unwrap();
+        assert_eq!(exp.binding_aliases, vec!["acme".to_string()]);
+
+        let dest = Store::open(dir.path().join("dst")).unwrap();
+        let imp = dest.graph_import(&out, "test", false).unwrap();
+        assert_eq!(imp.bindings_imported, vec!["acme".to_string()]);
+        assert!(dest.load_binding("personal").is_err());
+    }
+
+    #[test]
+    fn graph_list_surface() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_workspace_template(
+                "acme",
+                &WorkspaceConfig {
+                    version: 1,
+                    default_binding: Some("acme".into()),
+                    allowed_bindings: vec!["acme".into()],
+                    require_pin: true,
+                },
+            )
+            .unwrap();
+        let list = store.graph_list().unwrap();
+        assert!(list.iter().any(|e| e.kind == "binding" && e.name == "acme"));
+        assert!(list
+            .iter()
+            .any(|e| e.kind == "workspace" && e.name == "acme"));
+        // Never expose secret values — only refs
+        let acme = list
+            .iter()
+            .find(|e| e.name == "acme" && e.kind == "binding");
+        let refs = &acme.unwrap().credential_refs;
+        assert!(refs.iter().all(|r| r.starts_with("phm:")));
+    }
+
+    #[test]
+    fn graph_wrong_passphrase_fails() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let out = dir.path().join("g.locusgraph");
+        store.graph_export(None, &out, "correct").unwrap();
+        let dest = Store::open(dir.path().join("dst")).unwrap();
+        let err = dest.graph_import(&out, "wrong", false).unwrap_err();
+        assert!(
+            err.to_string().contains("decrypt") || err.to_string().contains("passphrase"),
+            "{err}"
+        );
     }
 }

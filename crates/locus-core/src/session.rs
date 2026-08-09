@@ -19,6 +19,8 @@ pub enum PinSource {
     Default,
     /// One-shot `locus run` temporary pin (not necessarily active.json).
     Run,
+    /// CI / ephemeral mint (`sessions/ci-*.json`, not active.json).
+    Ci,
     /// Matched via opt-in `[[autopin.remotes]]` git remote rule.
     Autopin {
         match_pattern: String,

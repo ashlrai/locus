@@ -1,6 +1,6 @@
 {
   "name": "locus-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Locus CLI — identity plane for coding agents. Pin multi-account bindings so agents never act in the wrong tenant.",
   "bin": {
     "locus": "bin/locus.js",

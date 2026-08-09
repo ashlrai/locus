@@ -17,7 +17,7 @@ impl ProviderAdapter for SupabaseAdapter {
             AdapterTool {
                 name: "supabase.scope".into(),
                 description: format!(
-                    "Frozen Supabase scope for tenant `{}` binding `{}`: project_ref={proj}, read_only={ro}. Identity only — no SQL."
+                    "Frozen Supabase scope for tenant `{}` binding `{}`: project_ref={proj}, read_only={ro}. Identity only — no SQL. project_ref is frozen on every tool."
                     , binding.tenant, binding.alias
                 ),
                 input_schema: json!({
@@ -38,18 +38,33 @@ impl ProviderAdapter for SupabaseAdapter {
                 description: format!(
                     "Return the frozen Supabase project_ref for this pin ({proj}). Agents must not invent another ref."
                 ),
-                input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "project_ref": {
+                            "type": "string",
+                            "description": "Ignored if binding freezes project_ref; mismatch is denied."
+                        }
+                    },
+                    "additionalProperties": false
+                }),
                 provider: "supabase".into(),
                 destructive: false,
             },
             AdapterTool {
                 name: "supabase.table.delete".into(),
-                description: "SYNTHETIC destructive stub — always gated by policy. Does not delete anything in phase 1.".into(),
+                description: format!(
+                    "SYNTHETIC destructive stub — always gated by policy. Frozen project_ref={proj}. Does not delete anything in phase 1."
+                ),
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "table": { "type": "string" },
-                        "confirm": { "type": "boolean" }
+                        "confirm": { "type": "boolean" },
+                        "project_ref": {
+                            "type": "string",
+                            "description": "Ignored if binding freezes project_ref; mismatch is denied."
+                        }
                     },
                     "required": ["table"],
                     "additionalProperties": false
@@ -67,8 +82,10 @@ impl ProviderAdapter for SupabaseAdapter {
         provider: &ProviderBinding,
         binding: &Binding,
     ) -> Result<ToolCallResult> {
+        // INV: project_ref freeze on ALL tools (including destructive stubs).
         let frozen = provider.scope.project_ref.as_deref();
         let project_ref = freeze_string_arg(args, "project_ref", frozen)?;
+        let resolved_ref = project_ref.or_else(|| provider.scope.project_ref.clone());
 
         match tool {
             "supabase.scope" | "supabase.project_ref" => Ok(ToolCallResult {
@@ -76,11 +93,12 @@ impl ProviderAdapter for SupabaseAdapter {
                 content: json!({
                     "provider": "supabase",
                     "account": provider.account,
-                    "project_ref": project_ref.or_else(|| provider.scope.project_ref.clone()),
+                    "project_ref": resolved_ref,
                     "read_only": provider.scope.read_only,
                     "credential_ref": provider.credential_ref,
                     "tenant": binding.tenant,
                     "binding": binding.alias,
+                    "frozen_selectors": ["project_ref", "read_only"],
                     "note": "Phase 1 identity tool — remote Supabase MCP fan-out lands next."
                 }),
                 policy: None,
@@ -91,7 +109,7 @@ impl ProviderAdapter for SupabaseAdapter {
                     "stub": true,
                     "action": "delete",
                     "table": args.get("table"),
-                    "project_ref": provider.scope.project_ref,
+                    "project_ref": resolved_ref,
                     "message": "Synthetic tool — no rows deleted. Real mutations require phase-2 workers + approval UX."
                 }),
                 policy: None,

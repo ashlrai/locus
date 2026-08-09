@@ -7,13 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-08-09
+
+Firm UX polish on top of the initial public release. Notifications stay quiet by
+default; doctor is a single mission-control pane; run/ns cover one-shot and
+experimental multi-bind workflows; local encrypted graph share + CI mint land.
+
 ### Added
 
-- **`locus doctor` single pane** — home/seal/bindings, active pin (alias/tenant/expires/seal), runtime drift, pending approvals + dual-control waiting, phantom + unresolved phm refs, autopin/`config.toml`, workspace allowlist, last 5 audit ops; verdict **SAFE|WARN|UNSAFE** (exit 0/1/2); stable mission-control JSON schema (tested)
+#### Firm UX
+
+- **`locus enter` / `leave`** — firm workflow pin + clear identity
+- **`locus engagement init|close`** — client engagement lifecycle (metadata; never deletes vault secrets)
+- **Autopin** — default binding from workspace / config when pin has no alias
+- **`locus run -b <alias> -- <cmd>`** — one-shot child session; global pin unchanged (`--share-pin` opt-in)
+- **`locus pin --ns a,b`** — experimental namespaced multi-binding; MCP tools appear as `alias__tool`
+- **`locus watch`** — drift freeze when the pinned binding changes under a live session
+- Structured policy rules + improved `approve wait` / grant UX
+
+#### Doctor single pane
+
+- **`locus doctor`** — home/seal/bindings, active pin (alias/tenant/expires/seal), runtime drift, pending approvals + dual-control waiting, phantom + unresolved phm refs, autopin/`config.toml`, workspace allowlist, last 5 audit ops
+- Verdict **SAFE | WARN | UNSAFE** (exit **0 / 1 / 2**); stable mission-control JSON schema
 - **`locus events --last N [--op] [--binding] [--json]`** — audit JSONL tail with filters
-- **Agency starter kit** — [`examples/agency-starter/`](./examples/agency-starter/) (personal, client-a, client-a-ro, client-b, workspaces, dual-control policy) + [`docs/agency-starter.md`](./docs/agency-starter.md)
+- MCP **`locus_heartbeat`** — agent-safe drift/runtime summary (never secrets)
+
+#### Graph & CI
+
+- **`locus graph list|export|import`** — encrypted local binding-graph share (bindings + workspace templates, CredentialRefs only; `LOCUS_GRAPH_PASSPHRASE`)
+- **`locus ci mint|env|run`** — short-lived sealed sessions under `sessions/ci-*.json` without mutating `active.json`; children set `LOCUS_SESSION_ID`
+
+#### Agency kit & docs
+
+- Agency starter kit — [`examples/agency-starter/`](./examples/agency-starter/) + [`docs/agency-starter.md`](./docs/agency-starter.md)
 - [docs/agency-certainty.md](./docs/agency-certainty.md) — identity vs epistemic certainty (Ashlr stack)
-- e2e: dual-control two-principal grant, doctor exit codes, optional enter/run feature detection
+- Firm-mode docs refreshed for enter/run/notify/doctor daily path
+
+#### Packaging
+
+- Release workflow still publishes `locus-<triple>.tar.gz` for aarch64/x86_64 Darwin + x86_64 Linux
+- Homebrew formula mirror + npm wrappers (`locus-cli`, `locus-mcp`) version-aligned at **0.1.1**
+
+### Changed
+
+- **Desktop approval notifications are OFF by default** — no spam, no sound; opt in with `locus notify on` or `LOCUS_NOTIFY=1`; kill switch `locus notify off` / `LOCUS_QUIET=1` / `CI=true`; silent + rate-limited when enabled
+- CLI help regrouped: Setup · Daily use · CI · Approvals · Audit · Maintenance
+
+### Tests
+
+- Shell e2e (`scripts/e2e.sh`): pin/isolation/MCP freeze/approval, dual-control two-principal grant, doctor exit codes, events, enter/run, notify off-by-default, graph export/import, `ci mint`, `locus_heartbeat` — all **feature-detected** where optional — **34 checks** (0 skipped) on full 0.1.1 command set
+- Core unit coverage for doctor verdicts, namespaced tool prefixing, notify defaults, CI session isolation
+
+### Security
+
+- Same fail-closed invariants as 0.1.0 (seal, exclusive catalog, scrub ambient identity, scope freeze)
+- Notify path is best-effort UX only — never surfaces errors on the agent/tool path
+- Graph export never includes secret values (refs + templates only); encrypted at rest with passphrase
+- Namespaced multi-bind remains explicit opt-in (`--ns`); exclusive pin stays the default isolation model
+- CI mint does not rewrite the human shell pin (`active.json`)
 
 ## [0.1.0] — 2026-08-06
 
@@ -108,8 +159,9 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 ### Known limitations
 
 - Most adapters remain identity/scope stubs; live upstream fan-out depends on per-binding `upstream` config
-- Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md))
-- Homebrew `sha256` for source tarball is a placeholder until the first tag is published (see [docs/RELEASE.md](./docs/RELEASE.md))
+- Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
+- Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
 
-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ashlrai/locus/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/ashlrai/locus/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ashlrai/locus/releases/tag/v0.1.0

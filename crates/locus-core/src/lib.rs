@@ -17,6 +17,7 @@ pub mod credential;
 pub mod doctor;
 pub mod engagement;
 pub mod error;
+pub mod graph;
 pub mod isolation;
 pub mod policy;
 pub mod seal;
@@ -54,9 +55,14 @@ pub use engagement::{
     EngagementMeta,
 };
 pub use error::{LocusError, Result};
+pub use graph::{
+    decrypt_graph, default_export_filename, encrypt_graph, resolve_passphrase, source_host,
+    GraphEnvelope, GraphExportResult, GraphImportResult, GraphListEntry, GraphMeta,
+    WorkspaceTemplate, ENV_PASSPHRASE as GRAPH_PASSPHRASE_ENV, GRAPH_VERSION, MAGIC as GRAPH_MAGIC,
+};
 pub use isolation::{
-    build_isolated_env, build_isolated_env_opts, build_isolated_env_strict,
-    visible_credential_refs, IsolatedEnv,
+    build_ci_env_map, build_isolated_env, build_isolated_env_opts, build_isolated_env_strict,
+    ci_secrets_allowed, visible_credential_refs, IsolatedEnv,
 };
 pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
 pub use seal::SealKey;

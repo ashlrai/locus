@@ -11,7 +11,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use locus_core::{
-    build_doctor_report, build_isolated_env_opts, filter_audit_events, parse_ttl, Binding,
+    build_ci_env_map, build_doctor_report, build_isolated_env_opts, ci_secrets_allowed,
+    default_export_filename, filter_audit_events, parse_ttl, resolve_passphrase, Binding,
     BindingBody, DoctorExternal, DoctorVerdict, Policy, ProviderBinding, Scope, Store,
     WorkspaceConfig, VERSION,
 };
@@ -30,8 +31,9 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · setup · doctor · watch · workspace · hook · mcp · engagement\n  \
+  Setup         init · setup · doctor · watch · workspace · hook · mcp · engagement · graph\n  \
   Daily use     enter · pin · leave · whoami · status · exec · run · binding\n  \
+  CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
   Audit         events\n  \
   Maintenance   version"
@@ -158,6 +160,10 @@ enum Commands {
     #[command(next_help_heading = "Setup", subcommand)]
     Engagement(EngagementCmd),
 
+    /// Encrypted binding-graph share (bindings + workspace templates, no secrets)
+    #[command(next_help_heading = "Setup", subcommand)]
+    Graph(GraphCmd),
+
     /// Show who you are acting as (active pin)
     #[command(next_help_heading = "Daily use")]
     Whoami,
@@ -211,6 +217,15 @@ enum Commands {
     #[command(next_help_heading = "Daily use", subcommand)]
     Binding(BindingCmd),
 
+    /// CI / ephemeral pin minting (short-lived sealed sessions)
+    ///
+    /// Mints sealed sessions under `sessions/ci-*.json` without touching
+    /// `active.json`. Children should set `LOCUS_SESSION_ID` (exported by
+    /// `ci mint` / `ci env` / `ci run`) so `require_active` and locus-mcp
+    /// resolve the ephemeral pin.
+    #[command(next_help_heading = "CI", subcommand)]
+    Ci(CiCmd),
+
     // ────────────────────────── Approvals ────────────────────────────
     /// Manage require_approval / dual-control grants for blocked tool calls
     #[command(next_help_heading = "Approvals", subcommand)]
@@ -239,6 +254,91 @@ enum Commands {
     /// Print version (also available as `locus --version`)
     #[command(next_help_heading = "Maintenance")]
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum CiCmd {
+    /// Mint a short-lived sealed CI session (JSON by default)
+    ///
+    /// Writes `sessions/ci-<id>.json`. Does not update active.json.
+    /// Env map includes LOCUS_* + frozen scopes — never secrets unless
+    /// `--resolve` **and** `LOCUS_CI_ALLOW_SECRETS=1`.
+    Mint {
+        /// Binding alias to mint against
+        #[arg(short = 'b', long = "binding")]
+        binding: String,
+        /// Session TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        #[arg(long, default_value = "15m")]
+        ttl: String,
+        /// Allow bindings outside workspace allowlist
+        #[arg(long)]
+        force: bool,
+        /// Include resolved secrets in env map (requires LOCUS_CI_ALLOW_SECRETS=1)
+        #[arg(long)]
+        resolve: bool,
+    },
+    /// Print `export FOO=bar` lines for a freshly minted CI session
+    Env {
+        /// Binding alias
+        #[arg(short = 'b', long = "binding")]
+        binding: String,
+        /// Session TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        #[arg(long, default_value = "15m")]
+        ttl: String,
+        /// Allow bindings outside workspace allowlist
+        #[arg(long)]
+        force: bool,
+        /// Include resolved secrets (requires LOCUS_CI_ALLOW_SECRETS=1)
+        #[arg(long)]
+        resolve: bool,
+    },
+    /// Mint a temporary CI session, run a command under it, then clean up
+    Run {
+        /// Binding alias
+        #[arg(short = 'b', long = "binding")]
+        binding: String,
+        /// Session TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        #[arg(long, default_value = "15m")]
+        ttl: String,
+        /// Allow bindings outside workspace allowlist
+        #[arg(long)]
+        force: bool,
+        /// Do not resolve phm:/env: credential refs into secret env vars
+        #[arg(long)]
+        no_resolve: bool,
+        /// Fail if any credential_ref cannot be resolved
+        #[arg(long)]
+        strict_creds: bool,
+        /// Command and args (after `--`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
+        cmd: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GraphCmd {
+    /// Export bindings (+ workspace templates) to an encrypted `.locusgraph` file
+    ///
+    /// Passphrase: `LOCUS_GRAPH_PASSPHRASE` or interactive prompt (TTY only).
+    /// Never includes secret values — CredentialRefs only.
+    Export {
+        /// Binding aliases to export (comma-separated). Default: all bindings.
+        #[arg(long, value_delimiter = ',')]
+        bindings: Option<Vec<String>>,
+        /// Output path (default: `locus-graph-<timestamp>.locusgraph` in cwd)
+        #[arg(long, short = 'o')]
+        out: Option<PathBuf>,
+    },
+    /// Import an encrypted `.locusgraph` file into the local store
+    Import {
+        /// Path to `.locusgraph` file
+        path: PathBuf,
+        /// Overwrite existing bindings / workspace templates
+        #[arg(long)]
+        force: bool,
+    },
+    /// List local shareable graph surface (bindings + workspace templates)
+    List,
 }
 
 #[derive(Subcommand, Debug)]
@@ -383,6 +483,7 @@ fn run() -> Result<()> {
         } => cmd_pin(alias, force, client, ns, cli.json),
         Commands::Leave => cmd_leave(cli.json),
         Commands::Engagement(sub) => cmd_engagement(sub, cli.json),
+        Commands::Graph(sub) => cmd_graph(sub, cli.json),
         Commands::Whoami => cmd_whoami(cli.json),
         Commands::Status { oneline } => cmd_status(oneline, cli.json),
         Commands::Exec {
@@ -398,6 +499,7 @@ fn run() -> Result<()> {
             force,
             cmd,
         } => cmd_run(binding, share_pin, cmd, !no_resolve, strict_creds, force),
+        Commands::Ci(sub) => cmd_ci(sub, cli.json),
         Commands::Mcp => cmd_mcp(),
         Commands::Binding(sub) => cmd_binding(sub, cli.json),
         Commands::Workspace {
@@ -768,6 +870,141 @@ fn cmd_leave(json: bool) -> Result<()> {
     Ok(())
 }
 
+fn cmd_graph(sub: GraphCmd, json: bool) -> Result<()> {
+    let s = store()?;
+    match sub {
+        GraphCmd::List => {
+            let entries = s.graph_list()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else if entries.is_empty() {
+                println!("{} graph empty — add bindings first", "->".dimmed());
+                println!("   {}", "locus binding add …".cyan());
+            } else {
+                println!(
+                    "{} local graph surface (CredentialRefs only, no secrets)",
+                    "graph".cyan().bold()
+                );
+                for e in &entries {
+                    match e.kind.as_str() {
+                        "binding" => {
+                            let prov = e.providers.join(", ");
+                            let refs = e.credential_refs.join(", ");
+                            println!(
+                                "  {} {}  tenant={}  providers=[{}]  refs=[{}]",
+                                "binding".green(),
+                                e.name.bold(),
+                                e.tenant.as_deref().unwrap_or("-"),
+                                prov,
+                                refs.dimmed()
+                            );
+                        }
+                        "workspace" => {
+                            let allow = e.allowed_bindings.join(", ");
+                            println!(
+                                "  {} {}  default={}  allow=[{}]",
+                                "workspace".yellow(),
+                                e.name.bold(),
+                                e.default_binding.as_deref().unwrap_or("-"),
+                                allow
+                            );
+                        }
+                        other => {
+                            println!("  {other} {}", e.name);
+                        }
+                    }
+                }
+                println!();
+                println!(
+                    "   export: {}  import: {}",
+                    "locus graph export --out team.locusgraph".cyan(),
+                    "locus graph import team.locusgraph".cyan()
+                );
+            }
+            Ok(())
+        }
+        GraphCmd::Export { bindings, out } => {
+            let passphrase = resolve_passphrase().context("graph passphrase")?;
+            let out_path = out.unwrap_or_else(|| PathBuf::from(default_export_filename()));
+            let aliases = bindings.as_deref();
+            let result = s
+                .graph_export(aliases, &out_path, passphrase.as_str())
+                .context("graph export")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!(
+                    "{} exported {} binding(s), {} workspace(s)",
+                    "ok".green().bold(),
+                    result.binding_aliases.len(),
+                    result.workspace_names.len()
+                );
+                println!("   {}", result.path.cyan());
+                println!(
+                    "   bindings: {}",
+                    result.binding_aliases.join(", ").dimmed()
+                );
+                if !result.workspace_names.is_empty() {
+                    println!(
+                        "   workspaces: {}",
+                        result.workspace_names.join(", ").dimmed()
+                    );
+                }
+                println!(
+                    "   {}",
+                    "secrets not included — importers must wire Phantom / env refs".dimmed()
+                );
+            }
+            Ok(())
+        }
+        GraphCmd::Import { path, force } => {
+            let passphrase = resolve_passphrase().context("graph passphrase")?;
+            let result = s
+                .graph_import(&path, passphrase.as_str(), force)
+                .context("graph import")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                println!(
+                    "{} imported {} binding(s), {} workspace(s)",
+                    "ok".green().bold(),
+                    result.bindings_imported.len(),
+                    result.workspaces_imported.len()
+                );
+                if !result.bindings_imported.is_empty() {
+                    println!(
+                        "   bindings: {}",
+                        result.bindings_imported.join(", ").cyan()
+                    );
+                }
+                if !result.bindings_skipped.is_empty() {
+                    println!(
+                        "   skipped (exists, use --force): {}",
+                        result.bindings_skipped.join(", ").yellow()
+                    );
+                }
+                if !result.workspaces_imported.is_empty() {
+                    println!(
+                        "   workspaces: {}",
+                        result.workspaces_imported.join(", ").cyan()
+                    );
+                }
+                if !result.workspaces_skipped.is_empty() {
+                    println!(
+                        "   workspaces skipped: {}",
+                        result.workspaces_skipped.join(", ").yellow()
+                    );
+                }
+                println!(
+                    "   {}",
+                    "wire Phantom secrets for each credential_ref before pin".dimmed()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
 fn cmd_engagement(sub: EngagementCmd, json: bool) -> Result<()> {
     let s = store()?;
     match sub {
@@ -1077,6 +1314,207 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
             "secrets_failed": iso.secrets_failed,
         })),
     )?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+fn cmd_ci(sub: CiCmd, json: bool) -> Result<()> {
+    match sub {
+        CiCmd::Mint {
+            binding,
+            ttl,
+            force,
+            resolve,
+        } => cmd_ci_mint(binding, ttl, force, resolve, json),
+        CiCmd::Env {
+            binding,
+            ttl,
+            force,
+            resolve,
+        } => cmd_ci_env(binding, ttl, force, resolve),
+        CiCmd::Run {
+            binding,
+            ttl,
+            force,
+            no_resolve,
+            strict_creds,
+            cmd,
+        } => cmd_ci_run(binding, ttl, force, !no_resolve, strict_creds, cmd),
+    }
+}
+
+/// Mint a CI session and print identity JSON (primary contract for pipelines).
+fn cmd_ci_mint(
+    binding_alias: String,
+    ttl: String,
+    force: bool,
+    resolve: bool,
+    _json: bool,
+) -> Result<()> {
+    let s = store()?;
+    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
+    let (session, path) = s
+        .create_ci_session(&binding_alias, &cwd(), force, Some(ttl_dur))
+        .with_context(|| format!("mint CI session for `{binding_alias}`"))?;
+    let binding = s.load_binding(&session.binding_alias)?;
+
+    if resolve && !ci_secrets_allowed() {
+        eprintln!(
+            "{} --resolve ignored: set LOCUS_CI_ALLOW_SECRETS=1 to include secrets",
+            "warn".yellow()
+        );
+    }
+    let env_map = build_ci_env_map(&session, &binding, resolve);
+    let secrets_in_output = resolve && ci_secrets_allowed();
+
+    // Always emit JSON for mint (machine-first); `--json` is accepted for consistency.
+    println!(
+        "{}",
+        json!({
+            "session_id": session.session_id,
+            "binding": session.binding_alias,
+            "binding_id": session.binding_id,
+            "tenant": session.tenant,
+            "expires_at": session.expires_at.to_rfc3339(),
+            "seal": session.seal,
+            "path": path.display().to_string(),
+            "worker_home": session.worker_home,
+            "secrets_resolved": secrets_in_output,
+            "env": env_map,
+        })
+    );
+    Ok(())
+}
+
+/// Mint a CI session and print shell `export` lines (eval-friendly).
+fn cmd_ci_env(binding_alias: String, ttl: String, force: bool, resolve: bool) -> Result<()> {
+    let s = store()?;
+    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
+    let (session, _path) = s
+        .create_ci_session(&binding_alias, &cwd(), force, Some(ttl_dur))
+        .with_context(|| format!("mint CI session for `{binding_alias}`"))?;
+    let binding = s.load_binding(&session.binding_alias)?;
+
+    if resolve && !ci_secrets_allowed() {
+        eprintln!(
+            "{} --resolve ignored: set LOCUS_CI_ALLOW_SECRETS=1 to include secrets",
+            "warn".yellow()
+        );
+    }
+    let env_map = build_ci_env_map(&session, &binding, resolve);
+    for (k, v) in &env_map {
+        // Shell-safe single-quoted export; escape embedded single quotes.
+        let escaped = v.replace('\'', "'\\''");
+        println!("export {k}='{escaped}'");
+    }
+    Ok(())
+}
+
+/// Mint temp CI session + exec command with isolated env, then leave session file.
+fn cmd_ci_run(
+    binding_alias: String,
+    ttl: String,
+    force: bool,
+    resolve_secrets: bool,
+    strict_creds: bool,
+    cmd: Vec<String>,
+) -> Result<()> {
+    if cmd.is_empty() {
+        bail!("usage: locus ci run -b <alias> -- <command> [args...]");
+    }
+    let mut args = cmd;
+    if args.first().map(|s| s.as_str()) == Some("--") {
+        args.remove(0);
+    }
+    if args.is_empty() {
+        bail!("usage: locus ci run -b <alias> -- <command> [args...]");
+    }
+
+    let s = store()?;
+    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
+    // Snapshot parent pin (active.json / LOCUS_SESSION_ID) before mint.
+    let parent_before = s.active_session()?;
+
+    let (session, ci_path) = s
+        .create_ci_session(&binding_alias, &cwd(), force, Some(ttl_dur))
+        .with_context(|| format!("mint CI session for `{binding_alias}`"))?;
+
+    // Parent pin must remain intact (create_ci_session never writes active.json
+    // and does not set LOCUS_SESSION_ID in this process).
+    let parent_after = s.active_session()?;
+    match (&parent_before, &parent_after) {
+        (None, None) => {}
+        (Some(a), Some(b)) if a.session_id == b.session_id => {}
+        _ => {
+            let _ = s.cleanup_ci_session(&ci_path, &session);
+            bail!("internal: ci session mutated global pin unexpectedly");
+        }
+    }
+
+    let binding = s.load_binding(&session.binding_alias)?;
+    if strict_creds {
+        std::env::set_var("LOCUS_SOFT_CREDS", "0");
+    } else {
+        std::env::set_var("LOCUS_SOFT_CREDS", "1");
+    }
+    // Child gets full isolated env (may resolve secrets for the command to work).
+    let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
+    if strict_creds && !iso.secrets_failed.is_empty() {
+        let _ = s.cleanup_ci_session(&ci_path, &session);
+        bail!(
+            "credential resolve failed: {}",
+            iso.secrets_failed.join("; ")
+        );
+    }
+
+    let program = &args[0];
+    let rest = &args[1..];
+
+    let mut child = Command::new(program);
+    child
+        .args(rest)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .env_clear();
+    for (k, v) in &iso.vars {
+        child.env(k, v);
+    }
+
+    eprintln!(
+        "{} ci run as {} ({}) — ttl_until={} · scrubbed {} · resolved {} secret(s)",
+        "->".dimmed(),
+        session.binding_alias.cyan(),
+        session.tenant.dimmed(),
+        session.expires_at.to_rfc3339().dimmed(),
+        iso.scrubbed.len(),
+        iso.secrets_resolved
+    );
+    if !iso.secrets_failed.is_empty() {
+        eprintln!(
+            "{} unresolved credential_refs: {}",
+            "warn".yellow(),
+            iso.secrets_failed.join(", ")
+        );
+    }
+
+    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    s.audit(
+        "ci.run",
+        &session.binding_alias,
+        Some(serde_json::json!({
+            "cmd": args,
+            "exit": status.code(),
+            "session_id": session.session_id,
+            "secrets_resolved": iso.secrets_resolved,
+            "secrets_failed": iso.secrets_failed,
+        })),
+    )?;
+
+    let _ = s.cleanup_ci_session(&ci_path, &session);
+
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }

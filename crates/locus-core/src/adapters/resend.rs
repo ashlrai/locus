@@ -5,28 +5,30 @@ use serde_json::{json, Value};
 
 pub struct ResendAdapter;
 
+fn domain_allowlist(provider: &ProviderBinding) -> Vec<String> {
+    if !provider.scope.projects.is_empty() {
+        return provider.scope.projects.clone();
+    }
+    provider
+        .scope
+        .extra
+        .get("domains")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl ProviderAdapter for ResendAdapter {
     fn name(&self) -> &'static str {
         "resend"
     }
 
     fn tools(&self, provider: &ProviderBinding, binding: &Binding) -> Vec<AdapterTool> {
-        // Domain allowlist lives in scope.extra or projects as a convenience list.
-        let domains = if provider.scope.projects.is_empty() {
-            provider
-                .scope
-                .extra
-                .get("domains")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
-        } else {
-            provider.scope.projects.clone()
-        };
+        let domains = domain_allowlist(provider);
         let domain_hint = if domains.is_empty() {
             "<any>".into()
         } else {
@@ -36,7 +38,7 @@ impl ProviderAdapter for ResendAdapter {
             AdapterTool {
                 name: "resend.scope".into(),
                 description: format!(
-                    "Frozen Resend scope for tenant `{}`: account={}, domains=[{domain_hint}].",
+                    "Frozen Resend scope for tenant `{}`: account={}, domains=[{domain_hint}]. Domain selector is allowlist-frozen.",
                     binding.tenant, provider.account
                 ),
                 input_schema: json!({
@@ -54,7 +56,10 @@ impl ProviderAdapter for ResendAdapter {
             },
             AdapterTool {
                 name: "resend.whoami".into(),
-                description: "Show which Resend identity this pin uses (account + domain allowlist). Does not call the Resend API.".into(),
+                description: format!(
+                    "Show which Resend identity this pin uses: account={}, domains=[{domain_hint}]. Does not call the Resend API.",
+                    provider.account
+                ),
                 input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
                 provider: "resend".into(),
                 destructive: false,
@@ -69,26 +74,12 @@ impl ProviderAdapter for ResendAdapter {
         provider: &ProviderBinding,
         binding: &Binding,
     ) -> Result<ToolCallResult> {
-        let allowlist: Vec<String> = if !provider.scope.projects.is_empty() {
-            provider.scope.projects.clone()
-        } else {
-            provider
-                .scope
-                .extra
-                .get("domains")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
+        let allowlist = domain_allowlist(provider);
 
         // Freeze: if allowlist is non-empty and model passes domain, it must match.
         let domain = freeze_string_arg(args, "domain", None)?;
         if let Some(ref d) = domain {
-            if !allowlist.is_empty() && !allowlist.iter().any(|a| a == d) {
+            if !allowlist.is_empty() && !allowlist.iter().any(|a| a == d || a == "*") {
                 return Err(crate::error::LocusError::msg(format!(
                     "scope freeze: refusing domain={d:?}; binding allows {:?}",
                     allowlist
@@ -107,6 +98,16 @@ impl ProviderAdapter for ResendAdapter {
                     "credential_ref": provider.credential_ref,
                     "tenant": binding.tenant,
                     "binding": binding.alias,
+                    "frozen_selectors": ["domains"],
+                    "identity": format!(
+                        "resend:{}:domains={}",
+                        provider.account,
+                        if allowlist.is_empty() {
+                            "*".into()
+                        } else {
+                            allowlist.join(",")
+                        }
+                    ),
                     "note": "Phase 2 identity tool — real Resend API fan-out injects RESEND_API_KEY into isolated workers only."
                 }),
                 policy: None,

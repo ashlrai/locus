@@ -203,16 +203,15 @@ fn store() -> Result<Store> {
 type ActiveBindings = (Session, Vec<(String, Binding)>);
 
 /// Load active pin + all bindings (exclusive: one; namespaced: many).
-/// Fails closed on invalid seal / expiry. Frozen is reported but still returned
-/// so callers can emit `session_frozen` tool errors (list may still work for
-/// control tools).
+/// Fails closed on invalid seal / expiry. Frozen sessions still return `Some`
+/// so callers can emit `session_frozen` tool errors.
 fn active_session_bindings() -> Result<Option<ActiveBindings>> {
     let s = store()?;
     match s.active_session()? {
         None => Ok(None),
         Some(session) => {
             let key = s.seal_key()?;
-            // Seal + expiry only here; freeze checked at tools/call.
+            // Seal + expiry only here; freeze checked at tools/call / list gate.
             session.verify_seal(&key)?;
             let mut bindings = Vec::new();
             for alias in session.all_aliases() {
@@ -228,13 +227,47 @@ fn primary_binding(bindings: &[(String, Binding)]) -> Option<&Binding> {
     bindings.first().map(|(_, b)| b)
 }
 
-/// Unpinned ⇒ only locus_* control tools. Pinned ⇒ control + provider tools
-/// (synthetic adapters + namespaced upstream MCP tools when declared).
+/// Map tools to MCP list payload.
+fn tools_list_payload(tools: Vec<AdapterTool>) -> Value {
+    let list: Vec<Value> = tools
+        .into_iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "inputSchema": t.input_schema,
+            })
+        })
+        .collect();
+    json!({ "tools": list })
+}
+
+/// Unpinned / frozen / invalid seal ⇒ only locus_* control tools.
+/// Healthy pin ⇒ control + provider tools (synthetic + upstream MCP when declared).
 /// Namespaced multi-bind prefixes tools as `alias__tool`.
 fn handle_tools_list() -> std::result::Result<Value, Value> {
+    let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
+    // Heartbeat on every tools/list: freeze session if binding material drifted.
+    let drift = s
+        .check_drift_and_freeze()
+        .map_err(|e| rpc_error(-32000, e.to_string()))?;
+
+    // Control tools always. `locus_providers` when a pin exists (even frozen).
+    let mut tools: Vec<AdapterTool> = control_tools(drift.pinned);
+
+    // Privileged provider catalog only when runtime is healthy (pinned, seal ok,
+    // unfrozen, unexpired, binding matches). Fail closed otherwise.
+    if !drift.ok {
+        debug_assert!(tools.iter().all(|t| t.name.starts_with("locus_")));
+        return Ok(tools_list_payload(tools));
+    }
+
     let pinned = active_session_bindings().map_err(|e| rpc_error(-32000, e.to_string()))?;
-    let mut tools: Vec<AdapterTool> = control_tools(pinned.is_some());
     if let Some((ref session, ref bindings)) = pinned {
+        // Belt + suspenders: frozen session never lists provider tools.
+        if session.is_frozen() {
+            return Ok(tools_list_payload(tools));
+        }
         let mut mgr = worker_manager()
             .lock()
             .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
@@ -259,21 +292,7 @@ fn handle_tools_list() -> std::result::Result<Value, Value> {
             }
         }
     }
-    // INV: unpinned must not expose provider tools
-    if pinned.is_none() {
-        debug_assert!(tools.iter().all(|t| t.name.starts_with("locus_")));
-    }
-    let list: Vec<Value> = tools
-        .into_iter()
-        .map(|t| {
-            json!({
-                "name": t.name,
-                "description": t.description,
-                "inputSchema": t.input_schema,
-            })
-        })
-        .collect();
-    Ok(json!({ "tools": list }))
+    Ok(tools_list_payload(tools))
 }
 
 fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
@@ -283,24 +302,66 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
         .ok_or_else(|| rpc_error(-32602, "missing tool name".into()))?;
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
-    // Control tools (allowed even when frozen — whoami/status report freeze)
+    // Control tools (allowed even when frozen — whoami/status/heartbeat report freeze)
     if name.starts_with("locus_") {
         return call_control(name, &args);
     }
 
-    // Provider tools require pin
+    // Provider tools require a healthy pin
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
 
     // Continuous drift check — freezes session if binding file mutated.
     let drift = s
         .check_drift_and_freeze()
         .map_err(|e| rpc_error(-32000, e.to_string()))?;
-    if drift.frozen {
+
+    // Fail closed on any unhealthy runtime (invalid seal, freeze, expiry, drift).
+    if !drift.ok {
+        if !drift.pinned {
+            return Ok(tool_text(
+                json!({
+                    "error": "not_pinned",
+                    "issues": drift.issues,
+                    "hint": "Human must run: locus enter <alias> (or `locus pin <alias>`). Agents: locus_enter_hint / locus_request_pin."
+                }),
+                true,
+            ));
+        }
+        if !drift.seal_ok {
+            return Ok(tool_text(
+                json!({
+                    "error": "invalid_seal",
+                    "issues": drift.issues,
+                    "hint": "Session seal is invalid. Human must re-pin: `locus leave` then `locus pin <alias>`.",
+                }),
+                true,
+            ));
+        }
+        if drift.frozen {
+            return Ok(tool_text(
+                json!({
+                    "error": "session_frozen: re-pin",
+                    "reason": drift.issues,
+                    "hint": "Binding changed under the active pin. Human must run `locus leave` then `locus pin <alias>`.",
+                }),
+                true,
+            ));
+        }
+        if drift.expired {
+            return Ok(tool_text(
+                json!({
+                    "error": "session_expired",
+                    "issues": drift.issues,
+                    "hint": "Pin TTL expired. Human must re-pin: `locus pin <alias>`.",
+                }),
+                true,
+            ));
+        }
         return Ok(tool_text(
             json!({
-                "error": "session_frozen: re-pin",
-                "reason": drift.issues,
-                "hint": "Binding changed under the active pin. Human must run `locus leave` then `locus pin <alias>`.",
+                "error": "runtime_unhealthy",
+                "issues": drift.issues,
+                "hint": "Identity drift detected. Human: `locus heartbeat` / `locus doctor`, then re-pin if needed. Agents: call locus_heartbeat.",
             }),
             true,
         ));
@@ -311,7 +372,7 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
         return Ok(tool_text(
             json!({
                 "error": "not_pinned",
-                "hint": "Human must run: locus pin <alias>. Agents: call locus_request_pin."
+                "hint": "Human must run: locus pin <alias>. Agents: call locus_request_pin or locus_enter_hint."
             }),
             true,
         ));
@@ -487,8 +548,11 @@ fn scope_or_err(
 
 fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
-    // Heartbeat: detect drift and freeze when control tools are polled.
-    if matches!(name, "locus_whoami" | "locus_status" | "locus_providers") {
+    // Heartbeat: detect drift and freeze when identity control tools are polled.
+    if matches!(
+        name,
+        "locus_whoami" | "locus_status" | "locus_providers" | "locus_heartbeat"
+    ) {
         let _ = s.check_drift_and_freeze();
     }
     match name {
@@ -501,7 +565,7 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
                 json!({
                     "pinned": false,
                     "error": e.to_string(),
-                    "hint": "Run `locus pin <alias>` in this workspace."
+                    "hint": "Run `locus pin <alias>` in this workspace. Agents: locus_enter_hint."
                 }),
                 true,
             )),
@@ -536,6 +600,79 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
                 }
             }
         }
+        "locus_heartbeat" => {
+            // Doctor-lite: full RuntimeDrift + operator hint. Never secrets.
+            let drift = s
+                .check_drift_and_freeze()
+                .map_err(|e| rpc_error(-32000, e.to_string()))?;
+            let hint = if drift.ok {
+                None
+            } else if !drift.pinned {
+                Some("not pinned — human: `locus enter <alias>` (or `locus pin <alias>`)")
+            } else if drift.frozen {
+                Some("session frozen after drift — human: `locus leave` then `locus pin <alias>`")
+            } else if !drift.seal_ok {
+                Some("invalid seal — human must re-pin")
+            } else if drift.expired {
+                Some("pin TTL expired — human must re-pin")
+            } else {
+                Some("runtime unhealthy — run `locus doctor`")
+            };
+            let body = json!({
+                "ok": drift.ok,
+                "pinned": drift.pinned,
+                "seal_ok": drift.seal_ok,
+                "frozen": drift.frozen,
+                "expired": drift.expired,
+                "binding": drift.binding_alias,
+                "tenant": drift.tenant_session,
+                "binding_id_match": drift.binding_id_match,
+                "tenant_match": drift.tenant_match,
+                "providers_match": drift.providers_match,
+                "issues": drift.issues,
+                "providers": drift.providers,
+                "hint": hint,
+                "runtime": drift,
+            });
+            // Informational probe — isError only when unhealthy so agents notice.
+            Ok(tool_text(body, !drift.ok))
+        }
+        "locus_enter_hint" => {
+            let alias = args
+                .get("alias")
+                .and_then(|a| a.as_str())
+                .map(str::trim)
+                .filter(|a| !a.is_empty());
+            let (enter_cmd, pin_cmd) = match alias {
+                Some(a) => (format!("locus enter {a}"), format!("locus pin {a}")),
+                None => ("locus enter".into(), "locus pin".into()),
+            };
+            let exists = alias.map(|a| s.load_binding(a).is_ok());
+            if let Some(a) = alias {
+                let _ = s.audit(
+                    "mcp.enter_hint",
+                    a,
+                    Some(json!({ "binding_exists": exists })),
+                );
+            }
+            let message = match alias {
+                Some(_) => format!(
+                    "Agents cannot pin. Ask the human to run `{enter_cmd}` (or `{pin_cmd}`) in a terminal, then continue."
+                ),
+                None => "Agents cannot pin. Ask the human to run `locus enter <alias>` (or `locus pin <alias>`) in a terminal.".into(),
+            };
+            Ok(tool_text(
+                json!({
+                    "agents_cannot_pin": true,
+                    "command": enter_cmd,
+                    "pin_command": pin_cmd,
+                    "alias": alias,
+                    "binding_exists": exists,
+                    "message": message,
+                }),
+                false,
+            ))
+        }
         "locus_list_bindings" => {
             let list = s
                 .list_bindings()
@@ -559,9 +696,10 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
                     "binding_exists": exists,
                     "message": format!(
                         "Pin request recorded for `{alias}`. Agents cannot pin themselves. \
-                         Human: run `locus pin {alias}` in the terminal, then continue."
+                         Human: run `locus enter {alias}` (or `locus pin {alias}`) in the terminal, then continue."
                     ),
-                    "command": format!("locus pin {alias}")
+                    "command": format!("locus enter {alias}"),
+                    "pin_command": format!("locus pin {alias}"),
                 }),
                 false,
             ))

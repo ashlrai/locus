@@ -27,12 +27,17 @@ impl ProviderAdapter for StripeAdapter {
             Some(false) => "test",
             None => "<unset>",
         };
+        let acct = provider
+            .scope
+            .account_id
+            .as_deref()
+            .unwrap_or(provider.account.as_str());
         vec![
             AdapterTool {
                 name: "stripe.scope".into(),
                 description: format!(
-                    "Frozen Stripe scope for tenant `{}`: account={}, mode={mode_hint}.",
-                    binding.tenant, provider.account
+                    "Frozen Stripe scope for tenant `{}`: account={acct}, mode={mode_hint}. account_id and livemode are frozen.",
+                    binding.tenant
                 ),
                 input_schema: json!({
                     "type": "object",
@@ -53,7 +58,9 @@ impl ProviderAdapter for StripeAdapter {
             },
             AdapterTool {
                 name: "stripe.whoami".into(),
-                description: "Show which Stripe identity this pin uses (account + livemode). Does not call the Stripe API.".into(),
+                description: format!(
+                    "Show which Stripe identity this pin uses: account={acct}, mode={mode_hint}. Does not call the Stripe API."
+                ),
                 input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
                 provider: "stripe".into(),
                 destructive: false,
@@ -73,6 +80,11 @@ impl ProviderAdapter for StripeAdapter {
 
         let frozen_live = frozen_livemode(provider);
         let livemode = freeze_bool_arg(args, "livemode", frozen_live)?;
+        let mode = match livemode {
+            Some(true) => "live",
+            Some(false) => "test",
+            None => "unset",
+        };
 
         match tool {
             "stripe.scope" | "stripe.whoami" => Ok(ToolCallResult {
@@ -82,9 +94,17 @@ impl ProviderAdapter for StripeAdapter {
                     "account": provider.account,
                     "account_id": account_id.or_else(|| provider.scope.account_id.clone()),
                     "livemode": livemode,
+                    "mode": mode,
+                    "read_only": provider.scope.read_only,
                     "credential_ref": provider.credential_ref,
                     "tenant": binding.tenant,
                     "binding": binding.alias,
+                    "frozen_selectors": ["account_id", "livemode"],
+                    "identity": format!(
+                        "stripe:{}:{}",
+                        provider.scope.account_id.as_deref().unwrap_or(&provider.account),
+                        mode
+                    ),
                     "note": "Phase 2 identity tool — real Stripe API fan-out injects STRIPE_API_KEY / STRIPE_SECRET_KEY into isolated workers only."
                 }),
                 policy: None,

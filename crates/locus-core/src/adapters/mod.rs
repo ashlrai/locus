@@ -227,6 +227,11 @@ pub fn enforce_policy(
 
 /// Dispatch a tool call with optional approval grant store.
 ///
+/// Order (fail closed):
+/// 1. **Scope freeze** — wrong-tenant selectors error before any approval is minted
+/// 2. Policy `require_approval` / dual_control gate
+/// 3. Adapter dispatch
+///
 /// When policy says `require_approval` (or dual_control):
 /// 1. If a still-valid **fully approved** grant exists for tool+binding+args_digest → allow
 /// 2. Else if `confirm=true` and `approval_id` names a valid matching grant → allow
@@ -240,11 +245,46 @@ pub fn call_tool_gated(
     args: &Value,
     gate: Option<ApprovalGate<'_>>,
 ) -> Result<ToolCallResult> {
+    // INV: freeze before policy — model cannot smuggle a wrong project_ref/team_id
+    // past require_approval into a grantable call.
+    preflight_scope_freeze(binding, tool_name, args)?;
     if let Some(blocked) = enforce_policy(binding, tool_name, args, gate)? {
         return Ok(blocked);
     }
     let verdict = evaluate(&binding.policy, tool_name);
     dispatch_tool(binding, tool_name, args, verdict)
+}
+
+/// Shared account-selector freezes applied before policy evaluation.
+///
+/// Adapters may re-check the same keys inside `call()`; this preflight ensures
+/// destructive tools under `require_approval` still deny wrong selectors as
+/// hard errors (not soft `requires_approval` results).
+fn preflight_scope_freeze(binding: &Binding, tool_name: &str, args: &Value) -> Result<()> {
+    let provider_name = tool_name.split('.').next().unwrap_or("");
+    let Some(p) = binding.provider(provider_name) else {
+        return Ok(());
+    };
+    freeze_string_arg(args, "project_ref", p.scope.project_ref.as_deref())?;
+    freeze_string_arg(args, "team_id", p.scope.team_id.as_deref())?;
+    freeze_string_arg(args, "account_id", p.scope.account_id.as_deref())?;
+    // Stripe (and similar) may freeze livemode via scope.extra
+    let frozen_live = p
+        .scope
+        .extra
+        .get("livemode")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            // also accept boolean-ish string
+            p.scope.extra.get("livemode").and_then(|v| match v {
+                toml::Value::Boolean(b) => Some(*b),
+                toml::Value::String(s) if s == "true" => Some(true),
+                toml::Value::String(s) if s == "false" => Some(false),
+                _ => None,
+            })
+        });
+    freeze_bool_arg(args, "livemode", frozen_live)?;
+    Ok(())
 }
 
 /// Returns `Some(())` when the call is allowed through the approval gate.
@@ -360,6 +400,29 @@ pub fn control_tools(pinned: bool) -> Vec<AdapterTool> {
             name: "locus_status".into(),
             description: "Short pin status: pinned|unpinned, binding alias, tenant, seal ok.".into(),
             input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
+            provider: "locus".into(),
+            destructive: false,
+        },
+        AdapterTool {
+            name: "locus_heartbeat".into(),
+            description: "Continuous identity heartbeat: runtime drift / doctor-lite JSON (seal, freeze, binding match). Safe for agents — never secrets. Call when pin health is unclear.".into(),
+            input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
+            provider: "locus".into(),
+            destructive: false,
+        },
+        AdapterTool {
+            name: "locus_enter_hint".into(),
+            description: "Return the shell command a human should run to enter/pin a binding. Agents cannot pin themselves — surface this command to the operator.".into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "alias": {
+                        "type": "string",
+                        "description": "Optional binding alias (e.g. acme). When omitted, returns generic `locus enter`."
+                    }
+                },
+                "additionalProperties": false
+            }),
             provider: "locus".into(),
             destructive: false,
         },
@@ -584,7 +647,7 @@ mod tests {
     #[test]
     fn require_approval_blocks_delete() {
         let b = acme();
-        let r = call_tool(&b, "supabase.table.delete", &json!({})).unwrap();
+        let r = call_tool(&b, "supabase.table.delete", &json!({"table": "users"})).unwrap();
         assert!(!r.ok);
         assert_eq!(
             r.content.get("error").and_then(|v| v.as_str()),
@@ -595,11 +658,275 @@ mod tests {
     #[test]
     fn confirm_alone_does_not_bypass_without_grant() {
         let b = acme();
-        let r = call_tool(&b, "supabase.table.delete", &json!({ "confirm": true })).unwrap();
+        let r = call_tool(
+            &b,
+            "supabase.table.delete",
+            &json!({ "table": "users", "confirm": true }),
+        )
+        .unwrap();
         assert!(!r.ok);
         assert_eq!(
             r.content.get("error").and_then(|v| v.as_str()),
             Some("requires_approval")
         );
+    }
+
+    #[test]
+    fn supabase_project_ref_freeze_on_destructive_tool() {
+        // Policy must allow so adapter freeze path is exercised (policy runs first).
+        let b = Binding::from_body(BindingBody {
+            id: "bnd_sb".into(),
+            alias: "sb".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(), // allow destructive stubs
+            providers: vec![ProviderBinding {
+                provider: "supabase".into(),
+                account: "acme".into(),
+                credential_ref: "phm:SUPABASE_ACME".into(),
+                scope: Scope {
+                    project_ref: Some("proj_acme".into()),
+                    read_only: Some(true),
+                    ..Scope::default()
+                },
+                upstream: None,
+            }],
+        });
+        // project_ref freeze must apply to table.delete, not only scope tools
+        let err = call_tool(
+            &b,
+            "supabase.table.delete",
+            &json!({ "table": "users", "project_ref": "proj_evil" }),
+        );
+        assert!(
+            err.is_err(),
+            "expected project_ref freeze on table.delete: {err:?}"
+        );
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("scope freeze") && msg.contains("project_ref"),
+            "unexpected: {msg}"
+        );
+
+        // Matching ref is allowed through freeze (synthetic stub succeeds)
+        let ok = call_tool(
+            &b,
+            "supabase.table.delete",
+            &json!({ "table": "users", "project_ref": "proj_acme" }),
+        )
+        .unwrap();
+        assert!(ok.ok);
+        assert_eq!(
+            ok.content.get("project_ref").and_then(|v| v.as_str()),
+            Some("proj_acme")
+        );
+    }
+
+    fn github_binding() -> Binding {
+        Binding::from_body(BindingBody {
+            id: "bnd_gh".into(),
+            alias: "gh".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "github".into(),
+                account: "acme-gh".into(),
+                credential_ref: "phm:GH_ACME".into(),
+                scope: Scope {
+                    orgs: vec!["acme-corp".into()],
+                    repos: vec!["acme-corp/web".into(), "acme-corp/api".into()],
+                    ..Scope::default()
+                },
+                upstream: None,
+            }],
+        })
+    }
+
+    #[test]
+    fn github_check_repo_allow_and_deny() {
+        let b = github_binding();
+        let ok = call_tool(
+            &b,
+            "github.check_repo",
+            &json!({ "full_name": "acme-corp/web" }),
+        )
+        .unwrap();
+        assert!(ok.ok);
+        assert_eq!(
+            ok.content.get("allowed").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            ok.content.get("full_name").and_then(|v| v.as_str()),
+            Some("acme-corp/web")
+        );
+
+        let ok2 = call_tool(
+            &b,
+            "github.check_repo",
+            &json!({ "org": "acme-corp", "repo": "api" }),
+        )
+        .unwrap();
+        assert!(ok2.ok);
+
+        // wrong org
+        let err = call_tool(
+            &b,
+            "github.check_repo",
+            &json!({ "full_name": "evil-corp/web" }),
+        );
+        assert!(err.is_err(), "expected org freeze: {err:?}");
+        assert!(err.unwrap_err().to_string().contains("scope freeze"));
+
+        // right org, wrong repo
+        let err2 = call_tool(
+            &b,
+            "github.check_repo",
+            &json!({ "org": "acme-corp", "repo": "secrets" }),
+        );
+        assert!(err2.is_err(), "expected repo freeze: {err2:?}");
+        let msg = err2.unwrap_err().to_string();
+        assert!(
+            msg.contains("scope freeze") && msg.contains("repo"),
+            "unexpected: {msg}"
+        );
+    }
+
+    fn vercel_binding() -> Binding {
+        Binding::from_body(BindingBody {
+            id: "bnd_vc".into(),
+            alias: "vc".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy {
+                require_approval: vec!["vercel.deploy.prod".into()],
+                ..Policy::default()
+            },
+            providers: vec![ProviderBinding {
+                provider: "vercel".into(),
+                account: "acme-vc".into(),
+                credential_ref: "phm:VERCEL_ACME".into(),
+                scope: Scope {
+                    team_id: Some("team_acme".into()),
+                    projects: vec!["acme-web".into()],
+                    env: vec!["preview".into(), "development".into()],
+                    ..Scope::default()
+                },
+                upstream: None,
+            }],
+        })
+    }
+
+    #[test]
+    fn vercel_env_target_freeze() {
+        let b = vercel_binding();
+        let ok = call_tool(
+            &b,
+            "vercel.scope",
+            &json!({ "team_id": "team_acme", "env": "preview" }),
+        )
+        .unwrap();
+        assert!(ok.ok);
+        assert_eq!(
+            ok.content.get("env_target").and_then(|v| v.as_str()),
+            Some("preview")
+        );
+
+        // production not in allowlist
+        let err = call_tool(&b, "vercel.scope", &json!({ "env": "production" }));
+        assert!(err.is_err(), "expected env freeze: {err:?}");
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("scope freeze") && (msg.contains("env") || msg.contains("production")),
+            "unexpected: {msg}"
+        );
+
+        // target alias also frozen
+        let err2 = call_tool(&b, "vercel.scope", &json!({ "target": "production" }));
+        assert!(err2.is_err());
+
+        // team_id still frozen
+        let err3 = call_tool(
+            &b,
+            "vercel.scope",
+            &json!({ "team_id": "team_evil", "env": "preview" }),
+        );
+        assert!(err3.is_err());
+        assert!(err3.unwrap_err().to_string().contains("team_id"));
+    }
+
+    #[test]
+    fn whoami_fields_complete_for_p2_providers() {
+        let b = multi_provider();
+        for tool in ["stripe.whoami", "aws.whoami", "cloudflare.whoami"] {
+            let r = call_tool(&b, tool, &json!({})).unwrap();
+            assert!(r.ok, "{tool} failed: {:?}", r.content);
+            assert!(
+                r.content.get("identity").is_some(),
+                "{tool} missing identity"
+            );
+            assert!(
+                r.content.get("frozen_selectors").is_some(),
+                "{tool} missing frozen_selectors"
+            );
+            assert_eq!(
+                r.content.get("tenant").and_then(|v| v.as_str()),
+                Some("acme-corp")
+            );
+            assert!(r.content.get("credential_ref").is_some());
+        }
+
+        // stripe mode label
+        let s = call_tool(&b, "stripe.whoami", &json!({})).unwrap();
+        assert_eq!(s.content.get("mode").and_then(|v| v.as_str()), Some("test"));
+        assert_eq!(
+            s.content.get("livemode").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+
+        // resend whoami with domain allowlist
+        let resend = Binding::from_body(BindingBody {
+            id: "bnd_rs".into(),
+            alias: "rs".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "resend".into(),
+                account: "acme-mail".into(),
+                credential_ref: "phm:RESEND_ACME".into(),
+                scope: Scope {
+                    projects: vec!["acme.com".into()],
+                    ..Scope::default()
+                },
+                upstream: None,
+            }],
+        });
+        let r = call_tool(&resend, "resend.whoami", &json!({})).unwrap();
+        assert!(r.ok);
+        assert!(r.content.get("identity").is_some());
+        assert!(r.content.get("domains").is_some());
+        assert!(r.content.get("frozen_selectors").is_some());
+    }
+
+    #[test]
+    fn control_tools_include_heartbeat_and_enter_hint() {
+        let unbound = control_tools(false);
+        let names: Vec<_> = unbound.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"locus_heartbeat"));
+        assert!(names.contains(&"locus_enter_hint"));
+        assert!(names.contains(&"locus_whoami"));
+        assert!(!names.contains(&"locus_providers"));
+
+        let pinned = control_tools(true);
+        let names: Vec<_> = pinned.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"locus_heartbeat"));
+        assert!(names.contains(&"locus_enter_hint"));
+        assert!(names.contains(&"locus_providers"));
     }
 }
