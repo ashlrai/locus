@@ -3,6 +3,12 @@
 //! Agents see only control tools when unpinned, and control + provider tools
 //! when pinned. Agents cannot pin themselves (`locus_request_pin` only).
 //!
+//! AI-native surface:
+//! - **Tools** — control + pinned providers; descriptions tagged `[locus:<alias|unpinned>]`
+//! - **Resources** — `locus://session`, `locus://doctor`, `locus://bindings`
+//! - **Prompts** — `locus_context` system fragment
+//! - **Auto-pin** — optional silent pin from workspace `default_binding` (never force)
+//!
 //! Protocol: JSON-RPC 2.0 over stdio.
 //! Framing: **Content-Length** (MCP standard; Claude Code / Cursor) and
 //! **NDJSON** (newline-delimited JSON) for simple clients/tests. Responses
@@ -10,18 +16,27 @@
 
 use anyhow::{Context, Result};
 use locus_core::{
-    call_tool_gated, control_tools, enforce_policy, split_namespaced_tool, tools_for_binding,
-    AdapterTool, ApprovalGate, Binding, CompositeWorkerManager, Session, Store, VERSION,
+    build_doctor_report, call_tool_gated, control_tools, enforce_policy, find_workspace,
+    load_config, split_namespaced_tool, tools_for_binding, AdapterTool, ApprovalGate, Binding,
+    DoctorExternal, Session, Store, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 /// Process-wide worker manager (synthetic + per-provider upstream MCP).
-fn worker_manager() -> &'static Mutex<CompositeWorkerManager> {
-    static MGR: OnceLock<Mutex<CompositeWorkerManager>> = OnceLock::new();
-    MGR.get_or_init(|| Mutex::new(CompositeWorkerManager::new()))
+fn worker_manager() -> &'static Mutex<CompositeWorkerManagerGuard> {
+    static MGR: OnceLock<Mutex<CompositeWorkerManagerGuard>> = OnceLock::new();
+    MGR.get_or_init(|| Mutex::new(CompositeWorkerManagerGuard::new()))
 }
+
+/// Thin alias so we can keep the type local without re-export noise.
+type CompositeWorkerManagerGuard = locus_core::CompositeWorkerManager;
+
+/// MCP auto-pin attempted once per process (start / first tools/list).
+static AUTO_PIN_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 /// Wire framing chosen per message so mixed clients stay happy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,8 +80,10 @@ fn run() -> Result<()> {
             "ping" => Ok(json!({})),
             "tools/list" => handle_tools_list(),
             "tools/call" => handle_tools_call(&params),
-            "resources/list" => Ok(json!({ "resources": [] })),
-            "prompts/list" => Ok(json!({ "prompts": [] })),
+            "resources/list" => handle_resources_list(),
+            "resources/read" => handle_resources_read(&params),
+            "prompts/list" => handle_prompts_list(),
+            "prompts/get" => handle_prompts_get(&params),
             other => Err(rpc_error(-32601, format!("method not found: {other}"))),
         };
 
@@ -168,7 +185,7 @@ fn handle_notification(method: &str, _params: &Value) {
     match method {
         "notifications/initialized" | "initialized" => {
             // Client finished initialize handshake — ready for tools/list etc.
-            // No server-side state required in phase 1.
+            // No server-side state required beyond optional auto-pin on initialize.
         }
         "notifications/cancelled" => {}
         _ => {
@@ -181,17 +198,36 @@ fn rpc_error(code: i64, message: String) -> Value {
     json!({ "code": code, "message": message })
 }
 
+// ─── Initialize / agent instructions ────────────────────────────────────────
+
+fn agent_instructions() -> String {
+    [
+        "Locus identity plane — tools are hard-scoped to the active pin (no ambient accounts).",
+        "• Call locus_whoami (or read locus://session) before infrastructure work.",
+        "• You cannot pin — ask the human to run `locus pin <alias>` / `locus enter <alias>`, or use locus_request_pin / locus_enter_hint.",
+        "• Frozen scopes (project_ref, team_id, orgs/repos) cannot be overridden; scope freeze is expected on mismatch.",
+        "• Unpinned sessions expose only locus_* control tools. Resources: locus://session, locus://doctor, locus://bindings. Prompt: locus_context.",
+    ]
+    .join("\n")
+}
+
 fn handle_initialize(_params: &Value) -> Value {
+    // Prefer auto-pin once at MCP start when workspace has default_binding / require_pin
+    // or when explicitly enabled (see maybe_mcp_auto_pin).
+    let _ = maybe_mcp_auto_pin();
+
     json!({
         "protocolVersion": "2024-11-05",
         "capabilities": {
-            "tools": { "listChanged": false }
+            "tools": { "listChanged": false },
+            "resources": { "subscribe": false, "listChanged": false },
+            "prompts": {}
         },
         "serverInfo": {
             "name": "locus-mcp",
             "version": VERSION
         },
-        "instructions": "Locus identity plane. Tools are hard-scoped to the active pin. Call locus_whoami first. Agents cannot pin — ask the human to run `locus pin <alias>` or use locus_request_pin."
+        "instructions": agent_instructions()
     })
 }
 
@@ -227,8 +263,396 @@ fn primary_binding(bindings: &[(String, Binding)]) -> Option<&Binding> {
     bindings.first().map(|(_, b)| b)
 }
 
-/// Map tools to MCP list payload.
-fn tools_list_payload(tools: Vec<AdapterTool>) -> Value {
+fn cwd() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+// ─── MCP auto-pin ───────────────────────────────────────────────────────────
+
+/// Whether MCP may silently pin from workspace/cwd.
+///
+/// Enabled when:
+/// - `LOCUS_MCP_AUTO_PIN=1` (explicit), or
+/// - `LOCUS_AUTO_PIN=cwd` / `clients.auto_pin=cwd`, or
+/// - workspace `.locus.toml` has `require_pin = true`, or
+/// - workspace has `default_binding` (preferred default: pin once at MCP start)
+///
+/// Disabled when `LOCUS_MCP_AUTO_PIN=0|false|off`.
+///
+/// Actual pin still requires `require_pin` or `default_binding` and never uses force.
+fn mcp_auto_pin_policy_enabled(home: &Path) -> bool {
+    if let Ok(v) = std::env::var("LOCUS_MCP_AUTO_PIN") {
+        let v = v.trim().to_ascii_lowercase();
+        if matches!(v.as_str(), "0" | "false" | "off" | "no") {
+            return false;
+        }
+        if matches!(v.as_str(), "1" | "true" | "on" | "yes") {
+            return true;
+        }
+    }
+
+    if env_truthy_cwd("LOCUS_AUTO_PIN") {
+        return true;
+    }
+
+    let cfg = load_config(home);
+    if cfg
+        .clients
+        .auto_pin
+        .as_deref()
+        .map(|s| s.eq_ignore_ascii_case("cwd"))
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    // Preferred default: workspace with default_binding and/or require_pin.
+    if let Some((_, ws)) = find_workspace(&cwd()) {
+        if ws.require_pin {
+            return true;
+        }
+        if ws
+            .default_binding
+            .as_ref()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn env_truthy_cwd(key: &str) -> bool {
+    std::env::var(key)
+        .map(|v| v.trim().eq_ignore_ascii_case("cwd"))
+        .unwrap_or(false)
+}
+
+/// Attempt silent workspace auto-pin when unpinned and policy allows.
+///
+/// - Only when unpinned
+/// - Only when workspace has `require_pin` or non-empty `default_binding`
+/// - Never force past allowlist (`pin_auto` never uses force for autopin sources)
+/// - Audits `session.auto_pin` (in addition to normal `session.pin`)
+/// - At most once per process (initialize and/or first tools/list)
+fn maybe_mcp_auto_pin() -> Option<String> {
+    if AUTO_PIN_ATTEMPTED.swap(true, Ordering::SeqCst) {
+        return None;
+    }
+
+    let s = match store() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("locus-mcp: auto-pin skipped (store): {e:#}");
+            return None;
+        }
+    };
+
+    if !mcp_auto_pin_policy_enabled(s.home()) {
+        return None;
+    }
+
+    // Already pinned → nothing to do.
+    match s.active_session() {
+        Ok(Some(_)) => return None,
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("locus-mcp: auto-pin skipped (active session): {e}");
+            return None;
+        }
+    }
+
+    let cwd = cwd();
+    let ws = find_workspace(&cwd);
+    let (_, ref cfg) = ws?;
+    // Only pin when workspace declares require_pin or default_binding.
+    let has_default = cfg
+        .default_binding
+        .as_ref()
+        .map(|a| !a.trim().is_empty())
+        .unwrap_or(false);
+    if !cfg.require_pin && !has_default {
+        return None;
+    }
+
+    match s.pin_auto(&cwd, Some("mcp-auto".into()), false) {
+        Ok(session) => {
+            let _ = s.audit(
+                "session.auto_pin",
+                &session.binding_alias,
+                Some(json!({
+                    "session_id": session.session_id,
+                    "tenant": session.tenant,
+                    "source": session.source,
+                    "client": session.client,
+                    "cwd": cwd.display().to_string(),
+                    "reason": "mcp_auto_pin",
+                })),
+            );
+            eprintln!(
+                "locus-mcp: auto-pinned `{}` (tenant {}) from workspace",
+                session.binding_alias, session.tenant
+            );
+            Some(session.binding_alias)
+        }
+        Err(e) => {
+            // Soft: leave unpinned; agents still see control tools + request_pin.
+            eprintln!("locus-mcp: auto-pin failed (staying unpinned): {e}");
+            None
+        }
+    }
+}
+
+// ─── Resources ──────────────────────────────────────────────────────────────
+
+const RESOURCE_SESSION: &str = "locus://session";
+const RESOURCE_DOCTOR: &str = "locus://doctor";
+const RESOURCE_BINDINGS: &str = "locus://bindings";
+
+fn handle_resources_list() -> std::result::Result<Value, Value> {
+    Ok(json!({
+        "resources": [
+            {
+                "uri": RESOURCE_SESSION,
+                "name": "session",
+                "title": "Active Locus pin (whoami)",
+                "description": "Current pin whoami JSON: tenant, binding, providers, frozen scopes. Never includes secrets.",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": RESOURCE_DOCTOR,
+                "name": "doctor",
+                "title": "Locus doctor lite",
+                "description": "Doctor-lite / runtime drift: pin health, seal, freeze, workspace. Never includes secrets.",
+                "mimeType": "application/json"
+            },
+            {
+                "uri": RESOURCE_BINDINGS,
+                "name": "bindings",
+                "title": "Configured bindings",
+                "description": "List of binding summaries (alias, tenant, providers). No secrets.",
+                "mimeType": "application/json"
+            }
+        ]
+    }))
+}
+
+fn handle_resources_read(params: &Value) -> std::result::Result<Value, Value> {
+    let uri = params
+        .get("uri")
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| rpc_error(-32602, "missing resource uri".into()))?;
+
+    let body = match uri {
+        RESOURCE_SESSION => resource_session_json()?,
+        RESOURCE_DOCTOR => resource_doctor_json()?,
+        RESOURCE_BINDINGS => resource_bindings_json()?,
+        other => {
+            return Err(rpc_error(-32002, format!("resource not found: {other}")));
+        }
+    };
+
+    let text = serde_json::to_string(&body).unwrap_or_else(|_| body.to_string());
+    Ok(json!({
+        "contents": [{
+            "uri": uri,
+            "mimeType": "application/json",
+            "text": text
+        }]
+    }))
+}
+
+fn resource_session_json() -> std::result::Result<Value, Value> {
+    let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
+    let _ = s.check_drift_and_freeze();
+    match s.whoami() {
+        Ok(w) => Ok(serde_json::to_value(w).unwrap_or(json!({}))),
+        Err(_) => Ok(json!({
+            "pinned": false,
+            "hint": "No active pin. Human: `locus pin <alias>` or `locus enter <alias>`. Agents: locus_request_pin / locus_enter_hint."
+        })),
+    }
+}
+
+fn resource_doctor_json() -> std::result::Result<Value, Value> {
+    let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
+    // Doctor lite: full structured report with empty external facts (no PATH probe).
+    // Never secrets.
+    let report = build_doctor_report(
+        &s,
+        DoctorExternal {
+            phantom_on_path: false,
+            unresolved_phm: Vec::new(),
+            cwd: Some(cwd()),
+        },
+    )
+    .map_err(|e| rpc_error(-32000, e.to_string()))?;
+    Ok(serde_json::to_value(report).unwrap_or(json!({})))
+}
+
+fn resource_bindings_json() -> std::result::Result<Value, Value> {
+    let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
+    let list = s
+        .list_bindings()
+        .map_err(|e| rpc_error(-32000, e.to_string()))?;
+    Ok(serde_json::to_value(list).unwrap_or(json!([])))
+}
+
+// ─── Prompts ────────────────────────────────────────────────────────────────
+
+fn handle_prompts_list() -> std::result::Result<Value, Value> {
+    Ok(json!({
+        "prompts": [{
+            "name": "locus_context",
+            "title": "Locus identity context",
+            "description": "System prompt fragment: active tenant, frozen scopes, and the rule that agents cannot pin.",
+            "arguments": []
+        }]
+    }))
+}
+
+fn handle_prompts_get(params: &Value) -> std::result::Result<Value, Value> {
+    let name = params
+        .get("name")
+        .and_then(|n| n.as_str())
+        .ok_or_else(|| rpc_error(-32602, "missing prompt name".into()))?;
+
+    match name {
+        "locus_context" => {
+            let text = build_locus_context_prompt();
+            Ok(json!({
+                "description": "Locus identity context for the agent system prompt",
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": text
+                    }
+                }]
+            }))
+        }
+        other => Err(rpc_error(-32602, format!("unknown prompt: {other}"))),
+    }
+}
+
+fn build_locus_context_prompt() -> String {
+    let s = match store() {
+        Ok(s) => s,
+        Err(e) => {
+            return format!(
+                "## Locus identity context\n\nStore unavailable ({e}). Treat session as unpinned. Agents cannot pin — ask the human to run `locus pin <alias>`."
+            );
+        }
+    };
+    let _ = s.check_drift_and_freeze();
+
+    let mut lines = vec![
+        "## Locus identity context".into(),
+        String::new(),
+        "You are operating under the Locus identity plane. Credentials and account selectors are resolved at the gate — not in the prompt.".into(),
+        String::new(),
+        "### Hard rules".into(),
+        "- You **cannot pin** or switch tenants. If the wrong account is active, ask the human to run `locus pin <alias>` / `locus enter <alias>` (or surface `locus_request_pin` / `locus_enter_hint`).".into(),
+        "- Call `locus_whoami` or read resource `locus://session` before infrastructure mutations.".into(),
+        "- Do **not** invent or override frozen `project_ref`, `team_id`, orgs, or repos.".into(),
+        "- Unpinned sessions only expose `locus_*` control tools — there is no ambient personal fallthrough.".into(),
+        String::new(),
+    ];
+
+    match s.whoami() {
+        Ok(w) => {
+            lines.push("### Active pin".into());
+            lines.push(format!("- **binding**: `{}`", w.binding_alias));
+            lines.push(format!("- **tenant**: `{}`", w.tenant));
+            lines.push(format!("- **binding_id**: `{}`", w.binding_id));
+            lines.push(format!("- **session_id**: `{}`", w.session_id));
+            lines.push(format!("- **seal_ok**: {}", w.seal_ok));
+            lines.push(format!("- **frozen**: {}", w.frozen));
+            if let Some(ref reason) = w.frozen_reason {
+                lines.push(format!("- **frozen_reason**: {reason}"));
+            }
+            lines.push(format!("- **mode**: {}", w.mode));
+            if !w.namespaces.is_empty() {
+                lines.push(format!("- **namespaces**: {}", w.namespaces.join(", ")));
+            }
+            lines.push(format!("- **expires_at**: {}", w.expires_at));
+            lines.push(String::new());
+            lines.push("### Frozen scopes (providers)".into());
+            if w.providers.is_empty() {
+                lines.push("- (no providers on this binding)".into());
+            } else {
+                for p in &w.providers {
+                    let mut scope_bits = Vec::new();
+                    if let Some(ref r) = p.project_ref {
+                        scope_bits.push(format!("project_ref={r}"));
+                    }
+                    if let Some(ref t) = p.team_id {
+                        scope_bits.push(format!("team_id={t}"));
+                    }
+                    if let Some(ref a) = p.account_id {
+                        scope_bits.push(format!("account_id={a}"));
+                    }
+                    if !p.orgs.is_empty() {
+                        scope_bits.push(format!("orgs={}", p.orgs.join(",")));
+                    }
+                    if p.read_only == Some(true) {
+                        scope_bits.push("read_only".into());
+                    }
+                    let scope = if scope_bits.is_empty() {
+                        "(open within provider adapter)".into()
+                    } else {
+                        scope_bits.join("; ")
+                    };
+                    lines.push(format!(
+                        "- **{}** account=`{}` ref=`{}` — {scope}",
+                        p.provider, p.account, p.credential_ref
+                    ));
+                }
+            }
+        }
+        Err(_) => {
+            lines.push("### Active pin".into());
+            lines.push("- **pinned**: false".into());
+            lines.push(
+                "- No sealed session. Provider tools are unavailable until a human pins a binding."
+                    .into(),
+            );
+        }
+    }
+
+    if let Some((path, cfg)) = find_workspace(&cwd()) {
+        lines.push(String::new());
+        lines.push("### Workspace".into());
+        lines.push(format!("- **path**: `{}`", path.display()));
+        if let Some(ref d) = cfg.default_binding {
+            lines.push(format!("- **default_binding**: `{d}`"));
+        }
+        if !cfg.allowed_bindings.is_empty() {
+            lines.push(format!(
+                "- **allowed_bindings**: {}",
+                cfg.allowed_bindings.join(", ")
+            ));
+        }
+        lines.push(format!("- **require_pin**: {}", cfg.require_pin));
+    }
+
+    lines.push(String::new());
+    lines.push("### Resources".into());
+    lines.push("- `locus://session` — whoami JSON".into());
+    lines.push("- `locus://doctor` — doctor lite / drift".into());
+    lines.push("- `locus://bindings` — configured binding summaries".into());
+
+    lines.join("\n")
+}
+
+// ─── Tools list / call ──────────────────────────────────────────────────────
+
+/// Map tools to MCP list payload; ensure `locus_whoami` first + locus tags.
+fn tools_list_payload(mut tools: Vec<AdapterTool>, pin_alias: Option<&str>) -> Value {
+    tag_tool_descriptions(&mut tools, pin_alias);
+    ensure_whoami_first(&mut tools);
     let list: Vec<Value> = tools
         .into_iter()
         .map(|t| {
@@ -242,10 +666,56 @@ fn tools_list_payload(tools: Vec<AdapterTool>) -> Value {
     json!({ "tools": list })
 }
 
+fn ensure_whoami_first(tools: &mut Vec<AdapterTool>) {
+    if let Some(i) = tools.iter().position(|t| t.name == "locus_whoami") {
+        if i != 0 {
+            let t = tools.remove(i);
+            tools.insert(0, t);
+        }
+    }
+}
+
+/// Prefix every tool description with `[locus:<alias|unpinned>]`.
+fn tag_tool_descriptions(tools: &mut [AdapterTool], pin_alias: Option<&str>) {
+    for t in tools.iter_mut() {
+        if t.description.starts_with("[locus:") {
+            continue;
+        }
+        let tag = if t.name.starts_with("locus_") {
+            match pin_alias {
+                Some(a) => format!("[locus:{a}]"),
+                None => "[locus:unpinned]".into(),
+            }
+        } else if let Some((alias, _)) = split_namespaced_tool(&t.name) {
+            format!("[locus:{alias}]")
+        } else {
+            match pin_alias {
+                Some(a) => format!("[locus:{a}]"),
+                None => "[locus:unpinned]".into(),
+            }
+        };
+        // Drop legacy `[alias] ` prefix from namespaced soft-fail path if present.
+        let rest = t.description.as_str();
+        let rest = if rest.starts_with('[') && !rest.starts_with("[locus:") {
+            if let Some(idx) = rest.find("] ") {
+                &rest[idx + 2..]
+            } else {
+                rest
+            }
+        } else {
+            rest
+        };
+        t.description = format!("{tag} {rest}");
+    }
+}
+
 /// Unpinned / frozen / invalid seal ⇒ only locus_* control tools.
 /// Healthy pin ⇒ control + provider tools (synthetic + upstream MCP when declared).
 /// Namespaced multi-bind prefixes tools as `alias__tool`.
 fn handle_tools_list() -> std::result::Result<Value, Value> {
+    // Silent cwd auto-pin when still unpinned (once per process; no-ops after initialize).
+    let _ = maybe_mcp_auto_pin();
+
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     // Heartbeat on every tools/list: freeze session if binding material drifted.
     let drift = s
@@ -254,19 +724,23 @@ fn handle_tools_list() -> std::result::Result<Value, Value> {
 
     // Control tools always. `locus_providers` when a pin exists (even frozen).
     let mut tools: Vec<AdapterTool> = control_tools(drift.pinned);
+    let pin_alias = drift.binding_alias.clone();
 
     // Privileged provider catalog only when runtime is healthy (pinned, seal ok,
     // unfrozen, unexpired, binding matches). Fail closed otherwise.
     if !drift.ok {
         debug_assert!(tools.iter().all(|t| t.name.starts_with("locus_")));
-        return Ok(tools_list_payload(tools));
+        return Ok(tools_list_payload(tools, pin_alias.as_deref()));
     }
 
     let pinned = active_session_bindings().map_err(|e| rpc_error(-32000, e.to_string()))?;
     if let Some((ref session, ref bindings)) = pinned {
         // Belt + suspenders: frozen session never lists provider tools.
         if session.is_frozen() {
-            return Ok(tools_list_payload(tools));
+            return Ok(tools_list_payload(
+                tools,
+                Some(session.binding_alias.as_str()),
+            ));
         }
         let mut mgr = worker_manager()
             .lock()
@@ -282,7 +756,6 @@ fn handle_tools_list() -> std::result::Result<Value, Value> {
                     for (alias, binding) in bindings {
                         for mut t in tools_for_binding(binding) {
                             t.name = locus_core::namespace_tool(alias, &t.name);
-                            t.description = format!("[{alias}] {}", t.description);
                             tools.push(t);
                         }
                     }
@@ -291,8 +764,12 @@ fn handle_tools_list() -> std::result::Result<Value, Value> {
                 }
             }
         }
+        return Ok(tools_list_payload(
+            tools,
+            Some(session.binding_alias.as_str()),
+        ));
     }
-    Ok(tools_list_payload(tools))
+    Ok(tools_list_payload(tools, pin_alias.as_deref()))
 }
 
 fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {

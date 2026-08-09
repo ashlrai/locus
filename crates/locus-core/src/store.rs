@@ -1162,6 +1162,7 @@ impl Store {
                     account_id: p.scope.account_id.clone(),
                     read_only: p.scope.read_only,
                     orgs: p.scope.orgs.clone(),
+                    repos: p.scope.repos.clone(),
                 })
                 .collect(),
             expires_at: session.expires_at.to_rfc3339(),
@@ -1279,6 +1280,7 @@ impl Store {
                         account_id: p.scope.account_id.clone(),
                         read_only: p.scope.read_only,
                         orgs: p.scope.orgs.clone(),
+                        repos: p.scope.repos.clone(),
                     })
                     .collect();
             }
@@ -1957,7 +1959,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProviderView {
     pub provider: String,
     pub account: String,
@@ -1967,6 +1969,8 @@ pub struct ProviderView {
     pub account_id: Option<String>,
     pub read_only: Option<bool>,
     pub orgs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
 }
 
 pub fn locus_home() -> Result<PathBuf> {

@@ -9,6 +9,7 @@
 //!   and resolved secrets inside worker env maps.
 
 pub mod adapters;
+pub mod agent_report;
 pub mod approval;
 pub mod autopin;
 pub mod binding;
@@ -29,6 +30,12 @@ pub mod workspace;
 pub use adapters::{
     call_tool, call_tool_gated, control_tools, enforce_policy, tools_for_binding, AdapterTool,
     ApprovalGate, ToolCallResult,
+};
+pub use agent_report::{
+    agent_md_content, agent_md_path, agent_md_present, agent_report_from_doctor,
+    agent_report_json_has_stable_keys, build_agent_report, mcp_agent_env, probe_agent_options,
+    probe_mcp_registered, workspace_present, workspace_stub_toml, AgentCommands, AgentReport,
+    AgentReportOptions, AgentStatus, McpRegistered, AGENT_REPORT_JSON_KEYS, REQUIRED_SERVERS,
 };
 pub use approval::notifications_enabled;
 pub use approval::{

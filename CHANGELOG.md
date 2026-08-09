@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`locus quickstart`** — first-60s bootstrap: config + samples if empty, enter workspace default / sample pin, whoami + doctor verdict
+- **`locus completion <shell>`** — bash/zsh/fish/elvish/powershell via clap_complete
+- **locus-mcp AI-native surface**
+  - Resources: `locus://session`, `locus://doctor`, `locus://bindings` (`resources/list` + `resources/read`)
+  - Prompt: `locus_context` system fragment (`prompts/list` + `prompts/get`)
+  - Tool descriptions tagged `[locus:<alias|unpinned>]`; `locus_whoami` always first in `tools/list`
+  - `initialize.instructions` agent rules; capabilities advertise tools + resources + prompts
+  - **MCP auto-pin** from workspace `default_binding` / `require_pin`, or `LOCUS_MCP_AUTO_PIN=1` / `LOCUS_AUTO_PIN=cwd` / `clients.auto_pin=cwd` — once per process, audit `session.auto_pin`, never force allowlist (`LOCUS_MCP_AUTO_PIN=0` kill switch)
+  - Protocol tests for resources, prompts, description tags, and auto-pin
+
+### Changed
+
+- **`locus init`** — writes `config.toml` with `notify.enabled = false` when missing; AI-native next steps (`setup` · `enter` · `doctor`); annotated sample bindings
+- **Shell hook** — prompt shows `[locus:FROZEN]`, `[locus:enter!]` when unpinned in `require_pin` workspaces; status oneline token `require_pin`
+- Landing page / agent docs: prefer `locus enter` before tool use; v0.1.1 graph + CI commands
+
 ## [0.1.1] — 2026-08-09
 
 Firm UX polish on top of the initial public release. Notifications stay quiet by

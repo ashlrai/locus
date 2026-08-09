@@ -1,5 +1,7 @@
 # Locus — Development Guide
 
+**Prefer `locus enter` (or `locus pin`) before tool use** — identity is resolved at the gate, not in the prompt.
+
 ## Quick reference
 
 ```bash
@@ -20,9 +22,9 @@ Smoke without touching `~/.locus`:
 
 ```bash
 export LOCUS_HOME=/tmp/locus-dev
-cargo run -p locus-cli -- init --with-samples
-cargo run -p locus-cli -- pin personal
+cargo run -p locus-cli -- quickstart   # or: init --with-samples && enter personal
 cargo run -p locus-cli -- whoami
+cargo run -p locus-cli -- doctor
 ```
 
 ## Architecture

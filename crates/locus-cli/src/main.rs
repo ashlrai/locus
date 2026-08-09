@@ -8,16 +8,19 @@
 //! ```
 
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use colored::Colorize;
 use locus_core::{
-    build_ci_env_map, build_doctor_report, build_isolated_env_opts, ci_secrets_allowed,
-    default_export_filename, filter_audit_events, parse_ttl, resolve_passphrase, Binding,
-    BindingBody, DoctorExternal, DoctorVerdict, Policy, ProviderBinding, Scope, Store,
-    WorkspaceConfig, VERSION,
+    agent_md_content, agent_md_path, agent_report_from_doctor, build_ci_env_map,
+    build_doctor_report, build_isolated_env_opts, ci_secrets_allowed, default_export_filename,
+    filter_audit_events, find_workspace, mcp_agent_env, parse_ttl, probe_agent_options,
+    resolve_passphrase, workspace_stub_toml, AgentStatus, Binding, BindingBody, DoctorExternal,
+    DoctorVerdict, Policy, ProviderBinding, Scope, Store, WorkspaceConfig, VERSION,
 };
 use serde_json::json;
 use std::env;
+use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -31,12 +34,12 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · setup · doctor · watch · workspace · hook · mcp · engagement · graph\n  \
+  Setup         init · quickstart · setup · agent · doctor · watch · workspace · hook · mcp · engagement · graph\n  \
   Daily use     enter · pin · leave · whoami · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
   Audit         events\n  \
-  Maintenance   version"
+  Maintenance   completion · version"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -57,6 +60,10 @@ enum Commands {
         #[arg(long)]
         with_samples: bool,
     },
+
+    /// First 60 seconds: init samples if needed, enter workspace default, whoami + doctor
+    #[command(next_help_heading = "Setup")]
+    Quickstart,
 
     /// Register locus-mcp with an AI client config
     #[command(next_help_heading = "Setup")]
@@ -176,6 +183,10 @@ enum Commands {
         oneline: bool,
     },
 
+    /// AI-native setup + identity readiness (setup / doctor / report)
+    #[command(next_help_heading = "Setup", subcommand)]
+    Agent(AgentCmd),
+
     /// Run a command with only the pinned binding's identity surface
     #[command(next_help_heading = "Daily use")]
     Exec {
@@ -251,9 +262,54 @@ enum Commands {
     },
 
     // ───────────────────────── Maintenance ───────────────────────────
+    /// Generate shell completions (bash | zsh | fish | elvish | powershell)
+    #[command(next_help_heading = "Maintenance")]
+    Completion {
+        /// Target shell
+        shell: Shell,
+    },
+
     /// Print version (also available as `locus --version`)
     #[command(next_help_heading = "Maintenance")]
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum AgentCmd {
+    /// Wire Locus into AI clients (MCP + agent guidance)
+    ///
+    /// Requires `--apply` or `--dry-run`. Registers locus-mcp with
+    /// `LOCUS_AUTO_PIN=cwd` + `LOCUS_CLIENT=<client>` (never `LOCUS_NOTIFY=1`).
+    Setup {
+        /// Client: claude | cursor | codex | all
+        #[arg(long, default_value = "all")]
+        client: String,
+        /// Apply changes (write MCP configs, AGENT.md, optional workspace stub)
+        #[arg(long)]
+        apply: bool,
+        /// Show planned actions without writing
+        #[arg(long)]
+        dry_run: bool,
+        /// Write a project `.locus.toml` stub if missing
+        #[arg(long)]
+        workspace: bool,
+        /// Path to locus-mcp binary (default: same dir as locus, or PATH)
+        #[arg(long)]
+        mcp_bin: Option<String>,
+    },
+    /// Human-readable identity-plane readiness for AI agents
+    ///
+    /// Exit codes: ready=0, protected=1, unsafe=2.
+    Doctor,
+    /// Hub JSON readiness report (version / ready / status / pin / mcp / doctor / commands)
+    ///
+    /// Prefer `--json`. Never includes secret values. Exit codes: ready=0,
+    /// protected=1, unsafe=2.
+    Report {
+        /// Emit JSON (hub contract). Also available as global `--json`.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -469,6 +525,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Init { with_samples } => cmd_init(with_samples, cli.json),
+        Commands::Quickstart => cmd_quickstart(cli.json),
         Commands::Enter {
             alias,
             force,
@@ -486,6 +543,7 @@ fn run() -> Result<()> {
         Commands::Graph(sub) => cmd_graph(sub, cli.json),
         Commands::Whoami => cmd_whoami(cli.json),
         Commands::Status { oneline } => cmd_status(oneline, cli.json),
+        Commands::Agent(sub) => cmd_agent(sub, cli.json),
         Commands::Exec {
             no_resolve,
             strict_creds,
@@ -519,6 +577,11 @@ fn run() -> Result<()> {
         Commands::Approve(sub) => cmd_approve(sub, cli.json),
         Commands::Notify(sub) => cmd_notify(sub, cli.json),
         Commands::Events { last, op, binding } => cmd_events(last, op, binding, cli.json),
+        Commands::Completion { shell } => {
+            let mut cmd = Cli::command();
+            generate(shell, &mut cmd, "locus", &mut io::stdout());
+            Ok(())
+        }
         Commands::Version => {
             if cli.json {
                 println!(
@@ -543,6 +606,7 @@ fn cwd() -> PathBuf {
 
 fn cmd_init(with_samples: bool, json: bool) -> Result<()> {
     let s = store()?;
+    let config_written = ensure_default_config(&s)?;
     if with_samples {
         write_sample_bindings(&s)?;
     }
@@ -553,116 +617,388 @@ fn cmd_init(with_samples: bool, json: bool) -> Result<()> {
                 "ok": true,
                 "home": s.home().display().to_string(),
                 "samples": with_samples,
+                "config_written": config_written,
             })
         );
     } else {
         println!("{} locus home {}", "ok".green().bold(), s.home().display());
         println!("   seal key {}", s.seal_key_path().display());
+        if config_written {
+            println!(
+                "   config   {}  {}",
+                s.config_path().display(),
+                "notify.enabled=false".dimmed()
+            );
+        } else {
+            println!("   config   {}", s.config_path().display());
+        }
         if with_samples {
-            println!("   samples  personal, acme");
+            println!(
+                "   samples  personal, acme  {}",
+                "(edit placeholders)".dimmed()
+            );
         }
         println!();
-        println!("next:");
-        println!("  locus binding list");
-        println!("  locus pin personal");
-        println!("  locus whoami");
+        println!("{}", "next (AI-native path):".bold());
+        println!(
+            "  {}  {}",
+            "locus setup --client claude".cyan(),
+            "# wire locus-mcp into the agent".dimmed()
+        );
+        println!(
+            "  {}  {}",
+            "locus enter personal".cyan(),
+            "# or: locus pin <alias> / workspace default".dimmed()
+        );
+        println!(
+            "  {}  {}",
+            "locus doctor".cyan(),
+            "# SAFE | WARN | UNSAFE before tool use".dimmed()
+        );
+        println!(
+            "  {}  {}",
+            "locus whoami".cyan(),
+            "# confirm tenant before mutations".dimmed()
+        );
+        println!();
+        println!("{}", "also useful:".dimmed());
+        println!("  {}", "locus binding list".dimmed());
+        println!(
+            "  {}",
+            "locus quickstart          # first 60s bootstrap".dimmed()
+        );
+        println!(
+            "  {}",
+            "eval \"$(locus hook zsh)\"  # prompt shows pin / frozen".dimmed()
+        );
+        println!(
+            "  {}",
+            "locus completion zsh > …  # shell completions".dimmed()
+        );
     }
     Ok(())
 }
 
+/// Write `$LOCUS_HOME/config.toml` with `notify.enabled = false` if missing.
+/// Returns true when a new file was created.
+fn ensure_default_config(s: &Store) -> Result<bool> {
+    let path = s.config_path();
+    if path.exists() {
+        return Ok(false);
+    }
+    // Explicit notify=false so first-run is quiet; comments for humans.
+    let body = r#"# Locus home config — no secrets live here.
+# Desktop approval banners are OFF by default (agent spam is worse than silence).
+# Enable with: locus notify on   |   kill: locus notify off / LOCUS_QUIET=1
+
+[notify]
+enabled = false
+
+# Optional shell/hook preference: cwd | none | last
+# [clients]
+# auto_pin = "cwd"
+
+# Opt-in git-remote → binding auto-pin (off by default)
+# [autopin]
+# enabled = false
+# [[autopin.remotes]]
+# match = "github.com/acme-corp"
+# binding = "acme"
+"#;
+    std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
+    Ok(true)
+}
+
 fn write_sample_bindings(s: &Store) -> Result<()> {
-    let personal = Binding::from_body(BindingBody {
-        id: "bnd_personal".into(),
-        alias: "personal".into(),
-        tenant: "personal".into(),
-        principal: None,
-        description: Some("Personal projects".into()),
-        policy: Policy::default(),
-        providers: vec![
-            ProviderBinding {
-                provider: "supabase".into(),
-                account: "personal".into(),
-                credential_ref: "phm:SUPABASE_PERSONAL".into(),
-                scope: Scope {
-                    project_ref: Some("personal_ref_replace_me".into()),
-                    read_only: Some(false),
-                    ..Scope::default()
-                },
-                upstream: None,
-            },
-            ProviderBinding {
-                provider: "github".into(),
-                account: "personal".into(),
-                credential_ref: "phm:GH_TOKEN_PERSONAL".into(),
-                scope: Scope {
-                    orgs: vec![],
-                    ..Scope::default()
-                },
-                upstream: None,
-            },
-            ProviderBinding {
-                provider: "vercel".into(),
-                account: "personal".into(),
-                credential_ref: "phm:VERCEL_TOKEN_PERSONAL".into(),
-                scope: Scope {
-                    team_id: Some("team_personal_replace_me".into()),
-                    ..Scope::default()
-                },
-                upstream: None,
-            },
-        ],
-    });
-    let acme = Binding::from_body(BindingBody {
-        id: "bnd_acme".into(),
-        alias: "acme".into(),
-        tenant: "acme-corp".into(),
-        principal: None,
-        description: Some("Acme client engagement".into()),
-        policy: Policy {
-            require_approval: vec!["*.delete*".into(), "vercel.deploy.prod".into()],
-            max_ttl: Some("8h".into()),
-            ..Policy::default()
-        },
-        providers: vec![
-            ProviderBinding {
-                provider: "supabase".into(),
-                account: "acme-prod".into(),
-                credential_ref: "phm:SUPABASE_ACME".into(),
-                scope: Scope {
-                    project_ref: Some("acme_ref_replace_me".into()),
-                    read_only: Some(true),
-                    ..Scope::default()
-                },
-                upstream: None,
-            },
-            ProviderBinding {
-                provider: "github".into(),
-                account: "acme-corp".into(),
-                credential_ref: "phm:GH_TOKEN_ACME".into(),
-                scope: Scope {
-                    orgs: vec!["acme-corp".into()],
-                    repos: vec!["acme-corp/*".into()],
-                    ..Scope::default()
-                },
-                upstream: None,
-            },
-            ProviderBinding {
-                provider: "vercel".into(),
-                account: "acme-team".into(),
-                credential_ref: "phm:VERCEL_TOKEN_ACME".into(),
-                scope: Scope {
-                    team_id: Some("team_acme_replace_me".into()),
-                    projects: vec!["acme-web".into()],
-                    env: vec!["preview".into()],
-                    ..Scope::default()
-                },
-                upstream: None,
-            },
-        ],
-    });
-    s.save_binding(&personal)?;
-    s.save_binding(&acme)?;
+    // Annotated TOML so first-run users know what to replace. Never raw secrets.
+    let personal = r#"# Sample personal binding — REPLACE project_ref / team_id placeholders.
+# CredentialRefs are Phantom names (phm:NAME). Never put raw tokens here.
+# Store secrets with: phantom store SUPABASE_PERSONAL / GH_TOKEN_PERSONAL / …
+# Then: locus enter personal && locus whoami && locus doctor
+
+[binding]
+id = "bnd_personal"
+alias = "personal"
+tenant = "personal"
+description = "Personal projects — sample; edit scopes before real use"
+
+[binding.policy]
+default = "allow"
+max_ttl = "12h"
+
+[[binding.providers]]
+provider = "supabase"
+account = "personal"
+credential_ref = "phm:SUPABASE_PERSONAL"
+# project_ref is frozen on every tool call — set the real ref.
+scope = { project_ref = "personal_ref_replace_me", read_only = false }
+
+[[binding.providers]]
+provider = "github"
+account = "personal"
+credential_ref = "phm:GH_TOKEN_PERSONAL"
+# Empty orgs/repos = no allowlist restriction (tighten for client work).
+scope = { orgs = [], repos = [] }
+
+[[binding.providers]]
+provider = "vercel"
+account = "personal"
+credential_ref = "phm:VERCEL_TOKEN_PERSONAL"
+scope = { team_id = "team_personal_replace_me", env = ["preview", "production"] }
+"#;
+
+    let acme = r#"# Sample client binding (Acme) — REPLACE placeholders before real work.
+# Client work: prefer read_only on prod Supabase; require_approval on delete/deploy.
+# Switch: locus enter acme   |   leave: locus leave
+# Dual-control / firm mode: docs/firm-mode.md
+
+[binding]
+id = "bnd_acme"
+alias = "acme"
+tenant = "acme-corp"
+description = "Acme client engagement — sample"
+
+[binding.policy]
+default = "allow"
+max_ttl = "8h"
+# Human must grant before these globs run (locus approve grant …).
+require_approval = ["*.delete*", "vercel.deploy.prod"]
+
+[[binding.providers]]
+provider = "supabase"
+account = "acme-prod"
+credential_ref = "phm:SUPABASE_ACME"
+scope = { project_ref = "acme_ref_replace_me", read_only = true }
+
+[[binding.providers]]
+provider = "github"
+account = "acme-corp"
+credential_ref = "phm:GH_TOKEN_ACME"
+# Frozen org/repo allowlist — model cannot reach outside.
+scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
+
+[[binding.providers]]
+provider = "vercel"
+account = "acme-team"
+credential_ref = "phm:VERCEL_TOKEN_ACME"
+scope = { team_id = "team_acme_replace_me", projects = ["acme-web"], env = ["preview"] }
+"#;
+
+    // Prefer annotated files over re-serialize (preserves comments).
+    write_annotated_binding(s, "personal", personal)?;
+    write_annotated_binding(s, "acme", acme)?;
     Ok(())
+}
+
+fn write_annotated_binding(s: &Store, alias: &str, toml: &str) -> Result<()> {
+    // Validate before write
+    let b = Binding::parse_toml(toml).with_context(|| format!("validate sample {alias}"))?;
+    b.validate()
+        .with_context(|| format!("validate sample {alias}"))?;
+    let path = s.bindings_dir().join(format!("{alias}.toml"));
+    std::fs::write(&path, toml).with_context(|| format!("write {}", path.display()))?;
+    Ok(())
+}
+
+/// First 60 seconds: ensure home + samples, enter workspace default if unpinned, whoami + doctor.
+fn cmd_quickstart(json: bool) -> Result<()> {
+    let s = store()?;
+    let config_written = ensure_default_config(&s)?;
+
+    let mut actions: Vec<String> = Vec::new();
+    if config_written {
+        actions.push("wrote config.toml (notify.enabled=false)".into());
+    }
+
+    let had_bindings = !s.list_bindings()?.is_empty();
+    if !had_bindings {
+        write_sample_bindings(&s)?;
+        actions.push("wrote sample bindings personal, acme".into());
+    }
+
+    let mut entered: Option<(String, String)> = None;
+    let mut enter_note: Option<String> = None;
+    let pinned = s.active_session()?.is_some();
+    if !pinned {
+        let ws = find_workspace(&cwd());
+        if let Some((_, ref cfg)) = ws {
+            if cfg.default_binding.is_some() || !cfg.allowed_bindings.is_empty() {
+                match s.pin_auto(&cwd(), Some("cli".into()), false) {
+                    Ok(session) => {
+                        entered = Some((session.binding_alias.clone(), session.tenant.clone()));
+                        actions.push(format!(
+                            "entered {} ({})",
+                            session.binding_alias, session.tenant
+                        ));
+                    }
+                    Err(e) => {
+                        enter_note = Some(format!("enter skipped: {e:#}"));
+                    }
+                }
+            } else {
+                enter_note = Some(
+                    "workspace has no default_binding — pin with `locus enter <alias>`".into(),
+                );
+            }
+        } else if !s.list_bindings()?.is_empty() {
+            // No .locus.toml: pin personal if sample exists, else first binding.
+            let alias = if s.load_binding("personal").is_ok() {
+                "personal".to_string()
+            } else {
+                s.list_bindings()?
+                    .into_iter()
+                    .next()
+                    .map(|b| b.alias)
+                    .unwrap_or_default()
+            };
+            if !alias.is_empty() {
+                match s.pin(&alias, &cwd(), Some("cli".into()), false) {
+                    Ok(session) => {
+                        entered = Some((session.binding_alias.clone(), session.tenant.clone()));
+                        actions.push(format!(
+                            "pinned {} ({}) — no .locus.toml; used first/sample binding",
+                            session.binding_alias, session.tenant
+                        ));
+                    }
+                    Err(e) => {
+                        enter_note = Some(format!("pin skipped: {e:#}"));
+                    }
+                }
+            }
+        }
+    } else {
+        actions.push("already pinned".into());
+    }
+
+    // Whoami surface
+    let _ = s.check_drift_and_freeze();
+    let whoami = s.whoami().ok();
+
+    // Doctor (do not hard-exit here — quickstart should finish printing)
+    let phantom_on_path = Command::new("phantom")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false);
+    let unresolved_phm = collect_unresolved_phm_refs(&s, phantom_on_path).unwrap_or_default();
+    let report = build_doctor_report(
+        &s,
+        DoctorExternal {
+            phantom_on_path,
+            unresolved_phm,
+            cwd: Some(cwd()),
+        },
+    )?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "home": s.home().display().to_string(),
+                "actions": actions,
+                "enter_note": enter_note,
+                "entered": entered.as_ref().map(|(a, t)| json!({"binding": a, "tenant": t})),
+                "whoami": whoami,
+                "doctor": {
+                    "verdict": match report.verdict {
+                        DoctorVerdict::Safe => "safe",
+                        DoctorVerdict::Warn => "warn",
+                        DoctorVerdict::Unsafe => "unsafe",
+                    },
+                    "findings": report.findings.len(),
+                },
+            })
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{} quickstart  home={}",
+        "ok".green().bold(),
+        s.home().display()
+    );
+    for a in &actions {
+        println!("   · {a}");
+    }
+    if let Some(note) = &enter_note {
+        println!("   · {}", note.yellow());
+    }
+
+    println!();
+    if let Some(ref w) = whoami {
+        println!(
+            "{} {}  tenant={}  session={}",
+            "whoami".magenta().bold(),
+            w.binding_alias.cyan().bold(),
+            w.tenant.yellow(),
+            w.session_id.dimmed()
+        );
+        if w.frozen {
+            println!(
+                "   frozen={}  — re-pin: {}",
+                "YES".red().bold(),
+                "locus leave && locus enter <alias>".cyan()
+            );
+        }
+    } else {
+        println!(
+            "{}  {}  — run {}",
+            "whoami".magenta().bold(),
+            "unpinned".yellow(),
+            "locus enter <alias>".cyan()
+        );
+    }
+
+    println!();
+    let verdict = match report.verdict {
+        DoctorVerdict::Safe => "SAFE".green().bold().to_string(),
+        DoctorVerdict::Warn => "WARN".yellow().bold().to_string(),
+        DoctorVerdict::Unsafe => "UNSAFE".red().bold().to_string(),
+    };
+    println!(
+        "{}  {}  bindings={}  findings={}",
+        "doctor".magenta().bold(),
+        verdict,
+        report.bindings,
+        report.findings.len()
+    );
+    for f in report.findings.iter().take(5) {
+        let mark = match f.severity {
+            locus_core::IssueSeverity::Unsafe => "!".red().bold().to_string(),
+            locus_core::IssueSeverity::Warn => "!".yellow().to_string(),
+        };
+        println!("   {mark} [{}] {}", f.code, f.message);
+    }
+    if report.findings.len() > 5 {
+        println!(
+            "   {} more — run {}",
+            report.findings.len() - 5,
+            "locus doctor".cyan()
+        );
+    }
+
+    println!();
+    println!("{}", "daily path:".bold());
+    println!(
+        "  {}  ·  {}  ·  {}",
+        "locus enter <alias>".cyan(),
+        "locus whoami".cyan(),
+        "locus doctor".cyan()
+    );
+    println!(
+        "  {}  ·  {}",
+        "locus setup --client claude".dimmed(),
+        "eval \"$(locus hook zsh)\"".dimmed()
+    );
+
+    // Soft exit: unsafe still signals; warn does not abort first-run UX
+    match report.verdict {
+        DoctorVerdict::Unsafe => std::process::exit(2),
+        _ => Ok(()),
+    }
 }
 
 fn cmd_enter(
@@ -1166,14 +1502,39 @@ fn cmd_whoami(json: bool) -> Result<()> {
 fn cmd_status(oneline: bool, json: bool) -> Result<()> {
     let s = store()?;
     let _ = s.check_drift_and_freeze();
+    let require_pin = find_workspace(&cwd())
+        .map(|(_, cfg)| cfg.require_pin)
+        .unwrap_or(false);
     match s.active_session()? {
         None => {
             if json {
-                println!("{}", serde_json::json!({ "pinned": false }));
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "pinned": false,
+                        "require_pin": require_pin,
+                    })
+                );
             } else if oneline {
-                println!("unpinned");
+                // Hook-friendly tokens:
+                //   unpinned | require_pin | frozen | invalid | alias:tenant
+                if require_pin {
+                    println!("require_pin");
+                } else {
+                    println!("unpinned");
+                }
             } else {
-                println!("{} unpinned — run `locus pin <alias>`", "!".yellow().bold());
+                if require_pin {
+                    println!(
+                        "{} unpinned — workspace require_pin: run `locus enter <alias>`",
+                        "!".red().bold()
+                    );
+                } else {
+                    println!(
+                        "{} unpinned — run `locus enter <alias>`",
+                        "!".yellow().bold()
+                    );
+                }
             }
         }
         Some(session) => {
@@ -1193,6 +1554,7 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                         "frozen": frozen,
                         "frozen_reason": session.frozen_reason,
                         "expired": session.is_expired(),
+                        "require_pin": require_pin,
                         "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
                         "namespaces": session.all_aliases(),
                     })
@@ -1839,24 +2201,7 @@ fn cmd_doctor(json: bool) -> Result<()> {
     // Continuous whoami: freeze session if binding material drifted under pin
     let _ = s.check_drift_and_freeze()?;
 
-    // Phantom on PATH (external)
-    let phantom_on_path = Command::new("phantom")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|st| st.success())
-        .unwrap_or(false);
-    let unresolved_phm = collect_unresolved_phm_refs(&s, phantom_on_path)?;
-
-    let report = build_doctor_report(
-        &s,
-        DoctorExternal {
-            phantom_on_path,
-            unresolved_phm,
-            cwd: Some(cwd()),
-        },
-    )?;
+    let report = gather_doctor_report(&s)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1869,6 +2214,359 @@ fn cmd_doctor(json: bool) -> Result<()> {
         DoctorVerdict::Warn => std::process::exit(1),
         DoctorVerdict::Unsafe => std::process::exit(2),
     }
+}
+
+/// AI-native agent plane: setup / doctor / report.
+fn cmd_agent(sub: AgentCmd, json: bool) -> Result<()> {
+    match sub {
+        AgentCmd::Setup {
+            client,
+            apply,
+            dry_run,
+            workspace,
+            mcp_bin,
+        } => cmd_agent_setup(&client, apply, dry_run, workspace, mcp_bin, json),
+        AgentCmd::Doctor => cmd_agent_doctor(json),
+        AgentCmd::Report { json: report_json } => cmd_agent_report(json || report_json),
+    }
+}
+
+fn gather_doctor_report(s: &Store) -> Result<locus_core::DoctorReport> {
+    let phantom_on_path = Command::new("phantom")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false);
+    let unresolved_phm = collect_unresolved_phm_refs(s, phantom_on_path)?;
+    build_doctor_report(
+        s,
+        DoctorExternal {
+            phantom_on_path,
+            unresolved_phm,
+            cwd: Some(cwd()),
+        },
+    )
+    .map_err(Into::into)
+}
+
+fn build_hub_agent_report(s: &Store) -> Result<locus_core::AgentReport> {
+    let doctor = gather_doctor_report(s)?;
+    let user_home = dirs::home_dir();
+    let mut opts = probe_agent_options(&cwd(), user_home.as_deref());
+    opts.home_ready = s.seal_key_path().exists() && s.home().exists();
+    Ok(agent_report_from_doctor(doctor, opts))
+}
+
+fn print_agent_report_human(report: &locus_core::AgentReport) {
+    let status_s = match report.status {
+        AgentStatus::Ready => "ready".green().bold().to_string(),
+        AgentStatus::Protected => "protected".yellow().bold().to_string(),
+        AgentStatus::Unsafe => "unsafe".red().bold().to_string(),
+    };
+    println!(
+        "{} agent readiness  {}  v{}",
+        "locus".magenta().bold(),
+        status_s,
+        report.version
+    );
+    println!(
+        "  ready     {}",
+        if report.ready {
+            "true".green().to_string()
+        } else {
+            "false".yellow().to_string()
+        }
+    );
+    let d = &report.doctor;
+    let dv = match d.verdict {
+        DoctorVerdict::Safe => "SAFE".green().bold().to_string(),
+        DoctorVerdict::Warn => "WARN".yellow().bold().to_string(),
+        DoctorVerdict::Unsafe => "UNSAFE".red().bold().to_string(),
+    };
+    println!(
+        "  doctor    {}  seal={}  bindings={}  pending={}",
+        dv,
+        if d.seal_ok {
+            "ok".green().to_string()
+        } else {
+            "FAIL".red().to_string()
+        },
+        d.bindings,
+        d.pending_approvals
+    );
+    if let Some(ref pin) = report.pin {
+        println!(
+            "  pin       {}  tenant={}  seal={}{}",
+            pin.alias.cyan().bold(),
+            pin.tenant.yellow(),
+            if pin.seal_ok {
+                "ok".green().to_string()
+            } else {
+                "FAIL".red().to_string()
+            },
+            if pin.expired {
+                format!("  {}", "EXPIRED".red().bold())
+            } else {
+                String::new()
+            }
+        );
+    } else {
+        println!("  pin       {}", "none".dimmed());
+    }
+    let yn = |v: bool| {
+        if v {
+            "yes".green().to_string()
+        } else {
+            "no".dimmed().to_string()
+        }
+    };
+    println!(
+        "  mcp       claude={}  cursor={}  codex={}",
+        yn(report.mcp_registered.claude),
+        yn(report.mcp_registered.cursor),
+        yn(report.mcp_registered.codex)
+    );
+    if report.findings.is_empty() {
+        println!(
+            "  {}",
+            "all clear — identity plane ready for agent work"
+                .green()
+                .bold()
+        );
+    } else {
+        println!("  findings");
+        for f in &report.findings {
+            println!("    · {f}");
+        }
+    }
+    if !report.next_steps.is_empty() {
+        println!("  next");
+        for s in &report.next_steps {
+            println!("    {} {}", "→".dimmed(), s.cyan());
+        }
+    }
+    println!(
+        "  commands  {}  ·  {}",
+        report.commands.enter.dimmed(),
+        report.commands.whoami.dimmed()
+    );
+    println!(
+        "  {}",
+        "machine contract: locus agent report --json".dimmed()
+    );
+}
+
+fn cmd_agent_doctor(json: bool) -> Result<()> {
+    let s = store()?;
+    let _ = s.check_drift_and_freeze()?;
+    let report = build_hub_agent_report(&s)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_agent_report_human(&report);
+    }
+    std::process::exit(report.exit_code);
+}
+
+fn cmd_agent_report(json: bool) -> Result<()> {
+    let s = store()?;
+    let _ = s.check_drift_and_freeze()?;
+    let report = build_hub_agent_report(&s)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print_agent_report_human(&report);
+    }
+    std::process::exit(report.exit_code);
+}
+
+fn cmd_agent_setup(
+    client: &str,
+    apply: bool,
+    dry_run: bool,
+    write_workspace: bool,
+    mcp_bin: Option<String>,
+    json: bool,
+) -> Result<()> {
+    if !apply && !dry_run {
+        bail!("pass --apply or --dry-run (refusing to mutate without intent)");
+    }
+    if apply && dry_run {
+        bail!("pass only one of --apply or --dry-run");
+    }
+    let clients: Vec<&str> = match client {
+        "all" => vec!["claude", "cursor", "codex"],
+        "claude" | "cursor" | "codex" => vec![client],
+        other => bail!("unknown client '{other}' (use claude|cursor|codex|all)"),
+    };
+
+    // Ensure ~/.locus (or LOCUS_HOME) exists — init layout + seal key if needed.
+    let s = store()?;
+    let bin = resolve_mcp_bin(mcp_bin);
+    let mut actions: Vec<String> = Vec::new();
+    let project = cwd();
+    actions.push(format!("ensure locus home → {}", s.home().display()));
+
+    for c in &clients {
+        let env_map = mcp_agent_env(c);
+        // Invariant: agent setup never enables desktop notify spam.
+        debug_assert!(
+            !env_map.contains_key("LOCUS_NOTIFY"),
+            "LOCUS_NOTIFY must not be set by agent setup"
+        );
+        let server_entry = json!({
+            "command": &bin,
+            "args": [],
+            "env": env_map,
+        });
+        match *c {
+            "claude" => {
+                let path = project.join(".mcp.json");
+                actions.push(format!(
+                    "mcp claude → {} (LOCUS_AUTO_PIN=cwd, LOCUS_CLIENT=claude)",
+                    path.display()
+                ));
+                if apply {
+                    merge_mcp_json(&path, "locus", &server_entry)?;
+                }
+            }
+            "cursor" => {
+                let path = project.join(".cursor").join("mcp.json");
+                actions.push(format!(
+                    "mcp cursor → {} (LOCUS_AUTO_PIN=cwd, LOCUS_CLIENT=cursor)",
+                    path.display()
+                ));
+                if apply {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    merge_mcp_json(&path, "locus", &server_entry)?;
+                    if let Some(home) = dirs::home_dir() {
+                        let global = home.join(".cursor").join("mcp.json");
+                        if global.exists() {
+                            merge_mcp_json(&global, "locus", &server_entry)?;
+                            actions.push(format!("mcp cursor global → {}", global.display()));
+                        }
+                    }
+                }
+            }
+            "codex" => {
+                let home = dirs::home_dir().context("home dir for codex config")?;
+                let path = home.join(".codex").join("config.toml");
+                actions.push(format!(
+                    "mcp codex → {} (LOCUS_AUTO_PIN=cwd, LOCUS_CLIENT=codex)",
+                    path.display()
+                ));
+                if apply {
+                    merge_codex_mcp(&path, &bin, c)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let agent_path = agent_md_path(&project);
+    actions.push(format!("agent guidance → {}", agent_path.display()));
+    if apply {
+        if let Some(parent) = agent_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&agent_path, agent_md_content())?;
+    }
+
+    if write_workspace {
+        let ws = project.join(".locus.toml");
+        if ws.exists() {
+            actions.push(format!(
+                "workspace stub skipped (exists) → {}",
+                ws.display()
+            ));
+        } else {
+            actions.push(format!("workspace stub → {}", ws.display()));
+            if apply {
+                std::fs::write(&ws, workspace_stub_toml())?;
+            }
+        }
+    }
+
+    if json {
+        println!(
+            "{}",
+            json!({
+                "ok": true,
+                "apply": apply,
+                "dry_run": dry_run,
+                "clients": clients,
+                "home": s.home().display().to_string(),
+                "mcp_bin": bin,
+                "actions": actions,
+                "env": {
+                    "LOCUS_AUTO_PIN": "cwd",
+                    "LOCUS_CLIENT": "<client>",
+                    "LOCUS_NOTIFY": null,
+                },
+            })
+        );
+    } else {
+        let mode = if dry_run { "dry-run" } else { "applied" };
+        println!("{} agent setup ({mode})", "ok".green().bold());
+        for a in &actions {
+            println!("   · {a}");
+        }
+        if dry_run {
+            println!("   {}", "re-run with --apply to write".dimmed());
+        } else {
+            println!();
+            println!("{}", "Next steps".bold());
+            println!(
+                "  1. {}  (or set default_binding in .locus.toml)",
+                "locus enter / locus pin <alias>".cyan()
+            );
+            println!("  2. {}", "locus whoami".cyan());
+            println!("  3. {}", "locus agent doctor".cyan());
+            println!("  4. Restart your AI client so MCP picks up locus-mcp");
+            println!();
+            println!(
+                "  {} MCP env: LOCUS_AUTO_PIN=cwd + LOCUS_CLIENT — never LOCUS_NOTIFY by default",
+                "note:".dimmed()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Merge/write `[mcp_servers.locus]` into Codex config.toml with agent env.
+fn merge_codex_mcp(path: &std::path::Path, bin: &str, client: &str) -> Result<()> {
+    let section = format!(
+        r#"
+[mcp_servers.locus]
+command = "{bin}"
+
+[mcp_servers.locus.env]
+LOCUS_AUTO_PIN = "cwd"
+LOCUS_CLIENT = "{client}"
+"#
+    );
+    if path.exists() {
+        let raw = std::fs::read_to_string(path)?;
+        if raw.contains("[mcp_servers.locus]") {
+            return Ok(());
+        }
+        let mut out = raw;
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&section);
+        std::fs::write(path, out)?;
+    } else {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, section.trim_start())?;
+    }
+    Ok(())
 }
 
 /// Poll `check_drift_and_freeze` until interrupted (or once with `--once`).
@@ -2197,16 +2895,26 @@ fn phantom_list_names() -> Result<Vec<String>> {
 fn cmd_hook(shell: &str) -> Result<()> {
     match shell {
         "zsh" | "bash" => {
+            // status --oneline tokens: unpinned | require_pin | frozen | invalid | alias:tenant
+            // zsh colors: red=unpinned/require_pin warn, yellow=frozen, cyan=healthy pin
             println!(
                 r#"# Locus prompt + optional auto-enter — eval "$(locus hook zsh)"
-# Prompt shows [locus:enter] when unpinned, [locus:alias:tenant] when pinned.
+# Prompt:
+#   [locus:enter]           unpinned
+#   [locus:enter!]          unpinned in require_pin workspace (warn)
+#   [locus:FROZEN]          pin frozen after binding drift — re-pin
+#   [locus:alias:tenant]    healthy pin
 # LOCUS_AUTO_ENTER=1 → on directory change, try `locus enter` (workspace default / autopin).
 # Never forces allowlist; never overrides with secrets.
 _locus_prompt() {{
   local s
   s="$(locus status --oneline 2>/dev/null)" || s="unpinned"
-  if [[ "$s" == "unpinned" ]]; then
+  if [[ "$s" == "require_pin" ]]; then
+    echo "%F{{red}}%B[locus:enter!]%b%f"
+  elif [[ "$s" == "unpinned" ]]; then
     echo "%F{{red}}[locus:enter]%f"
+  elif [[ "$s" == "frozen" ]]; then
+    echo "%F{{yellow}}%B[locus:FROZEN]%b%f"
   elif [[ "$s" == "invalid" ]]; then
     echo "%F{{red}}[locus:invalid]%f"
   else
@@ -2221,7 +2929,7 @@ if [[ -n "$ZSH_VERSION" ]]; then
   autoload -Uz add-zsh-hook 2>/dev/null
   add-zsh-hook chpwd _locus_auto_enter 2>/dev/null || true
 elif [[ -n "$BASH_VERSION" ]]; then
-  # bash: run on PROMPT_COMMAND (best-effort)
+  # bash: run on PROMPT_COMMAND (best-effort). Colors via ANSI for bash PS1 use.
   if [[ -z "$_LOCUS_PROMPT_CMD" ]]; then
     _LOCUS_PROMPT_CMD=1
     PROMPT_COMMAND="_locus_auto_enter${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
@@ -2233,17 +2941,33 @@ fi
         }
         "fish" => {
             println!(
-                r#"# Locus prompt helper for fish — [locus:enter] | [locus:alias:tenant]
+                r#"# Locus prompt helper for fish
+# [locus:enter] | [locus:enter!] (require_pin) | [locus:FROZEN] | [locus:alias:tenant]
 # LOCUS_AUTO_ENTER=1 → try enter when changing directories
 function locus_prompt
   set -l s (locus status --oneline 2>/dev/null; or echo unpinned)
-  if test "$s" = "unpinned"
-    echo "[locus:enter]"
+  if test "$s" = "require_pin"
+    set_color --bold red
+    echo -n "[locus:enter!]"
+    set_color normal
+  else if test "$s" = "unpinned"
+    set_color red
+    echo -n "[locus:enter]"
+    set_color normal
+  else if test "$s" = "frozen"
+    set_color --bold yellow
+    echo -n "[locus:FROZEN]"
+    set_color normal
   else if test "$s" = "invalid"
-    echo "[locus:invalid]"
+    set_color red
+    echo -n "[locus:invalid]"
+    set_color normal
   else
-    echo "[locus:$s]"
+    set_color cyan
+    echo -n "[locus:$s]"
+    set_color normal
   end
+  echo
 end
 function _locus_auto_enter --on-variable PWD
   if test "$LOCUS_AUTO_ENTER" = "1"

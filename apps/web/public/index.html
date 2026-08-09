@@ -492,29 +492,34 @@
     </section>
 
     <section>
-      <div class="sec-label">Quick start</div>
+      <div class="sec-label">Quick start · v0.1.1</div>
       <div class="term">
         <div class="term-bar">
           <span class="c"></span><span class="c"></span><span class="c"></span>
           <span class="title">zsh · locus</span>
         </div>
-        <pre><span class="cmd">locus init --with-samples</span>
-<span class="cmd">locus pin personal && locus whoami</span>
-<span class="out">ok  pinned personal (personal)</span>
+        <pre><span class="cmd">locus quickstart</span>  <span class="cmt"># init samples · enter · whoami · doctor</span>
+<span class="cmd">locus enter personal && locus whoami</span>
+<span class="out">ok  entered personal (personal)</span>
 
-<span class="cmd">locus pin acme && locus whoami</span>
-<span class="out">ok  pinned acme (acme-corp)</span>
+<span class="cmd">locus enter acme && locus whoami</span>
+<span class="out">ok  entered acme (acme-corp)</span>
 <span class="cmt"># previous identity is gone from the process env</span>
 
 <span class="cmd">locus exec -- env | grep LOCUS_</span>
-<span class="cmd">locus setup --client claude</span>  <span class="cmt"># wire locus-mcp</span></pre>
+<span class="cmd">locus setup --client claude</span>  <span class="cmt"># wire locus-mcp</span>
+<span class="cmd">locus doctor</span>  <span class="cmt"># SAFE | WARN | UNSAFE</span>
+
+<span class="cmt"># graph share · CI pins (v0.1.1)</span>
+<span class="cmd">locus graph export --out team.locusgraph</span>
+<span class="cmd">locus ci mint -b acme --ttl 15m</span></pre>
       </div>
     </section>
 
     <section id="arch">
       <div class="sec-label">Architecture</div>
       <div class="arch" aria-label="Architecture diagram">
-<span class="hl">locus pin acme</span>
+<span class="hl">locus enter acme</span>
         <span class="dim">│</span>
         <span class="dim">▼</span>
   Session sealed <span class="ok">(HMAC)</span> → binding <span class="hl">"acme"</span>
@@ -540,7 +545,7 @@
           <div class="flow-n">02</div>
           <div>
             <h3>Human pins. Agents cannot.</h3>
-            <p><code>locus pin acme</code> seals the session. MCP only offers <code>locus_request_pin</code>.</p>
+            <p><code>locus enter acme</code> seals the session. MCP only offers <code>locus_request_pin</code>.</p>
           </div>
         </div>
         <div class="flow-step">

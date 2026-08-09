@@ -84,12 +84,15 @@ Any client that can spawn a stdio MCP server can use:
 
 ## Protocol notes
 
-- **JSON-RPC 2.0**, newline-delimited messages on stdin/stdout  
-- Supported methods (MCP subset): `initialize`, `ping`, `tools/list`, `tools/call`, empty `resources/list` / `prompts/list`  
+- **JSON-RPC 2.0** over stdio — **Content-Length** framing (Claude Code / Cursor) and **NDJSON**  
+- Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`  
 - **Never** log to stdout from the server — that breaks the protocol (errors go to stderr)  
-- Protocol version advertised: `2024-11-05`
+- Protocol version advertised: `2024-11-05`  
+- `initialize.instructions` carries crisp agent rules (whoami first, cannot pin, scope freeze, resources)
 
 ## Tools the agent sees
+
+Every tool description is prefixed with **`[locus:<alias|unpinned>]`** so the model always sees which tenant the catalog belongs to. **`locus_whoami` is always first** in `tools/list`.
 
 ### Always (control plane)
 
@@ -97,6 +100,8 @@ Any client that can spawn a stdio MCP server can use:
 |------|----------|
 | `locus_whoami` | Active pin: tenant, binding, providers, frozen scopes — **no secrets** |
 | `locus_status` | Short pinned/unpinned + seal status |
+| `locus_heartbeat` | Doctor-lite / runtime drift (seal, freeze, binding match) |
+| `locus_enter_hint` | Shell command for the human to pin (`locus enter …`) |
 | `locus_list_bindings` | Configured aliases/tenants |
 | `locus_request_pin` | Returns instructions for the human; **does not pin** |
 
@@ -108,6 +113,61 @@ Any client that can spawn a stdio MCP server can use:
 | `supabase.*` / `github.*` / `vercel.*` | Adapter tools for providers on the binding |
 
 Tool names are **not** multi-tenant namespaced under exclusive pin — the catalog itself is the isolation boundary. Wrong-tenant tools simply do not appear.
+
+## Resources
+
+| URI | Content |
+|-----|---------|
+| `locus://session` | Current pin whoami JSON (or `{ "pinned": false }`) — **no secrets** |
+| `locus://doctor` | Doctor report (runtime drift, pin, workspace, findings) — **no secrets** |
+| `locus://bindings` | Binding summaries (alias, tenant, providers) |
+
+Use `resources/list` + `resources/read` with `{ "uri": "locus://session" }`.
+
+## Prompts
+
+| Name | Purpose |
+|------|---------|
+| `locus_context` | System prompt fragment: active tenant, frozen scopes, **you cannot pin — ask the human** |
+
+`prompts/get` with `{ "name": "locus_context" }` returns a user-role message agents can inject as context.
+
+## MCP auto-pin (cwd / workspace)
+
+Agents still **cannot** call pin. The **server** may silently pin once at MCP start (and at most once per process) from the workspace when policy allows:
+
+| Enable signal | Effect |
+|---------------|--------|
+| `.locus.toml` has `default_binding` | **Preferred default** — auto-pin that binding on MCP start (cwd must see the workspace file) |
+| `.locus.toml` has `require_pin = true` | Enables auto-pin policy (still needs a resolvable default or autopin target) |
+| `LOCUS_MCP_AUTO_PIN=1` | Explicit enable |
+| `LOCUS_AUTO_PIN=cwd` or `clients.auto_pin = "cwd"` in `$LOCUS_HOME/config.toml` | Enable cwd-based auto-pin |
+| `LOCUS_MCP_AUTO_PIN=0` / `false` / `off` | **Kill switch** — never auto-pin |
+
+Rules:
+
+1. Only when **unpinned**; never rewrites a human pin mid-session.  
+2. Only when workspace has `require_pin` or non-empty `default_binding`.  
+3. Uses `pin_auto` — **never `--force`**; workspace `allowed_bindings` always wins.  
+4. Audits **`session.auto_pin`** (plus normal `session.pin`).  
+5. Fail soft: if pin fails, stay unpinned and expose control tools only.
+
+Example workspace:
+
+```toml
+# .locus.toml
+version = 1
+default_binding = "acme"
+allowed_bindings = ["acme"]
+require_pin = true
+```
+
+```bash
+# optional explicit enable for CI / non-workspace shells
+export LOCUS_MCP_AUTO_PIN=1
+# kill switch when you want a bare control catalog
+export LOCUS_MCP_AUTO_PIN=0
+```
 
 ## Scope freeze and policy
 
@@ -125,7 +185,7 @@ locus pin personal    # human action
 locus leave           # unbind; agent loses provider tools
 ```
 
-Workspace defaults (`.locus.toml`) affect CLI pin UX; the MCP server always reads the **active sealed session**, not “whatever directory the IDE opened,” unless your workflow re-pins on directory change.
+Workspace defaults (`.locus.toml`) affect CLI pin UX. MCP reads the **active sealed session** under `LOCUS_HOME`; with auto-pin enabled (see above) it may also pin the workspace `default_binding` once when the server’s cwd contains that `.locus.toml`.
 
 ## Isolation relative to other MCPs
 

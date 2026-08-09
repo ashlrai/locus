@@ -2,6 +2,8 @@
 
 > Identity plane for coding agents. Pin a Binding; every CLI command and MCP tool is hard-scoped to that tenant until a human re-pins. **Wrong account, impossible.**
 
+**Prefer `locus enter` (or `locus pin`) before tool use** — call `locus whoami` / `locus_whoami` if context is unclear. Agents cannot re-pin; ask the human.
+
 Sibling: [Phantom](https://phm.dev) answers *can this secret enter the model?* Locus answers *as whom, against which tenant, right now?*
 
 ## What this repo is

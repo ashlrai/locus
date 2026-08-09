@@ -41,11 +41,30 @@ enum Framing {
 
 impl McpClient {
     fn spawn(locus_home: &std::path::Path, framing: Framing) -> Self {
-        let mut child = Command::new(mcp_bin())
-            .env("LOCUS_HOME", locus_home)
+        Self::spawn_opts(locus_home, framing, None, &[])
+    }
+
+    /// Spawn with optional working directory and extra env pairs.
+    fn spawn_opts(
+        locus_home: &std::path::Path,
+        framing: Framing,
+        cwd: Option<&std::path::Path>,
+        extra_env: &[(&str, &str)],
+    ) -> Self {
+        let mut cmd = Command::new(mcp_bin());
+        cmd.env("LOCUS_HOME", locus_home)
+            // Default off so tests without workspace defaults stay unpinned.
+            .env("LOCUS_MCP_AUTO_PIN", "0")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd
             .spawn()
             .expect("spawn locus-mcp — run `cargo build -p locus-mcp` first");
         let stdin = child.stdin.take().expect("stdin");
@@ -208,7 +227,7 @@ fn sample_bindings(store: &Store) {
     store.save_binding(&acme).unwrap();
 }
 
-fn handshake(client: &mut McpClient) {
+fn handshake(client: &mut McpClient) -> Value {
     let init = client.request(
         "initialize",
         json!({
@@ -218,7 +237,7 @@ fn handshake(client: &mut McpClient) {
         }),
     );
     assert!(init.get("result").is_some(), "initialize failed: {init}");
-    let result = init.get("result").unwrap();
+    let result = init.get("result").unwrap().clone();
     assert_eq!(
         result
             .get("serverInfo")
@@ -230,6 +249,17 @@ fn handshake(client: &mut McpClient) {
     client.notify("notifications/initialized", json!({}));
     // tiny pause so notification is fully consumed before next write
     std::thread::sleep(Duration::from_millis(20));
+    result
+}
+
+fn parse_resource_text(resp: &Value) -> String {
+    resp["result"]["contents"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 #[test]
@@ -240,16 +270,43 @@ fn unpinned_tools_list_only_control_tools_ndjson() {
     // no pin
 
     let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
-    handshake(&mut client);
+    let init = handshake(&mut client);
+
+    // initialize: agent instructions + resource/prompt capabilities
+    let instructions = init["instructions"].as_str().unwrap_or("");
+    assert!(
+        instructions.to_lowercase().contains("cannot pin") || instructions.contains("locus_whoami"),
+        "initialize instructions should teach agents about pin: {instructions}"
+    );
+    assert!(
+        init["capabilities"]["resources"].is_object(),
+        "initialize must advertise resources capability"
+    );
+    assert!(
+        init["capabilities"]["prompts"].is_object()
+            || init["capabilities"].get("prompts").is_some(),
+        "initialize must advertise prompts capability: {init}"
+    );
 
     let list = client.request("tools/list", json!({}));
     let tools = list["result"]["tools"].as_array().expect("tools array");
     assert!(!tools.is_empty());
+    // locus_whoami always first
+    assert_eq!(
+        tools[0]["name"].as_str(),
+        Some("locus_whoami"),
+        "locus_whoami must be first tool"
+    );
     for t in tools {
         let name = t["name"].as_str().unwrap();
         assert!(
             name.starts_with("locus_"),
             "unpinned tools/list must be control-only, got {name}"
+        );
+        let desc = t["description"].as_str().unwrap_or("");
+        assert!(
+            desc.starts_with("[locus:unpinned]"),
+            "unpinned tool {name} description must start with [locus:unpinned], got: {desc}"
         );
     }
     assert!(tools.iter().any(|t| t["name"] == "locus_whoami"));
@@ -276,6 +333,11 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
     // tools/list after initialize includes provider tools for pin
     let list = client.request("tools/list", json!({}));
     let tools = list["result"]["tools"].as_array().expect("tools");
+    assert_eq!(
+        tools[0]["name"].as_str(),
+        Some("locus_whoami"),
+        "locus_whoami must be first when pinned"
+    );
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(names.contains(&"locus_whoami"));
     assert!(names.contains(&"locus_heartbeat"));
@@ -284,6 +346,15 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
     assert!(names.contains(&"github.check_repo"));
     assert!(names.contains(&"vercel.scope"));
     assert!(names.contains(&"supabase.scope"));
+    // Every description tagged with active pin alias
+    for t in tools {
+        let name = t["name"].as_str().unwrap_or("?");
+        let desc = t["description"].as_str().unwrap_or("");
+        assert!(
+            desc.starts_with("[locus:acme]"),
+            "pinned tool {name} must start with [locus:acme], got: {desc}"
+        );
+    }
 
     // github.scope end-to-end
     let gh = client.request(
@@ -761,4 +832,447 @@ fn github_check_repo_and_vercel_env_freeze_over_mcp() {
     let (text, is_err) = McpClient::tool_text(&sb);
     assert!(is_err);
     assert!(text.contains("scope freeze") || text.contains("proj_evil"));
+}
+
+// ─── Resources + prompts (AI-native surface) ────────────────────────────────
+
+#[test]
+fn resources_list_and_read_session_doctor_bindings_unpinned() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    let list = client.request("resources/list", json!({}));
+    let resources = list["result"]["resources"]
+        .as_array()
+        .expect("resources array");
+    let uris: Vec<&str> = resources.iter().filter_map(|r| r["uri"].as_str()).collect();
+    assert!(uris.contains(&"locus://session"), "uris={uris:?}");
+    assert!(uris.contains(&"locus://doctor"), "uris={uris:?}");
+    assert!(uris.contains(&"locus://bindings"), "uris={uris:?}");
+    for r in resources {
+        assert_eq!(r["mimeType"], "application/json");
+        assert!(r["description"].as_str().is_some());
+    }
+
+    // session — unpinned
+    let sess = client.request("resources/read", json!({ "uri": "locus://session" }));
+    assert!(sess.get("result").is_some(), "session read failed: {sess}");
+    let text = parse_resource_text(&sess);
+    let body: Value = serde_json::from_str(&text).expect("session json");
+    assert_eq!(body["pinned"], false);
+
+    // doctor lite — structured report, no secrets
+    let doc = client.request("resources/read", json!({ "uri": "locus://doctor" }));
+    assert!(doc.get("result").is_some(), "doctor read failed: {doc}");
+    let text = parse_resource_text(&doc);
+    let body: Value = serde_json::from_str(&text).expect("doctor json");
+    assert!(body.get("verdict").is_some() || body.get("runtime").is_some());
+    assert!(body.get("ok").is_some() || body.get("runtime").is_some());
+    let dumped = text.to_lowercase();
+    assert!(
+        !dumped.contains("sk-") && !dumped.contains("ghp_"),
+        "doctor must not leak secret-like material"
+    );
+
+    // bindings list
+    let binds = client.request("resources/read", json!({ "uri": "locus://bindings" }));
+    let text = parse_resource_text(&binds);
+    let body: Value = serde_json::from_str(&text).expect("bindings json");
+    let arr = body.as_array().expect("bindings array");
+    assert!(
+        arr.iter().any(|b| b["alias"] == "acme"),
+        "expected acme binding: {body}"
+    );
+    assert!(
+        arr.iter().all(|b| b.get("credential_ref").is_none()),
+        "summaries must not include raw credential values"
+    );
+
+    // unknown resource
+    let bad = client.request("resources/read", json!({ "uri": "locus://nope" }));
+    assert!(
+        bad.get("error").is_some(),
+        "unknown resource should error: {bad}"
+    );
+}
+
+#[test]
+fn resources_session_whoami_when_pinned() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    store
+        .pin("acme", dir.path(), Some("mcp-res".into()), false)
+        .unwrap();
+
+    let mut client = McpClient::spawn(dir.path(), Framing::ContentLength);
+    handshake(&mut client);
+
+    let sess = client.request("resources/read", json!({ "uri": "locus://session" }));
+    let text = parse_resource_text(&sess);
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["binding_alias"], "acme");
+    assert_eq!(body["tenant"], "acme-corp");
+    assert_eq!(body["seal_ok"], true);
+    assert!(body.get("providers").is_some());
+    // CredentialRefs only — never resolved secret values
+    for p in body["providers"].as_array().unwrap() {
+        let cref = p["credential_ref"].as_str().unwrap_or("");
+        assert!(
+            cref.starts_with("phm:") || cref.starts_with("env:") || cref.starts_with("test:"),
+            "credential_ref should be a ref, got {cref}"
+        );
+    }
+
+    let doc = client.request("resources/read", json!({ "uri": "locus://doctor" }));
+    let text = parse_resource_text(&doc);
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["pinned"], "acme");
+    // Doctor lite may WARN on unresolved phm: (Phantom not probed in MCP resource).
+    // Assert pin/runtime health rather than full SAFE verdict.
+    assert!(
+        body["runtime"]["ok"].as_bool().unwrap_or(false)
+            || body["runtime"]["pinned"].as_bool().unwrap_or(false),
+        "doctor resource should report pinned runtime: {body}"
+    );
+    assert!(body.get("verdict").is_some());
+}
+
+#[test]
+fn prompts_list_and_get_locus_context() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+
+    // Unpinned context
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    let list = client.request("prompts/list", json!({}));
+    let prompts = list["result"]["prompts"].as_array().expect("prompts");
+    assert!(
+        prompts.iter().any(|p| p["name"] == "locus_context"),
+        "expected locus_context: {list}"
+    );
+
+    let got = client.request("prompts/get", json!({ "name": "locus_context" }));
+    assert!(got.get("result").is_some(), "prompts/get failed: {got}");
+    let messages = got["result"]["messages"].as_array().expect("messages");
+    assert!(!messages.is_empty());
+    let text = messages[0]["content"]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        text.to_lowercase().contains("cannot pin"),
+        "context must say agents cannot pin: {text}"
+    );
+    assert!(
+        text.contains("pinned**: false")
+            || text.contains("pinned: false")
+            || text.contains("No sealed session")
+            || text.contains("**pinned**: false"),
+        "unpinned context should state unpinned: {text}"
+    );
+    assert!(
+        text.contains("locus://session") || text.contains("locus_whoami"),
+        "context should point at session resource/tool"
+    );
+
+    // Unknown prompt
+    let bad = client.request("prompts/get", json!({ "name": "nope" }));
+    assert!(bad.get("error").is_some(), "unknown prompt: {bad}");
+
+    // Pinned context includes tenant + frozen scopes
+    store
+        .pin("acme", dir.path(), Some("mcp-prompt".into()), false)
+        .unwrap();
+    drop(client);
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+    let got = client.request("prompts/get", json!({ "name": "locus_context" }));
+    let text = got["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        text.contains("acme"),
+        "pinned context missing alias: {text}"
+    );
+    assert!(
+        text.contains("acme-corp"),
+        "pinned context missing tenant: {text}"
+    );
+    assert!(
+        text.contains("project_ref") || text.contains("proj_acme") || text.contains("github"),
+        "pinned context should mention frozen scopes/providers: {text}"
+    );
+    assert!(
+        text.to_lowercase().contains("cannot pin"),
+        "still cannot pin when pinned: {text}"
+    );
+}
+
+#[test]
+fn mcp_auto_pin_from_workspace_default_binding() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("locus-home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Store::open(&home).unwrap();
+    sample_bindings(&store);
+
+    // Workspace with default_binding enables preferred MCP auto-pin
+    std::fs::write(
+        project.join(".locus.toml"),
+        r#"
+version = 1
+default_binding = "acme"
+allowed_bindings = ["acme"]
+"#,
+    )
+    .unwrap();
+
+    // Explicit enable + cwd = project so auto-pin finds .locus.toml
+    let mut client = McpClient::spawn_opts(
+        &home,
+        Framing::Ndjson,
+        Some(&project),
+        &[("LOCUS_MCP_AUTO_PIN", "1")],
+    );
+    handshake(&mut client);
+
+    // After initialize auto-pin, tools/list should include provider tools
+    let list = client.request("tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().expect("tools");
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(
+        names.contains(&"github.scope"),
+        "auto-pin should expose provider tools, got {names:?}"
+    );
+    assert_eq!(tools[0]["name"], "locus_whoami");
+    for t in tools {
+        let desc = t["description"].as_str().unwrap_or("");
+        assert!(
+            desc.starts_with("[locus:acme]"),
+            "auto-pinned descriptions: {desc}"
+        );
+    }
+
+    let who = client.request(
+        "tools/call",
+        json!({ "name": "locus_whoami", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&who);
+    assert!(!is_err, "whoami after auto-pin: {text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["binding_alias"], "acme");
+    assert_eq!(body["tenant"], "acme-corp");
+
+    // Audit trail: session.auto_pin
+    let events = store.read_audit_events().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| e.op == "session.auto_pin" && e.binding == "acme"),
+        "expected session.auto_pin audit, events={events:?}"
+    );
+}
+
+#[test]
+fn mcp_auto_pin_default_on_with_default_binding_without_explicit_env() {
+    // Preferred default: .locus.toml with default_binding ⇒ auto-pin on MCP start
+    // even without LOCUS_MCP_AUTO_PIN=1 (policy treats default_binding as enable).
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("locus-home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Store::open(&home).unwrap();
+    sample_bindings(&store);
+    std::fs::write(
+        project.join(".locus.toml"),
+        r#"
+version = 1
+default_binding = "acme"
+require_pin = true
+allowed_bindings = ["acme"]
+"#,
+    )
+    .unwrap();
+
+    // Do NOT set LOCUS_MCP_AUTO_PIN=1 — rely on workspace default_binding / require_pin.
+    // spawn_opts defaults LOCUS_MCP_AUTO_PIN=0 which explicitly disables; override by unsetting
+    // via empty and use a custom spawn that omits the kill-switch.
+    let mut child = Command::new(mcp_bin())
+        .env("LOCUS_HOME", &home)
+        .env_remove("LOCUS_MCP_AUTO_PIN")
+        .env_remove("LOCUS_AUTO_PIN")
+        .current_dir(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let stdin = child.stdin.take().unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut client = McpClient {
+        child,
+        stdin,
+        stdout,
+        framing: Framing::Ndjson,
+        next_id: 1,
+    };
+    handshake(&mut client);
+
+    let list = client.request("tools/list", json!({}));
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"github.scope"),
+        "default_binding + require_pin should auto-pin without LOCUS_MCP_AUTO_PIN: {names:?}"
+    );
+    let _ = store; // keep home alive semantics
+}
+
+#[test]
+fn mcp_auto_pin_respects_allowlist() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("locus-home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Store::open(&home).unwrap();
+    sample_bindings(&store);
+
+    // default_binding blocked by allowlist — pin_auto must not force
+    std::fs::write(
+        project.join(".locus.toml"),
+        r#"
+version = 1
+default_binding = "acme"
+allowed_bindings = ["other"]
+require_pin = true
+"#,
+    )
+    .unwrap();
+
+    let mut client = McpClient::spawn_opts(
+        &home,
+        Framing::Ndjson,
+        Some(&project),
+        &[("LOCUS_MCP_AUTO_PIN", "1")],
+    );
+    handshake(&mut client);
+
+    let list = client.request("tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().unwrap();
+    for t in tools {
+        let name = t["name"].as_str().unwrap();
+        assert!(
+            name.starts_with("locus_"),
+            "allowlist block must leave session unpinned, got {name}"
+        );
+    }
+    assert!(store.active_session().unwrap().is_none());
+}
+
+#[test]
+fn mcp_auto_pin_disabled_stays_unpinned() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("locus-home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Store::open(&home).unwrap();
+    sample_bindings(&store);
+    std::fs::write(
+        project.join(".locus.toml"),
+        r#"
+version = 1
+default_binding = "acme"
+"#,
+    )
+    .unwrap();
+
+    // Explicit kill-switch
+    let mut client = McpClient::spawn_opts(
+        &home,
+        Framing::Ndjson,
+        Some(&project),
+        &[("LOCUS_MCP_AUTO_PIN", "0")],
+    );
+    handshake(&mut client);
+
+    let list = client.request("tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().unwrap();
+    for t in tools {
+        assert!(t["name"].as_str().unwrap().starts_with("locus_"));
+    }
+    assert!(store.active_session().unwrap().is_none());
+}
+
+#[test]
+fn mcp_auto_pin_via_clients_auto_pin_cwd_config() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("locus-home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let store = Store::open(&home).unwrap();
+    sample_bindings(&store);
+    std::fs::write(
+        project.join(".locus.toml"),
+        r#"
+version = 1
+default_binding = "acme"
+allowed_bindings = ["acme"]
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        r#"
+[clients]
+auto_pin = "cwd"
+"#,
+    )
+    .unwrap();
+
+    // No LOCUS_MCP_AUTO_PIN kill-switch — clients.auto_pin=cwd enables policy.
+    let mut child = Command::new(mcp_bin())
+        .env("LOCUS_HOME", &home)
+        .env_remove("LOCUS_MCP_AUTO_PIN")
+        .current_dir(&project)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let stdin = child.stdin.take().unwrap();
+    let stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut client = McpClient {
+        child,
+        stdin,
+        stdout,
+        framing: Framing::Ndjson,
+        next_id: 1,
+    };
+    handshake(&mut client);
+    let list = client.request("tools/list", json!({}));
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"github.scope"),
+        "clients.auto_pin=cwd should enable auto-pin: {names:?}"
+    );
+    let _ = store;
 }
