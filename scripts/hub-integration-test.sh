@@ -414,15 +414,32 @@ for (const badEnv of [{ GITHUB_TOKEN: "token" }, { LOCUS_SECRET: "token" }, { LO
   assert(rejected, "mint env rejects secrets and locators");
 }
 
-// --- LOCUS_ENFORCE / decidePreMutateGate (pure; mirrors locus.ts) ---
-function resolveLocusEnforceMode(env) {
-  const raw = env?.LOCUS_ENFORCE;
+// --- LOCUS_ENFORCE + config.locus.enforce / decidePreMutateGate (pure; mirrors locus.ts) ---
+function parseLocusEnforceToken(raw) {
   if (raw === undefined || raw === null) return "off";
   const v = String(raw).trim().toLowerCase();
   if (!v || v === "0" || v === "false" || v === "no" || v === "off") return "off";
   if (v === "warn" || v === "log") return "warn";
   if (v === "1" || v === "true" || v === "yes" || v === "enforce" || v === "block") return "enforce";
   return "enforce"; // unknown → fail closed
+}
+function extractLocusConfigEnforce(config) {
+  if (config == null || typeof config !== "object") return undefined;
+  if ("enforce" in config && !("locus" in config) && config.enforce != null) {
+    return String(config.enforce);
+  }
+  if ("locus" in config && config.locus != null && typeof config.locus === "object" && config.locus.enforce != null) {
+    return String(config.locus.enforce);
+  }
+  return undefined;
+}
+function resolveLocusEnforceMode(env, config) {
+  const e = env ?? {};
+  const rawEnv = e.LOCUS_ENFORCE;
+  if (rawEnv !== undefined && rawEnv !== null) return parseLocusEnforceToken(rawEnv);
+  const rawCfg = extractLocusConfigEnforce(config);
+  if (rawCfg !== undefined) return parseLocusEnforceToken(rawCfg);
+  return "off";
 }
 function decidePreMutateGate(gate, mode) {
   if (mode === "off") {
@@ -445,6 +462,24 @@ assert(resolveLocusEnforceMode({ LOCUS_ENFORCE: "0" }) === "off", "LOCUS_ENFORCE
 assert(resolveLocusEnforceMode({ LOCUS_ENFORCE: "warn" }) === "warn", "LOCUS_ENFORCE=warn");
 assert(resolveLocusEnforceMode({ LOCUS_ENFORCE: "1" }) === "enforce", "LOCUS_ENFORCE=1 → enforce");
 assert(resolveLocusEnforceMode({ LOCUS_ENFORCE: "typo-mode" }) === "enforce", "unknown LOCUS_ENFORCE → enforce");
+assert(
+  resolveLocusEnforceMode({}, { locus: { enforce: "enforce" } }) === "enforce",
+  "config.locus.enforce=enforce when env unset",
+);
+assert(
+  resolveLocusEnforceMode({}, { enforce: "warn" }) === "warn",
+  "bare { enforce } config slice",
+);
+assert(
+  resolveLocusEnforceMode({ LOCUS_ENFORCE: "off" }, { locus: { enforce: "enforce" } }) === "off",
+  "env LOCUS_ENFORCE=off wins over firm config",
+);
+assert(
+  resolveLocusEnforceMode({}, { locus: {} }) === "off",
+  "empty locus object → off (field absent)",
+);
+assert(parseLocusEnforceToken("block") === "enforce", "parseLocusEnforceToken block → enforce");
+assert(extractLocusConfigEnforce({ locus: { enforce: "warn" } }) === "warn", "extract locus.enforce");
 
 const blockedGate = { allowDispatch: false, blockers: ["status=unsafe"] };
 const healthyGate = { allowDispatch: true, blockers: [] };
@@ -630,7 +665,7 @@ do
 done
 
 # locus.ts exports (static grep)
-for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv validateMintBinding resolveLocusEnforceMode decidePreMutateGate assertLocusPreMutate formatPreMutateBlockers applyLocusPreMutateGate; do
+for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv validateMintBinding parseLocusEnforceToken extractLocusConfigEnforce readLocusConfigFromAshlr resolveLocusEnforceMode decidePreMutateGate assertLocusPreMutate formatPreMutateBlockers applyLocusPreMutateGate decideLocusSessionRun runWithLocusSessionIfConfigured; do
   if grep -qE "export (async )?function $sym" "$ROOT/integrations/ashlr-hub/locus.ts"; then
     ok "locus.ts exports $sym"
   else
@@ -638,16 +673,16 @@ for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFl
   fi
 done
 
-# Docs mention LOCUS_ENFORCE + scrub helpers
-if grep -q "LOCUS_ENFORCE" "$ROOT/docs/hub-integration.md" && grep -q "scrubbedChildEnv" "$ROOT/docs/hub-integration.md"; then
-  ok "hub-integration.md documents LOCUS_ENFORCE + scrubbedChildEnv"
+# Docs mention LOCUS_ENFORCE + config.locus + scrub helpers
+if grep -q "LOCUS_ENFORCE" "$ROOT/docs/hub-integration.md" && grep -q "scrubbedChildEnv" "$ROOT/docs/hub-integration.md" && grep -q "config.locus" "$ROOT/docs/hub-integration.md"; then
+  ok "hub-integration.md documents LOCUS_ENFORCE + config.locus + scrubbedChildEnv"
 else
-  bad "hub-integration.md missing LOCUS_ENFORCE / scrubbedChildEnv notes"
+  bad "hub-integration.md missing LOCUS_ENFORCE / config.locus / scrubbedChildEnv notes"
 fi
-if grep -qE "assertLocusPreMutate|applyLocusPreMutateGate" "$ROOT/integrations/ashlr-hub/fleet-preflight.md" && grep -q "validateMintEnv" "$ROOT/integrations/ashlr-hub/fleet-preflight.md"; then
-  ok "fleet-preflight.md documents pre-mutate + validateMintEnv"
+if grep -qE "assertLocusPreMutate|applyLocusPreMutateGate" "$ROOT/integrations/ashlr-hub/fleet-preflight.md" && grep -q "validateMintEnv" "$ROOT/integrations/ashlr-hub/fleet-preflight.md" && grep -q "locus.enforce" "$ROOT/integrations/ashlr-hub/fleet-preflight.md"; then
+  ok "fleet-preflight.md documents pre-mutate + validateMintEnv + locus.enforce"
 else
-  bad "fleet-preflight.md missing pre-mutate / mint scrub notes"
+  bad "fleet-preflight.md missing pre-mutate / mint scrub / firm config notes"
 fi
 
 if [[ "$fail" -ne 0 ]]; then
