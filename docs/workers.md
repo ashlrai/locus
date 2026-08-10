@@ -106,6 +106,30 @@ The macOS Seatbelt profile permits outbound TCP/UDP provider connections, but de
 
 **Remote URLs (host MCP, not Locus workers):** Supabase `https://mcp.supabase.com/mcp` (optional `?project_ref=…`); Vercel `https://mcp.vercel.com` (OAuth). Locus upstream workers are **stdio** only today. Use host-native remote MCP when the client supports it; the `vercel-mcp` bridge is an explicit unsandboxed fallback.
 
+## Composite + top-adapter recipes
+
+`CompositeWorkerManager` (used by `locus-mcp`) expands binding `upstream` via
+`mcp_config_from_upstream` before spawn:
+
+| Binding | Expanded defaults (pure recipe) |
+|---------|----------------------------------|
+| `upstream = { recipe = "github-mcp" }` | `npx` + `@modelcontextprotocol/server-github`, `resolve_secrets=true`, `sandbox=true` |
+| `upstream = { recipe = "supabase-mcp" }` | `npx` + `@supabase/mcp-server-supabase@latest --read-only`, same hardened defaults |
+| `upstream = { recipe = "vercel-mcp" }` | **unavailable** until `sandbox = false` (OAuth loopback); secrets default off |
+| `upstream = { recipe = "github-official" }` | **unavailable** until `sandbox = false` (Docker daemon) |
+
+Sibling providers without `upstream` stay **synthetic** (freeze/scope tools only).
+`ensure_provider` starts **only** the addressed provider — an allow decision for
+github never resolves supabase credentials. Catalog remains **exclusive** to the
+pinned binding: no ambient personal tools, no cross-binding fallthrough.
+
+When `resolve_secrets = false` (non-pure override, or recipes that default off),
+the child env is rebuilt from the isolation allowlist with `env_clear` — ambient
+`GH_TOKEN` / `GITHUB_PERSONAL_ACCESS_TOKEN` / `SUPABASE_ACCESS_TOKEN` from the
+parent process do **not** enter the worker. Pure recipes that default
+`resolve_secrets` on still inject only that provider’s resolved CredentialRef
+keys after scrub; they never forward parent env wholesale.
+
 When `locus-mcp` is pinned:
 
 1. `tools/list` returns synthetic schemas plus schemas cached from workers that an earlier authorized call already started.
