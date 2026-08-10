@@ -338,7 +338,7 @@ approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
 
 - Session pins are **HMAC-sealed**; tampering fails closed.
 - Workspace `allowed_bindings` blocks wrong-tenant pins (unless `--force`, audited).
-- `locus exec` / `locus run` scrub ambient identity; resolved credentials are injected into the manual child by default. `run --no-resolve` fails before start when a declared upstream can resolve credentials.
+- `locus exec`, `locus run`, and `locus ci run` scrub ambient identity; resolved credentials are injected into the child by default. Their shared `--no-resolve` preflight expands recipe defaults and fails before child, worker, session, or credential effects when a declared upstream can resolve credentials. Credential-free upstreams remain usable.
 - MCP never returns secret values; agents cannot pin (request only).
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
 - Policy: globs + structured `[[rules]]`, `require_approval`, dual-control (2 principals).

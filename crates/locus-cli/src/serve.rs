@@ -266,17 +266,30 @@ fn dashboard_capabilities(manual_state: &str) -> Value {
         "reporting": "live_runtime",
         "scope": "locus_surfaces_only",
         "manual_cli_command_execution": {
-            "state": manual_state,
-            "surfaces": ["locus exec", "locus run"]
+            "state": "surface_dependent",
+            "surface_states": {
+                "locus exec": manual_state,
+                "locus run": "available_with_explicit_binding",
+                "locus ci run": "available_with_explicit_binding"
+            }
         },
         "agent_command_execution": {
             "state": "not_exposed",
             "surface": "locus-mcp"
         },
         "provider_credential_injection": {
-            "state": if manual_state == "available" { "available_to_manual_cli_children" } else { manual_state },
-            "default_for_manual_exec_run": true,
-            "no_resolve": "credential_free_or_fail_closed_for_resolving_upstreams"
+            "state": "surface_dependent",
+            "surface_states": {
+                "locus exec": if manual_state == "available" { "available_to_manual_cli_child" } else { manual_state },
+                "locus run": "available_to_manual_cli_child_with_explicit_binding",
+                "locus ci run": "available_to_manual_cli_child_with_explicit_binding"
+            },
+            "default_for_child_launch_surfaces": ["locus exec", "locus run", "locus ci run"],
+            "no_resolve": {
+                "classification": "recipe_expanded",
+                "resolving_upstream": "fail_closed_before_child_worker_session_or_credential_effect",
+                "credential_free_upstream": "allowed"
+            }
         }
     })
 }
@@ -668,7 +681,15 @@ mod tests {
         assert_eq!(v["capabilities"]["reporting"], "live_runtime");
         assert_eq!(
             v["capabilities"]["manual_cli_command_execution"]["state"],
-            "blocked_unpinned"
+            "surface_dependent"
+        );
+        assert_eq!(
+            v["capabilities"]["manual_cli_command_execution"]["surface_states"],
+            json!({
+                "locus exec": "blocked_unpinned",
+                "locus run": "available_with_explicit_binding",
+                "locus ci run": "available_with_explicit_binding"
+            })
         );
         assert_eq!(
             v["capabilities"]["agent_command_execution"]["state"],
@@ -676,7 +697,7 @@ mod tests {
         );
         assert_eq!(
             v["capabilities"]["provider_credential_injection"]["state"],
-            "blocked_unpinned"
+            "surface_dependent"
         );
 
         s.pin("acme", dir.path(), None, false).unwrap();
@@ -696,15 +717,35 @@ mod tests {
         assert_eq!(v["pinned"], true);
         assert_eq!(
             v["capabilities"]["manual_cli_command_execution"]["state"],
-            "available"
+            "surface_dependent"
         );
         assert_eq!(
             v["capabilities"]["provider_credential_injection"]["state"],
-            "available_to_manual_cli_children"
+            "surface_dependent"
         );
         assert_eq!(
-            v["capabilities"]["provider_credential_injection"]["default_for_manual_exec_run"],
-            true
+            v["capabilities"]["manual_cli_command_execution"]["surface_states"],
+            json!({
+                "locus exec": "available",
+                "locus run": "available_with_explicit_binding",
+                "locus ci run": "available_with_explicit_binding"
+            })
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["surface_states"],
+            json!({
+                "locus exec": "available_to_manual_cli_child",
+                "locus run": "available_to_manual_cli_child_with_explicit_binding",
+                "locus ci run": "available_to_manual_cli_child_with_explicit_binding"
+            })
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["default_for_child_launch_surfaces"],
+            json!(["locus exec", "locus run", "locus ci run"])
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["no_resolve"]["resolving_upstream"],
+            "fail_closed_before_child_worker_session_or_credential_effect"
         );
     }
 
@@ -765,6 +806,8 @@ mod tests {
         assert!(html.contains("Locus"));
         assert!(html.contains("dashboard"));
         assert!(html.contains("status.capabilities"));
+        assert!(html.contains("surface_states"));
+        assert!(html.contains("manual child launch"));
         assert!(html.contains("unknown / degraded"));
         assert!(!html.contains("manual_identity_only"));
     }

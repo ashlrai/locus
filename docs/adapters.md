@@ -121,7 +121,7 @@ let project_ref = freeze_string_arg(args, "project_ref", frozen)?;
    - happy path returns frozen scope
    - policy blocks a destructive tool without `confirm`
 7. **Docs**: one row in the matrix below; binding example if user-facing.
-8. **Credential confinement**: provider credentials resolve only inside the policy-gated MCP worker. Do not expose them through `locus exec`, CI env maps, or arbitrary subprocesses.
+8. **Credential confinement**: provider credentials may resolve into isolated `locus exec`, `locus run`, and `locus ci run` children by default. Use their shared `--no-resolve` mode for identity-only diagnostics; it rejects recipe-expanded resolving upstreams before effects. CI `mint/env --resolve` additionally requires `LOCUS_CI_ALLOW_SECRETS=1`. Never return credentials through MCP results or logs.
 
 ### Minimal skeleton
 

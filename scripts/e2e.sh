@@ -224,10 +224,10 @@ echo "$exec_env" | grep -q "ambient-sb-must-not-leak" \
 echo "$exec_env" | grep -q "AWS_PROFILE=" \
   && die "AWS_PROFILE should be scrubbed" || true
 
-# `run --no-resolve` must fail before both worker and requested child start when
-# a declared upstream can independently resolve credentials.
-no_resolve_worker_marker="$LOCUS_HOME/no-resolve-worker-started"
-no_resolve_child_marker="$LOCUS_HOME/no-resolve-child-started"
+# Every command-child surface must reject resolving upstreams before any child,
+# worker, session, audit, or credential effect. Cover both explicit flags and
+# pure-recipe defaults (github-official defaults resolve_secrets=true).
+no_resolve_worker_marker="$LOCUS_HOME/no-resolve-worker-effect"
 cat >"$LOCUS_HOME/bindings/noresolve.toml" <<EOF
 [binding]
 id = "bnd_noresolve"
@@ -241,19 +241,129 @@ default = "allow"
 provider = "github"
 account = "noresolve-account"
 credential_ref = "env:LOCUS_E2E_GH_TOKEN"
-upstream = { command = "/bin/sh", args = ["-c", "printf worker > '$no_resolve_worker_marker'"], resolve_secrets = true }
+upstream = { command = "/bin/sh", args = ["-c", "env > '$no_resolve_worker_marker'"], resolve_secrets = true }
 EOF
 
-set +e
-no_resolve_err="$(locus run -b noresolve --no-resolve --force -- /bin/sh -c "printf child > '$no_resolve_child_marker'" 2>&1)"
-no_resolve_ec=$?
-set -e
-[[ $no_resolve_ec -ne 0 ]] || die "run --no-resolve allowed credential-resolving upstream"
-echo "$no_resolve_err" | grep -q "no session, upstream worker, or child command was started" \
-  || die "run --no-resolve did not report fail-closed boundary: $no_resolve_err"
-[[ ! -e "$no_resolve_worker_marker" ]] || die "run --no-resolve started resolving upstream worker"
-[[ ! -e "$no_resolve_child_marker" ]] || die "run --no-resolve started requested child"
-ok "run --no-resolve blocks resolving upstream before worker and child start"
+cat >"$LOCUS_HOME/bindings/noresolve-recipe.toml" <<'EOF'
+[binding]
+id = "bnd_noresolve_recipe"
+alias = "noresolve-recipe"
+tenant = "noresolve-recipe-tenant"
+
+[binding.policy]
+default = "allow"
+
+[[binding.providers]]
+provider = "github"
+account = "noresolve-recipe-account"
+credential_ref = "env:LOCUS_E2E_GH_TOKEN"
+upstream = { recipe = "github-official" }
+EOF
+
+control_plane_snapshot() {
+  {
+    [[ ! -f "$LOCUS_HOME/active.json" ]] || cksum "$LOCUS_HOME/active.json"
+    [[ ! -f "$LOCUS_HOME/audit/events.jsonl" ]] || cksum "$LOCUS_HOME/audit/events.jsonl"
+    find "$LOCUS_HOME/sessions" -type f -exec cksum {} \; 2>/dev/null || true
+  } | sort
+}
+
+assert_no_resolve_blocked() {
+  local label="$1" expected_surface="$2"
+  shift 2
+  local child_marker="$LOCUS_HOME/no-resolve-${label}-child-effect"
+  local output ec
+  rm -f "$child_marker"
+  set +e
+  output="$("$@" -- /bin/sh -c 'printf "%s" "${GH_TOKEN:-missing}" > "$1"' _ "$child_marker" 2>&1)"
+  ec=$?
+  set -e
+  [[ $ec -ne 0 ]] || die "$label allowed credential-resolving upstream"
+  echo "$output" | grep -Fq -- "--no-resolve refused $expected_surface" \
+    || die "$label did not report centralized fail-closed boundary: $output"
+  echo "$output" | grep -Fq "no session or credential effect occurred" \
+    || die "$label omitted no-effect contract: $output"
+  [[ ! -e "$child_marker" ]] || die "$label started secret-bearing child"
+}
+
+for binding in noresolve noresolve-recipe; do
+  locus pin "$binding" --force >/dev/null
+  no_resolve_state_before="$(control_plane_snapshot)"
+  assert_no_resolve_blocked "${binding}-exec" "locus exec" locus exec --no-resolve
+  assert_no_resolve_blocked "${binding}-run" "locus run" locus run -b "$binding" --no-resolve --force
+  assert_no_resolve_blocked "${binding}-run-share-pin" "locus run" locus run -b "$binding" --no-resolve --share-pin --force
+  assert_no_resolve_blocked "${binding}-ci-run" "locus ci run" locus ci run -b "$binding" --no-resolve --force
+  no_resolve_state_after="$(control_plane_snapshot)"
+  [[ "$no_resolve_state_after" == "$no_resolve_state_before" ]] \
+    || die "$binding --no-resolve changed active/session/audit state"
+done
+[[ ! -e "$no_resolve_worker_marker" ]] || die "--no-resolve started resolving upstream worker"
+ok "all --no-resolve child surfaces block explicit + recipe-default resolving upstreams before effects"
+
+# Credential-free upstreams remain usable. `run` performs its normal eager MCP
+# probe, while all three requested children run without receiving GH_TOKEN.
+no_resolve_free_worker="$LOCUS_HOME/no-resolve-free-worker.py"
+no_resolve_free_worker_marker="$LOCUS_HOME/no-resolve-free-worker-effect"
+cat >"$no_resolve_free_worker" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as marker:
+    marker.write(os.environ.get("GH_TOKEN", "missing"))
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    method = request.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "no-resolve-free", "version": "1"},
+        }
+    elif method == "tools/list":
+        result = {"tools": []}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+PY
+python_bin="$(command -v python3)"
+cat >"$LOCUS_HOME/bindings/noresolve-free.toml" <<EOF
+[binding]
+id = "bnd_noresolve_free"
+alias = "noresolve-free"
+tenant = "noresolve-free-tenant"
+
+[binding.policy]
+default = "allow"
+
+[[binding.providers]]
+provider = "github"
+account = "noresolve-free-account"
+credential_ref = "env:LOCUS_E2E_GH_TOKEN"
+upstream = { command = "$python_bin", args = ["$no_resolve_free_worker", "$no_resolve_free_worker_marker"], resolve_secrets = false }
+EOF
+
+locus pin noresolve-free --force >/dev/null
+for surface in exec run ci-run; do
+  free_child_marker="$LOCUS_HOME/no-resolve-free-${surface}-child-effect"
+  case "$surface" in
+    exec) locus exec --no-resolve -- /bin/sh -c 'printf "%s" "${GH_TOKEN:-missing}" > "$1"' _ "$free_child_marker" >/dev/null ;;
+    run)
+      free_run_output="$(locus run -b noresolve-free --no-resolve --force -- /bin/sh -c 'printf "%s" "${GH_TOKEN:-missing}" > "$1"' _ "$free_child_marker" 2>&1)"
+      echo "$free_run_output" | grep -Fq "worker ensure (upstream) soft-failed" \
+        && die "credential-free upstream failed MCP handshake: $free_run_output"
+      ;;
+    ci-run) locus ci run -b noresolve-free --no-resolve --force -- /bin/sh -c 'printf "%s" "${GH_TOKEN:-missing}" > "$1"' _ "$free_child_marker" >/dev/null ;;
+  esac
+  [[ "$(cat "$free_child_marker")" == "missing" ]] \
+    || die "$surface --no-resolve injected credentials into allowed child"
+done
+[[ "$(cat "$no_resolve_free_worker_marker")" == "missing" ]] \
+  || die "credential-free upstream worker received GH_TOKEN"
+ok "credential-free upstream and exec/run/ci-run children remain usable without credentials"
 echo "$exec_env" | grep -q "UNLISTED_SECRET_CANARY=" \
   && die "arbitrary parent secret leaked into locus exec" || true
 echo "$exec_env" | grep -q "arbitrary-parent-secret-must-not-leak" \

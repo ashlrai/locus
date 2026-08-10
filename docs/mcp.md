@@ -3,13 +3,14 @@
 `locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding. It is the agent-facing half of the identity plane.
 
 CLI and MCP share the same store and seal under `~/.locus` (or `LOCUS_HOME`).
-`locus exec --no-resolve` and `locus run --no-resolve` are manual,
+`locus exec --no-resolve`, `locus run --no-resolve`, and
+`locus ci run --no-resolve` are manual,
 identity-only diagnostics: they cannot resolve provider credentials or spawn
-provider workers, and CI/Hub or agent-originated sessions cannot invoke them.
-`locus run --no-resolve` fails before creating a session or starting the
-requested command when any declared upstream expands to
-`resolve_secrets = true` (including recipe defaults). Credential-free upstream
-declarations are permitted, but the CLI skips its eager worker probe.
+credential-resolving provider workers, and Hub or agent-originated sessions
+cannot invoke them. All three use one recipe-expanded preflight and fail before
+child, worker, session, or credential effects when any declared upstream
+expands to `resolve_secrets = true` (including recipe defaults).
+Credential-free upstream declarations are permitted and remain usable.
 
 ## Install
 

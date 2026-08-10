@@ -724,6 +724,16 @@
         const item = capabilities && capabilities.reporting === "live_runtime"
           ? capabilities[key]
           : null;
+        if (item && item.surface_states && typeof item.surface_states === "object") {
+          const entries = Object.entries(item.surface_states);
+          if (!entries.length || entries.some(([, state]) => typeof state !== "string" || !state)) {
+            return `<span class="warn">unknown / degraded</span>`;
+          }
+          return entries.map(([surface, state]) => {
+            const cls = state.startsWith("available") ? "err" : "warn";
+            return `<span class="${cls}">${esc(surface.replace("locus ", ""))}: ${esc(state.replace(/_/g, " "))}</span>`;
+          }).join(`<br>`);
+        }
         if (!item || typeof item.state !== "string" || !item.state) {
           return `<span class="warn">unknown / degraded</span>`;
         }
@@ -759,7 +769,7 @@
         html += kv("frozen", frozen);
         if (status.expired) html += kv("expired", `<span class="err">yes</span>`);
         html += kv("mode", esc(status.mode || "exclusive"));
-        html += kv("manual cli exec", renderCapability(status, "manual_cli_command_execution"));
+        html += kv("manual child launch", renderCapability(status, "manual_cli_command_execution"));
         html += kv("agent command exec", renderCapability(status, "agent_command_execution"));
         html += kv("credential injection", renderCapability(status, "provider_credential_injection"));
         if (status.namespaces && status.namespaces.length) {

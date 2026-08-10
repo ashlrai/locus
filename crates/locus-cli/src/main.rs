@@ -211,7 +211,7 @@ enum Commands {
     /// Run a command with only the pinned binding's identity surface
     #[command(next_help_heading = "Daily use")]
     Exec {
-        /// Do not resolve phm:/env: credential refs into secret env vars
+        /// Do not resolve credentials; fail before effects if an upstream can resolve them
         #[arg(long)]
         no_resolve: bool,
         /// Fail if any credential_ref cannot be resolved
@@ -231,7 +231,7 @@ enum Commands {
         /// Also update active.json (default: temporary session only)
         #[arg(long)]
         share_pin: bool,
-        /// Do not resolve credentials; fail before start if an upstream worker can resolve them
+        /// Do not resolve credentials; fail before effects if an upstream can resolve them
         #[arg(long)]
         no_resolve: bool,
         /// Fail if any credential_ref cannot be resolved
@@ -470,7 +470,7 @@ enum CiCmd {
         /// Allow bindings outside workspace allowlist
         #[arg(long)]
         force: bool,
-        /// Do not resolve phm:/env: credential refs into secret env vars
+        /// Do not resolve credentials; fail before effects if an upstream can resolve them
         #[arg(long)]
         no_resolve: bool,
         /// Fail if any credential_ref cannot be resolved
@@ -1997,6 +1997,10 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     }
 
     let s = store()?;
+    let session = s.require_active().context("need active pin for exec")?;
+    let binding = s.load_binding(&session.binding_alias)?;
+    preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Exec)?;
+
     // Drift check before privileged exec
     let drift = s.check_drift_and_freeze()?;
     if drift.frozen {
@@ -2005,8 +2009,6 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
             drift.issues.join(", ")
         );
     }
-    let session = s.require_active().context("need active pin for exec")?;
-    let binding = s.load_binding(&session.binding_alias)?;
     let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         bail!(
@@ -2176,6 +2178,9 @@ fn cmd_ci_run(
     }
 
     let s = store()?;
+    let binding = s.load_binding(&binding_alias)?;
+    preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::CiRun)?;
+
     let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
     // Snapshot parent pin (active.json / LOCUS_SESSION_ID) before mint.
     let parent_before = s.active_session()?;
@@ -2196,7 +2201,6 @@ fn cmd_ci_run(
         }
     }
 
-    let binding = s.load_binding(&session.binding_alias)?;
     // Child gets full isolated env (may resolve secrets for the command to work).
     let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
@@ -2282,17 +2286,7 @@ fn cmd_run(
 
     let s = store()?;
     let binding = s.load_binding(&binding_alias)?;
-    if !resolve_secrets {
-        let resolving_upstreams = credential_resolving_upstreams(&binding)
-            .context("inspect upstreams for --no-resolve")?;
-        if !resolving_upstreams.is_empty() {
-            bail!(
-                "--no-resolve refused binding `{}`: credential-resolving upstream(s) declared for {}; no session, upstream worker, or child command was started",
-                binding.alias,
-                resolving_upstreams.join(", ")
-            );
-        }
-    }
+    preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Run)?;
     // Capture parent pin (if any) so we can prove it is unchanged after run
     // when share_pin is false.
     let parent_before = s.active_session()?;
@@ -2335,7 +2329,7 @@ fn cmd_run(
 
     // Ensure composite workers when upstream is present (best-effort for CLI run).
     // Child process gets LOCUS_* env; upstream MCP is primarily for locus-mcp.
-    if resolve_secrets {
+    {
         use locus_core::CompositeWorkerManager;
         if binding.providers.iter().any(|p| p.has_upstream()) {
             let mut mgr = CompositeWorkerManager::new();
@@ -2410,9 +2404,55 @@ fn cmd_run(
     Ok(())
 }
 
-/// Providers whose upstream worker would independently resolve credentials.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildLaunchSurface {
+    Exec,
+    Run,
+    CiRun,
+}
+
+impl ChildLaunchSurface {
+    const fn command_name(self) -> &'static str {
+        match self {
+            Self::Exec => "locus exec",
+            Self::Run => "locus run",
+            Self::CiRun => "locus ci run",
+        }
+    }
+}
+
+/// Central fail-closed guard for every user-command child launch.
+///
 /// Recipe defaults are expanded before classification so `--no-resolve`
 /// cannot be bypassed by omitting `resolve_secrets` from a recipe declaration.
+/// Callers must invoke this before environment construction, worker startup,
+/// session creation/mutation, or requested child startup.
+fn preflight_child_launch(
+    binding: &Binding,
+    resolve_secrets: bool,
+    surface: ChildLaunchSurface,
+) -> Result<()> {
+    if resolve_secrets {
+        return Ok(());
+    }
+    let resolving_upstreams = credential_resolving_upstreams(binding).with_context(|| {
+        format!(
+            "inspect upstreams for {} --no-resolve",
+            surface.command_name()
+        )
+    })?;
+    if resolving_upstreams.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "--no-resolve refused {} for binding `{}`: credential-resolving upstream(s) declared for {}; no child or upstream worker was started and no session or credential effect occurred",
+        surface.command_name(),
+        binding.alias,
+        resolving_upstreams.join(", ")
+    )
+}
+
+/// Providers whose upstream worker would independently resolve credentials.
 fn credential_resolving_upstreams(binding: &Binding) -> Result<Vec<String>> {
     let mut providers = Vec::new();
     for provider in &binding.providers {
@@ -4734,7 +4774,10 @@ fn merge_mcp_json(path: &std::path::Path, name: &str, server: &serde_json::Value
 
 #[cfg(test)]
 mod touchid_tests {
-    use super::{confirm_grant_touchid, credential_resolving_upstreams};
+    use super::{
+        confirm_grant_touchid, credential_resolving_upstreams, preflight_child_launch,
+        ChildLaunchSurface,
+    };
     use locus_core::Binding;
     use std::sync::Mutex;
 
@@ -4775,7 +4818,7 @@ mod touchid_tests {
     }
 
     #[test]
-    fn no_resolve_detects_explicit_and_recipe_default_secret_workers() {
+    fn no_resolve_guard_covers_every_child_surface_and_expanded_worker_kind() {
         let explicit = Binding::parse_toml(
             r#"
 id = "bnd_explicit"
@@ -4831,5 +4874,20 @@ upstream = { command = "credential-free-worker", resolve_secrets = false }
         assert!(credential_resolving_upstreams(&credential_free)
             .unwrap()
             .is_empty());
+
+        for surface in [
+            ChildLaunchSurface::Exec,
+            ChildLaunchSurface::Run,
+            ChildLaunchSurface::CiRun,
+        ] {
+            for binding in [&explicit, &recipe] {
+                let error = preflight_child_launch(binding, false, surface).unwrap_err();
+                let message = error.to_string();
+                assert!(message.contains(surface.command_name()), "{message}");
+                assert!(message.contains("no session or credential effect occurred"));
+            }
+            preflight_child_launch(&credential_free, false, surface).unwrap();
+            preflight_child_launch(&explicit, true, surface).unwrap();
+        }
     }
 }

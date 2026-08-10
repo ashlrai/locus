@@ -159,10 +159,11 @@ Roadmap detail: [PLAN.md](../PLAN.md). Threat model: [DESIGN.md §9](../DESIGN.m
 
 Optional later: fleet gateway discovers **only** Locus, not raw personal MCP servers.
 
-Manual `locus exec --no-resolve` and `locus run --no-resolve` sit outside the
-provider data plane. They expose frozen identity metadata in a private,
-allowlisted environment, never provider credentials. Hub, CI, and
-agent-originated sessions cannot invoke arbitrary commands through Locus. A
-`run --no-resolve` request fails before session or child creation when a
-declared upstream (including a recipe default) resolves credentials; otherwise
-the command runs credential-free and Locus skips its eager upstream probe.
+Manual `locus exec --no-resolve`, `locus run --no-resolve`, and
+`locus ci run --no-resolve` sit outside the credential-bearing provider data
+plane. They expose frozen identity metadata in a private, allowlisted
+environment, never provider credentials. Hub and agent-originated sessions
+cannot invoke arbitrary commands through Locus. One shared preflight rejects
+any declared upstream (including a recipe default) that resolves credentials
+before child, worker, session, or credential effects. Credential-free workers
+remain available through the normal isolated launch path.

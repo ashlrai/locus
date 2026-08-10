@@ -21,7 +21,7 @@ locus dashboard
 
 ## Endpoints
 
-All bind **127.0.0.1 only**. Responses never include resolved secrets — only aliases, digests, scopes, and counts. Dashboard approval labels are advisory and cannot enable `locus exec`, `locus run`, or provider execution.
+All bind **127.0.0.1 only**. Responses never include resolved secrets — only aliases, digests, scopes, and counts. Dashboard approval labels are advisory and cannot enable `locus exec`, `locus run`, `locus ci run`, or provider execution.
 
 | Method | Path | Notes |
 |--------|------|--------|
@@ -54,4 +54,4 @@ Design language matches [`apps/web`](../web/) (dark terminal grid, mono labels, 
 - Agents cannot re-pin from the dashboard.
 - Dashboard assertions are `local_advisory`; a bearer/dashboard token is not human identity and cannot satisfy approval or dual-control authority.
 - External cryptographic approval authority is not implemented, so gated provider execution remains fail-closed.
-- `/api/status.capabilities` reports the live pin-dependent CLI/MCP surfaces. Manual `exec`/`run` can inject credentials into their child by default; the UI renders missing capability data as `unknown / degraded` rather than inferring a security assurance.
+- `/api/status.capabilities` reports each CLI/MCP surface separately: `exec` reflects the live active-pin state, while `run` and `ci run` report their explicit-binding requirement. All three can inject credentials into their child by default. Their shared `--no-resolve` guard expands recipe defaults, rejects resolving upstreams before effects, and permits credential-free upstreams. The UI renders missing capability data as `unknown / degraded` rather than inferring a security assurance.
