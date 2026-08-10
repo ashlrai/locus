@@ -890,6 +890,293 @@ for line in sys.stdin:
         assert!(cfg.spawn);
     }
 
+    /// Top-adapter recipes expand through the composite config path with the
+    /// sandbox / secret defaults operators get from pure-recipe bindings.
+    /// Does not spawn real npm packages (offline-safe).
+    #[test]
+    fn top_adapter_recipes_expand_sandbox_defaults_for_composite() {
+        // Sandbox-compatible stdio recipes — pure expand adopts both defaults.
+        for (id, package_needle) in [
+            ("github-mcp", "@modelcontextprotocol/server-github"),
+            ("supabase-mcp", "@supabase/mcp-server-supabase"),
+        ] {
+            let cfg = mcp_config_from_upstream_with_env(&UpstreamSpec::from_recipe(id), false)
+                .unwrap_or_else(|e| panic!("{id} expand failed: {e}"));
+            assert_eq!(cfg.command, "npx", "{id}");
+            assert!(
+                cfg.args.iter().any(|a| a.contains(package_needle)),
+                "{id} args missing well-known package {package_needle}: {:?}",
+                cfg.args
+            );
+            assert!(cfg.spawn, "{id}");
+            assert!(
+                cfg.resolve_secrets,
+                "{id} pure-recipe must default resolve_secrets"
+            );
+            assert!(cfg.sandbox, "{id} pure-recipe must default sandbox");
+            assert!(
+                cfg.sandbox_incompatibility.is_none(),
+                "{id} must be sandbox-compatible"
+            );
+        }
+
+        // Vercel remote bridge is intentionally unavailable until explicit
+        // sandbox = false; OAuth defaults leave resolve_secrets off.
+        assert!(
+            mcp_config_from_upstream_with_env(&UpstreamSpec::from_recipe("vercel-mcp"), false)
+                .is_err(),
+            "vercel-mcp must fail closed without sandbox = false"
+        );
+        let vercel = mcp_config_from_upstream_with_env(
+            &UpstreamSpec::from_recipe("vercel-mcp").sandbox(false),
+            false,
+        )
+        .expect("vercel-mcp with sandbox=false");
+        assert_eq!(vercel.command, "npx");
+        assert_eq!(
+            vercel.args,
+            vec![
+                "-y".to_string(),
+                "mcp-remote".to_string(),
+                "https://mcp.vercel.com".to_string()
+            ]
+        );
+        assert!(vercel.spawn);
+        assert!(
+            !vercel.resolve_secrets,
+            "vercel OAuth bridge must not default resolve_secrets"
+        );
+        assert!(!vercel.sandbox);
+        assert!(vercel.sandbox_incompatibility.is_some());
+    }
+
+    /// Recipe-based upstream keeps the exclusive synthetic catalog (scope /
+    /// freeze tools) and never falls through to ambient provider tools.
+    #[test]
+    fn recipe_upstream_keeps_exclusive_synthetic_catalog_and_freeze() {
+        if Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        std::fs::create_dir_all(&worker_home).unwrap();
+        let session = session_at(&worker_home.display().to_string());
+
+        // github uses a recipe id for documentation/config path, but we override
+        // command/args with the offline mock so tests do not fetch npm packages.
+        // Command/args override must not strip synthetic freeze tools.
+        let mut gh_upstream =
+            UpstreamSpec::from_recipe("github-mcp").with_args(["-u", "-c", mock_script()]);
+        gh_upstream.command = "python3".into();
+        gh_upstream.resolve_secrets = false;
+        gh_upstream.sandbox = Some(false);
+
+        let binding = Binding::from_body(BindingBody {
+            id: "bnd_acme".into(),
+            alias: "acme".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![
+                ProviderBinding {
+                    provider: "github".into(),
+                    account: "acme-gh".into(),
+                    credential_ref: "phm:GH_ACME".into(),
+                    scope: Scope {
+                        orgs: vec!["acme-corp".into()],
+                        ..Scope::default()
+                    },
+                    upstream: Some(gh_upstream),
+                },
+                ProviderBinding {
+                    provider: "supabase".into(),
+                    account: "acme".into(),
+                    credential_ref: "phm:SUPABASE_ACME".into(),
+                    scope: Scope {
+                        project_ref: Some("proj_acme".into()),
+                        ..Scope::default()
+                    },
+                    upstream: None, // synthetic only
+                },
+            ],
+        });
+
+        let mut mgr = CompositeWorkerManager::new();
+        // ensure_provider starts only the addressed upstream — exclusive credential boundary.
+        let gh_slot = mgr
+            .ensure_provider(&session, &binding, "github")
+            .expect("github recipe-shaped upstream");
+        assert_eq!(gh_slot.backend, "mcp_stdio");
+        assert_eq!(gh_slot.state, WorkerState::Running);
+        assert!(
+            mgr.list().iter().all(|s| s.key.provider == "github"),
+            "ensure_provider must not start sibling providers: {:?}",
+            mgr.list()
+                .iter()
+                .map(|s| s.key.provider.as_str())
+                .collect::<Vec<_>>()
+        );
+
+        // Synthetic schemas remain exclusive to this pin; upstream tools merge under provider.
+        let tools = mgr.tools_for_pin(&session, &binding);
+        assert!(
+            tools.iter().any(|t| t.name == "github.scope"),
+            "synthetic github.scope must remain in exclusive catalog"
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "supabase.scope"),
+            "synthetic supabase.scope must remain in exclusive catalog"
+        );
+        assert!(
+            tools.iter().any(|t| t.name == "github.ping"),
+            "live upstream tools merge under provider namespace"
+        );
+        assert!(!tools.iter().any(|t| t.name.starts_with("personal__")));
+        assert!(!tools.iter().any(|t| t.name.contains("evil")));
+
+        // Start supabase synthetic only; freeze remains exclusive to this pin.
+        let sb = mgr
+            .ensure_provider(&session, &binding, "supabase")
+            .expect("supabase synthetic");
+        assert_eq!(sb.backend, "synthetic");
+
+        let scope_ok = mgr
+            .call_tool(&session, &binding, "github.scope", &serde_json::json!({}))
+            .expect("synthetic github.scope alongside upstream");
+        assert!(scope_ok.ok);
+        let scope_body = serde_json::to_string(&scope_ok.content).unwrap();
+        assert!(
+            scope_body.contains("acme-gh") || scope_body.contains("acme-corp"),
+            "exclusive pin identity missing from scope: {scope_body}"
+        );
+        assert!(!scope_body.contains("phm:GH_ACME"));
+
+        let freeze = mgr
+            .call_tool(
+                &session,
+                &binding,
+                "supabase.scope",
+                &serde_json::json!({ "project_ref": "proj_evil" }),
+            )
+            .expect_err("scope freeze must deny alternate project_ref");
+        let msg = freeze.to_string();
+        assert!(
+            msg.contains("scope freeze")
+                || msg.contains("proj_evil")
+                || msg.contains("project_ref"),
+            "unexpected freeze error: {msg}"
+        );
+
+        mgr.teardown_session(&session.session_id).unwrap();
+    }
+
+    /// When resolve_secrets is false, ambient provider secrets and parent env
+    /// canaries must not appear in the MCP child environment (recipe or explicit).
+    #[test]
+    fn recipe_config_resolve_secrets_false_excludes_ambient_provider_secrets() {
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        let work_dir = worker_home.join("slots/github");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let session = session_at(&worker_home.display().to_string());
+        let binding = Binding::from_body(BindingBody {
+            id: "bnd_acme".into(),
+            alias: "acme".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "github".into(),
+                account: "acme-gh".into(),
+                credential_ref: "env:LOCUS_AMBIENT_GH_CANARY".into(),
+                scope: Scope {
+                    orgs: vec!["acme-corp".into()],
+                    ..Scope::default()
+                },
+                // Non-pure recipe override keeps resolve_secrets as written
+                // (pure recipe ORs default_resolve_secrets and cannot opt out alone).
+                upstream: Some(UpstreamSpec {
+                    recipe: Some("github-mcp".into()),
+                    command: "npx".into(),
+                    args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
+                    resolve_secrets: false,
+                    sandbox: Some(false),
+                }),
+            }],
+        });
+        let provider = binding.provider("github").unwrap();
+
+        std::env::set_var("LOCUS_AMBIENT_GH_CANARY", "should-never-reach-child");
+        std::env::set_var("GH_TOKEN", "ambient-gh-token-leak");
+        std::env::set_var("GITHUB_PERSONAL_ACCESS_TOKEN", "ambient-pat-leak");
+        std::env::set_var("SUPABASE_ACCESS_TOKEN", "ambient-supabase-leak");
+
+        let cfg = mcp_config_from_upstream_with_env(
+            binding.providers[0].upstream.as_ref().unwrap(),
+            false,
+        )
+        .unwrap();
+        assert!(!cfg.resolve_secrets);
+        assert!(!cfg.sandbox);
+
+        let backend = McpStdioBackend::new(cfg);
+        let command = backend
+            .build_command(&session, &binding, provider, &work_dir)
+            .unwrap();
+        let env: BTreeMap<String, String> = command
+            .get_envs()
+            .filter_map(|(k, v)| {
+                v.map(|v| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+
+        assert!(!env.contains_key("GH_TOKEN"), "ambient GH_TOKEN leaked");
+        assert!(
+            !env.contains_key("GITHUB_PERSONAL_ACCESS_TOKEN"),
+            "ambient GITHUB_PERSONAL_ACCESS_TOKEN leaked"
+        );
+        assert!(
+            !env.contains_key("SUPABASE_ACCESS_TOKEN"),
+            "ambient SUPABASE_ACCESS_TOKEN leaked"
+        );
+        assert!(
+            !env.values().any(|v| v.contains("should-never-reach-child")),
+            "credential canary leaked into child env"
+        );
+        assert!(
+            !env.values().any(|v| {
+                v.contains("ambient-gh-token-leak")
+                    || v.contains("ambient-pat-leak")
+                    || v.contains("ambient-supabase-leak")
+            }),
+            "ambient secret values leaked into child"
+        );
+        assert_eq!(
+            env.get("LOCUS_GITHUB_CREDENTIAL_RESOLVED")
+                .map(String::as_str),
+            Some("0"),
+            "credential must stay unresolved when resolve_secrets=false"
+        );
+        // Frozen identity still present (exclusive pin surface).
+        assert_eq!(env.get("LOCUS_BINDING").map(String::as_str), Some("acme"));
+        assert_eq!(
+            env.get("LOCUS_GITHUB_ACCOUNT").map(String::as_str),
+            Some("acme-gh")
+        );
+
+        std::env::remove_var("LOCUS_AMBIENT_GH_CANARY");
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("GITHUB_PERSONAL_ACCESS_TOKEN");
+        std::env::remove_var("SUPABASE_ACCESS_TOKEN");
+    }
+
     #[test]
     fn incompatible_recipes_never_become_false_sandbox_claims() {
         let dir = tempdir().unwrap();

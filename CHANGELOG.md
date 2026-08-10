@@ -29,6 +29,10 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
   notify late re-check — **43 checks** (0 skipped) on full current command set
 - Core unit `inv_notify_default_false` + e2e step 15/27 keep desktop notifications **OFF**
   by default under clean `LOCUS_HOME`
+- Composite worker tests for top-adapter recipe expansion (`github-mcp`,
+  `supabase-mcp`, `vercel-mcp` sandbox gates), exclusive synthetic catalog +
+  scope freeze alongside recipe-shaped upstream, and ambient provider-secret
+  exclusion when `resolve_secrets = false`
 
 ### Security
 

@@ -98,7 +98,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] `quickstart` + shell hook frozen/require_pin UX
 - [x] `scripts/dogfood.sh` — quickstart → agent setup → report → doctor → forensics → verify session → Hub smoke; `DOGFOOD READY` only when every required probe is green
 - [ ] Dogfood: agent report `ready` on real Claude Code + Cursor installs (personal + client) — local path exists; multi-client real installs still manual
-- [ ] Upstream MCP workers for top adapters (not only synthetic freeze tools)
+- [x] Upstream MCP workers for top adapters (not only synthetic freeze tools) — composite expands `github-mcp` / `supabase-mcp` / `vercel-mcp` recipes with sandbox defaults; exclusive catalog + `resolve_secrets=false` ambient scrub covered in `locus-core` worker tests
 
 ### M4 — Hub composition · **in progress**
 
