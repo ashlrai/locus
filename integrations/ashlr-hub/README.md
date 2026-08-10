@@ -5,7 +5,7 @@ Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus wi
 | Artifact | Path |
 |----------|------|
 | Full contract | [`docs/hub-integration.md`](../../docs/hub-integration.md) |
-| TypeScript probe | [`locus.ts`](./locus.ts) — `locusFleetGate`, `ensureLocusReady`, `withLocusSession`, `registerLocusInMcpConfig`, pure parsers |
+| TypeScript probe | [`locus.ts`](./locus.ts) — `locusFleetGate`, `assertLocusPreMutate`, `ensureLocusReady`, `withLocusSession` (scrubbed mint env), `registerLocusInMcpConfig`, pure parsers |
 | Fleet preflight | [`fleet-preflight.md`](./fleet-preflight.md) — exact steps before agent dispatch |
 | MCP gateway patch | [`mcp-gateway-snippet.md`](./mcp-gateway-snippet.md) |
 | Doctor check | [`doctor-check.md`](./doctor-check.md) |
@@ -18,10 +18,11 @@ Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus wi
 
 1. Shell out to Locus CLI (or spawn `locus-mcp` stdio) — do not reimplement pin/seal.
 2. Prefer **`locusFleetGate()`** (or `ensureLocusReady()`) before agent dispatch — see [fleet-preflight.md](./fleet-preflight.md).
-3. Register MCP servers from **`required_servers`** (`locus` + `phantom` only) — `registerLocusInMcpConfig` / [mcp-gateway-snippet.md](./mcp-gateway-snippet.md).
-4. Use **`withLocusSession(binding, fn)`** for ephemeral job pins (`ci mint`; no `active.json` mutation or ambient credential inheritance).
-5. Add **`checkLocus`** to ashlr doctor — see [doctor-check.md](./doctor-check.md).
-6. **Never** parse or store secret values from locus/phantom output.
+3. At shared spawn sites use **`applyLocusPreMutateGate()`** with opt-in `LOCUS_ENFORCE=1|warn` (default off = monorepo-safe).
+4. Register MCP servers from **`required_servers`** (`locus` + `phantom` only) — `registerLocusInMcpConfig` / [mcp-gateway-snippet.md](./mcp-gateway-snippet.md).
+5. Use **`withLocusSession(binding, fn)`** for ephemeral job pins (`ci mint`; scrubbed child env + `validateMintEnv`; no `active.json` mutation).
+6. Add **`checkLocus`** to ashlr doctor — see [doctor-check.md](./doctor-check.md).
+7. **Never** parse or store secret values from locus/phantom output.
 
 ## What hub must not do
 
@@ -60,6 +61,14 @@ Example MCP config fragment:
 ```
 
 Optional env for CI children: `LOCUS_SESSION_ID` (from `locus ci mint --json`).
+
+Pre-mutate enforce at hub spawn sites:
+
+| `LOCUS_ENFORCE` | Behavior |
+|-----------------|----------|
+| unset / `off` / `0` | No CLI probe; allow (default) |
+| `warn` / `log` | Probe fleet gate; log blockers; allow |
+| `1` / `true` / `enforce` | Probe fleet gate; **block** when unhealthy |
 
 ---
 
@@ -220,7 +229,11 @@ import {
   locusAgentReport,
   locusFleetGate,
   ensureLocusReady,
+  applyLocusPreMutateGate,
+  formatPreMutateBlockers,
   withLocusSession,
+  scrubbedChildEnv,
+  validateMintEnv,
   parseStatusOneline,
   canMutate,
   evaluateFleetGate,
@@ -228,21 +241,25 @@ import {
   locusDoctorLine,
 } from "./locus"; // copy of integrations/ashlr-hub/locus.ts
 
-// Fleet pre-dispatch gate (preferred)
+// Fleet pre-dispatch gate (preferred when always probing)
 const gate = locusFleetGate(); // { allowDispatch, blockers[], report }
 if (!gate.allowDispatch) throw new Error(gate.blockers.join("; "));
 
-// Or throw-style pre-mutate gate
+// Shared spawn sites — opt-in via LOCUS_ENFORCE (default off)
+const pre = applyLocusPreMutateGate();
+if (!pre.allow) throw new Error(formatPreMutateBlockers(pre));
+
+// Or throw-style readiness (always probes)
 ensureLocusReady();
 
 // Merge locus into project MCP JSON
 registerLocusInMcpConfig(".mcp.json", { client: "ashlr-hub" });
 
-// Ephemeral CI pin — does not touch human active.json
+// Ephemeral CI pin — scrubbed env, no human active.json mutation
 await withLocusSession("acme", async ({ env, sessionId }) => {
   const g = locusFleetGate(env);
   if (!g.allowDispatch) throw new Error(g.blockers.join("; "));
-  // spawn children with env (includes LOCUS_SESSION_ID)
+  // spawn children with env (includes LOCUS_SESSION_ID; no ambient tokens)
   return sessionId;
 });
 
