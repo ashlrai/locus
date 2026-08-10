@@ -8,6 +8,7 @@
 //! - Credential refs and values never live in MCP responses; only safe source
 //!   metadata is exposed, and resolved values stay inside worker env maps.
 
+pub mod adapter_registry;
 pub mod adapters;
 pub mod agent_report;
 pub mod approval;
@@ -34,6 +35,12 @@ pub mod verify;
 pub mod workers;
 pub mod workspace;
 
+pub use adapter_registry::{
+    builtin_manifest, canonical_entry_material, list_adapters, parse_manifest, sign_entry,
+    sign_entry_material, verify_builtin, verify_entry, verify_entry_with_keys, verify_manifest,
+    verify_manifest_with_keys, AdapterManifest, AdapterManifestEntry, EntryVerifyReport,
+    EntryVerifyStatus, ManifestVerifyReport, RegistryTrustKey, SIG_SCHEME_HMAC_SHA256,
+};
 pub use adapters::{
     call_tool, call_tool_gated, control_tools, enforce_policy, tools_for_binding, AdapterTool,
     ApprovalGate, ToolCallResult,

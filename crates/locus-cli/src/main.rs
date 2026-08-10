@@ -15,11 +15,12 @@ use clap_complete::{generate, Shell};
 use colored::Colorize;
 use locus_core::{
     agent_md_content, agent_md_path, agent_report_from_doctor, all_recipes, build_ci_env_map,
-    build_doctor_report, build_isolated_env_opts, ci_secrets_allowed, default_export_filename,
-    export_content_type, export_events, export_forensics_pack, filter_audit_events, find_workspace,
-    mcp_agent_env, parse_ttl, phantom_on_path, post_audit_webhook, probe_agent_options,
-    recipe_toml_snippet, resolve_audit_webhook_url, resolve_passphrase, suggest_for_provider,
-    verify_claim, verify_session, workspace_stub_toml, AgentStatus, Binding, BindingBody,
+    build_doctor_report, build_isolated_env_opts, builtin_manifest, ci_secrets_allowed,
+    default_export_filename, export_content_type, export_events, export_forensics_pack,
+    filter_audit_events, find_workspace, list_adapters, mcp_agent_env, parse_manifest, parse_ttl,
+    phantom_on_path, post_audit_webhook, probe_agent_options, recipe_toml_snippet,
+    resolve_audit_webhook_url, resolve_passphrase, suggest_for_provider, verify_claim,
+    verify_manifest, verify_session, workspace_stub_toml, AgentStatus, Binding, BindingBody,
     CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
     EventsExportOptions, EventsExportSink, ForensicsExportOptions, IsolatedEnv, Policy,
     ProviderBinding, Scope, Session, Store, WorkspaceConfig, AUDIT_WEBHOOK_URL_ENV, VERSION,
@@ -40,7 +41,7 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · quickstart · setup · agent · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream\n  \
+  Setup         init · quickstart · setup · agent · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter\n  \
   Daily use     enter · pin · leave · whoami · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
@@ -48,7 +49,7 @@ Commands are grouped (in display order):\n  \
   Local UI      serve · dashboard\n  \
   Maintenance   completion · topic · version\n\n\
 Topic help:  locus topic <name>  or  locus help topic <name>\n  \
-  Topics: dashboard · forensics · serve · goal · verify · agent · mcp · http · upstream"
+  Topics: dashboard · forensics · serve · goal · verify · agent · mcp · http · upstream · adapter"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -267,6 +268,13 @@ enum Commands {
     /// hand-writing command/args. See also `docs/workers.md`.
     #[command(next_help_heading = "Setup", subcommand)]
     Upstream(UpstreamCmd),
+
+    /// Built-in adapter registry catalog (manifest list + signature verify)
+    ///
+    /// Discovery surface for `adapters/manifest.toml` — not a plugin loader.
+    /// See `docs/adapter-sdk.md` and `schema/adapter-manifest.schema.json`.
+    #[command(next_help_heading = "Setup", subcommand)]
+    Adapter(AdapterCmd),
 
     /// CI / ephemeral pin minting (short-lived sealed sessions)
     ///
@@ -686,6 +694,21 @@ enum UpstreamCmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum AdapterCmd {
+    /// List built-in provider adapters from the registry catalog
+    List,
+    /// Verify adapter manifest signatures (soft by default; fail-closed with --require-signed)
+    Verify {
+        /// Path to a manifest.toml (default: embedded built-in catalog)
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Fail closed if any entry is unsigned, unknown-key, invalid, or malformed
+        #[arg(long)]
+        require_signed: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 enum BindingCmd {
     /// List configured bindings
     List,
@@ -793,6 +816,7 @@ fn run() -> Result<()> {
         Commands::Mcp => cmd_mcp(),
         Commands::Binding(sub) => cmd_binding(sub, cli.json),
         Commands::Upstream(sub) => cmd_upstream(sub, cli.json),
+        Commands::Adapter(sub) => cmd_adapter(sub, cli.json),
         Commands::Workspace {
             default,
             allow,
@@ -993,6 +1017,22 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
              Docker/OAuth bridge recipes require explicit sandbox=false and publish risk metadata.\n\
              Recipes: github-official · github-mcp · supabase-mcp · vercel-mcp · filesystem-mcp · everything-mcp\n\
              Source: adapters/recipes.toml · Docs: docs/workers.md · examples/upstream.binding.toml",
+        ),
+        (
+            "adapter",
+            "Built-in adapter registry catalog (discovery + signature verify).\n\n\
+             Commands:\n\
+               locus adapter list [--json]\n\
+               locus adapter verify [--path FILE] [--require-signed] [--json]\n\n\
+             Catalog source: adapters/manifest.toml (embedded).\n\
+             Schema:         schema/adapter-manifest.schema.json\n\n\
+             Per-entry optional fields:\n\
+               signature = \"hmac-sha256:<hex>\"   # v0 HMAC stand-in for future ed25519\n\
+               signed_by = \"key-id\"\n\n\
+             Soft verify (default): unsigned OK; invalid/malformed signatures fail.\n\
+             --require-signed: fail closed unless every entry has a valid trusted signature.\n\
+             Not a plugin loader — in-tree ProviderAdapter registration is still manual.\n\
+             Docs: docs/adapter-sdk.md · sibling: locus upstream (recipes)",
         ),
         (
             "http",
@@ -2759,6 +2799,166 @@ fn cmd_mcp() -> Result<()> {
             bail!(
                 "locus-mcp not found on PATH — install with: cargo install --path crates/locus-mcp"
             );
+        }
+    }
+}
+
+fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
+    match sub {
+        AdapterCmd::List => {
+            let providers = list_adapters().context("load built-in adapter registry")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&providers)?);
+                return Ok(());
+            }
+            if providers.is_empty() {
+                println!("{} no built-in adapters", "->".dimmed());
+                return Ok(());
+            }
+            println!(
+                "{} built-in adapter registry (catalog only — not a plugin loader):\n",
+                "locus adapter".cyan().bold()
+            );
+            for p in &providers {
+                let name = if p.name.is_empty() {
+                    p.id.clone()
+                } else {
+                    p.name.clone()
+                };
+                let syn = if p.synthetic { "synthetic" } else { "upstream" };
+                println!(
+                    "  {}  {}  ·  {}  ·  {}",
+                    p.id.green().bold(),
+                    name.dimmed(),
+                    p.status.yellow(),
+                    syn.dimmed()
+                );
+                if !p.tools.is_empty() {
+                    println!("      tools: {}", p.tools.join(", ").cyan());
+                }
+                if !p.frozen_selectors.is_empty() {
+                    println!("      freeze: {}", p.frozen_selectors.join(", ").yellow());
+                }
+                if !p.capabilities.is_empty() {
+                    println!("      caps: {}", p.capabilities.join(", ").dimmed());
+                }
+                let sig = match (p.signature.as_deref(), p.signed_by.as_deref()) {
+                    (Some(_), Some(by)) => format!("signed ({by})"),
+                    (Some(_), None) => "signed (no key id)".into(),
+                    _ => "unsigned".into(),
+                };
+                println!("      registry: {}", sig.dimmed());
+                if !p.description.trim().is_empty() {
+                    let first = p
+                        .description
+                        .lines()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("")
+                        .trim();
+                    if !first.is_empty() {
+                        println!("      {}", first.dimmed());
+                    }
+                }
+                println!();
+            }
+            println!(
+                "{}",
+                "Verify:  locus adapter verify [--require-signed] [--json]".dimmed()
+            );
+            println!(
+                "{}",
+                "Schema:  schema/adapter-manifest.schema.json · docs/adapter-sdk.md".dimmed()
+            );
+            Ok(())
+        }
+        AdapterCmd::Verify {
+            path,
+            require_signed,
+        } => {
+            let (source_label, manifest) = if let Some(p) = path {
+                let body = std::fs::read_to_string(&p)
+                    .with_context(|| format!("read adapter manifest {}", p.display()))?;
+                (
+                    p.display().to_string(),
+                    parse_manifest(&body).context("parse adapter manifest")?,
+                )
+            } else {
+                (
+                    "builtin:adapters/manifest.toml".into(),
+                    builtin_manifest().context("load built-in adapter manifest")?,
+                )
+            };
+            let report = verify_manifest(&manifest, require_signed);
+            if json {
+                let mut v = serde_json::to_value(&report)?;
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("source".into(), json!(source_label));
+                }
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            } else {
+                let verdict = if report.ok {
+                    "ok".green().bold()
+                } else {
+                    "FAIL".red().bold()
+                };
+                println!(
+                    "{} adapter registry verify  {}",
+                    "locus adapter".cyan().bold(),
+                    verdict
+                );
+                println!("  source          {}", source_label.dimmed());
+                println!(
+                    "  providers       {}  ·  trusted {}  ·  unsigned {}  ·  failed {}",
+                    report.provider_count, report.trusted, report.unsigned, report.failed
+                );
+                println!(
+                    "  require_signed  {}",
+                    if require_signed {
+                        "true (fail closed)".yellow().to_string()
+                    } else {
+                        "false".dimmed().to_string()
+                    }
+                );
+                println!();
+                for e in &report.entries {
+                    let st = e.status.as_str();
+                    let colored = match st {
+                        "valid" => st.green().to_string(),
+                        "unsigned" => st.dimmed().to_string(),
+                        "unknown_key" => st.yellow().to_string(),
+                        _ => st.red().to_string(),
+                    };
+                    let by = e
+                        .signed_by
+                        .as_deref()
+                        .map(|s| format!("  key={s}"))
+                        .unwrap_or_default();
+                    println!("  {:<16} {}{}", e.id.green(), colored, by.dimmed());
+                    if let Some(d) = &e.detail {
+                        if e.status.as_str() != "unsigned" {
+                            println!("      {}", d.dimmed());
+                        }
+                    }
+                }
+                if !report.errors.is_empty() {
+                    println!();
+                    for err in &report.errors {
+                        println!("  {} {}", "×".red(), err);
+                    }
+                }
+                if !report.ok && require_signed {
+                    println!();
+                    println!(
+                        "{}",
+                        "hint: built-in catalog ships unsigned in v0; sign entries or omit --require-signed"
+                            .dimmed()
+                    );
+                }
+            }
+            if !report.ok {
+                bail!("adapter registry verify failed");
+            }
+            Ok(())
         }
     }
 }

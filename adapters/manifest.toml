@@ -1,6 +1,15 @@
 # Built-in Locus provider adapters and capabilities.
 # Source of truth for docs / hub discovery. Implementations live under
 # crates/locus-core/src/adapters/. See docs/adapter-sdk.md.
+#
+# Schema: schema/adapter-manifest.schema.json
+# CLI:    locus adapter list | locus adapter verify [--require-signed]
+#
+# Optional per-provider signature fields (v0 — HMAC stand-in for future ed25519):
+#   signature = "hmac-sha256:<hex>"   # over canonical entry material
+#   signed_by = "key-id"              # trust-store key id
+# Built-in entries ship unsigned until a registry root is published.
+# `locus adapter verify --require-signed` is fail-closed when any entry is unsigned.
 
 version = 1
 
