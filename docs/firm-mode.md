@@ -136,6 +136,14 @@ locus whoami
 # Agent / IDE — after locus setup --client claude|cursor
 # tools are only Acme; agent cannot re-pin
 
+# Multi-client install probe (optional dogfood): detect Claude Code / Cursor /
+# Continue config paths and dry-run setup for each found client. Soft-skips
+# missing installs; never prints secrets. Real personal+client dual-account
+# dogfood still needs an operator with both pins wired in the IDE.
+#   scripts/dogfood-clients.sh
+#   DOGFOOD_CLIENTS=1 scripts/dogfood.sh
+#   LOCUS_DOGFOOD_REQUIRE_CLIENTS=1  # hard-fail if none found / setup fails
+
 # Manual identity diagnostics under the pin (no provider credentials)
 locus exec --no-resolve -- env | grep LOCUS_
 # Provider actions use typed locus-mcp tools behind scope and policy checks.

@@ -11,12 +11,15 @@
 #   5b. locus verify session --json (shape + secrets hard; session_ok hard at ready gate)
 #   6. locus goal status (northstar progress)
 #   7. scripts/hub-smoke.sh (ashlr-hub CLI contract; own throwaway home)
+#   8. (optional) scripts/dogfood-clients.sh when DOGFOOD_CLIENTS=1 —
+#      soft multi-client install probe; never blocks DOGFOOD READY by default
 #
 # Prints "DOGFOOD READY" only after every required readiness probe is green.
 #
 # Safe by default: uses a throwaway LOCUS_HOME unless DOGFOOD_USE_REAL_HOME=1.
 # Never prints secret values or credential locators.
 # `DOGFOOD_SKIP_HUB_SMOKE=1` is diagnostic-only and can never reach READY.
+# `DOGFOOD_CLIENTS=1` runs the multi-client probe (soft-skip missing installs).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -263,6 +266,7 @@ APPLY="${DOGFOOD_APPLY:-}"
 PACK_OUT="${DOGFOOD_PACK:-}"
 CLIENT="${DOGFOOD_CLIENT:-claude}"
 SKIP_HUB="${DOGFOOD_SKIP_HUB_SMOKE:-0}"
+RUN_CLIENTS="${DOGFOOD_CLIENTS:-0}"
 
 cleanup() {
   if [[ "${USE_REAL}" != "1" && -n "${DOGFOOD_HOME:-}" && -d "${DOGFOOD_HOME}" ]]; then
@@ -458,6 +462,20 @@ else
   bash "$ROOT/scripts/hub-smoke.sh"
   HUB_OK=1
   ok "hub-smoke"
+fi
+
+# ── 8. optional multi-client install probe (soft; does not gate READY) ───────
+if [[ "${RUN_CLIENTS}" == "1" ]]; then
+  log "8. scripts/dogfood-clients.sh (DOGFOOD_CLIENTS=1)"
+  if [[ ! -f "$ROOT/scripts/dogfood-clients.sh" ]]; then
+    die "dogfood-clients.sh missing at $ROOT/scripts/dogfood-clients.sh"
+  fi
+  # Soft by default: missing installs exit 0. Hard-fail only when the operator
+  # sets LOCUS_DOGFOOD_REQUIRE_CLIENTS=1 (or setup fails for a found client).
+  bash "$ROOT/scripts/dogfood-clients.sh"
+  ok "multi-client probe"
+else
+  printf '\n==> 8. multi-client probe skipped (set DOGFOOD_CLIENTS=1 to run)\n'
 fi
 
 # ── Ready gate ───────────────────────────────────────────────────────────────
