@@ -75,6 +75,9 @@ pub enum SandboxBackend {
     /// PATH restriction + marker only.
     Path,
     /// macOS `sandbox-exec` wrap + PATH restriction.
+    /// Present on all targets so backend tags / tests stay portable; only
+    /// constructed on macOS when `sandbox-exec` is available.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     SandboxExec,
 }
 
@@ -88,6 +91,7 @@ impl SandboxBackend {
 }
 
 /// True when `sandbox-exec` binary exists (macOS Seatbelt wrapper).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn sandbox_exec_available() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -120,6 +124,9 @@ fn which_sandbox_exec() -> Option<PathBuf> {
 /// Isolation already scrubs ambient identity. This profile denies reading other
 /// bindings under `~/.locus/bindings` while allowing the worker home, work dir,
 /// temp, and default operations (network included for upstream MCP).
+///
+/// Used on macOS spawn path; kept available on all targets for unit tests.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub fn seatbelt_profile_for_worker(work_dir: &Path, worker_home: &Path) -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/nonexistent".into());
     let wd = seatbelt_escape(&work_dir.display().to_string());
@@ -137,6 +144,7 @@ pub fn seatbelt_profile_for_worker(work_dir: &Path, worker_home: &Path) -> Strin
     )
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn seatbelt_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }

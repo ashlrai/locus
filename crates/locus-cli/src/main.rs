@@ -18,10 +18,10 @@ use locus_core::{
     build_doctor_report, build_isolated_env_opts, ci_secrets_allowed, default_export_filename,
     export_events, export_forensics_pack, filter_audit_events, find_workspace, mcp_agent_env,
     parse_ttl, phantom_on_path, probe_agent_options, recipe_toml_snippet, resolve_passphrase,
-    suggest_for_provider, verify_claim, verify_session, workspace_stub_toml, AgentStatus,
-    Binding, BindingBody, CredentialResolutionIssue, DoctorExternal, DoctorVerdict,
-    EventsExportFormat, EventsExportOptions, ForensicsExportOptions, Policy, ProviderBinding,
-    Scope, Store, WorkspaceConfig, VERSION,
+    suggest_for_provider, verify_claim, verify_session, workspace_stub_toml, AgentStatus, Binding,
+    BindingBody, CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
+    EventsExportOptions, ForensicsExportOptions, Policy, ProviderBinding, Scope, Store,
+    WorkspaceConfig, VERSION,
 };
 use serde_json::json;
 use std::env;
