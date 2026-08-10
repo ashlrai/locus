@@ -3,7 +3,7 @@
 Exact steps ashlr-hub (or any fleet orchestrator) must run **before** dispatching a mutating agent job. Fail closed.
 
 Contract: [`docs/hub-integration.md`](../../docs/hub-integration.md)  
-Drop-in: [`locus.ts`](./locus.ts) → `locusFleetGate()` / `evaluateFleetGate()`  
+Drop-in: [`locus.ts`](./locus.ts) → `locusFleetGate()` / `evaluateFleetGate()` / `assertLocusPreMutate()`  
 Schema: [`schema/hub-gate.schema.json`](../../schema/hub-gate.schema.json)
 
 ---
@@ -35,6 +35,7 @@ export LOCUS_QUIET=1
 |----------|----------|--------|
 | `LOCUS_HOME` | yes (default `~/.locus`) | Job-local path preferred in CI |
 | `LOCUS_SESSION_ID` | CI children | From `locus ci mint` / `withLocusSession` |
+| `LOCUS_ENFORCE` | opt-in at spawn sites | `1`/`enforce` fail closed; `warn` log-only; unset = off (no probe) |
 | `LOCUS_NOTIFY` | recommended `0` | Quiet hub children |
 | `PATH` | `locus` + `locus-mcp` | Or set `LOCUS_BIN` |
 
@@ -51,12 +52,18 @@ if (!locusAvailable()) {
 command -v locus >/dev/null || exit 2
 ```
 
-### 2. Single readiness probe — `locusFleetGate()`
+### 2. Single readiness probe — `locusFleetGate()` / `assertLocusPreMutate()`
 
-**Preferred hub entrypoint** (wraps `locus agent report --json` + contract checks):
+**Preferred hub entrypoint** when you always want a CLI probe (wraps `locus agent report --json` + contract checks):
 
 ```ts
-import { locusFleetGate, ensureLocusReady, withLocusSession } from "./locus";
+import {
+  locusFleetGate,
+  ensureLocusReady,
+  withLocusSession,
+  applyLocusPreMutateGate,
+  formatPreMutateBlockers,
+} from "./locus";
 
 const gate = locusFleetGate();
 // gate: { allowDispatch, blockers[], report }
@@ -67,7 +74,22 @@ if (!gate.allowDispatch) {
 // Safe to dispatch under gate.report pin
 ```
 
-Schema of the return value: [`schema/hub-gate.schema.json`](../../schema/hub-gate.schema.json).
+**Shared spawn sites** (fleet/run engines) should use the opt-in pre-mutate wrapper so unset `LOCUS_ENFORCE` does not break monorepo CI:
+
+```ts
+const pre = applyLocusPreMutateGate(); // mode from LOCUS_ENFORCE; logs to stderr
+if (!pre.allow) {
+  throw new Error(formatPreMutateBlockers(pre) || "locus pre-mutate blocked");
+}
+```
+
+| `LOCUS_ENFORCE` | Result |
+|-----------------|--------|
+| unset / off | `allow: true`, no CLI probe |
+| `warn` / `log` | probes fleet gate; `allow: true` + `shouldWarn` when blocked |
+| `1` / `enforce` / … | probes fleet gate; `allow: false` when blocked |
+
+Schema of the fleet-gate return value: [`schema/hub-gate.schema.json`](../../schema/hub-gate.schema.json).
 
 | Field | Rule |
 |-------|------|
@@ -78,10 +100,19 @@ Schema of the return value: [`schema/hub-gate.schema.json`](../../schema/hub-gat
 Equivalent pure path (when you already have report JSON):
 
 ```ts
-import { parseAgentReportJson, evaluateFleetGate } from "./locus";
+import {
+  parseAgentReportJson,
+  evaluateFleetGate,
+  decidePreMutateGate,
+  resolveLocusEnforceMode,
+} from "./locus";
 
 const report = parseAgentReportJson(stdout);
 const { allowDispatch, blockers } = evaluateFleetGate(report);
+const decision = decidePreMutateGate(
+  { allowDispatch, blockers },
+  resolveLocusEnforceMode(process.env),
+);
 ```
 
 ### 3. What the gate checks (fail closed)
@@ -146,6 +177,8 @@ ensureLocusReady(); // throws LocusNotReadyError
 
 ```ts
 await withLocusSession("acme", async ({ env, sessionId }) => {
+  // env is scrubbed: runtime basics + caller-explicit + validateMintEnv(ci mint)
+  // — no ambient GITHUB_TOKEN / AWS_PROFILE / etc. from the parent process
   const gate = locusFleetGate(env);
   if (!gate.allowDispatch) {
     throw new Error(gate.blockers.join("; "));
@@ -159,6 +192,13 @@ mint="$(locus ci mint -b acme --json)"
 export LOCUS_SESSION_ID="$(printf '%s' "$mint" | jq -r .session_id)"
 locus agent report --json   # env_session_id set; gate against this pin
 ```
+
+Security helpers (pure; also used inside mint):
+
+| Helper | Role |
+|--------|------|
+| `scrubbedChildEnv(parent, explicit?)` | Drop ambient credentials; keep `PATH`/`HOME`/`LC_*` + explicit |
+| `validateMintEnv(raw)` | Allowlist identity/scope keys from mint JSON; reject locators/secrets |
 
 ### 6. Dispatch
 
@@ -209,7 +249,9 @@ Full composition smoke: [`scripts/hub-integration-test.sh`](../../scripts/hub-in
 | Forbidden | Why |
 |-----------|-----|
 | Soft-allow `status=unsafe` or unhealthy oneline | Wrong-account risk |
+| Soft-allow unknown `LOCUS_ENFORCE` tokens | Typo must fail closed to `enforce` |
 | Parse resolved secrets from locus/phantom stdout | Secret opacity |
+| Inherit full parent `process.env` into mint children | Ambient credential leak |
 | Register ambient provider MCPs alongside locus for same accounts | Bypasses pin + freeze |
 | Let the model call `locus pin` | Agents request only |
 | Share one `active.json` pin across parallel mutate jobs | Race / cross-tenant |
@@ -220,7 +262,7 @@ Full composition smoke: [`scripts/hub-integration-test.sh`](../../scripts/hub-in
 
 | Doc | Topic |
 |-----|--------|
-| [locus.ts](./locus.ts) | `locusFleetGate`, `registerLocusInMcpConfig`, pure parsers |
+| [locus.ts](./locus.ts) | `locusFleetGate`, `assertLocusPreMutate`, `scrubbedChildEnv`, `validateMintEnv`, pure parsers |
 | [mcp-gateway-snippet.md](./mcp-gateway-snippet.md) | REQUIRED_SERVERS + discovery |
 | [doctor-check.md](./doctor-check.md) | `checkLocus` for ashlr doctor |
 | [docs/hub-integration.md](../../docs/hub-integration.md) | Full CLI contract |

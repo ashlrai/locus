@@ -330,6 +330,53 @@ for (const badEnv of [{ GITHUB_TOKEN: "token" }, { LOCUS_SECRET: "token" }, { LO
   assert(rejected, "mint env rejects secrets and locators");
 }
 
+// --- LOCUS_ENFORCE / decidePreMutateGate (pure; mirrors locus.ts) ---
+function resolveLocusEnforceMode(env) {
+  const raw = env?.LOCUS_ENFORCE;
+  if (raw === undefined || raw === null) return "off";
+  const v = String(raw).trim().toLowerCase();
+  if (!v || v === "0" || v === "false" || v === "no" || v === "off") return "off";
+  if (v === "warn" || v === "log") return "warn";
+  if (v === "1" || v === "true" || v === "yes" || v === "enforce" || v === "block") return "enforce";
+  return "enforce"; // unknown → fail closed
+}
+function decidePreMutateGate(gate, mode) {
+  if (mode === "off") {
+    return { allow: true, mode, blockers: [], shouldWarn: false };
+  }
+  const blockers = [...(gate.blockers ?? [])];
+  const blocked = !gate.allowDispatch || blockers.length > 0;
+  if (mode === "warn") {
+    return { allow: true, mode, blockers: blocked ? blockers : [], shouldWarn: blocked };
+  }
+  return { allow: !blocked, mode, blockers: blocked ? blockers : [], shouldWarn: false };
+}
+function formatPreMutateBlockers(decision) {
+  if (!decision.blockers.length) return "";
+  return `locus pre-mutate ${decision.mode}: ${decision.blockers.join("; ")}`;
+}
+
+assert(resolveLocusEnforceMode({}) === "off", "LOCUS_ENFORCE unset → off");
+assert(resolveLocusEnforceMode({ LOCUS_ENFORCE: "0" }) === "off", "LOCUS_ENFORCE=0 → off");
+assert(resolveLocusEnforceMode({ LOCUS_ENFORCE: "warn" }) === "warn", "LOCUS_ENFORCE=warn");
+assert(resolveLocusEnforceMode({ LOCUS_ENFORCE: "1" }) === "enforce", "LOCUS_ENFORCE=1 → enforce");
+assert(resolveLocusEnforceMode({ LOCUS_ENFORCE: "typo-mode" }) === "enforce", "unknown LOCUS_ENFORCE → enforce");
+
+const blockedGate = { allowDispatch: false, blockers: ["status=unsafe"] };
+const healthyGate = { allowDispatch: true, blockers: [] };
+const offDec = decidePreMutateGate(blockedGate, "off");
+assert(offDec.allow === true && offDec.blockers.length === 0 && offDec.shouldWarn === false, "mode=off ignores blockers");
+const warnDec = decidePreMutateGate(blockedGate, "warn");
+assert(warnDec.allow === true && warnDec.shouldWarn === true && warnDec.blockers[0] === "status=unsafe", "mode=warn allows + shouldWarn");
+const enfDec = decidePreMutateGate(blockedGate, "enforce");
+assert(enfDec.allow === false && enfDec.shouldWarn === false, "mode=enforce blocks");
+const okDec = decidePreMutateGate(healthyGate, "enforce");
+assert(okDec.allow === true && okDec.blockers.length === 0, "mode=enforce allows healthy gate");
+assert(
+  formatPreMutateBlockers(enfDec) === "locus pre-mutate enforce: status=unsafe",
+  "formatPreMutateBlockers includes mode + blockers",
+);
+
 // --- mergeLocusIntoMcpConfig ---
 function mergeLocusIntoMcpConfig(config, opts = {}) {
   const serverName = opts.name ?? "locus";
@@ -499,13 +546,25 @@ do
 done
 
 # locus.ts exports (static grep)
-for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv; do
-  if grep -q "export function $sym" "$ROOT/integrations/ashlr-hub/locus.ts"; then
+for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv resolveLocusEnforceMode decidePreMutateGate assertLocusPreMutate formatPreMutateBlockers applyLocusPreMutateGate; do
+  if grep -qE "export (async )?function $sym" "$ROOT/integrations/ashlr-hub/locus.ts"; then
     ok "locus.ts exports $sym"
   else
     bad "locus.ts missing export $sym"
   fi
 done
+
+# Docs mention LOCUS_ENFORCE + scrub helpers
+if grep -q "LOCUS_ENFORCE" "$ROOT/docs/hub-integration.md" && grep -q "scrubbedChildEnv" "$ROOT/docs/hub-integration.md"; then
+  ok "hub-integration.md documents LOCUS_ENFORCE + scrubbedChildEnv"
+else
+  bad "hub-integration.md missing LOCUS_ENFORCE / scrubbedChildEnv notes"
+fi
+if grep -qE "assertLocusPreMutate|applyLocusPreMutateGate" "$ROOT/integrations/ashlr-hub/fleet-preflight.md" && grep -q "validateMintEnv" "$ROOT/integrations/ashlr-hub/fleet-preflight.md"; then
+  ok "fleet-preflight.md documents pre-mutate + validateMintEnv"
+else
+  bad "fleet-preflight.md missing pre-mutate / mint scrub notes"
+fi
 
 if [[ "$fail" -ne 0 ]]; then
   echo "== hub-integration-test FAILED =="

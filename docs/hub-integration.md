@@ -36,14 +36,58 @@ Machine contract for **ashlr-hub** (and similar orchestrators) to shell out to L
 |----------|------|
 | `LOCUS_HOME` | Store root (default `~/.locus`). Use a dedicated path in tests/CI. |
 | `LOCUS_SESSION_ID` | Optional. When set (e.g. after `locus ci mint`), locus resolves that sealed session instead of `sessions/active.json`. Echoed on agent report as `env_session_id` when present. |
+| `LOCUS_ENFORCE` | Opt-in pre-mutate gate for hub spawn sites. See [Pre-mutate enforce](#pre-mutate-enforce-locus_enforce) below. |
+| `LOCUS_BIN` | Optional override for the `locus` binary path. |
+| `LOCUS_NOTIFY` / `LOCUS_QUIET` | Prefer `0` / `1` in hub children (drop-in sets these on mint handles). |
 
 ```bash
 export LOCUS_HOME="${LOCUS_HOME:-$HOME/.locus}"
 # CI / ephemeral child only:
 # export LOCUS_SESSION_ID="$(jq -r .session_id < mint.json)"
+# Production hub mutate paths (opt-in):
+# export LOCUS_ENFORCE=1
 ```
 
 Hub children that inherit a minted session **must** pass `LOCUS_SESSION_ID` (and usually `LOCUS_HOME`) into the process env. Do not invent session ids.
+
+### Pre-mutate enforce (`LOCUS_ENFORCE`)
+
+Shared hub spawn sites should call **`assertLocusPreMutate()`** / **`applyLocusPreMutateGate()`** (not bare `ensureLocusReady`) so monorepo CI without a pin stays green by default:
+
+| `LOCUS_ENFORCE` | Mode | Behavior |
+|-----------------|------|----------|
+| unset / `0` / `false` / `no` / `off` | `off` | Allow without CLI probe (monorepo-safe default) |
+| `warn` / `log` | `warn` | Shell `locusFleetGate`; log blockers; still allow |
+| `1` / `true` / `yes` / `enforce` / `block` | `enforce` | Shell fleet gate; **deny** when blocked |
+| any other non-empty value | `enforce` | Fail closed (typo ≠ soft-allow) |
+
+```ts
+import {
+  assertLocusPreMutate,
+  applyLocusPreMutateGate,
+  formatPreMutateBlockers,
+  decidePreMutateGate,
+  resolveLocusEnforceMode,
+} from "../integrations/ashlr-hub/locus";
+
+// Preferred at spawn sites: logs warn/block to stderr
+const decision = applyLocusPreMutateGate(); // or assertLocusPreMutate()
+if (!decision.allow) {
+  throw new Error(formatPreMutateBlockers(decision) || "locus pre-mutate blocked");
+}
+// Pure path when you already have a fleet-gate result:
+// decidePreMutateGate(gate, resolveLocusEnforceMode(env))
+```
+
+### Scrubbed mint env (`withLocusSession`)
+
+`withLocusSession` / `locusCiMint` never forward ambient parent credentials into the child handle:
+
+- **`scrubbedChildEnv(parent, explicit?)`** — keep only runtime basics (`PATH`, `HOME`, `TMPDIR`, `LC_*`, …) plus caller-explicit keys.
+- **`validateMintEnv(mint.env)`** — allowlist identity/scope keys from `ci mint --json` (`LOCUS_SESSION_ID`, `LOCUS_*_PROJECT_REF`, `GH_CONFIG_DIR`, …). Rejects secret-shaped values and `phm:` / `env:` / `test:` locators.
+- Handle env = scrubbed parent + validated mint map + `LOCUS_HOME` / `LOCUS_SESSION_ID` / quiet flags.
+
+Do not merge `process.env` wholesale into job children.
 
 ---
 
@@ -261,13 +305,31 @@ locus agent report --json   # resolves via LOCUS_SESSION_ID; env_session_id set
 ## Fleet gate (hub pre-dispatch)
 
 ```ts
-import { locusFleetGate, registerLocusInMcpConfig } from "../integrations/ashlr-hub/locus";
+import {
+  locusFleetGate,
+  applyLocusPreMutateGate,
+  formatPreMutateBlockers,
+  registerLocusInMcpConfig,
+  withLocusSession,
+} from "../integrations/ashlr-hub/locus";
 
+// Strict preflight (always probes CLI)
 const gate = locusFleetGate(); // { allowDispatch, blockers[], report }
 if (!gate.allowDispatch) {
   // do not dispatch mutating agents
 }
+
+// Opt-in spawn-site gate (default off until LOCUS_ENFORCE is set)
+const pre = applyLocusPreMutateGate();
+if (!pre.allow) throw new Error(formatPreMutateBlockers(pre));
+
 registerLocusInMcpConfig(".mcp.json"); // merge locus into MCP JSON
+
+// Ephemeral job pin — scrubbed child env, no active.json mutation
+await withLocusSession("acme", async ({ env }) => {
+  const g = locusFleetGate(env);
+  if (!g.allowDispatch) throw new Error(g.blockers.join("; "));
+});
 ```
 
 Schema: [`schema/hub-gate.schema.json`](../schema/hub-gate.schema.json).  
