@@ -188,6 +188,7 @@ Shipped as partial M5:
 - [x] Architecture doc (this file)
 - [x] `locus verify claim` + `locus_verify_claim` (currency / % / absolute language signals)
 - [x] `locus verify session` — doctor + whoami + safe_next JSON pack
+- [x] E2E + dogfood coverage: `scripts/e2e.sh` feature-detects `verify claim` / `verify session` (shape + no secret values); `scripts/dogfood.sh` hard-requires `session_ok` at the DOGFOOD READY gate
 - [x] Doctor optional `ungrounded_claims` finding
 - [x] Best-effort worker sandbox (`LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`)
 - [x] Core module + unit tests (heuristics only)

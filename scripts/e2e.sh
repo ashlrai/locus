@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Locus end-to-end shell tests — pin, isolation, MCP, freeze, approval, doctor,
 # dual-control, events, optional enter/run/notify/ns; graph/ci/heartbeat,
-# dashboard health, forensics export, goal status, verify claim, safe_next MCP,
-# upstream list when present (feature-detected).
+# dashboard health, forensics export, goal status, verify claim/session,
+# safe_next MCP, upstream list when present (feature-detected).
 # Full 0.2+ surface plus adversarial release security probes (~43+ checks).
 set -euo pipefail
 
@@ -994,8 +994,8 @@ assert d["workspace"]["valid"] is False, d["workspace"]
 '
 ok "broken workspace link blocks force/run and makes doctor UNSAFE"
 
-# ── 24. verify claim (feature-detected) ──────────────────────────────────────
-log "24. locus verify claim (optional)"
+# ── 25. verify claim (feature-detected) ──────────────────────────────────────
+log "25. locus verify claim (optional)"
 if ! has_cmd verify && ! has_cmd_path verify claim; then
   skip "verify claim command not available"
 else
@@ -1032,8 +1032,54 @@ print("verify claim confidence=%s needs_tool=%s signals=%s" % (
   fi
 fi
 
-# ── 25. MCP locus_safe_next (feature-detected) ───────────────────────────────
-log "25. MCP locus_safe_next (optional)"
+# ── 26. verify session (feature-detected) ────────────────────────────────────
+log "26. locus verify session (optional)"
+if ! has_cmd verify && ! has_cmd_path verify session; then
+  skip "verify session command not available"
+else
+  # Known pin so whoami + safe_next.ready surface when identity plane is healthy.
+  locus pin personal --force >/dev/null 2>&1 || locus pin acme --force >/dev/null 2>&1 || true
+  set +e
+  vs_json="$(locus verify session --json 2>/dev/null)"
+  vs_ec=$?
+  if [[ $vs_ec -ne 0 || -z "$vs_json" ]]; then
+    vs_json="$(locus --json verify session 2>/dev/null)"
+    vs_ec=$?
+  fi
+  set -e
+  if [[ $vs_ec -ne 0 || -z "$vs_json" ]]; then
+    skip "verify present but session invocation failed (API may differ)"
+  else
+    echo "$vs_json" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+d = json.loads(raw)
+assert isinstance(d, dict), type(d)
+# Session pack contract for hub heartbeats
+assert d.get("kind") == "session", "expected kind=session: %s" % d
+assert "session_ok" in d and isinstance(d["session_ok"], bool), d
+# doctor + safe_next are core fields when present
+doctor = d.get("doctor")
+assert isinstance(doctor, dict), "doctor missing/invalid: %s" % d
+safe_next = d.get("safe_next")
+assert isinstance(safe_next, dict), "safe_next missing/invalid: %s" % d
+# Optional fields when emitted
+if "version" in d:
+    assert d["version"], d
+# Never leak secret *values* (mirror claim checks; CredentialRef names may appear)
+blob = json.dumps(d).lower()
+for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "akia", "secret_value"):
+    assert bad not in blob, "verify session must not leak secrets (%s)" % bad
+print("verify session kind=%s session_ok=%s safe_next=%s doctor_ok=%s" % (
+    d.get("kind"), d.get("session_ok"),
+    (safe_next or {}).get("action"), (doctor or {}).get("ok")))
+'
+    ok "verify session --json pack (kind/session_ok/doctor/safe_next, no secrets)"
+  fi
+fi
+
+# ── 27. MCP locus_safe_next (feature-detected) ───────────────────────────────
+log "27. MCP locus_safe_next (optional)"
 locus leave >/dev/null 2>&1 || true
 sn_list_out="$(
   mcp_rpc \
@@ -1112,8 +1158,8 @@ print("safe_next pinned keys=%s" % ",".join(sorted(d.keys())[:12]))
   ok "MCP locus_safe_next pinned returns action (no secrets)"
 fi
 
-# ── 26. upstream list (feature-detected) ─────────────────────────────────────
-log "26. locus upstream list (optional)"
+# ── 28. upstream list (feature-detected) ─────────────────────────────────────
+log "28. locus upstream list (optional)"
 if ! has_cmd upstream && ! has_cmd_path upstream list; then
   skip "upstream command not available"
 else
@@ -1166,7 +1212,7 @@ fi
 # ── 15 reaffirm: notify still off after full suite (default hygiene) ─────────
 # Step 15 already asserts default-off under clean LOCUS_HOME. Re-check late so
 # later steps cannot silently re-enable notify via config writes.
-log "27. notify still disabled after suite (default hygiene)"
+log "29. notify still disabled after suite (default hygiene)"
 if ! has_cmd notify; then
   skip "notify command not available"
 else

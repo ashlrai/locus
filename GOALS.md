@@ -114,8 +114,8 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] `scripts/hub-integration-test.sh` composition smoke (required_servers + oneline + gate)
 - [x] Land drop-in inside ashlr-hub: `src/core/integrations/locus.ts` + REQUIRED_SERVERS includes `locus` (+ ecosystem discovery name `locus`)
 - [x] `ashlr doctor` calls `checkLocus` in production path (`src/core/doctor.ts`)
-- [ ] Hub pre-mutate gate uses `locusFleetGate` / `ensureLocusReady` / `canMutate`
-- [ ] CI jobs use `withLocusSession` (or `ci mint`) — no shared ambient pin races
+- [ ] Hub pre-mutate gate uses `locusFleetGate` / `ensureLocusReady` / `canMutate` — open; hub [PR #239](https://github.com/ashlrai/ashlr-hub/pull/239) lands doctor + REQUIRED_SERVERS (not pre-mutate / `withLocusSession` CI yet)
+- [ ] CI jobs use `withLocusSession` (or `ci mint`) — no shared ambient pin races — still open after hub PR #239 (drop-in probe only)
 
 ### M5 — Verification plane · **partial / in progress**
 
@@ -123,6 +123,8 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] `locus verify claim --text "…"` → `{ claim, confidence, needs_tool, suggestion, signals, grounding? }` (heuristics: numbers/URLs/versions/currency/percentages/absolute language)
 - [x] MCP `locus_verify_claim` (same shape; available unpinned; suggestion names concrete grounding steps)
 - [x] `locus verify session` → doctor + whoami + safe_next JSON pack for hub (`session_ok`)
+- [x] E2E: `scripts/e2e.sh` feature-detects `verify claim` + `verify session` (kind / session_ok / doctor / safe_next + no secret values)
+- [x] Dogfood: `scripts/dogfood.sh` runs `verify session --json`; hard-requires `session_ok` when claiming DOGFOOD READY
 - [x] Doctor optional WARN `ungrounded_claims` when audit tail has many low-confidence patterns
 - [x] Conformance pack in CI: `.github/workflows/conformance.yml` — `invariants` + `locus-mcp` tests + `hub-smoke` + `e2e` (high timeout)
 - [x] Best-effort sandboxed workers: `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox` → restricted PATH + `LOCUS_WORKER_SANDBOXED=1` + optional macOS `sandbox-exec` (not full seccomp/VM)
@@ -173,4 +175,4 @@ locus init --with-samples && locus enter personal && locus doctor
 | M2 Firm UX | done |
 | M3 AI surface | mostly done |
 | M4 Hub composition | in progress |
-| M5 Verification plane | partial (claim+session verify, best-effort worker sandbox, conformance CI) |
+| M5 Verification plane | partial (claim+session verify, e2e/dogfood coverage, best-effort worker sandbox, conformance CI) |
