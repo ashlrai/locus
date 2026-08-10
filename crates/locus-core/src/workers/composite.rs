@@ -191,6 +191,20 @@ impl CompositeWorkerManager {
         self.ensure_all(session, binding)
     }
 
+    /// Ensure only the provider addressed by one already-authorized tool call.
+    /// This prevents an allow decision for one provider from resolving every
+    /// other provider credential in the binding.
+    pub fn ensure_provider(
+        &mut self,
+        session: &Session,
+        binding: &Binding,
+        provider: &str,
+    ) -> Result<WorkerSlot> {
+        let _ = self.reap_idle_configured()?;
+        self.focus_session(&session.session_id)?;
+        self.ensure(session, binding, provider)
+    }
+
     /// Whether the provider uses MCP stdio (has live or declared upstream).
     pub fn is_upstream_provider(&self, binding: &Binding, provider: &str) -> bool {
         binding.provider(provider).is_some_and(|p| p.has_upstream())

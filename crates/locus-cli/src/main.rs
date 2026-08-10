@@ -20,7 +20,7 @@ use locus_core::{
     parse_ttl, phantom_on_path, probe_agent_options, recipe_toml_snippet, resolve_passphrase,
     suggest_for_provider, verify_claim, verify_session, workspace_stub_toml, AgentStatus, Binding,
     BindingBody, CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
-    EventsExportOptions, ForensicsExportOptions, Policy, ProviderBinding, Scope, Store,
+    EventsExportOptions, ForensicsExportOptions, Policy, ProviderBinding, Scope, Session, Store,
     WorkspaceConfig, VERSION,
 };
 use serde_json::json;
@@ -979,6 +979,42 @@ fn store() -> Result<Store> {
     Store::open_default().context("open locus store")
 }
 
+fn exact_session_selected() -> bool {
+    env::var("LOCUS_SESSION_ID")
+        .ok()
+        .is_some_and(|id| !id.trim().is_empty())
+}
+
+/// Environment selection is a confinement signal, never an authority signal.
+/// The selected session must exist and carry a valid store seal; run/CI/MCP
+/// sessions remain delegated even if their descriptive client labels are edited.
+fn delegated_child_session(s: &Store) -> Result<Option<Session>> {
+    let selected = exact_session_selected();
+    let Some(session) = s.active_session()? else {
+        if selected {
+            bail!("selected LOCUS_SESSION_ID does not name a valid exact session");
+        }
+        return Ok(None);
+    };
+    session
+        .verify(&s.seal_key()?)
+        .context("verify selected session authority")?;
+    if selected || session.is_delegated() {
+        Ok(Some(session))
+    } else {
+        Ok(None)
+    }
+}
+
+fn require_local_control_boundary(operation: &str) -> Result<()> {
+    if exact_session_selected() {
+        bail!(
+            "{operation} is a local control operation and is unavailable inside an exact delegated session"
+        );
+    }
+    Ok(())
+}
+
 fn cwd() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -1192,6 +1228,7 @@ fn write_annotated_binding(s: &Store, alias: &str, toml: &str) -> Result<()> {
 
 /// First 60 seconds: ensure home + samples, enter workspace default if unpinned, whoami + doctor.
 fn cmd_quickstart(json: bool) -> Result<()> {
+    require_local_control_boundary("locus quickstart")?;
     let s = store()?;
     let config_written = ensure_default_config(&s)?;
 
@@ -1392,6 +1429,7 @@ fn cmd_enter(
     exports: bool,
     json: bool,
 ) -> Result<()> {
+    require_local_control_boundary("locus enter")?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let session = match alias {
@@ -1454,6 +1492,7 @@ fn cmd_pin(
     ns: Option<String>,
     json: bool,
 ) -> Result<()> {
+    require_local_control_boundary("locus pin")?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let session = if let Some(ns_raw) = ns {
@@ -1543,6 +1582,7 @@ fn cmd_pin(
 }
 
 fn cmd_leave(json: bool) -> Result<()> {
+    require_local_control_boundary("locus leave")?;
     let s = store()?;
     match s.leave()? {
         None => {
@@ -1997,7 +2037,14 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     }
 
     let s = store()?;
-    let session = s.require_active().context("need active pin for exec")?;
+    let delegated = delegated_child_session(&s)?;
+    if delegated.is_some() && resolve_secrets {
+        bail!("locus exec cannot resolve credentials inside a delegated session; use --no-resolve");
+    }
+    let session = match delegated {
+        Some(session) => session,
+        None => s.require_active().context("need active pin for exec")?,
+    };
     let binding = s.load_binding(&session.binding_alias)?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Exec)?;
 
@@ -2098,6 +2145,7 @@ fn cmd_ci_mint(
     resolve: bool,
     _json: bool,
 ) -> Result<()> {
+    require_local_control_boundary("locus ci mint")?;
     let s = store()?;
     let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
     let (session, path) = s
@@ -2135,6 +2183,7 @@ fn cmd_ci_mint(
 
 /// Mint a CI session and print shell `export` lines (eval-friendly).
 fn cmd_ci_env(binding_alias: String, ttl: String, force: bool, resolve: bool) -> Result<()> {
+    require_local_control_boundary("locus ci env")?;
     let s = store()?;
     let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
     let (session, _path) = s
@@ -2178,6 +2227,31 @@ fn cmd_ci_run(
     }
 
     let s = store()?;
+    if let Some(session) = delegated_child_session(&s)? {
+        if binding_alias != session.binding_alias && binding_alias != session.binding_id {
+            bail!(
+                "locus ci run cannot select binding `{binding_alias}` from exact session bound to `{}`",
+                session.binding_alias
+            );
+        }
+        if force {
+            bail!("locus ci run --force is unavailable inside a delegated session");
+        }
+        if resolve_secrets {
+            bail!(
+                "locus ci run cannot resolve credentials inside a delegated session; use --no-resolve"
+            );
+        }
+        let binding = s.load_binding(&session.binding_alias)?;
+        return run_exact_session_child(
+            &s,
+            &session,
+            &binding,
+            &args,
+            ChildLaunchSurface::CiRun,
+            "ci.run.delegated",
+        );
+    }
     let binding = s.load_binding(&binding_alias)?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::CiRun)?;
 
@@ -2285,6 +2359,34 @@ fn cmd_run(
     }
 
     let s = store()?;
+    if let Some(session) = delegated_child_session(&s)? {
+        if binding_alias != session.binding_alias && binding_alias != session.binding_id {
+            bail!(
+                "locus run cannot select binding `{binding_alias}` from exact session bound to `{}`",
+                session.binding_alias
+            );
+        }
+        if force {
+            bail!("locus run --force is unavailable inside a delegated session");
+        }
+        if share_pin {
+            bail!("locus run --share-pin is unavailable inside a delegated session");
+        }
+        if resolve_secrets {
+            bail!(
+                "locus run cannot resolve credentials inside a delegated session; use --no-resolve"
+            );
+        }
+        let binding = s.load_binding(&session.binding_alias)?;
+        return run_exact_session_child(
+            &s,
+            &session,
+            &binding,
+            &args,
+            ChildLaunchSurface::Run,
+            "session.run.delegated",
+        );
+    }
     let binding = s.load_binding(&binding_alias)?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Run)?;
     // Capture parent pin (if any) so we can prove it is unchanged after run
@@ -2398,6 +2500,61 @@ fn cmd_run(
         let _ = s.cleanup_run_session(&run_path, &session);
     }
 
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+/// Execute a credential-free child without minting or switching sessions.
+/// This is the only raw-child path available to an agent-selected session.
+fn run_exact_session_child(
+    s: &Store,
+    session: &Session,
+    binding: &Binding,
+    args: &[String],
+    surface: ChildLaunchSurface,
+    audit_op: &str,
+) -> Result<()> {
+    preflight_child_launch(binding, false, surface)?;
+
+    let drift = s.check_drift_and_freeze()?;
+    if !drift.ok {
+        bail!(
+            "delegated session is not healthy: {}",
+            drift.issues.join(", ")
+        );
+    }
+
+    let iso = build_isolated_env_opts(session, binding, false);
+    if iso.secrets_resolved != 0 {
+        bail!("internal: delegated no-resolve child resolved credentials");
+    }
+
+    let program = &args[0];
+    let mut child = Command::new(program);
+    child
+        .args(&args[1..])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .env_clear();
+    for (k, v) in &iso.vars {
+        child.env(k, v);
+    }
+
+    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    s.audit(
+        audit_op,
+        &session.binding_alias,
+        Some(json!({
+            "cmd": args,
+            "exit": status.code(),
+            "session_id": session.session_id,
+            "secrets_resolved": 0,
+            "exact_session": true,
+        })),
+    )?;
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
@@ -3668,11 +3825,12 @@ fn print_doctor_human(report: &locus_core::DoctorReport) {
         "ok".green().to_string()
     };
     println!(
-        "  approvals {}  pending={} dual_control_waiting={} approved={} expired={} denied={}",
+        "  approvals {}  pending={} dual_control_waiting={} approved={} untrusted={} expired_authenticated={} denied={}",
         appr_status,
         report.pending_approvals,
         report.dual_control_waiting,
         appr.approved_valid,
+        appr.untrusted_approved,
         appr.expired_grants,
         appr.denied
     );

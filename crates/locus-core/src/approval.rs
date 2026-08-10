@@ -166,6 +166,19 @@ impl ApprovalRecord {
         false
     }
 
+    /// Number of grants authenticated by the external verifier for this exact
+    /// approval. Persisted `authority` labels and envelope ids are not proof.
+    pub fn authoritative_grant_count(&self) -> usize {
+        0
+    }
+
+    /// True only when an authenticated external grant existed and then aged
+    /// out. With the verifier disabled, approved-looking disk records are
+    /// untrusted rather than expired grants.
+    pub fn is_expired_authenticated_grant(&self) -> bool {
+        false
+    }
+
     pub fn matches_call(&self, tool: &str, binding: &str, args_digest: &str) -> bool {
         self.tool == tool && self.binding == binding && self.args_digest == args_digest
     }

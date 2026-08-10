@@ -431,6 +431,36 @@ export function validateMintEnv(raw: unknown): Record<string, string> {
 }
 
 /**
+ * Bind one Hub mint request to exactly one sealed session identity.
+ * Descriptive env labels are accepted only when they exactly mirror the
+ * top-level, CLI-sealed mint response; they never select a different binding.
+ */
+export function validateMintBinding(
+  requestedBinding: string,
+  mint: LocusCiMint,
+): LocusCiMint {
+  const requested = requestedBinding.trim();
+  if (!requested || (mint.binding !== requested && mint.binding_id !== requested)) {
+    throw new LocusMintError("ci mint returned a different binding than requested");
+  }
+  const expected: Record<string, string> = {
+    LOCUS_SESSION_ID: mint.session_id,
+    LOCUS_BINDING: mint.binding,
+    LOCUS_BINDING_ID: mint.binding_id,
+    LOCUS_TENANT: mint.tenant,
+    LOCUS_SEAL: mint.seal,
+    LOCUS_WORKER_HOME: mint.worker_home,
+    LOCUS_EXPIRES_AT: mint.expires_at,
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    if (!value || mint.env[key] !== value) {
+      throw new LocusMintError("ci mint identity environment does not match sealed response");
+    }
+  }
+  return mint;
+}
+
+/**
  * Merge sealed-session identity/scope keys from a mint handle into `target`.
  * Pure: mutates and returns `target`. Never copies secrets (allowlist only).
  *
@@ -1200,7 +1230,7 @@ export function locusCiMint(
     throw new LocusMintError("ci mint unexpectedly returned resolved secrets");
   }
   mint.env = validateMintEnv(mint.env);
-  return mint;
+  return validateMintBinding(binding, mint);
 }
 
 /**

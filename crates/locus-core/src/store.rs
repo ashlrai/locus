@@ -18,7 +18,9 @@ use crate::graph::{
     GraphListEntry, GraphMeta, WorkspaceTemplate,
 };
 use crate::seal::SealKey;
-use crate::session::{binding_fingerprint, parse_ttl, PinSource, Session, SessionMode};
+use crate::session::{
+    binding_fingerprint, parse_ttl, PinSource, Session, SessionAuthority, SessionMode,
+};
 use crate::ticket::{self, CapabilityTicket};
 use crate::workspace::{find_workspace, WorkspaceConfig};
 use chrono::{Duration, Utc};
@@ -498,6 +500,7 @@ impl Store {
         client: Option<String>,
         force: bool,
     ) -> Result<Session> {
+        self.reject_exact_session_mutation("pin")?;
         self.pin_with_opts(alias_or_id, cwd, client, force, None, true, None)
     }
 
@@ -513,6 +516,7 @@ impl Store {
         client: Option<String>,
         force: bool,
     ) -> Result<Session> {
+        self.reject_exact_session_mutation("namespaced pin")?;
         if aliases.len() < 2 {
             return Err(LocusError::msg(
                 "namespaced pin requires at least two bindings (e.g. `locus pin --ns a,b`)",
@@ -552,14 +556,17 @@ impl Store {
         share_pin: bool,
         run_suffix: &str,
     ) -> Result<(Session, PathBuf)> {
-        let session = self.pin_with_opts(
+        self.reject_exact_session_mutation("run session mint/share-pin")?;
+        let session = self.pin_with_opts_source(
             alias_or_id,
             cwd,
             client.or_else(|| Some("run".into())),
             force,
             None,
             share_pin,
+            Some(PinSource::Run),
             None,
+            SessionAuthority::LocalControl,
         )?;
         // When share_pin is false, pin_with_opts still built the session but did
         // not write active.json — write run session file.
@@ -605,6 +612,7 @@ impl Store {
         force: bool,
         ttl: Option<Duration>,
     ) -> Result<(Session, PathBuf)> {
+        self.reject_exact_session_mutation("CI session mint")?;
         let session = self.pin_with_opts_source(
             alias_or_id,
             cwd,
@@ -614,6 +622,7 @@ impl Store {
             false, // never write active.json
             Some(PinSource::Ci),
             ttl,
+            SessionAuthority::Delegated,
         )?;
         // Prefer session_id tail as file suffix so LOCUS_SESSION_ID can find it.
         let suffix = session
@@ -664,6 +673,15 @@ impl Store {
 
     /// Load a session by `session_id` from `sessions/*.json` (active, run-*, ci-*).
     pub fn load_session_by_id(&self, session_id: &str) -> Result<Option<Session>> {
+        let Some(path) = self.session_path_by_id(session_id)? else {
+            return Ok(None);
+        };
+        let raw = fs::read_to_string(path)?;
+        let session: Session = serde_json::from_str(&raw)?;
+        Ok((session.session_id == session_id).then_some(session))
+    }
+
+    fn session_path_by_id(&self, session_id: &str) -> Result<Option<PathBuf>> {
         if session_id.is_empty()
             || session_id.contains('/')
             || session_id.contains('\\')
@@ -683,14 +701,14 @@ impl Store {
                 let raw = fs::read_to_string(&ci)?;
                 let s: Session = serde_json::from_str(&raw)?;
                 if s.session_id == session_id {
-                    return Ok(Some(s));
+                    return Ok(Some(ci));
                 }
             }
         }
         // active.json
         if let Some(s) = self.read_active_session_file()? {
             if s.session_id == session_id {
-                return Ok(Some(s));
+                return Ok(Some(self.active_session_path()));
             }
         }
         // Scan remaining session files
@@ -705,7 +723,7 @@ impl Store {
             };
             if let Ok(s) = serde_json::from_str::<Session>(&raw) {
                 if s.session_id == session_id {
-                    return Ok(Some(s));
+                    return Ok(Some(path));
                 }
             }
         }
@@ -734,6 +752,7 @@ impl Store {
             write_active,
             None,
             ttl_override,
+            SessionAuthority::LocalControl,
         )
     }
 
@@ -748,6 +767,7 @@ impl Store {
         write_active: bool,
         source_override: Option<PinSource>,
         ttl_override: Option<Duration>,
+        authority: SessionAuthority,
     ) -> Result<Session> {
         let binding = self.load_binding(alias_or_id)?;
         let ws = find_workspace(cwd)?;
@@ -816,12 +836,13 @@ impl Store {
             .home
             .join("workers")
             .join(format!("pending-{}", binding.alias));
-        let mut session = Session::new(
+        let mut session = Session::new_with_authority(
             &binding.id,
             &binding.alias,
             &binding.tenant,
             binding.principal.clone(),
             source,
+            authority,
             client,
             ttl,
             worker_home.display().to_string(),
@@ -839,6 +860,7 @@ impl Store {
             session.namespaces = ns_aliases;
             session.namespace_fps = ns_fps;
         }
+        session.reseal(&key);
 
         if write_active {
             let path = self.active_session_path();
@@ -871,7 +893,32 @@ impl Store {
 
     /// Persist an updated session to `active.json` (e.g. freeze flag).
     pub fn save_active_session(&self, session: &Session) -> Result<()> {
-        self.write_session_file(&self.active_session_path(), session)
+        self.reject_exact_session_mutation("save active session")?;
+        self.save_session_at(&self.active_session_path(), session)
+    }
+
+    fn save_session_at(&self, path: &Path, session: &Session) -> Result<()> {
+        let mut sealed = session.clone();
+        sealed.reseal(&self.seal_key()?);
+        self.write_session_file(path, &sealed)
+    }
+
+    fn save_current_session(&self, session: &Session) -> Result<()> {
+        if let Ok(selected) = std::env::var("LOCUS_SESSION_ID") {
+            let selected = selected.trim();
+            if !selected.is_empty() {
+                if selected != session.session_id {
+                    return Err(LocusError::msg(
+                        "refusing to persist a session other than exact LOCUS_SESSION_ID",
+                    ));
+                }
+                let path = self.session_path_by_id(selected)?.ok_or_else(|| {
+                    LocusError::msg("selected LOCUS_SESSION_ID has no session file")
+                })?;
+                return self.save_session_at(&path, session);
+            }
+        }
+        self.save_session_at(&self.active_session_path(), session)
     }
 
     /// Resolve bare pin target: workspace `default_binding`, then opt-in git remote autopin.
@@ -883,6 +930,7 @@ impl Store {
     ///
     /// Autopin never uses `force` — allowlist blocks are skipped at resolve time.
     pub fn pin_auto(&self, cwd: &Path, client: Option<String>, force: bool) -> Result<Session> {
+        self.reject_exact_session_mutation("auto-pin")?;
         let target = self.resolve_auto_pin(cwd)?;
         let use_force = match &target.source {
             PinSource::Autopin { .. } => false,
@@ -897,6 +945,34 @@ impl Store {
             true,
             Some(target.source),
             None,
+            SessionAuthority::LocalControl,
+        )
+    }
+
+    /// Auto-pin for an agent/MCP runtime. Authority is sealed as delegated;
+    /// the caller-provided client label is descriptive only.
+    pub fn pin_auto_delegated(
+        &self,
+        cwd: &Path,
+        client: Option<String>,
+        force: bool,
+    ) -> Result<Session> {
+        self.reject_exact_session_mutation("delegated auto-pin")?;
+        let target = self.resolve_auto_pin(cwd)?;
+        let use_force = match &target.source {
+            PinSource::Autopin { .. } => false,
+            _ => force,
+        };
+        self.pin_with_opts_source(
+            &target.alias,
+            cwd,
+            client,
+            use_force,
+            None,
+            true,
+            Some(target.source),
+            None,
+            SessionAuthority::Delegated,
         )
     }
 
@@ -956,6 +1032,7 @@ impl Store {
     }
 
     pub fn leave(&self) -> Result<Option<Session>> {
+        self.reject_exact_session_mutation("leave")?;
         // Always operates on active.json — not LOCUS_SESSION_ID overrides.
         let path = self.active_session_path();
         if !path.exists() {
@@ -976,6 +1053,18 @@ impl Store {
         }
         fs::remove_file(path)?;
         Ok(session)
+    }
+
+    fn reject_exact_session_mutation(&self, operation: &str) -> Result<()> {
+        if std::env::var("LOCUS_SESSION_ID")
+            .ok()
+            .is_some_and(|id| !id.trim().is_empty())
+        {
+            return Err(LocusError::msg(format!(
+                "{operation} is unavailable inside an exact delegated session"
+            )));
+        }
+        Ok(())
     }
 
     // ── Engagements ───────────────────────────────────────────────────────
@@ -1398,7 +1487,7 @@ impl Store {
                         .cloned()
                         .unwrap_or_else(|| "binding_drift".into());
                     session.freeze(reason.clone());
-                    self.save_active_session(&session)?;
+                    self.save_current_session(&session)?;
                     self.audit(
                         "session.freeze",
                         &session.binding_alias,
@@ -1835,9 +1924,10 @@ impl Store {
                             ApprovalStatus::Approved => {
                                 if rec.is_valid_grant() {
                                     approved += 1;
+                                } else if rec.is_expired_authenticated_grant() {
+                                    expired_grants += 1;
                                 } else {
                                     untrusted_approved += 1;
-                                    expired_grants += 1;
                                 }
                             }
                         },
@@ -1858,6 +1948,8 @@ impl Store {
             expired_grants,
             denied,
             corrupt,
+            approval_authority: "local_advisory".into(),
+            authoritative_path_enabled: crate::approval::external_approval_authority_enabled(),
             ok: exists && writable && corrupt == 0 && untrusted_approved == 0,
         })
     }
@@ -1971,6 +2063,8 @@ pub struct ApprovalsHealth {
     pub expired_grants: usize,
     pub denied: usize,
     pub corrupt: usize,
+    pub approval_authority: String,
+    pub authoritative_path_enabled: bool,
     /// True when dir exists, is writable, and has no corrupt records.
     pub ok: bool,
 }
@@ -2992,6 +3086,9 @@ credential_ref = "ghp_UNSAFE/CANARY"
         let health = store.approvals_health().unwrap();
         assert_eq!(health.approved_valid, 0);
         assert_eq!(health.untrusted_approved, 1);
+        assert_eq!(health.expired_grants, 0);
+        assert_eq!(health.approval_authority, "local_advisory");
+        assert!(!health.authoritative_path_enabled);
         assert!(!health.ok);
 
         assert!(!forged.matches_call("supabase.table.delete", "other", &args_digest(&args)));
@@ -3386,6 +3483,43 @@ allowed_bindings = ["acme"]
         let events = store.read_audit_events().unwrap();
         assert!(events.iter().any(|e| e.op == "ci.mint"));
         store.cleanup_ci_session(&path, &ci).unwrap();
+    }
+
+    #[test]
+    fn exact_ci_drift_freezes_ci_file_without_replacing_global_pin() {
+        let _env_guard = lock_session_env();
+        std::env::remove_var("LOCUS_SESSION_ID");
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut acme = sample_binding("acme", "acme-corp", "p1");
+        store.save_binding(&acme).unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+        let global = store.pin("personal", dir.path(), None, false).unwrap();
+        let (ci, ci_path) = store
+            .create_ci_session("acme", dir.path(), false, Some(Duration::minutes(10)))
+            .unwrap();
+
+        acme.providers[0].scope.project_ref = Some("drifted".into());
+        store.save_binding(&acme).unwrap();
+        std::env::set_var("LOCUS_SESSION_ID", &ci.session_id);
+        let drift = store.check_drift_and_freeze().unwrap();
+        assert!(drift.frozen);
+        std::env::remove_var("LOCUS_SESSION_ID");
+
+        let still_global = store.active_session().unwrap().unwrap();
+        assert_eq!(still_global.session_id, global.session_id);
+        assert_eq!(still_global.binding_alias, "personal");
+        assert!(!still_global.frozen);
+
+        let frozen_ci: Session =
+            serde_json::from_str(&fs::read_to_string(&ci_path).unwrap()).unwrap();
+        assert_eq!(frozen_ci.session_id, ci.session_id);
+        assert!(frozen_ci.frozen);
+        frozen_ci.verify_seal(&store.seal_key().unwrap()).unwrap();
+        store.cleanup_ci_session(&ci_path, &frozen_ci).unwrap();
     }
 
     #[test]

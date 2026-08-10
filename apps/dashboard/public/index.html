@@ -924,6 +924,9 @@
         if (doc.approvals) {
           html += kv("approval trust", `<span class="warn">${esc(doc.approvals.approval_authority || "local_advisory")}</span>`);
           html += kv("external authority", doc.approvals.authoritative_path_enabled ? `<span class="ok">enabled</span>` : `<span class="warn">disabled</span>`);
+          html += kv("authenticated grants", String(doc.approvals.approved_valid ?? 0));
+          html += kv("untrusted approved-looking", doc.approvals.untrusted_approved ? `<span class="err">${esc(doc.approvals.untrusted_approved)}</span>` : "0");
+          html += kv("expired authenticated", String(doc.approvals.expired_grants ?? 0));
         }
         html += kv("phantom", doc.phantom_on_path ? `<span class="ok">on PATH</span>` : `<span class="warn">missing</span>`);
         if (doc.workspace) {

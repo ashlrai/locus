@@ -158,6 +158,23 @@ else
   ok "dogfood gate blocks incomplete credential migration"
 fi
 
+MINT="$(locus ci mint -b personal --json)"
+if printf '%s' "$MINT" | jq -e '
+  .binding == "personal"
+  and .binding_id == .env.LOCUS_BINDING_ID
+  and .binding == .env.LOCUS_BINDING
+  and .session_id == .env.LOCUS_SESSION_ID
+  and .tenant == .env.LOCUS_TENANT
+  and .seal == .env.LOCUS_SEAL
+  and .worker_home == .env.LOCUS_WORKER_HOME
+  and .expires_at == .env.LOCUS_EXPIRES_AT
+  and .secrets_resolved == false
+' >/dev/null 2>&1; then
+  ok "Hub mint is exact-binding and exact-session consistent"
+else
+  bad "Hub mint identity fields are not exact-session consistent"
+fi
+
 # ---------------------------------------------------------------------------
 # 4. Pure helpers (node — no TypeScript build; inline mirrors of locus.ts)
 # ---------------------------------------------------------------------------
@@ -546,7 +563,7 @@ do
 done
 
 # locus.ts exports (static grep)
-for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv resolveLocusEnforceMode decidePreMutateGate assertLocusPreMutate formatPreMutateBlockers applyLocusPreMutateGate; do
+for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv validateMintBinding resolveLocusEnforceMode decidePreMutateGate assertLocusPreMutate formatPreMutateBlockers applyLocusPreMutateGate; do
   if grep -qE "export (async )?function $sym" "$ROOT/integrations/ashlr-hub/locus.ts"; then
     ok "locus.ts exports $sym"
   else

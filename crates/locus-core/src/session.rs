@@ -37,8 +37,33 @@ pub enum SessionMode {
     Namespaced,
 }
 
+/// Authority carried by a sealed session.
+///
+/// `LocalControl` is minted only by direct local control operations. CI and
+/// MCP-auto sessions are `Delegated`; a human-created run session is also
+/// confined while selected through `LOCUS_SESSION_ID`. No caller-provided
+/// environment or client label can upgrade authority. Missing authority on
+/// legacy files is deliberately untrusted.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAuthority {
+    LocalControl,
+    Delegated,
+    #[default]
+    LegacyUntrusted,
+}
+
+const CURRENT_SEAL_VERSION: u32 = 2;
+
+const fn legacy_seal_version() -> u32 {
+    1
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Session {
+    /// Version of the canonical session material covered by `seal`.
+    #[serde(default = "legacy_seal_version")]
+    pub seal_version: u32,
     pub session_id: String,
     pub binding_id: String,
     pub binding_alias: String,
@@ -46,6 +71,9 @@ pub struct Session {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
     pub source: PinSource,
+    /// Sealed authority class. Caller-controlled labels never alter this.
+    #[serde(default)]
+    pub authority: SessionAuthority,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<String>,
     pub pinned_at: DateTime<Utc>,
@@ -86,35 +114,59 @@ impl Session {
         worker_home: String,
         key: &SealKey,
     ) -> Self {
+        Self::new_with_authority(
+            binding_id,
+            binding_alias,
+            tenant,
+            principal,
+            source,
+            SessionAuthority::LocalControl,
+            client,
+            ttl,
+            worker_home,
+            key,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_authority(
+        binding_id: &str,
+        binding_alias: &str,
+        tenant: &str,
+        principal: Option<String>,
+        source: PinSource,
+        authority: SessionAuthority,
+        client: Option<String>,
+        ttl: Duration,
+        worker_home: String,
+        key: &SealKey,
+    ) -> Self {
         let session_id = mint_session_id();
         let pinned_at = Utc::now();
         let expires_at = pinned_at + ttl;
-        let material = seal_material(
-            &session_id,
-            binding_id,
-            &pinned_at.to_rfc3339(),
-            &expires_at.to_rfc3339(),
-        );
-        let seal = key.seal(&material);
-        Self {
+        let mut session = Self {
+            seal_version: CURRENT_SEAL_VERSION,
             session_id,
             binding_id: binding_id.into(),
             binding_alias: binding_alias.into(),
             tenant: tenant.into(),
             principal,
             source,
+            authority,
             client,
             pinned_at,
             expires_at,
             mode: SessionMode::Exclusive,
-            seal,
+            seal: String::new(),
             worker_home,
             frozen: false,
             frozen_reason: None,
             binding_fp: None,
             namespaces: Vec::new(),
             namespace_fps: Vec::new(),
-        }
+        };
+        session.reseal(key);
+        session
     }
 
     pub fn with_mode(mut self, mode: SessionMode) -> Self {
@@ -150,15 +202,52 @@ impl Session {
     }
 
     pub fn material(&self) -> String {
-        seal_material(
-            &self.session_id,
-            &self.binding_id,
-            &self.pinned_at.to_rfc3339(),
-            &self.expires_at.to_rfc3339(),
-        )
+        if self.seal_version < CURRENT_SEAL_VERSION {
+            return seal_material(
+                &self.session_id,
+                &self.binding_id,
+                &self.pinned_at.to_rfc3339(),
+                &self.expires_at.to_rfc3339(),
+            );
+        }
+
+        // serde_json's map representation has deterministic key ordering, and
+        // every authorization-relevant mutable field is covered by the HMAC.
+        serde_json::to_string(&serde_json::json!({
+            "authority": self.authority,
+            "binding_alias": self.binding_alias,
+            "binding_fp": self.binding_fp,
+            "binding_id": self.binding_id,
+            "client": self.client,
+            "expires_at": self.expires_at.to_rfc3339(),
+            "frozen": self.frozen,
+            "frozen_reason": self.frozen_reason,
+            "mode": self.mode,
+            "namespace_fps": self.namespace_fps,
+            "namespaces": self.namespaces,
+            "pinned_at": self.pinned_at.to_rfc3339(),
+            "principal": self.principal,
+            "seal_version": self.seal_version,
+            "session_id": self.session_id,
+            "source": self.source,
+            "tenant": self.tenant,
+            "worker_home": self.worker_home,
+        }))
+        .expect("session seal tuple is serializable")
+    }
+
+    /// Refresh the HMAC after store-owned session state changes.
+    pub fn reseal(&mut self, key: &SealKey) {
+        self.seal_version = CURRENT_SEAL_VERSION;
+        self.seal = key.seal(&self.material());
     }
 
     pub fn verify(&self, key: &SealKey) -> Result<()> {
+        if self.seal_version != CURRENT_SEAL_VERSION
+            || self.authority == SessionAuthority::LegacyUntrusted
+        {
+            return Err(LocusError::InvalidSeal);
+        }
         if !key.verify(&self.material(), &self.seal) {
             return Err(LocusError::InvalidSeal);
         }
@@ -177,6 +266,11 @@ impl Session {
 
     /// Seal + expiry only — does not fail on frozen (for drift checks / doctor).
     pub fn verify_seal(&self, key: &SealKey) -> Result<()> {
+        if self.seal_version != CURRENT_SEAL_VERSION
+            || self.authority == SessionAuthority::LegacyUntrusted
+        {
+            return Err(LocusError::InvalidSeal);
+        }
         if !key.verify(&self.material(), &self.seal) {
             return Err(LocusError::InvalidSeal);
         }
@@ -192,6 +286,10 @@ impl Session {
 
     pub fn is_frozen(&self) -> bool {
         self.frozen
+    }
+
+    pub fn is_delegated(&self) -> bool {
+        self.authority != SessionAuthority::LocalControl
     }
 
     /// Mark session frozen (persist separately via store).
@@ -324,6 +422,45 @@ mod tests {
     }
 
     #[test]
+    fn authority_and_binding_metadata_are_sealed() {
+        let key = SealKey::generate();
+        let s = Session::new_with_authority(
+            "bnd_a",
+            "acme",
+            "acme-corp",
+            None,
+            PinSource::Ci,
+            SessionAuthority::Delegated,
+            Some("ci".into()),
+            Duration::hours(1),
+            "/tmp/locus-worker".into(),
+            &key,
+        );
+        s.verify(&key).unwrap();
+
+        let mut alias_forged = s.clone();
+        alias_forged.binding_alias = "personal".into();
+        assert!(matches!(
+            alias_forged.verify(&key),
+            Err(LocusError::InvalidSeal)
+        ));
+
+        let mut authority_forged = s.clone();
+        authority_forged.authority = SessionAuthority::LocalControl;
+        assert!(matches!(
+            authority_forged.verify(&key),
+            Err(LocusError::InvalidSeal)
+        ));
+
+        let mut worker_home_forged = s;
+        worker_home_forged.worker_home = "/tmp/other".into();
+        assert!(matches!(
+            worker_home_forged.verify(&key),
+            Err(LocusError::InvalidSeal)
+        ));
+    }
+
+    #[test]
     fn parse_ttl_variants() {
         assert_eq!(parse_ttl("8h").unwrap(), Duration::hours(8));
         assert_eq!(parse_ttl("90m").unwrap(), Duration::minutes(90));
@@ -363,6 +500,7 @@ mod tests {
         );
         s.verify(&key).unwrap();
         s.freeze("providers_drift");
+        s.reseal(&key);
         assert!(matches!(s.verify(&key), Err(LocusError::SessionFrozen(_))));
         // seal-only path still ok
         s.verify_seal(&key).unwrap();

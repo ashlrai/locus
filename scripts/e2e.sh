@@ -375,6 +375,86 @@ ok "exec scrubs ambient + injects env: secrets"
 # scrub parent ambient so later steps are clean
 unset GH_TOKEN SUPABASE_ACCESS_TOKEN AWS_PROFILE UNLISTED_SECRET_CANARY
 
+# Exact Hub/agent sessions are confinement capabilities. Reproduce the prior
+# env-i bypass with a synthetic Phantom resolver and verify every refusal occurs
+# before child, credential, audit, session, worker, or global-pin effects.
+fake_phantom_bin="$LOCUS_HOME/fake-phantom-bin"
+mkdir -p "$fake_phantom_bin"
+cat >"$fake_phantom_bin/phantom" <<'SH'
+#!/bin/sh
+case "${3:-${2:-}}" in
+  GH_TOKEN_ACME) printf '%s\n' 'acme-canary-token' ;;
+  GH_TOKEN_PERSONAL) printf '%s\n' 'personal-canary-token' ;;
+  *) printf '%s\n' 'other-canary-token' ;;
+esac
+SH
+chmod +x "$fake_phantom_bin/phantom"
+
+hub_session_json="$(locus ci mint -b acme --force)"
+hub_session_id="$(printf '%s' "$hub_session_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+active_before_exact="$(locus whoami --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+exact_state_before="$(control_plane_snapshot)"
+
+run_exact() {
+  env -i \
+    PATH="$fake_phantom_bin:/usr/bin:/bin" \
+    HOME="$HOME" \
+    LOCUS_HOME="$LOCUS_HOME" \
+    LOCUS_SESSION_ID="$hub_session_id" \
+    "$LOCUS_BIN" "$@"
+}
+
+assert_exact_blocked() {
+  local label="$1" expected="$2"
+  shift 2
+  local marker="$LOCUS_HOME/exact-${label}-child-effect"
+  local output ec
+  rm -f "$marker"
+  set +e
+  output="$(run_exact "$@" -- /bin/sh -c 'printf "%s|%s" "${LOCUS_BINDING:-missing}" "${GH_TOKEN:-missing}" > "$1"' _ "$marker" 2>&1)"
+  ec=$?
+  set -e
+  [[ $ec -ne 0 ]] || die "exact session allowed $label"
+  echo "$output" | grep -Fq -- "$expected" || die "$label wrong refusal: $output"
+  [[ ! -e "$marker" ]] || die "$label started token-bearing child: $(cat "$marker")"
+}
+
+assert_exact_blocked "exec-resolve" "cannot resolve credentials inside a delegated session" exec
+assert_exact_blocked "run-cross-binding" "cannot select binding \`personal\`" run -b personal --no-resolve --force
+assert_exact_blocked "ci-cross-binding" "cannot select binding \`personal\`" ci run -b personal --no-resolve --force
+assert_exact_blocked "run-share-pin" "--share-pin is unavailable" run -b acme --no-resolve --share-pin
+
+set +e
+exact_pin_error="$(run_exact pin personal --force 2>&1)"
+exact_pin_ec=$?
+set -e
+[[ $exact_pin_ec -ne 0 ]] || die "exact session mutated global pin"
+echo "$exact_pin_error" | grep -Fq "local control operation" \
+  || die "exact pin refusal did not name control boundary: $exact_pin_error"
+
+exact_state_after="$(control_plane_snapshot)"
+[[ "$exact_state_after" == "$exact_state_before" ]] \
+  || die "blocked exact-session probes changed session/audit/global state"
+active_after_exact="$(locus whoami --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+[[ "$active_after_exact" == "$active_before_exact" ]] || die "exact session changed global share-pin"
+
+exact_allowed_marker="$LOCUS_HOME/exact-allowed-no-resolve"
+run_exact exec --no-resolve -- /bin/sh -c \
+  'printf "%s|%s" "${LOCUS_BINDING:-missing}" "${GH_TOKEN:-missing}" > "$1"' \
+  _ "$exact_allowed_marker" >/dev/null
+[[ "$(cat "$exact_allowed_marker")" == "acme|missing" ]] \
+  || die "exact no-resolve child escaped binding or received token"
+
+recipe_session_json="$(locus ci mint -b noresolve-recipe --force)"
+hub_session_id="$(printf '%s' "$recipe_session_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+recipe_state_before="$(control_plane_snapshot)"
+assert_exact_blocked "recipe-default-worker" "--no-resolve refused locus run" \
+  run -b noresolve-recipe --no-resolve
+recipe_state_after="$(control_plane_snapshot)"
+[[ "$recipe_state_after" == "$recipe_state_before" ]] \
+  || die "recipe-default exact refusal caused session/audit/worker startup effects"
+ok "env-i exact sessions block cross-binding, share-pin, token children, and recipe-default workers before effects"
+
 # ── 6. MCP tools/list unpinned vs pinned ─────────────────────────────────────
 log "6. MCP tools/list unpinned vs pinned (printf | locus-mcp)"
 locus leave >/dev/null

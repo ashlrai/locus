@@ -751,7 +751,7 @@ fn maybe_mcp_auto_pin() -> Option<String> {
         return None;
     }
 
-    match s.pin_auto(&cwd, Some("mcp-auto".into()), false) {
+    match s.pin_auto_delegated(&cwd, Some("mcp-auto".into()), false) {
         Ok(session) => {
             let _ = s.audit(
                 "session.auto_pin",
@@ -1156,28 +1156,13 @@ fn handle_tools_list() -> std::result::Result<Value, Value> {
                 Some(session.binding_alias.as_str()),
             ));
         }
-        let mut mgr = worker_manager()
+        let mgr = worker_manager()
             .lock()
             .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
-        match mgr.ensure_session(session, bindings) {
-            Ok(_) => {
-                tools.extend(mgr.tools_for_session(session, bindings));
-            }
-            Err(e) => {
-                // Soft-fail spawn: still expose synthetic adapter tools.
-                eprintln!("locus-mcp: worker ensure failed (listing synthetic only): {e}");
-                if session.is_namespaced() {
-                    for (alias, binding) in bindings {
-                        for mut t in tools_for_binding(binding) {
-                            t.name = locus_core::namespace_tool(alias, &t.name);
-                            tools.push(t);
-                        }
-                    }
-                } else if let Some(b) = primary_binding(bindings) {
-                    tools.extend(tools_for_binding(b));
-                }
-            }
-        }
+        // Discovery is side-effect free: merge synthetic tools and schemas from
+        // workers that were already started by an authorized call. Never spawn
+        // a credential-bearing child from tools/list.
+        tools.extend(mgr.tools_for_session(session, bindings));
         return Ok(tools_list_payload(
             tools,
             Some(session.binding_alias.as_str()),
@@ -1332,47 +1317,26 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
         principal: principal_owned.as_deref(),
     };
 
-    // Ensure workers for this pin (spawns upstream MCP when binding declares it).
-    {
-        let mut mgr = worker_manager()
-            .lock()
-            .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
-        if let Err(e) = mgr.ensure_session(&session, &bindings) {
-            let synthetic = tools_for_binding(binding);
-            let is_synthetic = synthetic.iter().any(|t| t.name == tool_name);
-            if !is_synthetic {
-                return Ok(tool_text(
-                    json!({
-                        "error": "worker_ensure_failed",
-                        "detail": e.to_string(),
-                        "tool": name,
-                    }),
-                    true,
-                ));
-            }
-            eprintln!("locus-mcp: worker ensure failed (synthetic path): {e}");
-        }
-    }
-
     let synthetic = tools_for_binding(binding);
     let is_synthetic = synthetic.iter().any(|t| t.name == tool_name);
-
-    // Mint short-lived capability ticket before fan-out (audit ticket_id only).
-    let ticket = s
-        .mint_capability_ticket(&session.session_id, &binding.id, tool_name)
-        .ok();
-    let ticket_id = ticket.as_ref().map(|t| t.ticket_id.clone());
 
     if is_synthetic {
         match call_tool_gated(binding, tool_name, &args, Some(gate)) {
             Ok(r) => {
+                let ticket = if r.ok {
+                    s.mint_capability_ticket(&session.session_id, &binding.id, tool_name)
+                        .ok()
+                } else {
+                    None
+                };
+                let ticket_id = ticket.as_ref().map(|t| t.ticket_id.as_str());
                 audit_tool_block(&s, &binding.alias, tool_name, &r.content);
                 audit_tool_call(
                     &s,
                     &binding.alias,
                     tool_name,
                     &session.session_id,
-                    ticket_id.as_deref(),
+                    ticket_id,
                     r.ok,
                 );
                 Ok(tool_text(r.content, !r.ok))
@@ -1390,9 +1354,29 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
                 Ok(tool_text(blocked.content, true))
             }
             Ok(None) => {
+                let Some(provider) = tool_name.split('.').next().filter(|p| !p.is_empty()) else {
+                    return Ok(tool_text(
+                        json!({ "error": "invalid_tool_name", "tool": name }),
+                        true,
+                    ));
+                };
                 let mut mgr = worker_manager()
                     .lock()
                     .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
+                if let Err(e) = mgr.ensure_provider(&session, binding, provider) {
+                    return Ok(tool_text(
+                        json!({
+                            "error": "worker_ensure_failed",
+                            "detail": e.to_string(),
+                            "tool": name,
+                        }),
+                        true,
+                    ));
+                }
+                let ticket = s
+                    .mint_capability_ticket(&session.session_id, &binding.id, tool_name)
+                    .ok();
+                let ticket_id = ticket.as_ref().map(|t| t.ticket_id.as_str());
                 match mgr.call_tool(&session, binding, tool_name, &args) {
                     Ok(r) => {
                         audit_tool_call(
@@ -1400,7 +1384,7 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
                             &binding.alias,
                             tool_name,
                             &session.session_id,
-                            ticket_id.as_deref(),
+                            ticket_id,
                             r.ok,
                         );
                         Ok(tool_text(r.content, !r.ok))

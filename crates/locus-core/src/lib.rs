@@ -98,7 +98,7 @@ pub use recipes::{
 pub use seal::SealKey;
 pub use session::{
     binding_fingerprint, namespace_tool, parse_ttl, split_namespaced_tool, PinSource, Session,
-    SessionMode,
+    SessionAuthority, SessionMode,
 };
 pub use store::{
     locus_home, ApprovalsHealth, AuditEvent, CredentialRefMigration, EngagementInitResult,

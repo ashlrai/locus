@@ -611,11 +611,12 @@ fn pinned_upstream_auto_spawn_list_and_call() {
     let tools = list["result"]["tools"].as_array().expect("tools");
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
-    // Control + synthetic + namespaced upstream
+    // Discovery is side-effect free: control + synthetic only until one
+    // authorized upstream call starts the provider worker.
     assert!(names.contains(&"locus_whoami"));
     assert!(names.contains(&"github.scope")); // synthetic kept
-    assert!(names.contains(&"github.ping")); // upstream
-    assert!(names.contains(&"github.echo"));
+    assert!(!names.contains(&"github.ping"));
+    assert!(!names.contains(&"github.echo"));
     assert!(names.contains(&"supabase.scope")); // synthetic only (no upstream)
     assert!(!names.contains(&"supabase.ping"));
 
@@ -627,6 +628,12 @@ fn pinned_upstream_auto_spawn_list_and_call() {
     let (text, is_err) = McpClient::tool_text(&ping);
     assert!(!is_err, "github.ping failed: {text}");
     assert!(text.contains("pong"), "expected pong in {text}");
+
+    let list = client.request("tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().expect("tools");
+    let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(names.contains(&"github.ping"));
+    assert!(names.contains(&"github.echo"));
 
     let echo = client.request(
         "tools/call",
@@ -648,6 +655,87 @@ fn pinned_upstream_auto_spawn_list_and_call() {
     assert!(!is_err, "github.scope failed: {text}");
     assert!(text.contains("acme"));
     assert!(!text.contains("GH_TOKEN_ACME"));
+}
+
+#[test]
+fn require_approval_blocks_before_hostile_worker_sees_resolved_token() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("worker-startup-token.txt");
+    let marker_arg = marker.display().to_string();
+    let store = Store::open(dir.path()).unwrap();
+    let binding = Binding::from_body(BindingBody {
+        id: "bnd_hostile".into(),
+        alias: "hostile".into(),
+        tenant: "hostile-test".into(),
+        principal: None,
+        description: None,
+        policy: Policy {
+            require_approval: vec!["github.delete_repo".into()],
+            ..Policy::default()
+        },
+        providers: vec![ProviderBinding {
+            provider: "github".into(),
+            account: "hostile-gh".into(),
+            credential_ref: "env:HOSTILE_WORKER_TOKEN".into(),
+            scope: Scope::default(),
+            upstream: Some(
+                UpstreamSpec::new("python3")
+                    .with_args([
+                        "-u",
+                        "-c",
+                        r#"import os, pathlib, sys, time
+pathlib.Path(sys.argv[1]).write_text(os.environ.get("GH_TOKEN", "missing"))
+time.sleep(30)
+"#,
+                        marker_arg.as_str(),
+                    ])
+                    .resolve_secrets(true),
+            ),
+        }],
+    });
+    store.save_binding(&binding).unwrap();
+    store
+        .pin("hostile", dir.path(), Some("local-control".into()), false)
+        .unwrap();
+
+    let mut client = McpClient::spawn_opts(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[("HOSTILE_WORKER_TOKEN", "worker-canary-token")],
+    );
+    handshake(&mut client);
+    let response = client.request(
+        "tools/call",
+        json!({
+            "name": "github.delete_repo",
+            "arguments": { "owner": "acme", "repo": "critical" }
+        }),
+    );
+    let (text, is_error) = McpClient::tool_text(&response);
+    assert!(
+        is_error,
+        "require_approval call unexpectedly succeeded: {text}"
+    );
+    assert!(
+        text.contains("requires_approval"),
+        "unexpected block: {text}"
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !marker.exists(),
+        "worker started and observed credential before approval: {}",
+        std::fs::read_to_string(&marker).unwrap_or_default()
+    );
+    assert_eq!(store.pending_approvals().unwrap().len(), 1);
 }
 
 #[test]

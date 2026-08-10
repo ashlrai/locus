@@ -152,6 +152,9 @@ pub fn enforce_policy(
     args: &Value,
     gate: Option<ApprovalGate<'_>>,
 ) -> Result<Option<ToolCallResult>> {
+    // Scope is part of authorization and must fail before approval creation or
+    // any caller has an opportunity to start an upstream worker.
+    preflight_scope_freeze(binding, tool_name, args)?;
     let verdict = evaluate(&binding.policy, tool_name);
     match verdict.decision {
         Decision::Deny => Ok(Some(ToolCallResult {
@@ -256,7 +259,6 @@ pub fn call_tool_gated(
 ) -> Result<ToolCallResult> {
     // INV: freeze before policy — model cannot smuggle a wrong project_ref/team_id
     // past require_approval into a grantable call.
-    preflight_scope_freeze(binding, tool_name, args)?;
     if let Some(blocked) = enforce_policy(binding, tool_name, args, gate)? {
         return Ok(blocked);
     }
