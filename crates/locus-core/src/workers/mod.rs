@@ -465,15 +465,7 @@ mod tests {
         });
         assert!(backend.sandbox_active());
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            let err = backend
-                .build_command(&session, &binding, pb, &work_dir)
-                .unwrap_err()
-                .to_string();
-            assert!(err.contains("no supported OS isolation backend"), "{err}");
-        }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let command = backend
                 .build_command(&session, &binding, pb, &work_dir)
@@ -505,11 +497,25 @@ mod tests {
                 .get(crate::workers::ENV_WORKER_SANDBOX_BACKEND)
                 .map(String::as_str)
                 .expect("LOCUS_WORKER_SANDBOX_BACKEND required");
+            #[cfg(target_os = "macos")]
             assert_eq!(backend_tag, "sandbox-exec");
+            #[cfg(target_os = "linux")]
+            assert!(
+                backend_tag == "bwrap" || backend_tag == "path",
+                "linux backend must be bwrap or path, got {backend_tag}"
+            );
             let expected_tmp = worker_home.join("tmp").display().to_string();
             assert_eq!(env.get("TMPDIR"), Some(&expected_tmp));
             assert_eq!(env.get("TMP"), Some(&expected_tmp));
             assert_eq!(env.get("TEMP"), Some(&expected_tmp));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            let err = backend
+                .build_command(&session, &binding, pb, &work_dir)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("no supported OS isolation backend"), "{err}");
         }
     }
 

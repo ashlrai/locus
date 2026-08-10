@@ -1,8 +1,17 @@
-//! Fail-closed OS sandbox preparation for upstream workers.
+//! OS / best-effort sandbox preparation for upstream workers.
 //!
-//! `sandbox = true` means the worker is wrapped by a supported operating-system
-//! isolation backend. Environment markers and PATH filtering are diagnostics;
-//! they are never treated as isolation by themselves.
+//! `sandbox = true` / `LOCUS_WORKER_SANDBOX=1` selects a platform backend:
+//!
+//! | Platform | Backend tag | Strength |
+//! |----------|-------------|----------|
+//! | macOS | `sandbox-exec` | Seatbelt deny-by-default (required; fail closed if missing) |
+//! | Linux | `bwrap` | bubblewrap mount/pid namespace (when `bwrap` is installed) |
+//! | Linux | `path` | Restricted PATH + absolute executable only (**best-effort**, not kernel isolation) |
+//! | other | — | Fail closed |
+//!
+//! `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND=<tag>` are set only
+//! after backend resolution. The `path` tag must never be treated as equivalent to
+//! Seatbelt or bubblewrap. This is **not** a VM or full seccomp profile.
 
 use crate::error::{LocusError, Result};
 use std::fs::File;
@@ -15,7 +24,7 @@ pub const ENV_WORKER_SANDBOX: &str = "LOCUS_WORKER_SANDBOX";
 /// Marker injected into sandboxed worker children (never a secret).
 pub const ENV_WORKER_SANDBOXED: &str = "LOCUS_WORKER_SANDBOXED";
 
-/// Applied OS isolation backend.
+/// Applied sandbox backend tag (`sandbox-exec` / `bwrap` / `path`).
 pub const ENV_WORKER_SANDBOX_BACKEND: &str = "LOCUS_WORKER_SANDBOX_BACKEND";
 
 /// Whether global env requests sandbox mode.
@@ -43,6 +52,7 @@ pub(crate) fn sandbox_enabled_with_env(config_flag: bool, env_flag: bool) -> boo
 ///
 /// The resolved executable's directory is prepended separately so a protected
 /// absolute executable keeps working even when it lives outside system paths.
+/// On the Linux `path` backend this is the *only* restriction (best-effort).
 pub fn restricted_worker_path() -> String {
     ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin"].join(":")
 }
@@ -52,32 +62,110 @@ pub fn restricted_worker_path() -> String {
 pub enum SandboxBackend {
     /// macOS Seatbelt via `/usr/bin/sandbox-exec`.
     SandboxExec,
+    /// Linux bubblewrap (`bwrap`) — mount/pid namespace; network shared for MCP.
+    Bwrap,
+    /// Restricted PATH + absolute executable only. **Best-effort**, not OS isolation.
+    Path,
 }
 
 impl SandboxBackend {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SandboxExec => "sandbox-exec",
+            Self::Bwrap => "bwrap",
+            Self::Path => "path",
         }
     }
+
+    /// True when a kernel/namespace wrapper is used (not the path-only fallback).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_os_isolation(self) -> bool {
+        matches!(self, Self::SandboxExec | Self::Bwrap)
+    }
 }
 
-/// True only when a supported OS isolation backend is installed.
+/// Selected backend + optional wrapper binary (`sandbox-exec` / `bwrap`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackendSelection {
+    backend: SandboxBackend,
+    wrapper: Option<PathBuf>,
+}
+
+/// True when macOS sandbox-exec is present.
 #[allow(dead_code)]
 pub fn sandbox_exec_available() -> bool {
-    sandbox_backend_path().is_some()
+    sandbox_exec_path().is_some()
 }
 
-fn sandbox_backend_path() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let path = PathBuf::from("/usr/bin/sandbox-exec");
-        path.is_file().then_some(path)
+/// True when Linux bubblewrap is present on a fixed path.
+#[allow(dead_code)]
+pub fn bwrap_available() -> bool {
+    bwrap_path().is_some()
+}
+
+fn sandbox_exec_path() -> Option<PathBuf> {
+    let path = PathBuf::from("/usr/bin/sandbox-exec");
+    path.is_file().then_some(path)
+}
+
+fn bwrap_path() -> Option<PathBuf> {
+    for candidate in ["/usr/bin/bwrap", "/bin/bwrap", "/usr/local/bin/bwrap"] {
+        let path = PathBuf::from(candidate);
+        if path.is_file() {
+            return Some(path);
+        }
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
+    None
+}
+
+/// Choose backend for the current platform (production entry).
+fn select_sandbox_backend() -> Result<BackendSelection> {
+    select_sandbox_backend_with_probe(
+        sandbox_exec_path(),
+        bwrap_path(),
+        cfg!(target_os = "macos"),
+        cfg!(target_os = "linux"),
+    )
+}
+
+/// Pure selection logic (unit-testable without the host OS).
+///
+/// - macOS: require `sandbox-exec` (fail closed).
+/// - Linux: prefer `bwrap`; otherwise best-effort `path`.
+/// - other: fail closed.
+fn select_sandbox_backend_with_probe(
+    sandbox_exec: Option<PathBuf>,
+    bwrap: Option<PathBuf>,
+    is_macos: bool,
+    is_linux: bool,
+) -> Result<BackendSelection> {
+    if is_macos {
+        let wrapper = sandbox_exec.ok_or_else(|| {
+            LocusError::msg(
+                "sandbox requested but no supported OS isolation backend is available; refusing to spawn",
+            )
+        })?;
+        return Ok(BackendSelection {
+            backend: SandboxBackend::SandboxExec,
+            wrapper: Some(wrapper),
+        });
     }
+    if is_linux {
+        if let Some(wrapper) = bwrap {
+            return Ok(BackendSelection {
+                backend: SandboxBackend::Bwrap,
+                wrapper: Some(wrapper),
+            });
+        }
+        // Best-effort only — callers must tag backend as `path` and document limits.
+        return Ok(BackendSelection {
+            backend: SandboxBackend::Path,
+            wrapper: None,
+        });
+    }
+    Err(LocusError::msg(
+        "sandbox requested but no supported OS isolation backend is available; refusing to spawn",
+    ))
 }
 
 fn canonical_existing_dir(path: &Path, label: &str) -> Result<PathBuf> {
@@ -317,11 +405,19 @@ fn seatbelt_profile_for_worker_with_path(
     seatbelt_profile_for_runtime(work_dir, worker_home, &runtime)
 }
 
-fn seatbelt_profile_for_runtime(
+/// Canonical work dir, worker home, and LOCUS_HOME after authority overlap checks.
+struct SandboxPaths {
+    work_dir: PathBuf,
+    worker_home: PathBuf,
+    #[allow(dead_code)]
+    locus_home: PathBuf,
+}
+
+fn validate_sandbox_paths(
     work_dir: &Path,
     worker_home: &Path,
     runtime: &RuntimeAccess,
-) -> Result<String> {
+) -> Result<SandboxPaths> {
     let wd = canonical_existing_dir(work_dir, "work directory")?;
     let wh = canonical_existing_dir(worker_home, "worker home")?;
     let locus_home = locus_home_from_worker_home(&wh)?;
@@ -329,6 +425,21 @@ fn seatbelt_profile_for_runtime(
         validate_recursive_grant(&wd, &locus_home, "work directory")?;
     }
     validate_runtime_access(runtime, &locus_home)?;
+    Ok(SandboxPaths {
+        work_dir: wd,
+        worker_home: wh,
+        locus_home,
+    })
+}
+
+fn seatbelt_profile_for_runtime(
+    work_dir: &Path,
+    worker_home: &Path,
+    runtime: &RuntimeAccess,
+) -> Result<String> {
+    let paths = validate_sandbox_paths(work_dir, worker_home, runtime)?;
+    let wd = &paths.work_dir;
+    let wh = &paths.worker_home;
 
     let mut exec_rules = String::new();
     let mut metadata_rules = String::new();
@@ -390,7 +501,7 @@ fn seatbelt_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-/// Resolved spawn line after mandatory OS sandbox wrapping.
+/// Resolved spawn line after sandbox wrapping (or path-only best-effort).
 #[derive(Debug, Clone)]
 pub struct SandboxSpawn {
     pub program: String,
@@ -403,26 +514,145 @@ pub struct SandboxSpawn {
     pub executable: PathBuf,
 }
 
+fn restricted_path_for_runtime(runtime: &RuntimeAccess) -> String {
+    let mut path_dirs = Vec::new();
+    if let Some(parent) = runtime.interpreter.as_deref().and_then(Path::parent) {
+        path_dirs.push(parent.display().to_string());
+    }
+    if let Some(parent) = runtime.executable.parent() {
+        let parent = parent.display().to_string();
+        if !path_dirs.contains(&parent) {
+            path_dirs.push(parent);
+        }
+    }
+    path_dirs.push(restricted_worker_path());
+    path_dirs.join(":")
+}
+
+/// Read-only system roots for the Linux bubblewrap profile.
+///
+/// Uses `--ro-bind-try` so missing merged-usr paths do not fail the wrap.
+/// Network stays shared (no `--unshare-net`) so MCP provider HTTPS works.
+const BWRAP_RO_ROOTS: &[&str] = &[
+    "/usr",
+    "/bin",
+    "/lib",
+    "/lib64",
+    "/sbin",
+    "/usr/local",
+    "/etc", // DNS + TLS trust store; not LOCUS_HOME authority state
+];
+
+/// Build `bwrap` argv (without the `bwrap` program itself).
+///
+/// Profile goals (best-effort, not a VM):
+/// - RO system roots
+/// - RW bind of work tree + session worker home only (not full `LOCUS_HOME`)
+/// - tmpfs `/tmp`; private HOME via env (worker home)
+/// - network allowed (shared netns) for MCP stdio → provider APIs
+/// - no bind of `LOCUS_HOME/bindings` or host ambient home
+fn bwrap_args_for_runtime(
+    work_dir: &Path,
+    worker_home: &Path,
+    runtime: &RuntimeAccess,
+    args: &[String],
+) -> Vec<String> {
+    let mut out: Vec<String> = vec![
+        "--die-with-parent".into(),
+        "--unshare-pid".into(),
+        // Intentionally no --unshare-net: MCP servers need outbound provider traffic.
+        "--proc".into(),
+        "/proc".into(),
+        "--dev".into(),
+        "/dev".into(),
+        "--tmpfs".into(),
+        "/tmp".into(),
+    ];
+
+    for root in BWRAP_RO_ROOTS {
+        out.push("--ro-bind-try".into());
+        out.push((*root).into());
+        out.push((*root).into());
+    }
+
+    // Session-private trees only — never the LOCUS_HOME parent (bindings/, daemon.key).
+    out.push("--bind".into());
+    out.push(work_dir.display().to_string());
+    out.push(work_dir.display().to_string());
+    out.push("--bind".into());
+    out.push(worker_home.display().to_string());
+    out.push(worker_home.display().to_string());
+
+    let mut already = vec![work_dir.to_path_buf(), worker_home.to_path_buf()];
+    for root in &runtime.read_roots {
+        if already
+            .iter()
+            .any(|p| root.starts_with(p) || p.starts_with(root))
+        {
+            continue;
+        }
+        if BWRAP_RO_ROOTS
+            .iter()
+            .any(|sys| root.starts_with(Path::new(sys)))
+        {
+            continue;
+        }
+        out.push("--ro-bind-try".into());
+        out.push(root.display().to_string());
+        out.push(root.display().to_string());
+        already.push(root.clone());
+    }
+
+    for literal in runtime
+        .interpreter
+        .iter()
+        .chain(std::iter::once(&runtime.executable))
+    {
+        if already.iter().any(|p| literal.starts_with(p)) {
+            continue;
+        }
+        if BWRAP_RO_ROOTS
+            .iter()
+            .any(|sys| literal.starts_with(Path::new(sys)))
+        {
+            continue;
+        }
+        out.push("--ro-bind-try".into());
+        out.push(literal.display().to_string());
+        out.push(literal.display().to_string());
+    }
+
+    out.push("--chdir".into());
+    out.push(work_dir.display().to_string());
+    out.push("--".into());
+    out.push(runtime.executable.display().to_string());
+    out.extend(args.iter().cloned());
+    out
+}
+
 /// Build program/args/backend for a sandboxed spawn (does not touch env yet).
 ///
-/// Missing backend or executable is an error. There is deliberately no
-/// PATH-only fallback.
+/// Platform rules: macOS requires Seatbelt; Linux prefers bubblewrap and falls
+/// back to best-effort `path` when `bwrap` is missing; other OS fail closed.
 pub fn resolve_sandbox_spawn(
     program: &str,
     args: &[String],
     work_dir: &Path,
     worker_home: &Path,
 ) -> Result<SandboxSpawn> {
-    resolve_sandbox_spawn_with_backend(
+    let selection = select_sandbox_backend()?;
+    resolve_sandbox_spawn_for(
         program,
         args,
         work_dir,
         worker_home,
         std::env::var("PATH").ok().as_deref(),
-        sandbox_backend_path().as_deref(),
+        selection,
     )
 }
 
+/// Test helper: force a Seatbelt wrapper path (or fail closed when `None`).
+#[cfg(test)]
 fn resolve_sandbox_spawn_with_backend(
     program: &str,
     args: &[String],
@@ -431,46 +661,90 @@ fn resolve_sandbox_spawn_with_backend(
     search_path: Option<&str>,
     backend_path: Option<&Path>,
 ) -> Result<SandboxSpawn> {
-    let backend_path = backend_path.ok_or_else(|| {
-        LocusError::msg(
-            "sandbox requested but no supported OS isolation backend is available; refusing to spawn",
-        )
-    })?;
-    let backend = backend_path.canonicalize().map_err(|e| {
-        LocusError::msg(format!(
-            "sandbox backend `{}` is unavailable: {e}",
-            backend_path.display()
-        ))
-    })?;
+    let selection = match backend_path {
+        Some(path) => BackendSelection {
+            backend: SandboxBackend::SandboxExec,
+            wrapper: Some(path.to_path_buf()),
+        },
+        None => {
+            return Err(LocusError::msg(
+                "sandbox requested but no supported OS isolation backend is available; refusing to spawn",
+            ));
+        }
+    };
+    resolve_sandbox_spawn_for(program, args, work_dir, worker_home, search_path, selection)
+}
+
+fn resolve_sandbox_spawn_for(
+    program: &str,
+    args: &[String],
+    work_dir: &Path,
+    worker_home: &Path,
+    search_path: Option<&str>,
+    selection: BackendSelection,
+) -> Result<SandboxSpawn> {
     let requested_executable = resolve_executable(program, work_dir, search_path)?;
     let runtime = resolve_runtime_access(&requested_executable, search_path)?;
-    let profile = seatbelt_profile_for_runtime(work_dir, worker_home, &runtime)?;
+    let paths = validate_sandbox_paths(work_dir, worker_home, &runtime)?;
+    let path = restricted_path_for_runtime(&runtime);
     let executable = runtime.executable.clone();
-    let mut wrapped = Vec::with_capacity(3 + args.len());
-    wrapped.push("-p".into());
-    wrapped.push(profile);
-    wrapped.push(executable.display().to_string());
-    wrapped.extend(args.iter().cloned());
 
-    let mut path_dirs = Vec::new();
-    if let Some(parent) = runtime.interpreter.as_deref().and_then(Path::parent) {
-        path_dirs.push(parent.display().to_string());
-    }
-    if let Some(parent) = executable.parent() {
-        let parent = parent.display().to_string();
-        if !path_dirs.contains(&parent) {
-            path_dirs.push(parent);
+    match selection.backend {
+        SandboxBackend::SandboxExec => {
+            let profile = seatbelt_profile_for_runtime(work_dir, worker_home, &runtime)?;
+            let wrapper = selection.wrapper.ok_or_else(|| {
+                LocusError::msg("sandbox-exec backend selected without wrapper path")
+            })?;
+            let backend = wrapper.canonicalize().map_err(|e| {
+                LocusError::msg(format!(
+                    "sandbox backend `{}` is unavailable: {e}",
+                    wrapper.display()
+                ))
+            })?;
+            let mut wrapped = Vec::with_capacity(3 + args.len());
+            wrapped.push("-p".into());
+            wrapped.push(profile);
+            wrapped.push(executable.display().to_string());
+            wrapped.extend(args.iter().cloned());
+            Ok(SandboxSpawn {
+                program: backend.display().to_string(),
+                args: wrapped,
+                backend: SandboxBackend::SandboxExec,
+                path,
+                executable,
+            })
+        }
+        SandboxBackend::Bwrap => {
+            let wrapper = selection
+                .wrapper
+                .ok_or_else(|| LocusError::msg("bwrap backend selected without wrapper path"))?;
+            let backend = wrapper.canonicalize().map_err(|e| {
+                LocusError::msg(format!(
+                    "sandbox backend `{}` is unavailable: {e}",
+                    wrapper.display()
+                ))
+            })?;
+            let wrapped =
+                bwrap_args_for_runtime(&paths.work_dir, &paths.worker_home, &runtime, args);
+            Ok(SandboxSpawn {
+                program: backend.display().to_string(),
+                args: wrapped,
+                backend: SandboxBackend::Bwrap,
+                path,
+                executable,
+            })
+        }
+        SandboxBackend::Path => {
+            // Best-effort only: absolute executable + restricted PATH.
+            Ok(SandboxSpawn {
+                program: executable.display().to_string(),
+                args: args.to_vec(),
+                backend: SandboxBackend::Path,
+                path,
+                executable,
+            })
         }
     }
-    path_dirs.push(restricted_worker_path());
-    let path = path_dirs.join(":");
-    Ok(SandboxSpawn {
-        program: backend.display().to_string(),
-        args: wrapped,
-        backend: SandboxBackend::SandboxExec,
-        path,
-        executable,
-    })
 }
 
 #[cfg(test)]
@@ -558,6 +832,182 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("no supported OS isolation backend"), "{err}");
+    }
+
+    #[test]
+    fn linux_selects_path_backend_when_bwrap_missing() {
+        let sel = select_sandbox_backend_with_probe(None, None, false, true).unwrap();
+        assert_eq!(sel.backend, SandboxBackend::Path);
+        assert_eq!(sel.backend.as_str(), "path");
+        assert!(!sel.backend.is_os_isolation());
+        assert!(sel.wrapper.is_none());
+    }
+
+    #[test]
+    fn linux_prefers_bwrap_when_available() {
+        let dir = tempdir().unwrap();
+        let bwrap = dir.path().join("bwrap");
+        fs::write(&bwrap, "wrapper").unwrap();
+        let sel =
+            select_sandbox_backend_with_probe(None, Some(bwrap.clone()), false, true).unwrap();
+        assert_eq!(sel.backend, SandboxBackend::Bwrap);
+        assert_eq!(sel.backend.as_str(), "bwrap");
+        assert!(sel.backend.is_os_isolation());
+        assert_eq!(sel.wrapper.as_deref(), Some(bwrap.as_path()));
+    }
+
+    #[test]
+    fn macos_requires_sandbox_exec_and_ignores_bwrap() {
+        let dir = tempdir().unwrap();
+        let bwrap = dir.path().join("bwrap");
+        fs::write(&bwrap, "wrapper").unwrap();
+        let err = select_sandbox_backend_with_probe(None, Some(bwrap), true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no supported OS isolation backend"), "{err}");
+
+        let se = dir.path().join("sandbox-exec");
+        fs::write(&se, "wrapper").unwrap();
+        let sel = select_sandbox_backend_with_probe(Some(se.clone()), None, true, false).unwrap();
+        assert_eq!(sel.backend, SandboxBackend::SandboxExec);
+        assert_eq!(sel.wrapper.as_deref(), Some(se.as_path()));
+    }
+
+    #[test]
+    fn unsupported_platform_fails_closed() {
+        let err = select_sandbox_backend_with_probe(None, None, false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no supported OS isolation backend"), "{err}");
+    }
+
+    #[test]
+    fn path_backend_resolve_uses_absolute_executable_and_restricted_path() {
+        let (_dir, worker_home, work_dir, executable, _backend) = fixture();
+        let search_path = executable.parent().unwrap().display().to_string();
+        let custom_args = vec!["--flag".into(), "value".into()];
+        let spawn = resolve_sandbox_spawn_for(
+            "custom-mcp",
+            &custom_args,
+            &work_dir,
+            &worker_home,
+            Some(&search_path),
+            BackendSelection {
+                backend: SandboxBackend::Path,
+                wrapper: None,
+            },
+        )
+        .unwrap();
+        let canonical = executable.canonicalize().unwrap();
+        assert_eq!(spawn.backend, SandboxBackend::Path);
+        assert_eq!(spawn.backend.as_str(), "path");
+        assert!(!spawn.backend.is_os_isolation());
+        assert_eq!(spawn.program, canonical.display().to_string());
+        assert_eq!(spawn.args, custom_args);
+        assert_eq!(spawn.executable, canonical);
+        assert!(spawn.path.ends_with(&restricted_worker_path()));
+        assert!(spawn
+            .path
+            .split(':')
+            .any(|part| part == canonical.parent().unwrap().display().to_string()));
+    }
+
+    #[test]
+    fn path_backend_still_refuses_work_dir_over_locus_home() {
+        let (dir, worker_home, _work_dir, executable, _backend) = fixture();
+        let search_path = executable.parent().unwrap().display().to_string();
+        let err = resolve_sandbox_spawn_for(
+            "custom-mcp",
+            &[],
+            dir.path(),
+            &worker_home,
+            Some(&search_path),
+            BackendSelection {
+                backend: SandboxBackend::Path,
+                wrapper: None,
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("work directory") && err.contains("LOCUS_HOME"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn bwrap_args_bind_worker_not_bindings_and_keep_network() {
+        let (dir, worker_home, work_dir, executable, _backend) = fixture();
+        let locus_home = dir.path().join("custom-locus-home");
+        let bindings = locus_home.join("bindings");
+        fs::create_dir_all(&bindings).unwrap();
+        fs::write(bindings.join("acme.toml"), "alias = \"acme\"").unwrap();
+
+        let runtime = resolve_runtime_access(&executable, None).unwrap();
+        let wd = work_dir.canonicalize().unwrap();
+        let wh = worker_home.canonicalize().unwrap();
+        let args = bwrap_args_for_runtime(&wd, &wh, &runtime, &["--ping".into()]);
+
+        assert!(args.iter().any(|a| a == "--die-with-parent"));
+        assert!(args.iter().any(|a| a == "--unshare-pid"));
+        assert!(
+            !args.iter().any(|a| a == "--unshare-net"),
+            "MCP needs shared network: {args:?}"
+        );
+        assert!(args
+            .windows(3)
+            .any(|w| { w[0] == "--ro-bind-try" && w[1] == "/usr" && w[2] == "/usr" }));
+        assert!(args.windows(3).any(|w| {
+            w[0] == "--bind" && w[1] == wd.display().to_string() && w[2] == wd.display().to_string()
+        }));
+        assert!(args.windows(3).any(|w| {
+            w[0] == "--bind" && w[1] == wh.display().to_string() && w[2] == wh.display().to_string()
+        }));
+        // Must not bind LOCUS_HOME root or bindings/ (deny authority state).
+        let locus_s = locus_home.canonicalize().unwrap().display().to_string();
+        let bindings_s = bindings.canonicalize().unwrap().display().to_string();
+        for window in args.windows(3) {
+            if window[0] == "--bind" || window[0] == "--ro-bind" || window[0] == "--ro-bind-try" {
+                assert_ne!(window[1], locus_s, "must not bind LOCUS_HOME root");
+                assert_ne!(window[1], bindings_s, "must not bind bindings/");
+                assert!(!window[1].ends_with("/bindings"), "must not bind bindings/");
+            }
+        }
+        assert!(args.iter().any(|a| a == "--tmpfs"));
+        let sep = args
+            .iter()
+            .position(|a| a == "--")
+            .expect("bwrap -- separator");
+        assert_eq!(args[sep + 1], runtime.executable.display().to_string());
+        assert_eq!(args[sep + 2], "--ping");
+    }
+
+    #[test]
+    fn bwrap_backend_resolve_wraps_with_bwrap_argv() {
+        let (dir, worker_home, work_dir, executable, _backend) = fixture();
+        let bwrap = dir.path().join("bwrap");
+        fs::write(&bwrap, "wrapper").unwrap();
+        let search_path = executable.parent().unwrap().display().to_string();
+        let spawn = resolve_sandbox_spawn_for(
+            "custom-mcp",
+            &["a".into()],
+            &work_dir,
+            &worker_home,
+            Some(&search_path),
+            BackendSelection {
+                backend: SandboxBackend::Bwrap,
+                wrapper: Some(bwrap.clone()),
+            },
+        )
+        .unwrap();
+        assert_eq!(spawn.backend, SandboxBackend::Bwrap);
+        assert_eq!(
+            spawn.program,
+            bwrap.canonicalize().unwrap().display().to_string()
+        );
+        assert!(spawn.args.iter().any(|a| a == "--die-with-parent"));
+        assert!(!spawn.args.iter().any(|a| a == "--unshare-net"));
+        assert_eq!(spawn.args.last().map(String::as_str), Some("a"));
     }
 
     #[test]

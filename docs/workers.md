@@ -20,9 +20,9 @@ When spawning:
 4. Private `GH_CONFIG_DIR` / AWS config paths under the session worker home.
 5. Optional **sandbox** (below) when `LOCUS_WORKER_SANDBOX=1` or `upstream.sandbox = true`.
 
-## Worker sandbox (fail closed)
+## Worker sandbox (best-effort / platform backends)
 
-Blast radius for a malicious upstream is still **one binding’s credentials**. Sandbox is additive isolation, not a multi-tenant VM. When enabled, it means a supported OS sandbox was applied; missing backends or executables stop the spawn.
+Blast radius for a malicious upstream is still **one binding’s credentials**. Sandbox is additive isolation, **not** a multi-tenant VM or full seccomp profile. When enabled, Locus selects a platform backend and records it in `LOCUS_WORKER_SANDBOX_BACKEND`. **Never invent false security:** read the backend tag — `path` is not equivalent to Seatbelt or bubblewrap.
 
 Enable globally:
 
@@ -36,17 +36,39 @@ Or per-provider in binding TOML:
 upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }
 ```
 
-When enabled, on spawn Locus:
+### Backend matrix
+
+| Platform | Tag | Strength | When |
+|----------|-----|----------|------|
+| macOS | `sandbox-exec` | Seatbelt deny-by-default | `/usr/bin/sandbox-exec` required; missing → fail closed |
+| Linux | `bwrap` | bubblewrap mount + pid namespace (best-effort) | Prefer when `bwrap` is on a fixed path (`/usr/bin/bwrap`, `/bin/bwrap`, `/usr/local/bin/bwrap`) |
+| Linux | `path` | Restricted PATH + absolute executable only | Fallback when `bwrap` is missing — **not** kernel isolation |
+| other | — | — | Fail closed |
+
+### Spawn steps (all backends)
 
 | Step | Behavior |
 |------|----------|
-| Backend | Requires macOS `/usr/bin/sandbox-exec`; unsupported platforms fail closed |
-| Files | Deny by default; allow the work tree, current session worker home, system runtime files, the narrow canonical executable package/parent tree, and exact shebang interpreter |
-| Authority | Denies the rest of the actual custom/default `LOCUS_HOME`, including `daemon.key`, bindings, sessions, approvals, and audit |
+| Backend | Platform selection above; tag written to `LOCUS_WORKER_SANDBOX_BACKEND` |
+| Files (Seatbelt / bwrap) | Work tree + session worker home RW; system roots RO; no bind/grant of full `LOCUS_HOME` (bindings, `daemon.key`, sessions, approvals, audit stay out) |
+| Files (`path`) | No mount namespace — only PATH restriction + canonical absolute executable |
+| Authority | Work trees that overlap or contain `LOCUS_HOME` are refused before spawn |
 | Secrets | Rebuilds env from the isolation allowlist and uses a private temp root under the worker home |
-| Network | Allows outbound TCP/UDP provider traffic; denies application-created inbound listeners and non-system Unix-domain sockets. Imported Apple system profiles retain OS-defined system-service IPC such as logging |
+| Network | **Allowed** for MCP stdio → provider APIs (Seatbelt: outbound TCP/UDP; bwrap: shared netns — no `--unshare-net`; path: host network) |
 | Provenance | Resolves the requested executable to a canonical absolute path before PATH is restricted; unavailable commands fail before spawn |
-| Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND=sandbox-exec` only after backend resolution succeeds |
+| Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND=<tag>` only after backend resolution succeeds |
+
+### Linux bubblewrap profile (when `bwrap` is used)
+
+Minimal session-sized profile (not a VM):
+
+- `--ro-bind-try` for `/usr`, `/bin`, `/lib`, `/lib64`, `/sbin`, `/usr/local`, `/etc` (TLS/DNS)
+- `--bind` work directory + session worker home only (not `~/.locus/bindings` or host home)
+- `--tmpfs /tmp`, `--proc`, `--dev`, `--unshare-pid`, `--die-with-parent`
+- Network **shared** so upstream MCP can reach provider APIs
+- Extra runtime roots (e.g. node package trees outside `/usr`) bound RO as needed
+
+Bubblewrap still depends on host user namespaces and may fail at spawn on locked-down kernels — that is a hard error, not a silent downgrade. If `bwrap` is simply **not installed**, Locus uses the `path` backend instead and tags it clearly.
 
 Composite uses the same flag path: `mcp_config_from_upstream` sets `McpStdioConfig.sandbox` from the spec **or** env.
 
@@ -56,7 +78,7 @@ only the addressed provider, whose environment contains only that provider's
 scope and credential keys. Batch/session startup is transactional; if a later
 provider fails, every child created earlier in that attempt is torn down.
 
-This is **not** a VM boundary. macOS Seatbelt is the only implemented backend; Linux and Windows sandbox requests currently fail closed. The explicitly allowed work tree may itself contain sensitive files, so bindings should use a narrowly scoped working directory.
+This is **not** a VM boundary. The explicitly allowed work tree may itself contain sensitive files, so bindings should use a narrowly scoped working directory.
 See SECURITY.md / DESIGN.md for residual risk: a started worker already holds
 the addressed provider's scoped credential.
 
@@ -187,7 +209,7 @@ let slot = mgr.ensure(&session, &binding, "github")?;
 
 ```bash
 export LOCUS_WORKER_IDLE_SECS=300   # tear down workers idle for 5 minutes
-export LOCUS_WORKER_SANDBOX=1       # require a supported OS sandbox or fail closed
+export LOCUS_WORKER_SANDBOX=1       # platform backend (sandbox-exec / bwrap / path)
 ```
 
 - Unset or `0` → never idle-reap (default).
