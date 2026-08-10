@@ -16,12 +16,13 @@ use colored::Colorize;
 use locus_core::{
     agent_md_content, agent_md_path, agent_report_from_doctor, all_recipes, build_ci_env_map,
     build_doctor_report, build_isolated_env_opts, ci_secrets_allowed, default_export_filename,
-    export_events, export_forensics_pack, filter_audit_events, find_workspace, mcp_agent_env,
-    parse_ttl, phantom_on_path, probe_agent_options, recipe_toml_snippet, resolve_passphrase,
-    suggest_for_provider, verify_claim, verify_session, workspace_stub_toml, AgentStatus, Binding,
-    BindingBody, CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
-    EventsExportOptions, ForensicsExportOptions, IsolatedEnv, Policy, ProviderBinding, Scope,
-    Session, Store, WorkspaceConfig, VERSION,
+    export_content_type, export_events, export_forensics_pack, filter_audit_events, find_workspace,
+    mcp_agent_env, parse_ttl, phantom_on_path, post_audit_webhook, probe_agent_options,
+    recipe_toml_snippet, resolve_audit_webhook_url, resolve_passphrase, suggest_for_provider,
+    verify_claim, verify_session, workspace_stub_toml, AgentStatus, Binding, BindingBody,
+    CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
+    EventsExportOptions, EventsExportSink, ForensicsExportOptions, IsolatedEnv, Policy,
+    ProviderBinding, Scope, Session, Store, WorkspaceConfig, AUDIT_WEBHOOK_URL_ENV, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -288,8 +289,8 @@ enum Commands {
     // ──────────────────────────── Audit ──────────────────────────────
     /// Read recent local audit events (`$LOCUS_HOME/audit/events.jsonl`)
     ///
-    /// Subcommand: `locus events export [--otlp] [--out file]` for fleet pulse /
-    /// OTLP-compatible log export. See docs/observability.md.
+    /// Subcommand: `locus events export [--otlp] [--out file] [--sink webhook]`
+    /// for fleet pulse / OTLP / optional SIEM webhook. See docs/observability.md.
     #[command(next_help_heading = "Audit")]
     Events {
         /// Max events from the end of the log
@@ -565,13 +566,38 @@ enum EventsAction {
         /// Emit OTLP-compatible Logs JSON instead of fleet-pulse JSON lines
         #[arg(long)]
         otlp: bool,
-        /// Write to file (default: stdout)
+        /// Write to file (default: stdout when sink=local)
         #[arg(long, short = 'o')]
         out: Option<PathBuf>,
         /// OTLP service.name attribute (default: locus)
         #[arg(long, default_value = "locus")]
         service_name: String,
+        /// Export destination: `local` (stdout/`--out`) or `webhook` (HTTP POST)
+        #[arg(long, value_enum, default_value_t = CliEventsExportSink::Local)]
+        sink: CliEventsExportSink,
+        /// Webhook URL when `--sink webhook` (env: `LOCUS_AUDIT_WEBHOOK_URL`)
+        #[arg(long)]
+        url: Option<String>,
     },
+}
+
+/// CLI mirror of [`EventsExportSink`] (clap ValueEnum).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+enum CliEventsExportSink {
+    /// Stdout or `--out` file
+    #[default]
+    Local,
+    /// POST redacted body to `--url` / `LOCUS_AUDIT_WEBHOOK_URL` (fail soft if unset)
+    Webhook,
+}
+
+impl From<CliEventsExportSink> for EventsExportSink {
+    fn from(s: CliEventsExportSink) -> Self {
+        match s {
+            CliEventsExportSink::Local => EventsExportSink::Local,
+            CliEventsExportSink::Webhook => EventsExportSink::Webhook,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -800,7 +826,19 @@ fn run() -> Result<()> {
                 otlp,
                 out,
                 service_name,
-            }) => cmd_events_export(last, op, binding, otlp, out, service_name, cli.json),
+                sink,
+                url,
+            }) => cmd_events_export(
+                last,
+                op,
+                binding,
+                otlp,
+                out,
+                service_name,
+                sink.into(),
+                url,
+                cli.json,
+            ),
             None => cmd_events(last, op, binding, cli.json),
         },
         Commands::Forensics(sub) => cmd_forensics(sub, cli.json),
@@ -856,7 +894,8 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus forensics export --json            # stdout JSON\n\n\
              Pair with:\n\
                locus events --last N [--op …] [--binding …]\n\
-               locus events export [--otlp] [--out file]  # fleet pulse / OTLP logs",
+               locus events export [--otlp] [--out file]  # fleet pulse / OTLP logs\n\
+               locus events export --sink webhook [--url URL]  # SIEM webhook (or LOCUS_AUDIT_WEBHOOK_URL)",
         ),
         (
             "serve",
@@ -3421,7 +3460,7 @@ fn embedded_goal_milestones() -> Vec<GoalMilestone> {
             id: "M5".into(),
             title: "M5 — Verification plane".into(),
             state: "partial".into(),
-            done: 5,
+            done: 6,
             total: 10,
         },
     ]
@@ -4484,6 +4523,10 @@ fn cmd_events(last: usize, op: Option<String>, binding: Option<String>, json: bo
 }
 
 /// Export audit events as fleet-pulse JSON lines or OTLP logs JSON.
+///
+/// `--sink webhook` POSTs the same redacted body (no secrets). Unset URL fails
+/// soft (skip, exit 0). Secret-looking bodies fail closed (error, no POST).
+#[allow(clippy::too_many_arguments)]
 fn cmd_events_export(
     last: usize,
     op: Option<String>,
@@ -4491,6 +4534,8 @@ fn cmd_events_export(
     otlp: bool,
     out: Option<PathBuf>,
     service_name: String,
+    sink: EventsExportSink,
+    url: Option<String>,
     _json: bool,
 ) -> Result<()> {
     let s = store()?;
@@ -4511,22 +4556,58 @@ fn cmd_events_export(
         },
     )?;
 
-    if let Some(path) = out {
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)?;
+    match sink {
+        EventsExportSink::Webhook => {
+            let resolved = resolve_audit_webhook_url(url.as_deref());
+            match resolved {
+                None => {
+                    eprintln!(
+                        "{} webhook sink skipped — set {} or --url (fail soft)",
+                        "events export".magenta().bold(),
+                        AUDIT_WEBHOOK_URL_ENV
+                    );
+                }
+                Some(webhook_url) => {
+                    let ct = export_content_type(format);
+                    let result = post_audit_webhook(&webhook_url, &body, ct)?;
+                    eprintln!(
+                        "{} webhook POST {} → HTTP {} ({} bytes)",
+                        "events export".magenta().bold(),
+                        result.host.cyan(),
+                        result.status,
+                        result.bytes
+                    );
+                }
+            }
+            // Optional local copy alongside webhook.
+            if let Some(path) = out {
+                write_events_export_file(&path, &body)?;
             }
         }
-        std::fs::write(&path, &body)?;
-        eprintln!(
-            "{} wrote {} ({} bytes)",
-            "events export".magenta().bold(),
-            path.display(),
-            body.len()
-        );
-    } else {
-        print!("{body}");
+        EventsExportSink::Local => {
+            if let Some(path) = out {
+                write_events_export_file(&path, &body)?;
+            } else {
+                print!("{body}");
+            }
+        }
     }
+    Ok(())
+}
+
+fn write_events_export_file(path: &std::path::Path, body: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(path, body)?;
+    eprintln!(
+        "{} wrote {} ({} bytes)",
+        "events export".magenta().bold(),
+        path.display(),
+        body.len()
+    );
     Ok(())
 }
 

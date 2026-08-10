@@ -81,7 +81,12 @@ pub use engagement::{
     EngagementMeta,
 };
 pub use error::{LocusError, Result};
-pub use events::{export_events, EventsExportFormat, EventsExportOptions, FleetPulseEvent};
+pub use events::{
+    assert_export_body_no_secrets, export_body_secret_issues, export_content_type, export_events,
+    post_audit_webhook, resolve_audit_webhook_url, webhook_url_safe_label, EventsExportFormat,
+    EventsExportOptions, EventsExportSink, FleetPulseEvent, WebhookPostResult,
+    AUDIT_WEBHOOK_TIMEOUT_SECS, AUDIT_WEBHOOK_URL_ENV,
+};
 pub use forensics::{
     export_forensics_pack, forensics_pack_json_has_stable_keys, AuditChainTip,
     ForensicsExportOptions, ForensicsPack, DEFAULT_AUDIT_LAST, FORENSICS_PACK_JSON_KEYS,

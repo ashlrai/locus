@@ -3,12 +3,22 @@
 #
 # Requires: locus (or cargo build), jq
 # Safe: never touches ~/.locus; never prints secret values.
+#
+# Resilience notes (CI):
+#   After heavy cargo tests, the first authority-broker spawn can race a tight
+#   handoff window (debug binary cold start + executable identity hash + socket
+#   bind). Core defaults to a 10s wait and honors
+#   LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS; this script also retries init/pin
+#   a few times so hub-smoke stays green under runner load. Webhook/export
+#   code is not on this path — pin only needs a live local broker.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Prefer freshly built binaries over an older cargo install.
 export PATH="${ROOT}/target/debug:${ROOT}/target/release:${HOME}/.cargo/bin:${PATH}"
 export LOCUS_CONTROL_CAPABILITY="${LOCUS_CONTROL_CAPABILITY:-$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')}"
+# Give the supervised broker more headroom on contested CI runners (clamped in core).
+export LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS="${LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS:-15000}"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq is required" >&2
@@ -27,7 +37,8 @@ fi
 
 SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-smoke.XXXXXX")"
 SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-proj.XXXXXX")"
-cleanup() { rm -rf "$SMOKE_HOME" "$SMOKE_PROJ"; }
+SMOKE_ERR="$(mktemp "${TMPDIR:-/tmp}/locus-hub-smoke-err.XXXXXX")"
+cleanup() { rm -rf "$SMOKE_HOME" "$SMOKE_PROJ" "$SMOKE_ERR"; }
 trap cleanup EXIT
 
 export LOCUS_HOME="$SMOKE_HOME"
@@ -36,8 +47,41 @@ unset LOCUS_SESSION_ID || true
 echo "== hub-smoke LOCUS_HOME=$LOCUS_HOME =="
 echo "locus: $(command -v locus) ($(locus --version 2>/dev/null || true))"
 
-locus init --with-samples >/dev/null
-locus pin personal >/dev/null
+# Pre-fault the binary into page cache so the broker child is less likely to
+# miss the handoff window on cold CI disks.
+locus --help >/dev/null 2>&1 || true
+
+# init + pin both need the live authority broker (require_local_control).
+# Retry a few times; leave between attempts so a half-started broker can exit.
+
+smoke_init_and_pin() {
+  local attempt=1
+  local max_attempts=3
+  while (( attempt <= max_attempts )); do
+    : >"$SMOKE_ERR"
+    if locus init --with-samples >/dev/null 2>"$SMOKE_ERR" \
+      && locus pin personal >/dev/null 2>"$SMOKE_ERR"; then
+      return 0
+    fi
+    if (( attempt == max_attempts )); then
+      echo "error: hub-smoke init/pin failed after ${max_attempts} attempts" >&2
+      head -c 800 "$SMOKE_ERR" >&2 || true
+      echo >&2
+      # Surface a final un-silenced pin for CI logs.
+      locus pin personal 2>&1 || true
+      return 1
+    fi
+    echo "warn: hub-smoke init/pin attempt ${attempt} failed; retrying…" >&2
+    head -c 400 "$SMOKE_ERR" >&2 || true
+    echo >&2
+    locus leave >/dev/null 2>&1 || true
+    sleep "$attempt"
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+smoke_init_and_pin
 
 # Project dir with MCP registration so agent status can become ready
 cd "$SMOKE_PROJ"

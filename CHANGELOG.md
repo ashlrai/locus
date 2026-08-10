@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Dogfood polish and release hygiene on top of 0.2.0. No identity-plane
 invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog.
 
+### Fixed
+
+- **Authority broker start under CI load** — production handoff wait raised from 3s → 10s;
+  optional `LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS` override; timeout errors may include a
+  short broker stderr snip. `scripts/hub-smoke.sh` retries init/pin and defaults the
+  override to 15s so hub contract smoke stays resilient after heavy test jobs (flaky
+  "broker startup timed out" unrelated to webhook export).
+
 ### Added
 
 - **`locus watch` session heartbeat (M5)** — each tick runs the same pack as
@@ -19,6 +27,11 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
   - `--require-ok`: fail closed whenever `session_ok` is false (hub / CI)
   - `--once` without `--require-ok`: non-zero only when a pin was present/expected and not ok
   - Docs: [docs/verification-plane.md](./docs/verification-plane.md)
+- **Audit webhook sink (M5 partial)** — `locus events export --sink webhook [--url URL]`
+  posts redacted fleet-pulse JSONL or OTLP JSON to a remote URL for SIEM / log shippers.
+  Env: `LOCUS_AUDIT_WEBHOOK_URL`. **Fail soft** when URL unset (skip, exit 0);
+  **fail closed** if export body matches secret patterns (refuse POST). See
+  [`docs/observability.md`](./docs/observability.md).
 - **`scripts/dogfood.sh`** — after forensics export, also prints **`locus goal status`**
   (from repo `GOALS.md` when present) and runs **`scripts/hub-smoke.sh`** (own throwaway
   home; skip with `DOGFOOD_SKIP_HUB_SMOKE=1`)
@@ -33,6 +46,8 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 
 ### Tests
 
+- Core: webhook POST against local `TcpListener`, secret-scan fail-closed, URL resolve
+  (explicit / env / blank → soft skip)
 - Shell e2e (`scripts/e2e.sh`): prior 0.2 surface **plus** verify / safe_next / upstream /
   watch heartbeat / notify late re-check — **44+ checks** on full current command set
 - CLI unit tests: watch interval parse, fail policy, heartbeat from pinned/unpinned packs
