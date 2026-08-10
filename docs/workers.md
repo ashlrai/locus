@@ -20,9 +20,9 @@ When spawning:
 4. Private `GH_CONFIG_DIR` / AWS config paths under the session worker home.
 5. Optional **sandbox** (below) when `LOCUS_WORKER_SANDBOX=1` or `upstream.sandbox = true`.
 
-## Worker sandbox (best-effort)
+## Worker sandbox (fail closed)
 
-Blast radius for a malicious upstream is still **one binding’s credentials**. Sandbox is additive isolation — not a multi-tenant VM.
+Blast radius for a malicious upstream is still **one binding’s credentials**. Sandbox is additive isolation, not a multi-tenant VM. When enabled, it means a supported OS sandbox was applied; missing backends or executables stop the spawn.
 
 Enable globally:
 
@@ -40,13 +40,25 @@ When enabled, on spawn Locus:
 
 | Step | Behavior |
 |------|----------|
-| Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND` (`path` or `sandbox-exec`) |
-| PATH | Restricts to `/usr/bin:/bin:/usr/local/bin` + `$CARGO_HOME/bin` or `~/.cargo/bin` when present |
-| macOS | If `sandbox-exec` is available, best-effort Seatbelt wrap (does **not** fail if missing) |
+| Backend | Requires macOS `/usr/bin/sandbox-exec`; unsupported platforms fail closed |
+| Files | Deny by default; allow the work tree, current session worker home, system runtime files, the narrow canonical executable package/parent tree, and exact shebang interpreter |
+| Authority | Denies the rest of the actual custom/default `LOCUS_HOME`, including `daemon.key`, bindings, sessions, approvals, and audit |
+| Secrets | Rebuilds env from the isolation allowlist and uses a private temp root under the worker home |
+| Network | Allows outbound TCP/UDP provider traffic; denies application-created inbound listeners and non-system Unix-domain sockets. Imported Apple system profiles retain OS-defined system-service IPC such as logging |
+| Provenance | Resolves the requested executable to a canonical absolute path before PATH is restricted; unavailable commands fail before spawn |
+| Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND=sandbox-exec` only after backend resolution succeeds |
 
 Composite uses the same flag path: `mcp_config_from_upstream` sets `McpStdioConfig.sandbox` from the spec **or** env.
 
-This is **not** full seccomp/VM isolation. See SECURITY.md / DESIGN.md for residual risk (worker already holds that binding’s secrets).
+Worker discovery and startup are fail closed: `tools/list` never starts an
+upstream child or resolves its credentials. An authorized `tools/call` starts
+only the addressed provider, whose environment contains only that provider's
+scope and credential keys. Batch/session startup is transactional; if a later
+provider fails, every child created earlier in that attempt is torn down.
+
+This is **not** a VM boundary. macOS Seatbelt is the only implemented backend; Linux and Windows sandbox requests currently fail closed. The explicitly allowed work tree may itself contain sensitive files, so bindings should use a narrowly scoped working directory.
+See SECURITY.md / DESIGN.md for residual risk: a started worker already holds
+the addressed provider's scoped credential.
 
 ## Binding TOML — per-provider upstream
 
@@ -56,9 +68,9 @@ provider = "github"
 account = "acme"
 credential_ref = "phm:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"] }
-# Built-in recipe (recommended) — expands to command/args + hardened defaults:
-upstream = { recipe = "github-official", resolve_secrets = true, sandbox = true }
-# Legacy npx community package still works: recipe = "github-mcp"
+# Sandbox-compatible npx recipe — expands to command/args + hardened defaults:
+upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }
+# Official Docker recipe requires explicit sandbox = false acknowledgement.
 # Supabase: recipe = "supabase-mcp" · Vercel remote bridge: recipe = "vercel-mcp"
 
 # Explicit command/args (still supported):
@@ -72,12 +84,12 @@ upstream = { recipe = "github-official", resolve_secrets = true, sandbox = true 
 
 ### Built-in recipes
 
-| Recipe | Typical use | Defaults (pure-recipe expand) |
+| Recipe | Typical use | Defaults |
 |--------|-------------|-------------------------------|
-| `github-official` | **Preferred** — official Docker image + `GITHUB_PERSONAL_ACCESS_TOKEN` | `resolve_secrets`, `sandbox` |
+| `github-official` | Official Docker image + `GITHUB_PERSONAL_ACCESS_TOKEN`; unavailable by default because Docker daemon authority cannot be sandboxed | explicit `sandbox = false` |
 | `github-mcp` | Legacy community `@modelcontextprotocol/server-github` via `npx` (deprecated package) | `resolve_secrets`, `sandbox` |
 | `supabase-mcp` | `@supabase/mcp-server-supabase` stdio (`--read-only`) | `resolve_secrets`, `sandbox` |
-| `vercel-mcp` | Official remote `https://mcp.vercel.com` via documented `mcp-remote` bridge (OAuth) | `sandbox` only |
+| `vercel-mcp` | Official remote `https://mcp.vercel.com` via `mcp-remote`; unavailable by default because first-time OAuth needs a loopback listener and Locus cannot attest cached auth separately | explicit `sandbox = false` |
 | `filesystem-mcp` | Safe filesystem demo (override root path via `args`) | off |
 | `everything-mcp` | MCP test/echo server for wiring checks | off |
 
@@ -88,20 +100,22 @@ locus upstream suggest supabase
 locus upstream suggest vercel
 ```
 
-Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` override recipe defaults when both are set. Pure-recipe expand adopts each recipe’s `default_resolve_secrets` / `default_sandbox` (OR with binding flags).
+Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` replace the recipe's command or arguments, but do not disable its sandbox policy. Compatible recipes adopt `default_sandbox`, including command-only and args-only overrides; explicit `sandbox = false` remains the opt-out. Recipes whose machine-readable `readiness` is `explicit_unsandboxed_required` are unavailable when `sandbox` is omitted or true, and run only after an explicit `sandbox = false` acknowledgement. `LOCUS_WORKER_SANDBOX=1` makes those recipes fail closed instead of producing a false sandbox claim.
 
-**Remote URLs (host MCP, not Locus workers):** Supabase `https://mcp.supabase.com/mcp` (optional `?project_ref=…`); Vercel `https://mcp.vercel.com` (OAuth). Locus upstream workers are **stdio** only today — use host-native remote MCP when the client supports it, or the `vercel-mcp` bridge when you need a stdio child.
+The macOS Seatbelt profile permits outbound TCP/UDP provider connections, but denies application-created inbound listeners and non-system Unix-domain sockets. It imports Apple's `system.sb` and `system-network` baseline and allows `system-socket`, so OS-defined system-service IPC such as logging is intentionally outside the blanket denial claim. Native tests prove denial for an arbitrary external Unix socket, `/var/run/docker.sock` when present, Docker Desktop-style sockets, and TCP OAuth listeners. Locus never grants a Docker socket or blanket inbound networking. Docker therefore remains a host-level, high-authority execution path outside the filesystem boundary. The Vercel bridge remains unsandboxed until Locus can separate and attest OAuth bootstrap from a cached-auth steady state; host-native remote MCP is preferred meanwhile.
+
+**Remote URLs (host MCP, not Locus workers):** Supabase `https://mcp.supabase.com/mcp` (optional `?project_ref=…`); Vercel `https://mcp.vercel.com` (OAuth). Locus upstream workers are **stdio** only today. Use host-native remote MCP when the client supports it; the `vercel-mcp` bridge is an explicit unsandboxed fallback.
 
 When `locus-mcp` is pinned:
 
-1. `tools/list` / `tools/call` call `CompositeWorkerManager::ensure_binding`.
-2. Providers with `upstream` spawn MCP children; others stay synthetic.
+1. `tools/list` returns synthetic schemas plus schemas cached from workers that an earlier authorized call already started.
+2. `tools/call` completes session, scope, and approval policy checks before `ensure_provider` starts only the addressed upstream child.
 3. Upstream tools are namespaced as `provider.toolname` (e.g. `github.list_issues`).
 4. Synthetic tools (e.g. `github.scope`) stay available; name collisions prefer synthetic.
 
 Worker children start from a positive runtime environment allowlist. Locus then
 adds frozen binding metadata and only the provider credential keys resolved for
-that binding. `McpStdioConfig::extra_env` remains for source compatibility but
+that provider. `McpStdioConfig::extra_env` remains for source compatibility but
 is intentionally ignored; arbitrary caller or parent environment cannot cross
 the worker boundary.
 
@@ -140,7 +154,7 @@ let slot = mgr.ensure(&session, &binding, "github")?;
 
 `CompositeWorkerManager` is process-wide inside `locus-mcp`. For a given pin:
 
-1. `tools/list` / `tools/call` call `ensure_session` / `ensure_binding`.
+1. An authorized `tools/call` calls `ensure_provider`; explicit batch callers may use transactional `ensure_session` / `ensure_binding`.
 2. Existing slots in `Ready` / `Running` / `Pending` are **reused** — upstream MCP children are **not** respawned per list/call.
 3. Pin switch (`focus_session`) tears down slots for other `session_id`s.
 4. Process exit / `Drop` tears down all remaining children.
@@ -149,7 +163,7 @@ let slot = mgr.ensure(&session, &binding, "github")?;
 
 ```bash
 export LOCUS_WORKER_IDLE_SECS=300   # tear down workers idle for 5 minutes
-export LOCUS_WORKER_SANDBOX=1       # restricted PATH + marker (+ macOS sandbox-exec if present)
+export LOCUS_WORKER_SANDBOX=1       # require a supported OS sandbox or fail closed
 ```
 
 - Unset or `0` → never idle-reap (default).

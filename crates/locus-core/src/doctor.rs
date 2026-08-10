@@ -247,17 +247,17 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     let mut pin_seal_ok: Option<bool> = None;
     let mut pin: Option<DoctorPin> = None;
     if let Some(ref sess) = active {
-        let seal_only = match store.seal_key() {
-            Ok(key) => key.verify(&sess.material(), &sess.seal),
-            Err(_) => false,
-        };
-        pin_seal_ok = Some(seal_only);
+        let runtime_verified = runtime.seal_ok
+            && runtime.authority_anchor_ok
+            && runtime.backing_ok
+            && !sess.is_expired();
+        pin_seal_ok = Some(runtime_verified);
         pin = Some(DoctorPin {
             alias: sess.binding_alias.clone(),
             tenant: sess.tenant.clone(),
             binding_id: sess.binding_id.clone(),
             expires_at: sess.expires_at.to_rfc3339(),
-            seal_ok: seal_only,
+            seal_ok: runtime_verified,
             principal: sess.principal.clone(),
             client: sess.client.clone(),
             expired: sess.is_expired(),
@@ -460,7 +460,29 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
         findings.push(issue(
             IssueSeverity::Warn,
             "dual_control_waiting",
-            format!("{dual_control_waiting} dual-control approval(s) waiting for second principal"),
+            format!(
+                "{dual_control_waiting} dual-control approval(s) have exactly one externally authenticated principal and await a second"
+            ),
+        ));
+    }
+    if approvals.untrusted_approved > 0 {
+        findings.push(issue(
+            IssueSeverity::Unsafe,
+            "untrusted_approved",
+            format!(
+                "{} approved-looking approval record(s) lack independently authenticated authority",
+                approvals.untrusted_approved
+            ),
+        ));
+    }
+    if approvals.expired_grants > 0 {
+        findings.push(issue(
+            IssueSeverity::Warn,
+            "expired_authenticated_grants",
+            format!(
+                "{} externally authenticated approval grant(s) expired",
+                approvals.expired_grants
+            ),
         ));
     }
     if audit.scope_freeze > 0 {
@@ -550,7 +572,10 @@ fn issue(
 fn count_dual_control_waiting(store: &Store, pending: &[crate::approval::ApprovalRecord]) -> usize {
     pending
         .iter()
-        .filter(|rec| store.tool_requires_dual_control(&rec.binding, &rec.tool))
+        .filter(|rec| {
+            store.tool_requires_dual_control(&rec.binding, &rec.tool)
+                && rec.authoritative_grant_count() == 1
+        })
         .count()
 }
 
@@ -706,6 +731,27 @@ pub fn doctor_json_has_stable_keys(value: &serde_json::Value) -> Result<(), Vec<
         for k in ["path", "total", "last", "scope_freeze", "deny"] {
             if au.get(k).is_none() {
                 missing.push(format!("audit.{k}"));
+            }
+        }
+    }
+    if let Some(ap) = obj.get("approvals") {
+        for k in [
+            "dir",
+            "exists",
+            "writable",
+            "total",
+            "pending",
+            "approved_valid",
+            "expired_grants",
+            "untrusted_approved",
+            "denied",
+            "corrupt",
+            "approval_authority",
+            "authoritative_path_enabled",
+            "ok",
+        ] {
+            if ap.get(k).is_none() {
+                missing.push(format!("approvals.{k}"));
             }
         }
     }
@@ -1063,7 +1109,46 @@ require_pin = true
     }
 
     #[test]
-    fn dual_control_waiting_counted() {
+    fn live_doctor_report_validates_against_published_schema() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        let instance = serde_json::to_value(report).unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schema/doctor.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&instance)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "live doctor JSON violated schema: {}\n{}",
+            errors.join("\n"),
+            serde_json::to_string_pretty(&instance).unwrap()
+        );
+        assert_eq!(
+            instance["approvals"]["approval_authority"],
+            "local_advisory"
+        );
+        assert_eq!(instance["approvals"]["authoritative_path_enabled"], false);
+    }
+
+    #[test]
+    fn advisory_labels_do_not_count_as_waiting_for_second_principal() {
         use crate::adapters::{call_tool_gated, ApprovalGate};
         use serde_json::json;
 
@@ -1079,11 +1164,76 @@ require_pin = true
             session_id: &session.session_id,
             principal: Some("agent"),
         };
-        let _ = call_tool_gated(
+        let blocked = call_tool_gated(
             &binding,
             "github.delete_repo",
             &json!({ "name": "x" }),
             Some(gate),
+        )
+        .unwrap();
+        let id = blocked.content["approval_id"].as_str().unwrap();
+        store.grant_approval(id, None, "alice").unwrap();
+        store.grant_approval(id, None, "bob").unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        assert!(report.pending_approvals >= 1);
+        assert_eq!(report.dual_control_waiting, 0);
+        assert!(!report
+            .findings
+            .iter()
+            .any(|f| f.code == "dual_control_waiting"));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.code == "pending_approvals"));
+    }
+
+    #[test]
+    fn approved_looking_unverified_record_is_blocking_not_expired() {
+        use crate::adapters::{call_tool_gated, ApprovalGate};
+        use crate::approval::{ApprovalAuthority, ApprovalGrant, ApprovalStatus};
+        use serde_json::json;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        let session = store.pin("acme", dir.path(), None, false).unwrap();
+        let binding = store.load_binding("acme").unwrap();
+        let blocked = call_tool_gated(
+            &binding,
+            "github.delete_repo",
+            &json!({ "name": "x" }),
+            Some(ApprovalGate {
+                store: &store,
+                session_id: &session.session_id,
+                principal: Some("agent"),
+            }),
+        )
+        .unwrap();
+        let id = blocked.content["approval_id"].as_str().unwrap();
+        let mut forged = store.load_approval(id).unwrap();
+        forged.status = ApprovalStatus::Approved;
+        forged.granted_at = Some(Utc::now());
+        forged.expires_at = Some(Utc::now() + Duration::minutes(15));
+        forged.grants.push(ApprovalGrant {
+            principal: "forged".into(),
+            granted_at: Utc::now(),
+            authority: ApprovalAuthority::ExternalAuthenticated,
+            envelope_id: Some("unsigned-envelope".into()),
+        });
+        std::fs::write(
+            store.approvals_dir().join(format!("{id}.json")),
+            serde_json::to_string_pretty(&forged).unwrap(),
         )
         .unwrap();
 
@@ -1096,11 +1246,14 @@ require_pin = true
             },
         )
         .unwrap();
-        assert!(report.pending_approvals >= 1);
-        assert!(report.dual_control_waiting >= 1);
+        assert_eq!(report.approvals.approved_valid, 0);
+        assert_eq!(report.approvals.untrusted_approved, 1);
+        assert_eq!(report.approvals.expired_grants, 0);
+        assert_eq!(report.verdict, DoctorVerdict::Unsafe);
         assert!(report
             .findings
             .iter()
-            .any(|f| f.code == "dual_control_waiting" || f.code == "pending_approvals"));
+            .any(|finding| finding.code == "untrusted_approved"
+                && finding.severity == IssueSeverity::Unsafe));
     }
 }

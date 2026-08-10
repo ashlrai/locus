@@ -207,7 +207,7 @@ Only after `allowDispatch === true`:
 1. Spawn agent with MCP catalog = locus (+ phantom).
 2. Forward `LOCUS_HOME` + `LOCUS_SESSION_ID` into children.
 3. Agents may call `locus_whoami` / `locus_status` / `locus_request_pin` — **never** re-pin from the model.
-4. Destructive tools may hit `require_approval` — human grants via CLI; do not loop-spam.
+4. Destructive tools may hit `require_approval`. Only a closed, independently authenticated external authorization envelope may release provider execution. Local CLI/dashboard labels are advisory; do not retry or redispatch after recording one. This release has no external verifier, so keep the job blocked.
 
 ### 7. On block — human remediation
 
@@ -218,6 +218,7 @@ Only after `allowDispatch === true`:
 | MCP unwired | `locus agent setup --apply --client all` or `registerLocusInMcpConfig` |
 | unsafe / invalid seal | `locus doctor`; re-init only if seal key lost (audit) |
 | required_servers contract | Upgrade locus; do not soft-allow missing phantom |
+| `require_approval` pending | Keep provider execution blocked pending a closed external authorization envelope; never convert local labels into retry authority |
 
 Surface `report.next_steps[0]` when present.
 

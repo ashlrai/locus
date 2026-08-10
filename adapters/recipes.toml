@@ -1,13 +1,14 @@
 # Built-in upstream MCP recipes for Locus bindings.
 #
 # Use in a binding as:
-#   upstream = { recipe = "github-official", resolve_secrets = true, sandbox = true }
+#   upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }
 #
 # Or expand with `locus upstream list` / `locus upstream suggest <provider>`.
 # Recipes fill command + args when those fields are omitted. Explicit
 # command/args in the binding override the recipe defaults.
-# Real provider recipes set default_sandbox = true (pure-recipe expand);
-# demo recipes stay false so offline wiring is unblocked.
+# Sandbox-compatible provider recipes set default_sandbox = true. Recipes that
+# need host authority or an inbound OAuth callback are unavailable until the
+# binding explicitly acknowledges sandbox = false. Demo recipes stay false.
 #
 # Source of truth for `locus-core` (embedded via include_str). Keep ids stable.
 # Only well-known, documented package names — never invent npm packages.
@@ -28,7 +29,7 @@ Legacy Anthropic / modelcontextprotocol reference server via npx.
 Package is deprecated on npm — prefer recipe `github-official` (Docker image
 ghcr.io/github/github-mcp-server) for new bindings.
 
-Pure-recipe expand sets resolve_secrets + best-effort sandbox. Locus injects
+Pure-recipe expand sets resolve_secrets + required OS sandbox. Locus injects
 the binding credential into the child env only (never into MCP tool results).
 Prefer a fine-scoped, vault-backed PAT per tenant — never a personal token on
 a client binding. Opt out: sandbox = false / resolve_secrets = false.
@@ -48,18 +49,24 @@ args = [
   "ghcr.io/github/github-mcp-server",
 ]
 default_resolve_secrets = true
-default_sandbox = true
+default_sandbox = false
+sandbox_compatibility = "incompatible"
+readiness = "explicit_unsandboxed_required"
+risks = ["host_docker_daemon", "filesystem_boundary_not_enforced"]
+readiness_detail = "Docker daemon access is intentionally unavailable inside Seatbelt. Set sandbox = false only after accepting host-daemon authority, or use a sandbox-compatible npx/remote recipe."
 env_hints = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
 notes = """
-Official GitHub-maintained local MCP server (Docker). Recommended github recipe.
-Image: ghcr.io/github/github-mcp-server — public; docker must be on PATH
-(sandbox restricted PATH includes /usr/local/bin where Docker Desktop usually lives).
+Official GitHub-maintained local MCP server (Docker).
+Image: ghcr.io/github/github-mcp-server; docker must be on PATH.
 
 With resolve_secrets = true, Locus resolves the binding credential and injects
 GITHUB_PERSONAL_ACCESS_TOKEN into the child only (`docker -e VAR` pass-through).
 Remote hosted option (not stdio): https://api.githubcopilot.com/mcp/ — use
 host-native remote MCP when available; Locus workers today are stdio only.
-Best-effort sandbox on by pure-recipe expand; set sandbox = false to opt out.
+Unavailable by default: Docker daemon access is intentionally denied inside
+Seatbelt, and granting the daemon socket would defeat the filesystem boundary.
+Set sandbox = false only as an explicit high-authority acknowledgement, or use
+the sandbox-compatible github-mcp / host-native remote path.
 """
 
 [[recipes]]
@@ -74,7 +81,7 @@ env_hints = ["SUPABASE_ACCESS_TOKEN"]
 notes = """
 Official Supabase stdio package (@supabase/mcp-server-supabase). Defaults to
 --read-only; drop that arg only when the binding is intentionally write-capable.
-Pure-recipe expand sets resolve_secrets + best-effort sandbox.
+Pure-recipe expand sets resolve_secrets + required OS sandbox.
 
 Env: SUPABASE_ACCESS_TOKEN (injected when resolve_secrets = true). Prefer
 project-scoped tokens; Locus freezes project_ref on the synthetic adapter.
@@ -94,7 +101,11 @@ providers = ["vercel"]
 command = "npx"
 args = ["-y", "mcp-remote", "https://mcp.vercel.com"]
 default_resolve_secrets = false
-default_sandbox = true
+default_sandbox = false
+sandbox_compatibility = "incompatible"
+readiness = "explicit_unsandboxed_required"
+risks = ["oauth_loopback_listener", "inbound_network_required_for_bootstrap"]
+readiness_detail = "mcp-remote OAuth bootstrap requires a localhost callback listener, which Seatbelt intentionally denies. Set sandbox = false explicitly or use a host-native remote MCP client."
 env_hints = ["VERCEL_TOKEN"]
 notes = """
 Official Vercel MCP is remote OAuth Streamable HTTP at https://mcp.vercel.com
@@ -103,7 +114,10 @@ Official Vercel MCP is remote OAuth Streamable HTTP at https://mcp.vercel.com
 This recipe bridges via the documented `mcp-remote` proxy (same pattern Vercel
 docs show for Gemini Code Assist / CLI). Auth is browser/OAuth on first connect —
 resolve_secrets defaults off because the remote server does not take VERCEL_TOKEN
-via env the way github-official does. Sandbox still defaults on.
+via env the way github-official does. Locus does not yet persist and attest an
+OAuth bootstrap separately from steady-state execution, so this recipe is
+unavailable until sandbox = false is acknowledged explicitly. Inbound networking
+is never opened globally; prefer a host-native remote MCP client.
 
 Prefer host-native remote MCP (Cursor/Claude HTTP connector) when available.
 Synthetic vercel.scope / vercel.deploy.prod remain without upstream.

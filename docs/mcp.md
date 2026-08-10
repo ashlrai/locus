@@ -2,7 +2,15 @@
 
 `locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding. It is the agent-facing half of the identity plane.
 
-CLI (`locus pin`, `locus exec`) and MCP share the same store and seal under `~/.locus` (or `LOCUS_HOME`).
+CLI and MCP share the same store and seal under `~/.locus` (or `LOCUS_HOME`).
+`locus exec --no-resolve`, `locus run --no-resolve`, and
+`locus ci run --no-resolve` are manual,
+identity-only diagnostics: they cannot resolve provider credentials or spawn
+credential-resolving provider workers, and Hub or agent-originated sessions
+cannot invoke them. All three use one recipe-expanded preflight and fail before
+child, worker, session, or credential effects when any declared upstream
+expands to `resolve_secrets = true` (including recipe defaults).
+Credential-free upstream declarations are permitted and remain usable.
 
 ## Install
 
@@ -157,7 +165,7 @@ Every tool description is prefixed with **`[locus:<alias|unpinned>]`** so the mo
 | Tool | Behavior |
 |------|----------|
 | `locus_whoami` | Active pin: tenant, binding, providers, frozen scopes — **no secrets** |
-| `locus_safe_next` | **Single best next action** (enter / re-pin / approve / doctor fix / ready) — call when stuck |
+| `locus_safe_next` | **Single best next action** (enter / re-pin / approval blocked / doctor fix / ready) — call when stuck |
 | `locus_status` | Short pinned/unpinned + seal status |
 | `locus_heartbeat` | Doctor-lite / runtime drift (seal, freeze, binding match) |
 | `locus_enter_hint` | Shell command for the human to pin (`locus enter …`) |
@@ -243,7 +251,7 @@ export LOCUS_MCP_AUTO_PIN=0
 
 ## Scope freeze and policy
 
-1. **Policy** (`binding.policy`) may deny or require approval (`confirm=true`) before the adapter runs.  
+1. **Policy** (`binding.policy`) may deny or require external authority before the adapter runs. Local `confirm`, approval ids, CLI labels, HTTP tokens, and dashboard actions are advisory only.
 2. **Scope freeze** rejects args that conflict with frozen selectors (e.g. another Supabase `project_ref`).  
 3. Results are synthetic/identity-oriented in phase 1 — safe to explore without mutating cloud resources.
 
@@ -264,7 +272,7 @@ Workspace defaults (`.locus.toml`) affect CLI pin UX. MCP reads the **active sea
 | Anti-pattern | Locus approach |
 |--------------|----------------|
 | N Supabase MCP servers (personal + each client) in one agent | One `locus-mcp`; pin selects which project_ref exists |
-| Global `gh auth` shared by all chats | Pin + private worker dirs for `locus exec`; MCP tools report frozen GH scope |
+| Global `gh auth` shared by all chats | Pin + private worker dirs; manual exec is credential-free and MCP tools report frozen GH scope |
 | Model “please use the other project” | Freeze denies alternate selectors |
 
 Do **not** also register unrestricted personal Supabase/GitHub MCP servers alongside Locus if you want hard isolation — that reintroduces ambient tools outside the pin.

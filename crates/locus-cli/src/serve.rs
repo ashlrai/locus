@@ -13,8 +13,8 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use locus_core::{
-    build_doctor_report, filter_audit_events, find_workspace, parse_ttl, phantom_on_path,
-    DoctorExternal, Store, VERSION,
+    build_doctor_report, external_approval_authority_enabled, filter_audit_events, find_workspace,
+    parse_ttl, phantom_on_path, DoctorExternal, Store, VERSION,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -261,6 +261,39 @@ fn cwd() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
+fn dashboard_capabilities(manual_state: &str) -> Value {
+    json!({
+        "reporting": "live_runtime",
+        "scope": "locus_surfaces_only",
+        "manual_cli_command_execution": {
+            "state": "surface_dependent",
+            "surface_states": {
+                "locus exec": manual_state,
+                "locus run": "available_with_explicit_binding",
+                "locus ci run": "available_with_explicit_binding"
+            }
+        },
+        "agent_command_execution": {
+            "state": "not_exposed",
+            "surface": "locus-mcp"
+        },
+        "provider_credential_injection": {
+            "state": "surface_dependent",
+            "surface_states": {
+                "locus exec": if manual_state == "available" { "available_to_manual_cli_child" } else { manual_state },
+                "locus run": "available_to_manual_cli_child_with_explicit_binding",
+                "locus ci run": "available_to_manual_cli_child_with_explicit_binding"
+            },
+            "default_for_child_launch_surfaces": ["locus exec", "locus run", "locus ci run"],
+            "no_resolve": {
+                "classification": "recipe_expanded",
+                "resolving_upstream": "fail_closed_before_child_worker_session_or_credential_effect",
+                "credential_free_upstream": "allowed"
+            }
+        }
+    })
+}
+
 async fn api_status(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -275,10 +308,16 @@ async fn api_status(
         None => Ok(Json(json!({
             "pinned": false,
             "require_pin": require_pin,
+            "capabilities": dashboard_capabilities("blocked_unpinned"),
         }))),
         Some(session) => {
             let key = s.seal_key().map_err(store_err)?;
             let seal_ok = session.verify_seal(&key).is_ok();
+            let manual_state = if seal_ok && !session.frozen && !session.is_expired() {
+                "available"
+            } else {
+                "blocked_unhealthy_session"
+            };
             Ok(Json(json!({
                 "pinned": true,
                 "binding": session.binding_alias,
@@ -291,6 +330,7 @@ async fn api_status(
                 "require_pin": require_pin,
                 "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
                 "namespaces": session.all_aliases(),
+                "capabilities": dashboard_capabilities(manual_state),
             })))
         }
     }
@@ -352,14 +392,23 @@ async fn api_approvals(
         if let Some(obj) = v.as_object_mut() {
             obj.insert("dual_control".into(), json!(dual));
             obj.insert("required_grants".into(), json!(required));
-            obj.insert(
-                "grants_progress".into(),
-                json!(format!("{}/{}", rec.grants.len(), required)),
-            );
+            obj.insert("approval_authority".into(), json!("local_advisory"));
+            obj.insert("authoritative_grants".into(), json!(0));
+            obj.insert("required_authoritative_grants".into(), json!(required));
+            obj.insert("authoritative_path_enabled".into(), json!(false));
+            obj.insert("grants_progress".into(), json!(format!("0/{required}")));
+            obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
         }
         out.push(v);
     }
-    Ok(Json(json!({ "approvals": out })))
+    Ok(Json(json!({
+        "approvals": out,
+        "approval_authority": "local_advisory",
+        "authoritative_path_enabled": external_approval_authority_enabled(),
+        "authority_blocker": locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER,
+        "peer_authenticated_os_broker_required": true,
+        "non_agent_issue_capability_required": true
+    })))
 }
 
 async fn api_doctor(
@@ -453,11 +502,23 @@ async fn api_grant(
     if let Some(obj) = v.as_object_mut() {
         obj.insert("dual_control".into(), json!(dual));
         obj.insert("required_grants".into(), json!(required));
+        obj.insert("approval_authority".into(), json!("local_advisory"));
+        obj.insert("authoritative_grants".into(), json!(0));
+        obj.insert("required_authoritative_grants".into(), json!(required));
+        obj.insert("authoritative_path_enabled".into(), json!(false));
+        obj.insert("grants_progress".into(), json!(format!("0/{required}")));
+        obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
+        obj.insert("recorded_label".into(), json!(principal));
         obj.insert(
-            "grants_progress".into(),
-            json!(format!("{}/{}", rec.grants.len(), required)),
+            "authority_blocker".into(),
+            json!(locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER),
         );
-        obj.insert("granted_as".into(), json!(principal));
+        obj.insert("peer_authenticated_os_broker_required".into(), json!(true));
+        obj.insert("non_agent_issue_capability_required".into(), json!(true));
+        obj.insert(
+            "detail".into(),
+            json!("Advisory evidence recorded; provider execution remains blocked."),
+        );
     }
     Ok(Json(v))
 }
@@ -582,8 +643,10 @@ mod tests {
 
     #[tokio::test]
     async fn health_is_public_and_status_works() {
-        let (_dir, s, state) = temp_store();
-        let b = sample_binding("acme", "acme-corp");
+        let (dir, s, state) = temp_store();
+        let mut b = sample_binding("acme", "acme-corp");
+        b.policy.require_approval = vec!["github.delete_repo".into()];
+        b.policy.dual_control = vec!["github.delete_repo".into()];
         s.save_binding(&b).unwrap();
 
         let app = build_router(state);
@@ -600,6 +663,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
 
         let res = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/status")
@@ -614,6 +678,75 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["pinned"], false);
+        assert_eq!(v["capabilities"]["reporting"], "live_runtime");
+        assert_eq!(
+            v["capabilities"]["manual_cli_command_execution"]["state"],
+            "surface_dependent"
+        );
+        assert_eq!(
+            v["capabilities"]["manual_cli_command_execution"]["surface_states"],
+            json!({
+                "locus exec": "blocked_unpinned",
+                "locus run": "available_with_explicit_binding",
+                "locus ci run": "available_with_explicit_binding"
+            })
+        );
+        assert_eq!(
+            v["capabilities"]["agent_command_execution"]["state"],
+            "not_exposed"
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["state"],
+            "surface_dependent"
+        );
+
+        s.pin("acme", dir.path(), None, false).unwrap();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["pinned"], true);
+        assert_eq!(
+            v["capabilities"]["manual_cli_command_execution"]["state"],
+            "surface_dependent"
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["state"],
+            "surface_dependent"
+        );
+        assert_eq!(
+            v["capabilities"]["manual_cli_command_execution"]["surface_states"],
+            json!({
+                "locus exec": "available",
+                "locus run": "available_with_explicit_binding",
+                "locus ci run": "available_with_explicit_binding"
+            })
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["surface_states"],
+            json!({
+                "locus exec": "available_to_manual_cli_child",
+                "locus run": "available_to_manual_cli_child_with_explicit_binding",
+                "locus ci run": "available_to_manual_cli_child_with_explicit_binding"
+            })
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["default_for_child_launch_surfaces"],
+            json!(["locus exec", "locus run", "locus ci run"])
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["no_resolve"]["resolving_upstream"],
+            "fail_closed_before_child_worker_session_or_credential_effect"
+        );
     }
 
     #[tokio::test]
@@ -672,12 +805,18 @@ mod tests {
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("Locus"));
         assert!(html.contains("dashboard"));
+        assert!(html.contains("status.capabilities"));
+        assert!(html.contains("surface_states"));
+        assert!(html.contains("manual child launch"));
+        assert!(html.contains("unknown / degraded"));
+        assert!(!html.contains("manual_identity_only"));
     }
 
     #[tokio::test]
     async fn bindings_and_grant_no_secrets() {
         let (_dir, s, state) = temp_store();
-        let b = sample_binding("acme", "acme-corp");
+        let mut b = sample_binding("acme", "acme-corp");
+        b.policy.dual_control = vec!["github.delete_repo".into()];
         s.save_binding(&b).unwrap();
 
         let rec = s
@@ -727,11 +866,46 @@ mod tests {
             .await
             .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["status"], "approved");
-        assert_eq!(v["granted_as"], "mason");
+        assert_eq!(v["status"], "pending");
+        assert_eq!(v["recorded_label"], "mason");
+        assert_eq!(v["approval_authority"], "local_advisory");
+        assert_eq!(v["authoritative_grants"], 0);
+        assert_eq!(v["required_authoritative_grants"], 2);
+        assert_eq!(v["authoritative_path_enabled"], false);
+        assert_eq!(v["peer_authenticated_os_broker_required"], true);
+        assert_eq!(v["non_agent_issue_capability_required"], true);
+        assert_eq!(
+            v["authority_blocker"],
+            locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER
+        );
         let text = String::from_utf8_lossy(&body);
         assert!(!text.contains("ghp_"));
         assert!(!text.contains("sk-live"));
+
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/approve/{}/grant", rec.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"principal":"company_ceo"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "pending");
+        assert_eq!(v["advisory_assertions"], 2);
+        assert_eq!(v["authoritative_grants"], 0);
+
+        let persisted = s.load_approval(&rec.id).unwrap();
+        assert_eq!(persisted.status, locus_core::ApprovalStatus::Pending);
+        assert!(!persisted.is_valid_grant());
     }
 
     #[tokio::test]

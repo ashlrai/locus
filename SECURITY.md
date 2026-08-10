@@ -34,7 +34,7 @@ We appreciate coordinated disclosure. Credit is given unless you ask otherwise.
 | **Provider credentials** | Resolved only into worker/child env; never returned by MCP tools |
 | **Tenant / account selection** | Session sealed to one Binding; tools catalog is exclusive |
 | **Scope freezes** | `project_ref`, `team_id`, org/repo allowlists cannot be overridden by the model |
-| **Session integrity** | Pins are HMAC-sealed; tampering fails closed |
+| **Session integrity** | V3 HMAC seals plus a live broker subject/generation bind the exact record, backing, expiry, and authority |
 | **Workspace boundaries** | `.locus.toml` `allowed_bindings` blocks wrong-tenant pins (unless audited `--force`) |
 
 ### High-priority threats we design against
@@ -46,34 +46,37 @@ We appreciate coordinated disclosure. Credit is given unless you ask otherwise.
 | Arg smuggling (`project_ref` swap) | Adapter scope freeze |
 | Ambient CLI race (`gh auth switch`) | Private `GH_CONFIG_DIR` / scrubbed env in `locus exec` |
 | Ambient credential inheritance | Scrub known identity env vars; inject only resolved refs for the pin |
-| Seal forgery | HMAC over session fields with local seal key |
+| Seal forgery / replay | HMAC covers session fields; an in-memory supervised broker independently binds their digest to a monotonic generation and rejects stale records |
 | Approval id path traversal | Ids constrained to safe charset; joined path must stay under `approvals/` |
 | Confirm / approval_id injection into digests | `args_digest` strips control + secret-like keys before hashing |
 
-### Dual-control approvals
+### Approval authority and dual-control
 
-Destructive tools can require **two distinct human principals** before a grant becomes active.
+Destructive tools remain blocked until Locus receives independently authenticated
+external authorization. Local CLI/dashboard principal strings are advisory
+review labels only and never become execution authority.
 
 | Policy field | Effect |
 |--------------|--------|
-| `require_approval = ["*.delete*", …]` | Tool blocked until a valid grant exists (single principal by default) |
-| `dual_control = ["vercel.deploy.prod", …]` | Matching tools need **two** distinct `--as` principals |
-| `dual_control_all_approvals = true` | Every `require_approval` match also needs two principals |
+| `require_approval = ["*.delete*", …]` | Tool blocked pending one valid external authorization envelope |
+| `dual_control = ["vercel.deploy.prod", …]` | Matching tools require two externally authenticated approvers |
+| `dual_control_all_approvals = true` | Every `require_approval` match requires two external approvers |
 
 Flow:
 
 1. Agent hits a gated tool → Locus creates `$LOCUS_HOME/approvals/appr_….json` with `status=pending` and an `args_digest` (raw args **never** stored).
-2. Human A: `locus approve grant appr_… --as alice`
-3. If dual-control: still pending until Human B: `locus approve grant appr_… --as bob` (same principal cannot grant twice).
-4. Once `status=approved`, re-call with the **same** args (digest match) within the grant TTL (default 15m), or pass `confirm=true` + `approval_id`.
+2. Operators may record local review evidence with `locus approve grant appr_… --as alice`; the record remains pending.
+3. A second local label is still advisory and cannot satisfy dual-control.
+4. Only a closed external envelope, issued through a non-agent-accessible capability and verified against an independent trust root, may authorize the exact request. No such verifier ships in this release, so provider execution remains blocked and agents must not retry after local labels.
 
 **Secrets never appear** in approval files, audit JSONL, or MCP tool results — only digests, ids, tool names, and principal labels. Principal names are restricted to `[A-Za-z0-9_-]` (no path separators).
 
-**Rate limiting:** Locus does not yet enforce request rate limits on `approve grant` / pending creation in process. Operators should treat approval files as sensitive control-plane state (filesystem permissions on `$LOCUS_HOME`), rotate seal keys if compromised, and use short grant TTLs for high-risk tools. Process-level rate limiting and OS attestation are roadmap.
+**Rate limiting:** Locus does not yet enforce request rate limits on advisory-label or pending-record creation in process. Operators should treat approval files as sensitive control-plane state. External envelope replay protection, expiry, identity binding, and OS attestation are required before authoritative approvals can be enabled.
 
 ### Explicit non-goals (out of scope)
 
 - **Root / malware on the developer machine** — if the OS is fully compromised, all local tools are in scope for the attacker.
+- **Same-UID code that can inspect or modify the trusted operator/broker process memory** — filesystem mode `0600` does not isolate `daemon.key` from code already running as the same user. The broker prevents possession of that file key alone from forging current authority, but it cannot survive theft of the in-memory control capability through an OS debugging/process-memory boundary.
 - **A human who deliberately pins the wrong client** (`locus pin personal --force`) — Locus does not second-guess intentional human pin switches beyond workspace allowlists and audit hooks.
 - **Replacing cloud IAM / SSO** — Locus complements provider IAM; it does not replace org SSO policies.
 - **Malicious code inside a worker that already holds that binding’s credentials** — blast radius is intentionally one binding; deeper sandboxing is future work.
@@ -107,6 +110,6 @@ When in doubt whether an issue is security-sensitive, use the private channel ab
 - Treat malformed `.locus.toml` as an `UNSAFE` doctor finding; pin and autopin refuse to continue, including with `--force`.
 - Use `locus doctor` and `locus whoami` before destructive agent work.
 - Keep Phantom (or your vault) and Locus updated together when using `phm:` refs.
-- For production-like deploys, set `dual_control` globs (or `dual_control_all_approvals = true`) so one laptop user cannot solo-approve high-risk tools.
-- Keep `$LOCUS_HOME` mode-restricted (seal key is `0600`); treat `approvals/` and `audit/` as sensitive.
-- Prefer short approval TTLs (`locus approve grant … --ttl 15m`) and review `locus approve list` regularly.
+- For production-like deploys, set `dual_control` globs (or `dual_control_all_approvals = true`) to declare the required external authority threshold. Local laptop labels do not satisfy it.
+- Keep `$LOCUS_HOME` mode-restricted to block other OS users and treat `approvals/` and `audit/` as sensitive. Do not treat `daemon.key` mode `0600` as protection from same-UID code; delegated mutation/provider execution also requires a live broker capability.
+- Review `locus approve list` regularly; `--ttl` is reserved for future externally authenticated grants and does not make local labels authoritative.

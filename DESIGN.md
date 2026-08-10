@@ -411,12 +411,12 @@ when = 'args.owner == "acme-corp"'
 
 **Approval UX:**
 
-- CLI: `locus approve grant <id> --as <principal>` / `locus approve status <id>`
+- CLI: `locus approve grant <id> --as <principal>` records a local advisory label; `locus approve status <id>` shows authoritative progress separately.
 - Dual-control (firm mode): tools matching `policy.dual_control` (or all when
-  `dual_control_all_approvals = true`) need **two distinct principals** before
-  `status=approved`. One grant leaves the record `pending` with `grants.len()=1`.
-  Same principal cannot grant twice. Default principal: `LOCUS_PRINCIPAL` or `$USER`.
-- MCP tool result: clear message “Blocked pending approval… run `locus approve grant appr_… --as …`”
+  `dual_control_all_approvals = true`) require two independently authenticated
+  external approvers. Local principal strings never change `status=pending` or
+  establish authority. The external verifier is intentionally absent today.
+- MCP tool result: report the closed external-envelope requirement and instruct agents not to retry after local advisory labels.
 - Optional: auto-deny after N minutes / macOS notification + Touch ID
 
 ### 4.5 Audit plane

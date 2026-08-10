@@ -81,10 +81,13 @@ pub struct UpstreamSpec {
     /// Resolve `phm:` / `env:` credential_refs into the child env when spawning.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resolve_secrets: bool,
-    /// Best-effort worker sandbox: restricted PATH + `LOCUS_WORKER_SANDBOXED=1`.
-    /// Also enabled globally via `LOCUS_WORKER_SANDBOX=1`. See docs/workers.md.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub sandbox: bool,
+    /// Require a supported OS sandbox backend for this worker.
+    ///
+    /// `None` adopts a recipe's default, `Some(true)` requires isolation, and
+    /// `Some(false)` explicitly opts out. `LOCUS_WORKER_SANDBOX=1` still forces
+    /// isolation globally. See docs/workers.md.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<bool>,
 }
 
 impl UpstreamSpec {
@@ -94,7 +97,7 @@ impl UpstreamSpec {
             command: command.into(),
             args: Vec::new(),
             resolve_secrets: false,
-            sandbox: false,
+            sandbox: None,
         }
     }
 
@@ -105,7 +108,7 @@ impl UpstreamSpec {
             command: String::new(),
             args: Vec::new(),
             resolve_secrets: false,
-            sandbox: false,
+            sandbox: None,
         }
     }
 
@@ -124,9 +127,9 @@ impl UpstreamSpec {
         self
     }
 
-    /// Enable best-effort sandbox (restricted PATH + marker env).
+    /// Explicitly enable or disable the OS sandbox.
     pub fn sandbox(mut self, yes: bool) -> Self {
-        self.sandbox = yes;
+        self.sandbox = Some(yes);
         self
     }
 
@@ -142,12 +145,14 @@ impl UpstreamSpec {
     /// - Recipe set → look up builtins; empty `command`/`args` take recipe
     ///   defaults; non-empty fields win (full override, not merge).
     /// - Pure recipe path (empty command *and* empty args): adopt
-    ///   `recipe.default_resolve_secrets` / `recipe.default_sandbox` via OR
-    ///   (`binding_flag || recipe.default_*`). Explicit command/args keep
-    ///   the binding's flags as written.
+    ///   `recipe.default_resolve_secrets` when false.
+    /// - Sandbox-compatible recipes adopt `recipe.default_sandbox` when omitted,
+    ///   including command or args overrides.
+    /// - Sandbox-incompatible recipes are unavailable unless the binding
+    ///   explicitly acknowledges `sandbox = false`.
     ///
-    /// Note: TOML bool default is false, so omitted flags mean false until
-    /// pure-recipe expand. CLI snippets include recommended flags.
+    /// Note: `resolve_secrets` still uses a bool default, while `sandbox` uses
+    /// `Option<bool>` so omission remains distinguishable from explicit false.
     pub fn expand(&self) -> crate::Result<Self> {
         let recipe_name = self
             .recipe
@@ -180,20 +185,16 @@ impl UpstreamSpec {
                 "upstream recipe `{name}` resolved to an empty command"
             )));
         }
-        // Pure recipe path: adopt recommended resolve_secrets / sandbox when
-        // the binding did not set command (recipe-only). If the user wrote an
-        // explicit command, keep flags as given.
+        // Secret resolution keeps its historical pure-recipe behavior.
+        // Sandbox omission always means recipe default, independent of command
+        // or argument overrides; only explicit false opts out.
         let pure_recipe = self.command.trim().is_empty() && self.args.is_empty();
         let resolve_secrets = if pure_recipe {
             self.resolve_secrets || recipe.default_resolve_secrets
         } else {
             self.resolve_secrets
         };
-        let sandbox = if pure_recipe {
-            self.sandbox || recipe.default_sandbox
-        } else {
-            self.sandbox
-        };
+        let sandbox = Some(recipe.resolve_sandbox_choice(self.sandbox)?);
 
         Ok(Self {
             recipe: self.recipe.clone(),
@@ -665,7 +666,7 @@ upstream = { recipe = "github-mcp" }
         assert_eq!(expanded.command, "npx");
         assert!(expanded.args.iter().any(|a| a.contains("server-github")));
         assert!(expanded.resolve_secrets, "recipe default_resolve_secrets");
-        assert!(expanded.sandbox, "recipe default_sandbox on real providers");
+        assert_eq!(expanded.sandbox, Some(true));
         assert!(b.provider("github").unwrap().has_upstream());
     }
 
@@ -673,39 +674,113 @@ upstream = { recipe = "github-mcp" }
     fn expand_pure_recipe_adopts_default_sandbox() {
         // Real provider recipe: default_sandbox = true → pure expand enables it.
         let up = UpstreamSpec::from_recipe("github-mcp");
-        assert!(!up.sandbox, "raw from_recipe starts sandbox-off");
+        assert_eq!(up.sandbox, None, "raw from_recipe leaves sandbox omitted");
         let expanded = up.expand().unwrap();
-        assert!(expanded.sandbox, "pure recipe adopts default_sandbox");
+        assert_eq!(expanded.sandbox, Some(true));
         assert!(expanded.resolve_secrets);
 
         // Explicit sandbox = true still true after expand.
         let forced = UpstreamSpec::from_recipe("github-mcp").sandbox(true);
-        assert!(forced.expand().unwrap().sandbox);
+        assert_eq!(forced.expand().unwrap().sandbox, Some(true));
+
+        // Explicit false is distinguishable from omission and remains an opt-out.
+        let opted_out = UpstreamSpec::from_recipe("github-mcp").sandbox(false);
+        assert_eq!(opted_out.expand().unwrap().sandbox, Some(false));
 
         // Demo recipe stays sandbox-off unless the binding forces it.
         let demo = UpstreamSpec::from_recipe("everything-mcp");
-        assert!(!demo.expand().unwrap().sandbox);
+        assert_eq!(demo.expand().unwrap().sandbox, Some(false));
         let demo_on = UpstreamSpec::from_recipe("everything-mcp").sandbox(true);
-        assert!(demo_on.expand().unwrap().sandbox);
+        assert_eq!(demo_on.expand().unwrap().sandbox, Some(true));
+    }
 
-        // Explicit command path does not auto-adopt recipe defaults.
-        let override_cmd = UpstreamSpec {
+    #[test]
+    fn recipe_command_only_override_inherits_default_sandbox() {
+        let command_only = UpstreamSpec {
             recipe: Some("github-mcp".into()),
             command: "custom-mcp".into(),
-            args: vec!["--flag".into()],
+            args: Vec::new(),
             resolve_secrets: false,
-            sandbox: false,
+            sandbox: None,
         };
-        let expanded = override_cmd.expand().unwrap();
+        let expanded = command_only.expand().unwrap();
         assert_eq!(expanded.command, "custom-mcp");
-        assert!(
-            !expanded.sandbox,
-            "explicit command keeps sandbox as written"
-        );
+        assert_eq!(expanded.sandbox, Some(true));
         assert!(
             !expanded.resolve_secrets,
             "explicit command keeps resolve_secrets as written"
         );
+
+        let opted_out = UpstreamSpec {
+            sandbox: Some(false),
+            ..command_only
+        };
+        assert_eq!(opted_out.expand().unwrap().sandbox, Some(false));
+    }
+
+    #[test]
+    fn recipe_args_only_override_inherits_default_sandbox() {
+        let args_only = UpstreamSpec {
+            recipe: Some("github-mcp".into()),
+            command: String::new(),
+            args: vec!["--custom-arg".into()],
+            resolve_secrets: false,
+            sandbox: None,
+        };
+        let expanded = args_only.expand().unwrap();
+        assert_eq!(expanded.command, "npx");
+        assert_eq!(expanded.args, vec!["--custom-arg"]);
+        assert_eq!(expanded.sandbox, Some(true));
+    }
+
+    #[test]
+    fn recipe_toml_distinguishes_omitted_and_explicit_false_sandbox() {
+        let omitted: UpstreamSpec = toml::from_str("recipe = \"github-mcp\"").unwrap();
+        let opted_out: UpstreamSpec =
+            toml::from_str("recipe = \"github-mcp\"\nsandbox = false").unwrap();
+        assert_eq!(omitted.sandbox, None);
+        assert_eq!(omitted.expand().unwrap().sandbox, Some(true));
+        assert_eq!(opted_out.sandbox, Some(false));
+        assert_eq!(opted_out.expand().unwrap().sandbox, Some(false));
+        let serialized = toml::to_string(&opted_out).unwrap();
+        assert!(serialized.contains("sandbox = false"));
+    }
+
+    #[test]
+    fn incompatible_recipe_requires_explicit_unsandboxed_acknowledgement() {
+        for id in ["github-official", "vercel-mcp"] {
+            let omitted = UpstreamSpec::from_recipe(id);
+            let err = omitted.expand().unwrap_err().to_string();
+            assert!(err.contains("unavailable by default"), "{id}: {err}");
+            assert!(err.contains("sandbox = false"), "{id}: {err}");
+
+            let falsely_sandboxed = UpstreamSpec::from_recipe(id).sandbox(true);
+            let err = falsely_sandboxed.expand().unwrap_err().to_string();
+            assert!(err.contains("not compatible"), "{id}: {err}");
+
+            let acknowledged = UpstreamSpec::from_recipe(id).sandbox(false);
+            let expanded = acknowledged.expand().unwrap();
+            assert_eq!(expanded.sandbox, Some(false));
+
+            let command_override = UpstreamSpec {
+                recipe: Some(id.into()),
+                command: "custom-wrapper".into(),
+                args: Vec::new(),
+                resolve_secrets: false,
+                sandbox: None,
+            };
+            assert!(command_override.expand().is_err());
+            assert_eq!(
+                UpstreamSpec {
+                    sandbox: Some(false),
+                    ..command_override
+                }
+                .expand()
+                .unwrap()
+                .sandbox,
+                Some(false)
+            );
+        }
     }
 
     #[test]

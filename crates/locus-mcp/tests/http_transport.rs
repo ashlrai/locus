@@ -1,5 +1,6 @@
 //! HTTP transport: health probe + token auth reject/accept + JSON-RPC POST /mcp.
 
+use locus_core::{Binding, BindingBody, Policy, ProviderBinding, Scope, Store, UpstreamSpec};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -47,19 +48,38 @@ impl HttpServer {
         // Store the TempDir inside a Box that we leak so the directory survives.
         std::mem::forget(dir);
 
+        Self::spawn_with_home(token, &home_owned, &[])
+    }
+
+    fn spawn_with_home(token: &str, home: &std::path::Path, extra_env: &[(&str, &str)]) -> Self {
         let port = free_port();
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let mut child = Command::new(mcp_bin())
+        let mut command = Command::new(mcp_bin());
+        command
             .arg("--http")
             .arg(addr.to_string())
-            .env("LOCUS_HOME", &home_owned)
+            .env("LOCUS_HOME", home)
             .env("LOCUS_MCP_HTTP_TOKEN", token)
             .env("LOCUS_MCP_AUTO_PIN", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn locus-mcp --http");
+            .stderr(Stdio::piped());
+        if !extra_env
+            .iter()
+            .any(|(key, _)| *key == locus_core::EXECUTOR_CAPABILITY_ENV)
+        {
+            if let Ok(store) = Store::open(home) {
+                if let Ok(Some(session)) = store.active_session() {
+                    if let Ok(capability) = store.grant_executor_capability(&session) {
+                        command.env(locus_core::EXECUTOR_CAPABILITY_ENV, capability);
+                    }
+                }
+            }
+        }
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().expect("spawn locus-mcp --http");
 
         // Wait until /health responds or timeout.
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -252,6 +272,70 @@ fn http_jsonrpc_initialize_and_tools_list() {
 }
 
 #[test]
+fn direct_http_with_pin_but_no_executor_capability_cannot_discover_or_call_provider() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let binding = Binding::from_body(BindingBody {
+        id: "bnd_http_direct".into(),
+        alias: "http-direct".into(),
+        tenant: "http-direct".into(),
+        principal: None,
+        description: None,
+        policy: Policy::default(),
+        providers: vec![ProviderBinding {
+            provider: "github".into(),
+            account: "http-direct".into(),
+            credential_ref: "phm:HTTP_DIRECT_GITHUB".into(),
+            scope: Scope::default(),
+            upstream: None,
+        }],
+    });
+    store.save_binding(&binding).unwrap();
+    store
+        .pin(
+            "http-direct",
+            dir.path(),
+            Some("local-control".into()),
+            false,
+        )
+        .unwrap();
+    let server = HttpServer::spawn_with_home(
+        "direct-no-executor",
+        dir.path(),
+        &[(locus_core::EXECUTOR_CAPABILITY_ENV, "")],
+    );
+
+    let list = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 21, "method": "tools/list", "params": {}
+    }))
+    .unwrap();
+    let (status, _, response) = server.request("POST", "/mcp", Some(&list), Some(&server.token));
+    assert_eq!(status, 200, "{response}");
+    let listed: Value = serde_json::from_str(&response).unwrap();
+    if let Some(tools) = listed["result"]["tools"].as_array() {
+        assert!(!tools.iter().any(|tool| tool["name"] == "github.scope"));
+    } else {
+        assert!(
+            listed.get("error").is_some(),
+            "unexpected tools/list: {listed}"
+        );
+    }
+
+    let call = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+        "params": {"name": "github.scope", "arguments": {}}
+    }))
+    .unwrap();
+    let (status, _, response) = server.request("POST", "/mcp", Some(&call), Some(&server.token));
+    assert_eq!(status, 200, "{response}");
+    let called: Value = serde_json::from_str(&response).unwrap();
+    assert!(
+        called.get("error").is_some() || called["result"]["isError"] == true,
+        "provider call unexpectedly succeeded without executor authority: {called}"
+    );
+}
+
+#[test]
 fn http_x_locus_token_header_accepted() {
     let srv = HttpServer::spawn("header-token");
     let mut stream = TcpStream::connect(srv.addr).unwrap();
@@ -272,4 +356,81 @@ fn http_x_locus_token_header_accepted() {
     assert_eq!(status, 200, "{raw}");
     let v: Value = serde_json::from_str(&resp_body).unwrap();
     assert!(v.get("result").is_some());
+}
+
+#[test]
+fn http_require_approval_precedes_worker_and_credential_startup() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        return;
+    }
+
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("http-worker-token.txt");
+    let marker_arg = marker.display().to_string();
+    let store = Store::open(dir.path()).unwrap();
+    let binding = Binding::from_body(BindingBody {
+        id: "bnd_http_hostile".into(),
+        alias: "http-hostile".into(),
+        tenant: "http-hostile-test".into(),
+        principal: None,
+        description: None,
+        policy: Policy {
+            require_approval: vec!["github.delete_repo".into()],
+            ..Policy::default()
+        },
+        providers: vec![ProviderBinding {
+            provider: "github".into(),
+            account: "http-hostile-gh".into(),
+            credential_ref: "env:HTTP_HOSTILE_WORKER_TOKEN".into(),
+            scope: Scope::default(),
+            upstream: Some(
+                UpstreamSpec::new("python3")
+                    .with_args([
+                        "-u",
+                        "-c",
+                        r#"import os, pathlib, sys, time
+pathlib.Path(sys.argv[1]).write_text(os.environ.get("GH_TOKEN", "missing"))
+time.sleep(30)
+"#,
+                        marker_arg.as_str(),
+                    ])
+                    .resolve_secrets(true),
+            ),
+        }],
+    });
+    store.save_binding(&binding).unwrap();
+    store
+        .pin(
+            "http-hostile",
+            dir.path(),
+            Some("local-control".into()),
+            false,
+        )
+        .unwrap();
+
+    let server = HttpServer::spawn_with_home(
+        "http-hostile-auth",
+        dir.path(),
+        &[("HTTP_HOSTILE_WORKER_TOKEN", "http-worker-canary-token")],
+    );
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "tools/call",
+        "params": {
+            "name": "github.delete_repo",
+            "arguments": { "owner": "acme", "repo": "critical" }
+        }
+    });
+    let body = serde_json::to_vec(&call).unwrap();
+    let (status, _, response) = server.request("POST", "/mcp", Some(&body), Some(&server.token));
+    assert_eq!(status, 200, "{response}");
+    assert!(response.contains("requires_approval"), "{response}");
+    thread::sleep(Duration::from_millis(100));
+    assert!(
+        !marker.exists(),
+        "HTTP worker observed a credential before approval: {}",
+        std::fs::read_to_string(marker).unwrap_or_default()
+    );
+    assert_eq!(store.pending_approvals().unwrap().len(), 1);
 }

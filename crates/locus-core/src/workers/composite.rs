@@ -4,7 +4,7 @@
 //! with `spawn=true`. All others use [`SyntheticBackend`].
 
 use super::mcp_stdio::{McpStdioBackend, McpStdioConfig};
-use super::sandbox::sandbox_enabled;
+use super::sandbox::{sandbox_enabled_with_env, sandbox_from_env};
 use super::stdio_client::UpstreamTool;
 use super::synthetic::SyntheticBackend;
 use super::{WorkerBackend, WorkerKey, WorkerManager, WorkerSlot, WorkerState, WorkerToolResult};
@@ -13,7 +13,7 @@ use crate::binding::{Binding, UpstreamSpec};
 use crate::error::{LocusError, Result};
 use crate::session::Session;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -27,14 +27,28 @@ pub const ENV_WORKER_IDLE_SECS: &str = "LOCUS_WORKER_IDLE_SECS";
 ///
 /// Sandbox is on when `upstream.sandbox = true` **or** `LOCUS_WORKER_SANDBOX=1`.
 pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
+    mcp_config_from_upstream_with_env(spec, sandbox_from_env())
+}
+
+fn mcp_config_from_upstream_with_env(
+    spec: &UpstreamSpec,
+    env_sandbox: bool,
+) -> Result<McpStdioConfig> {
     let expanded = spec.expand()?;
+    let sandbox_incompatibility = expanded
+        .recipe
+        .as_deref()
+        .map(crate::recipes::get_recipe)
+        .transpose()?
+        .and_then(|recipe| recipe.sandbox_incompatibility());
     Ok(McpStdioConfig {
         command: expanded.command,
         args: expanded.args,
         spawn: true,
         resolve_secrets: expanded.resolve_secrets,
         extra_env: BTreeMap::new(),
-        sandbox: sandbox_enabled(expanded.sandbox),
+        sandbox: sandbox_enabled_with_env(expanded.sandbox.unwrap_or(false), env_sandbox),
+        sandbox_incompatibility,
     })
 }
 
@@ -191,6 +205,20 @@ impl CompositeWorkerManager {
         self.ensure_all(session, binding)
     }
 
+    /// Ensure only the provider addressed by one already-authorized tool call.
+    /// This prevents an allow decision for one provider from resolving every
+    /// other provider credential in the binding.
+    pub fn ensure_provider(
+        &mut self,
+        session: &Session,
+        binding: &Binding,
+        provider: &str,
+    ) -> Result<WorkerSlot> {
+        let _ = self.reap_idle_configured()?;
+        self.focus_session(&session.session_id)?;
+        self.ensure(session, binding, provider)
+    }
+
     /// Whether the provider uses MCP stdio (has live or declared upstream).
     pub fn is_upstream_provider(&self, binding: &Binding, provider: &str) -> bool {
         binding.provider(provider).is_some_and(|p| p.has_upstream())
@@ -307,11 +335,41 @@ impl CompositeWorkerManager {
     ) -> Result<Vec<WorkerSlot>> {
         let _ = self.reap_idle_configured()?;
         self.focus_session(&session.session_id)?;
+        let before = self.slots.keys().cloned().collect::<BTreeSet<_>>();
         let mut out = Vec::new();
         for (_, binding) in bindings {
-            out.extend(self.ensure_all(session, binding)?);
+            match self.ensure_all(session, binding) {
+                Ok(slots) => out.extend(slots),
+                Err(error) => {
+                    self.rollback_new_workers(&before)?;
+                    return Err(error);
+                }
+            }
         }
         Ok(out)
+    }
+
+    fn rollback_new_workers(&mut self, before: &BTreeSet<WorkerKey>) -> Result<()> {
+        let created = self
+            .slots
+            .keys()
+            .filter(|key| !before.contains(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for key in created {
+            if let Err(error) = self.teardown(&key) {
+                failures.push(error.to_string());
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(LocusError::msg(format!(
+                "worker startup rollback failed: {}",
+                failures.join("; ")
+            )))
+        }
     }
 
     /// Route a tool call: upstream MCP when the tool is not a synthetic adapter
@@ -421,9 +479,16 @@ impl WorkerManager for CompositeWorkerManager {
     }
 
     fn ensure_all(&mut self, session: &Session, binding: &Binding) -> Result<Vec<WorkerSlot>> {
+        let before = self.slots.keys().cloned().collect::<BTreeSet<_>>();
         let mut out = Vec::with_capacity(binding.providers.len());
         for p in &binding.providers {
-            out.push(self.ensure(session, binding, &p.provider)?);
+            match self.ensure(session, binding, &p.provider) {
+                Ok(slot) => out.push(slot),
+                Err(error) => {
+                    self.rollback_new_workers(&before)?;
+                    return Err(error);
+                }
+            }
         }
         Ok(out)
     }
@@ -487,7 +552,9 @@ mod tests {
 
     fn mock_script() -> &'static str {
         r#"
-import sys, json
+import sys, json, os, pathlib
+if len(sys.argv) > 1:
+    pathlib.Path(sys.argv[1]).write_text(str(os.getpid()) + "|" + os.environ.get("GH_TOKEN", "missing") + "|" + os.environ.get("SUPABASE_ACCESS_TOKEN", "missing"))
 def send(o):
     sys.stdout.write(json.dumps(o)+"\n"); sys.stdout.flush()
 for line in sys.stdin:
@@ -673,6 +740,90 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn partial_multi_provider_startup_rolls_back_earlier_credential_child() {
+        if Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        let marker = dir.path().join("first-provider.txt");
+        std::fs::create_dir_all(&worker_home).unwrap();
+        let session = session_at(&worker_home.display().to_string());
+        std::env::set_var("LOCUS_ROLLBACK_GITHUB", "github-rollback-canary");
+        std::env::set_var("LOCUS_ROLLBACK_SUPABASE", "supabase-rollback-canary");
+        let binding = Binding::from_body(BindingBody {
+            id: "bnd_rollback".into(),
+            alias: "rollback".into(),
+            tenant: "rollback".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![
+                ProviderBinding {
+                    provider: "github".into(),
+                    account: "rollback-gh".into(),
+                    credential_ref: "env:LOCUS_ROLLBACK_GITHUB".into(),
+                    scope: Scope::default(),
+                    upstream: Some(
+                        UpstreamSpec::new("python3")
+                            .with_args(["-u", "-c", mock_script(), marker.to_str().unwrap()])
+                            .resolve_secrets(true),
+                    ),
+                },
+                ProviderBinding {
+                    provider: "supabase".into(),
+                    account: "rollback-db".into(),
+                    credential_ref: "env:LOCUS_ROLLBACK_SUPABASE".into(),
+                    scope: Scope::default(),
+                    upstream: Some(
+                        UpstreamSpec::new(
+                            dir.path().join("missing-upstream").display().to_string(),
+                        )
+                        .resolve_secrets(true),
+                    ),
+                },
+            ],
+        });
+
+        let mut mgr = CompositeWorkerManager::new();
+        let error = mgr.ensure_binding(&session, &binding).unwrap_err();
+        assert!(error.to_string().contains("failed to spawn"));
+        assert!(
+            mgr.list().is_empty(),
+            "partial startup retained worker slots"
+        );
+        let marker_body = std::fs::read_to_string(&marker).unwrap();
+        let mut fields = marker_body.split('|');
+        let _pid = fields.next().unwrap().to_string();
+        assert_eq!(fields.next(), Some("github-rollback-canary"));
+        assert_eq!(fields.next(), Some("missing"));
+        #[cfg(unix)]
+        {
+            let mut stopped = false;
+            for _ in 0..20 {
+                if !Command::new("kill")
+                    .args(["-0", &_pid])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+                {
+                    stopped = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(
+                stopped,
+                "earlier credential-bearing child {_pid} survived rollback"
+            );
+        }
+        std::env::remove_var("LOCUS_ROLLBACK_GITHUB");
+        std::env::remove_var("LOCUS_ROLLBACK_SUPABASE");
+    }
+
+    #[test]
     fn focus_session_tears_down_other() {
         if Command::new("python3").arg("--version").output().is_err() {
             return;
@@ -718,23 +869,16 @@ for line in sys.stdin:
     fn mcp_config_sandbox_from_spec_or_env() {
         // Spec flag forces sandbox on regardless of env.
         let spec = UpstreamSpec::new("npx").sandbox(true);
-        let cfg = mcp_config_from_upstream(&spec).unwrap();
+        let cfg = mcp_config_from_upstream_with_env(&spec, false).unwrap();
         assert!(cfg.sandbox);
 
-        // Env-only path: force-enable, then restore prior value.
-        let key = crate::workers::ENV_WORKER_SANDBOX;
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, "1");
-        let cfg2 = mcp_config_from_upstream(&UpstreamSpec::new("false-cmd-for-test")).unwrap();
+        // Env-only path is injected so parallel tests do not mutate process state.
+        let cfg2 =
+            mcp_config_from_upstream_with_env(&UpstreamSpec::new("false-cmd-for-test"), true)
+                .unwrap();
         assert!(cfg2.sandbox);
-        // Spec false + env off
-        std::env::set_var(key, "0");
-        let cfg3 = mcp_config_from_upstream(&UpstreamSpec::new("npx")).unwrap();
+        let cfg3 = mcp_config_from_upstream_with_env(&UpstreamSpec::new("npx"), false).unwrap();
         assert!(!cfg3.sandbox);
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
     }
 
     #[test]
@@ -744,6 +888,43 @@ for line in sys.stdin:
         assert_eq!(cfg.command, "npx");
         assert!(cfg.args.iter().any(|a| a.contains("server-everything")));
         assert!(cfg.spawn);
+    }
+
+    #[test]
+    fn incompatible_recipes_never_become_false_sandbox_claims() {
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("locus-home/workers/sess_test");
+        let work_dir = worker_home.join("slots/github");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let session = session_at(&worker_home.display().to_string());
+        let binding = binding_mixed(false);
+        let provider = binding.provider("github").unwrap();
+
+        for id in ["github-official", "vercel-mcp"] {
+            let omitted = UpstreamSpec::from_recipe(id);
+            assert!(mcp_config_from_upstream(&omitted).is_err());
+
+            let requested_sandbox = UpstreamSpec::from_recipe(id).sandbox(true);
+            assert!(mcp_config_from_upstream(&requested_sandbox).is_err());
+
+            let acknowledged = UpstreamSpec::from_recipe(id).sandbox(false);
+            let mut cfg = mcp_config_from_upstream(&acknowledged).unwrap();
+            assert!(!cfg.sandbox, "{id} must remain explicitly unsandboxed");
+            assert!(cfg.sandbox_incompatibility.is_some());
+
+            // Model a later global force without mutating process-global env.
+            // The spawn layer must fail before resolving or launching the child.
+            cfg.sandbox = true;
+            let backend = McpStdioBackend::new(cfg);
+            let err = backend
+                .build_command(&session, &binding, provider, &work_dir)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("cannot run in the worker sandbox"),
+                "{id}: {err}"
+            );
+        }
     }
 
     #[test]

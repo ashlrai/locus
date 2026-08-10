@@ -136,8 +136,8 @@ pub fn tools_for_binding(binding: &Binding) -> Vec<AdapterTool> {
 
 /// Dispatch a tool call against the pinned binding (no approval store).
 ///
-/// For `require_approval` tools this always blocks unless a matching grant
-/// would be checked via [`call_tool_gated`]. Prefer gated calls from MCP.
+/// For `require_approval` tools this always blocks. Prefer gated calls from MCP
+/// so callers receive a stable advisory record and explicit authority status.
 pub fn call_tool(binding: &Binding, tool_name: &str, args: &Value) -> Result<ToolCallResult> {
     call_tool_gated(binding, tool_name, args, None)
 }
@@ -152,6 +152,9 @@ pub fn enforce_policy(
     args: &Value,
     gate: Option<ApprovalGate<'_>>,
 ) -> Result<Option<ToolCallResult>> {
+    // Scope is part of authorization and must fail before approval creation or
+    // any caller has an opportunity to start an upstream worker.
+    preflight_scope_freeze(binding, tool_name, args)?;
     let verdict = evaluate(&binding.policy, tool_name);
     match verdict.decision {
         Decision::Deny => Ok(Some(ToolCallResult {
@@ -179,9 +182,21 @@ pub fn enforce_policy(
                 )?;
                 let dual = binding.policy.requires_dual_control(tool_name);
                 let required = crate::approval::required_grant_count(dual);
-                let grants = pending.grants.len();
-                let hint =
-                    crate::approval::agent_approval_hint(&pending.id, dual, required, grants);
+                let advisory_assertions = pending.grants.len();
+                let hint = if dual {
+                    format!(
+                        "Dual-control requires {required} externally authenticated approvers. \
+                         `locus approve grant {} --as <label>` records local advisory evidence only; \
+                         external approval authority is not configured, so provider execution remains blocked.",
+                        pending.id
+                    )
+                } else {
+                    format!(
+                        "`locus approve grant {} --as <label>` records local advisory evidence only. \
+                         External approval authority is not configured, so provider execution remains blocked.",
+                        pending.id
+                    )
+                };
                 Ok(Some(ToolCallResult {
                     ok: false,
                     content: json!({
@@ -190,8 +205,13 @@ pub fn enforce_policy(
                         "approval_id": pending.id,
                         "args_digest": pending.args_digest,
                         "dual_control": dual,
-                        "grants": grants,
+                        "grants": advisory_assertions,
+                        "advisory_assertions": advisory_assertions,
+                        "authoritative_grants": 0,
                         "required_grants": required,
+                        "required_authoritative_grants": required,
+                        "approval_authority": "local_advisory",
+                        "authoritative_path_enabled": false,
                         "requester": pending.requester,
                         "hint": hint,
                     }),
@@ -205,7 +225,9 @@ pub fn enforce_policy(
                         "error": "requires_approval",
                         "detail": verdict.reason,
                         "dual_control": dual,
-                        "hint": "Re-call via locus-mcp after `locus approve grant <id> --as <principal>`, or adjust binding.policy.require_approval"
+                        "approval_authority": "local_advisory",
+                        "authoritative_path_enabled": false,
+                        "hint": "Local approval assertions are advisory and cannot unlock provider execution. External approval authority is not configured."
                     }),
                     policy: Some(verdict),
                 }))
@@ -215,7 +237,7 @@ pub fn enforce_policy(
     }
 }
 
-/// Dispatch a tool call with optional approval grant store.
+/// Dispatch a tool call with an optional advisory approval-record store.
 ///
 /// Order (fail closed):
 /// 1. **Scope freeze** — wrong-tenant selectors error before any approval is minted
@@ -223,12 +245,12 @@ pub fn enforce_policy(
 /// 3. Adapter dispatch
 ///
 /// When policy says `require_approval` (or dual_control):
-/// 1. If a still-valid **fully approved** grant exists for tool+binding+args_digest → allow
-/// 2. Else if `confirm=true` and `approval_id` names a valid matching grant → allow
+/// 1. If a still-valid externally authenticated grant exists for the exact call → allow
+/// 2. Else if `confirm=true` and `approval_id` names such a grant → allow
 /// 3. Else create/reuse a pending approval record and block with `approval_id`
 ///
-/// Dual-control tools only pass once two distinct principals have granted
-/// (`status=approved`). A single grant leaves the record pending.
+/// No external verifier ships today, so locally asserted approvals remain
+/// advisory and every gated provider call remains blocked.
 pub fn call_tool_gated(
     binding: &Binding,
     tool_name: &str,
@@ -237,7 +259,6 @@ pub fn call_tool_gated(
 ) -> Result<ToolCallResult> {
     // INV: freeze before policy — model cannot smuggle a wrong project_ref/team_id
     // past require_approval into a grantable call.
-    preflight_scope_freeze(binding, tool_name, args)?;
     if let Some(blocked) = enforce_policy(binding, tool_name, args, gate)? {
         return Ok(blocked);
     }

@@ -19,13 +19,13 @@ Agents inherit **ambient identity**: global `gh auth`, one Supabase MCP token, l
 ┌─────────────────────────────────────────────────────────────┐
 │  Clients: Claude Code · Cursor · Codex · human CLI · CI     │
 └────────────────────────────┬────────────────────────────────┘
-                             │ MCP stdio  or  locus exec
+                             │ policy-gated MCP stdio
 ┌────────────────────────────▼────────────────────────────────┐
-│  DATA PLANE — locus-mcp / isolated exec                      │
+│  DATA PLANE — locus-mcp                                      │
 │  · resolve sealed session → one Binding                      │
 │  · compose tool catalog (pin only + locus_* controls)        │
 │  · policy gate + scope freeze                                │
-│  · fan-out to workers / child env                            │
+│  · fan-out to scoped MCP workers                             │
 └───┬──────────────────┬───────────────────┬──────────────────┘
     │                  │                   │
 ┌───▼────────┐  ┌──────▼──────┐  ┌─────────▼─────────┐
@@ -37,7 +37,7 @@ Agents inherit **ambient identity**: global `gh auth`, one Supabase MCP token, l
     │
 ┌───▼────────────────────────────────────────────────────────┐
 │  CREDENTIAL PLANE                                             │
-│  CredentialRef → resolve only into worker/child env           │
+│  CredentialRef → resolve only into policy-gated worker env    │
 │  phm:NAME (Phantom) · env:VAR · test: compiled tests only      │
 │  Model never sees resolved values                             │
 └───┬────────────────────────────────────────────────────────┘
@@ -86,9 +86,10 @@ locus pin acme
       │     agents cannot pin
       │     scope freeze: wrong project_ref / team_id → deny
       │
-      └─► locus exec -- <cmd>
+      └─► locus exec --no-resolve -- <cmd>  (manual identity diagnostics)
             scrub ambient AWS_PROFILE / GH_TOKEN / SUPABASE_* / …
-            resolve CredentialRefs into child only
+            validate binding identity + scope fingerprint
+            never inject provider credentials; deny CI/Hub/agent sessions
             private CLI config dirs under workers/<session>/
             never inject other bindings' providers
 ```
@@ -99,7 +100,7 @@ locus pin acme
 1. Valid session seal?           else DENY
 2. Tool provider ∈ binding?      else DENY
 3. Scope allowlist / freeze?     else DENY
-4. require_approval match?       else pending human grant
+4. require_approval match?       else block; local labels are advisory only
 5. policy.default                ALLOW or DENY
 6. Audit meta (no secret values)
 ```
@@ -146,7 +147,7 @@ Roadmap detail: [PLAN.md](../PLAN.md). Threat model: [DESIGN.md §9](../DESIGN.m
 .locus.toml + ~/.locus/bindings
         │
         ▼
-   locus-mcp / locus exec
+   locus-mcp
         │
         │  CredentialRef phm:NAME
         ▼
@@ -157,3 +158,12 @@ Roadmap detail: [PLAN.md](../PLAN.md). Threat model: [DESIGN.md §9](../DESIGN.m
 ```
 
 Optional later: fleet gateway discovers **only** Locus, not raw personal MCP servers.
+
+Manual `locus exec --no-resolve`, `locus run --no-resolve`, and
+`locus ci run --no-resolve` sit outside the credential-bearing provider data
+plane. They expose frozen identity metadata in a private, allowlisted
+environment, never provider credentials. Hub and agent-originated sessions
+cannot invoke arbitrary commands through Locus. One shared preflight rejects
+any declared upstream (including a recipe default) that resolves credentials
+before child, worker, session, or credential effects. Credential-free workers
+remain available through the normal isolated launch path.

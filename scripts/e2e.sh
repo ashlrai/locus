@@ -7,6 +7,8 @@
 set -euo pipefail
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
+export LOCUS_CONTROL_CAPABILITY="${LOCUS_CONTROL_CAPABILITY:-$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')}"
+OPERATOR_CONTROL_CAPABILITY="$LOCUS_CONTROL_CAPABILITY"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -67,7 +69,11 @@ mcp_rpc() {
     body+="${line}"$'\n'
   done
   # shellcheck disable=SC2086
-  printf '%s' "$body" | LOCUS_HOME="$LOCUS_HOME" "$MCP_BIN" 2>/dev/null
+  if [[ -f "$LOCUS_HOME/sessions/active.json" ]]; then
+    printf '%s' "$body" | locus exec --no-resolve -- "$MCP_BIN" 2>/dev/null
+  else
+    printf '%s' "$body" | LOCUS_HOME="$LOCUS_HOME" "$MCP_BIN" 2>/dev/null
+  fi
 }
 
 # Extract tool names from a tools/list response line (id matching $1 if given)
@@ -223,6 +229,147 @@ echo "$exec_env" | grep -q "ambient-sb-must-not-leak" \
   && die "ambient SUPABASE_ACCESS_TOKEN leaked" || true
 echo "$exec_env" | grep -q "AWS_PROFILE=" \
   && die "AWS_PROFILE should be scrubbed" || true
+
+# Every command-child surface must reject resolving upstreams before any child,
+# worker, session, audit, or credential effect. Cover both explicit flags and
+# pure-recipe defaults (github-official defaults resolve_secrets=true).
+no_resolve_worker_marker="$LOCUS_HOME/no-resolve-worker-effect"
+cat >"$LOCUS_HOME/bindings/noresolve.toml" <<EOF
+[binding]
+id = "bnd_noresolve"
+alias = "noresolve"
+tenant = "noresolve-tenant"
+
+[binding.policy]
+default = "allow"
+
+[[binding.providers]]
+provider = "github"
+account = "noresolve-account"
+credential_ref = "env:LOCUS_E2E_GH_TOKEN"
+upstream = { command = "/bin/sh", args = ["-c", "env > '$no_resolve_worker_marker'"], resolve_secrets = true }
+EOF
+
+cat >"$LOCUS_HOME/bindings/noresolve-recipe.toml" <<'EOF'
+[binding]
+id = "bnd_noresolve_recipe"
+alias = "noresolve-recipe"
+tenant = "noresolve-recipe-tenant"
+
+[binding.policy]
+default = "allow"
+
+[[binding.providers]]
+provider = "github"
+account = "noresolve-recipe-account"
+credential_ref = "env:LOCUS_E2E_GH_TOKEN"
+upstream = { recipe = "github-official", sandbox = false }
+EOF
+
+control_plane_snapshot() {
+  {
+    [[ ! -f "$LOCUS_HOME/active.json" ]] || cksum "$LOCUS_HOME/active.json"
+    [[ ! -f "$LOCUS_HOME/audit/events.jsonl" ]] || cksum "$LOCUS_HOME/audit/events.jsonl"
+    find "$LOCUS_HOME/sessions" -type f -exec cksum {} \; 2>/dev/null || true
+  } | sort
+}
+
+assert_no_resolve_blocked() {
+  local label="$1" expected_surface="$2"
+  shift 2
+  local child_marker="$LOCUS_HOME/no-resolve-${label}-child-effect"
+  local output ec
+  rm -f "$child_marker"
+  set +e
+  output="$("$@" -- /bin/sh -c 'printf "%s" "${GH_TOKEN:-missing}" > "$1"' _ "$child_marker" 2>&1)"
+  ec=$?
+  set -e
+  [[ $ec -ne 0 ]] || die "$label allowed credential-resolving upstream"
+  echo "$output" | grep -Fq -- "--no-resolve refused $expected_surface" \
+    || die "$label did not report centralized fail-closed boundary: $output"
+  echo "$output" | grep -Fq "no session or credential effect occurred" \
+    || die "$label omitted no-effect contract: $output"
+  [[ ! -e "$child_marker" ]] || die "$label started secret-bearing child"
+}
+
+for binding in noresolve noresolve-recipe; do
+  locus pin "$binding" --force >/dev/null
+  no_resolve_state_before="$(control_plane_snapshot)"
+  assert_no_resolve_blocked "${binding}-exec" "locus exec" locus exec --no-resolve
+  assert_no_resolve_blocked "${binding}-run" "locus run" locus run -b "$binding" --no-resolve --force
+  assert_no_resolve_blocked "${binding}-run-share-pin" "locus run" locus run -b "$binding" --no-resolve --share-pin --force
+  assert_no_resolve_blocked "${binding}-ci-run" "locus ci run" locus ci run -b "$binding" --no-resolve --force
+  no_resolve_state_after="$(control_plane_snapshot)"
+  [[ "$no_resolve_state_after" == "$no_resolve_state_before" ]] \
+    || die "$binding --no-resolve changed active/session/audit state"
+done
+[[ ! -e "$no_resolve_worker_marker" ]] || die "--no-resolve started resolving upstream worker"
+ok "all --no-resolve child surfaces block explicit + recipe-default resolving upstreams before effects"
+
+# Credential-free upstreams remain usable. `run` performs its normal eager MCP
+# probe, while all three requested children run without receiving GH_TOKEN.
+no_resolve_free_worker="$LOCUS_HOME/no-resolve-free-worker.py"
+no_resolve_free_worker_marker="$LOCUS_HOME/no-resolve-free-worker-effect"
+cat >"$no_resolve_free_worker" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as marker:
+    marker.write(os.environ.get("GH_TOKEN", "missing"))
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    method = request.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "no-resolve-free", "version": "1"},
+        }
+    elif method == "tools/list":
+        result = {"tools": []}
+    else:
+        result = {}
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+PY
+python_bin="$(command -v python3)"
+cat >"$LOCUS_HOME/bindings/noresolve-free.toml" <<EOF
+[binding]
+id = "bnd_noresolve_free"
+alias = "noresolve-free"
+tenant = "noresolve-free-tenant"
+
+[binding.policy]
+default = "allow"
+
+[[binding.providers]]
+provider = "github"
+account = "noresolve-free-account"
+credential_ref = "env:LOCUS_E2E_GH_TOKEN"
+upstream = { command = "$python_bin", args = ["$no_resolve_free_worker", "$no_resolve_free_worker_marker"], resolve_secrets = false }
+EOF
+
+locus pin noresolve-free --force >/dev/null
+for surface in exec run ci-run; do
+  free_child_marker="$LOCUS_HOME/no-resolve-free-${surface}-child-effect"
+  case "$surface" in
+    exec) locus exec --no-resolve -- /bin/sh -c 'printf "%s" "${GH_TOKEN:-missing}" > "$1"' _ "$free_child_marker" >/dev/null ;;
+    run)
+      free_run_output="$(locus run -b noresolve-free --no-resolve --force -- /bin/sh -c 'printf "%s" "${GH_TOKEN:-missing}" > "$1"' _ "$free_child_marker" 2>&1)"
+      echo "$free_run_output" | grep -Fq "worker ensure (upstream) soft-failed" \
+        && die "credential-free upstream failed MCP handshake: $free_run_output"
+      ;;
+    ci-run) locus ci run -b noresolve-free --no-resolve --force -- /bin/sh -c 'printf "%s" "${GH_TOKEN:-missing}" > "$1"' _ "$free_child_marker" >/dev/null ;;
+  esac
+  [[ "$(cat "$free_child_marker")" == "missing" ]] \
+    || die "$surface --no-resolve injected credentials into allowed child"
+done
+[[ "$(cat "$no_resolve_free_worker_marker")" == "missing" ]] \
+  || die "credential-free upstream worker received GH_TOKEN"
+ok "credential-free upstream and exec/run/ci-run children remain usable without credentials"
 echo "$exec_env" | grep -q "UNLISTED_SECRET_CANARY=" \
   && die "arbitrary parent secret leaked into locus exec" || true
 echo "$exec_env" | grep -q "arbitrary-parent-secret-must-not-leak" \
@@ -233,6 +380,129 @@ ok "exec scrubs ambient + injects env: secrets"
 
 # scrub parent ambient so later steps are clean
 unset GH_TOKEN SUPABASE_ACCESS_TOKEN AWS_PROFILE UNLISTED_SECRET_CANARY
+export LOCUS_CONTROL_CAPABILITY="$OPERATOR_CONTROL_CAPABILITY"
+
+# Exact Hub/agent sessions are confinement capabilities. Reproduce the prior
+# env-i bypass with a synthetic Phantom resolver and verify every refusal occurs
+# before child, credential, audit, session, worker, or global-pin effects.
+fake_phantom_bin="$LOCUS_HOME/fake-phantom-bin"
+mkdir -p "$fake_phantom_bin"
+cat >"$fake_phantom_bin/phantom" <<'SH'
+#!/bin/sh
+case "${3:-${2:-}}" in
+  GH_TOKEN_ACME) printf '%s\n' 'acme-canary-token' ;;
+  GH_TOKEN_PERSONAL) printf '%s\n' 'personal-canary-token' ;;
+  *) printf '%s\n' 'other-canary-token' ;;
+esac
+SH
+chmod +x "$fake_phantom_bin/phantom"
+
+[[ ${#OPERATOR_CONTROL_CAPABILITY} -eq 64 ]] \
+  || die "operator control capability was not preserved for exact-session probes"
+set +e
+hub_session_json="$(LOCUS_CONTROL_CAPABILITY="$OPERATOR_CONTROL_CAPABILITY" \
+  "$LOCUS_BIN" ci mint -b acme --force 2>&1)"
+hub_session_ec=$?
+set -e
+[[ $hub_session_ec -eq 0 ]] || die "exact-session CI mint failed: $hub_session_json"
+hub_session_id="$(printf '%s' "$hub_session_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+hub_executor_capability="$(printf '%s' "$hub_session_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["env"]["LOCUS_EXECUTOR_CAPABILITY"])')"
+set +e
+active_before_exact_json="$(LOCUS_CONTROL_CAPABILITY="$OPERATOR_CONTROL_CAPABILITY" \
+  "$LOCUS_BIN" whoami --json 2>&1)"
+active_before_exact_ec=$?
+set -e
+[[ $active_before_exact_ec -eq 0 ]] \
+  || die "operator active-session lookup failed: $active_before_exact_json"
+active_before_exact="$(printf '%s' "$active_before_exact_json" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+exact_state_before="$(control_plane_snapshot)"
+
+run_exact() {
+  env -i \
+    PATH="$fake_phantom_bin:/usr/bin:/bin" \
+    HOME="$HOME" \
+    LOCUS_HOME="$LOCUS_HOME" \
+    LOCUS_SESSION_ID="$hub_session_id" \
+    LOCUS_EXECUTOR_CAPABILITY="$hub_executor_capability" \
+    "$LOCUS_BIN" "$@"
+}
+
+assert_exact_blocked() {
+  local label="$1" expected="$2"
+  shift 2
+  local marker="$LOCUS_HOME/exact-${label}-child-effect"
+  local output ec
+  rm -f "$marker"
+  set +e
+  output="$(run_exact "$@" -- /bin/sh -c 'printf "%s|%s" "${LOCUS_BINDING:-missing}" "${GH_TOKEN:-missing}" > "$1"' _ "$marker" 2>&1)"
+  ec=$?
+  set -e
+  [[ $ec -ne 0 ]] || die "exact session allowed $label"
+  echo "$output" | grep -Fq -- "$expected" || die "$label wrong refusal: $output"
+  [[ ! -e "$marker" ]] || die "$label started token-bearing child: $(cat "$marker")"
+}
+
+assert_exact_blocked "exec-resolve" "cannot resolve credentials inside a delegated session" exec
+assert_exact_blocked "run-cross-binding" "cannot select binding \`personal\`" run -b personal --no-resolve --force
+assert_exact_blocked "ci-cross-binding" "cannot select binding \`personal\`" ci run -b personal --no-resolve --force
+assert_exact_blocked "run-share-pin" "--share-pin is unavailable" run -b acme --no-resolve --share-pin
+
+set +e
+exact_pin_error="$(run_exact pin personal --force 2>&1)"
+exact_pin_ec=$?
+set -e
+[[ $exact_pin_ec -ne 0 ]] || die "exact session mutated global pin"
+echo "$exact_pin_error" | grep -Fq "local control operation" \
+  || echo "$exact_pin_error" | grep -Fq "LOCUS_CONTROL_CAPABILITY" \
+  || die "exact pin refusal did not name control boundary: $exact_pin_error"
+
+stripped_mutation() {
+  env -i PATH="/usr/bin:/bin" HOME="$HOME" LOCUS_HOME="$LOCUS_HOME" \
+    LOCUS_GRAPH_PASSPHRASE="stripped-authority-probe" \
+    "$LOCUS_BIN" "$@" >/dev/null 2>&1
+}
+for mutation in \
+  "pin personal --force" \
+  "ci mint -b personal --force" \
+  "notify on" \
+  "workspace --default personal --force" \
+  "binding add stripped --tenant stripped --provider github --account stripped --credential-ref env:STRIPPED_TOKEN" \
+  "graph export --out $LOCUS_HOME/stripped-graph.locus"
+do
+  read -r -a mutation_args <<<"$mutation"
+  if stripped_mutation "${mutation_args[@]}"; then
+    die "stripped child upgraded ambient active authority: $mutation"
+  fi
+done
+[[ ! -e "$LOCUS_HOME/stripped-graph.locus" ]] \
+  || die "stripped child wrote graph output"
+
+exact_state_after="$(control_plane_snapshot)"
+[[ "$exact_state_after" == "$exact_state_before" ]] \
+  || die "blocked exact-session probes changed session/audit/global state"
+active_after_exact="$(LOCUS_CONTROL_CAPABILITY="$OPERATOR_CONTROL_CAPABILITY" \
+  "$LOCUS_BIN" whoami --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+[[ "$active_after_exact" == "$active_before_exact" ]] || die "exact session changed global share-pin"
+
+exact_allowed_marker="$LOCUS_HOME/exact-allowed-no-resolve"
+run_exact exec --no-resolve -- /bin/sh -c \
+  'printf "%s|%s" "${LOCUS_BINDING:-missing}" "${GH_TOKEN:-missing}" > "$1"' \
+  _ "$exact_allowed_marker" >/dev/null
+[[ "$(cat "$exact_allowed_marker")" == "acme|missing" ]] \
+  || die "exact no-resolve child escaped binding or received token"
+
+recipe_session_json="$(LOCUS_CONTROL_CAPABILITY="$OPERATOR_CONTROL_CAPABILITY" \
+  "$LOCUS_BIN" ci mint -b noresolve-recipe --force)"
+hub_session_id="$(printf '%s' "$recipe_session_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+hub_executor_capability="$(printf '%s' "$recipe_session_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["env"]["LOCUS_EXECUTOR_CAPABILITY"])')"
+recipe_state_before="$(control_plane_snapshot)"
+assert_exact_blocked "recipe-default-worker" "--no-resolve refused locus run" \
+  run -b noresolve-recipe --no-resolve
+recipe_state_after="$(control_plane_snapshot)"
+[[ "$recipe_state_after" == "$recipe_state_before" ]] \
+  || die "recipe-default exact refusal caused session/audit/worker startup effects"
+ok "env-i exact sessions block cross-binding, share-pin, token children, and recipe-default workers before effects"
 
 # ── 6. MCP tools/list unpinned vs pinned ─────────────────────────────────────
 log "6. MCP tools/list unpinned vs pinned (printf | locus-mcp)"
@@ -265,7 +535,8 @@ pinned_out="$(
 )"
 pinned_names="$(echo "$pinned_out" | tool_names_from_list)"
 echo "$pinned_names" | grep -qx 'locus_whoami' || die "pinned missing locus_whoami"
-echo "$pinned_names" | grep -q 'supabase.scope' || die "pinned missing supabase.scope"
+echo "$pinned_names" | grep -q 'supabase.scope' \
+  || die "pinned missing supabase.scope: names=$pinned_names response=$pinned_out"
 echo "$pinned_names" | grep -q 'github.scope' || die "pinned missing github.scope"
 echo "$pinned_names" | grep -q 'vercel.scope' || die "pinned missing vercel.scope"
 ok "pinned tools/list includes provider tools"
@@ -284,8 +555,8 @@ echo "$freeze_line" | grep -qiE 'scope freeze|proj_evil' \
   || die "unexpected freeze message: $freeze_line"
 ok "scope freeze denies wrong project_ref"
 
-# ── 8. require_approval → grant → re-call success ────────────────────────────
-log "8. require_approval → approve grant → re-call success"
+# ── 8. require_approval → advisory → still blocked ───────────────────────────
+log "8. require_approval → local advisory → authority remains blocked"
 appr_out="$(
   mcp_rpc \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
@@ -301,7 +572,7 @@ appr_id="$(echo "$appr_line" | grep -oE 'appr_[a-f0-9]+' | head -1)"
 ok "require_approval blocked with $appr_id"
 
 locus approve grant "$appr_id" >/dev/null
-ok "approve grant $appr_id"
+ok "local advisory recorded for $appr_id"
 
 retry_out="$(
   mcp_rpc \
@@ -310,8 +581,9 @@ retry_out="$(
     '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supabase.table.delete","arguments":{"table":"users"}}}'
 )"
 retry_line="$(echo "$retry_out" | tool_call_text)"
-echo "$retry_line" | grep -q '^OK|' || die "expected success after grant: $retry_line"
-ok "re-call after grant succeeds"
+echo "$retry_line" | grep -q '^ERR|' || die "local advisory must not authorize: $retry_line"
+echo "$retry_line" | grep -q 'local_advisory' || die "missing advisory authority label: $retry_line"
+ok "re-call remains blocked after local advisory"
 
 # ── 9. doctor (structure + exit codes) ───────────────────────────────────────
 log "9. doctor structure + exit codes"
@@ -368,8 +640,8 @@ ok "doctor unpinned exit code coherent (exit=$doctor_un_ec)"
 # Re-pin acme for dual-control / events steps
 locus pin acme --force >/dev/null
 
-# ── 10. dual_control two-principal grant (feature-detected) ──────────────────
-log "10. dual_control two principals (if policy supports)"
+# ── 10. dual_control local labels never satisfy authority ────────────────────
+log "10. dual_control local advisory labels remain untrusted"
 # Write a binding with dual_control on delete tools; use env: refs for isolation.
 cat >"$LOCUS_HOME/bindings/dual.toml" <<'EOF'
 [binding]
@@ -413,32 +685,38 @@ else
   fi
   ok "touchid mock cancel fails closed"
 
-  # First principal — partial grant (Touch ID mock ok)
+  # A caller-controlled successful mock can only record advisory evidence.
   g1="$(LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json 2>/dev/null || true)"
   echo "$g1" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
 assert r.get("status") in ("pending", "Pending") or r.get("status") == "pending", r
 assert len(r.get("grants") or []) == 1, r
+assert r.get("approval_authority") == "local_advisory", r
+assert r.get("authoritative_path_enabled") is False, r
+assert r.get("authoritative_grants") == 0, r
 '
-  ok "first principal alice partial grant (touchid mock ok)"
+  ok "LOCUS_TOUCHID_MOCK=ok records advisory only"
 
-  # Same principal cannot complete dual-control
+  # Duplicate local label is rejected.
   if locus approve grant "$dual_id" --as alice >/dev/null 2>&1; then
-    die "same principal should not complete dual_control"
+    die "duplicate advisory label should be rejected"
   fi
-  ok "same principal rejected on second grant"
+  ok "duplicate advisory label rejected"
 
-  # Second principal completes
+  # A second local label still cannot establish identity or dual-control authority.
   g2="$(locus approve grant "$dual_id" --as bob --json 2>/dev/null)"
   echo "$g2" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
 st = (r.get("status") or "").lower()
-assert st == "approved", r
+assert st == "pending", r
 assert len(r.get("grants") or []) >= 2, r
+assert r.get("approval_authority") == "local_advisory", r
+assert r.get("authoritative_path_enabled") is False, r
+assert r.get("authoritative_grants") == 0, r
 '
-  ok "second principal bob fully approved"
+  ok "second local label remains advisory"
 
   retry_dual="$(
     mcp_rpc \
@@ -447,8 +725,42 @@ assert len(r.get("grants") or []) >= 2, r
       '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supabase.table.delete","arguments":{"table":"users"}}}'
   )"
   retry_dual_line="$(echo "$retry_dual" | tool_call_text)"
-  echo "$retry_dual_line" | grep -q '^OK|' || die "expected success after dual grant: $retry_dual_line"
-  ok "re-call after dual grant succeeds"
+  echo "$retry_dual_line" | grep -q '^ERR|' || die "local labels must not satisfy dual control: $retry_dual_line"
+  echo "$retry_dual_line" | grep -q 'local_advisory' || die "missing advisory authority label: $retry_dual_line"
+  ok "dual-control call remains blocked after two local labels"
+
+  # Forge the strongest same-user JSON record after a caller-controlled
+  # Touch ID mock. Persisted status and authority strings are never proof.
+  export DUAL_APPROVAL_ID="$dual_id"
+  python3 - <<'PY'
+import datetime
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["LOCUS_HOME"]) / "approvals" / f'{os.environ["DUAL_APPROVAL_ID"]}.json'
+record = json.loads(path.read_text())
+record["status"] = "approved"
+record["granted_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+record["expires_at"] = "2099-01-01T00:00:00Z"
+for index, grant in enumerate(record.get("grants") or []):
+    grant["authority"] = "external_authenticated"
+    grant["envelope_id"] = f"unsigned-same-user-{index}"
+path.write_text(json.dumps(record, indent=2) + "\n")
+PY
+
+  forged_retry="$(
+    mcp_rpc \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supabase.table.delete","arguments":{"table":"users"}}}'
+  )"
+  forged_retry_line="$(echo "$forged_retry" | tool_call_text)"
+  echo "$forged_retry_line" | grep -q '^ERR|' \
+    || die "forged same-user approval JSON authorized provider execution: $forged_retry_line"
+  echo "$forged_retry_line" | grep -q '"authoritative_grants":0' \
+    || die "forged record did not surface zero authority: $forged_retry_line"
+  ok "forged future-dated external labels remain non-authoritative"
 fi
 
 # ── 11. locus events (audit export) ──────────────────────────────────────────
@@ -1048,14 +1360,21 @@ else
   set +e
   vs_json="$(locus verify session --json 2>/dev/null)"
   vs_ec=$?
-  if [[ $vs_ec -ne 0 || -z "$vs_json" ]]; then
+  if [[ -z "$vs_json" ]]; then
     vs_json="$(locus --json verify session 2>/dev/null)"
     vs_ec=$?
   fi
   set -e
-  if [[ $vs_ec -ne 0 || -z "$vs_json" ]]; then
-    skip "verify present but session invocation failed (API may differ)"
+  if [[ -z "$vs_json" ]]; then
+    die "verify session emitted no inspection JSON (exit=$vs_ec)"
   else
+    vs_expected_ec="$(printf '%s' "$vs_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(0 if d.get("session_ok") is True else 1)
+')"
+    [[ $vs_ec -eq $vs_expected_ec ]] \
+      || die "verify session exit=$vs_ec does not match session_ok (expected $vs_expected_ec)"
     echo "$vs_json" | python3 -c '
 import json, sys
 raw = sys.stdin.read().strip()
@@ -1080,7 +1399,7 @@ print("verify session kind=%s session_ok=%s safe_next=%s doctor_ok=%s" % (
     d.get("kind"), d.get("session_ok"),
     (safe_next or {}).get("action"), (doctor or {}).get("ok")))
 '
-    ok "verify session --json pack (kind/session_ok/doctor/safe_next, no secrets)"
+    ok "verify session --json pack + truthful exit (kind/session_ok/doctor/safe_next, no secrets)"
   fi
 fi
 
@@ -1211,13 +1530,25 @@ for r in recipes:
     assert rid, "recipe missing id: %s" % r
     ids.append(rid)
     by_id[rid] = r
-# Top adapters must ship hardened recipes (M3 tail)
+# Compatible adapters keep secure defaults; daemon/OAuth adapters must publish
+# an explicit high-authority readiness gate instead of a false sandbox claim.
 for required in ("github-mcp", "github-official", "supabase-mcp", "vercel-mcp"):
     assert required in by_id, "missing top recipe %s in %s" % (required, ids)
-for rid in ("github-mcp", "github-official", "supabase-mcp", "vercel-mcp"):
+for rid in ("github-mcp", "supabase-mcp"):
     r = by_id[rid]
     sandbox = r.get("default_sandbox", r.get("defaultSandbox"))
     assert sandbox is True, "%s must default_sandbox: %s" % (rid, r)
+    assert r.get("sandbox_compatibility") == "compatible", r
+    assert r.get("readiness") == "ready", r
+for rid, risk in (("github-official", "host_docker_daemon"),
+                  ("vercel-mcp", "oauth_loopback_listener")):
+    r = by_id[rid]
+    sandbox = r.get("default_sandbox", r.get("defaultSandbox"))
+    assert sandbox is False, "%s must be unavailable by default: %s" % (rid, r)
+    assert r.get("sandbox_compatibility") == "incompatible", r
+    assert r.get("readiness") == "explicit_unsandboxed_required", r
+    assert risk in (r.get("risks") or []), r
+    assert r.get("readiness_detail"), r
 for rid in ("github-mcp", "github-official", "supabase-mcp"):
     r = by_id[rid]
     resolve = r.get("default_resolve_secrets", r.get("defaultResolveSecrets"))

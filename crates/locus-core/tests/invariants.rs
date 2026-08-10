@@ -781,14 +781,18 @@ fn inv_dual_control_requires_two_principals() {
         .grant_approval(&pending.id, None, "alice")
         .unwrap_err();
     assert!(
-        err.to_string().contains("already granted") || err.to_string().contains("different"),
+        err.to_string().contains("already recorded") || err.to_string().contains("different"),
         "{err}"
     );
 
     let two = store.grant_approval(&pending.id, None, "bob").unwrap();
-    assert_eq!(two.status.as_str(), "approved");
+    assert_eq!(two.status.as_str(), "pending");
     assert_eq!(two.grants.len(), 2);
-    assert!(two.is_valid_grant());
+    assert!(two
+        .grants
+        .iter()
+        .all(|grant| grant.authority.as_str() == "local_advisory"));
+    assert!(!two.is_valid_grant());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

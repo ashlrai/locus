@@ -78,7 +78,8 @@ locus pin                 # → client-a via .locus.toml
 locus whoami
 locus doctor              # prefer SAFE before heavy agent work
 
-# … agents / locus exec …
+# … agents use policy-gated locus-mcp tools …
+# optional human diagnostic: locus exec --no-resolve -- <command>
 
 cd ~/clients/client-b
 locus leave
@@ -96,9 +97,11 @@ Sample policy: [`examples/agency-starter/policies/dual-control.toml`](../example
 
 ```bash
 locus approve list
-locus approve grant <id> --as engineer
-locus approve grant <id> --as partner   # second principal
+locus approve grant <id> --as engineer  # local advisory only
+locus approve grant <id> --as partner   # still external authority 0/2
 ```
+
+These labels are not authenticated identities. Provider execution remains blocked until an external cryptographic approval adapter exists.
 
 `locus doctor` reports `pending_approvals` and `dual_control_waiting`.
 

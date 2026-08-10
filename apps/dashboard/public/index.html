@@ -719,6 +719,31 @@
         return id.slice(0, 10) + "…" + id.slice(-4);
       }
 
+      function renderCapability(status, key) {
+        const capabilities = status && status.capabilities;
+        const item = capabilities && capabilities.reporting === "live_runtime"
+          ? capabilities[key]
+          : null;
+        if (item && item.surface_states && typeof item.surface_states === "object") {
+          const entries = Object.entries(item.surface_states);
+          if (!entries.length || entries.some(([, state]) => typeof state !== "string" || !state)) {
+            return `<span class="warn">unknown / degraded</span>`;
+          }
+          return entries.map(([surface, state]) => {
+            const cls = state.startsWith("available") ? "err" : "warn";
+            return `<span class="${cls}">${esc(surface.replace("locus ", ""))}: ${esc(state.replace(/_/g, " "))}</span>`;
+          }).join(`<br>`);
+        }
+        if (!item || typeof item.state !== "string" || !item.state) {
+          return `<span class="warn">unknown / degraded</span>`;
+        }
+        const state = item.state;
+        const cls = state === "available" || state === "available_to_manual_cli_children"
+          ? "err"
+          : "warn";
+        return `<span class="${cls}">${esc(state.replace(/_/g, " "))}</span>`;
+      }
+
       function renderPin(status, whoami) {
         const el = $("pin-body");
         if (!status || !status.pinned) {
@@ -744,6 +769,9 @@
         html += kv("frozen", frozen);
         if (status.expired) html += kv("expired", `<span class="err">yes</span>`);
         html += kv("mode", esc(status.mode || "exclusive"));
+        html += kv("manual child launch", renderCapability(status, "manual_cli_command_execution"));
+        html += kv("agent command exec", renderCapability(status, "agent_command_execution"));
+        html += kv("credential injection", renderCapability(status, "provider_credential_injection"));
         if (status.namespaces && status.namespaces.length) {
           html += kv("namespaces", esc(status.namespaces.join(", ")));
         }
@@ -829,30 +857,27 @@
         for (const a of items) {
           const dual = !!a.dual_control;
           const required = a.required_grants || (dual ? 2 : 1);
-          const grants = (a.grants || []).length;
+          const advisory = a.advisory_assertions ?? (a.grants || []).length;
+          const authoritative = a.authoritative_grants || 0;
           html += `<div class="row" data-id="${esc(a.id)}">`;
           html += `<div class="row-top"><span class="id">${esc(a.id)}</span><span class="ts">${esc(a.created_at || "")}</span></div>`;
           html += `<div class="row-meta">tool=<span class="y">${esc(a.tool)}</span> · binding=<span class="y">${esc(a.binding)}</span></div>`;
-          html += `<div class="row-meta">grants ${grants}/${required}${dual ? " · dual_control" : ""}`;
+          html += `<div class="row-meta"><span class="warn">untrusted local advisory</span> · authoritative ${authoritative}/${required}${dual ? " · dual_control" : ""}`;
           if (a.requester) html += ` · requester=${esc(a.requester)}`;
-          html += `</div>`;
-          // Next-principal hint for partial dual-control (1 of 2 grants in).
-          if (dual && grants > 0 && grants < required) {
+          html += ` · advisory assertions=${advisory}</div>`;
+          if (dual && advisory > 0) {
             const who = (a.grants || [])
               .map((g) => (g && g.principal) || "")
               .filter(Boolean)
               .join(", ");
-            html += `<div class="row-meta"><span class="warn">need second principal</span>`;
-            if (who) html += ` · granted: <span class="y">${esc(who)}</span>`;
-            html += ` · next: locus approve grant ${esc(a.id)} --as &lt;other-principal&gt;</div>`;
+            html += `<div class="row-meta"><span class="warn">external authority still required</span>`;
+            if (who) html += ` · local labels: <span class="y">${esc(who)}</span>`;
+            html += ` · local labels never satisfy dual control</div>`;
           }
           html += `<div class="row-actions">`;
           html += `<input type="text" class="principal" placeholder="principal" value="" />`;
-          html += `<button class="btn sm primary grant-btn" type="button">grant</button>`;
-          // Entity-escape angle brackets in the attribute; getAttribute decodes for clipboard.
-          const cliAs =
-            dual && grants > 0 && grants < required ? "&lt;other-principal&gt;" : "$USER";
-          html += `<button class="btn sm" type="button" data-copy="locus approve grant ${esc(a.id)} --as ${cliAs}">cli</button>`;
+          html += `<button class="btn sm primary grant-btn" type="button">record advisory</button>`;
+          html += `<button class="btn sm" type="button" data-copy="locus approve grant ${esc(a.id)} --as $USER">cli</button>`;
           html += `</div></div>`;
         }
         el.innerHTML = html;
@@ -875,7 +900,7 @@
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ principal }),
               });
-              toast("granted " + id);
+              toast("advisory recorded; authority remains blocked");
               refresh();
             } catch (e) {
               toast(e.message || "grant failed", true);
@@ -896,6 +921,13 @@
         html += kv("bindings", String(doc.bindings ?? 0));
         html += kv("pending", String(doc.pending_approvals ?? 0));
         html += kv("dual wait", String(doc.dual_control_waiting ?? 0));
+        if (doc.approvals) {
+          html += kv("approval trust", `<span class="warn">${esc(doc.approvals.approval_authority || "local_advisory")}</span>`);
+          html += kv("external authority", doc.approvals.authoritative_path_enabled ? `<span class="ok">enabled</span>` : `<span class="warn">disabled</span>`);
+          html += kv("authenticated grants", String(doc.approvals.approved_valid ?? 0));
+          html += kv("untrusted approved-looking", doc.approvals.untrusted_approved ? `<span class="err">${esc(doc.approvals.untrusted_approved)}</span>` : "0");
+          html += kv("expired authenticated", String(doc.approvals.expired_grants ?? 0));
+        }
         html += kv("phantom", doc.phantom_on_path ? `<span class="ok">on PATH</span>` : `<span class="warn">missing</span>`);
         if (doc.workspace) {
           html += kv(

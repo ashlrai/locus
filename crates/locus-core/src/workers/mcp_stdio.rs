@@ -4,8 +4,8 @@
 //! child, handshakes MCP, and routes `tools/call` to the upstream server.
 //!
 //! When sandbox is enabled (`LOCUS_WORKER_SANDBOX=1`, [`McpStdioConfig::sandbox`],
-//! or binding `upstream.sandbox`), spawn restricts PATH, sets
-//! `LOCUS_WORKER_SANDBOXED=1`, and on macOS best-effort wraps with `sandbox-exec`.
+//! or binding `upstream.sandbox`), spawn requires a supported OS isolation
+//! backend. Missing backends and unresolved executables fail before spawn.
 
 use super::sandbox::{
     resolve_sandbox_spawn, sandbox_enabled, ENV_WORKER_SANDBOXED, ENV_WORKER_SANDBOX_BACKEND,
@@ -14,7 +14,7 @@ use super::stdio_client::{client_key, McpStdioClient};
 use super::{WorkerBackend, WorkerKey, WorkerSlot, WorkerState, WorkerToolResult};
 use crate::binding::{Binding, ProviderBinding};
 use crate::error::{LocusError, Result};
-use crate::isolation::build_isolated_env_opts;
+use crate::isolation::build_isolated_env_for_provider_opts;
 use crate::session::Session;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -46,9 +46,12 @@ pub struct McpStdioConfig {
     /// Deprecated compatibility field. Arbitrary env is never forwarded; use
     /// binding scope metadata or provider credential resolution instead.
     pub extra_env: BTreeMap<String, String>,
-    /// Best-effort sandbox (restricted PATH + marker; optional macOS sandbox-exec).
+    /// Require OS-backed sandbox isolation. PATH/markers are diagnostics only.
     /// Also enabled when `LOCUS_WORKER_SANDBOX=1` regardless of this flag.
     pub sandbox: bool,
+    /// Present when recipe metadata says sandboxing would make the command
+    /// unusable or would require authority the profile intentionally denies.
+    pub sandbox_incompatibility: Option<String>,
 }
 
 /// Stdio MCP backend with live JSON-RPC clients.
@@ -71,17 +74,27 @@ impl McpStdioBackend {
 
     /// Build a `Command` ready to spawn with isolated env.
     ///
-    /// When sandbox is on: restricted PATH, `LOCUS_WORKER_SANDBOXED=1`, and
-    /// optional macOS `sandbox-exec` wrap (best-effort).
+    /// When sandbox is on: resolve the protected executable, require an OS
+    /// backend, and install a private temp root before returning the command.
     pub fn build_command(
         &self,
         session: &Session,
         binding: &Binding,
         provider: &ProviderBinding,
         work_dir: &Path,
-    ) -> Command {
-        let iso = build_isolated_env_opts(session, binding, self.config.resolve_secrets);
+    ) -> Result<Command> {
+        let iso = build_isolated_env_for_provider_opts(
+            session,
+            binding,
+            provider,
+            self.config.resolve_secrets,
+        );
         let sandboxed = sandbox_enabled(self.config.sandbox);
+        if sandboxed {
+            if let Some(reason) = &self.config.sandbox_incompatibility {
+                return Err(LocusError::msg(reason.clone()));
+            }
+        }
 
         let (program, args, sandbox_backend) = if sandboxed {
             let spawn = resolve_sandbox_spawn(
@@ -89,7 +102,7 @@ impl McpStdioBackend {
                 &self.config.args,
                 work_dir,
                 Path::new(&session.worker_home),
-            );
+            )?;
             (spawn.program, spawn.args, Some((spawn.backend, spawn.path)))
         } else {
             (self.config.command.clone(), self.config.args.clone(), None)
@@ -111,15 +124,18 @@ impl McpStdioBackend {
         cmd.env("LOCUS_WORKER_DIR", work_dir);
 
         if let Some((backend, restricted_path)) = sandbox_backend {
-            // Restricted PATH wins over any PATH that isolation copied from parent.
-            // Sandbox markers win over any ambient PATH; `extra_env` is never
-            // forwarded (deprecated compatibility field — fail closed).
+            let temp_root = Path::new(&session.worker_home).join("tmp");
+            std::fs::create_dir_all(&temp_root)?;
+            // These diagnostics are set only after real OS isolation resolved.
             cmd.env("PATH", restricted_path);
+            cmd.env("TMPDIR", &temp_root);
+            cmd.env("TMP", &temp_root);
+            cmd.env("TEMP", &temp_root);
             cmd.env(ENV_WORKER_SANDBOXED, "1");
             cmd.env(ENV_WORKER_SANDBOX_BACKEND, backend.as_str());
         }
 
-        cmd
+        Ok(cmd)
     }
 
     /// Whether this backend will apply sandbox on spawn (config or env).
@@ -205,7 +221,7 @@ impl WorkerBackend for McpStdioBackend {
                     "mcp_stdio spawn requested but command is empty",
                 ));
             }
-            let mut cmd = self.build_command(session, binding, provider, work_dir);
+            let mut cmd = self.build_command(session, binding, provider, work_dir)?;
             match cmd.spawn() {
                 Ok(mut child) => {
                     pid = Some(child.id());

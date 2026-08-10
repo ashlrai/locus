@@ -133,16 +133,15 @@ When an agent hits a gated tool:
 
 ```bash
 locus approve list
-locus approve grant appr_… --as engineer
-# still pending under dual-control:
-locus approve grant appr_… --as partner
-# re-call tool with same args (or confirm + approval_id)
+locus approve grant appr_… --as engineer  # local advisory only
+locus approve grant appr_… --as partner   # still authority 0/2
+# provider call remains blocked until an external authenticated authority exists
 ```
 
 Doctor surfaces:
 
 - `pending_approvals` — all open grants
-- `dual_control_waiting` — subset that needs a second principal
+- `dual_control_waiting` — subset awaiting external authenticated authority
 
 ```bash
 locus doctor --json | jq '{verdict,pending_approvals,dual_control_waiting,findings}'

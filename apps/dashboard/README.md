@@ -21,7 +21,7 @@ locus dashboard
 
 ## Endpoints
 
-All bind **127.0.0.1 only**. Responses never include resolved secrets — only aliases, digests, scopes, and counts.
+All bind **127.0.0.1 only**. Responses never include resolved secrets — only aliases, digests, scopes, and counts. Dashboard approval labels are advisory and cannot enable `locus exec`, `locus run`, `locus ci run`, or provider execution.
 
 | Method | Path | Notes |
 |--------|------|--------|
@@ -32,7 +32,7 @@ All bind **127.0.0.1 only**. Responses never include resolved secrets — only a
 | GET | `/api/approvals` | Pending approvals |
 | GET | `/api/doctor` | Full doctor report |
 | GET | `/api/events?last=N` | Audit tail |
-| POST | `/api/approve/{id}/grant` | Body: `{"principal":"…","ttl":"15m?"}` |
+| POST | `/api/approve/{id}/grant` | Records an untrusted local advisory label; never authorizes provider execution |
 
 If `LOCUS_DASHBOARD_TOKEN` (or `--token`) is set, every `/api/*` call requires:
 
@@ -51,4 +51,7 @@ Design language matches [`apps/web`](../web/) (dark terminal grid, mono labels, 
 - Loopback only (`127.0.0.1`)
 - No credential resolution
 - Optional token gate
-- Agents cannot re-pin from the dashboard (grant only; pin stays human CLI)
+- Agents cannot re-pin from the dashboard.
+- Dashboard assertions are `local_advisory`; a bearer/dashboard token is not human identity and cannot satisfy approval or dual-control authority.
+- External cryptographic approval authority is not implemented, so gated provider execution remains fail-closed.
+- `/api/status.capabilities` reports each CLI/MCP surface separately: `exec` reflects the live active-pin state, while `run` and `ci run` report their explicit-binding requirement. All three can inject credentials into their child by default. Their shared `--no-resolve` guard expands recipe defaults, rejects resolving upstreams before effects, and permits credential-free upstreams. The UI renders missing capability data as `unknown / degraded` rather than inferring a security assurance.

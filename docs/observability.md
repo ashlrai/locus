@@ -19,7 +19,7 @@ Each line:
 | Field | Notes |
 |-------|--------|
 | `ts` | RFC3339 UTC |
-| `op` | e.g. `session.pin`, `mcp.scope_freeze`, `mcp.require_approval`, `approval.use` |
+| `op` | e.g. `session.pin`, `mcp.scope_freeze`, `mcp.require_approval`, `approval.advisory` |
 | `binding` | Binding alias (or empty for global ops) |
 | `detail` | Optional JSON — digests and ids only, never raw tokens |
 
@@ -38,7 +38,7 @@ A **near miss** is an audit event that shows the identity plane stopped a wrong-
 | Op pattern | Meaning |
 |------------|---------|
 | `*scope_freeze*` | Model tried a selector outside frozen scope |
-| `*require_approval*` | Destructive / gated tool blocked pending human grant |
+| `*require_approval*` | Destructive / gated tool blocked pending external authority |
 
 `locus doctor` (and doctor JSON) include:
 

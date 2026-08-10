@@ -138,6 +138,8 @@
       "required": [
         "pinned",
         "seal_ok",
+        "authority_anchor_ok",
+        "backing_ok",
         "binding_present",
         "binding_id_match",
         "tenant_match",
@@ -151,6 +153,11 @@
       "properties": {
         "pinned": { "type": "boolean" },
         "seal_ok": { "type": "boolean" },
+        "authority_anchor_ok": { "type": "boolean" },
+        "backing_ok": { "type": "boolean" },
+        "backing_type": { "type": ["string", "null"], "enum": ["active", "run", "ci", null] },
+        "backing_path": { "type": ["string", "null"] },
+        "authority": { "type": ["string", "null"], "enum": ["local_control", "delegated", "legacy_untrusted", null] },
         "binding_present": { "type": "boolean" },
         "binding_id_match": { "type": "boolean" },
         "tenant_match": { "type": "boolean" },
@@ -222,8 +229,11 @@
         "pending",
         "approved_valid",
         "expired_grants",
+        "untrusted_approved",
         "denied",
         "corrupt",
+        "approval_authority",
+        "authoritative_path_enabled",
         "ok"
       ],
       "properties": {
@@ -234,8 +244,11 @@
         "pending": { "type": "integer", "minimum": 0 },
         "approved_valid": { "type": "integer", "minimum": 0 },
         "expired_grants": { "type": "integer", "minimum": 0 },
+        "untrusted_approved": { "type": "integer", "minimum": 0 },
         "denied": { "type": "integer", "minimum": 0 },
         "corrupt": { "type": "integer", "minimum": 0 },
+        "approval_authority": { "const": "local_advisory" },
+        "authoritative_path_enabled": { "const": false },
         "ok": { "type": "boolean" }
       }
     },

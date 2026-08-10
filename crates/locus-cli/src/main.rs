@@ -20,8 +20,8 @@ use locus_core::{
     parse_ttl, phantom_on_path, probe_agent_options, recipe_toml_snippet, resolve_passphrase,
     suggest_for_provider, verify_claim, verify_session, workspace_stub_toml, AgentStatus, Binding,
     BindingBody, CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
-    EventsExportOptions, ForensicsExportOptions, Policy, ProviderBinding, Scope, Store,
-    WorkspaceConfig, VERSION,
+    EventsExportOptions, ForensicsExportOptions, IsolatedEnv, Policy, ProviderBinding, Scope,
+    Session, Store, WorkspaceConfig, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -211,7 +211,7 @@ enum Commands {
     /// Run a command with only the pinned binding's identity surface
     #[command(next_help_heading = "Daily use")]
     Exec {
-        /// Do not resolve phm:/env: credential refs into secret env vars
+        /// Do not resolve credentials; fail before effects if an upstream can resolve them
         #[arg(long)]
         no_resolve: bool,
         /// Fail if any credential_ref cannot be resolved
@@ -231,7 +231,7 @@ enum Commands {
         /// Also update active.json (default: temporary session only)
         #[arg(long)]
         share_pin: bool,
-        /// Do not resolve phm:/env: credential refs into secret env vars
+        /// Do not resolve credentials; fail before effects if an upstream can resolve them
         #[arg(long)]
         no_resolve: bool,
         /// Fail if any credential_ref cannot be resolved
@@ -266,7 +266,7 @@ enum Commands {
     Ci(CiCmd),
 
     // ────────────────────────── Approvals ────────────────────────────
-    /// Manage require_approval / dual-control grants for blocked tool calls
+    /// Manage advisory review labels and blocked external authorization records
     #[command(next_help_heading = "Approvals", subcommand)]
     Approve(ApproveCmd),
 
@@ -381,7 +381,8 @@ enum VerifyCmd {
     /// Pack doctor + whoami + safe_next as one JSON object for hub heartbeats
     ///
     /// Machine contract: `{ kind: "session", version, whoami?, doctor, safe_next, session_ok }`.
-    /// Never includes secrets. Prefer `--json` for hub gates.
+    /// Never includes secrets. Exits nonzero when `session_ok` is false.
+    /// Prefer `--json` for hub gates.
     Session,
 }
 
@@ -470,7 +471,7 @@ enum CiCmd {
         /// Allow bindings outside workspace allowlist
         #[arg(long)]
         force: bool,
-        /// Do not resolve phm:/env: credential refs into secret env vars
+        /// Do not resolve credentials; fail before effects if an upstream can resolve them
         #[arg(long)]
         no_resolve: bool,
         /// Fail if any credential_ref cannot be resolved
@@ -587,18 +588,18 @@ enum ApproveCmd {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
-    /// Grant a pending approval as a principal (default TTL 15m)
+    /// Record a non-authoritative local advisory label
     Grant {
         /// Approval id (`appr_…`)
         id: String,
-        /// Principal granting (default: LOCUS_PRINCIPAL or $USER)
+        /// Local review label (default: LOCUS_PRINCIPAL or $USER)
         #[arg(long = "as")]
         as_principal: Option<String>,
-        /// Grant lifetime once fully approved (e.g. 15m, 1h). Default: 15m
+        /// Reserved external-authority TTL; local advisory records ignore it
         #[arg(long)]
         ttl: Option<String>,
-        /// macOS: blocking confirm dialog before grant (fail closed on cancel).
-        /// Not a real biometric API — `osascript` "Confirm grant as $USER?".
+        /// macOS: blocking confirmation before recording advisory evidence.
+        /// Not a biometric or identity API and never establishes authority.
         /// Tests: set `LOCUS_TOUCHID_MOCK=ok` or `cancel`.
         #[arg(long)]
         touchid: bool,
@@ -691,6 +692,13 @@ enum BindingCmd {
 }
 
 fn main() {
+    if let Some(result) = locus_core::run_authority_anchor_server_if_requested() {
+        if let Err(error) = result {
+            eprintln!("authority anchor error: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(e) = run() {
         eprintln!("{} {e:#}", "error:".red().bold());
         std::process::exit(1);
@@ -866,7 +874,8 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                MCP: locus_verify_claim  { \"text\": \"…\" }\n\n\
              Session pack (hub heartbeat):\n\
                locus verify session [--json]\n\
-               → { kind:\"session\", whoami?, doctor, safe_next, session_ok }\n\n\
+               → { kind:\"session\", whoami?, doctor, safe_next, session_ok }\n\
+               Exit 0 only when session_ok=true; JSON is still emitted on failure.\n\n\
              Identity gate checks:\n\
                locus whoami [--json]           # active pin + seal\n\
                locus doctor [--json]           # SAFE|WARN|UNSAFE (exit 0/1/2)\n\
@@ -906,7 +915,7 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus upstream list\n\
                locus upstream suggest github\n\
                locus upstream suggest vercel\n\
-               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = true }\n\n\
+               upstream = { recipe = \"github-mcp\", resolve_secrets = true, sandbox = true }\n\n\
              Invariants: agents cannot pin; unpinned ⇒ control tools only; no secrets in results.\n\
              Docs: docs/mcp.md · docs/workers.md",
         ),
@@ -917,12 +926,13 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus upstream list [--json]\n\
                locus upstream suggest <provider> [--json]\n\n\
              In a binding:\n\
-               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = true }\n\
+               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = false }  # Docker: high authority\n\
                upstream = { recipe = \"supabase-mcp\", resolve_secrets = true, sandbox = true }\n\
-               upstream = { recipe = \"vercel-mcp\", sandbox = true }\n\
+               upstream = { recipe = \"vercel-mcp\", sandbox = false }  # OAuth bridge: explicit unsandboxed\n\
                upstream = { recipe = \"filesystem-mcp\", args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/tmp/demo\"] }\n\
                upstream = { command = \"npx\", args = [\"-y\", \"@pkg\"] }  # explicit still works\n\n\
-             Pure-recipe expand adopts default_resolve_secrets / default_sandbox from recipes.toml.\n\
+             Compatible recipe sandbox defaults survive command/args overrides.\n\
+             Docker/OAuth bridge recipes require explicit sandbox=false and publish risk metadata.\n\
              Recipes: github-official · github-mcp · supabase-mcp · vercel-mcp · filesystem-mcp · everything-mcp\n\
              Source: adapters/recipes.toml · Docs: docs/workers.md · examples/upstream.binding.toml",
         ),
@@ -979,6 +989,48 @@ fn store() -> Result<Store> {
     Store::open_default().context("open locus store")
 }
 
+fn exact_session_selected() -> bool {
+    env::var("LOCUS_SESSION_ID")
+        .ok()
+        .is_some_and(|id| !id.trim().is_empty())
+}
+
+/// Environment selection is a confinement signal, never an authority signal.
+/// The selected session must exist and carry a valid store seal; run/CI/MCP
+/// sessions remain delegated even if their descriptive client labels are edited.
+fn delegated_child_session(s: &Store) -> Result<Option<Session>> {
+    let selected = exact_session_selected();
+    let session = match s.require_active() {
+        Ok(session) => session,
+        Err(_) if !selected && s.active_session()?.is_none() => return Ok(None),
+        Err(error) => return Err(error).context("verify selected session authority"),
+    };
+    if selected || session.is_delegated() {
+        Ok(Some(session))
+    } else {
+        Ok(None)
+    }
+}
+
+fn require_local_control_boundary(operation: &str) -> Result<()> {
+    store()?
+        .require_local_control(operation)
+        .map_err(Into::into)
+}
+
+fn isolated_child_env(
+    store: &Store,
+    session: &Session,
+    binding: &Binding,
+    resolve_secrets: bool,
+) -> IsolatedEnv {
+    let mut isolated = build_isolated_env_opts(session, binding, resolve_secrets);
+    isolated
+        .vars
+        .insert("LOCUS_HOME".into(), store.home().display().to_string());
+    isolated
+}
+
 fn cwd() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -995,6 +1047,7 @@ fn cmd_serve(port: u16, token: Option<String>, open_browser: bool) -> Result<()>
 }
 
 fn cmd_init(with_samples: bool, json: bool) -> Result<()> {
+    require_local_control_boundary("locus init")?;
     let s = store()?;
     let config_written = ensure_default_config(&s)?;
     if with_samples {
@@ -1151,7 +1204,7 @@ description = "Acme client engagement — sample"
 [binding.policy]
 default = "allow"
 max_ttl = "8h"
-# Human must grant before these globs run (locus approve grant …).
+# Closed external authorization is required; local approve labels are advisory only.
 require_approval = ["*.delete*", "vercel.deploy.prod"]
 
 [[binding.providers]]
@@ -1192,6 +1245,7 @@ fn write_annotated_binding(s: &Store, alias: &str, toml: &str) -> Result<()> {
 
 /// First 60 seconds: ensure home + samples, enter workspace default if unpinned, whoami + doctor.
 fn cmd_quickstart(json: bool) -> Result<()> {
+    require_local_control_boundary("locus quickstart")?;
     let s = store()?;
     let config_written = ensure_default_config(&s)?;
 
@@ -1392,6 +1446,7 @@ fn cmd_enter(
     exports: bool,
     json: bool,
 ) -> Result<()> {
+    require_local_control_boundary("locus enter")?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let session = match alias {
@@ -1454,6 +1509,7 @@ fn cmd_pin(
     ns: Option<String>,
     json: bool,
 ) -> Result<()> {
+    require_local_control_boundary("locus pin")?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let session = if let Some(ns_raw) = ns {
@@ -1543,6 +1599,7 @@ fn cmd_pin(
 }
 
 fn cmd_leave(json: bool) -> Result<()> {
+    require_local_control_boundary("locus leave")?;
     let s = store()?;
     match s.leave()? {
         None => {
@@ -1997,6 +2054,26 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     }
 
     let s = store()?;
+    if let Some(session) = delegated_child_session(&s)? {
+        if resolve_secrets {
+            bail!(
+                "locus exec cannot resolve credentials inside a delegated session; use --no-resolve"
+            );
+        }
+        let binding = s.load_binding(&session.binding_alias)?;
+        return run_exact_session_child(
+            &s,
+            &session,
+            &binding,
+            &args,
+            ChildLaunchSurface::Exec,
+            "session.exec.delegated",
+        );
+    }
+    let session = s.require_active().context("need active pin for exec")?;
+    let binding = s.load_binding(&session.binding_alias)?;
+    preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Exec)?;
+
     // Drift check before privileged exec
     let drift = s.check_drift_and_freeze()?;
     if drift.frozen {
@@ -2005,15 +2082,14 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
             drift.issues.join(", ")
         );
     }
-    let session = s.require_active().context("need active pin for exec")?;
-    let binding = s.load_binding(&session.binding_alias)?;
-    let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
+    let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         bail!(
             "credential resolve failed: {}",
             format_credential_issues(&iso.secrets_failed)
         );
     }
+    let executor_capability = s.grant_executor_capability(&session)?;
 
     let program = &args[0];
     let rest = &args[1..];
@@ -2028,6 +2104,7 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     for (k, v) in &iso.vars {
         child.env(k, v);
     }
+    child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
     eprintln!(
         "{} exec as {} ({}) — scrubbed {} ambient · resolved {} secret(s)",
@@ -2096,6 +2173,7 @@ fn cmd_ci_mint(
     resolve: bool,
     _json: bool,
 ) -> Result<()> {
+    require_local_control_boundary("locus ci mint")?;
     let s = store()?;
     let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
     let (session, path) = s
@@ -2109,7 +2187,11 @@ fn cmd_ci_mint(
             "warn".yellow()
         );
     }
-    let env_map = build_ci_env_map(&session, &binding, resolve);
+    let mut env_map = build_ci_env_map(&session, &binding, resolve);
+    env_map.insert(
+        locus_core::EXECUTOR_CAPABILITY_ENV.into(),
+        s.grant_executor_capability(&session)?,
+    );
     let secrets_in_output = resolve && ci_secrets_allowed();
 
     // Always emit JSON for mint (machine-first); `--json` is accepted for consistency.
@@ -2133,6 +2215,7 @@ fn cmd_ci_mint(
 
 /// Mint a CI session and print shell `export` lines (eval-friendly).
 fn cmd_ci_env(binding_alias: String, ttl: String, force: bool, resolve: bool) -> Result<()> {
+    require_local_control_boundary("locus ci env")?;
     let s = store()?;
     let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
     let (session, _path) = s
@@ -2146,7 +2229,11 @@ fn cmd_ci_env(binding_alias: String, ttl: String, force: bool, resolve: bool) ->
             "warn".yellow()
         );
     }
-    let env_map = build_ci_env_map(&session, &binding, resolve);
+    let mut env_map = build_ci_env_map(&session, &binding, resolve);
+    env_map.insert(
+        locus_core::EXECUTOR_CAPABILITY_ENV.into(),
+        s.grant_executor_capability(&session)?,
+    );
     for (k, v) in &env_map {
         // Shell-safe single-quoted export; escape embedded single quotes.
         let escaped = v.replace('\'', "'\\''");
@@ -2176,6 +2263,34 @@ fn cmd_ci_run(
     }
 
     let s = store()?;
+    if let Some(session) = delegated_child_session(&s)? {
+        if binding_alias != session.binding_alias && binding_alias != session.binding_id {
+            bail!(
+                "locus ci run cannot select binding `{binding_alias}` from exact session bound to `{}`",
+                session.binding_alias
+            );
+        }
+        if force {
+            bail!("locus ci run --force is unavailable inside a delegated session");
+        }
+        if resolve_secrets {
+            bail!(
+                "locus ci run cannot resolve credentials inside a delegated session; use --no-resolve"
+            );
+        }
+        let binding = s.load_binding(&session.binding_alias)?;
+        return run_exact_session_child(
+            &s,
+            &session,
+            &binding,
+            &args,
+            ChildLaunchSurface::CiRun,
+            "ci.run.delegated",
+        );
+    }
+    let binding = s.load_binding(&binding_alias)?;
+    preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::CiRun)?;
+
     let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
     // Snapshot parent pin (active.json / LOCUS_SESSION_ID) before mint.
     let parent_before = s.active_session()?;
@@ -2196,9 +2311,8 @@ fn cmd_ci_run(
         }
     }
 
-    let binding = s.load_binding(&session.binding_alias)?;
     // Child gets full isolated env (may resolve secrets for the command to work).
-    let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
+    let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_ci_session(&ci_path, &session);
         bail!(
@@ -2206,6 +2320,7 @@ fn cmd_ci_run(
             format_credential_issues(&iso.secrets_failed)
         );
     }
+    let executor_capability = s.grant_executor_capability(&session)?;
 
     let program = &args[0];
     let rest = &args[1..];
@@ -2220,6 +2335,7 @@ fn cmd_ci_run(
     for (k, v) in &iso.vars {
         child.env(k, v);
     }
+    child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
     eprintln!(
         "{} ci run as {} ({}) — ttl_until={} · scrubbed {} · resolved {} secret(s)",
@@ -2281,6 +2397,36 @@ fn cmd_run(
     }
 
     let s = store()?;
+    if let Some(session) = delegated_child_session(&s)? {
+        if binding_alias != session.binding_alias && binding_alias != session.binding_id {
+            bail!(
+                "locus run cannot select binding `{binding_alias}` from exact session bound to `{}`",
+                session.binding_alias
+            );
+        }
+        if force {
+            bail!("locus run --force is unavailable inside a delegated session");
+        }
+        if share_pin {
+            bail!("locus run --share-pin is unavailable inside a delegated session");
+        }
+        if resolve_secrets {
+            bail!(
+                "locus run cannot resolve credentials inside a delegated session; use --no-resolve"
+            );
+        }
+        let binding = s.load_binding(&session.binding_alias)?;
+        return run_exact_session_child(
+            &s,
+            &session,
+            &binding,
+            &args,
+            ChildLaunchSurface::Run,
+            "session.run.delegated",
+        );
+    }
+    let binding = s.load_binding(&binding_alias)?;
+    preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Run)?;
     // Capture parent pin (if any) so we can prove it is unchanged after run
     // when share_pin is false.
     let parent_before = s.active_session()?;
@@ -2312,8 +2458,7 @@ fn cmd_run(
         }
     }
 
-    let binding = s.load_binding(&session.binding_alias)?;
-    let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
+    let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_run_session(&run_path, &session);
         bail!(
@@ -2321,6 +2466,7 @@ fn cmd_run(
             format_credential_issues(&iso.secrets_failed)
         );
     }
+    let executor_capability = s.grant_executor_capability(&session)?;
 
     // Ensure composite workers when upstream is present (best-effort for CLI run).
     // Child process gets LOCUS_* env; upstream MCP is primarily for locus-mcp.
@@ -2352,6 +2498,7 @@ fn cmd_run(
     for (k, v) in &iso.vars {
         child.env(k, v);
     }
+    child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
     eprintln!(
         "{} run as {} ({}) — temporary={} · scrubbed {} · resolved {} secret(s)",
@@ -2397,6 +2544,126 @@ fn cmd_run(
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+/// Execute a credential-free child without minting or switching sessions.
+/// This is the only raw-child path available to an agent-selected session.
+fn run_exact_session_child(
+    s: &Store,
+    session: &Session,
+    binding: &Binding,
+    args: &[String],
+    surface: ChildLaunchSurface,
+    audit_op: &str,
+) -> Result<()> {
+    preflight_child_launch(binding, false, surface)?;
+
+    let drift = s.check_drift_and_freeze()?;
+    if !drift.ok {
+        bail!(
+            "delegated session is not healthy: {}",
+            drift.issues.join(", ")
+        );
+    }
+
+    let iso = isolated_child_env(s, session, binding, false);
+    if iso.secrets_resolved != 0 {
+        bail!("internal: delegated no-resolve child resolved credentials");
+    }
+    let executor_capability = env::var(locus_core::EXECUTOR_CAPABILITY_ENV)
+        .context("delegated child requires a supervised executor capability")?;
+
+    let program = &args[0];
+    let mut child = Command::new(program);
+    child
+        .args(&args[1..])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .env_clear();
+    for (k, v) in &iso.vars {
+        child.env(k, v);
+    }
+    child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
+
+    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    s.audit(
+        audit_op,
+        &session.binding_alias,
+        Some(json!({
+            "cmd": args,
+            "exit": status.code(),
+            "session_id": session.session_id,
+            "secrets_resolved": 0,
+            "exact_session": true,
+        })),
+    )?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildLaunchSurface {
+    Exec,
+    Run,
+    CiRun,
+}
+
+impl ChildLaunchSurface {
+    const fn command_name(self) -> &'static str {
+        match self {
+            Self::Exec => "locus exec",
+            Self::Run => "locus run",
+            Self::CiRun => "locus ci run",
+        }
+    }
+}
+
+/// Central fail-closed guard for every user-command child launch.
+///
+/// Recipe defaults are expanded before classification so `--no-resolve`
+/// cannot be bypassed by omitting `resolve_secrets` from a recipe declaration.
+/// Callers must invoke this before environment construction, worker startup,
+/// session creation/mutation, or requested child startup.
+fn preflight_child_launch(
+    binding: &Binding,
+    resolve_secrets: bool,
+    surface: ChildLaunchSurface,
+) -> Result<()> {
+    if resolve_secrets {
+        return Ok(());
+    }
+    let resolving_upstreams = credential_resolving_upstreams(binding).with_context(|| {
+        format!(
+            "inspect upstreams for {} --no-resolve",
+            surface.command_name()
+        )
+    })?;
+    if resolving_upstreams.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "--no-resolve refused {} for binding `{}`: credential-resolving upstream(s) declared for {}; no child or upstream worker was started and no session or credential effect occurred",
+        surface.command_name(),
+        binding.alias,
+        resolving_upstreams.join(", ")
+    )
+}
+
+/// Providers whose upstream worker would independently resolve credentials.
+fn credential_resolving_upstreams(binding: &Binding) -> Result<Vec<String>> {
+    let mut providers = Vec::new();
+    for provider in &binding.providers {
+        let Some(upstream) = provider.upstream.as_ref().filter(|u| u.is_declared()) else {
+            continue;
+        };
+        if upstream.expand()?.resolve_secrets {
+            providers.push(provider.provider.clone());
+        }
+    }
+    Ok(providers)
 }
 
 fn cmd_mcp() -> Result<()> {
@@ -2477,6 +2744,14 @@ fn cmd_upstream(sub: UpstreamCmd, json: bool) -> Result<()> {
                     r.args.join(" ").dimmed()
                 );
                 println!("      {}", recipe_toml_snippet(r).dimmed());
+                println!(
+                    "      readiness: {}  ·  sandbox: {}",
+                    r.readiness.as_str().yellow(),
+                    r.sandbox_compatibility.as_str().yellow()
+                );
+                if !r.risks.is_empty() {
+                    println!("      risks: {}", r.risks.join(", ").yellow());
+                }
                 if !r.notes.trim().is_empty() {
                     let first = r.notes.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                     if !first.is_empty() {
@@ -2515,6 +2790,14 @@ fn cmd_upstream(sub: UpstreamCmd, json: bool) -> Result<()> {
                 println!("  {}  {}", r.id.green().bold(), r.title.dimmed());
                 println!("      {} {}", r.command.cyan(), r.args.join(" ").dimmed());
                 println!("      copy: {}", recipe_toml_snippet(r));
+                println!(
+                    "      readiness: {}  ·  sandbox: {}",
+                    r.readiness.as_str().yellow(),
+                    r.sandbox_compatibility.as_str().yellow()
+                );
+                if !r.risks.is_empty() {
+                    println!("      risks: {}", r.risks.join(", ").yellow());
+                }
                 if !r.env_hints.is_empty() {
                     println!("      env hints: {}", r.env_hints.join(", ").dimmed());
                 }
@@ -2664,6 +2947,7 @@ fn cmd_workspace(
     require_pin: bool,
     force: bool,
 ) -> Result<()> {
+    require_local_control_boundary("locus workspace")?;
     let path = cwd().join(".locus.toml");
     if path.exists() && !force {
         bail!(
@@ -2814,15 +3098,8 @@ fn cmd_verify_claim(text: &str, json: bool) -> Result<()> {
 fn cmd_verify_session(json: bool) -> Result<()> {
     let s = store()?;
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let pack = verify_session(
-        &s,
-        &cwd,
-        DoctorExternal {
-            phantom_on_path: phantom_on_path(),
-            unresolved_phm: Vec::new(),
-            cwd: Some(cwd.clone()),
-        },
-    )?;
+    let external = gather_doctor_external(&s, cwd.clone())?;
+    let pack = verify_session(&s, &cwd, external)?;
     let binding = pack
         .whoami
         .as_ref()
@@ -2842,7 +3119,7 @@ fn cmd_verify_session(json: bool) -> Result<()> {
 
     if json {
         println!("{}", serde_json::to_string_pretty(&pack)?);
-        return Ok(());
+        return verify_session_exit(pack.session_ok);
     }
 
     println!(
@@ -2885,7 +3162,15 @@ fn cmd_verify_session(json: bool) -> Result<()> {
     }
     // Machine JSON line for pipelines.
     println!("{}", serde_json::to_string(&pack)?);
-    Ok(())
+    verify_session_exit(pack.session_ok)
+}
+
+fn verify_session_exit(session_ok: bool) -> Result<()> {
+    if session_ok {
+        Ok(())
+    } else {
+        bail!("session verification is not ready (session_ok=false)")
+    }
 }
 
 fn cmd_goal_status(json: bool) -> Result<()> {
@@ -3124,18 +3409,25 @@ fn embedded_goal_milestones() -> Vec<GoalMilestone> {
 }
 
 fn gather_doctor_report(s: &Store) -> Result<locus_core::DoctorReport> {
+    build_doctor_report(s, gather_doctor_external(s, cwd())?).map_err(Into::into)
+}
+
+fn gather_doctor_external(s: &Store, cwd: PathBuf) -> Result<DoctorExternal> {
     // phantom --version is process-cached (locus_core::phantom_on_path).
-    let phantom = phantom_on_path();
+    gather_doctor_external_with_phantom_status(s, cwd, phantom_on_path())
+}
+
+fn gather_doctor_external_with_phantom_status(
+    s: &Store,
+    cwd: PathBuf,
+    phantom: bool,
+) -> Result<DoctorExternal> {
     let unresolved_phm = collect_unresolved_phm_refs(s, phantom)?;
-    build_doctor_report(
-        s,
-        DoctorExternal {
-            phantom_on_path: phantom,
-            unresolved_phm,
-            cwd: Some(cwd()),
-        },
-    )
-    .map_err(Into::into)
+    Ok(DoctorExternal {
+        phantom_on_path: phantom,
+        unresolved_phm,
+        cwd: Some(cwd),
+    })
 }
 
 fn build_hub_agent_report(s: &Store) -> Result<locus_core::AgentReport> {
@@ -3282,6 +3574,9 @@ fn cmd_agent_setup(
     }
     if apply && dry_run {
         bail!("pass only one of --apply or --dry-run");
+    }
+    if apply {
+        require_local_control_boundary("locus agent setup --apply")?;
     }
     let clients: Vec<&str> = match client {
         "all" => vec!["claude", "cursor", "codex"],
@@ -3601,11 +3896,12 @@ fn print_doctor_human(report: &locus_core::DoctorReport) {
         "ok".green().to_string()
     };
     println!(
-        "  approvals {}  pending={} dual_control_waiting={} approved={} expired={} denied={}",
+        "  approvals {}  pending={} dual_control_waiting={} approved={} untrusted={} expired_authenticated={} denied={}",
         appr_status,
         report.pending_approvals,
         report.dual_control_waiting,
         appr.approved_valid,
+        appr.untrusted_approved,
         appr.expired_grants,
         appr.denied
     );
@@ -3933,6 +4229,9 @@ fn resolve_mcp_bin(mcp_bin: Option<String>) -> String {
 }
 
 fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<()> {
+    if !print_only && matches!(client, "claude" | "cursor") {
+        require_local_control_boundary("locus setup")?;
+    }
     let bin = resolve_mcp_bin(mcp_bin);
     let server_entry = serde_json::json!({
         "command": bin,
@@ -4203,7 +4502,7 @@ fn cmd_forensics(sub: ForensicsCmd, json: bool) -> Result<()> {
 }
 
 fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {
-    use locus_core::{load_config, notifications_enabled, save_config};
+    use locus_core::{load_config, notifications_enabled};
 
     let s = store()?;
     let home = s.home();
@@ -4247,9 +4546,10 @@ fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {
             }
         }
         NotifyCmd::On => {
+            s.require_local_control("locus notify on")?;
             let mut cfg = load_config(home);
             cfg.notify.enabled = true;
-            let path = save_config(home, &cfg)?;
+            let path = s.save_config(&cfg)?;
             if json {
                 println!(
                     "{}",
@@ -4264,9 +4564,10 @@ fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {
             }
         }
         NotifyCmd::Off => {
+            s.require_local_control("locus notify off")?;
             let mut cfg = load_config(home);
             cfg.notify.enabled = false;
-            let path = save_config(home, &cfg)?;
+            let path = s.save_config(&cfg)?;
             if json {
                 println!(
                     "{}",
@@ -4314,7 +4615,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 );
                 println!(
                     "   {}",
-                    "Grant: locus approve grant <id> --as <principal> [--touchid]   Deny: locus approve deny <id>"
+                    "Advisory: locus approve grant <id> --as <label> [--touchid]   Deny: locus approve deny <id>"
                         .dimmed()
                 );
                 return Ok(());
@@ -4355,7 +4656,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             println!();
             println!(
                 "{}",
-                "Grant: locus approve grant <id> --as <principal> [--touchid]   status: locus approve status <id>   wait: locus approve wait <id>"
+                "Advisory: locus approve grant <id> --as <label> [--touchid]   status: locus approve status <id>   wait: locus approve wait <id>"
                     .dimmed()
             );
             Ok(())
@@ -4387,25 +4688,15 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("dual_control".into(), json!(dual));
                     obj.insert("required_grants".into(), json!(required));
+                    obj.insert("approval_authority".into(), json!("local_advisory"));
+                    obj.insert("authoritative_grants".into(), json!(0));
+                    obj.insert("required_authoritative_grants".into(), json!(required));
+                    obj.insert("authoritative_path_enabled".into(), json!(false));
+                    obj.insert("grants_progress".into(), json!(format!("0/{required}")));
+                    obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
                     obj.insert(
-                        "grants_progress".into(),
-                        json!(locus_core::format_grants_progress(
-                            rec.grants.len(),
-                            required
-                        )),
-                    );
-                    obj.insert(
-                        "progress".into(),
-                        json!(locus_core::format_dual_control_progress(
-                            rec.grants.len(),
-                            required,
-                            &rec.grants
-                                .iter()
-                                .map(|g| g.principal.clone())
-                                .collect::<Vec<_>>(),
-                            dual,
-                            rec.status == locus_core::ApprovalStatus::Approved,
-                        )),
+                        "authority_blocker".into(),
+                        json!(locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER),
                     );
                 }
                 println!("{}", serde_json::to_string_pretty(&v)?);
@@ -4423,9 +4714,15 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("dual_control".into(), json!(dual));
                     obj.insert("required_grants".into(), json!(required));
+                    obj.insert("approval_authority".into(), json!("local_advisory"));
+                    obj.insert("authoritative_grants".into(), json!(0));
+                    obj.insert("required_authoritative_grants".into(), json!(required));
+                    obj.insert("authoritative_path_enabled".into(), json!(false));
+                    obj.insert("grants_progress".into(), json!(format!("0/{required}")));
+                    obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
                     obj.insert(
-                        "grants_progress".into(),
-                        json!(format!("{}/{}", rec.grants.len(), required)),
+                        "authority_blocker".into(),
+                        json!(locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER),
                     );
                 }
                 println!("{}", serde_json::to_string_pretty(&v)?);
@@ -4447,10 +4744,10 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                     }
                 );
                 println!(
-                    "   dual      {}  grants {}/{}",
+                    "   dual      {}  authoritative 0/{}  advisory {}",
                     if dual { "yes" } else { "no" },
-                    rec.grants.len(),
-                    required
+                    required,
+                    rec.grants.len()
                 );
                 if rec.grants.is_empty() {
                     println!("   grants    (none)");
@@ -4488,6 +4785,13 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 let required = if dual { 2 } else { 1 };
                 match rec.status {
                     ApprovalStatus::Approved => {
+                        if !rec.is_valid_grant() {
+                            bail!(
+                                "approval {} is not authoritative: {}",
+                                rec.id,
+                                locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER
+                            );
+                        }
                         if json {
                             let mut v = serde_json::to_value(&rec)?;
                             if let Some(obj) = v.as_object_mut() {
@@ -4578,75 +4882,35 @@ fn print_grant_summary(
     principal: &str,
     dual: bool,
     required: usize,
-    ttl_flag: Option<&str>,
+    _ttl_flag: Option<&str>,
 ) {
     let principals: Vec<String> = rec.grants.iter().map(|g| g.principal.clone()).collect();
-    let fully = rec.status == locus_core::ApprovalStatus::Approved;
     let progress = locus_core::format_dual_control_progress(
         rec.grants.len(),
         required,
         &principals,
         dual,
-        fully,
+        false,
     );
-    let grants_progress = locus_core::format_grants_progress(rec.grants.len(), required);
-
-    if fully {
-        println!(
-            "{} granted {} as {}",
-            "ok".green().bold(),
-            rec.id.cyan(),
-            principal.yellow()
-        );
-        println!("   tool      {}", rec.tool.yellow());
-        println!("   binding   {}", rec.binding.yellow());
-        println!("   progress  {}", progress.bold());
-        println!(
-            "   grants    {}  of {} required",
-            grants_progress.bold(),
-            required
-        );
-        if dual {
-            println!("   dual      yes (fully approved)");
-        }
-        if let Some(exp) = rec.expires_at {
-            let ttl_note = ttl_flag.unwrap_or("15m");
-            println!("   ttl       {}  expires {}", ttl_note, exp.to_rfc3339());
-        }
-        println!(
-            "   {}",
-            locus_core::next_grant_command(&rec.id, true).dimmed()
-        );
-    } else {
-        let remaining = required.saturating_sub(rec.grants.len());
-        println!(
-            "{} partial grant {} as {}  (dual-control {}/{})",
-            "ok".yellow().bold(),
-            rec.id.cyan(),
-            principal.yellow(),
-            rec.grants.len(),
-            required
-        );
-        println!("   tool      {}", rec.tool.yellow());
-        println!("   binding   {}", rec.binding.yellow());
-        println!("   progress  {}", progress.bold());
-        println!(
-            "   grants    {}  need {} more distinct principal(s)",
-            grants_progress.bold(),
-            remaining
-        );
-        println!(
-            "   next      {}",
-            locus_core::next_grant_command(&rec.id, false).yellow()
-        );
-        println!(
-            "   {}",
-            format!("Or wait: locus approve wait {} --timeout 120", rec.id).dimmed()
-        );
-    }
+    println!(
+        "{} recorded local advisory {} as {}",
+        "ok".yellow().bold(),
+        rec.id.cyan(),
+        principal.yellow()
+    );
+    println!("   tool          {}", rec.tool.yellow());
+    println!("   binding       {}", rec.binding.yellow());
+    println!("   advisory      {}", progress);
+    println!("   authoritative 0/{required}");
+    println!("   status        pending");
+    println!(
+        "   blocker       {}",
+        locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER
+    );
+    println!("   local labels and Touch ID confirmation never authorize provider execution");
 }
 
-/// Blocking confirmation before `locus approve grant --touchid`.
+/// Local UI confirmation before recording an advisory assertion.
 ///
 /// Fail closed: cancel / non-confirm / missing osascript aborts the grant.
 /// Test hooks: `LOCUS_TOUCHID_MOCK=ok` | `cancel` (any OS).
@@ -4675,7 +4939,7 @@ fn confirm_grant_touchid(principal: &str, id: &str, tool: &str, binding: &str) -
         }
         // Blocking dialog — not real biometrics; user must click Confirm.
         let prompt = format!(
-            "Confirm grant as {principal}?\n\nApproval: {id}\nTool: {tool}\nBinding: {binding}"
+            "Record local advisory as {principal}?\n\nApproval: {id}\nTool: {tool}\nBinding: {binding}\n\nThis does not authorize provider execution."
         );
         let script = format!(
             r#"display dialog "{}" with title "Locus approve grant" buttons {{"Cancel", "Confirm"}} default button "Confirm" cancel button "Cancel" with icon caution"#,
@@ -4744,7 +5008,11 @@ fn merge_mcp_json(path: &std::path::Path, name: &str, server: &serde_json::Value
 
 #[cfg(test)]
 mod touchid_tests {
-    use super::confirm_grant_touchid;
+    use super::{
+        confirm_grant_touchid, credential_resolving_upstreams, preflight_child_launch,
+        ChildLaunchSurface,
+    };
+    use locus_core::Binding;
     use std::sync::Mutex;
 
     /// Serialize env-var mutations across tests in this binary.
@@ -4781,5 +5049,128 @@ mod touchid_tests {
         let r = confirm_grant_touchid("bob", "appr_aabbccddeeff001122334455", "t", "b");
         std::env::remove_var("LOCUS_TOUCHID_MOCK");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn no_resolve_guard_covers_every_child_surface_and_expanded_worker_kind() {
+        let explicit = Binding::parse_toml(
+            r#"
+id = "bnd_explicit"
+alias = "explicit"
+tenant = "tenant"
+
+[[providers]]
+provider = "github"
+account = "acme"
+credential_ref = "env:GH_TOKEN"
+upstream = { command = "provider-worker", resolve_secrets = true }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            credential_resolving_upstreams(&explicit).unwrap(),
+            vec!["github"]
+        );
+
+        let recipe = Binding::parse_toml(
+            r#"
+id = "bnd_recipe"
+alias = "recipe"
+tenant = "tenant"
+
+[[providers]]
+provider = "github"
+account = "acme"
+credential_ref = "env:GH_TOKEN"
+upstream = { recipe = "github-official", sandbox = false }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            credential_resolving_upstreams(&recipe).unwrap(),
+            vec!["github"]
+        );
+
+        let credential_free = Binding::parse_toml(
+            r#"
+id = "bnd_free"
+alias = "free"
+tenant = "tenant"
+
+[[providers]]
+provider = "filesystem"
+account = "local"
+credential_ref = "env:UNUSED"
+upstream = { command = "credential-free-worker", resolve_secrets = false }
+"#,
+        )
+        .unwrap();
+        assert!(credential_resolving_upstreams(&credential_free)
+            .unwrap()
+            .is_empty());
+
+        for surface in [
+            ChildLaunchSurface::Exec,
+            ChildLaunchSurface::Run,
+            ChildLaunchSurface::CiRun,
+        ] {
+            for binding in [&explicit, &recipe] {
+                let error = preflight_child_launch(binding, false, surface).unwrap_err();
+                let message = error.to_string();
+                assert!(message.contains(surface.command_name()), "{message}");
+                assert!(message.contains("no session or credential effect occurred"));
+            }
+            preflight_child_launch(&credential_free, false, surface).unwrap();
+            preflight_child_launch(&explicit, true, surface).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod verify_session_tests {
+    use super::{gather_doctor_external_with_phantom_status, verify_session_exit};
+    use locus_core::{verify_session, Binding, Store};
+    use tempfile::tempdir;
+
+    #[test]
+    fn verify_session_uses_unresolved_credential_evidence() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        let binding = Binding::parse_toml(
+            r#"
+[binding]
+id = "bnd_verify"
+alias = "verify"
+tenant = "tenant"
+
+[[binding.providers]]
+provider = "github"
+account = "tenant"
+credential_ref = "phm:VERIFY_SESSION_MISSING"
+"#,
+        )
+        .unwrap();
+        store.save_binding(&binding).unwrap();
+        store
+            .pin("verify", dir.path(), Some("test".into()), false)
+            .unwrap();
+
+        let external =
+            gather_doctor_external_with_phantom_status(&store, dir.path().to_path_buf(), false)
+                .unwrap();
+        assert_eq!(external.unresolved_phm.len(), 1);
+        let pack = verify_session(&store, dir.path(), external).unwrap();
+        assert!(!pack.session_ok);
+        assert!(pack
+            .doctor
+            .findings
+            .iter()
+            .any(|finding| finding.code == "unresolved_phm"));
+    }
+
+    #[test]
+    fn verify_session_exit_follows_session_ok() {
+        assert!(verify_session_exit(true).is_ok());
+        assert!(verify_session_exit(false).is_err());
     }
 }

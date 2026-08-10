@@ -11,6 +11,7 @@
 pub mod adapters;
 pub mod agent_report;
 pub mod approval;
+mod authority_anchor;
 pub mod autopin;
 pub mod binding;
 pub mod config;
@@ -46,10 +47,15 @@ pub use agent_report::{
 };
 pub use approval::notifications_enabled;
 pub use approval::{
-    agent_approval_hint, args_digest, default_grant_ttl, format_dual_control_progress,
-    format_grants_progress, mint_approval_id, next_grant_command, notification_body,
-    partial_grant_notification_body, required_grant_count, validate_approval_id, ApprovalGrant,
-    ApprovalRecord, ApprovalStatus,
+    agent_approval_hint, args_digest, default_grant_ttl, external_approval_authority_enabled,
+    format_dual_control_progress, format_grants_progress, mint_approval_id, next_grant_command,
+    notification_body, partial_grant_notification_body, required_grant_count, validate_approval_id,
+    ApprovalAuthority, ApprovalGrant, ApprovalRecord, ApprovalStatus, ExternalApprovalEnvelope,
+    EXTERNAL_APPROVAL_AUTHORITY_BLOCKER,
+};
+pub use authority_anchor::{
+    restrict_validation_to_executor, run_authority_anchor_server_if_requested,
+    CONTROL_CAPABILITY_ENV, EXECUTOR_CAPABILITY_ENV,
 };
 pub use autopin::{match_remote_binding, resolve_auto_pin, AutoPinTarget};
 pub use binding::{
@@ -57,8 +63,7 @@ pub use binding::{
     ProviderBinding, Scope, UpstreamSpec,
 };
 pub use config::{
-    load_config, save_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig,
-    NotifyConfig,
+    load_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig, NotifyConfig,
 };
 pub use credential::{
     credential_metadata, inject_keys_for_provider, phantom_on_path, resolve,
@@ -87,21 +92,23 @@ pub use graph::{
     WorkspaceTemplate, ENV_PASSPHRASE as GRAPH_PASSPHRASE_ENV, GRAPH_VERSION, MAGIC as GRAPH_MAGIC,
 };
 pub use isolation::{
-    build_ci_env_map, build_isolated_env, build_isolated_env_opts, build_isolated_env_strict,
-    ci_secrets_allowed, IsolatedEnv,
+    build_ci_env_map, build_isolated_env, build_isolated_env_for_provider_opts,
+    build_isolated_env_opts, build_isolated_env_strict, ci_secrets_allowed, IsolatedEnv,
 };
 pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
 pub use recipes::{
-    all_recipes, get_recipe, recipe_toml_snippet, suggest_for_provider, UpstreamRecipe,
+    all_recipes, get_recipe, recipe_toml_snippet, suggest_for_provider, RecipeReadiness,
+    SandboxCompatibility, UpstreamRecipe,
 };
 pub use seal::SealKey;
 pub use session::{
     binding_fingerprint, namespace_tool, parse_ttl, split_namespaced_tool, PinSource, Session,
-    SessionMode,
+    SessionAuthority, SessionAuthorityAnchor, SessionBackingIdentity, SessionBackingType,
+    SessionMode, CURRENT_SEAL_VERSION,
 };
 pub use store::{
     locus_home, ApprovalsHealth, AuditEvent, CredentialRefMigration, EngagementInitResult,
-    ProviderView, RuntimeDrift, Store, Whoami,
+    ProviderView, ResolvedSession, RuntimeDrift, Store, Whoami,
 };
 pub use ticket::{
     mint_ticket, verify_ticket, verify_ticket_parts, CapabilityTicket, DEFAULT_TICKET_TTL_SECS,

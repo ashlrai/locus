@@ -209,10 +209,11 @@ Approvals:
 ```bash
 # After an agent hits require_approval (MCP returns appr_…)
 locus approve list
-locus approve grant appr_… --as alice
-# dual_control tools need a second distinct principal:
-locus approve grant appr_… --as bob
-locus events --last 20 --op approval.grant --json
+locus approve grant appr_… --as alice  # advisory review label only
+# A second local label still cannot satisfy dual_control:
+locus approve grant appr_… --as bob    # authority remains 0/2
+locus events --last 20 --op approval.advisory --json
+# Provider execution stays blocked pending a closed external authorization envelope.
 ```
 
 Graph share (bindings + workspace templates only — CredentialRefs, never secret values):
@@ -316,7 +317,7 @@ locus run -b personal -- npm test    # one-shot; global pin unchanged
 locus leave
 
 locus approve list
-locus approve grant appr_… --as mason
+locus approve grant appr_… --as mason  # advisory only; never execution authority
 locus notify status                  # OFF by default (no spam)
 locus doctor                         # SAFE | WARN | UNSAFE
 
@@ -335,13 +336,13 @@ approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
 
 ## Security model
 
-- Session pins are **HMAC-sealed**; tampering fails closed.
+- Session pins use **V3 HMAC seals plus a supervised live authority broker**. The broker binds the exact record digest, backing file, authority, expiry, and monotonic generation, so reading `daemon.key` alone cannot forge or replay current authority.
 - Workspace `allowed_bindings` blocks wrong-tenant pins (unless `--force`, audited).
-- `locus exec` / `locus run` scrub ambient identity; secrets only in the child.
+- `locus exec`, `locus run`, and `locus ci run` scrub ambient identity; resolved credentials are injected into the child by default. Their shared `--no-resolve` preflight expands recipe defaults and fails before child, worker, session, or credential effects when a declared upstream can resolve credentials. Credential-free upstreams remain usable.
 - MCP never returns secret values; agents cannot pin (request only).
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
 - Policy: globs + structured `[[rules]]`, `require_approval`, dual-control (2 principals).
-- Upstream MCP workers auto-spawn per-binding when `upstream = { command, args }` is set.
+- Upstream MCP workers start only after an authorized provider call. `tools/list` is discovery-only, multi-provider startup rolls back on partial failure, and each worker receives only its named provider's resolved credential keys.
 - Drift freeze: `locus watch` / doctor re-pin if binding changes under a session.
 
 Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md §9](./DESIGN.md).

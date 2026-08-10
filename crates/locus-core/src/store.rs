@@ -1,9 +1,10 @@
 //! Local control-plane store under `~/.locus/` (or `LOCUS_HOME`).
 
 use crate::approval::{
-    args_digest, default_grant_ttl, mint_approval_id, validate_approval_id, ApprovalRecord,
+    args_digest, mint_approval_id, validate_approval_id, ApprovalAuthority, ApprovalRecord,
     ApprovalStatus,
 };
+use crate::authority_anchor::{self, ValidationMode};
 use crate::autopin::{self, AutoPinTarget};
 use crate::binding::{validate_name_component, Binding, BindingSummary};
 use crate::config::{self, LocusConfig};
@@ -18,7 +19,10 @@ use crate::graph::{
     GraphListEntry, GraphMeta, WorkspaceTemplate,
 };
 use crate::seal::SealKey;
-use crate::session::{binding_fingerprint, parse_ttl, PinSource, Session, SessionMode};
+use crate::session::{
+    binding_fingerprint, parse_ttl, PinSource, Session, SessionAuthority, SessionBackingType,
+    SessionMode,
+};
 use crate::ticket::{self, CapabilityTicket};
 use crate::workspace::{find_workspace, WorkspaceConfig};
 use chrono::{Duration, Utc};
@@ -45,6 +49,13 @@ pub struct Store {
     home: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct ResolvedSession {
+    pub session: Session,
+    pub path: PathBuf,
+    pub backing_type: SessionBackingType,
+}
+
 impl Store {
     pub fn open_default() -> Result<Self> {
         let home = locus_home()?;
@@ -53,6 +64,8 @@ impl Store {
 
     pub fn open(home: impl Into<PathBuf>) -> Result<Self> {
         let home = home.into();
+        fs::create_dir_all(&home)?;
+        let home = fs::canonicalize(home)?;
         fs::create_dir_all(home.join("bindings"))?;
         fs::create_dir_all(home.join("workspaces"))?;
         fs::create_dir_all(home.join("sessions"))?;
@@ -61,6 +74,7 @@ impl Store {
         fs::create_dir_all(home.join("approvals"))?;
         fs::create_dir_all(home.join("engagements"))?;
         fs::create_dir_all(home.join("archives"))?;
+        fs::create_dir_all(home.join("runtime"))?;
         let s = Self { home };
         // Ensure seal key exists
         let _ = s.seal_key()?;
@@ -114,6 +128,7 @@ impl Store {
 
     /// Persist config.toml.
     pub fn save_config(&self, cfg: &LocusConfig) -> Result<PathBuf> {
+        self.require_local_control("save config")?;
         config::save_config(&self.home, cfg)
     }
 
@@ -129,9 +144,100 @@ impl Store {
         }
     }
 
+    fn issue_session_authority(
+        &self,
+        session: &Session,
+    ) -> Result<crate::session::SessionAuthorityAnchor> {
+        let backing_type = session
+            .backing
+            .as_ref()
+            .map(|backing| backing.backing_type)
+            .ok_or(LocusError::InvalidSeal)?;
+        authority_anchor::issue(
+            &self.home,
+            &session.session_id,
+            backing_type.as_str(),
+            &session.authority_subject_digest(),
+        )
+    }
+
+    fn validate_session_authority(&self, session: &Session) -> Result<ValidationMode> {
+        session.verify_authority_shape()?;
+        let lease = session
+            .authority_anchor
+            .as_ref()
+            .ok_or(LocusError::LegacySessionSeal)?;
+        let backing_type = session
+            .backing
+            .as_ref()
+            .map(|backing| backing.backing_type)
+            .ok_or(LocusError::InvalidSeal)?;
+        authority_anchor::validate(
+            &self.home,
+            lease,
+            &session.session_id,
+            backing_type.as_str(),
+            &session.authority_subject_digest(),
+        )
+    }
+
+    fn revoke_session_authority(&self, session: &Session) -> Result<()> {
+        let Some(lease) = session.authority_anchor.as_ref() else {
+            return Ok(());
+        };
+        let Some(backing_type) = session.backing.as_ref().map(|backing| backing.backing_type)
+        else {
+            return Ok(());
+        };
+        authority_anchor::revoke(
+            &self.home,
+            lease,
+            &session.session_id,
+            backing_type.as_str(),
+        )
+    }
+
+    pub fn grant_executor_capability(&self, session: &Session) -> Result<String> {
+        session.verify_authority_shape()?;
+        let lease = session
+            .authority_anchor
+            .as_ref()
+            .ok_or(LocusError::LegacySessionSeal)?;
+        let backing_type = session
+            .backing
+            .as_ref()
+            .map(|backing| backing.backing_type)
+            .ok_or(LocusError::InvalidSeal)?;
+        authority_anchor::grant_executor(
+            &self.home,
+            lease,
+            &session.session_id,
+            backing_type.as_str(),
+            &session.authority_subject_digest(),
+        )
+    }
+
+    /// Authenticate the operator control capability and, when a session is
+    /// selected, verify its exact sealed backing and live broker generation.
+    pub fn require_local_control(&self, operation: &str) -> Result<()> {
+        authority_anchor::authorize_control(&self.home)?;
+        let Some(resolved) = self.resolve_active_session()? else {
+            return Ok(());
+        };
+        resolved.session.verify_seal(&self.seal_key()?)?;
+        self.validate_session_authority(&resolved.session)?;
+        if resolved.session.authority != SessionAuthority::LocalControl {
+            return Err(LocusError::msg(format!(
+                "{operation} requires an authenticated local-control session"
+            )));
+        }
+        Ok(())
+    }
+
     // ── Bindings ──────────────────────────────────────────────────────────
 
     pub fn save_binding(&self, binding: &Binding) -> Result<PathBuf> {
+        self.require_local_control("save binding")?;
         binding.validate()?;
         // Double-check alias cannot escape bindings/ (also enforced in validate)
         validate_name_component("alias", &binding.alias)?;
@@ -210,10 +316,14 @@ impl Store {
         alias: &str,
         write: bool,
     ) -> Result<CredentialRefMigration> {
+        if write {
+            self.require_local_control("migrate binding credential references")?;
+        }
         crate::credential_migration::migrate(self, alias, write)
     }
 
     pub fn remove_binding(&self, alias: &str) -> Result<()> {
+        self.require_local_control("remove binding")?;
         validate_name_component("alias", alias)?;
         let _lock = crate::credential_migration::lock_bindings(self)?;
         let path = self.bindings_dir().join(format!("{alias}.toml"));
@@ -230,6 +340,7 @@ impl Store {
 
     /// Persist a named workspace template under `$LOCUS_HOME/workspaces/`.
     pub fn save_workspace_template(&self, name: &str, cfg: &WorkspaceConfig) -> Result<PathBuf> {
+        self.require_local_control("save workspace template")?;
         validate_name_component("workspace name", name)?;
         fs::create_dir_all(self.workspaces_dir())?;
         let path = self.workspaces_dir().join(format!("{name}.toml"));
@@ -333,6 +444,7 @@ impl Store {
         out: &Path,
         passphrase: &str,
     ) -> Result<GraphExportResult> {
+        self.require_local_control("export binding graph")?;
         let summaries = self.list_bindings()?;
         let wanted: Vec<String> = match aliases {
             None | Some([]) => summaries.iter().map(|s| s.alias.clone()).collect(),
@@ -422,6 +534,7 @@ impl Store {
         passphrase: &str,
         force: bool,
     ) -> Result<GraphImportResult> {
+        self.require_local_control("import binding graph")?;
         let file_bytes = fs::read(path)
             .map_err(|e| LocusError::msg(format!("read graph file {}: {e}", path.display())))?;
         let plain = decrypt_graph(&file_bytes, passphrase)?;
@@ -552,22 +665,34 @@ impl Store {
         share_pin: bool,
         run_suffix: &str,
     ) -> Result<(Session, PathBuf)> {
-        let session = self.pin_with_opts(
+        let run_path = self.run_session_path(run_suffix);
+        let backing_type = if share_pin {
+            SessionBackingType::Active
+        } else {
+            SessionBackingType::Run
+        };
+        let backing_path = if share_pin {
+            self.active_session_path()
+        } else {
+            run_path.clone()
+        };
+        let session = self.pin_with_opts_source(
             alias_or_id,
             cwd,
             client.or_else(|| Some("run".into())),
             force,
             None,
             share_pin,
+            backing_type,
+            Some(backing_path.clone()),
+            Some(PinSource::Run),
             None,
+            SessionAuthority::LocalControl,
         )?;
         // When share_pin is false, pin_with_opts still built the session but did
         // not write active.json — write run session file.
-        let run_path = self.run_session_path(run_suffix);
-        self.write_session_file(&run_path, &session)?;
-        if share_pin {
-            // Also ensure active.json (pin_with_opts already wrote it when share_pin).
-            // Re-write so source reflects Run when desired.
+        if !share_pin {
+            self.write_session_file(&run_path, &session)?;
         }
         self.audit(
             "session.run",
@@ -578,7 +703,7 @@ impl Store {
                 "run_path": run_path.display().to_string(),
             })),
         )?;
-        Ok((session, run_path))
+        Ok((session, backing_path))
     }
 
     pub fn run_session_path(&self, suffix: &str) -> PathBuf {
@@ -612,8 +737,11 @@ impl Store {
             force,
             None,
             false, // never write active.json
+            SessionBackingType::Ci,
+            None,
             Some(PinSource::Ci),
             ttl,
+            SessionAuthority::Delegated,
         )?;
         // Prefer session_id tail as file suffix so LOCUS_SESSION_ID can find it.
         let suffix = session
@@ -646,6 +774,7 @@ impl Store {
     }
 
     fn cleanup_named_session(&self, path: &Path, session: &Session, prefix: &str) -> Result<()> {
+        self.revoke_session_authority(session)?;
         let wh = PathBuf::from(&session.worker_home);
         if wh.exists() && wh.starts_with(self.home.join("workers")) {
             let _ = fs::remove_dir_all(&wh);
@@ -664,6 +793,27 @@ impl Store {
 
     /// Load a session by `session_id` from `sessions/*.json` (active, run-*, ci-*).
     pub fn load_session_by_id(&self, session_id: &str) -> Result<Option<Session>> {
+        Ok(self
+            .load_session_by_id_resolved(session_id)?
+            .map(|resolved| resolved.session))
+    }
+
+    pub fn load_session_by_id_resolved(&self, session_id: &str) -> Result<Option<ResolvedSession>> {
+        let Some(path) = self.session_path_by_id(session_id)? else {
+            return Ok(None);
+        };
+        let backing_type = self.backing_type_for_path(&path)?;
+        let session = self.read_session_file(&path, backing_type)?;
+        Ok(
+            (session.session_id == session_id).then_some(ResolvedSession {
+                session,
+                path: self.canonical_session_path(&path)?,
+                backing_type,
+            }),
+        )
+    }
+
+    fn session_path_by_id(&self, session_id: &str) -> Result<Option<PathBuf>> {
         if session_id.is_empty()
             || session_id.contains('/')
             || session_id.contains('\\')
@@ -683,14 +833,14 @@ impl Store {
                 let raw = fs::read_to_string(&ci)?;
                 let s: Session = serde_json::from_str(&raw)?;
                 if s.session_id == session_id {
-                    return Ok(Some(s));
+                    return Ok(Some(ci));
                 }
             }
         }
         // active.json
         if let Some(s) = self.read_active_session_file()? {
             if s.session_id == session_id {
-                return Ok(Some(s));
+                return Ok(Some(self.active_session_path()));
             }
         }
         // Scan remaining session files
@@ -705,7 +855,7 @@ impl Store {
             };
             if let Ok(s) = serde_json::from_str::<Session>(&raw) {
                 if s.session_id == session_id {
-                    return Ok(Some(s));
+                    return Ok(Some(path));
                 }
             }
         }
@@ -732,8 +882,11 @@ impl Store {
             force,
             extra_namespaces,
             write_active,
+            SessionBackingType::Active,
+            Some(self.active_session_path()),
             None,
             ttl_override,
+            SessionAuthority::LocalControl,
         )
     }
 
@@ -746,9 +899,13 @@ impl Store {
         force: bool,
         extra_namespaces: Option<Vec<String>>,
         write_active: bool,
+        backing_type: SessionBackingType,
+        backing_path: Option<PathBuf>,
         source_override: Option<PinSource>,
         ttl_override: Option<Duration>,
+        authority: SessionAuthority,
     ) -> Result<Session> {
+        self.require_local_control("mint or replace session")?;
         let binding = self.load_binding(alias_or_id)?;
         let ws = find_workspace(cwd)?;
 
@@ -816,12 +973,13 @@ impl Store {
             .home
             .join("workers")
             .join(format!("pending-{}", binding.alias));
-        let mut session = Session::new(
+        let mut session = Session::new_with_authority(
             &binding.id,
             &binding.alias,
             &binding.tenant,
             binding.principal.clone(),
             source,
+            authority,
             client,
             ttl,
             worker_home.display().to_string(),
@@ -839,6 +997,21 @@ impl Store {
             session.namespaces = ns_aliases;
             session.namespace_fps = ns_fps;
         }
+        let backing_path = match backing_path {
+            Some(path) => path,
+            None if backing_type == SessionBackingType::Ci => {
+                let suffix = session
+                    .session_id
+                    .strip_prefix("ses_")
+                    .unwrap_or(&session.session_id);
+                self.ci_session_path(suffix)
+            }
+            None => return Err(LocusError::InvalidSeal),
+        };
+        let canonical_backing = self.canonical_session_path(&backing_path)?;
+        session.set_backing(backing_type, &canonical_backing)?;
+        session.authority_anchor = Some(self.issue_session_authority(&session)?);
+        session.reseal(&key);
 
         if write_active {
             let path = self.active_session_path();
@@ -862,6 +1035,12 @@ impl Store {
     }
 
     fn write_session_file(&self, path: &Path, session: &Session) -> Result<()> {
+        let backing_type = session
+            .backing
+            .as_ref()
+            .map(|backing| backing.backing_type)
+            .ok_or(LocusError::InvalidSeal)?;
+        session.verify_backing(backing_type, &self.canonical_session_path(path)?)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -869,9 +1048,64 @@ impl Store {
         Ok(())
     }
 
-    /// Persist an updated session to `active.json` (e.g. freeze flag).
-    pub fn save_active_session(&self, session: &Session) -> Result<()> {
-        self.write_session_file(&self.active_session_path(), session)
+    fn canonical_session_path(&self, path: &Path) -> Result<PathBuf> {
+        let sessions = fs::canonicalize(self.home.join("sessions"))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| LocusError::msg("session path has no parent"))?;
+        if fs::canonicalize(parent)? != sessions {
+            return Err(LocusError::InvalidSeal);
+        }
+        let file_name = path.file_name().ok_or(LocusError::InvalidSeal)?;
+        Ok(sessions.join(file_name))
+    }
+
+    fn backing_type_for_path(&self, path: &Path) -> Result<SessionBackingType> {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(LocusError::InvalidSeal)?;
+        if name == "active.json" {
+            Ok(SessionBackingType::Active)
+        } else if name.starts_with("run-") && name.ends_with(".json") {
+            Ok(SessionBackingType::Run)
+        } else if name.starts_with("ci-") && name.ends_with(".json") {
+            Ok(SessionBackingType::Ci)
+        } else {
+            Err(LocusError::InvalidSeal)
+        }
+    }
+
+    fn read_session_file(&self, path: &Path, backing_type: SessionBackingType) -> Result<Session> {
+        let canonical = self.canonical_session_path(path)?;
+        let raw = fs::read_to_string(&canonical)?;
+        let session: Session = serde_json::from_str(&raw)?;
+        session.verify_backing(backing_type, &canonical)?;
+        Ok(session)
+    }
+
+    fn save_session_at(&self, path: &Path, session: &Session) -> Result<()> {
+        let mut sealed = session.clone();
+        sealed.reseal(&self.seal_key()?);
+        self.write_session_file(path, &sealed)
+    }
+
+    fn save_current_session(&self, session: &Session) -> Result<()> {
+        if let Ok(selected) = std::env::var("LOCUS_SESSION_ID") {
+            let selected = selected.trim();
+            if !selected.is_empty() {
+                if selected != session.session_id {
+                    return Err(LocusError::msg(
+                        "refusing to persist a session other than exact LOCUS_SESSION_ID",
+                    ));
+                }
+                let path = self.session_path_by_id(selected)?.ok_or_else(|| {
+                    LocusError::msg("selected LOCUS_SESSION_ID has no session file")
+                })?;
+                return self.save_session_at(&path, session);
+            }
+        }
+        self.save_session_at(&self.active_session_path(), session)
     }
 
     /// Resolve bare pin target: workspace `default_binding`, then opt-in git remote autopin.
@@ -895,9 +1129,25 @@ impl Store {
             use_force,
             None,
             true,
+            SessionBackingType::Active,
+            Some(self.active_session_path()),
             Some(target.source),
             None,
+            SessionAuthority::LocalControl,
         )
+    }
+
+    /// Auto-pin for an agent/MCP runtime. Authority is sealed as delegated;
+    /// the caller-provided client label is descriptive only.
+    pub fn pin_auto_delegated(
+        &self,
+        _cwd: &Path,
+        _client: Option<String>,
+        _force: bool,
+    ) -> Result<Session> {
+        Err(LocusError::ExecutorAuthorityUnavailable(
+            "agent/MCP auto-pin cannot acquire local-control session authority".into(),
+        ))
     }
 
     /// Read `sessions/active.json` only (ignores `LOCUS_SESSION_ID`).
@@ -906,9 +1156,9 @@ impl Store {
         if !path.exists() {
             return Ok(None);
         }
-        let raw = fs::read_to_string(&path)?;
-        let session: Session = serde_json::from_str(&raw)?;
-        Ok(Some(session))
+        Ok(Some(
+            self.read_session_file(&path, SessionBackingType::Active)?,
+        ))
     }
 
     /// Resolve the current pin.
@@ -916,7 +1166,7 @@ impl Store {
     /// When `LOCUS_SESSION_ID` is set (CI mint / child of `ci run`), that
     /// session is used **exclusively** — fail closed if missing (no fallthrough
     /// to `active.json`). Otherwise load `sessions/active.json`.
-    pub fn active_session(&self) -> Result<Option<Session>> {
+    pub fn resolve_active_session(&self) -> Result<Option<ResolvedSession>> {
         // In tests, serialize with cases that mutate LOCUS_SESSION_ID
         // (re-entrant for the same thread so holders can call require_active).
         #[cfg(test)]
@@ -925,19 +1175,35 @@ impl Store {
         if let Ok(id) = std::env::var("LOCUS_SESSION_ID") {
             let id = id.trim();
             if !id.is_empty() {
-                return self.load_session_by_id(id);
+                return self.load_session_by_id_resolved(id);
             }
         }
-        self.read_active_session_file()
+        let path = self.active_session_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let session = self.read_session_file(&path, SessionBackingType::Active)?;
+        Ok(Some(ResolvedSession {
+            session,
+            path: self.canonical_session_path(&path)?,
+            backing_type: SessionBackingType::Active,
+        }))
+    }
+
+    pub fn active_session(&self) -> Result<Option<Session>> {
+        Ok(self
+            .resolve_active_session()?
+            .map(|resolved| resolved.session))
     }
 
     pub fn require_active(&self) -> Result<Session> {
         let key = self.seal_key()?;
-        match self.active_session()? {
+        match self.resolve_active_session()? {
             None => Err(LocusError::NotPinned),
-            Some(s) => {
-                s.verify(&key)?;
-                Ok(s)
+            Some(resolved) => {
+                resolved.session.verify(&key)?;
+                self.validate_session_authority(&resolved.session)?;
+                Ok(resolved.session)
             }
         }
     }
@@ -946,16 +1212,18 @@ impl Store {
     /// Used by doctor / whoami reporting so frozen pins remain inspectable.
     pub fn require_active_allow_frozen(&self) -> Result<Session> {
         let key = self.seal_key()?;
-        match self.active_session()? {
+        match self.resolve_active_session()? {
             None => Err(LocusError::NotPinned),
-            Some(s) => {
-                s.verify_seal(&key)?;
-                Ok(s)
+            Some(resolved) => {
+                resolved.session.verify_seal(&key)?;
+                self.validate_session_authority(&resolved.session)?;
+                Ok(resolved.session)
             }
         }
     }
 
     pub fn leave(&self) -> Result<Option<Session>> {
+        authority_anchor::authorize_control(&self.home)?;
         // Always operates on active.json — not LOCUS_SESSION_ID overrides.
         let path = self.active_session_path();
         if !path.exists() {
@@ -963,6 +1231,19 @@ impl Store {
         }
         let session = self.read_active_session_file()?;
         if let Some(ref s) = session {
+            let key = self.seal_key()?;
+            let authentic = s.seal_version == crate::session::CURRENT_SEAL_VERSION
+                && s.authority != SessionAuthority::LegacyUntrusted
+                && key.verify(&s.material(), &s.seal);
+            if authentic {
+                self.validate_session_authority(s)?;
+                if s.authority != SessionAuthority::LocalControl {
+                    return Err(LocusError::msg(
+                        "leave active session requires authenticated local-control authority",
+                    ));
+                }
+            }
+            self.revoke_session_authority(s)?;
             // Best-effort cleanup of worker home
             let wh = PathBuf::from(&s.worker_home);
             if wh.exists() && wh.starts_with(self.home.join("workers")) {
@@ -992,6 +1273,7 @@ impl Store {
         write_readme: bool,
         force: bool,
     ) -> Result<EngagementInitResult> {
+        self.require_local_control("initialize engagement")?;
         validate_name_component("alias", alias)?;
         if tenant.trim().is_empty() {
             return Err(LocusError::msg("tenant must be non-empty"));
@@ -1070,6 +1352,7 @@ impl Store {
     ///
     /// Does **not** delete Phantom vault secrets or the binding file.
     pub fn engagement_close(&self, alias: &str, archive: bool) -> Result<EngagementCloseResult> {
+        self.require_local_control("close engagement")?;
         validate_name_component("alias", alias)?;
         // Ensure binding exists (or meta-only close of known alias)
         let binding = self.load_binding(alias).ok();
@@ -1129,6 +1412,7 @@ impl Store {
 
     /// Filter audit events for a binding into `$LOCUS_HOME/archives/<alias>-<date>.jsonl`.
     pub fn archive_audit_for_binding(&self, alias: &str) -> Result<PathBuf> {
+        self.require_local_control("archive engagement audit")?;
         validate_name_component("alias", alias)?;
         let events = self.read_audit_events()?;
         let matched: Vec<_> = events.into_iter().filter(|e| e.binding == alias).collect();
@@ -1166,6 +1450,7 @@ impl Store {
     pub fn whoami(&self) -> Result<Whoami> {
         let session = self.require_active_allow_frozen()?;
         let binding = self.load_binding(&session.binding_alias)?;
+        let backing = session.backing.as_ref().ok_or(LocusError::InvalidSeal)?;
         Ok(Whoami {
             session_id: session.session_id,
             binding_alias: session.binding_alias,
@@ -1190,6 +1475,16 @@ impl Store {
             expires_at: session.expires_at.to_rfc3339(),
             worker_home: session.worker_home,
             seal_ok: true,
+            seal: session.seal,
+            authority: match session.authority {
+                SessionAuthority::LocalControl => "local_control",
+                SessionAuthority::Delegated => "delegated",
+                SessionAuthority::LegacyUntrusted => "legacy_untrusted",
+            }
+            .into(),
+            authority_anchor_ok: true,
+            backing_type: backing.backing_type,
+            backing_path: backing.canonical_path.clone(),
             frozen: session.frozen,
             frozen_reason: session.frozen_reason,
             mode: match session.mode {
@@ -1210,6 +1505,11 @@ impl Store {
         let mut drift = RuntimeDrift {
             pinned: false,
             seal_ok: false,
+            authority_anchor_ok: false,
+            backing_ok: false,
+            backing_type: None,
+            backing_path: None,
+            authority: None,
             binding_present: false,
             binding_id_match: false,
             tenant_match: false,
@@ -1227,12 +1527,24 @@ impl Store {
             ok: false,
         };
 
-        let Some(session) = self.active_session()? else {
+        let Some(resolved) = self.resolve_active_session()? else {
             drift.issues.push("not_pinned".into());
             return Ok(drift);
         };
+        let session = resolved.session;
 
         drift.pinned = true;
+        drift.backing_ok = true;
+        drift.backing_type = Some(resolved.backing_type);
+        drift.backing_path = Some(resolved.path.display().to_string());
+        drift.authority = Some(
+            match session.authority {
+                SessionAuthority::LocalControl => "local_control",
+                SessionAuthority::Delegated => "delegated",
+                SessionAuthority::LegacyUntrusted => "legacy_untrusted",
+            }
+            .into(),
+        );
         drift.session_id = Some(session.session_id.clone());
         drift.binding_alias = Some(session.binding_alias.clone());
         drift.binding_id_session = Some(session.binding_id.clone());
@@ -1243,7 +1555,7 @@ impl Store {
         // Use seal-only verify so we still detect material drift on frozen pins.
         match session.verify_seal(&key) {
             Ok(()) => drift.seal_ok = true,
-            Err(LocusError::InvalidSeal) => {
+            Err(LocusError::InvalidSeal | LocusError::LegacySessionSeal) => {
                 drift.seal_ok = false;
                 drift.issues.push("invalid_seal".into());
             }
@@ -1260,6 +1572,17 @@ impl Store {
         }
         if drift.frozen {
             drift.issues.push("session_frozen".into());
+        }
+
+        match self.validate_session_authority(&session) {
+            Ok(_) => drift.authority_anchor_ok = true,
+            Err(LocusError::AuthorityAnchorMismatch) => {
+                drift.issues.push("authority_anchor_mismatch".into())
+            }
+            Err(LocusError::ExecutorAuthorityUnavailable(_)) => {
+                drift.issues.push("executor_authority_unavailable".into())
+            }
+            Err(_) => drift.issues.push("authority_anchor_unavailable".into()),
         }
 
         match self.load_binding(&session.binding_alias) {
@@ -1347,6 +1670,8 @@ impl Store {
             .collect();
         drift.ok = drift.pinned
             && drift.seal_ok
+            && drift.authority_anchor_ok
+            && drift.backing_ok
             && drift.binding_present
             && drift.binding_id_match
             && drift.tenant_match
@@ -1379,7 +1704,7 @@ impl Store {
             ) || i.starts_with("namespace_binding_missing:")
         });
 
-        if should_freeze {
+        if should_freeze && drift.seal_ok && drift.backing_ok && drift.authority_anchor_ok {
             if let Some(mut session) = self.active_session()? {
                 if !session.frozen {
                     let reason = drift
@@ -1398,7 +1723,7 @@ impl Store {
                         .cloned()
                         .unwrap_or_else(|| "binding_drift".into());
                     session.freeze(reason.clone());
-                    self.save_active_session(&session)?;
+                    self.save_current_session(&session)?;
                     self.audit(
                         "session.freeze",
                         &session.binding_alias,
@@ -1643,16 +1968,18 @@ impl Store {
             .unwrap_or(false)
     }
 
-    /// Add a principal grant. Single-control → Approved immediately.
-    /// Dual-control needs two distinct principals; one grant leaves status=Pending.
+    /// Record a caller-controlled local advisory label.
     ///
-    /// `principal` must be non-empty. The same principal cannot grant twice.
+    /// CLI, environment, Touch ID, and dashboard callers cannot establish
+    /// human-principal authority. This method therefore never transitions a
+    /// record to approved, regardless of the number of distinct strings.
     pub fn grant_approval(
         &self,
         id: &str,
-        ttl: Option<Duration>,
+        _ttl: Option<Duration>,
         principal: &str,
     ) -> Result<ApprovalRecord> {
+        self.require_local_control("record local approval assertion")?;
         validate_approval_id(id)?;
         let principal = principal.trim();
         if principal.is_empty() {
@@ -1669,18 +1996,15 @@ impl Store {
                 "approval {id} was denied — request a new one"
             )));
         }
-        if rec.status == ApprovalStatus::Approved && rec.is_valid_grant() {
+        if rec.status == ApprovalStatus::Approved {
             return Err(LocusError::msg(format!(
-                "approval {id} is already fully approved (expires {})",
-                rec.expires_at
-                    .map(|t| t.to_rfc3339())
-                    .unwrap_or_else(|| "n/a".into())
+                "approval {id} is marked approved but no peer-authenticated external authority verifier is available"
             )));
         }
 
         if rec.has_grant_from(principal) {
             return Err(LocusError::msg(format!(
-                "principal '{principal}' already granted approval {id} — dual-control needs a different principal"
+                "local advisory label '{principal}' is already recorded for approval {id}"
             )));
         }
 
@@ -1691,56 +2015,35 @@ impl Store {
         rec.grants.push(crate::approval::ApprovalGrant {
             principal: principal.into(),
             granted_at: now,
+            authority: ApprovalAuthority::LocalAdvisory,
+            envelope_id: None,
         });
-
-        if rec.grants.len() >= required {
-            let ttl = ttl.unwrap_or_else(default_grant_ttl);
-            rec.status = ApprovalStatus::Approved;
-            rec.granted_at = Some(now);
-            rec.expires_at = Some(now + ttl);
-            self.write_approval(&rec)?;
-            self.audit(
-                "approval.grant",
-                &rec.binding,
-                Some(serde_json::json!({
-                    "id": rec.id,
-                    "tool": rec.tool,
-                    "args_digest": rec.args_digest,
-                    "principal": principal,
-                    "grants": rec.grants.len(),
-                    "required": required,
-                    "dual_control": dual,
-                    "expires_at": rec.expires_at.map(|t| t.to_rfc3339()),
-                    "status": "approved",
-                })),
-            )?;
-        } else {
-            // Partial dual-control grant — stay pending
-            rec.status = ApprovalStatus::Pending;
-            rec.granted_at = None;
-            rec.expires_at = None;
-            self.write_approval(&rec)?;
-            self.audit(
-                "approval.grant_partial",
-                &rec.binding,
-                Some(serde_json::json!({
-                    "id": rec.id,
-                    "tool": rec.tool,
-                    "principal": principal,
-                    "grants": rec.grants.len(),
-                    "required": required,
-                    "dual_control": true,
-                    "status": "pending",
-                    "hint": crate::approval::agent_approval_hint(
-                        &rec.id,
-                        true,
-                        required,
-                        rec.grants.len(),
-                    ),
-                })),
-            )?;
-            // Best-effort UX only — never surface notify errors to the grant path.
-            // Opt-in (LOCUS_NOTIFY / [notify] enabled); default OFF.
+        rec.status = ApprovalStatus::Pending;
+        rec.granted_at = None;
+        rec.expires_at = None;
+        self.write_approval(&rec)?;
+        self.audit(
+            "approval.advisory",
+            &rec.binding,
+            Some(serde_json::json!({
+                "id": rec.id,
+                "tool": rec.tool,
+                "args_digest": rec.args_digest,
+                "principal_label": principal,
+                "authority": ApprovalAuthority::LocalAdvisory.as_str(),
+                "advisory_assertions": rec.grants.len(),
+                "required_authoritative_grants": required,
+                "dual_control": dual,
+                "authoritative_path_enabled": false,
+                "authority_blocker": crate::approval::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER,
+                "peer_authenticated_os_broker_required": true,
+                "non_agent_issue_capability_required": true,
+                "status": "pending",
+            })),
+        )?;
+        if dual && rec.grants.len() == 1 {
+            // Best-effort UX only: opt-in, rate-limited, async on macOS, and
+            // explicitly non-authoritative. Delivery cannot affect the record.
             crate::approval::try_notify_partial_grant(&rec);
         }
         Ok(rec)
@@ -1748,6 +2051,7 @@ impl Store {
 
     /// Mark approval denied (terminal).
     pub fn deny_approval(&self, id: &str) -> Result<ApprovalRecord> {
+        self.require_local_control("deny approval")?;
         validate_approval_id(id)?;
         let mut rec = self.load_approval(id)?;
         rec.status = ApprovalStatus::Denied;
@@ -1786,8 +2090,9 @@ impl Store {
 
     /// Validate an explicit `approval_id` for a gated call.
     ///
-    /// Requires status=approved, unexpired, and tool+binding match.
-    /// Args digest must also match (grant is for that fingerprint).
+    /// Requires independently verified external authority plus an unexpired,
+    /// exact tool, binding, and argument fingerprint. This release ships no
+    /// external verifier, so even an edited `status=approved` record is denied.
     pub fn check_approval_id(
         &self,
         id: &str,
@@ -1823,6 +2128,7 @@ impl Store {
         let exists = dir.exists();
         let mut pending = 0usize;
         let mut approved = 0usize;
+        let mut untrusted_approved = 0usize;
         let mut denied = 0usize;
         let mut expired_grants = 0usize;
         let mut corrupt = 0usize;
@@ -1856,8 +2162,10 @@ impl Store {
                             ApprovalStatus::Approved => {
                                 if rec.is_valid_grant() {
                                     approved += 1;
-                                } else {
+                                } else if rec.is_expired_authenticated_grant() {
                                     expired_grants += 1;
+                                } else {
+                                    untrusted_approved += 1;
                                 }
                             }
                         },
@@ -1874,10 +2182,13 @@ impl Store {
             total,
             pending,
             approved_valid: approved,
+            untrusted_approved,
             expired_grants,
             denied,
             corrupt,
-            ok: exists && writable && corrupt == 0,
+            approval_authority: "local_advisory".into(),
+            authoritative_path_enabled: crate::approval::external_approval_authority_enabled(),
+            ok: exists && writable && corrupt == 0 && untrusted_approved == 0,
         })
     }
 
@@ -1985,9 +2296,13 @@ pub struct ApprovalsHealth {
     pub total: usize,
     pub pending: usize,
     pub approved_valid: usize,
+    /// Approved-looking files that lack independently verified authority.
+    pub untrusted_approved: usize,
     pub expired_grants: usize,
     pub denied: usize,
     pub corrupt: usize,
+    pub approval_authority: String,
+    pub authoritative_path_enabled: bool,
     /// True when dir exists, is writable, and has no corrupt records.
     pub ok: bool,
 }
@@ -2060,6 +2375,11 @@ pub struct Whoami {
     pub expires_at: String,
     pub worker_home: String,
     pub seal_ok: bool,
+    pub seal: String,
+    pub authority: String,
+    pub authority_anchor_ok: bool,
+    pub backing_type: SessionBackingType,
+    pub backing_path: String,
     #[serde(default)]
     pub frozen: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2081,6 +2401,16 @@ fn default_mode_exclusive() -> String {
 pub struct RuntimeDrift {
     pub pinned: bool,
     pub seal_ok: bool,
+    #[serde(default)]
+    pub authority_anchor_ok: bool,
+    #[serde(default)]
+    pub backing_ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backing_type: Option<SessionBackingType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backing_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
     pub binding_present: bool,
     pub binding_id_match: bool,
     pub tenant_match: bool,
@@ -2637,18 +2967,23 @@ credential_ref = "ghp_UNSAFE/CANARY"
         .unwrap();
         assert!(!r3.ok);
 
-        // 4) Grant (single-control → approved)
+        // 4) A caller-controlled principal label remains advisory.
         let granted = store.grant_approval(&approval_id, None, "alice").unwrap();
-        assert_eq!(granted.status, ApprovalStatus::Approved);
-        assert!(granted.expires_at.is_some());
-        assert!(granted.is_valid_grant());
+        assert_eq!(granted.status, ApprovalStatus::Pending);
+        assert!(granted.expires_at.is_none());
+        assert!(!granted.is_valid_grant());
         assert_eq!(granted.grants.len(), 1);
         assert_eq!(granted.grants[0].principal, "alice");
-        assert!(store.pending_approvals().unwrap().is_empty());
+        assert_eq!(
+            granted.grants[0].authority,
+            ApprovalAuthority::LocalAdvisory
+        );
+        assert_eq!(store.pending_approvals().unwrap().len(), 1);
 
-        // 5) Same args within TTL — allowed (no confirm needed)
+        // 5) Same args remain blocked.
         let r5 = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
-        assert!(r5.ok, "expected allow after grant: {:?}", r5.content);
+        assert!(!r5.ok, "local advisory must not allow: {:?}", r5.content);
+        assert_eq!(r5.content["authoritative_grants"], 0);
 
         // 6) Different args still need approval
         let r6 = call_tool_gated(
@@ -2699,7 +3034,11 @@ credential_ref = "ghp_UNSAFE/CANARY"
             Some(gate),
         )
         .unwrap();
-        assert!(r8b.ok, "approval_id path: {:?}", r8b.content);
+        assert!(
+            !r8b.ok,
+            "approval_id path must remain blocked: {:?}",
+            r8b.content
+        );
 
         // Path traversal / unsafe approval ids must never touch the filesystem
         assert!(store.load_approval("../evil").is_err());
@@ -2759,8 +3098,9 @@ credential_ref = "ghp_UNSAFE/CANARY"
             .to_string();
         let hint = r.content.get("hint").and_then(|v| v.as_str()).unwrap_or("");
         assert!(
-            hint.contains("ask human: locus approve grant") && hint.contains("needs 2 grants"),
-            "agent hint should tell human to grant with dual count: {hint}"
+            hint.contains("records local advisory evidence only")
+                && hint.contains("requires 2 externally authenticated approvers"),
+            "agent hint must distinguish advisory labels from authority: {hint}"
         );
         assert!(hint.contains(&id), "hint must include approval id: {hint}");
 
@@ -2795,13 +3135,14 @@ credential_ref = "ghp_UNSAFE/CANARY"
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert!(
-            hint2.contains("have 1") || hint2.contains("needs 2 grants"),
-            "partial dual-control hint: {hint2}"
+            hint2.contains("records local advisory evidence only")
+                && hint2.contains("provider execution remains blocked"),
+            "advisory dual-control hint: {hint2}"
         );
     }
 
     #[test]
-    fn dual_control_two_grants_allow() {
+    fn dual_control_two_local_labels_never_authorize() {
         use crate::adapters::{call_tool_gated, ApprovalGate};
         use crate::approval::ApprovalStatus;
         use serde_json::json;
@@ -2831,16 +3172,22 @@ credential_ref = "ghp_UNSAFE/CANARY"
 
         store.grant_approval(&id, None, "alice").unwrap();
         let full = store.grant_approval(&id, None, "bob").unwrap();
-        assert_eq!(full.status, ApprovalStatus::Approved);
+        assert_eq!(full.status, ApprovalStatus::Pending);
         assert_eq!(full.grants.len(), 2);
-        assert!(full.is_valid_grant());
+        assert!(!full.is_valid_grant());
         assert!(full.has_grant_from("alice"));
         assert!(full.has_grant_from("bob"));
-        assert!(store.pending_approvals().unwrap().is_empty());
+        assert_eq!(store.pending_approvals().unwrap().len(), 1);
 
-        let allowed =
+        let blocked =
             call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
-        assert!(allowed.ok, "two grants should allow: {:?}", allowed.content);
+        assert!(
+            !blocked.ok,
+            "two labels must not allow: {:?}",
+            blocked.content
+        );
+        assert_eq!(blocked.content["authoritative_grants"], 0);
+        assert_eq!(blocked.content["required_authoritative_grants"], 2);
     }
 
     #[test]
@@ -2878,10 +3225,7 @@ credential_ref = "ghp_UNSAFE/CANARY"
 
         let err = store.grant_approval(&id, None, "alice").unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("already granted") || msg.contains("different principal"),
-            "unexpected: {msg}"
-        );
+        assert!(msg.contains("already recorded"), "unexpected: {msg}");
 
         // Still only one grant
         let rec = store.load_approval(&id).unwrap();
@@ -2933,6 +3277,79 @@ credential_ref = "ghp_UNSAFE/CANARY"
             r2.content.get("error").and_then(|v| v.as_str()),
             Some("requires_approval")
         );
+    }
+
+    #[test]
+    fn forged_same_user_approval_json_and_spoofed_principals_fail_closed() {
+        use crate::adapters::{call_tool_gated, ApprovalGate};
+        use serde_json::json;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut binding = sample_binding("acme", "acme-corp", "p1");
+        binding.policy.require_approval = vec!["*.delete*".into()];
+        binding.policy.dual_control = vec!["*.delete*".into()];
+        store.save_binding(&binding).unwrap();
+        let session = store.pin("acme", dir.path(), None, false).unwrap();
+        let binding = store.load_binding("acme").unwrap();
+        let args = json!({"table": "users", "project_ref": "p1"});
+        let gate = ApprovalGate {
+            store: &store,
+            session_id: &session.session_id,
+            principal: Some("agent"),
+        };
+
+        let first = call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        let id = first.content["approval_id"].as_str().unwrap().to_string();
+        for label in ["agent", "company_ceo"] {
+            let record = store.grant_approval(&id, None, label).unwrap();
+            assert_eq!(record.status, ApprovalStatus::Pending);
+            assert!(record.grants.iter().all(|grant| {
+                grant.authority == ApprovalAuthority::LocalAdvisory && grant.envelope_id.is_none()
+            }));
+        }
+
+        let mut forged = store.load_approval(&id).unwrap();
+        forged.status = ApprovalStatus::Approved;
+        forged.granted_at = Some(Utc::now());
+        forged.expires_at = Some(Utc::now() + Duration::minutes(15));
+        for (index, grant) in forged.grants.iter_mut().enumerate() {
+            grant.authority = ApprovalAuthority::ExternalAuthenticated;
+            grant.envelope_id = Some(format!("unsigned-same-user-{index}"));
+        }
+        fs::write(
+            store.approvals_dir().join(format!("{id}.json")),
+            serde_json::to_string_pretty(&forged).unwrap(),
+        )
+        .unwrap();
+
+        assert!(!crate::approval::external_approval_authority_enabled());
+        assert!(!store.load_approval(&id).unwrap().is_valid_grant());
+        for _ in 0..2 {
+            assert!(store
+                .find_valid_grant("supabase.table.delete", "acme", &args)
+                .unwrap()
+                .is_none());
+        }
+        let blocked =
+            call_tool_gated(&binding, "supabase.table.delete", &args, Some(gate)).unwrap();
+        assert!(!blocked.ok);
+        assert_eq!(blocked.content["authoritative_grants"], 0);
+
+        let health = store.approvals_health().unwrap();
+        assert_eq!(health.approved_valid, 0);
+        assert_eq!(health.untrusted_approved, 1);
+        assert_eq!(health.expired_grants, 0);
+        assert_eq!(health.approval_authority, "local_advisory");
+        assert!(!health.authoritative_path_enabled);
+        assert!(!health.ok);
+
+        assert!(!forged.matches_call("supabase.table.delete", "other", &args_digest(&args)));
+        assert!(!forged.matches_call(
+            "supabase.table.delete",
+            "acme",
+            &args_digest(&json!({"table": "payments", "project_ref": "p1"}))
+        ));
     }
 
     /// Sequential stress: many pin/leave cycles must not leave a sticky pin
@@ -3016,6 +3433,107 @@ credential_ref = "ghp_UNSAFE/CANARY"
         store.leave().unwrap();
         store.pin("acme", dir.path(), None, false).unwrap();
         assert!(store.verify_runtime().unwrap().ok);
+    }
+
+    #[test]
+    fn readable_hmac_key_cannot_rebind_live_broker_authority() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        let path = store.active_session_path();
+        let mut forged: Session =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        forged.tenant = "other-tenant".into();
+        forged.worker_home = dir.path().join("aliased-worker").display().to_string();
+        forged.reseal(&store.seal_key().unwrap());
+        fs::write(&path, serde_json::to_vec(&forged).unwrap()).unwrap();
+
+        assert!(matches!(
+            store.require_active().unwrap_err(),
+            LocusError::AuthorityAnchorMismatch
+        ));
+        let runtime = store.verify_runtime().unwrap();
+        assert!(!runtime.ok);
+        assert!(runtime
+            .issues
+            .iter()
+            .any(|issue| issue == "authority_anchor_mismatch"));
+    }
+
+    #[test]
+    fn drift_check_does_not_mutate_broker_rejected_hmac_record() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        let path = store.active_session_path();
+        let mut forged: Session =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        forged.binding_alias = "missing-binding".into();
+        forged.reseal(&store.seal_key().unwrap());
+        let forged_bytes = serde_json::to_vec(&forged).unwrap();
+        fs::write(&path, &forged_bytes).unwrap();
+
+        let runtime = store.check_drift_and_freeze().unwrap();
+        assert!(!runtime.authority_anchor_ok);
+        assert!(runtime
+            .issues
+            .iter()
+            .any(|issue| issue == "binding_missing"));
+        assert!(!runtime.frozen);
+        assert_eq!(fs::read(&path).unwrap(), forged_bytes);
+    }
+
+    #[test]
+    fn leave_then_restored_record_cannot_resurrect_revoked_generation() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let path = store.active_session_path();
+        let replay = fs::read(&path).unwrap();
+
+        store.leave().unwrap();
+        fs::write(&path, replay).unwrap();
+
+        assert!(matches!(
+            store.require_active().unwrap_err(),
+            LocusError::AuthorityAnchorMismatch
+        ));
+        assert!(!store.verify_runtime().unwrap().ok);
+    }
+
+    #[test]
+    fn legacy_seal_downgrade_is_invalid_in_runtime_and_doctor_inputs() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let path = store.active_session_path();
+        let mut downgraded: Session =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        downgraded.seal_version = 2;
+        downgraded.seal = store.seal_key().unwrap().seal(&downgraded.material());
+        fs::write(&path, serde_json::to_vec(&downgraded).unwrap()).unwrap();
+
+        assert!(matches!(
+            store.require_active().unwrap_err(),
+            LocusError::LegacySessionSeal
+        ));
+        let runtime = store.verify_runtime().unwrap();
+        assert!(!runtime.seal_ok);
+        assert!(runtime.issues.iter().any(|issue| issue == "invalid_seal"));
     }
 
     #[test]
@@ -3319,6 +3837,43 @@ allowed_bindings = ["acme"]
         let events = store.read_audit_events().unwrap();
         assert!(events.iter().any(|e| e.op == "ci.mint"));
         store.cleanup_ci_session(&path, &ci).unwrap();
+    }
+
+    #[test]
+    fn exact_ci_drift_freezes_ci_file_without_replacing_global_pin() {
+        let _env_guard = lock_session_env();
+        std::env::remove_var("LOCUS_SESSION_ID");
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut acme = sample_binding("acme", "acme-corp", "p1");
+        store.save_binding(&acme).unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+        let global = store.pin("personal", dir.path(), None, false).unwrap();
+        let (ci, ci_path) = store
+            .create_ci_session("acme", dir.path(), false, Some(Duration::minutes(10)))
+            .unwrap();
+
+        acme.providers[0].scope.project_ref = Some("drifted".into());
+        store.save_binding(&acme).unwrap();
+        std::env::set_var("LOCUS_SESSION_ID", &ci.session_id);
+        let drift = store.check_drift_and_freeze().unwrap();
+        assert!(drift.frozen);
+        std::env::remove_var("LOCUS_SESSION_ID");
+
+        let still_global = store.active_session().unwrap().unwrap();
+        assert_eq!(still_global.session_id, global.session_id);
+        assert_eq!(still_global.binding_alias, "personal");
+        assert!(!still_global.frozen);
+
+        let frozen_ci: Session =
+            serde_json::from_str(&fs::read_to_string(&ci_path).unwrap()).unwrap();
+        assert_eq!(frozen_ci.session_id, ci.session_id);
+        assert!(frozen_ci.frozen);
+        frozen_ci.verify_seal(&store.seal_key().unwrap()).unwrap();
+        store.cleanup_ci_session(&ci_path, &frozen_ci).unwrap();
     }
 
     #[test]

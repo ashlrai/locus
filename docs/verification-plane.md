@@ -66,7 +66,7 @@ Confidence is a **label**, not a calibrated probability. Hub may map bands to al
 
 When `needs_tool` is true, the suggestion points at grounding actions:
 
-- **Factual claims** (versions, URLs, quantities) → provider read tools (`*.list`, `*.get`, `*.status`, CLI under `locus exec`)
+- **Factual claims** (versions, URLs, quantities) → policy-gated provider read tools (`*.list`, `*.get`, `*.status`)
 - **Identity claims** without pin → human `locus enter` / `locus pin`; agents use `locus_request_pin` / `locus_enter_hint`
 - **Identity claims** with pin → attach whoami grounding; re-check with `locus_whoami` / `locus_heartbeat` if drift is possible
 
@@ -120,7 +120,7 @@ locus verify session --json   # doctor + whoami + safe_next pack for hub
 }
 ```
 
-Never includes secrets. `session_ok` is true only when doctor is ok **and** `safe_next.ready`.
+Never includes secrets. `session_ok` is true only when doctor is ok **and** `safe_next.ready`. `locus verify session` emits the pack for inspection but exits nonzero whenever `session_ok` is false; there is no success-status inspection bypass.
 
 ### MCP
 
@@ -190,7 +190,7 @@ Shipped as partial M5:
 - [x] `locus verify session` — doctor + whoami + safe_next JSON pack
 - [x] E2E + dogfood coverage: `scripts/e2e.sh` feature-detects `verify claim` / `verify session` (shape + no secret values); `scripts/dogfood.sh` hard-requires `session_ok` at the DOGFOOD READY gate
 - [x] Doctor optional `ungrounded_claims` finding
-- [x] Best-effort worker sandbox (`LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`)
+- [x] Fail-closed macOS worker sandbox (`LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`); unsupported platforms refuse sandboxed spawn
 - [x] Core module + unit tests (heuristics only)
 
 ---
@@ -201,7 +201,7 @@ Shipped as partial M5:
 |------|------|
 | `crates/locus-core/src/verify.rs` | Heuristics + `ClaimVerification` |
 | `crates/locus-core/src/agent_report.rs` | `verify_session` → `SessionVerificationPack` |
-| `crates/locus-core/src/workers/sandbox.rs` | Restricted PATH + optional macOS sandbox-exec |
+| `crates/locus-core/src/workers/sandbox.rs` | Deny-by-default macOS Seatbelt; no PATH-only fallback |
 | `crates/locus-cli` | `locus verify claim` · `locus verify session` |
 | `crates/locus-mcp` | `locus_verify_claim` control tool |
 | `crates/locus-core/src/doctor.rs` | Optional audit signal finding |
