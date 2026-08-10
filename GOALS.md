@@ -96,7 +96,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Tool description pin tags; `initialize.instructions`
 - [x] MCP auto-pin from workspace / `LOCUS_AUTO_PIN`
 - [x] `quickstart` + shell hook frozen/require_pin UX
-- [x] `scripts/dogfood.sh` — quickstart → agent setup → report → doctor → forensics; `DOGFOOD READY` when ready or protected+pin
+- [x] `scripts/dogfood.sh` — quickstart → agent setup → report → doctor → forensics → verify session → Hub smoke; `DOGFOOD READY` only when every required probe is green
 - [ ] Dogfood: agent report `ready` on real Claude Code + Cursor installs (personal + client) — local path exists; multi-client real installs still manual
 - [ ] Upstream MCP workers for top adapters (not only synthetic freeze tools)
 
@@ -131,7 +131,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Dogfood: `scripts/dogfood.sh` runs `verify session --json`; hard-requires `session_ok` when claiming DOGFOOD READY
 - [x] Doctor optional WARN `ungrounded_claims` when audit tail has many low-confidence patterns
 - [x] Conformance pack in CI: `.github/workflows/conformance.yml` — `invariants` + `locus-mcp` tests + `hub-smoke` + `e2e` (high timeout)
-- [x] Best-effort sandboxed workers: `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox` → restricted PATH + `LOCUS_WORKER_SANDBOXED=1` + optional macOS `sandbox-exec` (not full seccomp/VM)
+- [x] Fail-closed sandboxed workers: `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox` requires macOS Seatbelt, denies authority state and inbound network, and refuses unsupported backends
 - [ ] Continuous whoami / `watch` in long agent sessions as first-class hub heartbeat (session pack is the CLI primitive; not yet a long-lived watcher)
 - [ ] Audit export → SIEM / remote append (team tier)
 - [ ] Adapter SDK + signed registry
@@ -179,4 +179,4 @@ locus init --with-samples && locus enter personal && locus doctor
 | M2 Firm UX | done |
 | M3 AI surface | mostly done |
 | M4 Hub composition | in progress |
-| M5 Verification plane | partial (claim+session verify, e2e/dogfood coverage, best-effort worker sandbox, conformance CI) |
+| M5 Verification plane | partial (claim+session verify, e2e/dogfood coverage, fail-closed macOS worker sandbox, conformance CI) |

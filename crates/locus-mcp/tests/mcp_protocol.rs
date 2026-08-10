@@ -603,6 +603,32 @@ for line in sys.stdin:
 "#
 }
 
+#[cfg(target_os = "macos")]
+fn sandbox_scope_fixture_script() -> &'static str {
+    r#"#!/bin/sh
+printf '%s|%s|%s|%s|%s|%s\n' \
+  "${LOCUS_WORKER_PROVIDER:-missing}" \
+  "${LOCUS_WORKER_SANDBOXED:-missing}" \
+  "${LOCUS_WORKER_SANDBOX_BACKEND:-missing}" \
+  "${GH_TOKEN:-missing}" \
+  "${SUPABASE_ACCESS_TOKEN:-missing}" \
+  "${LOCUS_PROVIDERS:-missing}" > worker-env.txt
+while IFS= read -r line; do
+  case "$line" in
+    *'"method":"initialize"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"sandbox-scope-fixture","version":"1"}}}'
+      ;;
+    *'"method":"tools/list"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"ping","description":"sandbox scope probe","inputSchema":{"type":"object"}}]}}'
+      ;;
+    *'"method":"tools/call"'*)
+      printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"sandbox scope probe ok"}],"isError":false}}'
+      ;;
+  esac
+done
+"#
+}
+
 #[test]
 fn pinned_upstream_auto_spawn_list_and_call() {
     // Requires python3 for mock upstream MCP
@@ -804,6 +830,147 @@ time.sleep(30)
         std::fs::read_to_string(&marker).unwrap_or_default()
     );
     assert_eq!(store.pending_approvals().unwrap().len(), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn broker_session_gates_sandbox_start_and_scopes_each_provider_environment() {
+    use std::os::unix::fs::PermissionsExt;
+
+    assert!(
+        std::path::Path::new("/usr/bin/sandbox-exec").is_file(),
+        "native Seatbelt backend is required for this integration regression"
+    );
+
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("locus-home");
+    let project = dir.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    let fixture = project.join("sandbox-scope-fixture.sh");
+    std::fs::write(&fixture, sandbox_scope_fixture_script()).unwrap();
+    std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let store = Store::open(&home).unwrap();
+    let upstream = || {
+        Some(
+            UpstreamSpec::new(fixture.display().to_string())
+                .resolve_secrets(true)
+                .sandbox(true),
+        )
+    };
+    let binding = Binding::from_body(BindingBody {
+        id: "bnd_sandbox_scope".into(),
+        alias: "sandbox-scope".into(),
+        tenant: "sandbox-scope".into(),
+        principal: None,
+        description: None,
+        policy: Policy {
+            require_approval: vec!["github.delete_repo".into()],
+            ..Policy::default()
+        },
+        providers: vec![
+            ProviderBinding {
+                provider: "github".into(),
+                account: "sandbox-gh".into(),
+                credential_ref: "env:SANDBOX_GITHUB_TOKEN".into(),
+                scope: Scope {
+                    orgs: vec!["sandbox-org".into()],
+                    ..Scope::default()
+                },
+                upstream: upstream(),
+            },
+            ProviderBinding {
+                provider: "supabase".into(),
+                account: "sandbox-db".into(),
+                credential_ref: "env:SANDBOX_SUPABASE_TOKEN".into(),
+                scope: Scope {
+                    project_ref: Some("sandbox-project".into()),
+                    read_only: Some(true),
+                    ..Scope::default()
+                },
+                upstream: upstream(),
+            },
+        ],
+    });
+    store.save_binding(&binding).unwrap();
+    let session = store
+        .pin(
+            "sandbox-scope",
+            &project,
+            Some("broker-sandbox-regression".into()),
+            false,
+        )
+        .unwrap();
+    assert_eq!(session.seal_version, 3);
+    assert!(
+        session.authority_anchor.is_some(),
+        "session must be backed by the live authority broker"
+    );
+
+    let github_marker =
+        std::path::Path::new(&session.worker_home).join("slots/github/worker-env.txt");
+    let supabase_marker =
+        std::path::Path::new(&session.worker_home).join("slots/supabase/worker-env.txt");
+    let mut client = McpClient::spawn_opts(
+        &home,
+        Framing::Ndjson,
+        Some(&project),
+        &[
+            ("SANDBOX_GITHUB_TOKEN", "github-sandbox-canary"),
+            ("SANDBOX_SUPABASE_TOKEN", "supabase-sandbox-canary"),
+        ],
+    );
+    handshake(&mut client);
+
+    let discovery = client.request("tools/list", json!({}));
+    assert!(
+        discovery.get("result").is_some(),
+        "tools/list failed: {discovery}"
+    );
+    assert!(!github_marker.exists() && !supabase_marker.exists());
+
+    let blocked = client.request(
+        "tools/call",
+        json!({
+            "name": "github.delete_repo",
+            "arguments": { "owner": "sandbox-org", "repo": "critical" }
+        }),
+    );
+    let (blocked_text, blocked_error) = McpClient::tool_text(&blocked);
+    assert!(blocked_error && blocked_text.contains("requires_approval"));
+    assert!(
+        !github_marker.exists() && !supabase_marker.exists(),
+        "approval-blocked call started a sandbox worker"
+    );
+
+    let github = client.request(
+        "tools/call",
+        json!({ "name": "github.ping", "arguments": {} }),
+    );
+    let (github_text, github_error) = McpClient::tool_text(&github);
+    assert!(!github_error, "sandboxed GitHub call failed: {github_text}");
+    assert_eq!(
+        std::fs::read_to_string(&github_marker).unwrap().trim(),
+        "github|1|sandbox-exec|github-sandbox-canary|missing|github"
+    );
+    assert!(
+        !supabase_marker.exists(),
+        "GitHub authorization started the Supabase worker"
+    );
+
+    let supabase = client.request(
+        "tools/call",
+        json!({ "name": "supabase.ping", "arguments": {} }),
+    );
+    let (supabase_text, supabase_error) = McpClient::tool_text(&supabase);
+    assert!(
+        !supabase_error,
+        "sandboxed Supabase call failed: {supabase_text}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&supabase_marker).unwrap().trim(),
+        "supabase|1|sandbox-exec|missing|supabase-sandbox-canary|supabase"
+    );
 }
 
 #[test]

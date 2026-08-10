@@ -381,7 +381,8 @@ enum VerifyCmd {
     /// Pack doctor + whoami + safe_next as one JSON object for hub heartbeats
     ///
     /// Machine contract: `{ kind: "session", version, whoami?, doctor, safe_next, session_ok }`.
-    /// Never includes secrets. Prefer `--json` for hub gates.
+    /// Never includes secrets. Exits nonzero when `session_ok` is false.
+    /// Prefer `--json` for hub gates.
     Session,
 }
 
@@ -873,7 +874,8 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                MCP: locus_verify_claim  { \"text\": \"…\" }\n\n\
              Session pack (hub heartbeat):\n\
                locus verify session [--json]\n\
-               → { kind:\"session\", whoami?, doctor, safe_next, session_ok }\n\n\
+               → { kind:\"session\", whoami?, doctor, safe_next, session_ok }\n\
+               Exit 0 only when session_ok=true; JSON is still emitted on failure.\n\n\
              Identity gate checks:\n\
                locus whoami [--json]           # active pin + seal\n\
                locus doctor [--json]           # SAFE|WARN|UNSAFE (exit 0/1/2)\n\
@@ -913,7 +915,7 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus upstream list\n\
                locus upstream suggest github\n\
                locus upstream suggest vercel\n\
-               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = true }\n\n\
+               upstream = { recipe = \"github-mcp\", resolve_secrets = true, sandbox = true }\n\n\
              Invariants: agents cannot pin; unpinned ⇒ control tools only; no secrets in results.\n\
              Docs: docs/mcp.md · docs/workers.md",
         ),
@@ -924,12 +926,13 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus upstream list [--json]\n\
                locus upstream suggest <provider> [--json]\n\n\
              In a binding:\n\
-               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = true }\n\
+               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = false }  # Docker: high authority\n\
                upstream = { recipe = \"supabase-mcp\", resolve_secrets = true, sandbox = true }\n\
-               upstream = { recipe = \"vercel-mcp\", sandbox = true }\n\
+               upstream = { recipe = \"vercel-mcp\", sandbox = false }  # OAuth bridge: explicit unsandboxed\n\
                upstream = { recipe = \"filesystem-mcp\", args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/tmp/demo\"] }\n\
                upstream = { command = \"npx\", args = [\"-y\", \"@pkg\"] }  # explicit still works\n\n\
-             Pure-recipe expand adopts default_resolve_secrets / default_sandbox from recipes.toml.\n\
+             Compatible recipe sandbox defaults survive command/args overrides.\n\
+             Docker/OAuth bridge recipes require explicit sandbox=false and publish risk metadata.\n\
              Recipes: github-official · github-mcp · supabase-mcp · vercel-mcp · filesystem-mcp · everything-mcp\n\
              Source: adapters/recipes.toml · Docs: docs/workers.md · examples/upstream.binding.toml",
         ),
@@ -2741,6 +2744,14 @@ fn cmd_upstream(sub: UpstreamCmd, json: bool) -> Result<()> {
                     r.args.join(" ").dimmed()
                 );
                 println!("      {}", recipe_toml_snippet(r).dimmed());
+                println!(
+                    "      readiness: {}  ·  sandbox: {}",
+                    r.readiness.as_str().yellow(),
+                    r.sandbox_compatibility.as_str().yellow()
+                );
+                if !r.risks.is_empty() {
+                    println!("      risks: {}", r.risks.join(", ").yellow());
+                }
                 if !r.notes.trim().is_empty() {
                     let first = r.notes.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                     if !first.is_empty() {
@@ -2779,6 +2790,14 @@ fn cmd_upstream(sub: UpstreamCmd, json: bool) -> Result<()> {
                 println!("  {}  {}", r.id.green().bold(), r.title.dimmed());
                 println!("      {} {}", r.command.cyan(), r.args.join(" ").dimmed());
                 println!("      copy: {}", recipe_toml_snippet(r));
+                println!(
+                    "      readiness: {}  ·  sandbox: {}",
+                    r.readiness.as_str().yellow(),
+                    r.sandbox_compatibility.as_str().yellow()
+                );
+                if !r.risks.is_empty() {
+                    println!("      risks: {}", r.risks.join(", ").yellow());
+                }
                 if !r.env_hints.is_empty() {
                     println!("      env hints: {}", r.env_hints.join(", ").dimmed());
                 }
@@ -3079,15 +3098,8 @@ fn cmd_verify_claim(text: &str, json: bool) -> Result<()> {
 fn cmd_verify_session(json: bool) -> Result<()> {
     let s = store()?;
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let pack = verify_session(
-        &s,
-        &cwd,
-        DoctorExternal {
-            phantom_on_path: phantom_on_path(),
-            unresolved_phm: Vec::new(),
-            cwd: Some(cwd.clone()),
-        },
-    )?;
+    let external = gather_doctor_external(&s, cwd.clone())?;
+    let pack = verify_session(&s, &cwd, external)?;
     let binding = pack
         .whoami
         .as_ref()
@@ -3107,7 +3119,7 @@ fn cmd_verify_session(json: bool) -> Result<()> {
 
     if json {
         println!("{}", serde_json::to_string_pretty(&pack)?);
-        return Ok(());
+        return verify_session_exit(pack.session_ok);
     }
 
     println!(
@@ -3150,7 +3162,15 @@ fn cmd_verify_session(json: bool) -> Result<()> {
     }
     // Machine JSON line for pipelines.
     println!("{}", serde_json::to_string(&pack)?);
-    Ok(())
+    verify_session_exit(pack.session_ok)
+}
+
+fn verify_session_exit(session_ok: bool) -> Result<()> {
+    if session_ok {
+        Ok(())
+    } else {
+        bail!("session verification is not ready (session_ok=false)")
+    }
 }
 
 fn cmd_goal_status(json: bool) -> Result<()> {
@@ -3389,18 +3409,25 @@ fn embedded_goal_milestones() -> Vec<GoalMilestone> {
 }
 
 fn gather_doctor_report(s: &Store) -> Result<locus_core::DoctorReport> {
+    build_doctor_report(s, gather_doctor_external(s, cwd())?).map_err(Into::into)
+}
+
+fn gather_doctor_external(s: &Store, cwd: PathBuf) -> Result<DoctorExternal> {
     // phantom --version is process-cached (locus_core::phantom_on_path).
-    let phantom = phantom_on_path();
+    gather_doctor_external_with_phantom_status(s, cwd, phantom_on_path())
+}
+
+fn gather_doctor_external_with_phantom_status(
+    s: &Store,
+    cwd: PathBuf,
+    phantom: bool,
+) -> Result<DoctorExternal> {
     let unresolved_phm = collect_unresolved_phm_refs(s, phantom)?;
-    build_doctor_report(
-        s,
-        DoctorExternal {
-            phantom_on_path: phantom,
-            unresolved_phm,
-            cwd: Some(cwd()),
-        },
-    )
-    .map_err(Into::into)
+    Ok(DoctorExternal {
+        phantom_on_path: phantom,
+        unresolved_phm,
+        cwd: Some(cwd),
+    })
 }
 
 fn build_hub_agent_report(s: &Store) -> Result<locus_core::AgentReport> {
@@ -5055,7 +5082,7 @@ tenant = "tenant"
 provider = "github"
 account = "acme"
 credential_ref = "env:GH_TOKEN"
-upstream = { recipe = "github-official" }
+upstream = { recipe = "github-official", sandbox = false }
 "#,
         )
         .unwrap();
@@ -5096,5 +5123,54 @@ upstream = { command = "credential-free-worker", resolve_secrets = false }
             preflight_child_launch(&credential_free, false, surface).unwrap();
             preflight_child_launch(&explicit, true, surface).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod verify_session_tests {
+    use super::{gather_doctor_external_with_phantom_status, verify_session_exit};
+    use locus_core::{verify_session, Binding, Store};
+    use tempfile::tempdir;
+
+    #[test]
+    fn verify_session_uses_unresolved_credential_evidence() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        let binding = Binding::parse_toml(
+            r#"
+[binding]
+id = "bnd_verify"
+alias = "verify"
+tenant = "tenant"
+
+[[binding.providers]]
+provider = "github"
+account = "tenant"
+credential_ref = "phm:VERIFY_SESSION_MISSING"
+"#,
+        )
+        .unwrap();
+        store.save_binding(&binding).unwrap();
+        store
+            .pin("verify", dir.path(), Some("test".into()), false)
+            .unwrap();
+
+        let external =
+            gather_doctor_external_with_phantom_status(&store, dir.path().to_path_buf(), false)
+                .unwrap();
+        assert_eq!(external.unresolved_phm.len(), 1);
+        let pack = verify_session(&store, dir.path(), external).unwrap();
+        assert!(!pack.session_ok);
+        assert!(pack
+            .doctor
+            .findings
+            .iter()
+            .any(|finding| finding.code == "unresolved_phm"));
+    }
+
+    #[test]
+    fn verify_session_exit_follows_session_ok() {
+        assert!(verify_session_exit(true).is_ok());
+        assert!(verify_session_exit(false).is_err());
     }
 }

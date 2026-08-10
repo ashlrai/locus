@@ -263,7 +263,7 @@ default = "allow"
 provider = "github"
 account = "noresolve-recipe-account"
 credential_ref = "env:LOCUS_E2E_GH_TOKEN"
-upstream = { recipe = "github-official" }
+upstream = { recipe = "github-official", sandbox = false }
 EOF
 
 control_plane_snapshot() {
@@ -1360,14 +1360,21 @@ else
   set +e
   vs_json="$(locus verify session --json 2>/dev/null)"
   vs_ec=$?
-  if [[ $vs_ec -ne 0 || -z "$vs_json" ]]; then
+  if [[ -z "$vs_json" ]]; then
     vs_json="$(locus --json verify session 2>/dev/null)"
     vs_ec=$?
   fi
   set -e
-  if [[ $vs_ec -ne 0 || -z "$vs_json" ]]; then
-    skip "verify present but session invocation failed (API may differ)"
+  if [[ -z "$vs_json" ]]; then
+    die "verify session emitted no inspection JSON (exit=$vs_ec)"
   else
+    vs_expected_ec="$(printf '%s' "$vs_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(0 if d.get("session_ok") is True else 1)
+')"
+    [[ $vs_ec -eq $vs_expected_ec ]] \
+      || die "verify session exit=$vs_ec does not match session_ok (expected $vs_expected_ec)"
     echo "$vs_json" | python3 -c '
 import json, sys
 raw = sys.stdin.read().strip()
@@ -1392,7 +1399,7 @@ print("verify session kind=%s session_ok=%s safe_next=%s doctor_ok=%s" % (
     d.get("kind"), d.get("session_ok"),
     (safe_next or {}).get("action"), (doctor or {}).get("ok")))
 '
-    ok "verify session --json pack (kind/session_ok/doctor/safe_next, no secrets)"
+    ok "verify session --json pack + truthful exit (kind/session_ok/doctor/safe_next, no secrets)"
   fi
 fi
 
@@ -1523,13 +1530,25 @@ for r in recipes:
     assert rid, "recipe missing id: %s" % r
     ids.append(rid)
     by_id[rid] = r
-# Top adapters must ship hardened recipes (M3 tail)
+# Compatible adapters keep secure defaults; daemon/OAuth adapters must publish
+# an explicit high-authority readiness gate instead of a false sandbox claim.
 for required in ("github-mcp", "github-official", "supabase-mcp", "vercel-mcp"):
     assert required in by_id, "missing top recipe %s in %s" % (required, ids)
-for rid in ("github-mcp", "github-official", "supabase-mcp", "vercel-mcp"):
+for rid in ("github-mcp", "supabase-mcp"):
     r = by_id[rid]
     sandbox = r.get("default_sandbox", r.get("defaultSandbox"))
     assert sandbox is True, "%s must default_sandbox: %s" % (rid, r)
+    assert r.get("sandbox_compatibility") == "compatible", r
+    assert r.get("readiness") == "ready", r
+for rid, risk in (("github-official", "host_docker_daemon"),
+                  ("vercel-mcp", "oauth_loopback_listener")):
+    r = by_id[rid]
+    sandbox = r.get("default_sandbox", r.get("defaultSandbox"))
+    assert sandbox is False, "%s must be unavailable by default: %s" % (rid, r)
+    assert r.get("sandbox_compatibility") == "incompatible", r
+    assert r.get("readiness") == "explicit_unsandboxed_required", r
+    assert risk in (r.get("risks") or []), r
+    assert r.get("readiness_detail"), r
 for rid in ("github-mcp", "github-official", "supabase-mcp"):
     r = by_id[rid]
     resolve = r.get("default_resolve_secrets", r.get("defaultResolveSecrets"))

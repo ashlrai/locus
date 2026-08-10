@@ -407,12 +407,15 @@ mod tests {
                 "configured-mcp-secret".into(),
             )]),
             sandbox: false,
+            sandbox_incompatibility: None,
         });
         let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();
         assert_eq!(slot.backend, "mcp_stdio");
         assert_eq!(slot.state, WorkerState::Ready);
         assert!(slot.pid.is_none());
-        let command = backend.build_command(&session, &binding, pb, &work_dir);
+        let command = backend
+            .build_command(&session, &binding, pb, &work_dir)
+            .unwrap();
         let env = command
             .get_envs()
             .filter_map(|(key, value)| value.map(|value| (key, value)))
@@ -437,9 +440,13 @@ mod tests {
     }
 
     #[test]
-    fn mcp_stdio_sandbox_restricts_path_marker() {
+    fn mcp_stdio_sandbox_requires_real_backend_and_private_temp() {
         let dir = tempdir().unwrap();
-        let worker_home = dir.path().join("worker");
+        let worker_home = dir
+            .path()
+            .join("custom-locus-home")
+            .join("workers")
+            .join("sess_test");
         std::fs::create_dir_all(&worker_home).unwrap();
         let session = sample_session(&worker_home.display().to_string());
         let binding = sample_binding();
@@ -454,44 +461,56 @@ mod tests {
             resolve_secrets: false,
             extra_env: BTreeMap::new(),
             sandbox: true,
+            sandbox_incompatibility: None,
         });
         assert!(backend.sandbox_active());
 
-        let command = backend.build_command(&session, &binding, pb, &work_dir);
-        let env = command
-            .get_envs()
-            .filter_map(|(key, value)| value.map(|value| (key, value)))
-            .map(|(key, value)| {
-                (
-                    key.to_string_lossy().into_owned(),
-                    value.to_string_lossy().into_owned(),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
+        #[cfg(not(target_os = "macos"))]
+        {
+            let err = backend
+                .build_command(&session, &binding, pb, &work_dir)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("no supported OS isolation backend"), "{err}");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let command = backend
+                .build_command(&session, &binding, pb, &work_dir)
+                .unwrap();
+            let env = command
+                .get_envs()
+                .filter_map(|(key, value)| value.map(|value| (key, value)))
+                .map(|(key, value)| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
 
-        let restricted = crate::workers::restricted_worker_path();
-        let path = env.get("PATH").expect("sandboxed worker must set PATH");
-        assert_eq!(
-            path, &restricted,
-            "PATH must equal restricted_worker_path()"
-        );
-        assert!(path.contains("/usr/bin"));
-        assert!(path.contains("/bin"));
+            let restricted = crate::workers::restricted_worker_path();
+            let path = env.get("PATH").expect("sandboxed worker must set PATH");
+            assert!(path.ends_with(&restricted));
+            assert!(path.contains("/usr/bin"));
+            assert!(path.contains("/bin"));
 
-        assert_eq!(
-            env.get(crate::workers::ENV_WORKER_SANDBOXED)
-                .map(String::as_str),
-            Some("1"),
-            "LOCUS_WORKER_SANDBOXED marker required"
-        );
-        let backend_tag = env
-            .get(crate::workers::ENV_WORKER_SANDBOX_BACKEND)
-            .map(String::as_str)
-            .expect("LOCUS_WORKER_SANDBOX_BACKEND required");
-        assert!(
-            backend_tag == "path" || backend_tag == "sandbox-exec",
-            "unexpected sandbox backend: {backend_tag}"
-        );
+            assert_eq!(
+                env.get(crate::workers::ENV_WORKER_SANDBOXED)
+                    .map(String::as_str),
+                Some("1"),
+                "LOCUS_WORKER_SANDBOXED marker required"
+            );
+            let backend_tag = env
+                .get(crate::workers::ENV_WORKER_SANDBOX_BACKEND)
+                .map(String::as_str)
+                .expect("LOCUS_WORKER_SANDBOX_BACKEND required");
+            assert_eq!(backend_tag, "sandbox-exec");
+            let expected_tmp = worker_home.join("tmp").display().to_string();
+            assert_eq!(env.get("TMPDIR"), Some(&expected_tmp));
+            assert_eq!(env.get("TMP"), Some(&expected_tmp));
+            assert_eq!(env.get("TEMP"), Some(&expected_tmp));
+        }
     }
 
     #[test]
@@ -536,6 +555,7 @@ for line in sys.stdin:
             resolve_secrets: false,
             extra_env: BTreeMap::new(),
             sandbox: false,
+            sandbox_incompatibility: None,
         });
         let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();
         assert_eq!(slot.state, WorkerState::Running);

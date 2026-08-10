@@ -29,6 +29,7 @@ const SERVER_ENV: &str = "LOCUS_INTERNAL_AUTHORITY_ANCHOR_SERVER";
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
 const START_TIMEOUT: Duration = Duration::from_secs(3);
+const TEST_START_TIMEOUT: Duration = Duration::from_secs(15);
 const CONTROL_TTL: Duration = Duration::from_secs(2);
 const MAX_CLIENTS: usize = 64;
 const SUPERVISOR_POLL: Duration = Duration::from_millis(250);
@@ -411,7 +412,7 @@ pub(crate) fn revoke(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn retire_for_test(home: &Path) -> Result<()> {
     let auth = control_auth()?;
     let endpoint = read_endpoint(home)?;
@@ -595,7 +596,7 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
         let result = BufReader::new(stdout).read_line(&mut line).map(|_| line);
         let _ = sender.send(result);
     });
-    let line = match receiver.recv_timeout(START_TIMEOUT) {
+    let line = match receiver.recv_timeout(broker_start_timeout()) {
         Ok(Ok(line)) => line,
         Ok(Err(error)) => {
             let _ = child.kill();
@@ -622,7 +623,7 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
 }
 
 fn retry_current_endpoint(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoint> {
-    let deadline = Instant::now() + START_TIMEOUT;
+    let deadline = Instant::now() + broker_start_timeout();
     while Instant::now() < deadline {
         if let Ok(endpoint) = read_endpoint(home) {
             if ping(home, &endpoint, auth).is_ok() {
@@ -646,9 +647,11 @@ fn start_in_process(startup: ServerStartup) -> Result<AuthorityAnchorEndpoint> {
                 let _ = sender.send(Err(error));
             }
         })?;
-    let endpoint = receiver.recv_timeout(START_TIMEOUT).map_err(|_| {
-        LocusError::AuthorityAnchorUnavailable("test broker startup timed out".into())
-    })??;
+    let endpoint = receiver
+        .recv_timeout(broker_start_timeout())
+        .map_err(|_| {
+            LocusError::AuthorityAnchorUnavailable("test broker startup timed out".into())
+        })??;
     Ok(endpoint)
 }
 
@@ -1360,7 +1363,13 @@ mod windows_tests {
     #[test]
     fn execution_authority_fails_closed_without_native_peer_authenticated_pipe() {
         let dir = tempdir().unwrap();
-        let error = issue(dir.path(), "ses_windows", "active").unwrap_err();
+        let error = issue(
+            dir.path(),
+            "ses_windows",
+            "active",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap_err();
         assert!(matches!(error, LocusError::AuthorityAnchorUnavailable(_)));
         assert!(!endpoint_path(dir.path()).exists());
     }
@@ -1503,6 +1512,14 @@ fn canonical_home(home: &Path) -> Result<PathBuf> {
 
 fn should_host_in_process() -> bool {
     is_test_harness()
+}
+
+fn broker_start_timeout() -> Duration {
+    if is_test_harness() {
+        TEST_START_TIMEOUT
+    } else {
+        START_TIMEOUT
+    }
 }
 
 fn is_test_harness() -> bool {

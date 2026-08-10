@@ -4,7 +4,7 @@
 //! with `spawn=true`. All others use [`SyntheticBackend`].
 
 use super::mcp_stdio::{McpStdioBackend, McpStdioConfig};
-use super::sandbox::sandbox_enabled;
+use super::sandbox::{sandbox_enabled_with_env, sandbox_from_env};
 use super::stdio_client::UpstreamTool;
 use super::synthetic::SyntheticBackend;
 use super::{WorkerBackend, WorkerKey, WorkerManager, WorkerSlot, WorkerState, WorkerToolResult};
@@ -27,14 +27,28 @@ pub const ENV_WORKER_IDLE_SECS: &str = "LOCUS_WORKER_IDLE_SECS";
 ///
 /// Sandbox is on when `upstream.sandbox = true` **or** `LOCUS_WORKER_SANDBOX=1`.
 pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
+    mcp_config_from_upstream_with_env(spec, sandbox_from_env())
+}
+
+fn mcp_config_from_upstream_with_env(
+    spec: &UpstreamSpec,
+    env_sandbox: bool,
+) -> Result<McpStdioConfig> {
     let expanded = spec.expand()?;
+    let sandbox_incompatibility = expanded
+        .recipe
+        .as_deref()
+        .map(crate::recipes::get_recipe)
+        .transpose()?
+        .and_then(|recipe| recipe.sandbox_incompatibility());
     Ok(McpStdioConfig {
         command: expanded.command,
         args: expanded.args,
         spawn: true,
         resolve_secrets: expanded.resolve_secrets,
         extra_env: BTreeMap::new(),
-        sandbox: sandbox_enabled(expanded.sandbox),
+        sandbox: sandbox_enabled_with_env(expanded.sandbox.unwrap_or(false), env_sandbox),
+        sandbox_incompatibility,
     })
 }
 
@@ -780,7 +794,7 @@ for line in sys.stdin:
         );
         let marker_body = std::fs::read_to_string(&marker).unwrap();
         let mut fields = marker_body.split('|');
-        let pid = fields.next().unwrap().to_string();
+        let _pid = fields.next().unwrap().to_string();
         assert_eq!(fields.next(), Some("github-rollback-canary"));
         assert_eq!(fields.next(), Some("missing"));
         #[cfg(unix)]
@@ -788,7 +802,7 @@ for line in sys.stdin:
             let mut stopped = false;
             for _ in 0..20 {
                 if !Command::new("kill")
-                    .args(["-0", &pid])
+                    .args(["-0", &_pid])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()
@@ -802,7 +816,7 @@ for line in sys.stdin:
             }
             assert!(
                 stopped,
-                "earlier credential-bearing child {pid} survived rollback"
+                "earlier credential-bearing child {_pid} survived rollback"
             );
         }
         std::env::remove_var("LOCUS_ROLLBACK_GITHUB");
@@ -855,23 +869,16 @@ for line in sys.stdin:
     fn mcp_config_sandbox_from_spec_or_env() {
         // Spec flag forces sandbox on regardless of env.
         let spec = UpstreamSpec::new("npx").sandbox(true);
-        let cfg = mcp_config_from_upstream(&spec).unwrap();
+        let cfg = mcp_config_from_upstream_with_env(&spec, false).unwrap();
         assert!(cfg.sandbox);
 
-        // Env-only path: force-enable, then restore prior value.
-        let key = crate::workers::ENV_WORKER_SANDBOX;
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, "1");
-        let cfg2 = mcp_config_from_upstream(&UpstreamSpec::new("false-cmd-for-test")).unwrap();
+        // Env-only path is injected so parallel tests do not mutate process state.
+        let cfg2 =
+            mcp_config_from_upstream_with_env(&UpstreamSpec::new("false-cmd-for-test"), true)
+                .unwrap();
         assert!(cfg2.sandbox);
-        // Spec false + env off
-        std::env::set_var(key, "0");
-        let cfg3 = mcp_config_from_upstream(&UpstreamSpec::new("npx")).unwrap();
+        let cfg3 = mcp_config_from_upstream_with_env(&UpstreamSpec::new("npx"), false).unwrap();
         assert!(!cfg3.sandbox);
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
     }
 
     #[test]
@@ -881,6 +888,43 @@ for line in sys.stdin:
         assert_eq!(cfg.command, "npx");
         assert!(cfg.args.iter().any(|a| a.contains("server-everything")));
         assert!(cfg.spawn);
+    }
+
+    #[test]
+    fn incompatible_recipes_never_become_false_sandbox_claims() {
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("locus-home/workers/sess_test");
+        let work_dir = worker_home.join("slots/github");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let session = session_at(&worker_home.display().to_string());
+        let binding = binding_mixed(false);
+        let provider = binding.provider("github").unwrap();
+
+        for id in ["github-official", "vercel-mcp"] {
+            let omitted = UpstreamSpec::from_recipe(id);
+            assert!(mcp_config_from_upstream(&omitted).is_err());
+
+            let requested_sandbox = UpstreamSpec::from_recipe(id).sandbox(true);
+            assert!(mcp_config_from_upstream(&requested_sandbox).is_err());
+
+            let acknowledged = UpstreamSpec::from_recipe(id).sandbox(false);
+            let mut cfg = mcp_config_from_upstream(&acknowledged).unwrap();
+            assert!(!cfg.sandbox, "{id} must remain explicitly unsandboxed");
+            assert!(cfg.sandbox_incompatibility.is_some());
+
+            // Model a later global force without mutating process-global env.
+            // The spawn layer must fail before resolving or launching the child.
+            cfg.sandbox = true;
+            let backend = McpStdioBackend::new(cfg);
+            let err = backend
+                .build_command(&session, &binding, provider, &work_dir)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("cannot run in the worker sandbox"),
+                "{id}: {err}"
+            );
+        }
     }
 
     #[test]

@@ -97,7 +97,8 @@ pub use isolation::{
 };
 pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
 pub use recipes::{
-    all_recipes, get_recipe, recipe_toml_snippet, suggest_for_provider, UpstreamRecipe,
+    all_recipes, get_recipe, recipe_toml_snippet, suggest_for_provider, RecipeReadiness,
+    SandboxCompatibility, UpstreamRecipe,
 };
 pub use seal::SealKey;
 pub use session::{
