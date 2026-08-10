@@ -114,10 +114,12 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] `scripts/hub-integration-test.sh` composition smoke (required_servers + oneline + gate)
 - [x] Land drop-in inside ashlr-hub: `src/core/integrations/locus.ts` + REQUIRED_SERVERS includes `locus` (+ ecosystem discovery name `locus`)
 - [x] `ashlr doctor` calls `checkLocus` in production path (`src/core/doctor.ts`)
-- [x] Hub pre-mutate gate library + spawn wire-in (opt-in `LOCUS_ENFORCE=1|warn`) — hub [PR #240](https://github.com/ashlrai/ashlr-hub/pull/240) stacks on [PR #239](https://github.com/ashlrai/ashlr-hub/pull/239) (`assertLocusPreMutate` in `spawnEngine`; scrubbed mint env)
-- [x] Drop-in `integrations/ashlr-hub/locus.ts` synced with #240: `scrubbedChildEnv`, `validateMintEnv`, `withLocusSession` scrub, `resolveLocusEnforceMode` / `decidePreMutateGate` / `assertLocusPreMutate` / `formatPreMutateBlockers` / `applyLocusPreMutateGate` + docs (`hub-integration.md`, `fleet-preflight.md`)
-- [ ] Always-on firm-mode enforce (default off until pin guaranteed on all hub paths) — open after #240 merges
-- [ ] CI jobs use `withLocusSession` (or `ci mint`) — no shared ambient pin races — helpers + scrubbed mint in #240; job runners not yet wrapped
+- [x] Hub pre-mutate gate library + production wire-in (opt-in `LOCUS_ENFORCE=1|warn`) — hub [PR #239](https://github.com/ashlrai/ashlr-hub/pull/239) doctor/REQUIRED_SERVERS; [PR #241](https://github.com/ashlrai/ashlr-hub/pull/241) scrubbed mint + `applyLocusPreMutateGate` on `spawnEngine` / `runSwarm` / `runApiModelSandboxed`
+- [x] Drop-in `integrations/ashlr-hub/locus.ts` synced with hub: `scrubbedChildEnv`, `validateMintEnv`, `withLocusSession` scrub, `resolveLocusEnforceMode` / `decidePreMutateGate` / `assertLocusPreMutate` / `formatPreMutateBlockers` / `applyLocusPreMutateGate` / `runWithLocusSessionIfConfigured` + docs (`hub-integration.md`, `fleet-preflight.md`)
+- [x] Ecosystem MCP write injects `locusServerSpec` env (`LOCUS_HOME` / `LOCUS_CLIENT` / `LOCUS_NOTIFY`) — hub #241
+- [x] Swarm path: `runWithLocusSessionIfConfigured` when `LOCUS_CI_BINDING` / `LOCUS_BINDING` set — hub #241
+- [ ] Always-on firm-mode enforce (default off until pin guaranteed on all hub paths)
+- [ ] Broader CI/job runners beyond swarm use `withLocusSession` / `ci mint` (daemon / discrete job workers)
 
 ### M5 — Verification plane · **partial / in progress**
 
