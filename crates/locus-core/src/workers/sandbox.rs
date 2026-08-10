@@ -284,8 +284,9 @@ fn validate_runtime_access(runtime: &RuntimeAccess, locus_home: &Path) -> Result
 /// The current work tree and worker home are the only caller-owned trees made
 /// readable. The rest of LOCUS_HOME (including daemon.key, bindings, sessions,
 /// approvals, and audit) and the user's ambient home remain inaccessible.
-/// Network is outbound-only because upstream MCP servers are provider clients;
-/// listening sockets are not part of the worker contract.
+/// Network is outbound TCP/UDP only because upstream MCP servers are provider
+/// clients. Listening sockets and local Unix-domain sockets are not part of the
+/// worker contract; the latter includes host daemon sockets such as Docker.
 #[allow(dead_code)]
 pub fn seatbelt_profile_for_worker(
     work_dir: &Path,
@@ -362,7 +363,7 @@ fn seatbelt_profile_for_runtime(
 (allow ipc-posix*)
 (allow system-socket)
 (system-network)
-(allow network-outbound)
+(allow network-outbound (remote tcp) (remote udp))
 (allow file-read-metadata file-test-existence
     (path-ancestors "{wd}")
     (path-ancestors "{wh}")
@@ -530,7 +531,7 @@ mod tests {
         let (_dir, worker_home, work_dir, executable, _backend) = fixture();
         let profile = seatbelt_profile_for_worker(&work_dir, &worker_home, &executable).unwrap();
         assert!(profile.contains("(deny default)"));
-        assert!(profile.contains("(allow network-outbound)"));
+        assert!(profile.contains("(allow network-outbound (remote tcp) (remote udp))"));
         assert!(!profile.contains("network-inbound"));
         assert!(profile.contains(&worker_home.canonicalize().unwrap().display().to_string()));
         assert!(!profile.contains("(allow default)"));
@@ -756,7 +757,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn inbound_network_cannot_fall_through_real_sandbox() {
+    fn oauth_callback_listener_cannot_bind_in_real_sandbox() {
         use std::process::Stdio;
         use std::time::Duration;
 
@@ -777,14 +778,87 @@ mod tests {
             .unwrap();
         for _ in 0..50 {
             if let Some(status) = child.try_wait().unwrap() {
-                assert!(!status.success(), "sandbox unexpectedly allowed a listener");
+                assert!(
+                    !status.success(),
+                    "sandbox unexpectedly allowed an OAuth callback listener"
+                );
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
         let _ = child.kill();
         let _ = child.wait();
-        panic!("sandbox unexpectedly allowed an inbound listener to remain active");
+        panic!("sandbox unexpectedly allowed an OAuth callback listener to remain active");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn docker_style_unix_socket_is_denied_in_real_sandbox() {
+        use std::os::unix::net::UnixListener;
+        use std::time::{Duration, Instant};
+
+        let (dir, worker_home, work_dir, _executable, _backend) = fixture();
+        let socket_path = dir.path().join("docker.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let accept = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok(_) => return true,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => return false,
+                }
+            }
+            false
+        });
+        let spawn = resolve_sandbox_spawn(
+            "/usr/bin/nc",
+            &["-U".into(), socket_path.display().to_string()],
+            &work_dir,
+            &worker_home,
+        )
+        .unwrap();
+        let output = std::process::Command::new(&spawn.program)
+            .args(&spawn.args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let connected = accept.join().unwrap();
+        assert!(
+            !output.status.success() && !connected,
+            "sandbox unexpectedly reached a Docker-style Unix socket: status={} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn live_docker_socket_is_denied_in_real_sandbox_when_present() {
+        let socket_path = Path::new("/var/run/docker.sock");
+        if !socket_path.exists() {
+            return;
+        }
+        let (_dir, worker_home, work_dir, _executable, _backend) = fixture();
+        let spawn = resolve_sandbox_spawn(
+            "/usr/bin/nc",
+            &["-U".into(), socket_path.display().to_string()],
+            &work_dir,
+            &worker_home,
+        )
+        .unwrap();
+        let output = std::process::Command::new(&spawn.program)
+            .args(&spawn.args)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "sandbox unexpectedly connected to the live Docker daemon socket"
+        );
     }
 
     #[cfg(target_os = "macos")]

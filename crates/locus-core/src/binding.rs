@@ -146,9 +146,10 @@ impl UpstreamSpec {
     ///   defaults; non-empty fields win (full override, not merge).
     /// - Pure recipe path (empty command *and* empty args): adopt
     ///   `recipe.default_resolve_secrets` when false.
-    /// - Any recipe path adopts `recipe.default_sandbox` when `sandbox` is
-    ///   omitted, even when command or args override the recipe. Explicit
-    ///   `sandbox = false` is the only opt-out.
+    /// - Sandbox-compatible recipes adopt `recipe.default_sandbox` when omitted,
+    ///   including command or args overrides.
+    /// - Sandbox-incompatible recipes are unavailable unless the binding
+    ///   explicitly acknowledges `sandbox = false`.
     ///
     /// Note: `resolve_secrets` still uses a bool default, while `sandbox` uses
     /// `Option<bool>` so omission remains distinguishable from explicit false.
@@ -193,7 +194,7 @@ impl UpstreamSpec {
         } else {
             self.resolve_secrets
         };
-        let sandbox = Some(self.sandbox.unwrap_or(recipe.default_sandbox));
+        let sandbox = Some(recipe.resolve_sandbox_choice(self.sandbox)?);
 
         Ok(Self {
             recipe: self.recipe.clone(),
@@ -743,6 +744,43 @@ upstream = { recipe = "github-mcp" }
         assert_eq!(opted_out.expand().unwrap().sandbox, Some(false));
         let serialized = toml::to_string(&opted_out).unwrap();
         assert!(serialized.contains("sandbox = false"));
+    }
+
+    #[test]
+    fn incompatible_recipe_requires_explicit_unsandboxed_acknowledgement() {
+        for id in ["github-official", "vercel-mcp"] {
+            let omitted = UpstreamSpec::from_recipe(id);
+            let err = omitted.expand().unwrap_err().to_string();
+            assert!(err.contains("unavailable by default"), "{id}: {err}");
+            assert!(err.contains("sandbox = false"), "{id}: {err}");
+
+            let falsely_sandboxed = UpstreamSpec::from_recipe(id).sandbox(true);
+            let err = falsely_sandboxed.expand().unwrap_err().to_string();
+            assert!(err.contains("not compatible"), "{id}: {err}");
+
+            let acknowledged = UpstreamSpec::from_recipe(id).sandbox(false);
+            let expanded = acknowledged.expand().unwrap();
+            assert_eq!(expanded.sandbox, Some(false));
+
+            let command_override = UpstreamSpec {
+                recipe: Some(id.into()),
+                command: "custom-wrapper".into(),
+                args: Vec::new(),
+                resolve_secrets: false,
+                sandbox: None,
+            };
+            assert!(command_override.expand().is_err());
+            assert_eq!(
+                UpstreamSpec {
+                    sandbox: Some(false),
+                    ..command_override
+                }
+                .expand()
+                .unwrap()
+                .sandbox,
+                Some(false)
+            );
+        }
     }
 
     #[test]

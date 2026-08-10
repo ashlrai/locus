@@ -3,7 +3,7 @@
 #
 # Steps:
 #   1. locus quickstart
-#   2. locus agent setup --client claude (--dry-run by default, --apply with DOGFOOD_APPLY=1)
+#   2. locus agent setup --client claude (applied in isolated mode)
 #   3. locus agent report --json | jq .status
 #   4. locus doctor
 #   5. locus forensics export --out /tmp/pack.json (or $DOGFOOD_PACK)
@@ -31,67 +31,92 @@ readiness_gate() {
   [[ "$doctor_rc" -eq 0 ]] || return 1
   [[ "$verify_rc" -eq 0 ]] || return 1
   [[ "$hub_ok" -eq 1 ]] || return 1
-  printf '%s' "$report" | jq -e '
-    def backing_file: gsub("\\\\"; "/") | split("/") | last;
-    def backing_ok:
-      . as $pin
-      | (($pin.session_id | type) == "string" and ($pin.session_id | length) > 0)
-      and (($pin.backing_path | type) == "string" and ($pin.backing_path | length) > 0)
-      and (($pin.backing_path | backing_file) as $file
-        | ($pin.backing_type == "active" and $file == "active.json")
-          or ($pin.backing_type == "run" and ($file | test("^run-.+\\.json$")))
-          or ($pin.backing_type == "ci"
-            and $file == ("ci-" + ($pin.session_id | sub("^ses_"; "")) + ".json")));
-    .status == "ready"
-    and .ready == true
-    and .pin != null
-    and .pin.authority_anchor_ok == true
-    and .pin.binding_authority_ok == true
-    and (.pin | backing_ok)
-    and (.status_oneline | type == "string" and contains(":"))
-    and .doctor.verdict == "SAFE"
-    and .doctor.ok == true
-    and ((.doctor.unresolved_phm // []) | length == 0)
+  jq -ne --argjson report "$report" --argjson verify "$verify" '
+    def nonempty: type == "string" and length > 0;
+    def runtime_matches($runtime; $pin; $session_id):
+      $runtime.pinned == true
+      and $runtime.seal_ok == true
+      and $runtime.binding_present == true
+      and $runtime.binding_id_match == true
+      and $runtime.tenant_match == true
+      and $runtime.providers_match == true
+      and $runtime.frozen == false
+      and $runtime.expired == false
+      and $runtime.ok == true
+      and (($runtime.issues // []) | length == 0)
+      and $runtime.session_id == $session_id
+      and $runtime.binding_alias == $pin.alias
+      and $runtime.binding_id_session == $pin.binding_id
+      and $runtime.binding_id_file == $pin.binding_id
+      and $runtime.tenant_session == $pin.tenant
+      and $runtime.tenant_file == $pin.tenant;
+    ($report.pin) as $pin
+    | ($verify.whoami) as $who
+    | ($who.session_id) as $session_id
+    | $report.status == "ready"
+    and $report.ready == true
+    and $report.exit_code == 0
+    and ($pin.alias | nonempty)
+    and ($pin.tenant | nonempty)
+    and ($pin.binding_id | nonempty)
+    and ($pin.expires_at | nonempty)
+    and $pin.seal_ok == true
+    and $pin.expired == false
+    and $report.status_oneline == ($pin.alias + ":" + $pin.tenant)
+    and $report.env_session_id == null
+    and $report.home == $report.doctor.home
+    and $report.doctor.pin == $pin
+    and $report.doctor.pin_seal_ok == true
+    and $report.doctor.verdict == "SAFE"
+    and $report.doctor.ok == true
+    and (($report.doctor.unresolved_phm // []) | length == 0)
+    and runtime_matches($report.doctor.runtime; $pin; $session_id)
+    and $verify.kind == "session"
+    and $verify.session_ok == true
+    and ($session_id | nonempty)
+    and $who.binding_alias == $pin.alias
+    and $who.binding_id == $pin.binding_id
+    and $who.tenant == $pin.tenant
+    and $who.expires_at == $pin.expires_at
+    and ($who.worker_home | nonempty)
+    and ($who.providers | type == "array" and length > 0)
+    and $who.seal_ok == true
+    and $who.frozen == false
+    and $verify.doctor.home == $report.home
+    and $verify.doctor.pin == $pin
+    and $verify.doctor.pin_seal_ok == true
+    and $verify.doctor.verdict == "SAFE"
+    and $verify.doctor.ok == true
+    and (($verify.doctor.unresolved_phm // []) | length == 0)
+    and $verify.doctor.runtime == $report.doctor.runtime
+    and runtime_matches($verify.doctor.runtime; $pin; $session_id)
+    and $verify.doctor.runtime.providers == $who.providers
+    and $verify.safe_next.ready == true
+    and $verify.safe_next.action == "ready"
+    and $verify.safe_next.binding == $pin.alias
+    and $verify.safe_next.tenant == $pin.tenant
   ' >/dev/null 2>&1 || return 1
   printf '%s' "$report" | jq -e -f "$ROOT/scripts/dogfood-ready.jq" >/dev/null 2>&1 || return 1
-  printf '%s' "$verify" | jq -e '
-    def backing_file: gsub("\\\\"; "/") | split("/") | last;
-    def backing_ok:
-      . as $pin
-      | (($pin.session_id | type) == "string" and ($pin.session_id | length) > 0)
-      and (($pin.backing_path | type) == "string" and ($pin.backing_path | length) > 0)
-      and (($pin.backing_path | backing_file) as $file
-        | ($pin.backing_type == "active" and $file == "active.json")
-          or ($pin.backing_type == "run" and ($file | test("^run-.+\\.json$")))
-          or ($pin.backing_type == "ci"
-            and $file == ("ci-" + ($pin.session_id | sub("^ses_"; "")) + ".json")));
-    .kind == "session"
-    and .session_ok == true
-    and .whoami != null
-    and .whoami.authority_anchor_ok == true
-    and .whoami.binding_authority_ok == true
-    and (.whoami | backing_ok)
-    and .doctor.verdict == "SAFE"
-    and .doctor.ok == true
-    and ((.doctor.unresolved_phm // []) | length == 0)
-    and .safe_next.ready == true
-    and .safe_next.action == "ready"
-  ' >/dev/null 2>&1
+  return 0
 }
 
 dogfood_gate_self_test() {
-  local ready warn unresolved protected verify_ready verify_not_ready anchor_bad authority_bad backing_bad verify_authority_bad ci_mismatch
-  ready='{"status":"ready","ready":true,"pin":{"alias":"a","session_id":"ses_abc","authority_anchor_ok":true,"binding_authority_ok":true,"backing_type":"active","backing_path":"/tmp/locus/sessions/active.json"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[],"findings":[]}}'
-  warn='{"status":"ready","ready":true,"pin":{"alias":"a","session_id":"ses_abc","authority_anchor_ok":true,"binding_authority_ok":true,"backing_type":"active","backing_path":"/tmp/locus/sessions/active.json"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"WARN","ok":false,"unresolved_phm":[],"findings":[]}}'
-  unresolved='{"status":"ready","ready":true,"pin":{"alias":"a","session_id":"ses_abc","authority_anchor_ok":true,"binding_authority_ok":true,"backing_type":"active","backing_path":"/tmp/locus/sessions/active.json"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[{"provider":"github"}],"findings":[]}}'
-  protected='{"status":"protected","ready":false,"pin":{"alias":"a","session_id":"ses_abc","authority_anchor_ok":true,"binding_authority_ok":true,"backing_type":"active","backing_path":"/tmp/locus/sessions/active.json"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[],"findings":[]}}'
-  verify_ready='{"kind":"session","session_ok":true,"whoami":{"session_id":"ses_abc","authority_anchor_ok":true,"binding_authority_ok":true,"backing_type":"active","backing_path":"/tmp/locus/sessions/active.json"},"doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[]},"safe_next":{"ready":true,"action":"ready"}}'
+  local ready warn unresolved protected verify_ready verify_not_ready report_identity_bad verify_identity_bad session_bad env_override
+  local pin runtime doctor whoami
+  pin='{"alias":"dogfood","tenant":"dogfood","binding_id":"bnd_dogfood","expires_at":"2026-08-10T12:00:00Z","seal_ok":true,"expired":false}'
+  runtime='{"pinned":true,"seal_ok":true,"binding_present":true,"binding_id_match":true,"tenant_match":true,"providers_match":true,"frozen":false,"expired":false,"session_id":"ses_abc","binding_alias":"dogfood","binding_id_session":"bnd_dogfood","binding_id_file":"bnd_dogfood","tenant_session":"dogfood","tenant_file":"dogfood","providers":[{"provider":"github","account":"dogfood","credential":{"present":true,"source":"env"},"project_ref":null,"team_id":null,"account_id":null,"read_only":null,"orgs":["dogfood"],"repos":[]}],"issues":[],"ok":true}'
+  doctor="$(jq -cn --argjson pin "$pin" --argjson runtime "$runtime" '{home:"/tmp/locus",pin:$pin,pin_seal_ok:true,runtime:$runtime,verdict:"SAFE",ok:true,unresolved_phm:[]}')"
+  whoami='{"session_id":"ses_abc","binding_alias":"dogfood","binding_id":"bnd_dogfood","tenant":"dogfood","principal":null,"providers":[{"provider":"github","account":"dogfood","credential":{"present":true,"source":"env"},"project_ref":null,"team_id":null,"account_id":null,"read_only":null,"orgs":["dogfood"],"repos":[]}],"expires_at":"2026-08-10T12:00:00Z","worker_home":"/tmp/locus/workers/ses_abc","seal_ok":true,"frozen":false,"mode":"exclusive","namespaces":[]}'
+  ready="$(jq -cn --argjson pin "$pin" --argjson doctor "$doctor" '{status:"ready",ready:true,exit_code:0,pin:$pin,status_oneline:"dogfood:dogfood",home:"/tmp/locus",required_servers:["locus","phantom"],mcp_command:"locus-mcp",doctor:$doctor}')"
+  verify_ready="$(jq -cn --argjson whoami "$whoami" --argjson doctor "$doctor" '{kind:"session",session_ok:true,whoami:$whoami,doctor:$doctor,safe_next:{ready:true,action:"ready",binding:"dogfood",tenant:"dogfood"}}')"
+  warn="$(printf '%s' "$ready" | jq '.doctor.verdict = "WARN" | .doctor.ok = false')"
+  unresolved="$(printf '%s' "$ready" | jq '.doctor.unresolved_phm = [{"provider":"github"}]')"
+  protected="$(printf '%s' "$ready" | jq '.status = "protected" | .ready = false | .exit_code = 1')"
   verify_not_ready="$(printf '%s' "$verify_ready" | jq '.session_ok = false')"
-  anchor_bad="$(printf '%s' "$ready" | jq '.pin.authority_anchor_ok = false')"
-  authority_bad="$(printf '%s' "$ready" | jq '.pin.binding_authority_ok = false')"
-  backing_bad="$(printf '%s' "$ready" | jq '.pin.backing_path = "/tmp/locus/sessions/run-wrong.json"')"
-  verify_authority_bad="$(printf '%s' "$verify_ready" | jq '.whoami.binding_authority_ok = false')"
-  ci_mismatch="$(printf '%s' "$ready" | jq '.pin.backing_type = "ci" | .pin.backing_path = "/tmp/locus/sessions/ci-wrong.json"')"
+  report_identity_bad="$(printf '%s' "$ready" | jq '.doctor.runtime.binding_id_file = "bnd_other"')"
+  verify_identity_bad="$(printf '%s' "$verify_ready" | jq '.whoami.binding_id = "bnd_other"')"
+  session_bad="$(printf '%s' "$verify_ready" | jq '.doctor.runtime.session_id = "ses_other"')"
+  env_override="$(printf '%s' "$ready" | jq '.env_session_id = "ses_stale"')"
 
   readiness_gate "$ready" 0 0 "$verify_ready" 0 1 || die "self-test rejected complete readiness"
   ! readiness_gate "$warn" 0 0 "$verify_ready" 0 1 || die "self-test reproduced WARN false-ready"
@@ -101,11 +126,10 @@ dogfood_gate_self_test() {
   ! readiness_gate "$ready" 0 0 "$verify_ready" 0 0 || die "self-test reproduced skipped Hub smoke false-ready"
   ! readiness_gate "$ready" 0 0 "$verify_not_ready" 0 1 || die "self-test accepted session_ok=false"
   ! readiness_gate "$ready" 0 0 "$verify_ready" 1 1 || die "self-test accepted nonzero verify-session exit"
-  ! readiness_gate "$anchor_bad" 0 0 "$verify_ready" 0 1 || die "self-test accepted stale authority anchor"
-  ! readiness_gate "$authority_bad" 0 0 "$verify_ready" 0 1 || die "self-test accepted incomplete binding authority"
-  ! readiness_gate "$backing_bad" 0 0 "$verify_ready" 0 1 || die "self-test accepted mismatched backing type"
-  ! readiness_gate "$ready" 0 0 "$verify_authority_bad" 0 1 || die "self-test accepted verify-session authority mismatch"
-  ! readiness_gate "$ci_mismatch" 0 0 "$verify_ready" 0 1 || die "self-test accepted CI backing/session mismatch"
+  ! readiness_gate "$report_identity_bad" 0 0 "$verify_ready" 0 1 || die "self-test accepted report binding mismatch"
+  ! readiness_gate "$ready" 0 0 "$verify_identity_bad" 0 1 || die "self-test accepted whoami binding mismatch"
+  ! readiness_gate "$ready" 0 0 "$session_bad" 0 1 || die "self-test accepted doctor/whoami session mismatch"
+  ! readiness_gate "$env_override" 0 0 "$verify_ready" 0 1 || die "self-test accepted env-selected identity"
   printf 'dogfood readiness gate self-test: ok\n'
 }
 
@@ -125,8 +149,8 @@ if ! command -v locus >/dev/null 2>&1 || ! locus agent report --help >/dev/null 
 fi
 
 USE_REAL="${DOGFOOD_USE_REAL_HOME:-0}"
-APPLY="${DOGFOOD_APPLY:-0}"
-PACK_OUT="${DOGFOOD_PACK:-/tmp/pack.json}"
+APPLY="${DOGFOOD_APPLY:-}"
+PACK_OUT="${DOGFOOD_PACK:-}"
 CLIENT="${DOGFOOD_CLIENT:-claude}"
 SKIP_HUB="${DOGFOOD_SKIP_HUB_SMOKE:-0}"
 
@@ -138,6 +162,8 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "${USE_REAL}" == "1" ]]; then
+  APPLY="${APPLY:-0}"
+  PACK_OUT="${PACK_OUT:-/tmp/pack.json}"
   log "using real LOCUS_HOME (${LOCUS_HOME:-~/.locus})"
   unset LOCUS_HOME 2>/dev/null || true
   # Allow caller to set LOCUS_HOME explicitly for real dogfood
@@ -145,10 +171,23 @@ if [[ "${USE_REAL}" == "1" ]]; then
     export LOCUS_HOME="$DOGFOOD_HOME"
   fi
 else
+  APPLY="${APPLY:-1}"
   DOGFOOD_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-dogfood.XXXXXX")"
   export LOCUS_HOME="$DOGFOOD_HOME"
+  PACK_OUT="${PACK_OUT:-$DOGFOOD_HOME/pack.json}"
   unset LOCUS_SESSION_ID || true
   log "isolated LOCUS_HOME=$LOCUS_HOME"
+  DOGFOOD_PROJECT="$DOGFOOD_HOME/project"
+  mkdir -p "$DOGFOOD_PROJECT"
+  cd "$DOGFOOD_PROJECT"
+  export LOCUS_DOGFOOD_TOKEN="dogfood-local-${PPID}-${RANDOM}"
+  locus init >/dev/null
+  locus binding add dogfood \
+    --tenant dogfood \
+    --provider github \
+    --account dogfood \
+    --credential-ref env:LOCUS_DOGFOOD_TOKEN \
+    --org dogfood >/dev/null
 fi
 
 echo "locus: $(command -v locus) ($(locus --version 2>/dev/null || true))"

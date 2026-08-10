@@ -49,6 +49,9 @@ pub struct McpStdioConfig {
     /// Require OS-backed sandbox isolation. PATH/markers are diagnostics only.
     /// Also enabled when `LOCUS_WORKER_SANDBOX=1` regardless of this flag.
     pub sandbox: bool,
+    /// Present when recipe metadata says sandboxing would make the command
+    /// unusable or would require authority the profile intentionally denies.
+    pub sandbox_incompatibility: Option<String>,
 }
 
 /// Stdio MCP backend with live JSON-RPC clients.
@@ -82,6 +85,11 @@ impl McpStdioBackend {
     ) -> Result<Command> {
         let iso = build_isolated_env_opts(session, binding, self.config.resolve_secrets);
         let sandboxed = sandbox_enabled(self.config.sandbox);
+        if sandboxed {
+            if let Some(reason) = &self.config.sandbox_incompatibility {
+                return Err(LocusError::msg(reason.clone()));
+            }
+        }
 
         let (program, args, sandbox_backend) = if sandboxed {
             let spawn = resolve_sandbox_spawn(

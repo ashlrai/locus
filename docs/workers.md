@@ -44,7 +44,7 @@ When enabled, on spawn Locus:
 | Files | Deny by default; allow the work tree, current session worker home, system runtime files, the narrow canonical executable package/parent tree, and exact shebang interpreter |
 | Authority | Denies the rest of the actual custom/default `LOCUS_HOME`, including `daemon.key`, bindings, sessions, approvals, and audit |
 | Secrets | Rebuilds env from the isolation allowlist and uses a private temp root under the worker home |
-| Network | Allows outbound provider traffic; denies inbound listeners |
+| Network | Allows outbound TCP/UDP provider traffic; denies inbound listeners and local Unix-domain sockets |
 | Provenance | Resolves the requested executable to a canonical absolute path before PATH is restricted; unavailable commands fail before spawn |
 | Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND=sandbox-exec` only after backend resolution succeeds |
 
@@ -60,9 +60,9 @@ provider = "github"
 account = "acme"
 credential_ref = "phm:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"] }
-# Built-in recipe (recommended) — expands to command/args + hardened defaults:
-upstream = { recipe = "github-official", resolve_secrets = true, sandbox = true }
-# Legacy npx community package still works: recipe = "github-mcp"
+# Sandbox-compatible npx recipe — expands to command/args + hardened defaults:
+upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }
+# Official Docker recipe requires explicit sandbox = false acknowledgement.
 # Supabase: recipe = "supabase-mcp" · Vercel remote bridge: recipe = "vercel-mcp"
 
 # Explicit command/args (still supported):
@@ -78,10 +78,10 @@ upstream = { recipe = "github-official", resolve_secrets = true, sandbox = true 
 
 | Recipe | Typical use | Defaults |
 |--------|-------------|-------------------------------|
-| `github-official` | **Preferred** — official Docker image + `GITHUB_PERSONAL_ACCESS_TOKEN` | `resolve_secrets`, `sandbox` |
+| `github-official` | Official Docker image + `GITHUB_PERSONAL_ACCESS_TOKEN`; unavailable by default because Docker daemon authority cannot be sandboxed | explicit `sandbox = false` |
 | `github-mcp` | Legacy community `@modelcontextprotocol/server-github` via `npx` (deprecated package) | `resolve_secrets`, `sandbox` |
 | `supabase-mcp` | `@supabase/mcp-server-supabase` stdio (`--read-only`) | `resolve_secrets`, `sandbox` |
-| `vercel-mcp` | Official remote `https://mcp.vercel.com` via documented `mcp-remote` bridge (OAuth) | `sandbox` only |
+| `vercel-mcp` | Official remote `https://mcp.vercel.com` via `mcp-remote`; unavailable by default because first-time OAuth needs a loopback listener and Locus cannot attest cached auth separately | explicit `sandbox = false` |
 | `filesystem-mcp` | Safe filesystem demo (override root path via `args`) | off |
 | `everything-mcp` | MCP test/echo server for wiring checks | off |
 
@@ -92,9 +92,11 @@ locus upstream suggest supabase
 locus upstream suggest vercel
 ```
 
-Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` replace the recipe's command or arguments, but do not disable its sandbox policy. Omitted `sandbox` always adopts `default_sandbox`, including command-only and args-only overrides; explicit `sandbox = false` is the only recipe opt-out. `sandbox = true` requires OS isolation, and `LOCUS_WORKER_SANDBOX=1` always forces it.
+Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` replace the recipe's command or arguments, but do not disable its sandbox policy. Compatible recipes adopt `default_sandbox`, including command-only and args-only overrides; explicit `sandbox = false` remains the opt-out. Recipes whose machine-readable `readiness` is `explicit_unsandboxed_required` are unavailable when `sandbox` is omitted or true, and run only after an explicit `sandbox = false` acknowledgement. `LOCUS_WORKER_SANDBOX=1` makes those recipes fail closed instead of producing a false sandbox claim.
 
-**Remote URLs (host MCP, not Locus workers):** Supabase `https://mcp.supabase.com/mcp` (optional `?project_ref=…`); Vercel `https://mcp.vercel.com` (OAuth). Locus upstream workers are **stdio** only today — use host-native remote MCP when the client supports it, or the `vercel-mcp` bridge when you need a stdio child.
+The macOS Seatbelt profile permits outbound TCP/UDP provider connections, but denies inbound listeners and local Unix-domain sockets. Locus never grants `/var/run/docker.sock`, Docker Desktop's user socket, or blanket inbound networking. Docker therefore remains a host-level, high-authority execution path outside the filesystem boundary. The Vercel bridge remains unsandboxed until Locus can separate and attest OAuth bootstrap from a cached-auth steady state; host-native remote MCP is preferred meanwhile.
+
+**Remote URLs (host MCP, not Locus workers):** Supabase `https://mcp.supabase.com/mcp` (optional `?project_ref=…`); Vercel `https://mcp.vercel.com` (OAuth). Locus upstream workers are **stdio** only today. Use host-native remote MCP when the client supports it; the `vercel-mcp` bridge is an explicit unsandboxed fallback.
 
 When `locus-mcp` is pinned:
 

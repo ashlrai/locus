@@ -1218,13 +1218,25 @@ for r in recipes:
     assert rid, "recipe missing id: %s" % r
     ids.append(rid)
     by_id[rid] = r
-# Top adapters must ship hardened recipes (M3 tail)
+# Compatible adapters keep secure defaults; daemon/OAuth adapters must publish
+# an explicit high-authority readiness gate instead of a false sandbox claim.
 for required in ("github-mcp", "github-official", "supabase-mcp", "vercel-mcp"):
     assert required in by_id, "missing top recipe %s in %s" % (required, ids)
-for rid in ("github-mcp", "github-official", "supabase-mcp", "vercel-mcp"):
+for rid in ("github-mcp", "supabase-mcp"):
     r = by_id[rid]
     sandbox = r.get("default_sandbox", r.get("defaultSandbox"))
     assert sandbox is True, "%s must default_sandbox: %s" % (rid, r)
+    assert r.get("sandbox_compatibility") == "compatible", r
+    assert r.get("readiness") == "ready", r
+for rid, risk in (("github-official", "host_docker_daemon"),
+                  ("vercel-mcp", "oauth_loopback_listener")):
+    r = by_id[rid]
+    sandbox = r.get("default_sandbox", r.get("defaultSandbox"))
+    assert sandbox is False, "%s must be unavailable by default: %s" % (rid, r)
+    assert r.get("sandbox_compatibility") == "incompatible", r
+    assert r.get("readiness") == "explicit_unsandboxed_required", r
+    assert risk in (r.get("risks") or []), r
+    assert r.get("readiness_detail"), r
 for rid in ("github-mcp", "github-official", "supabase-mcp"):
     r = by_id[rid]
     resolve = r.get("default_resolve_secrets", r.get("defaultResolveSecrets"))

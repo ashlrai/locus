@@ -908,7 +908,7 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus upstream list\n\
                locus upstream suggest github\n\
                locus upstream suggest vercel\n\
-               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = true }\n\n\
+               upstream = { recipe = \"github-mcp\", resolve_secrets = true, sandbox = true }\n\n\
              Invariants: agents cannot pin; unpinned ⇒ control tools only; no secrets in results.\n\
              Docs: docs/mcp.md · docs/workers.md",
         ),
@@ -919,12 +919,13 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus upstream list [--json]\n\
                locus upstream suggest <provider> [--json]\n\n\
              In a binding:\n\
-               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = true }\n\
+               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = false }  # Docker: high authority\n\
                upstream = { recipe = \"supabase-mcp\", resolve_secrets = true, sandbox = true }\n\
-               upstream = { recipe = \"vercel-mcp\", sandbox = true }\n\
+               upstream = { recipe = \"vercel-mcp\", sandbox = false }  # OAuth bridge: explicit unsandboxed\n\
                upstream = { recipe = \"filesystem-mcp\", args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/tmp/demo\"] }\n\
                upstream = { command = \"npx\", args = [\"-y\", \"@pkg\"] }  # explicit still works\n\n\
-             Recipe sandbox defaults survive command/args overrides; only sandbox=false opts out.\n\
+             Compatible recipe sandbox defaults survive command/args overrides.\n\
+             Docker/OAuth bridge recipes require explicit sandbox=false and publish risk metadata.\n\
              Recipes: github-official · github-mcp · supabase-mcp · vercel-mcp · filesystem-mcp · everything-mcp\n\
              Source: adapters/recipes.toml · Docs: docs/workers.md · examples/upstream.binding.toml",
         ),
@@ -2479,6 +2480,14 @@ fn cmd_upstream(sub: UpstreamCmd, json: bool) -> Result<()> {
                     r.args.join(" ").dimmed()
                 );
                 println!("      {}", recipe_toml_snippet(r).dimmed());
+                println!(
+                    "      readiness: {}  ·  sandbox: {}",
+                    r.readiness.as_str().yellow(),
+                    r.sandbox_compatibility.as_str().yellow()
+                );
+                if !r.risks.is_empty() {
+                    println!("      risks: {}", r.risks.join(", ").yellow());
+                }
                 if !r.notes.trim().is_empty() {
                     let first = r.notes.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
                     if !first.is_empty() {
@@ -2517,6 +2526,14 @@ fn cmd_upstream(sub: UpstreamCmd, json: bool) -> Result<()> {
                 println!("  {}  {}", r.id.green().bold(), r.title.dimmed());
                 println!("      {} {}", r.command.cyan(), r.args.join(" ").dimmed());
                 println!("      copy: {}", recipe_toml_snippet(r));
+                println!(
+                    "      readiness: {}  ·  sandbox: {}",
+                    r.readiness.as_str().yellow(),
+                    r.sandbox_compatibility.as_str().yellow()
+                );
+                if !r.risks.is_empty() {
+                    println!("      risks: {}", r.risks.join(", ").yellow());
+                }
                 if !r.env_hints.is_empty() {
                     println!("      env hints: {}", r.env_hints.join(", ").dimmed());
                 }

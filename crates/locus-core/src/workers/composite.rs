@@ -28,6 +28,12 @@ pub const ENV_WORKER_IDLE_SECS: &str = "LOCUS_WORKER_IDLE_SECS";
 /// Sandbox is on when `upstream.sandbox = true` **or** `LOCUS_WORKER_SANDBOX=1`.
 pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
     let expanded = spec.expand()?;
+    let sandbox_incompatibility = expanded
+        .recipe
+        .as_deref()
+        .map(crate::recipes::get_recipe)
+        .transpose()?
+        .and_then(|recipe| recipe.sandbox_incompatibility());
     Ok(McpStdioConfig {
         command: expanded.command,
         args: expanded.args,
@@ -35,6 +41,7 @@ pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
         resolve_secrets: expanded.resolve_secrets,
         extra_env: BTreeMap::new(),
         sandbox: sandbox_enabled(expanded.sandbox.unwrap_or(false)),
+        sandbox_incompatibility,
     })
 }
 
@@ -744,6 +751,43 @@ for line in sys.stdin:
         assert_eq!(cfg.command, "npx");
         assert!(cfg.args.iter().any(|a| a.contains("server-everything")));
         assert!(cfg.spawn);
+    }
+
+    #[test]
+    fn incompatible_recipes_never_become_false_sandbox_claims() {
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("locus-home/workers/sess_test");
+        let work_dir = worker_home.join("slots/github");
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let session = session_at(&worker_home.display().to_string());
+        let binding = binding_mixed(false);
+        let provider = binding.provider("github").unwrap();
+
+        for id in ["github-official", "vercel-mcp"] {
+            let omitted = UpstreamSpec::from_recipe(id);
+            assert!(mcp_config_from_upstream(&omitted).is_err());
+
+            let requested_sandbox = UpstreamSpec::from_recipe(id).sandbox(true);
+            assert!(mcp_config_from_upstream(&requested_sandbox).is_err());
+
+            let acknowledged = UpstreamSpec::from_recipe(id).sandbox(false);
+            let mut cfg = mcp_config_from_upstream(&acknowledged).unwrap();
+            assert!(!cfg.sandbox, "{id} must remain explicitly unsandboxed");
+            assert!(cfg.sandbox_incompatibility.is_some());
+
+            // Model a later global force without mutating process-global env.
+            // The spawn layer must fail before resolving or launching the child.
+            cfg.sandbox = true;
+            let backend = McpStdioBackend::new(cfg);
+            let err = backend
+                .build_command(&session, &binding, provider, &work_dir)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("cannot run in the worker sandbox"),
+                "{id}: {err}"
+            );
+        }
     }
 
     #[test]
