@@ -123,7 +123,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Firm config: `~/.ashlr/config.json` → `locus.enforce` (`off`|`warn`|`enforce`); env `LOCUS_ENFORCE` wins; drop-in `parseLocusEnforceToken` / `extractLocusConfigEnforce` / `readLocusConfigFromAshlr` — hub [PR #254](https://github.com/ashlrai/ashlr-hub/pull/254)
 - [x] Firm profile: `~/.ashlr/config.json` → `locus.firm: true` enables enforce for production fleets (env `LOCUS_ENFORCE` still wins; explicit `locus.enforce` beats firm; monorepo default remains off when firm absent/false); drop-in `extractLocusConfigFirm` + resolution step — hub [PR #258](https://github.com/ashlrai/ashlr-hub/pull/258)
 - [ ] Always-on firm-mode enforce by default (still **off** unless `locus.firm` / `locus.enforce` / `LOCUS_ENFORCE` set — #258 lands opt-in firm profile only; do not flip monorepo default until pin is guaranteed on all hub paths)
-- [ ] Broader CI/job runners beyond swarm/runTask use `withLocusSession` / `ci mint` — **partial**: `runBestOfN` hub [PR #257](https://github.com/ashlrai/ashlr-hub/pull/257) **merged**; simple-conductor mint overlay hub [PR #256](https://github.com/ashlrai/ashlr-hub/pull/256) open/pending merge; other daemon / discrete job workers still open
+- [x] Broader CI/job runners: `runWithLocusSessionIfConfigured` on swarm (#241), `runTask` (#252), simple-conductor (#256), `runBestOfN` (#257) — other raw daemon tick paths (if any) still open
 
 ### M5 — Verification plane · **partial / in progress**
 
