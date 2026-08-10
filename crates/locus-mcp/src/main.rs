@@ -145,7 +145,7 @@ fn print_help() {
            LOCUS_MCP_HTTP_ALLOW_REMOTE=1  allow non-loopback bind (default: loopback only)\n\
            LOCUS_HOME                  store root\n\
            LOCUS_WORKER_IDLE_SECS      optional idle teardown for upstream workers\n\
-           LOCUS_WORKER_SANDBOX=1      restricted PATH + SANDBOXED marker (+ macOS sandbox-exec)\n"
+           LOCUS_WORKER_SANDBOX=1      require supported OS isolation or fail closed\n"
     );
 }
 

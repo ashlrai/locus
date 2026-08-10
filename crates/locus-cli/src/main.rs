@@ -922,7 +922,7 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                upstream = { recipe = \"vercel-mcp\", sandbox = true }\n\
                upstream = { recipe = \"filesystem-mcp\", args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/tmp/demo\"] }\n\
                upstream = { command = \"npx\", args = [\"-y\", \"@pkg\"] }  # explicit still works\n\n\
-             Pure-recipe expand adopts default_resolve_secrets / default_sandbox from recipes.toml.\n\
+             Pure-recipe expand adopts defaults only when flags are omitted; sandbox=false explicitly opts out.\n\
              Recipes: github-official · github-mcp · supabase-mcp · vercel-mcp · filesystem-mcp · everything-mcp\n\
              Source: adapters/recipes.toml · Docs: docs/workers.md · examples/upstream.binding.toml",
         ),
@@ -2814,15 +2814,8 @@ fn cmd_verify_claim(text: &str, json: bool) -> Result<()> {
 fn cmd_verify_session(json: bool) -> Result<()> {
     let s = store()?;
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let pack = verify_session(
-        &s,
-        &cwd,
-        DoctorExternal {
-            phantom_on_path: phantom_on_path(),
-            unresolved_phm: Vec::new(),
-            cwd: Some(cwd.clone()),
-        },
-    )?;
+    let external = gather_doctor_external(&s, cwd.clone())?;
+    let pack = verify_session(&s, &cwd, external)?;
     let binding = pack
         .whoami
         .as_ref()
@@ -3124,18 +3117,25 @@ fn embedded_goal_milestones() -> Vec<GoalMilestone> {
 }
 
 fn gather_doctor_report(s: &Store) -> Result<locus_core::DoctorReport> {
+    build_doctor_report(s, gather_doctor_external(s, cwd())?).map_err(Into::into)
+}
+
+fn gather_doctor_external(s: &Store, cwd: PathBuf) -> Result<DoctorExternal> {
     // phantom --version is process-cached (locus_core::phantom_on_path).
-    let phantom = phantom_on_path();
+    gather_doctor_external_with_phantom_status(s, cwd, phantom_on_path())
+}
+
+fn gather_doctor_external_with_phantom_status(
+    s: &Store,
+    cwd: PathBuf,
+    phantom: bool,
+) -> Result<DoctorExternal> {
     let unresolved_phm = collect_unresolved_phm_refs(s, phantom)?;
-    build_doctor_report(
-        s,
-        DoctorExternal {
-            phantom_on_path: phantom,
-            unresolved_phm,
-            cwd: Some(cwd()),
-        },
-    )
-    .map_err(Into::into)
+    Ok(DoctorExternal {
+        phantom_on_path: phantom,
+        unresolved_phm,
+        cwd: Some(cwd),
+    })
 }
 
 fn build_hub_agent_report(s: &Store) -> Result<locus_core::AgentReport> {
@@ -4781,5 +4781,48 @@ mod touchid_tests {
         let r = confirm_grant_touchid("bob", "appr_aabbccddeeff001122334455", "t", "b");
         std::env::remove_var("LOCUS_TOUCHID_MOCK");
         assert!(r.is_err());
+    }
+}
+
+#[cfg(test)]
+mod verify_session_tests {
+    use super::gather_doctor_external_with_phantom_status;
+    use locus_core::{verify_session, Binding, Store};
+    use tempfile::tempdir;
+
+    #[test]
+    fn verify_session_uses_unresolved_credential_evidence() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        let binding = Binding::parse_toml(
+            r#"
+[binding]
+id = "bnd_verify"
+alias = "verify"
+tenant = "tenant"
+
+[[binding.providers]]
+provider = "github"
+account = "tenant"
+credential_ref = "phm:VERIFY_SESSION_MISSING"
+"#,
+        )
+        .unwrap();
+        store.save_binding(&binding).unwrap();
+        store
+            .pin("verify", dir.path(), Some("test".into()), false)
+            .unwrap();
+
+        let external =
+            gather_doctor_external_with_phantom_status(&store, dir.path().to_path_buf(), false)
+                .unwrap();
+        assert_eq!(external.unresolved_phm.len(), 1);
+        let pack = verify_session(&store, dir.path(), external).unwrap();
+        assert!(!pack.session_ok);
+        assert!(pack
+            .doctor
+            .findings
+            .iter()
+            .any(|finding| finding.code == "unresolved_phm"));
     }
 }

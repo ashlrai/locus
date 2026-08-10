@@ -34,7 +34,7 @@ pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
         spawn: true,
         resolve_secrets: expanded.resolve_secrets,
         extra_env: BTreeMap::new(),
-        sandbox: sandbox_enabled(expanded.sandbox),
+        sandbox: sandbox_enabled(expanded.sandbox.unwrap_or(false)),
     })
 }
 

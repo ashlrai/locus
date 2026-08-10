@@ -20,9 +20,9 @@ When spawning:
 4. Private `GH_CONFIG_DIR` / AWS config paths under the session worker home.
 5. Optional **sandbox** (below) when `LOCUS_WORKER_SANDBOX=1` or `upstream.sandbox = true`.
 
-## Worker sandbox (best-effort)
+## Worker sandbox (fail closed)
 
-Blast radius for a malicious upstream is still **one binding’s credentials**. Sandbox is additive isolation — not a multi-tenant VM.
+Blast radius for a malicious upstream is still **one binding’s credentials**. Sandbox is additive isolation, not a multi-tenant VM. When enabled, it means a supported OS sandbox was applied; missing backends or executables stop the spawn.
 
 Enable globally:
 
@@ -40,13 +40,17 @@ When enabled, on spawn Locus:
 
 | Step | Behavior |
 |------|----------|
-| Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND` (`path` or `sandbox-exec`) |
-| PATH | Restricts to `/usr/bin:/bin:/usr/local/bin` + `$CARGO_HOME/bin` or `~/.cargo/bin` when present |
-| macOS | If `sandbox-exec` is available, best-effort Seatbelt wrap (does **not** fail if missing) |
+| Backend | Requires macOS `/usr/bin/sandbox-exec`; unsupported platforms fail closed |
+| Files | Deny by default; allow the work tree, current session worker home, system runtime files, and the canonical executable install root |
+| Authority | Denies the rest of the actual custom/default `LOCUS_HOME`, including `daemon.key`, bindings, sessions, approvals, and audit |
+| Secrets | Rebuilds env from the isolation allowlist and uses a private temp root under the worker home |
+| Network | Allows outbound provider traffic; denies inbound listeners |
+| Provenance | Resolves the requested executable to a canonical absolute path before PATH is restricted; unavailable commands fail before spawn |
+| Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND=sandbox-exec` only after backend resolution succeeds |
 
 Composite uses the same flag path: `mcp_config_from_upstream` sets `McpStdioConfig.sandbox` from the spec **or** env.
 
-This is **not** full seccomp/VM isolation. See SECURITY.md / DESIGN.md for residual risk (worker already holds that binding’s secrets).
+This is **not** a VM boundary. macOS Seatbelt is the only implemented backend; Linux and Windows sandbox requests currently fail closed. The explicitly allowed work tree may itself contain sensitive files, so bindings should use a narrowly scoped working directory.
 
 ## Binding TOML — per-provider upstream
 
@@ -88,7 +92,7 @@ locus upstream suggest supabase
 locus upstream suggest vercel
 ```
 
-Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` override recipe defaults when both are set. Pure-recipe expand adopts each recipe’s `default_resolve_secrets` / `default_sandbox` (OR with binding flags).
+Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` override recipe defaults when both are set. For a pure recipe, omitted `sandbox` adopts `default_sandbox`; explicit `sandbox = true` requires OS isolation and explicit `sandbox = false` opts out. `LOCUS_WORKER_SANDBOX=1` always forces isolation.
 
 **Remote URLs (host MCP, not Locus workers):** Supabase `https://mcp.supabase.com/mcp` (optional `?project_ref=…`); Vercel `https://mcp.vercel.com` (OAuth). Locus upstream workers are **stdio** only today — use host-native remote MCP when the client supports it, or the `vercel-mcp` bridge when you need a stdio child.
 
@@ -149,7 +153,7 @@ let slot = mgr.ensure(&session, &binding, "github")?;
 
 ```bash
 export LOCUS_WORKER_IDLE_SECS=300   # tear down workers idle for 5 minutes
-export LOCUS_WORKER_SANDBOX=1       # restricted PATH + marker (+ macOS sandbox-exec if present)
+export LOCUS_WORKER_SANDBOX=1       # require a supported OS sandbox or fail closed
 ```
 
 - Unset or `0` → never idle-reap (default).

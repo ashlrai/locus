@@ -190,7 +190,7 @@ Shipped as partial M5:
 - [x] `locus verify session` — doctor + whoami + safe_next JSON pack
 - [x] E2E + dogfood coverage: `scripts/e2e.sh` feature-detects `verify claim` / `verify session` (shape + no secret values); `scripts/dogfood.sh` hard-requires `session_ok` at the DOGFOOD READY gate
 - [x] Doctor optional `ungrounded_claims` finding
-- [x] Best-effort worker sandbox (`LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`)
+- [x] Fail-closed macOS worker sandbox (`LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`); unsupported platforms refuse sandboxed spawn
 - [x] Core module + unit tests (heuristics only)
 
 ---
@@ -201,7 +201,7 @@ Shipped as partial M5:
 |------|------|
 | `crates/locus-core/src/verify.rs` | Heuristics + `ClaimVerification` |
 | `crates/locus-core/src/agent_report.rs` | `verify_session` → `SessionVerificationPack` |
-| `crates/locus-core/src/workers/sandbox.rs` | Restricted PATH + optional macOS sandbox-exec |
+| `crates/locus-core/src/workers/sandbox.rs` | Deny-by-default macOS Seatbelt; no PATH-only fallback |
 | `crates/locus-cli` | `locus verify claim` · `locus verify session` |
 | `crates/locus-mcp` | `locus_verify_claim` control tool |
 | `crates/locus-core/src/doctor.rs` | Optional audit signal finding |

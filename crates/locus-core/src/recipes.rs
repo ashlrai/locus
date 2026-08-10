@@ -28,7 +28,7 @@ pub struct UpstreamRecipe {
     /// Recommended `resolve_secrets` when the binding omits it.
     #[serde(default)]
     pub default_resolve_secrets: bool,
-    /// Recommended best-effort worker sandbox when the binding omits it.
+    /// Recommended required OS sandbox when the binding omits it.
     /// Pure-recipe expand adopts this (same pattern as `default_resolve_secrets`).
     /// Demo / local recipes keep this false so offline wiring stays unblocked.
     #[serde(default)]

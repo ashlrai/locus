@@ -28,7 +28,7 @@ Legacy Anthropic / modelcontextprotocol reference server via npx.
 Package is deprecated on npm — prefer recipe `github-official` (Docker image
 ghcr.io/github/github-mcp-server) for new bindings.
 
-Pure-recipe expand sets resolve_secrets + best-effort sandbox. Locus injects
+Pure-recipe expand sets resolve_secrets + required OS sandbox. Locus injects
 the binding credential into the child env only (never into MCP tool results).
 Prefer a fine-scoped, vault-backed PAT per tenant — never a personal token on
 a client binding. Opt out: sandbox = false / resolve_secrets = false.
@@ -59,7 +59,7 @@ With resolve_secrets = true, Locus resolves the binding credential and injects
 GITHUB_PERSONAL_ACCESS_TOKEN into the child only (`docker -e VAR` pass-through).
 Remote hosted option (not stdio): https://api.githubcopilot.com/mcp/ — use
 host-native remote MCP when available; Locus workers today are stdio only.
-Best-effort sandbox on by pure-recipe expand; set sandbox = false to opt out.
+OS sandbox on by pure-recipe expand; set sandbox = false to opt out explicitly.
 """
 
 [[recipes]]
@@ -74,7 +74,7 @@ env_hints = ["SUPABASE_ACCESS_TOKEN"]
 notes = """
 Official Supabase stdio package (@supabase/mcp-server-supabase). Defaults to
 --read-only; drop that arg only when the binding is intentionally write-capable.
-Pure-recipe expand sets resolve_secrets + best-effort sandbox.
+Pure-recipe expand sets resolve_secrets + required OS sandbox.
 
 Env: SUPABASE_ACCESS_TOKEN (injected when resolve_secrets = true). Prefer
 project-scoped tokens; Locus freezes project_ref on the synthetic adapter.

@@ -412,7 +412,9 @@ mod tests {
         assert_eq!(slot.backend, "mcp_stdio");
         assert_eq!(slot.state, WorkerState::Ready);
         assert!(slot.pid.is_none());
-        let command = backend.build_command(&session, &binding, pb, &work_dir);
+        let command = backend
+            .build_command(&session, &binding, pb, &work_dir)
+            .unwrap();
         let env = command
             .get_envs()
             .filter_map(|(key, value)| value.map(|value| (key, value)))
@@ -437,9 +439,13 @@ mod tests {
     }
 
     #[test]
-    fn mcp_stdio_sandbox_restricts_path_marker() {
+    fn mcp_stdio_sandbox_requires_real_backend_and_private_temp() {
         let dir = tempdir().unwrap();
-        let worker_home = dir.path().join("worker");
+        let worker_home = dir
+            .path()
+            .join("custom-locus-home")
+            .join("workers")
+            .join("sess_test");
         std::fs::create_dir_all(&worker_home).unwrap();
         let session = sample_session(&worker_home.display().to_string());
         let binding = sample_binding();
@@ -458,6 +464,14 @@ mod tests {
         assert!(backend.sandbox_active());
 
         let command = backend.build_command(&session, &binding, pb, &work_dir);
+        #[cfg(not(target_os = "macos"))]
+        {
+            let err = command.unwrap_err().to_string();
+            assert!(err.contains("no supported OS isolation backend"), "{err}");
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        let command = command.unwrap();
         let env = command
             .get_envs()
             .filter_map(|(key, value)| value.map(|value| (key, value)))
@@ -471,10 +485,7 @@ mod tests {
 
         let restricted = crate::workers::restricted_worker_path();
         let path = env.get("PATH").expect("sandboxed worker must set PATH");
-        assert_eq!(
-            path, &restricted,
-            "PATH must equal restricted_worker_path()"
-        );
+        assert!(path.ends_with(&restricted));
         assert!(path.contains("/usr/bin"));
         assert!(path.contains("/bin"));
 
@@ -488,10 +499,11 @@ mod tests {
             .get(crate::workers::ENV_WORKER_SANDBOX_BACKEND)
             .map(String::as_str)
             .expect("LOCUS_WORKER_SANDBOX_BACKEND required");
-        assert!(
-            backend_tag == "path" || backend_tag == "sandbox-exec",
-            "unexpected sandbox backend: {backend_tag}"
-        );
+        assert_eq!(backend_tag, "sandbox-exec");
+        let expected_tmp = worker_home.join("tmp").display().to_string();
+        assert_eq!(env.get("TMPDIR"), Some(&expected_tmp));
+        assert_eq!(env.get("TMP"), Some(&expected_tmp));
+        assert_eq!(env.get("TEMP"), Some(&expected_tmp));
     }
 
     #[test]

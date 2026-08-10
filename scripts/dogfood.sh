@@ -11,12 +11,11 @@
 #   6. locus goal status (northstar progress)
 #   7. scripts/hub-smoke.sh (ashlr-hub CLI contract; own throwaway home)
 #
-# Prints "DOGFOOD READY" when identity is pin-safe: status=ready, or protected+pin
-# (throwaway / dry-run without full MCP apply). unsafe / unpinned always fail.
+# Prints "DOGFOOD READY" only after every required readiness probe is green.
 #
 # Safe by default: uses a throwaway LOCUS_HOME unless DOGFOOD_USE_REAL_HOME=1.
 # Never prints secret values or credential locators.
-# Skip hub-smoke with DOGFOOD_SKIP_HUB_SMOKE=1.
+# `DOGFOOD_SKIP_HUB_SMOKE=1` is diagnostic-only and can never reach READY.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,8 +25,57 @@ log()  { printf '\n==> %s\n' "$*"; }
 ok()   { printf '  ok  %s\n' "$*"; }
 die()  { printf '  FAIL %s\n' "$*" >&2; exit 1; }
 
+readiness_gate() {
+  local report="$1" report_rc="$2" doctor_rc="$3" verify="$4" verify_rc="$5" hub_ok="$6"
+  [[ "$report_rc" -eq 0 ]] || return 1
+  [[ "$doctor_rc" -eq 0 ]] || return 1
+  [[ "$verify_rc" -eq 0 ]] || return 1
+  [[ "$hub_ok" -eq 1 ]] || return 1
+  printf '%s' "$report" | jq -e '
+    .status == "ready"
+    and .ready == true
+    and .pin != null
+    and (.status_oneline | type == "string" and contains(":"))
+    and .doctor.verdict == "SAFE"
+    and .doctor.ok == true
+    and ((.doctor.unresolved_phm // []) | length == 0)
+  ' >/dev/null 2>&1 || return 1
+  printf '%s' "$report" | jq -e -f "$ROOT/scripts/dogfood-ready.jq" >/dev/null 2>&1 || return 1
+  printf '%s' "$verify" | jq -e '
+    .kind == "session"
+    and .session_ok == true
+    and .doctor.verdict == "SAFE"
+    and .doctor.ok == true
+    and ((.doctor.unresolved_phm // []) | length == 0)
+    and .safe_next.ready == true
+    and .safe_next.action == "ready"
+  ' >/dev/null 2>&1
+}
+
+dogfood_gate_self_test() {
+  local ready warn unresolved protected verify_ready
+  ready='{"status":"ready","ready":true,"pin":{"alias":"a"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[],"findings":[]}}'
+  warn='{"status":"ready","ready":true,"pin":{"alias":"a"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"WARN","ok":false,"unresolved_phm":[],"findings":[]}}'
+  unresolved='{"status":"ready","ready":true,"pin":{"alias":"a"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[{"provider":"github"}],"findings":[]}}'
+  protected='{"status":"protected","ready":false,"pin":{"alias":"a"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[],"findings":[]}}'
+  verify_ready='{"kind":"session","session_ok":true,"doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[]},"safe_next":{"ready":true,"action":"ready"}}'
+
+  readiness_gate "$ready" 0 0 "$verify_ready" 0 1 || die "self-test rejected complete readiness"
+  ! readiness_gate "$warn" 0 0 "$verify_ready" 0 1 || die "self-test reproduced WARN false-ready"
+  ! readiness_gate "$ready" 0 1 "$verify_ready" 0 1 || die "self-test reproduced nonzero doctor false-ready"
+  ! readiness_gate "$unresolved" 0 0 "$verify_ready" 0 1 || die "self-test reproduced unresolved credential false-ready"
+  ! readiness_gate "$protected" 1 0 "$verify_ready" 0 1 || die "self-test reproduced protection-only false-ready"
+  ! readiness_gate "$ready" 0 0 "$verify_ready" 0 0 || die "self-test reproduced skipped Hub smoke false-ready"
+  printf 'dogfood readiness gate self-test: ok\n'
+}
+
 if ! command -v jq >/dev/null 2>&1; then
   die "jq is required"
+fi
+
+if [[ "${DOGFOOD_SELF_TEST:-0}" == "1" ]]; then
+  dogfood_gate_self_test
+  exit 0
 fi
 
 # Prefer a local build that has agent/forensics/quickstart.
@@ -125,44 +173,34 @@ if grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|"credential_ref"|phm:|env:|te
 fi
 ok "forensics pack → ${PACK_OUT} ($(wc -c <"${PACK_OUT}" | tr -d ' ') bytes)"
 
-# ── 5b. verify session (structure hard; session_ok enforced at ready gate) ───
-# Throwaway quickstart leaves a pin. Mid-path we require a clean JSON pack;
-# session_ok is hard-checked when claiming DOGFOOD READY (below).
+# ── 5b. verify session (required readiness evidence) ─────────────────────────
 log "5b. locus verify session --json"
-SESSION_OK=""
-if locus verify session --help >/dev/null 2>&1; then
-  set +e
-  VS_JSON="$(locus verify session --json 2>/dev/null)"
-  VS_RC=$?
-  set -e
-  if [[ $VS_RC -ne 0 ]] || ! printf '%s' "$VS_JSON" | jq -e . >/dev/null 2>&1; then
-    printf '  warn verify session did not emit JSON (exit=%s) — continuing\n' "${VS_RC}"
-  else
-    # Secret-value hygiene (mirror e2e claim/session checks; CredentialRef names may appear)
-    if printf '%s' "$VS_JSON" | grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|github_pat_|AKIA|secret_value'; then
-      die "possible secret material in verify session JSON"
-    fi
-    KIND="$(printf '%s' "$VS_JSON" | jq -r '.kind // empty')"
-    SESSION_OK="$(printf '%s' "$VS_JSON" | jq -r 'if .session_ok == true then "true" elif .session_ok == false then "false" else empty end')"
-    HAS_DOCTOR="$(printf '%s' "$VS_JSON" | jq -r 'if .doctor != null then "true" else "false" end')"
-    HAS_SAFE_NEXT="$(printf '%s' "$VS_JSON" | jq -r 'if .safe_next != null then "true" else "false" end')"
-    if [[ "$KIND" != "session" ]] \
-      || [[ -z "$SESSION_OK" ]] \
-      || [[ "$HAS_DOCTOR" != "true" ]] \
-      || [[ "$HAS_SAFE_NEXT" != "true" ]]; then
-      die "verify session pack shape invalid (kind=${KIND} session_ok=${SESSION_OK} doctor=${HAS_DOCTOR} safe_next=${HAS_SAFE_NEXT})"
-    fi
-    if [[ "$SESSION_OK" != "true" ]]; then
-      # Soft mid-path: partial identity can yield session_ok=false before the gate.
-      printf '  warn session_ok=false mid-dogfood (will hard-fail at ready gate if still not ok)\n'
-    fi
-    printf '  kind=%s session_ok=%s doctor=%s safe_next=%s\n' \
-      "$KIND" "$SESSION_OK" "$HAS_DOCTOR" "$HAS_SAFE_NEXT"
-    ok "verify session --json"
-  fi
-else
-  printf '  skip verify session (command not available)\n'
+if ! locus verify session --help >/dev/null 2>&1; then
+  die "verify session command is required"
 fi
+set +e
+VS_JSON="$(locus verify session --json 2>/dev/null)"
+VS_RC=$?
+set -e
+if ! printf '%s' "$VS_JSON" | jq -e . >/dev/null 2>&1; then
+  die "verify session did not emit JSON (exit=${VS_RC})"
+fi
+if printf '%s' "$VS_JSON" | grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|github_pat_|AKIA|secret_value'; then
+  die "possible secret material in verify session JSON"
+fi
+KIND="$(printf '%s' "$VS_JSON" | jq -r '.kind // empty')"
+SESSION_OK="$(printf '%s' "$VS_JSON" | jq -r 'if .session_ok == true then "true" elif .session_ok == false then "false" else empty end')"
+HAS_DOCTOR="$(printf '%s' "$VS_JSON" | jq -r 'if .doctor != null then "true" else "false" end')"
+HAS_SAFE_NEXT="$(printf '%s' "$VS_JSON" | jq -r 'if .safe_next != null then "true" else "false" end')"
+if [[ "$KIND" != "session" ]] \
+  || [[ -z "$SESSION_OK" ]] \
+  || [[ "$HAS_DOCTOR" != "true" ]] \
+  || [[ "$HAS_SAFE_NEXT" != "true" ]]; then
+  die "verify session pack shape invalid (kind=${KIND} session_ok=${SESSION_OK} doctor=${HAS_DOCTOR} safe_next=${HAS_SAFE_NEXT})"
+fi
+printf '  kind=%s session_ok=%s doctor=%s safe_next=%s exit=%s\n' \
+  "$KIND" "$SESSION_OK" "$HAS_DOCTOR" "$HAS_SAFE_NEXT" "$VS_RC"
+ok "verify session --json"
 
 # ── 6. goal status (northstar; walk GOALS.md from repo root) ──────────────────
 log "6. locus goal status"
@@ -201,56 +239,22 @@ fi
 
 # ── 7. hub-smoke (own LOCUS_HOME; hub CLI contract) ──────────────────────────
 log "7. scripts/hub-smoke.sh"
+HUB_OK=0
 if [[ "${SKIP_HUB}" == "1" ]]; then
-  printf '  skip hub-smoke (DOGFOOD_SKIP_HUB_SMOKE=1)\n'
+  printf '  skip hub-smoke (diagnostic only; readiness will fail)\n'
 elif [[ ! -x "$ROOT/scripts/hub-smoke.sh" && ! -f "$ROOT/scripts/hub-smoke.sh" ]]; then
   die "hub-smoke.sh missing at $ROOT/scripts/hub-smoke.sh"
 else
   # hub-smoke is self-contained (own throwaway home); do not pollute dogfood pin.
   bash "$ROOT/scripts/hub-smoke.sh"
+  HUB_OK=1
   ok "hub-smoke"
 fi
 
 # ── Ready gate ───────────────────────────────────────────────────────────────
-# Identity-plane dogfood: accept status=ready (hub mutate gate) OR
-# protected+pin (throwaway quickstart without --apply MCP).
-# unsafe / unpinned / invalid oneline always fail closed.
 log "dogfood gate"
-GATE_OK=0
-if [[ "$HAS_PIN" == "true" ]] \
-  && [[ "$ONELINE" == *:* ]] \
-  && [[ "$STATUS" != "unsafe" ]] \
-  && printf '%s' "$REPORT" | jq -e -f "$ROOT/scripts/dogfood-ready.jq" >/dev/null 2>&1; then
-  if [[ "$STATUS" == "ready" && "$READY" == "true" && "$REPORT_RC" -eq 0 ]]; then
-    GATE_OK=1
-  elif [[ "$STATUS" == "protected" ]]; then
-    # protected+pin is the throwaway / dry-run path (GOALS M3 dogfood contract)
-    GATE_OK=1
-  fi
+if ! readiness_gate "$REPORT" "$REPORT_RC" "$DOCTOR_RC" "$VS_JSON" "$VS_RC" "$HUB_OK"; then
+  die "readiness blocked (status=${STATUS} ready=${READY} pin=${HAS_PIN} oneline=${ONELINE} report_exit=${REPORT_RC} doctor_exit=${DOCTOR_RC} verify_exit=${VS_RC} hub_ok=${HUB_OK})"
 fi
-if [[ "$GATE_OK" -ne 1 ]]; then
-  die "dispatch contract blocked (status=${STATUS} ready=${READY} pin=${HAS_PIN} oneline=${ONELINE} exit=${REPORT_RC})"
-fi
-
-# Pinned identity path: hard-require verify session session_ok when CLI is present.
-# Throwaway samples often leave agent report protected; session_ok still tracks
-# doctor.ok ∧ safe_next.ready for the identity plane.
-if locus verify session --help >/dev/null 2>&1; then
-  set +e
-  VS_GATE="$(locus verify session --json 2>/dev/null)"
-  VS_GATE_RC=$?
-  set -e
-  if [[ $VS_GATE_RC -ne 0 ]] || ! printf '%s' "$VS_GATE" | jq -e . >/dev/null 2>&1; then
-    die "verify session failed at ready gate (exit=${VS_GATE_RC})"
-  fi
-  if printf '%s' "$VS_GATE" | grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|github_pat_|AKIA|secret_value'; then
-    die "possible secret material in verify session JSON at ready gate"
-  fi
-  GATE_SESSION_OK="$(printf '%s' "$VS_GATE" | jq -r 'if .session_ok == true then "true" else "false" end')"
-  GATE_KIND="$(printf '%s' "$VS_GATE" | jq -r '.kind // empty')"
-  if [[ "$GATE_KIND" != "session" ]] || [[ "$GATE_SESSION_OK" != "true" ]]; then
-    die "verify session not ok at ready gate (kind=${GATE_KIND} session_ok=${GATE_SESSION_OK})"
-  fi
-  ok "verify session session_ok=true at ready gate"
-fi
+ok "strict readiness evidence"
 echo "DOGFOOD READY"
