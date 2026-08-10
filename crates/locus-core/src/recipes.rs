@@ -327,11 +327,7 @@ mod tests {
         let all = all_recipes().unwrap();
         let mut seen = std::collections::BTreeSet::new();
         for r in &all {
-            assert!(
-                seen.insert(r.id.as_str()),
-                "duplicate recipe id `{}`",
-                r.id
-            );
+            assert!(seen.insert(r.id.as_str()), "duplicate recipe id `{}`", r.id);
             assert!(!r.id.trim().is_empty());
             assert!(!r.title.trim().is_empty(), "{} missing title", r.id);
         }
