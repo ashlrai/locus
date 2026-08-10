@@ -22,9 +22,11 @@ parallel_sessions = 2
 # ── Upstream mock (stdio MCP) ─────────────────────────────────────────────
 # Prefer built-in recipes (`locus upstream list` / `locus upstream suggest`):
 #   upstream = { recipe = "everything-mcp" }
-#   upstream = { recipe = "github-mcp", resolve_secrets = true }
+#   upstream = { recipe = "github-official", resolve_secrets = true, sandbox = true }
+#   upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }  # legacy npx
+#   upstream = { recipe = "supabase-mcp", resolve_secrets = true, sandbox = true }
+#   upstream = { recipe = "vercel-mcp", sandbox = true }  # remote OAuth via mcp-remote
 #   upstream = { recipe = "filesystem-mcp", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/locus-demo"] }
-#   upstream = { recipe = "supabase-mcp", resolve_secrets = true }
 # Explicit command/args still work (and override recipe defaults when both set).
 #
 # resolve_secrets = true injects resolved credential_ref values into the child

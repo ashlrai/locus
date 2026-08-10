@@ -905,7 +905,8 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
              Upstream recipes (per-provider MCP children):\n\
                locus upstream list\n\
                locus upstream suggest github\n\
-               upstream = { recipe = \"github-mcp\", resolve_secrets = true }\n\n\
+               locus upstream suggest vercel\n\
+               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = true }\n\n\
              Invariants: agents cannot pin; unpinned ⇒ control tools only; no secrets in results.\n\
              Docs: docs/mcp.md · docs/workers.md",
         ),
@@ -916,10 +917,13 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus upstream list [--json]\n\
                locus upstream suggest <provider> [--json]\n\n\
              In a binding:\n\
-               upstream = { recipe = \"github-mcp\", resolve_secrets = true }\n\
+               upstream = { recipe = \"github-official\", resolve_secrets = true, sandbox = true }\n\
+               upstream = { recipe = \"supabase-mcp\", resolve_secrets = true, sandbox = true }\n\
+               upstream = { recipe = \"vercel-mcp\", sandbox = true }\n\
                upstream = { recipe = \"filesystem-mcp\", args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/tmp/demo\"] }\n\
                upstream = { command = \"npx\", args = [\"-y\", \"@pkg\"] }  # explicit still works\n\n\
-             Recipes: github-mcp · github-official · supabase-mcp · filesystem-mcp · everything-mcp\n\
+             Pure-recipe expand adopts default_resolve_secrets / default_sandbox from recipes.toml.\n\
+             Recipes: github-official · github-mcp · supabase-mcp · vercel-mcp · filesystem-mcp · everything-mcp\n\
              Source: adapters/recipes.toml · Docs: docs/workers.md · examples/upstream.binding.toml",
         ),
         (

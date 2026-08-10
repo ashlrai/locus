@@ -130,7 +130,7 @@ mod tests {
     fn builtin_recipes_parse_and_have_core_ids() {
         let all = all_recipes().unwrap();
         assert!(
-            all.len() >= 4,
+            all.len() >= 5,
             "expected several recipes, got {}",
             all.len()
         );
@@ -138,12 +138,14 @@ mod tests {
             "github-mcp",
             "github-official",
             "supabase-mcp",
+            "vercel-mcp",
             "filesystem-mcp",
             "everything-mcp",
         ] {
             assert!(all.iter().any(|r| r.id == id), "missing recipe {id}");
             let r = get_recipe(id).unwrap();
             assert!(!r.command.is_empty(), "{id} command empty");
+            assert!(!r.args.is_empty(), "{id} should ship default args");
         }
     }
 
@@ -175,6 +177,29 @@ mod tests {
     }
 
     #[test]
+    fn suggest_vercel() {
+        let s = suggest_for_provider("vercel").unwrap();
+        assert!(
+            s.iter().any(|r| r.id == "vercel-mcp"),
+            "expected vercel-mcp suggestion, got {:?}",
+            s.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        let r = get_recipe("vercel-mcp").unwrap();
+        assert!(
+            r.notes.contains("mcp.vercel.com"),
+            "vercel recipe must document official remote endpoint"
+        );
+        assert!(
+            r.args.iter().any(|a| a == "mcp-remote"),
+            "vercel bridge must use documented mcp-remote package"
+        );
+        assert!(
+            r.args.iter().any(|a| a.contains("mcp.vercel.com")),
+            "vercel bridge must target official remote URL"
+        );
+    }
+
+    #[test]
     fn snippet_includes_resolve_when_default() {
         let r = get_recipe("github-mcp").unwrap();
         let snip = recipe_toml_snippet(&r);
@@ -184,6 +209,24 @@ mod tests {
             snip.contains("sandbox = true"),
             "real provider recipes should suggest sandbox: {snip}"
         );
+    }
+
+    #[test]
+    fn snippet_vercel_sandbox_without_resolve_secrets() {
+        let r = get_recipe("vercel-mcp").unwrap();
+        let snip = recipe_toml_snippet(&r);
+        assert!(snip.contains("recipe = \"vercel-mcp\""));
+        assert!(
+            snip.contains("sandbox = true"),
+            "vercel remote bridge still defaults sandbox: {snip}"
+        );
+        // OAuth remote — resolve_secrets not recommended by default
+        assert!(
+            !snip.contains("resolve_secrets"),
+            "vercel snippet must not force resolve_secrets: {snip}"
+        );
+        assert!(!r.default_resolve_secrets);
+        assert!(r.default_sandbox);
     }
 
     #[test]
@@ -199,7 +242,12 @@ mod tests {
 
     #[test]
     fn real_recipes_default_sandbox() {
-        for id in ["github-mcp", "github-official", "supabase-mcp"] {
+        for id in [
+            "github-mcp",
+            "github-official",
+            "supabase-mcp",
+            "vercel-mcp",
+        ] {
             let r = get_recipe(id).unwrap();
             assert!(
                 r.default_sandbox,
@@ -209,6 +257,83 @@ mod tests {
         for id in ["filesystem-mcp", "everything-mcp"] {
             let r = get_recipe(id).unwrap();
             assert!(!r.default_sandbox, "{id} demo must stay sandbox-off");
+        }
+    }
+
+    #[test]
+    fn top_adapters_resolve_secrets_defaults() {
+        // Token-injectable stdio recipes must default resolve_secrets on.
+        for id in ["github-mcp", "github-official", "supabase-mcp"] {
+            let r = get_recipe(id).unwrap();
+            assert!(
+                r.default_resolve_secrets,
+                "{id} should default_resolve_secrets"
+            );
+            assert!(
+                !r.env_hints.is_empty(),
+                "{id} should document credential env hints"
+            );
+        }
+        // Vercel official path is remote OAuth — secrets default off.
+        let v = get_recipe("vercel-mcp").unwrap();
+        assert!(
+            !v.default_resolve_secrets,
+            "vercel-mcp is OAuth bridge; resolve_secrets off by default"
+        );
+    }
+
+    #[test]
+    fn top_adapter_commands_are_well_known() {
+        let gh = get_recipe("github-mcp").unwrap();
+        assert_eq!(gh.command, "npx");
+        assert!(gh
+            .args
+            .iter()
+            .any(|a| a == "@modelcontextprotocol/server-github"));
+
+        let official = get_recipe("github-official").unwrap();
+        assert_eq!(official.command, "docker");
+        assert!(official
+            .args
+            .iter()
+            .any(|a| a == "ghcr.io/github/github-mcp-server"));
+        assert!(official
+            .args
+            .iter()
+            .any(|a| a == "GITHUB_PERSONAL_ACCESS_TOKEN"));
+
+        let sb = get_recipe("supabase-mcp").unwrap();
+        assert_eq!(sb.command, "npx");
+        assert!(sb
+            .args
+            .iter()
+            .any(|a| a.starts_with("@supabase/mcp-server-supabase")));
+        assert!(sb.args.iter().any(|a| a == "--read-only"));
+
+        let vercel = get_recipe("vercel-mcp").unwrap();
+        assert_eq!(vercel.command, "npx");
+        assert_eq!(
+            vercel.args,
+            vec![
+                "-y".to_string(),
+                "mcp-remote".to_string(),
+                "https://mcp.vercel.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn recipe_ids_unique() {
+        let all = all_recipes().unwrap();
+        let mut seen = std::collections::BTreeSet::new();
+        for r in &all {
+            assert!(
+                seen.insert(r.id.as_str()),
+                "duplicate recipe id `{}`",
+                r.id
+            );
+            assert!(!r.id.trim().is_empty());
+            assert!(!r.title.trim().is_empty(), "{} missing title", r.id);
         }
     }
 }
