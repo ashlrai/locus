@@ -518,6 +518,53 @@ pub fn probe_agent_options(project_dir: &Path, user_home: Option<&Path>) -> Agen
     }
 }
 
+// ── Session verification pack (hub) ─────────────────────────────────────────
+
+/// Combined identity + health pack for hub heartbeats:
+/// doctor + whoami + safe_next in one JSON object.
+///
+/// Never includes secrets — aliases, verdicts, scopes only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionVerificationPack {
+    /// Stable kind tag for consumers (`session`).
+    pub kind: String,
+    /// Locus crate version.
+    pub version: String,
+    /// Whoami when pinned and seal-readable; `null` when unbound / broken.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub whoami: Option<crate::store::Whoami>,
+    /// Full doctor report (SAFE | WARN | UNSAFE).
+    pub doctor: DoctorReport,
+    /// Single best next action.
+    pub safe_next: SafeNext,
+    /// True when doctor ok and safe_next.ready (convenience for hub gates).
+    pub session_ok: bool,
+}
+
+/// Build doctor + whoami + safe_next as one pack for hub / CI.
+///
+/// Fail-closed pieces still surface as structured fields (e.g. missing whoami)
+/// rather than panicking. Never resolves credential values.
+pub fn verify_session(
+    store: &Store,
+    cwd: &Path,
+    external: DoctorExternal,
+) -> crate::Result<SessionVerificationPack> {
+    let _ = store.check_drift_and_freeze();
+    let whoami = store.whoami().ok();
+    let doctor = build_doctor_report(store, external)?;
+    let safe_next = compute_safe_next(store, cwd)?;
+    let session_ok = doctor.ok && safe_next.ready;
+    Ok(SessionVerificationPack {
+        kind: "session".into(),
+        version: VERSION.into(),
+        whoami,
+        doctor,
+        safe_next,
+        session_ok,
+    })
+}
+
 // ── Safe next action ────────────────────────────────────────────────────────
 
 /// Single best next human/agent action for identity readiness.
@@ -967,6 +1014,31 @@ mod tests {
         assert!(agent_md_content().contains("Kill switch"));
         assert!(workspace_stub_toml().contains("require_pin"));
         assert!(agent_md_path(Path::new("/tmp")).ends_with(".locus/AGENT.md"));
+    }
+
+    #[test]
+    fn verify_session_pack_unpinned() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        let pack = verify_session(
+            &store,
+            dir.path(),
+            DoctorExternal {
+                phantom_on_path: false,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        assert_eq!(pack.kind, "session");
+        assert!(!pack.version.is_empty());
+        assert!(pack.whoami.is_none());
+        assert_eq!(pack.safe_next.action, "enter");
+        assert!(!pack.session_ok);
+        assert!(!pack.doctor.ok || pack.safe_next.action == "enter");
     }
 
     #[test]

@@ -81,6 +81,10 @@ pub struct UpstreamSpec {
     /// Resolve `phm:` / `env:` credential_refs into the child env when spawning.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub resolve_secrets: bool,
+    /// Best-effort worker sandbox: restricted PATH + `LOCUS_WORKER_SANDBOXED=1`.
+    /// Also enabled globally via `LOCUS_WORKER_SANDBOX=1`. See docs/workers.md.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sandbox: bool,
 }
 
 impl UpstreamSpec {
@@ -90,6 +94,7 @@ impl UpstreamSpec {
             command: command.into(),
             args: Vec::new(),
             resolve_secrets: false,
+            sandbox: false,
         }
     }
 
@@ -100,6 +105,7 @@ impl UpstreamSpec {
             command: String::new(),
             args: Vec::new(),
             resolve_secrets: false,
+            sandbox: false,
         }
     }
 
@@ -115,6 +121,12 @@ impl UpstreamSpec {
 
     pub fn resolve_secrets(mut self, yes: bool) -> Self {
         self.resolve_secrets = yes;
+        self
+    }
+
+    /// Enable best-effort sandbox (restricted PATH + marker env).
+    pub fn sandbox(mut self, yes: bool) -> Self {
+        self.sandbox = yes;
         self
     }
 
@@ -187,6 +199,7 @@ impl UpstreamSpec {
             command,
             args,
             resolve_secrets,
+            sandbox: self.sandbox,
         })
     }
 

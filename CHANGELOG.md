@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Dogfood polish and release hygiene on top of 0.2.0. No identity-plane
+invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog.
+
+### Added
+
+- **`scripts/dogfood.sh`** — after forensics export, also prints **`locus goal status`**
+  (from repo `GOALS.md` when present) and runs **`scripts/hub-smoke.sh`** (own throwaway
+  home; skip with `DOGFOOD_SKIP_HUB_SMOKE=1`)
+- Shell e2e feature-detects post-0.2 surfaces:
+  - **`locus verify claim --text … --json`** (URL claims → `needs_tool`)
+  - MCP **`locus_safe_next`** unpinned (`action=enter`) + pinned (no secrets)
+  - **`locus upstream list --json`** (recipe catalog)
+  - Re-asserts **notify disabled by default** after the full suite
+- Landing page ([`apps/web/`](./apps/web/)) — verify claim + `locus_safe_next` callouts
+  alongside dashboard / forensics / HTTP MCP / goal status
+
+### Tests
+
+- Shell e2e (`scripts/e2e.sh`): prior 0.2 surface **plus** verify / safe_next / upstream /
+  notify late re-check — **43 checks** (0 skipped) on full current command set
+- Core unit `inv_notify_default_false` + e2e step 15/27 keep desktop notifications **OFF**
+  by default under clean `LOCUS_HOME`
+
 ## [0.2.0] — 2026-08-09
 
 AI-native / hub-native identity plane polish on top of 0.1.1. Local dashboard,

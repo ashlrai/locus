@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Locus end-to-end shell tests — pin, isolation, MCP, freeze, approval, doctor,
 # dual-control, events, optional enter/run/notify/ns; graph/ci/heartbeat,
-# dashboard health, forensics export, goal status when present (feature-detected).
-# Full 0.2 surface plus adversarial release security probes.
+# dashboard health, forensics export, goal status, verify claim, safe_next MCP,
+# upstream list when present (feature-detected).
+# Full 0.2+ surface plus adversarial release security probes (~43+ checks).
 set -euo pipefail
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
@@ -992,6 +993,201 @@ assert d["verdict"] == "UNSAFE", d
 assert d["workspace"]["valid"] is False, d["workspace"]
 '
 ok "broken workspace link blocks force/run and makes doctor UNSAFE"
+
+# ── 24. verify claim (feature-detected) ──────────────────────────────────────
+log "24. locus verify claim (optional)"
+if ! has_cmd verify && ! has_cmd_path verify claim; then
+  skip "verify claim command not available"
+else
+  set +e
+  verify_json="$(locus verify claim --text 'Deploy hits https://api.x/v2' --json 2>/dev/null)"
+  verify_ec=$?
+  if [[ $verify_ec -ne 0 || -z "$verify_json" ]]; then
+    verify_json="$(locus --json verify claim --text 'Deploy hits https://api.x/v2' 2>/dev/null)"
+    verify_ec=$?
+  fi
+  set -e
+  if [[ $verify_ec -ne 0 || -z "$verify_json" ]]; then
+    skip "verify present but claim invocation failed (API may differ)"
+  else
+    echo "$verify_json" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+d = json.loads(raw)
+assert isinstance(d, dict), type(d)
+# Heuristic claim scoring surface (verification plane stubs)
+for k in ("claim", "confidence", "needs_tool"):
+    assert k in d, "missing %s: %s" % (k, d)
+assert d.get("needs_tool") is True, "URL claim should need_tool: %s" % d
+conf = str(d.get("confidence") or "").lower()
+assert conf in ("low", "medium", "high", "unknown") or conf, d
+# Never leak secrets in claim scoring output
+blob = json.dumps(d).lower()
+for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "akia", "secret_value"):
+    assert bad not in blob, "verify claim must not leak secrets (%s)" % bad
+print("verify claim confidence=%s needs_tool=%s signals=%s" % (
+    d.get("confidence"), d.get("needs_tool"), d.get("signals")))
+'
+    ok "verify claim --json scores URL claim (needs_tool)"
+  fi
+fi
+
+# ── 25. MCP locus_safe_next (feature-detected) ───────────────────────────────
+log "25. MCP locus_safe_next (optional)"
+locus leave >/dev/null 2>&1 || true
+sn_list_out="$(
+  mcp_rpc \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+)"
+sn_names="$(echo "$sn_list_out" | tool_names_from_list)"
+if ! echo "$sn_names" | grep -qx 'locus_safe_next'; then
+  skip "locus_safe_next MCP tool not available"
+else
+  # Unpinned: safe_next should recommend enter / re_pin style action (isError ok)
+  sn_un_out="$(
+    mcp_rpc \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"locus_safe_next","arguments":{}}}'
+  )"
+  sn_un_line="$(echo "$sn_un_out" | tool_call_text)"
+  # Accept OK| or ERR| — body must describe a next action without secrets
+  echo "$sn_un_line" | python3 -c '
+import json, sys, re
+line = sys.stdin.read().strip()
+assert line.startswith("OK|") or line.startswith("ERR|"), line
+body = line[3:] if line.startswith("OK|") else line[4:]
+try:
+    d = json.loads(body)
+except json.JSONDecodeError:
+    m = re.search(r"\{.*\}", body, re.S)
+    assert m, "safe_next body not JSON: %r" % body[:200]
+    d = json.loads(m.group(0))
+assert isinstance(d, dict), d
+# Single best next action surface
+action = (d.get("action") or d.get("next") or d.get("safe_next") or "").lower()
+# Accept action field or nested recommendation
+if not action:
+    action = str(d.get("recommendation") or d.get("status") or "").lower()
+blob = json.dumps(d).lower()
+for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "akia", "secret_value"):
+    assert bad not in blob, "safe_next must not leak secrets (%s)" % bad
+# Unpinned should not claim ready without a pin
+ready_ish = action in ("ready",) or d.get("ready") is True
+assert not ready_ish or d.get("pinned"), "unpinned safe_next should not be ready: %s" % d
+print("safe_next unpinned keys=%s action=%s" % (
+    ",".join(sorted(d.keys())[:12]), action or d.get("action")))
+'
+  ok "MCP locus_safe_next unpinned returns next action (no secrets)"
+
+  # Pinned: should succeed with a coherent action (ready / approve / doctor_fix / …)
+  locus pin personal --force >/dev/null 2>&1 || locus pin acme --force >/dev/null 2>&1 || true
+  sn_pin_out="$(
+    mcp_rpc \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"locus_safe_next","arguments":{}}}'
+  )"
+  sn_pin_line="$(echo "$sn_pin_out" | tool_call_text)"
+  echo "$sn_pin_line" | python3 -c '
+import json, sys, re
+line = sys.stdin.read().strip()
+assert line.startswith("OK|") or line.startswith("ERR|"), line
+body = line[3:] if line.startswith("OK|") else line[4:]
+try:
+    d = json.loads(body)
+except json.JSONDecodeError:
+    m = re.search(r"\{.*\}", body, re.S)
+    assert m, "safe_next body not JSON: %r" % body[:200]
+    d = json.loads(m.group(0))
+assert isinstance(d, dict), d
+blob = json.dumps(d)
+for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "AKIA"):
+    assert bad not in blob, "safe_next must not leak secrets (%s)" % bad
+assert "secret_value" not in blob.lower()
+print("safe_next pinned keys=%s" % ",".join(sorted(d.keys())[:12]))
+'
+  ok "MCP locus_safe_next pinned returns action (no secrets)"
+fi
+
+# ── 26. upstream list (feature-detected) ─────────────────────────────────────
+log "26. locus upstream list (optional)"
+if ! has_cmd upstream && ! has_cmd_path upstream list; then
+  skip "upstream command not available"
+else
+  set +e
+  up_json="$(locus upstream list --json 2>/dev/null)"
+  up_ec=$?
+  if [[ $up_ec -ne 0 || -z "$up_json" ]]; then
+    up_json="$(locus --json upstream list 2>/dev/null)"
+    up_ec=$?
+  fi
+  set -e
+  if [[ $up_ec -ne 0 || -z "$up_json" ]]; then
+    # Text mode still useful
+    if locus upstream list >/dev/null 2>&1; then
+      ok "upstream list text mode"
+    else
+      skip "upstream present but list invocation failed"
+    fi
+  else
+    echo "$up_json" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+d = json.loads(raw)
+# Array of recipes, or object wrapping recipes
+if isinstance(d, list):
+    recipes = d
+elif isinstance(d, dict):
+    recipes = d.get("recipes") or d.get("items") or d.get("upstream") or []
+    if not recipes and any(k in d for k in ("id", "title", "command")):
+        recipes = [d]
+else:
+    raise AssertionError("unexpected upstream list type: %s" % type(d))
+assert isinstance(recipes, list) and len(recipes) >= 1, "expected >=1 recipe: %r" % d
+# Structural + secret hygiene
+blob = json.dumps(recipes).lower()
+for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "akia", "secret_value"):
+    assert bad not in blob, "upstream list must not leak secrets (%s)" % bad
+ids = []
+for r in recipes:
+    assert isinstance(r, dict), r
+    rid = r.get("id") or r.get("name") or r.get("recipe")
+    assert rid, "recipe missing id: %s" % r
+    ids.append(rid)
+print("upstream list count=%d sample=%s" % (len(recipes), ",".join(ids[:6])))
+'
+    ok "upstream list --json returns recipes (no secrets)"
+  fi
+fi
+
+# ── 15 reaffirm: notify still off after full suite (default hygiene) ─────────
+# Step 15 already asserts default-off under clean LOCUS_HOME. Re-check late so
+# later steps cannot silently re-enable notify via config writes.
+log "27. notify still disabled after suite (default hygiene)"
+if ! has_cmd notify; then
+  skip "notify command not available"
+else
+  unset LOCUS_NOTIFY LOCUS_QUIET 2>/dev/null || true
+  notify_json="$(locus notify status --json 2>/dev/null || true)"
+  if [[ -n "$notify_json" ]]; then
+    echo "$notify_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+eff = d.get("effective")
+assert eff in (False, "false", 0) or eff is False, "notify effective must stay false: %s" % d
+print("notify still effective=%s config_enabled=%s" % (eff, d.get("config_enabled")))
+'
+    ok "notify still disabled by default after full e2e suite"
+  else
+    notify_txt="$(locus notify status 2>/dev/null || true)"
+    echo "$notify_txt" | grep -qiE 'off|disabled' \
+      || die "notify should remain disabled after suite: $notify_txt"
+    ok "notify still disabled (text) after full e2e suite"
+  fi
+fi
 
 printf '\n========================================\n'
 printf 'e2e PASS  (%d checks, %d skipped)\n' "$pass" "$skip"

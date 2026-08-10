@@ -180,18 +180,8 @@ pub fn enforce_policy(
                 let dual = binding.policy.requires_dual_control(tool_name);
                 let required = crate::approval::required_grant_count(dual);
                 let grants = pending.grants.len();
-                let hint = if dual {
-                    format!(
-                        "Dual-control: need {required} distinct principals (have {grants}). \
-                         Run `locus approve grant {} --as <principal>` twice with different principals, then re-call.",
-                        pending.id
-                    )
-                } else {
-                    format!(
-                        "Human: run `locus approve grant {} --as <principal>` then re-call (same args), or re-call with confirm=true and approval_id={}",
-                        pending.id, pending.id
-                    )
-                };
+                let hint =
+                    crate::approval::agent_approval_hint(&pending.id, dual, required, grants);
                 Ok(Some(ToolCallResult {
                     ok: false,
                     content: json!({
@@ -456,7 +446,7 @@ pub fn control_tools(pinned: bool) -> Vec<AdapterTool> {
         },
         AdapterTool {
             name: "locus_verify_claim".into(),
-            description: "Verification plane (M5 stub): score a free-text claim before acting. Returns {claim, confidence: unknown|low|medium|high, needs_tool, suggestion, signals, grounding?}. Heuristic — numbers/URLs/versions ⇒ needs_tool + low; identity claims ground against whoami when pinned. Never secrets.".into(),
+            description: "Verification plane (M5): score a free-text claim before acting. Returns {claim, confidence: unknown|low|medium|high, needs_tool, suggestion, signals, grounding?}. Heuristic — numbers/URLs/versions/currency ($)/percentages/absolute language (always|never) ⇒ needs_tool + low confidence; identity claims ground against whoami when pinned. Suggestion names concrete next steps (provider reads, locus exec, whoami). Never secrets. For hub session pack use CLI: locus verify session --json.".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

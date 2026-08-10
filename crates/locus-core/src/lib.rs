@@ -40,14 +40,15 @@ pub use adapters::{
 pub use agent_report::{
     agent_md_content, agent_md_path, agent_md_present, agent_report_from_doctor,
     agent_report_json_has_stable_keys, build_agent_report, compute_safe_next, mcp_agent_env,
-    probe_agent_options, probe_mcp_registered, workspace_present, workspace_stub_toml,
-    AgentCommands, AgentReport, AgentReportOptions, AgentStatus, McpRegistered, SafeNext,
-    AGENT_REPORT_JSON_KEYS, REQUIRED_SERVERS,
+    probe_agent_options, probe_mcp_registered, verify_session, workspace_present,
+    workspace_stub_toml, AgentCommands, AgentReport, AgentReportOptions, AgentStatus,
+    McpRegistered, SafeNext, SessionVerificationPack, AGENT_REPORT_JSON_KEYS, REQUIRED_SERVERS,
 };
 pub use approval::notifications_enabled;
 pub use approval::{
-    args_digest, default_grant_ttl, mint_approval_id, required_grant_count, validate_approval_id,
-    ApprovalGrant, ApprovalRecord, ApprovalStatus,
+    agent_approval_hint, args_digest, default_grant_ttl, format_dual_control_progress,
+    format_grants_progress, mint_approval_id, next_grant_command, notification_body,
+    required_grant_count, validate_approval_id, ApprovalGrant, ApprovalRecord, ApprovalStatus,
 };
 pub use autopin::{match_remote_binding, resolve_auto_pin, AutoPinTarget};
 pub use binding::{
@@ -112,9 +113,11 @@ pub use verify::{
 };
 pub use workers::{
     idle_timeout_from_env, mcp_config_from_upstream, namespace_upstream_tool,
-    provider_from_tool_name, strip_provider_prefix, CompositeWorkerManager, InMemoryWorkerManager,
-    McpStdioBackend, McpStdioClient, McpStdioConfig, SyntheticBackend, UpstreamTool, WorkerBackend,
-    WorkerKey, WorkerManager, WorkerSlot, WorkerState, WorkerToolResult, ENV_WORKER_IDLE_SECS,
+    provider_from_tool_name, restricted_worker_path, sandbox_enabled, sandbox_from_env,
+    strip_provider_prefix, CompositeWorkerManager, InMemoryWorkerManager, McpStdioBackend,
+    McpStdioClient, McpStdioConfig, SyntheticBackend, UpstreamTool, WorkerBackend, WorkerKey,
+    WorkerManager, WorkerSlot, WorkerState, WorkerToolResult, ENV_WORKER_IDLE_SECS,
+    ENV_WORKER_SANDBOX, ENV_WORKER_SANDBOXED, ENV_WORKER_SANDBOX_BACKEND,
 };
 pub use workspace::{find_workspace, WorkspaceConfig};
 

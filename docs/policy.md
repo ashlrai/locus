@@ -120,8 +120,8 @@ locus approve deny appr_…
 
 | Command | Purpose |
 |---------|---------|
-| `locus approve list` | Pending rows; shows **`grants 1/2`** for dual-control progress |
-| `locus approve grant <id> [--as P] [--ttl 15m]` | Human summary: tool, binding, grants n/required, TTL/expiry |
+| `locus approve list` / `pending` | Pending rows; shows **`grants 1/2`** for dual-control progress |
+| `locus approve grant <id> [--as P] [--ttl 15m] [--touchid]` | Progress summary (n/required); `--touchid` = macOS confirm (fail closed) |
 | `locus approve status <id>` | Full record + dual-control progress |
 | `locus approve wait <id> [--timeout 120]` | Poll until approved / denied / timeout (exit non-zero on deny/timeout) |
 | `locus approve deny <id>` | Terminal deny |

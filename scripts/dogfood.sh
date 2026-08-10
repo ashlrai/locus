@@ -7,11 +7,14 @@
 #   3. locus agent report --json | jq .status
 #   4. locus doctor
 #   5. locus forensics export --out /tmp/pack.json (or $DOGFOOD_PACK)
+#   6. locus goal status (northstar progress)
+#   7. scripts/hub-smoke.sh (ashlr-hub CLI contract; own throwaway home)
 #
 # Prints "DOGFOOD READY" only when the same fail-closed contract as Hub dispatch passes.
 #
 # Safe by default: uses a throwaway LOCUS_HOME unless DOGFOOD_USE_REAL_HOME=1.
 # Never prints secret values or credential locators.
+# Skip hub-smoke with DOGFOOD_SKIP_HUB_SMOKE=1.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,6 +38,7 @@ USE_REAL="${DOGFOOD_USE_REAL_HOME:-0}"
 APPLY="${DOGFOOD_APPLY:-0}"
 PACK_OUT="${DOGFOOD_PACK:-/tmp/pack.json}"
 CLIENT="${DOGFOOD_CLIENT:-claude}"
+SKIP_HUB="${DOGFOOD_SKIP_HUB_SMOKE:-0}"
 
 cleanup() {
   if [[ "${USE_REAL}" != "1" && -n "${DOGFOOD_HOME:-}" && -d "${DOGFOOD_HOME}" ]]; then
@@ -118,6 +122,53 @@ if grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|"credential_ref"|phm:|env:|te
   die "possible secret or credential locator material in forensics pack"
 fi
 ok "forensics pack → ${PACK_OUT} ($(wc -c <"${PACK_OUT}" | tr -d ' ') bytes)"
+
+# ── 6. goal status (northstar; walk GOALS.md from repo root) ──────────────────
+log "6. locus goal status"
+if locus goal status --help >/dev/null 2>&1; then
+  # Prefer repo GOALS.md when dogfood is run from a checkout
+  set +e
+  (
+    cd "$ROOT"
+    locus goal status
+  )
+  GOAL_RC=$?
+  set -e
+  set +e
+  GOAL_JSON="$(
+    cd "$ROOT"
+    locus goal status --json 2>/dev/null
+  )"
+  set -e
+  if printf '%s' "$GOAL_JSON" | jq -e . >/dev/null 2>&1; then
+    DONE="$(printf '%s' "$GOAL_JSON" | jq -r '
+      if .milestones then ([.milestones[].done] | add // 0)
+      elif .done then .done
+      else "?" end')"
+    TOTAL="$(printf '%s' "$GOAL_JSON" | jq -r '
+      if .milestones then ([.milestones[].total] | add // 0)
+      elif .total then .total
+      else "?" end')"
+    printf '  goal progress: %s / %s done (exit=%s)\n' "$DONE" "$TOTAL" "$GOAL_RC"
+  else
+    printf '  goal status text mode (exit=%s)\n' "$GOAL_RC"
+  fi
+  ok "goal status"
+else
+  printf '  skip goal status (command not available)\n'
+fi
+
+# ── 7. hub-smoke (own LOCUS_HOME; hub CLI contract) ──────────────────────────
+log "7. scripts/hub-smoke.sh"
+if [[ "${SKIP_HUB}" == "1" ]]; then
+  printf '  skip hub-smoke (DOGFOOD_SKIP_HUB_SMOKE=1)\n'
+elif [[ ! -x "$ROOT/scripts/hub-smoke.sh" && ! -f "$ROOT/scripts/hub-smoke.sh" ]]; then
+  die "hub-smoke.sh missing at $ROOT/scripts/hub-smoke.sh"
+else
+  # hub-smoke is self-contained (own throwaway home); do not pollute dogfood pin.
+  bash "$ROOT/scripts/hub-smoke.sh"
+  ok "hub-smoke"
+fi
 
 # ── Ready gate ───────────────────────────────────────────────────────────────
 log "dogfood gate"

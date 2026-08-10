@@ -112,22 +112,24 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] `integrations/ashlr-hub/fleet-preflight.md` — exact pre-dispatch preflight
 - [x] `schema/hub-gate.schema.json` fleet gate response contract
 - [x] `scripts/hub-integration-test.sh` composition smoke (required_servers + oneline + gate)
-- [ ] Land drop-in inside ashlr-hub: REQUIRED_SERVERS + locus-first discovery
-- [ ] `ashlr doctor` calls `checkLocus` in production path
+- [x] Land drop-in inside ashlr-hub: `src/core/integrations/locus.ts` + REQUIRED_SERVERS includes `locus` (+ ecosystem discovery name `locus`)
+- [x] `ashlr doctor` calls `checkLocus` in production path (`src/core/doctor.ts`)
 - [ ] Hub pre-mutate gate uses `locusFleetGate` / `ensureLocusReady` / `canMutate`
 - [ ] CI jobs use `withLocusSession` (or `ci mint`) — no shared ambient pin races
 
 ### M5 — Verification plane · **partial / in progress**
 
 - [x] Architecture: [docs/verification-plane.md](./docs/verification-plane.md) (proposal → verify → act; confidence; tool grounding)
-- [x] `locus verify claim --text "…"` → `{ claim, confidence, needs_tool, suggestion, signals, grounding? }` (heuristics only)
-- [x] MCP `locus_verify_claim` (same shape; available unpinned)
+- [x] `locus verify claim --text "…"` → `{ claim, confidence, needs_tool, suggestion, signals, grounding? }` (heuristics: numbers/URLs/versions/currency/percentages/absolute language)
+- [x] MCP `locus_verify_claim` (same shape; available unpinned; suggestion names concrete grounding steps)
+- [x] `locus verify session` → doctor + whoami + safe_next JSON pack for hub (`session_ok`)
 - [x] Doctor optional WARN `ungrounded_claims` when audit tail has many low-confidence patterns
 - [x] Conformance pack in CI: `.github/workflows/conformance.yml` — `invariants` + `locus-mcp` tests + `hub-smoke` + `e2e` (high timeout)
-- [ ] Continuous whoami / `watch` in long agent sessions as first-class hub heartbeat
+- [x] Best-effort sandboxed workers: `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox` → restricted PATH + `LOCUS_WORKER_SANDBOXED=1` + optional macOS `sandbox-exec` (not full seccomp/VM)
+- [ ] Continuous whoami / `watch` in long agent sessions as first-class hub heartbeat (session pack is the CLI primitive; not yet a long-lived watcher)
 - [ ] Audit export → SIEM / remote append (team tier)
 - [ ] Adapter SDK + signed registry
-- [ ] Sandboxed workers; bug bounty on seal/capability logic
+- [ ] Hard sandbox (seccomp/VM) + bug bounty on seal/capability logic
 - [ ] Streamable HTTP / remote multiplexor (platform phase)
 
 ---
@@ -171,4 +173,4 @@ locus init --with-samples && locus enter personal && locus doctor
 | M2 Firm UX | done |
 | M3 AI surface | mostly done |
 | M4 Hub composition | in progress |
-| M5 Verification plane | partial (claim verify stubs + conformance CI) |
+| M5 Verification plane | partial (claim+session verify, best-effort worker sandbox, conformance CI) |
