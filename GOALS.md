@@ -114,8 +114,9 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] `scripts/hub-integration-test.sh` composition smoke (required_servers + oneline + gate)
 - [x] Land drop-in inside ashlr-hub: `src/core/integrations/locus.ts` + REQUIRED_SERVERS includes `locus` (+ ecosystem discovery name `locus`)
 - [x] `ashlr doctor` calls `checkLocus` in production path (`src/core/doctor.ts`)
-- [ ] Hub pre-mutate gate uses `locusFleetGate` / `ensureLocusReady` / `canMutate` — open; hub [PR #239](https://github.com/ashlrai/ashlr-hub/pull/239) lands doctor + REQUIRED_SERVERS (not pre-mutate / `withLocusSession` CI yet)
-- [ ] CI jobs use `withLocusSession` (or `ci mint`) — no shared ambient pin races — still open after hub PR #239 (drop-in probe only)
+- [x] Hub pre-mutate gate library + spawn wire-in (opt-in `LOCUS_ENFORCE=1|warn`) — hub [PR #240](https://github.com/ashlrai/ashlr-hub/pull/240) stacks on [PR #239](https://github.com/ashlrai/ashlr-hub/pull/239) (`assertLocusPreMutate` in `spawnEngine`; scrubbed mint env)
+- [ ] Always-on firm-mode enforce (default off until pin guaranteed on all hub paths) — open after #240 merges
+- [ ] CI jobs use `withLocusSession` (or `ci mint`) — no shared ambient pin races — helpers + scrubbed mint in #240; job runners not yet wrapped
 
 ### M5 — Verification plane · **partial / in progress**
 
