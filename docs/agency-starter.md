@@ -150,6 +150,18 @@ Append-only JSONL under `$LOCUS_HOME/audit/events.jsonl`. Never contains resolve
 6. Export audit: `locus events --binding client-a --last 10000 --json`  
 7. Confirm with `locus doctor` / `locus binding list`
 
+## Multi-client dogfood probe
+
+After wiring Claude Code / Cursor (and optionally Continue), run
+`scripts/dogfood-clients.sh` to detect common macOS/Linux config paths and
+dry-run `locus agent setup --client <x>` for each found supported client.
+Missing installs soft-skip (exit 0 + summary); set
+`LOCUS_DOGFOOD_REQUIRE_CLIENTS=1` only when you expect clients on the host.
+Optional soft step from the main dogfood path: `DOGFOOD_CLIENTS=1 scripts/dogfood.sh`.
+The probe never mutates MCP configs and never prints secrets. Confirming
+`agent report ready` across real personal + client accounts in the IDE remains
+an operator-manual check.
+
 ## Operator checklist
 
 - [ ] One binding (or full+ro pair) per client tenant  
@@ -158,6 +170,8 @@ Append-only JSONL under `$LOCUS_HOME/audit/events.jsonl`. Never contains resolve
 - [ ] Destructive globs on `require_approval` (+ dual-control)  
 - [ ] Shell hook; `whoami` / `doctor` before risky sessions  
 - [ ] Offboard = binding + secrets + access + audit  
+- [ ] Optional: `scripts/dogfood-clients.sh` after IDE MCP setup  
+
 
 ## Related
 
