@@ -27,11 +27,32 @@ crates/locus-core/src/adapters/
   stripe.rs
   resend.rs
 
-adapters/manifest.toml          # built-in provider catalog + capabilities
-examples/adapters/_template/    # copy-paste skeleton
+crates/locus-core/src/adapter_registry.rs  # catalog parse + signature verify
+
+adapters/manifest.toml                     # built-in provider catalog + capabilities
+schema/adapter-manifest.schema.json        # JSON Schema for the catalog shape
+examples/adapters/_template/               # copy-paste skeleton
 ```
 
 Built-in providers and tools are listed in [`adapters/manifest.toml`](../adapters/manifest.toml).
+
+### Registry CLI (v0)
+
+Discovery and signature verification over the catalog — **not** a plugin loader:
+
+```bash
+locus adapter list [--json]
+locus adapter verify [--path FILE] [--require-signed] [--json]
+locus topic adapter
+```
+
+| Command | Behavior |
+|---------|----------|
+| `adapter list` | Print every provider in the embedded manifest (tools, freeze selectors, caps) |
+| `adapter verify` | Soft by default: unsigned entries OK; **invalid/malformed** signatures fail |
+| `adapter verify --require-signed` | **Fail closed** unless every entry has a valid trusted signature |
+
+Sibling: `locus upstream list` covers **spawn recipes** (`adapters/recipes.toml`); `locus adapter` covers the **provider catalog**.
 
 ---
 
@@ -257,8 +278,76 @@ impl ProviderAdapter for MyProviderAdapter {
 
 | Now | Later |
 |-----|--------|
-| In-tree `ProviderAdapter`, synthetic identity tools | Upstream MCP / REST workers |
-| Manual `adapter_for` match | Optional out-of-tree packages / registry |
+| In-tree `ProviderAdapter`, synthetic identity tools | Upstream MCP / REST workers (partially landed via recipes) |
+| Manual `adapter_for` match | Optional out-of-tree packages / dynamic load |
+| Catalog parse + HMAC signature verify (`locus adapter`) | Signed registry root (ed25519) + published trust anchors |
 | Policy + approval CLI | Elevation TTL, dual-control UX polish |
 
 Prefer **wrapping** official upstream MCP servers with frozen env over reimplementing APIs — see [workers.md](./workers.md).
+
+---
+
+## Signed registry roadmap
+
+The adapter **catalog** (`adapters/manifest.toml`) is the first registry primitive. v0 ships parse + list + verify; it does **not** load plugins or replace `adapter_for()`.
+
+### Manifest fields (v0)
+
+```toml
+version = 1
+
+[[providers]]
+id = "github"
+name = "GitHub"
+status = "built-in"
+synthetic = true
+capabilities = ["scope", "identity", "repo_allowlist"]
+frozen_selectors = ["orgs", "repos"]
+tools = ["github.scope", "github.whoami", "github.check_repo"]
+destructive_tools = []
+description = "…"
+# Optional detached signature (omit until a registry root is published):
+# signature = "hmac-sha256:<64-hex>"
+# signed_by = "locus-registry-mock"
+```
+
+JSON Schema: [`schema/adapter-manifest.schema.json`](../schema/adapter-manifest.schema.json).
+
+### Signature scheme (v0)
+
+| Item | v0 (now) | Later |
+|------|----------|--------|
+| Algorithm | HMAC-SHA256 over canonical entry material | ed25519 detached sig |
+| Wire form | `hmac-sha256:<hex>` | `ed25519:<base64>` |
+| Trust store | Process-local keys (tests inject a mock key; production default = empty) | Published registry root key(s) under `~/.locus/trust/` + offline pin |
+| Built-in catalog | **Unsigned** (soft verify passes; `--require-signed` fails closed) | Signed at release with the registry root |
+| Scope | Per-provider entry | + whole-file signature, transparency log optional |
+
+**Canonical material** (stable, excludes signature fields):
+
+```text
+v1|{id}|{name}|{status}|{synthetic 0|1}|{caps sorted}|{selectors sorted}|{tools sorted}|{destructive sorted}
+```
+
+### Verify semantics
+
+| Mode | Unsigned | Unknown key | Invalid / malformed |
+|------|----------|-------------|---------------------|
+| Soft (`locus adapter verify`) | OK (informational) | OK (informational) | **Fail** (tamper) |
+| Strict (`--require-signed`) | **Fail** | **Fail** | **Fail** |
+
+`--require-signed` is intentionally fail-closed so CI / firm policy can require a trusted catalog before enabling experimental adapters.
+
+### What is intentionally out of scope (v0)
+
+- Dynamic `.so` / WASM / script adapter loading  
+- Network fetch of remote registries  
+- Replacing in-tree `adapter_for()` registration  
+- Returning or storing credential values in the catalog  
+
+### Next slices
+
+1. **Publish a registry root** (ed25519) and sign release manifests in CI.  
+2. **Trust pin UX** — `locus adapter trust add|list` writing under `~/.locus/trust/`.  
+3. **Optional remote index** — signed HTTP feed of community adapters (still no auto-exec).  
+4. **Out-of-tree packages** — crate or MCP child declared in the catalog, still gated by pin + policy + freeze.  

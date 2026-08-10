@@ -100,7 +100,7 @@ Any client that can spawn a stdio MCP server can use:
 
 ## HTTP transport (CI / remote agents)
 
-Stdio remains the default for Claude Code and Cursor. For CI runners and agents that prefer HTTP, enable the local JSON-RPC server:
+Stdio remains the default for Claude Code and Cursor. For CI runners and agents that prefer HTTP, enable the **streamable-HTTP-lite** server (JSON-RPC over HTTP with streamable Accept negotiation; not a full multi-message SSE bus):
 
 ```bash
 export LOCUS_MCP_HTTP_TOKEN="$(openssl rand -hex 16)"   # required shared secret
@@ -113,8 +113,9 @@ LOCUS_MCP_HTTP=1 LOCUS_MCP_HTTP_ADDR=127.0.0.1:8742 locus-mcp
 
 | Endpoint | Auth | Behavior |
 |----------|------|----------|
-| `GET /health` (`/healthz`, `/`) | none | Liveness JSON: `{ ok, service, version, transport }` |
-| `POST /mcp` (also `/jsonrpc`) | **required** | One JSON-RPC 2.0 request body → JSON-RPC response |
+| `GET /health` (`/healthz`, `/`) | none | Liveness JSON: `{ ok, service, version, transport, endpoints }` |
+| `GET /mcp` (also `/jsonrpc`) | **required** | Capabilities + pin summary + **tool names only** (values-free) |
+| `POST /mcp` (also `/jsonrpc`) | **required** | One JSON-RPC 2.0 request body → one JSON or single SSE event |
 | `OPTIONS /mcp` | none | Minimal CORS preflight for local tooling |
 
 Auth headers (any one):
@@ -123,22 +124,93 @@ Auth headers (any one):
 - `X-Locus-Token: <token>`
 - `X-Locus-Mcp-Token: <token>`
 
+### Streamable Accept / Content-Type
+
+Compatible with MCP streamable HTTP **without** a full multi-message SSE rewrite:
+
+| Header | Server behavior |
+|--------|-----------------|
+| `Content-Type: application/json` | Required for POST when present; missing Content-Type still accepted (legacy CI). Non-JSON → **415**. |
+| `Accept: application/json` (and/or `*/*`) | Response `Content-Type: application/json` (default / preferred). |
+| `Accept: text/event-stream` only | Response `Content-Type: text/event-stream` with **one** `event: message` + `data: <json-rpc>` then close. |
+| `Accept` lists both | Prefer JSON. |
+| `Accept` that allows neither | **406** not acceptable. |
+
+Long tool results still return as **one** JSON object (or one SSE data event). Session resume, multi-event streaming, and `Mcp-Session-Id` continuity are **not** implemented yet.
+
 **Hard rules:**
 
 1. **Loopback only by default** — non-`127.0.0.1` / non-loopback binds refuse unless `LOCUS_MCP_HTTP_ALLOW_REMOTE=1`.
 2. **Token required** — HTTP mode will not start without a non-empty `LOCUS_MCP_HTTP_TOKEN`.
-3. Missing/wrong token → **401**; never soft-allow.
+3. Missing/wrong token → **401**; never soft-allow. Applies to `GET /mcp` and `POST /mcp`.
 4. Same pin/policy/seal gate as stdio — HTTP is only a transport.
+5. `GET /mcp` never returns secret values or credential refs — tool **names** and pin alias/tenant only.
 
 Example (CI):
 
 ```bash
 curl -sS http://127.0.0.1:8742/health
 curl -sS -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
+  http://127.0.0.1:8742/mcp
+curl -sS -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
   http://127.0.0.1:8742/mcp
 ```
+
+### Remote deploy (reverse proxy)
+
+HTTP mode is safe for **remote** agents only when you treat the process like any other secret-scoped service:
+
+1. **Pin before serving** — identity is resolved at the gate. On the host that runs `locus-mcp`:
+   ```bash
+   export LOCUS_HOME=/var/lib/locus          # dedicated store (not a shared laptop home)
+   locus init --with-samples                # once
+   locus pin <alias>                        # or: locus ci mint / enter workflow
+   locus whoami                             # confirm tenant
+   ```
+   Agents still **cannot** pin. Wrong pin ⇒ wrong catalog. Unpinned ⇒ control tools only.
+
+2. **Token** — set a strong `LOCUS_MCP_HTTP_TOKEN` (env or secret manager). Never commit it. Rotate on offboarding.
+
+3. **Bind loopback + reverse proxy** (recommended):
+   ```bash
+   # process listens only on loopback
+   LOCUS_MCP_HTTP_TOKEN=… LOCUS_HOME=/var/lib/locus \
+     locus-mcp --http 127.0.0.1:8742
+   ```
+   Terminate TLS and auth at the proxy (nginx, Caddy, Envoy, cloud LB). Forward:
+   - `Authorization` (or `X-Locus-Token`)
+   - `Content-Type`, `Accept`
+   - path `/mcp` and `/health` (health may stay internal)
+
+   Example nginx sketch:
+   ```nginx
+   location /mcp {
+     proxy_pass http://127.0.0.1:8742;
+     proxy_set_header Authorization $http_authorization;
+     proxy_set_header Content-Type $http_content_type;
+     proxy_set_header Accept $http_accept;
+     proxy_http_version 1.1;
+   }
+   location /health {
+     proxy_pass http://127.0.0.1:8742/health;
+     # optional: restrict to VPC / private probes only
+   }
+   ```
+
+4. **Non-loopback bind** — only if you understand the exposure:
+   ```bash
+   LOCUS_MCP_HTTP_ALLOW_REMOTE=1 locus-mcp --http 0.0.0.0:8742
+   ```
+   Still require the token; prefer network policy (security group / private subnet) in front. TLS at the edge is mandatory for anything beyond localhost.
+
+5. **LOCUS_HOME isolation** — each remote multiplexor process should use its own `LOCUS_HOME` (or a carefully shared store with one intended pin). Do not point a shared CI runner at a developer's `~/.locus`.
+
+6. **Pin requirements** — same as stdio: workspace `.locus.toml` `allowed_bindings` / `require_pin` apply; provider tools appear only with a healthy sealed pin. Destructive tools still hit policy / external authority.
+
+7. **Do not log tokens or resolved secrets** — MCP never returns secret values; keep proxy access logs free of `Authorization` bodies when possible.
 
 ### Capability tickets
 
