@@ -1731,10 +1731,11 @@ impl Store {
                     "required": required,
                     "dual_control": true,
                     "status": "pending",
-                    "hint": format!(
-                        "Need {} more distinct principal(s); run `locus approve grant {} --as <other>`",
-                        required - rec.grants.len(),
-                        rec.id
+                    "hint": crate::approval::agent_approval_hint(
+                        &rec.id,
+                        true,
+                        required,
+                        rec.grants.len(),
                     ),
                 })),
             )?;
@@ -2753,6 +2754,12 @@ credential_ref = "ghp_UNSAFE/CANARY"
             .and_then(|v| v.as_str())
             .unwrap()
             .to_string();
+        let hint = r.content.get("hint").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            hint.contains("ask human: locus approve grant") && hint.contains("needs 2 grants"),
+            "agent hint should tell human to grant with dual count: {hint}"
+        );
+        assert!(hint.contains(&id), "hint must include approval id: {hint}");
 
         // One grant → still pending
         let partial = store.grant_approval(&id, None, "alice").unwrap();
@@ -2773,6 +2780,15 @@ credential_ref = "ghp_UNSAFE/CANARY"
             Some("requires_approval")
         );
         assert_eq!(r2.content.get("grants").and_then(|v| v.as_u64()), Some(1));
+        let hint2 = r2
+            .content
+            .get("hint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            hint2.contains("have 1") || hint2.contains("needs 2 grants"),
+            "partial dual-control hint: {hint2}"
+        );
     }
 
     #[test]

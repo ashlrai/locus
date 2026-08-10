@@ -200,35 +200,47 @@ dual_control = ["*.delete*", "vercel.deploy.prod"]
 # Or: dual_control_all_approvals = true  # every require_approval tool needs 2
 ```
 
-Flow:
+### Walkthrough (two humans, one blast-radius tool)
 
 ```
-Agent tools/call vercel.deploy.prod
+1. Agent tools/call vercel.deploy.prod
         │
         ▼
- Policy → RequireApproval (+ dual_control if matched)
+2. Policy → RequireApproval (+ dual_control)
         │ write approvals/appr_….json (args_digest only — no secrets)
-        │ requester label from session principal
+        │ MCP error includes required_grants=2 + hint:
+        │   "ask human: locus approve grant appr_… --as <principal> (needs 2 grants)"
+        │ Optional: locus notify on → banner body names the grant command
         ▼
- Agent sees blocked + approval_id + grants/required_grants
-        │
- Human A: locus approve grant <id> --as alice
-        │  → status still pending (grants=1) when dual_control
- Human B: locus approve grant <id> --as bob
-        │  → status=approved, TTL starts (default ~15m)
+3. Human A (or partner):
+     locus approve pending                  # alias for `approve list`
+     locus approve grant appr_… --as alice
+     # optional macOS confirm dialog (fail closed on Cancel):
+     # locus approve grant appr_… --as alice --touchid
+        │  → still pending  grants 1/2  (alice)
+        │  → prints next: locus approve grant appr_… --as <other-principal>
         ▼
- Matching tools/call allowed until grant expires
+4. Human B (different principal):
+     locus approve grant appr_… --as bob
+        │  → status=approved  grants 2/2  TTL starts (default ~15m)
+        ▼
+5. Agent re-calls with the **same** args (or confirm=true + approval_id)
+        │  → allowed until grant expires
 ```
 
 CLI:
 
 ```bash
-locus approve list
-locus approve status <id>
-locus approve grant <id> --as alice     # or LOCUS_PRINCIPAL / $USER
+locus approve list              # or: locus approve pending
+locus approve status <id>       # grants n/required + dual-control progress
+locus approve grant <id> --as alice
+locus approve grant <id> --as alice --touchid   # macOS confirm dialog; cancel aborts
 locus approve grant <id> --as bob
+locus approve wait <id> --timeout 120
 locus approve deny <id>
 ```
+
+After each grant, the CLI prints **dual-control progress** clearly (`grants 1/2`, who granted, next command). Partial grants stay `status=pending` until a second distinct principal grants.
 
 **Mechanisms:**
 
@@ -237,6 +249,7 @@ locus approve deny <id>
 - Single-control tools still approve on the first grant.
 - Grants are **time-bounded** — forgotten elevation expires.
 - Agents do not approve themselves; MCP cannot mint a valid grant without the control plane.
+- `--touchid` is a blocking confirm dialog (not a biometric API); cancel **fails closed** (no grant written).
 
 **Roadmap (Phase 3):** shared binding graph, policy packs, engagement offboard as a unit, remote dual-control (team sync).
 

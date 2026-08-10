@@ -7,6 +7,7 @@
 
 mod composite;
 mod mcp_stdio;
+mod sandbox;
 mod stdio_client;
 mod synthetic;
 
@@ -23,6 +24,10 @@ pub use composite::{
     provider_from_tool_name, strip_provider_prefix, CompositeWorkerManager, ENV_WORKER_IDLE_SECS,
 };
 pub use mcp_stdio::{McpStdioBackend, McpStdioConfig};
+pub use sandbox::{
+    restricted_worker_path, sandbox_enabled, sandbox_from_env, ENV_WORKER_SANDBOX,
+    ENV_WORKER_SANDBOXED, ENV_WORKER_SANDBOX_BACKEND,
+};
 pub use stdio_client::{McpStdioClient, UpstreamTool};
 pub use synthetic::SyntheticBackend;
 
@@ -401,6 +406,7 @@ mod tests {
                 "ARBITRARY_EXTRA_SECRET".into(),
                 "configured-mcp-secret".into(),
             )]),
+            sandbox: false,
         });
         let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();
         assert_eq!(slot.backend, "mcp_stdio");
@@ -428,6 +434,64 @@ mod tests {
         assert!(!slot_json.contains("credential_ref"));
         backend.teardown(&slot).unwrap();
         std::env::remove_var("MCP_UNLISTED_SECRET_CANARY");
+    }
+
+    #[test]
+    fn mcp_stdio_sandbox_restricts_path_marker() {
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        std::fs::create_dir_all(&worker_home).unwrap();
+        let session = sample_session(&worker_home.display().to_string());
+        let binding = sample_binding();
+        let pb = binding.provider("github").unwrap();
+        let work_dir = worker_home.join("slots").join("github");
+        std::fs::create_dir_all(&work_dir).unwrap();
+
+        let backend = McpStdioBackend::new(McpStdioConfig {
+            command: "false".into(),
+            args: vec![],
+            spawn: false,
+            resolve_secrets: false,
+            extra_env: BTreeMap::new(),
+            sandbox: true,
+        });
+        assert!(backend.sandbox_active());
+
+        let command = backend.build_command(&session, &binding, pb, &work_dir);
+        let env = command
+            .get_envs()
+            .filter_map(|(key, value)| value.map(|value| (key, value)))
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let restricted = crate::workers::restricted_worker_path();
+        let path = env.get("PATH").expect("sandboxed worker must set PATH");
+        assert_eq!(
+            path, &restricted,
+            "PATH must equal restricted_worker_path()"
+        );
+        assert!(path.contains("/usr/bin"));
+        assert!(path.contains("/bin"));
+
+        assert_eq!(
+            env.get(crate::workers::ENV_WORKER_SANDBOXED)
+                .map(String::as_str),
+            Some("1"),
+            "LOCUS_WORKER_SANDBOXED marker required"
+        );
+        let backend_tag = env
+            .get(crate::workers::ENV_WORKER_SANDBOX_BACKEND)
+            .map(String::as_str)
+            .expect("LOCUS_WORKER_SANDBOX_BACKEND required");
+        assert!(
+            backend_tag == "path" || backend_tag == "sandbox-exec",
+            "unexpected sandbox backend: {backend_tag}"
+        );
     }
 
     #[test]
@@ -471,6 +535,7 @@ for line in sys.stdin:
             spawn: true,
             resolve_secrets: false,
             extra_env: BTreeMap::new(),
+            sandbox: false,
         });
         let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();
         assert_eq!(slot.state, WorkerState::Running);

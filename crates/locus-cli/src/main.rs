@@ -18,8 +18,8 @@ use locus_core::{
     build_doctor_report, build_isolated_env_opts, ci_secrets_allowed, default_export_filename,
     export_events, export_forensics_pack, filter_audit_events, find_workspace, mcp_agent_env,
     parse_ttl, phantom_on_path, probe_agent_options, recipe_toml_snippet, resolve_passphrase,
-    suggest_for_provider, verify_claim, workspace_stub_toml, AgentStatus, Binding, BindingBody,
-    CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
+    suggest_for_provider, verify_claim, verify_session, workspace_stub_toml, AgentStatus, Binding,
+    BindingBody, CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
     EventsExportOptions, ForensicsExportOptions, Policy, ProviderBinding, Scope, Store,
     WorkspaceConfig, VERSION,
 };
@@ -199,10 +199,11 @@ enum Commands {
     #[command(next_help_heading = "Setup", subcommand)]
     Goal(GoalCmd),
 
-    /// Verification plane — score claims before acting (M5 heuristic stubs)
+    /// Verification plane — score claims / session pack before acting (M5)
     ///
     /// `locus verify claim --text "…"` returns
     /// `{ claim, confidence, needs_tool, suggestion, signals, grounding? }`.
+    /// `locus verify session` packs doctor + whoami + safe_next for hub.
     /// No ML — pure heuristics for hub/agent extension. See docs/verification-plane.md.
     #[command(next_help_heading = "Setup", subcommand)]
     Verify(VerifyCmd),
@@ -369,13 +370,19 @@ enum GoalCmd {
 enum VerifyCmd {
     /// Score a free-text claim for tool grounding / confidence
     ///
-    /// Heuristic stub (no ML): numbers, URLs, or versions ⇒ needs_tool + low
-    /// confidence. Identity language + active pin attaches whoami grounding.
+    /// Heuristic stub (no ML): numbers, URLs, versions, currency ($), percentages,
+    /// or absolute language (always/never) ⇒ needs_tool + low confidence.
+    /// Identity language + active pin attaches whoami grounding.
     Claim {
         /// Claim text to score
         #[arg(long)]
         text: String,
     },
+    /// Pack doctor + whoami + safe_next as one JSON object for hub heartbeats
+    ///
+    /// Machine contract: `{ kind: "session", version, whoami?, doctor, safe_next, session_ok }`.
+    /// Never includes secrets. Prefer `--json` for hub gates.
+    Session,
 }
 
 #[derive(Subcommand, Debug)]
@@ -574,6 +581,7 @@ enum ForensicsCmd {
 #[derive(Subcommand, Debug)]
 enum ApproveCmd {
     /// List pending approval requests
+    #[command(visible_alias = "pending")]
     List {
         /// Max rows (default: 50)
         #[arg(long, default_value_t = 50)]
@@ -589,6 +597,11 @@ enum ApproveCmd {
         /// Grant lifetime once fully approved (e.g. 15m, 1h). Default: 15m
         #[arg(long)]
         ttl: Option<String>,
+        /// macOS: blocking confirm dialog before grant (fail closed on cancel).
+        /// Not a real biometric API — `osascript` "Confirm grant as $USER?".
+        /// Tests: set `LOCUS_TOUCHID_MOCK=ok` or `cancel`.
+        #[arg(long)]
+        touchid: bool,
     },
     /// Show status of one approval (grants, dual-control progress)
     Status {
@@ -849,14 +862,18 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
              Claim scoring (heuristic, no ML):\n\
                locus verify claim --text \"Deploy hits https://api.x/v2\" [--json]\n\
                → { claim, confidence, needs_tool, suggestion, signals, grounding? }\n\
+               Signals: url, version, number, percentage, currency, absolute_language, identity\n\
                MCP: locus_verify_claim  { \"text\": \"…\" }\n\n\
+             Session pack (hub heartbeat):\n\
+               locus verify session [--json]\n\
+               → { kind:\"session\", whoami?, doctor, safe_next, session_ok }\n\n\
              Identity gate checks:\n\
                locus whoami [--json]           # active pin + seal\n\
                locus doctor [--json]           # SAFE|WARN|UNSAFE (exit 0/1/2)\n\
                locus agent report --json       # hub contract (ready|protected|unsafe)\n\
                locus status --oneline          # unpinned | alias:tenant | frozen\n\n\
              Doctor may WARN (ungrounded_claims) when recent audit details look\n\
-             like low-confidence factual claims (numbers/URLs/versions).\n\n\
+             like low-confidence factual claims (numbers/URLs/versions/currency/…).\n\n\
              Docs: docs/verification-plane.md · schema/doctor.schema.json\n\
              Isolation smoke: export LOCUS_HOME=/tmp/locus-verify && locus init --with-samples",
         ),
@@ -2716,6 +2733,7 @@ fn cmd_goal(sub: GoalCmd, json: bool) -> Result<()> {
 fn cmd_verify(sub: VerifyCmd, json: bool) -> Result<()> {
     match sub {
         VerifyCmd::Claim { text } => cmd_verify_claim(&text, json),
+        VerifyCmd::Session => cmd_verify_session(json),
     }
 }
 
@@ -2786,6 +2804,83 @@ fn cmd_verify_claim(text: &str, json: bool) -> Result<()> {
     println!("  suggestion  {}", result.suggestion);
     // Always emit machine JSON line for pipelines that ignore human formatting.
     println!("{}", serde_json::to_string(&result)?);
+    Ok(())
+}
+
+fn cmd_verify_session(json: bool) -> Result<()> {
+    let s = store()?;
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let pack = verify_session(
+        &s,
+        &cwd,
+        DoctorExternal {
+            phantom_on_path: phantom_on_path(),
+            unresolved_phm: Vec::new(),
+            cwd: Some(cwd.clone()),
+        },
+    )?;
+    let binding = pack
+        .whoami
+        .as_ref()
+        .map(|w| w.binding_alias.as_str())
+        .unwrap_or("-");
+    let _ = s.audit(
+        "verify.session",
+        binding,
+        Some(json!({
+            "session_ok": pack.session_ok,
+            "safe_next": pack.safe_next.action,
+            "doctor_verdict": pack.doctor.verdict,
+            "doctor_ok": pack.doctor.ok,
+            "has_whoami": pack.whoami.is_some(),
+        })),
+    );
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&pack)?);
+        return Ok(());
+    }
+
+    println!(
+        "{} verify session  session_ok={}  safe_next={}  doctor={}",
+        "locus".magenta().bold(),
+        if pack.session_ok {
+            "true".green().to_string()
+        } else {
+            "false".yellow().to_string()
+        },
+        pack.safe_next.action.cyan(),
+        format!("{:?}", pack.doctor.verdict).dimmed()
+    );
+    if let Some(ref w) = pack.whoami {
+        println!(
+            "  whoami      pin={}  tenant={}  seal={}",
+            w.binding_alias.cyan().bold(),
+            w.tenant.yellow(),
+            if w.seal_ok {
+                "ok".green().to_string()
+            } else {
+                "BAD".red().to_string()
+            }
+        );
+    } else {
+        println!("  whoami      {}", "(unpinned)".dimmed());
+    }
+    println!(
+        "  doctor      verdict={:?}  ok={}  findings={}",
+        pack.doctor.verdict,
+        pack.doctor.ok,
+        pack.doctor.findings.len()
+    );
+    println!(
+        "  safe_next   {} — {}",
+        pack.safe_next.action, pack.safe_next.message
+    );
+    if let Some(ref cmd) = pack.safe_next.command {
+        println!("  command     {}", cmd.cyan());
+    }
+    // Machine JSON line for pipelines.
+    println!("{}", serde_json::to_string(&pack)?);
     Ok(())
 }
 
@@ -4215,7 +4310,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 );
                 println!(
                     "   {}",
-                    "Grant: locus approve grant <id> --as <principal>   Deny: locus approve deny <id>"
+                    "Grant: locus approve grant <id> --as <principal> [--touchid]   Deny: locus approve deny <id>"
                         .dimmed()
                 );
                 return Ok(());
@@ -4228,12 +4323,12 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             );
             for rec in &pending {
                 let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
-                let required = if dual { 2 } else { 1 };
-                let grants_n = format!("grants {}/{}", rec.grants.len(), required);
+                let required = locus_core::required_grant_count(dual);
+                let grants_n = locus_core::format_grants_progress(rec.grants.len(), required);
                 let progress = if dual {
-                    format!("{grants_n} (dual_control)")
+                    format!("grants {grants_n} (dual_control)")
                 } else {
-                    grants_n
+                    format!("grants {grants_n}")
                 };
                 println!(
                     "  {}  {}  binding={}  tool={}",
@@ -4256,7 +4351,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             println!();
             println!(
                 "{}",
-                "Grant: locus approve grant <id> --as <principal>   status: locus approve status <id>   wait: locus approve wait <id>"
+                "Grant: locus approve grant <id> --as <principal> [--touchid]   status: locus approve status <id>   wait: locus approve wait <id>"
                     .dimmed()
             );
             Ok(())
@@ -4265,6 +4360,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             id,
             as_principal,
             ttl,
+            touchid,
         } => {
             let principal = as_principal
                 .or_else(|| env::var("LOCUS_PRINCIPAL").ok().filter(|s| !s.is_empty()))
@@ -4274,9 +4370,14 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 Some(ref t) => Some(parse_ttl(t)?),
                 None => None,
             };
+            if touchid {
+                // Confirm *before* mutating the approval record (fail closed).
+                let preview = s.load_approval(&id)?;
+                confirm_grant_touchid(&principal, &id, &preview.tool, &preview.binding)?;
+            }
             let rec = s.grant_approval(&id, ttl_dur, &principal)?;
             let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
-            let required = if dual { 2 } else { 1 };
+            let required = locus_core::required_grant_count(dual);
             if json {
                 let mut v = serde_json::to_value(&rec)?;
                 if let Some(obj) = v.as_object_mut() {
@@ -4284,7 +4385,23 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                     obj.insert("required_grants".into(), json!(required));
                     obj.insert(
                         "grants_progress".into(),
-                        json!(format!("{}/{}", rec.grants.len(), required)),
+                        json!(locus_core::format_grants_progress(
+                            rec.grants.len(),
+                            required
+                        )),
+                    );
+                    obj.insert(
+                        "progress".into(),
+                        json!(locus_core::format_dual_control_progress(
+                            rec.grants.len(),
+                            required,
+                            &rec.grants
+                                .iter()
+                                .map(|g| g.principal.clone())
+                                .collect::<Vec<_>>(),
+                            dual,
+                            rec.status == locus_core::ApprovalStatus::Approved,
+                        )),
                     );
                 }
                 println!("{}", serde_json::to_string_pretty(&v)?);
@@ -4459,15 +4576,18 @@ fn print_grant_summary(
     required: usize,
     ttl_flag: Option<&str>,
 ) {
-    let principals: String = rec
-        .grants
-        .iter()
-        .map(|g| g.principal.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let grants_progress = format!("{}/{}", rec.grants.len(), required);
+    let principals: Vec<String> = rec.grants.iter().map(|g| g.principal.clone()).collect();
+    let fully = rec.status == locus_core::ApprovalStatus::Approved;
+    let progress = locus_core::format_dual_control_progress(
+        rec.grants.len(),
+        required,
+        &principals,
+        dual,
+        fully,
+    );
+    let grants_progress = locus_core::format_grants_progress(rec.grants.len(), required);
 
-    if rec.status == locus_core::ApprovalStatus::Approved {
+    if fully {
         println!(
             "{} granted {} as {}",
             "ok".green().bold(),
@@ -4476,14 +4596,11 @@ fn print_grant_summary(
         );
         println!("   tool      {}", rec.tool.yellow());
         println!("   binding   {}", rec.binding.yellow());
+        println!("   progress  {}", progress.bold());
         println!(
-            "   grants    {}  ({})",
+            "   grants    {}  of {} required",
             grants_progress.bold(),
-            if principals.is_empty() {
-                "-"
-            } else {
-                &principals
-            }
+            required
         );
         if dual {
             println!("   dual      yes (fully approved)");
@@ -4494,41 +4611,104 @@ fn print_grant_summary(
         }
         println!(
             "   {}",
-            "Re-call the tool with the same args (or confirm=true + approval_id).".dimmed()
+            locus_core::next_grant_command(&rec.id, true).dimmed()
         );
     } else {
+        let remaining = required.saturating_sub(rec.grants.len());
         println!(
-            "{} partial grant {} as {}",
+            "{} partial grant {} as {}  (dual-control {}/{})",
             "ok".yellow().bold(),
             rec.id.cyan(),
-            principal.yellow()
+            principal.yellow(),
+            rec.grants.len(),
+            required
         );
         println!("   tool      {}", rec.tool.yellow());
         println!("   binding   {}", rec.binding.yellow());
+        println!("   progress  {}", progress.bold());
         println!(
-            "   grants    {}  ({}){}",
+            "   grants    {}  need {} more distinct principal(s)",
             grants_progress.bold(),
-            if principals.is_empty() {
-                "-"
-            } else {
-                &principals
-            },
-            if dual { "  dual_control" } else { "" }
+            remaining
         );
-        let remaining = required.saturating_sub(rec.grants.len());
         println!(
-            "   {}",
-            format!(
-                "Need {remaining} more distinct principal(s) — run `locus approve grant {} --as <other>`",
-                rec.id
-            )
-            .dimmed()
+            "   next      {}",
+            locus_core::next_grant_command(&rec.id, false).yellow()
         );
         println!(
             "   {}",
             format!("Or wait: locus approve wait {} --timeout 120", rec.id).dimmed()
         );
     }
+}
+
+/// Blocking confirmation before `locus approve grant --touchid`.
+///
+/// Fail closed: cancel / non-confirm / missing osascript aborts the grant.
+/// Test hooks: `LOCUS_TOUCHID_MOCK=ok` | `cancel` (any OS).
+fn confirm_grant_touchid(principal: &str, id: &str, tool: &str, binding: &str) -> Result<()> {
+    if let Ok(v) = env::var("LOCUS_TOUCHID_MOCK") {
+        let v = v.trim().to_ascii_lowercase();
+        match v.as_str() {
+            "ok" | "1" | "true" | "yes" | "confirm" => return Ok(()),
+            "cancel" | "deny" | "0" | "false" | "no" | "abort" => {
+                bail!(
+                    "Touch ID / confirm cancelled — grant of {id} as {principal} aborted (fail closed)"
+                );
+            }
+            other => bail!("invalid LOCUS_TOUCHID_MOCK={other:?} (use ok or cancel)"),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::path::Path;
+        let osascript = Path::new("/usr/bin/osascript");
+        if !osascript.is_file() {
+            bail!(
+                "--touchid requires /usr/bin/osascript (not found) — grant aborted (fail closed)"
+            );
+        }
+        // Blocking dialog — not real biometrics; user must click Confirm.
+        let prompt = format!(
+            "Confirm grant as {principal}?\n\nApproval: {id}\nTool: {tool}\nBinding: {binding}"
+        );
+        let script = format!(
+            r#"display dialog "{}" with title "Locus approve grant" buttons {{"Cancel", "Confirm"}} default button "Confirm" cancel button "Cancel" with icon caution"#,
+            escape_applescript_dialog(&prompt)
+        );
+        let status = Command::new(osascript)
+            .arg("-e")
+            .arg(&script)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .with_context(|| "failed to run osascript for --touchid confirm")?;
+        if !status.success() {
+            bail!(
+                "Touch ID / confirm cancelled — grant of {id} as {principal} aborted (fail closed)"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (principal, id, tool, binding);
+        bail!(
+            "--touchid is only supported on macOS (or set LOCUS_TOUCHID_MOCK=ok|cancel for tests)"
+        );
+    }
+}
+
+/// Escape for AppleScript double-quoted string literals.
+#[cfg(target_os = "macos")]
+fn escape_applescript_dialog(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .chars()
+        .filter(|c| *c == '\n' || !c.is_control())
+        .collect()
 }
 
 /// Merge a single server entry into an mcpServers JSON file.
@@ -4556,4 +4736,46 @@ fn merge_mcp_json(path: &std::path::Path, name: &str, server: &serde_json::Value
         .insert(name.to_string(), server.clone());
     std::fs::write(path, serde_json::to_string_pretty(&root)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod touchid_tests {
+    use super::confirm_grant_touchid;
+    use std::sync::Mutex;
+
+    /// Serialize env-var mutations across tests in this binary.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn touchid_mock_ok_allows_grant_confirm() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("LOCUS_TOUCHID_MOCK", "ok");
+        let r = confirm_grant_touchid("alice", "appr_aabbccddeeff001122334455", "t", "b");
+        std::env::remove_var("LOCUS_TOUCHID_MOCK");
+        assert!(r.is_ok(), "mock ok should allow: {r:?}");
+    }
+
+    #[test]
+    fn touchid_mock_cancel_fails_closed() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("LOCUS_TOUCHID_MOCK", "cancel");
+        let r = confirm_grant_touchid("alice", "appr_aabbccddeeff001122334455", "t", "b");
+        std::env::remove_var("LOCUS_TOUCHID_MOCK");
+        assert!(r.is_err(), "mock cancel must fail closed");
+        let msg = r.unwrap_err().to_string();
+        assert!(
+            msg.contains("cancelled") || msg.contains("fail closed"),
+            "unexpected err: {msg}"
+        );
+        assert!(msg.contains("aborted"));
+    }
+
+    #[test]
+    fn touchid_mock_deny_fails_closed() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("LOCUS_TOUCHID_MOCK", "deny");
+        let r = confirm_grant_touchid("bob", "appr_aabbccddeeff001122334455", "t", "b");
+        std::env::remove_var("LOCUS_TOUCHID_MOCK");
+        assert!(r.is_err());
+    }
 }

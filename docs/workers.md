@@ -18,6 +18,35 @@ When spawning:
 2. Only the pinned binding’s `LOCUS_*` surface is injected.
 3. Optional `resolve_secrets` pulls `phm:` / `env:` into the child only.
 4. Private `GH_CONFIG_DIR` / AWS config paths under the session worker home.
+5. Optional **sandbox** (below) when `LOCUS_WORKER_SANDBOX=1` or `upstream.sandbox = true`.
+
+## Worker sandbox (best-effort)
+
+Blast radius for a malicious upstream is still **one binding’s credentials**. Sandbox is additive isolation — not a multi-tenant VM.
+
+Enable globally:
+
+```bash
+export LOCUS_WORKER_SANDBOX=1
+```
+
+Or per-provider in binding TOML:
+
+```toml
+upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }
+```
+
+When enabled, on spawn Locus:
+
+| Step | Behavior |
+|------|----------|
+| Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND` (`path` or `sandbox-exec`) |
+| PATH | Restricts to `/usr/bin:/bin:/usr/local/bin` + `$CARGO_HOME/bin` or `~/.cargo/bin` when present |
+| macOS | If `sandbox-exec` is available, best-effort Seatbelt wrap (does **not** fail if missing) |
+
+Composite uses the same flag path: `mcp_config_from_upstream` sets `McpStdioConfig.sandbox` from the spec **or** env.
+
+This is **not** full seccomp/VM isolation. See SECURITY.md / DESIGN.md for residual risk (worker already holds that binding’s secrets).
 
 ## Binding TOML — per-provider upstream
 
@@ -97,6 +126,7 @@ let backend = McpStdioBackend::new(McpStdioConfig {
     spawn: true,
     resolve_secrets: true,
     extra_env: Default::default(),
+    sandbox: false, // or true / LOCUS_WORKER_SANDBOX=1
 });
 let mut mgr = InMemoryWorkerManager::new(Box::new(backend));
 let slot = mgr.ensure(&session, &binding, "github")?;
@@ -115,6 +145,7 @@ let slot = mgr.ensure(&session, &binding, "github")?;
 
 ```bash
 export LOCUS_WORKER_IDLE_SECS=300   # tear down workers idle for 5 minutes
+export LOCUS_WORKER_SANDBOX=1       # restricted PATH + marker (+ macOS sandbox-exec if present)
 ```
 
 - Unset or `0` → never idle-reap (default).

@@ -4,6 +4,7 @@
 //! with `spawn=true`. All others use [`SyntheticBackend`].
 
 use super::mcp_stdio::{McpStdioBackend, McpStdioConfig};
+use super::sandbox::sandbox_enabled;
 use super::stdio_client::UpstreamTool;
 use super::synthetic::SyntheticBackend;
 use super::{WorkerBackend, WorkerKey, WorkerManager, WorkerSlot, WorkerState, WorkerToolResult};
@@ -23,6 +24,8 @@ pub const ENV_WORKER_IDLE_SECS: &str = "LOCUS_WORKER_IDLE_SECS";
 ///
 /// Expands built-in `recipe` fields when present. Fails if the recipe is
 /// unknown or neither recipe nor command is usable.
+///
+/// Sandbox is on when `upstream.sandbox = true` **or** `LOCUS_WORKER_SANDBOX=1`.
 pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
     let expanded = spec.expand()?;
     Ok(McpStdioConfig {
@@ -31,6 +34,7 @@ pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
         spawn: true,
         resolve_secrets: expanded.resolve_secrets,
         extra_env: BTreeMap::new(),
+        sandbox: sandbox_enabled(expanded.sandbox),
     })
 }
 
@@ -706,6 +710,31 @@ for line in sys.stdin:
         assert!(cfg.resolve_secrets);
         assert_eq!(cfg.command, "npx");
         assert_eq!(cfg.args, vec!["-y", "@pkg"]);
+        // sandbox may be true if LOCUS_WORKER_SANDBOX is set in the process env
+        assert_eq!(cfg.sandbox, crate::workers::sandbox_from_env());
+    }
+
+    #[test]
+    fn mcp_config_sandbox_from_spec_or_env() {
+        // Spec flag forces sandbox on regardless of env.
+        let spec = UpstreamSpec::new("npx").sandbox(true);
+        let cfg = mcp_config_from_upstream(&spec).unwrap();
+        assert!(cfg.sandbox);
+
+        // Env-only path: force-enable, then restore prior value.
+        let key = crate::workers::ENV_WORKER_SANDBOX;
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, "1");
+        let cfg2 = mcp_config_from_upstream(&UpstreamSpec::new("false-cmd-for-test")).unwrap();
+        assert!(cfg2.sandbox);
+        // Spec false + env off
+        std::env::set_var(key, "0");
+        let cfg3 = mcp_config_from_upstream(&UpstreamSpec::new("npx")).unwrap();
+        assert!(!cfg3.sandbox);
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
     }
 
     #[test]

@@ -81,9 +81,11 @@ MCP never returns secrets. Grounding includes only aliases, tenant, binding id, 
 ```bash
 locus verify claim --text "Error rate is 12% on https://api.example.com"
 locus verify claim --text "We are pinned to acme" --json
+locus verify claim --text "This always costs $500" --json
+locus verify session --json   # doctor + whoami + safe_next pack for hub
 ```
 
-**Result shape** (always; human mode also prints a compact summary):
+**Claim result shape** (always; human mode also prints a compact summary):
 
 ```json
 {
@@ -91,7 +93,7 @@ locus verify claim --text "We are pinned to acme" --json
   "confidence": "unknown" | "low" | "medium" | "high",
   "needs_tool": true,
   "suggestion": "…",
-  "signals": ["url", "number"],
+  "signals": ["url", "number", "percentage"],
   "grounding": {
     "kind": "whoami",
     "binding_alias": "acme",
@@ -105,15 +107,32 @@ locus verify claim --text "We are pinned to acme" --json
 
 `grounding` is omitted when not identity-related or when unbound.
 
+**Session pack** (`locus verify session`):
+
+```json
+{
+  "kind": "session",
+  "version": "0.x.y",
+  "whoami": { "...": "…" },
+  "doctor": { "verdict": "…", "ok": true, "findings": [] },
+  "safe_next": { "action": "ready|enter|…", "ready": true, "message": "…" },
+  "session_ok": true
+}
+```
+
+Never includes secrets. `session_ok` is true only when doctor is ok **and** `safe_next.ready`.
+
 ### MCP
 
 Control tool (available unpinned and pinned):
 
 | Tool | Args | Result |
 |------|------|--------|
-| `locus_verify_claim` | `text` or `claim` (string) | Same JSON shape as CLI |
+| `locus_verify_claim` | `text` or `claim` (string) | Same JSON shape as CLI claim |
 
-Audit op: `mcp.verify_claim` / `verify.claim` — confidence, signals, truncated claim preview only (no secrets).
+Session pack is CLI/hub today (`locus verify session --json`); agents can compose `locus_whoami` + doctor resource + `locus_safe_next` equivalently.
+
+Audit op: `mcp.verify_claim` / `verify.claim` / `verify.session` — confidence, signals, truncated claim preview / verdict flags only (no secrets).
 
 ### Doctor (light)
 
@@ -132,11 +151,14 @@ Implemented in `locus_core::verify`:
 
 1. **URL-like** tokens (`http://`, `https://`, `www.`, `://`) → signal `url`
 2. **Version-like** tokens (`1.2`, `v0.1.1`) → signal `version`
-3. **Significant numbers** (2+ digits, percentages) → signal `number`
-4. **Identity language** (pin, tenant, whoami, binding, acting as, wrong account, …) → signal `identity`
-5. If (1–3) fire → `confidence=low`, `needs_tool=true`
-6. If identity + healthy pin → attach whoami grounding; `confidence=medium` when not also factual
-7. Else → `confidence=unknown`
+3. **Percentages** (`12%`, `0.5 %`) → signal `percentage` (also counts as number)
+4. **Currency** (`$1,200`, `USD 40`, `€99`) → signal `currency`
+5. **Significant numbers** (2+ digits) → signal `number`
+6. **Absolute language** (`always`, `never`, `impossible`, `guaranteed`, …) → signal `absolute_language` → **low** confidence
+7. **Identity language** (pin, tenant, whoami, binding, acting as, wrong account, …) → signal `identity`
+8. If (1–6) fire → `confidence=low`, `needs_tool=true` (suggestion names concrete grounding steps)
+9. If identity + healthy pin → attach whoami grounding; `confidence=medium` when not also factual/absolute
+10. Else → `confidence=unknown`
 
 Hub extension points: re-score using `signals`, require tools when `needs_tool`, or demand multi-source agreement before allowing `high`.
 
@@ -155,18 +177,20 @@ Hub extension points: re-score using `signals`, require tools when `needs_tool`,
 
 Still open under verification plane:
 
-- Conformance pack (INV suite in CI matrix)
-- Continuous whoami / watch as hub heartbeat
+- Continuous whoami / watch as first-class hub heartbeat (session pack is the CLI primitive)
 - Audit export → SIEM
 - Adapter SDK + signed registry
-- Sandboxed workers; bounty on seal logic
+- Harder sandbox (seccomp/VM); bounty on seal logic
 - Streamable HTTP / remote multiplexor
 
 Shipped as partial M5:
 
 - [x] Architecture doc (this file)
-- [x] `locus verify claim` + `locus_verify_claim`
+- [x] `locus verify claim` + `locus_verify_claim` (currency / % / absolute language signals)
+- [x] `locus verify session` — doctor + whoami + safe_next JSON pack
+- [x] E2E + dogfood coverage: `scripts/e2e.sh` feature-detects `verify claim` / `verify session` (shape + no secret values); `scripts/dogfood.sh` hard-requires `session_ok` at the DOGFOOD READY gate
 - [x] Doctor optional `ungrounded_claims` finding
+- [x] Best-effort worker sandbox (`LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`)
 - [x] Core module + unit tests (heuristics only)
 
 ---
@@ -176,7 +200,9 @@ Shipped as partial M5:
 | Path | Role |
 |------|------|
 | `crates/locus-core/src/verify.rs` | Heuristics + `ClaimVerification` |
-| `crates/locus-cli` | `locus verify claim` |
+| `crates/locus-core/src/agent_report.rs` | `verify_session` → `SessionVerificationPack` |
+| `crates/locus-core/src/workers/sandbox.rs` | Restricted PATH + optional macOS sandbox-exec |
+| `crates/locus-cli` | `locus verify claim` · `locus verify session` |
 | `crates/locus-mcp` | `locus_verify_claim` control tool |
 | `crates/locus-core/src/doctor.rs` | Optional audit signal finding |
 | `GOALS.md` | M5 checklist |

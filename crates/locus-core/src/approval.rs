@@ -116,6 +116,89 @@ pub fn required_grant_count(dual_control: bool) -> usize {
     }
 }
 
+/// Compact progress string: `"1/2"`, `"0/1"`, …
+pub fn format_grants_progress(grants: usize, required: usize) -> String {
+    format!("{grants}/{required}")
+}
+
+/// Agent-facing hint when a tool is blocked pending approval (MCP / policy gate).
+///
+/// Dual-control always names the grant command and required principal count so
+/// agents surface a clear human action instead of looping the tool call.
+pub fn agent_approval_hint(
+    approval_id: &str,
+    dual_control: bool,
+    required: usize,
+    grants: usize,
+) -> String {
+    if dual_control {
+        if grants == 0 {
+            format!(
+                "ask human: locus approve grant {approval_id} --as <principal> (needs {required} grants)"
+            )
+        } else {
+            format!(
+                "ask human: locus approve grant {approval_id} --as <other-principal> \
+                 (needs {required} grants; have {grants} — dual-control)"
+            )
+        }
+    } else {
+        format!(
+            "ask human: locus approve grant {approval_id} --as <principal> then re-call \
+             (same args, or confirm=true + approval_id={approval_id})"
+        )
+    }
+}
+
+/// CLI / status line for dual-control progress after a grant.
+///
+/// Examples:
+/// - fully approved dual: `"dual_control  grants 2/2  (alice, bob)  fully approved"`
+/// - partial: `"dual_control  grants 1/2  (alice)  need 1 more distinct principal"`
+/// - single: `"grants 1/1  (alice)  fully approved"`
+pub fn format_dual_control_progress(
+    grants: usize,
+    required: usize,
+    principals: &[String],
+    dual_control: bool,
+    fully_approved: bool,
+) -> String {
+    let progress = format_grants_progress(grants, required);
+    let who = if principals.is_empty() {
+        "-".to_string()
+    } else {
+        principals.join(", ")
+    };
+    let prefix = if dual_control {
+        format!("dual_control  grants {progress}  ({who})")
+    } else {
+        format!("grants {progress}  ({who})")
+    };
+    if fully_approved {
+        format!("{prefix}  fully approved")
+    } else {
+        let remaining = required.saturating_sub(grants);
+        format!("{prefix}  need {remaining} more distinct principal(s)")
+    }
+}
+
+/// Next human command after a partial (or full) grant.
+pub fn next_grant_command(approval_id: &str, fully_approved: bool) -> String {
+    if fully_approved {
+        format!("Re-call the tool with the same args (or confirm=true + approval_id={approval_id})")
+    } else {
+        format!("locus approve grant {approval_id} --as <other-principal>")
+    }
+}
+
+/// Desktop notification body for a **new** pending approval (opt-in notify).
+pub fn notification_body(rec: &ApprovalRecord) -> String {
+    format!(
+        "{} on {} — locus approve grant {}",
+        rec.tool, rec.binding, rec.id
+    )
+}
+
 /// Whether desktop notifications are enabled.
 ///
 /// **Default: OFF** — approval spam during agent/MCP use is worse than silence.
@@ -220,7 +303,7 @@ fn notify_macos_pending(rec: &ApprovalRecord) {
     }
 
     let title = "Locus approval";
-    let body = format!("{} on {} — run: locus approve list", rec.tool, rec.binding);
+    let body = notification_body(rec);
     // No sound name — silent banner only when user opted in
     let script = format!(
         "display notification \"{}\" with title \"{}\"",
@@ -590,5 +673,96 @@ mod tests {
         assert!(!rec.has_grant_from("bob"));
         assert_eq!(rec.grants_remaining(2), 1);
         assert_eq!(rec.grants_remaining(1), 0);
+    }
+
+    #[test]
+    fn agent_approval_hint_dual_control() {
+        let id = "appr_aabbccddeeff001122334455";
+        let zero = agent_approval_hint(id, true, 2, 0);
+        assert!(
+            zero.contains("ask human: locus approve grant"),
+            "expected agent-facing ask human: {zero}"
+        );
+        assert!(zero.contains(id));
+        assert!(zero.contains("--as"));
+        assert!(
+            zero.contains("needs 2 grants"),
+            "expected needs 2 grants: {zero}"
+        );
+
+        let partial = agent_approval_hint(id, true, 2, 1);
+        assert!(partial.contains("needs 2 grants"));
+        assert!(partial.contains("have 1"));
+        assert!(partial.contains("dual-control") || partial.contains("other-principal"));
+    }
+
+    #[test]
+    fn agent_approval_hint_single() {
+        let id = "appr_aabbccddeeff001122334455";
+        let h = agent_approval_hint(id, false, 1, 0);
+        assert!(h.contains("ask human: locus approve grant"));
+        assert!(h.contains(id));
+        assert!(!h.contains("needs 2 grants"));
+    }
+
+    #[test]
+    fn format_dual_control_progress_partial_and_full() {
+        let partial = format_dual_control_progress(1, 2, &["alice".into()], true, false);
+        assert!(partial.contains("dual_control"));
+        assert!(partial.contains("1/2"));
+        assert!(partial.contains("alice"));
+        assert!(partial.contains("need 1 more"));
+
+        let full = format_dual_control_progress(2, 2, &["alice".into(), "bob".into()], true, true);
+        assert!(full.contains("2/2"));
+        assert!(full.contains("fully approved"));
+        assert!(full.contains("bob"));
+
+        let single = format_dual_control_progress(1, 1, &["mason".into()], false, true);
+        assert!(single.contains("grants 1/1"));
+        assert!(!single.contains("dual_control"));
+        assert!(single.contains("fully approved"));
+    }
+
+    #[test]
+    fn next_grant_command_and_notification_body() {
+        let id = "appr_aabbccddeeff001122334455";
+        let next = next_grant_command(id, false);
+        assert_eq!(
+            next,
+            format!("locus approve grant {id} --as <other-principal>")
+        );
+        let done = next_grant_command(id, true);
+        assert!(done.contains("Re-call"));
+        assert!(done.contains(id));
+
+        let rec = ApprovalRecord {
+            id: id.into(),
+            tool: "vercel.deploy.prod".into(),
+            binding: "acme".into(),
+            args_digest: "sha256:x".into(),
+            created_at: Utc::now(),
+            status: ApprovalStatus::Pending,
+            session_id: "ses".into(),
+            requester: "agent".into(),
+            grants: vec![],
+            expires_at: None,
+            granted_at: None,
+        };
+        let body = notification_body(&rec);
+        assert!(body.contains("vercel.deploy.prod"));
+        assert!(body.contains("acme"));
+        assert!(
+            body.contains(&format!("locus approve grant {id}")),
+            "notify body must name grant command: {body}"
+        );
+        assert!(!body.contains("locus approve list"));
+    }
+
+    #[test]
+    fn format_grants_progress_basic() {
+        assert_eq!(format_grants_progress(0, 2), "0/2");
+        assert_eq!(format_grants_progress(1, 2), "1/2");
+        assert_eq!(format_grants_progress(2, 2), "2/2");
     }
 }

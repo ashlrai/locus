@@ -511,7 +511,9 @@
 <span class="cmd">locus agent setup --apply</span>  <span class="cmt"># wire MCP + AGENT.md</span>
 <span class="cmd">locus doctor</span>  <span class="cmt"># SAFE | WARN | UNSAFE</span>
 <span class="cmd">locus dashboard</span>  <span class="cmt"># local identity UI · 127.0.0.1:8750</span>
-<span class="cmd">locus goal status</span>  <span class="cmt"># northstar from GOALS.md</span></pre>
+<span class="cmd">locus goal status</span>  <span class="cmt"># northstar from GOALS.md</span>
+<span class="cmd">locus verify claim --text "Deploy hits https://api.x/v2"</span>
+<span class="cmt"># MCP: locus_safe_next → single best next action (enter / approve / ready)</span></pre>
       </div>
     </section>
 
@@ -529,7 +531,7 @@
           <div class="flow-n">MCP</div>
           <div>
             <h3>Stdio + HTTP MCP</h3>
-            <p>Claude Code / Cursor via stdio. CI agents: <code>locus-mcp --http</code> with token auth on <code>POST /mcp</code>.</p>
+            <p>Claude Code / Cursor via stdio. CI agents: <code>locus-mcp --http</code> with token auth on <code>POST /mcp</code>. Agents call <code>locus_safe_next</code> for the single best next action.</p>
           </div>
         </div>
         <div class="flow-step">
@@ -544,6 +546,13 @@
           <div>
             <h3>Goal + agent report</h3>
             <p><code>locus goal status</code> · <code>locus agent report --json</code> for hub gates (ready / protected / unsafe).</p>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">VRF</div>
+          <div>
+            <h3>Verify claim</h3>
+            <p><code>locus verify claim --text "…"</code> / MCP <code>locus_verify_claim</code> — heuristic confidence + <code>needs_tool</code> before acting on numbers, URLs, or versions.</p>
           </div>
         </div>
       </div>

@@ -83,9 +83,10 @@ pub const DOCTOR_LOW_CONFIDENCE_AUDIT_SCAN: usize = 50;
 /// Score a free-text claim with pure heuristics.
 ///
 /// Rules (M5 stub):
-/// - Numbers, URLs, or version-like tokens → `needs_tool=true`, `confidence=low`
+/// - Numbers, URLs, versions, currency ($), percentages → `needs_tool=true`, `confidence=low`
+/// - Absolute language (`always` / `never` / …) → low confidence; ground before acting
 /// - Identity-related language + active pin → attach whoami grounding; confidence
-///   at least `medium` when seal is ok and not frozen
+///   at least `medium` when seal is ok and not frozen (unless also factual/absolute)
 /// - Identity-related without pin → `needs_tool=true` (whoami/pin), `confidence=low`
 /// - Otherwise → `confidence=unknown`, soft suggestion
 pub fn verify_claim(text: &str, whoami: Option<&Whoami>) -> ClaimVerification {
@@ -94,7 +95,10 @@ pub fn verify_claim(text: &str, whoami: Option<&Whoami>) -> ClaimVerification {
 
     let has_url = claim_has_url(&claim);
     let has_version = claim_has_version(&claim);
+    let has_percentage = claim_has_percentage(&claim);
+    let has_currency = claim_has_currency(&claim);
     let has_number = claim_has_significant_number(&claim);
+    let absolute = claim_has_absolute_language(&claim);
     let identity = claim_is_identity_related(&claim);
 
     if has_url {
@@ -103,14 +107,24 @@ pub fn verify_claim(text: &str, whoami: Option<&Whoami>) -> ClaimVerification {
     if has_version {
         signals.push("version".into());
     }
+    if has_percentage {
+        signals.push("percentage".into());
+    }
+    if has_currency {
+        signals.push("currency".into());
+    }
     if has_number {
         signals.push("number".into());
+    }
+    if absolute {
+        signals.push("absolute_language".into());
     }
     if identity {
         signals.push("identity".into());
     }
 
-    let factual = has_url || has_version || has_number;
+    let factual =
+        has_url || has_version || has_number || has_percentage || has_currency || absolute;
 
     let grounding = if identity {
         whoami.map(ClaimGrounding::from_whoami)
@@ -123,12 +137,51 @@ pub fn verify_claim(text: &str, whoami: Option<&Whoami>) -> ClaimVerification {
     }
 
     let (confidence, needs_tool, suggestion) = match (factual, identity, &grounding) {
-        // Factual claim — always ask for tool grounding in this stub.
+        // Factual / absolute claim — always ask for tool grounding in this stub.
         (true, _, _) => {
-            let mut sug = String::from(
-                "Claim includes numbers, URLs, or versions — ground with a tool before acting \
-                 (e.g. list/get/status against the pinned provider).",
-            );
+            let mut parts: Vec<&str> = Vec::new();
+            if has_url {
+                parts.push("URLs");
+            }
+            if has_version {
+                parts.push("versions");
+            }
+            if has_percentage {
+                parts.push("percentages");
+            }
+            if has_currency {
+                parts.push("currency amounts");
+            }
+            if has_number {
+                parts.push("numbers");
+            }
+            if absolute {
+                parts.push("absolute language (always/never/…)");
+            }
+            let only_absolute = absolute
+                && !has_url
+                && !has_version
+                && !has_number
+                && !has_percentage
+                && !has_currency;
+            let mut sug = if only_absolute {
+                "Absolute language (always/never/guaranteed/impossible/…) without measured \
+                 evidence — treat as low confidence. Replace absolute claims with tool-backed \
+                 facts, or verify via whoami/doctor/provider reads before acting."
+                    .to_string()
+            } else {
+                format!(
+                    "Claim includes {} — confidence is low until grounded. \
+                     Call a read tool against the pinned provider (list/get/status) or \
+                     `locus exec -- <cli>` before mutations; re-check with \
+                     `locus verify claim --text \"…\"`.",
+                    if parts.is_empty() {
+                        "factual tokens".to_string()
+                    } else {
+                        parts.join(", ")
+                    }
+                )
+            };
             if identity {
                 if let Some(g) = &grounding {
                     sug.push_str(&format!(
@@ -136,7 +189,10 @@ pub fn verify_claim(text: &str, whoami: Option<&Whoami>) -> ClaimVerification {
                         g.binding_alias, g.tenant
                     ));
                 } else {
-                    sug.push_str(" Identity language detected but no active pin — run `locus pin` / `locus whoami` first.");
+                    sug.push_str(
+                        " Identity language detected but no active pin — human: \
+                         `locus enter <alias>` / `locus whoami` first.",
+                    );
                 }
             }
             (ClaimConfidence::Low, true, sug)
@@ -147,7 +203,8 @@ pub fn verify_claim(text: &str, whoami: Option<&Whoami>) -> ClaimVerification {
             false,
             format!(
                 "Identity claim grounded against active pin `{}` (tenant `{}`). \
-                 Call `locus_whoami` / `locus heartbeat` if drift is possible.",
+                 Prefer `locus_safe_next` / `locus_whoami` / `locus heartbeat` if drift is possible; \
+                 use `locus verify session` for a doctor+whoami+safe_next pack.",
                 g.binding_alias, g.tenant
             ),
         ),
@@ -156,7 +213,8 @@ pub fn verify_claim(text: &str, whoami: Option<&Whoami>) -> ClaimVerification {
             ClaimConfidence::Low,
             true,
             format!(
-                "Identity claim with pin `{}` but seal_ok={} frozen={} — re-pin or run `locus doctor` before acting.",
+                "Identity claim with pin `{}` but seal_ok={} frozen={} — re-pin or run \
+                 `locus doctor` / `locus verify session` before acting.",
                 g.binding_alias, g.seal_ok, g.frozen
             ),
         ),
@@ -164,15 +222,17 @@ pub fn verify_claim(text: &str, whoami: Option<&Whoami>) -> ClaimVerification {
         (false, true, None) => (
             ClaimConfidence::Low,
             true,
-            "Identity-related claim with no active pin. Human: `locus enter <alias>` then `locus whoami` before acting."
+            "Identity-related claim with no active pin. Human: `locus enter <alias>` then \
+             `locus whoami` (or agents: `locus_request_pin` / `locus_safe_next`) before acting."
                 .into(),
         ),
         // Soft / qualitative claim.
         (false, false, _) => (
             ClaimConfidence::Unknown,
             false,
-            "No strong verification signal (no numbers/URLs/versions/identity). \
-             Proceed carefully, or ground with tools if the claim will drive mutations."
+            "No strong verification signal (no numbers/URLs/versions/currency/percentages/\
+             absolute language/identity). Proceed carefully, or ground with tools if the claim \
+             will drive mutations. Hub pack: `locus verify session --json`."
                 .into(),
         ),
     };
@@ -214,15 +274,22 @@ fn audit_event_looks_low_confidence(ev: &AuditEvent) -> bool {
         Some(d) => d.to_string(),
         None => return false,
     };
-    claim_has_url(&blob) || claim_has_version(&blob) || claim_has_significant_number(&blob)
+    claim_has_url(&blob)
+        || claim_has_version(&blob)
+        || claim_has_significant_number(&blob)
+        || claim_has_currency(&blob)
+        || claim_has_percentage(&blob)
+        || claim_has_absolute_language(&blob)
 }
 
 /// Doctor finding helper: warn when many low-confidence-looking audit details appear.
 pub fn doctor_low_confidence_message(count: usize) -> Option<String> {
     if count >= DOCTOR_LOW_CONFIDENCE_AUDIT_THRESHOLD {
         Some(format!(
-            "{count} recent audit event(s) look low-confidence (numbers/URLs/versions in detail) — \
-             ground claims with tools; try `locus verify claim --text \"…\"`"
+            "{count} recent audit event(s) look low-confidence \
+             (numbers/URLs/versions/currency/percentages/absolute language in detail) — \
+             ground claims with tools; try `locus verify claim --text \"…\"` or \
+             `locus verify session`"
         ))
     } else {
         None
@@ -282,14 +349,9 @@ fn claim_has_version(s: &str) -> bool {
 
 /// Digits that look like quantities (not single digits in prose).
 fn claim_has_significant_number(s: &str) -> bool {
-    // Percentages
-    if s.contains('%') {
-        let bytes = s.as_bytes();
-        for (idx, &b) in bytes.iter().enumerate() {
-            if b == b'%' && idx > 0 && bytes[idx - 1].is_ascii_digit() {
-                return true;
-            }
-        }
+    // Percentages (also covered by claim_has_percentage — still count as number).
+    if claim_has_percentage(s) {
+        return true;
     }
     // Runs of 2+ digits, or digit runs with commas/underscores (1,000 / 1_000)
     let bytes = s.as_bytes();
@@ -315,6 +377,132 @@ fn claim_has_significant_number(s: &str) -> bool {
         } else {
             i += 1;
         }
+    }
+    false
+}
+
+/// Percentage tokens: `12%`, `0.5%`, `99 %`.
+fn claim_has_percentage(s: &str) -> bool {
+    if !s.contains('%') {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    for (idx, &b) in bytes.iter().enumerate() {
+        if b != b'%' {
+            continue;
+        }
+        // digit immediately before, or spaces then digit
+        let mut j = idx;
+        while j > 0 && bytes[j - 1] == b' ' {
+            j -= 1;
+        }
+        if j > 0 && bytes[j - 1].is_ascii_digit() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Currency-like tokens: `$12`, `$1,000.50`, `USD 40`, `€99`, `£3.50`.
+fn claim_has_currency(s: &str) -> bool {
+    // `$` + amount
+    let mut search_from = 0;
+    while let Some(rel) = s[search_from..].find('$') {
+        let idx = search_from + rel;
+        if currency_amount_follows(&s[idx + 1..]) {
+            return true;
+        }
+        search_from = idx + 1;
+    }
+    // Euro / pound symbols
+    for sym in ['€', '£'] {
+        let mut from = 0;
+        while let Some(rel) = s[from..].find(sym) {
+            let idx = from + rel;
+            let rest = &s[idx + sym.len_utf8()..];
+            if currency_amount_follows(rest) {
+                return true;
+            }
+            from = idx + sym.len_utf8();
+        }
+    }
+    let lower = s.to_ascii_lowercase();
+    for code in ["usd ", "usd$", "eur ", "gbp ", "cad ", "aud "] {
+        if let Some(pos) = lower.find(code) {
+            let rest = &s[pos + code.len()..];
+            if currency_amount_follows(rest) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn currency_amount_follows(s: &str) -> bool {
+    let s = s.trim_start();
+    let bytes = s.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut i = 0;
+    let mut digits = 0u32;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            digits += 1;
+            i += 1;
+        } else if (bytes[i] == b',' || bytes[i] == b'.' || bytes[i] == b'_') && digits > 0 {
+            i += 1;
+        } else {
+            break;
+        }
+    }
+    digits >= 1
+}
+
+/// Absolute / universal quantifiers that usually overclaim without evidence.
+fn claim_has_absolute_language(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    // Word-boundary-ish checks via surrounding non-letter or string edges.
+    const WORDS: &[&str] = &[
+        "always",
+        "never",
+        "impossible",
+        "guaranteed",
+        "certainly",
+        "definitely",
+        "absolutely",
+        "invariably",
+        "without exception",
+        "no matter what",
+        "100% of the time",
+        "zero chance",
+        "cannot fail",
+        "can't fail",
+        "must always",
+        "will never",
+    ];
+    for w in WORDS {
+        if word_or_phrase_present(&lower, w) {
+            return true;
+        }
+    }
+    false
+}
+
+fn word_or_phrase_present(hay: &str, needle: &str) -> bool {
+    if needle.contains(' ') {
+        return hay.contains(needle);
+    }
+    let mut start = 0;
+    while let Some(rel) = hay[start..].find(needle) {
+        let i = start + rel;
+        let before_ok = i == 0 || !hay.as_bytes()[i - 1].is_ascii_alphabetic();
+        let end = i + needle.len();
+        let after_ok = end >= hay.len() || !hay.as_bytes()[end].is_ascii_alphabetic();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = i + 1;
     }
     false
 }
@@ -419,6 +607,36 @@ mod tests {
         assert!(r.needs_tool);
         assert_eq!(r.confidence, ClaimConfidence::Low);
         assert!(r.signals.iter().any(|s| s == "number"));
+        assert!(r.signals.iter().any(|s| s == "percentage"));
+        assert!(r.suggestion.contains("ground") || r.suggestion.contains("low"));
+    }
+
+    #[test]
+    fn currency_signal_low_confidence() {
+        let r = verify_claim("This deploy will cost $1,200.50 per month", None);
+        assert!(r.needs_tool);
+        assert_eq!(r.confidence, ClaimConfidence::Low);
+        assert!(r.signals.iter().any(|s| s == "currency"));
+        assert!(
+            r.suggestion.to_ascii_lowercase().contains("currency")
+                || r.suggestion.to_ascii_lowercase().contains("ground")
+        );
+    }
+
+    #[test]
+    fn absolute_language_low_confidence() {
+        let r = verify_claim("This always works and never fails in production", None);
+        assert!(r.needs_tool);
+        assert_eq!(r.confidence, ClaimConfidence::Low);
+        assert!(r.signals.iter().any(|s| s == "absolute_language"));
+        assert!(r.suggestion.to_ascii_lowercase().contains("absolute"));
+    }
+
+    #[test]
+    fn absolute_language_does_not_match_substring() {
+        // "whenever" contains "ever" but not word "never"/"always"
+        assert!(!claim_has_absolute_language("whenever we ship"));
+        assert!(claim_has_absolute_language("we never ship on Fridays"));
     }
 
     #[test]

@@ -2,7 +2,14 @@
 //!
 //! Builds a `std::process::Command` with isolated env, optionally spawns the
 //! child, handshakes MCP, and routes `tools/call` to the upstream server.
+//!
+//! When sandbox is enabled (`LOCUS_WORKER_SANDBOX=1`, [`McpStdioConfig::sandbox`],
+//! or binding `upstream.sandbox`), spawn restricts PATH, sets
+//! `LOCUS_WORKER_SANDBOXED=1`, and on macOS best-effort wraps with `sandbox-exec`.
 
+use super::sandbox::{
+    resolve_sandbox_spawn, sandbox_enabled, ENV_WORKER_SANDBOXED, ENV_WORKER_SANDBOX_BACKEND,
+};
 use super::stdio_client::{client_key, McpStdioClient};
 use super::{WorkerBackend, WorkerKey, WorkerSlot, WorkerState, WorkerToolResult};
 use crate::binding::{Binding, ProviderBinding};
@@ -39,6 +46,9 @@ pub struct McpStdioConfig {
     /// Deprecated compatibility field. Arbitrary env is never forwarded; use
     /// binding scope metadata or provider credential resolution instead.
     pub extra_env: BTreeMap<String, String>,
+    /// Best-effort sandbox (restricted PATH + marker; optional macOS sandbox-exec).
+    /// Also enabled when `LOCUS_WORKER_SANDBOX=1` regardless of this flag.
+    pub sandbox: bool,
 }
 
 /// Stdio MCP backend with live JSON-RPC clients.
@@ -60,6 +70,9 @@ impl McpStdioBackend {
     }
 
     /// Build a `Command` ready to spawn with isolated env.
+    ///
+    /// When sandbox is on: restricted PATH, `LOCUS_WORKER_SANDBOXED=1`, and
+    /// optional macOS `sandbox-exec` wrap (best-effort).
     pub fn build_command(
         &self,
         session: &Session,
@@ -68,9 +81,22 @@ impl McpStdioBackend {
         work_dir: &Path,
     ) -> Command {
         let iso = build_isolated_env_opts(session, binding, self.config.resolve_secrets);
+        let sandboxed = sandbox_enabled(self.config.sandbox);
 
-        let mut cmd = Command::new(&self.config.command);
-        cmd.args(&self.config.args)
+        let (program, args, sandbox_backend) = if sandboxed {
+            let spawn = resolve_sandbox_spawn(
+                &self.config.command,
+                &self.config.args,
+                work_dir,
+                Path::new(&session.worker_home),
+            );
+            (spawn.program, spawn.args, Some((spawn.backend, spawn.path)))
+        } else {
+            (self.config.command.clone(), self.config.args.clone(), None)
+        };
+
+        let mut cmd = Command::new(&program);
+        cmd.args(&args)
             .current_dir(work_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -84,7 +110,21 @@ impl McpStdioBackend {
         cmd.env("LOCUS_WORKER_ACCOUNT", &provider.account);
         cmd.env("LOCUS_WORKER_DIR", work_dir);
 
+        if let Some((backend, restricted_path)) = sandbox_backend {
+            // Restricted PATH wins over any PATH that isolation copied from parent.
+            // Sandbox markers win over any ambient PATH; `extra_env` is never
+            // forwarded (deprecated compatibility field — fail closed).
+            cmd.env("PATH", restricted_path);
+            cmd.env(ENV_WORKER_SANDBOXED, "1");
+            cmd.env(ENV_WORKER_SANDBOX_BACKEND, backend.as_str());
+        }
+
         cmd
+    }
+
+    /// Whether this backend will apply sandbox on spawn (config or env).
+    pub fn sandbox_active(&self) -> bool {
+        sandbox_enabled(self.config.sandbox)
     }
 
     /// List tools from a live upstream client (handshake if needed).
