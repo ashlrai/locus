@@ -199,6 +199,25 @@ pub fn notification_body(rec: &ApprovalRecord) -> String {
     )
 }
 
+/// Desktop notification body after a **partial** dual-control grant (opt-in notify).
+///
+/// Tells the second principal that one grant is in and another is still required.
+pub fn partial_grant_notification_body(rec: &ApprovalRecord) -> String {
+    let who = if rec.grants.is_empty() {
+        "-".to_string()
+    } else {
+        rec.grant_principals().join(", ")
+    };
+    format!(
+        "{} on {} — need second principal (grants {}/2, granted: {}) — locus approve grant {} --as <other-principal>",
+        rec.tool,
+        rec.binding,
+        rec.grants.len(),
+        who,
+        rec.id
+    )
+}
+
 /// Whether desktop notifications are enabled.
 ///
 /// **Default: OFF** — approval spam during agent/MCP use is worse than silence.
@@ -256,12 +275,12 @@ pub fn try_notify_pending_approval(rec: &ApprovalRecord) {
     if !notifications_enabled() {
         return;
     }
-    if !rate_limit_allow(&rec.tool, &rec.binding) {
+    if !rate_limit_allow(&format!("pending::{}::{}", rec.binding, rec.tool)) {
         return;
     }
     #[cfg(target_os = "macos")]
     {
-        notify_macos_pending(rec);
+        notify_macos("Locus approval", &notification_body(rec));
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -269,31 +288,58 @@ pub fn try_notify_pending_approval(rec: &ApprovalRecord) {
     }
 }
 
-/// Simple process-local rate limit (plus optional file stamp under LOCUS_HOME).
-fn rate_limit_allow(tool: &str, binding: &str) -> bool {
+/// Best-effort desktop notification when dual-control reaches a **partial** grant
+/// (one principal granted; still needs a distinct second).
+///
+/// Opt-in only (see [`notifications_enabled`]). Default OFF — same kill switches
+/// as pending notify (`CI`, `LOCUS_QUIET`, `LOCUS_NOTIFY=0`). Rate-limited per
+/// approval id (separate from pending create so a partial can still fire after
+/// a recent pending banner). **No sound**.
+pub fn try_notify_partial_grant(rec: &ApprovalRecord) {
+    if !notifications_enabled() {
+        return;
+    }
+    // Only meaningful for partial dual-control (at least one grant, still pending).
+    if rec.grants.is_empty() || rec.status != ApprovalStatus::Pending {
+        return;
+    }
+    if !rate_limit_allow(&format!("partial::{}", rec.id)) {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        notify_macos("Locus dual-control", &partial_grant_notification_body(rec));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = rec;
+    }
+}
+
+/// Simple process-local rate limit keyed by an arbitrary string.
+fn rate_limit_allow(key: &str) -> bool {
     use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
 
     static LAST: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
-    let key = format!("{binding}::{tool}");
     let mut guard = match LAST.lock() {
         Ok(g) => g,
         Err(_) => return false,
     };
     let map = guard.get_or_insert_with(HashMap::new);
     let now = Instant::now();
-    if let Some(prev) = map.get(&key) {
+    if let Some(prev) = map.get(key) {
         if now.duration_since(*prev) < Duration::from_secs(60) {
             return false;
         }
     }
-    map.insert(key, now);
+    map.insert(key.to_string(), now);
     true
 }
 
 #[cfg(target_os = "macos")]
-fn notify_macos_pending(rec: &ApprovalRecord) {
+fn notify_macos(title: &str, body: &str) {
     use std::path::Path;
     use std::process::{Command, Stdio};
 
@@ -302,12 +348,10 @@ fn notify_macos_pending(rec: &ApprovalRecord) {
         return;
     }
 
-    let title = "Locus approval";
-    let body = notification_body(rec);
     // No sound name — silent banner only when user opted in
     let script = format!(
         "display notification \"{}\" with title \"{}\"",
-        escape_applescript(&body),
+        escape_applescript(body),
         escape_applescript(title)
     );
     let _ = Command::new(osascript)
@@ -757,6 +801,93 @@ mod tests {
             "notify body must name grant command: {body}"
         );
         assert!(!body.contains("locus approve list"));
+    }
+
+    #[test]
+    fn partial_grant_notification_body_names_second_principal() {
+        let id = "appr_aabbccddeeff001122334455";
+        let rec = ApprovalRecord {
+            id: id.into(),
+            tool: "supabase.table.delete".into(),
+            binding: "acme".into(),
+            args_digest: "sha256:x".into(),
+            created_at: Utc::now(),
+            status: ApprovalStatus::Pending,
+            session_id: "ses".into(),
+            requester: "agent".into(),
+            grants: vec![ApprovalGrant {
+                principal: "alice".into(),
+                granted_at: Utc::now(),
+            }],
+            expires_at: None,
+            granted_at: None,
+        };
+        let body = partial_grant_notification_body(&rec);
+        assert!(
+            body.contains("need second principal"),
+            "partial body must ask for second principal: {body}"
+        );
+        assert!(
+            body.contains("1/2"),
+            "partial body must show grants 1/2: {body}"
+        );
+        assert!(
+            body.contains("alice"),
+            "partial body must name granter: {body}"
+        );
+        assert!(
+            body.contains("supabase.table.delete") && body.contains("acme"),
+            "partial body must name tool/binding: {body}"
+        );
+        assert!(
+            body.contains(&format!("locus approve grant {id}"))
+                && body.contains("--as <other-principal>"),
+            "partial body must name next grant command: {body}"
+        );
+    }
+
+    #[test]
+    fn try_notify_partial_grant_silent_when_notify_off() {
+        // Default / kill-switch path must never panic and must not require a display.
+        let prev_notify = std::env::var_os("LOCUS_NOTIFY");
+        let prev_quiet = std::env::var_os("LOCUS_QUIET");
+        // Force OFF even if CI runner or shell has LOCUS_NOTIFY=1
+        std::env::set_var("LOCUS_NOTIFY", "0");
+        std::env::remove_var("LOCUS_QUIET");
+
+        assert!(
+            !notifications_enabled(),
+            "LOCUS_NOTIFY=0 must disable notifications"
+        );
+
+        let rec = ApprovalRecord {
+            id: "appr_aabbccddeeff001122334455".into(),
+            tool: "supabase.table.delete".into(),
+            binding: "acme".into(),
+            args_digest: "sha256:x".into(),
+            created_at: Utc::now(),
+            status: ApprovalStatus::Pending,
+            session_id: "ses".into(),
+            requester: "agent".into(),
+            grants: vec![ApprovalGrant {
+                principal: "alice".into(),
+                granted_at: Utc::now(),
+            }],
+            expires_at: None,
+            granted_at: None,
+        };
+        // Must be a pure no-op (no osascript) when notify is off.
+        try_notify_partial_grant(&rec);
+        try_notify_pending_approval(&rec);
+
+        match prev_notify {
+            Some(v) => std::env::set_var("LOCUS_NOTIFY", v),
+            None => std::env::remove_var("LOCUS_NOTIFY"),
+        }
+        match prev_quiet {
+            Some(v) => std::env::set_var("LOCUS_QUIET", v),
+            None => std::env::remove_var("LOCUS_QUIET"),
+        }
     }
 
     #[test]

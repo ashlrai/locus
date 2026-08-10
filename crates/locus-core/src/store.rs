@@ -1739,6 +1739,9 @@ impl Store {
                     ),
                 })),
             )?;
+            // Best-effort UX only — never surface notify errors to the grant path.
+            // Opt-in (LOCUS_NOTIFY / [notify] enabled); default OFF.
+            crate::approval::try_notify_partial_grant(&rec);
         }
         Ok(rec)
     }
@@ -2761,8 +2764,14 @@ credential_ref = "ghp_UNSAFE/CANARY"
         );
         assert!(hint.contains(&id), "hint must include approval id: {hint}");
 
-        // One grant → still pending
+        // One grant → still pending (partial notify is opt-in; LOCUS_NOTIFY off stays silent)
+        let prev_notify = std::env::var_os("LOCUS_NOTIFY");
+        std::env::set_var("LOCUS_NOTIFY", "0");
         let partial = store.grant_approval(&id, None, "alice").unwrap();
+        match prev_notify {
+            Some(v) => std::env::set_var("LOCUS_NOTIFY", v),
+            None => std::env::remove_var("LOCUS_NOTIFY"),
+        }
         assert_eq!(partial.status, ApprovalStatus::Pending);
         assert_eq!(partial.grants.len(), 1);
         assert!(!partial.is_valid_grant());
