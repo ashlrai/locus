@@ -573,6 +573,11 @@ mod tests {
             expires_at: "2099-01-01T00:00:00Z".into(),
             worker_home: "/tmp".into(),
             seal_ok,
+            seal: "hmac-sha256:test".into(),
+            authority: "local_control".into(),
+            authority_anchor_ok: true,
+            backing_type: crate::SessionBackingType::Active,
+            backing_path: "/tmp/active.json".into(),
             frozen,
             frozen_reason: if frozen {
                 Some("binding_id_drift".into())

@@ -46,6 +46,12 @@ When enabled, on spawn Locus:
 
 Composite uses the same flag path: `mcp_config_from_upstream` sets `McpStdioConfig.sandbox` from the spec **or** env.
 
+Worker discovery and startup are fail closed: `tools/list` never starts an
+upstream child or resolves its credentials. An authorized `tools/call` starts
+only the addressed provider, whose environment contains only that provider's
+scope and credential keys. Batch/session startup is transactional; if a later
+provider fails, every child created earlier in that attempt is torn down.
+
 This is **not** full seccomp/VM isolation. See SECURITY.md / DESIGN.md for residual risk (worker already holds that binding’s secrets).
 
 ## Binding TOML — per-provider upstream
@@ -94,14 +100,14 @@ Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explic
 
 When `locus-mcp` is pinned:
 
-1. `tools/list` / `tools/call` call `CompositeWorkerManager::ensure_binding`.
-2. Providers with `upstream` spawn MCP children; others stay synthetic.
+1. `tools/list` returns synthetic schemas plus schemas cached from workers that an earlier authorized call already started.
+2. `tools/call` completes session, scope, and approval policy checks before `ensure_provider` starts only the addressed upstream child.
 3. Upstream tools are namespaced as `provider.toolname` (e.g. `github.list_issues`).
 4. Synthetic tools (e.g. `github.scope`) stay available; name collisions prefer synthetic.
 
 Worker children start from a positive runtime environment allowlist. Locus then
 adds frozen binding metadata and only the provider credential keys resolved for
-that binding. `McpStdioConfig::extra_env` remains for source compatibility but
+that provider. `McpStdioConfig::extra_env` remains for source compatibility but
 is intentionally ignored; arbitrary caller or parent environment cannot cross
 the worker boundary.
 
@@ -140,7 +146,7 @@ let slot = mgr.ensure(&session, &binding, "github")?;
 
 `CompositeWorkerManager` is process-wide inside `locus-mcp`. For a given pin:
 
-1. `tools/list` / `tools/call` call `ensure_session` / `ensure_binding`.
+1. An authorized `tools/call` calls `ensure_provider`; explicit batch callers may use transactional `ensure_session` / `ensure_binding`.
 2. Existing slots in `Ready` / `Running` / `Pending` are **reused** — upstream MCP children are **not** respawned per list/call.
 3. Pin switch (`focus_session`) tears down slots for other `session_id`s.
 4. Process exit / `Drop` tears down all remaining children.

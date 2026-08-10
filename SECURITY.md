@@ -34,7 +34,7 @@ We appreciate coordinated disclosure. Credit is given unless you ask otherwise.
 | **Provider credentials** | Resolved only into worker/child env; never returned by MCP tools |
 | **Tenant / account selection** | Session sealed to one Binding; tools catalog is exclusive |
 | **Scope freezes** | `project_ref`, `team_id`, org/repo allowlists cannot be overridden by the model |
-| **Session integrity** | Pins are HMAC-sealed; tampering fails closed |
+| **Session integrity** | V3 HMAC seals plus a live broker subject/generation bind the exact record, backing, expiry, and authority |
 | **Workspace boundaries** | `.locus.toml` `allowed_bindings` blocks wrong-tenant pins (unless audited `--force`) |
 
 ### High-priority threats we design against
@@ -46,7 +46,7 @@ We appreciate coordinated disclosure. Credit is given unless you ask otherwise.
 | Arg smuggling (`project_ref` swap) | Adapter scope freeze |
 | Ambient CLI race (`gh auth switch`) | Private `GH_CONFIG_DIR` / scrubbed env in `locus exec` |
 | Ambient credential inheritance | Scrub known identity env vars; inject only resolved refs for the pin |
-| Seal forgery | HMAC over session fields with local seal key |
+| Seal forgery / replay | HMAC covers session fields; an in-memory supervised broker independently binds their digest to a monotonic generation and rejects stale records |
 | Approval id path traversal | Ids constrained to safe charset; joined path must stay under `approvals/` |
 | Confirm / approval_id injection into digests | `args_digest` strips control + secret-like keys before hashing |
 
@@ -71,11 +71,12 @@ Flow:
 
 **Secrets never appear** in approval files, audit JSONL, or MCP tool results — only digests, ids, tool names, and principal labels. Principal names are restricted to `[A-Za-z0-9_-]` (no path separators).
 
-**Rate limiting:** Locus does not yet enforce request rate limits on advisory-label or pending-record creation in process. Operators should treat approval files as sensitive control-plane state (filesystem permissions on `$LOCUS_HOME`) and rotate seal keys if compromised. External envelope replay protection, expiry, identity binding, and OS attestation are required before authoritative approvals can be enabled.
+**Rate limiting:** Locus does not yet enforce request rate limits on advisory-label or pending-record creation in process. Operators should treat approval files as sensitive control-plane state. External envelope replay protection, expiry, identity binding, and OS attestation are required before authoritative approvals can be enabled.
 
 ### Explicit non-goals (out of scope)
 
 - **Root / malware on the developer machine** — if the OS is fully compromised, all local tools are in scope for the attacker.
+- **Same-UID code that can inspect or modify the trusted operator/broker process memory** — filesystem mode `0600` does not isolate `daemon.key` from code already running as the same user. The broker prevents possession of that file key alone from forging current authority, but it cannot survive theft of the in-memory control capability through an OS debugging/process-memory boundary.
 - **A human who deliberately pins the wrong client** (`locus pin personal --force`) — Locus does not second-guess intentional human pin switches beyond workspace allowlists and audit hooks.
 - **Replacing cloud IAM / SSO** — Locus complements provider IAM; it does not replace org SSO policies.
 - **Malicious code inside a worker that already holds that binding’s credentials** — blast radius is intentionally one binding; deeper sandboxing is future work.
@@ -110,5 +111,5 @@ When in doubt whether an issue is security-sensitive, use the private channel ab
 - Use `locus doctor` and `locus whoami` before destructive agent work.
 - Keep Phantom (or your vault) and Locus updated together when using `phm:` refs.
 - For production-like deploys, set `dual_control` globs (or `dual_control_all_approvals = true`) to declare the required external authority threshold. Local laptop labels do not satisfy it.
-- Keep `$LOCUS_HOME` mode-restricted (seal key is `0600`); treat `approvals/` and `audit/` as sensitive.
+- Keep `$LOCUS_HOME` mode-restricted to block other OS users and treat `approvals/` and `audit/` as sensitive. Do not treat `daemon.key` mode `0600` as protection from same-UID code; delegated mutation/provider execution also requires a live broker capability.
 - Review `locus approve list` regularly; `--ttl` is reserved for future externally authenticated grants and does not make local labels authoritative.

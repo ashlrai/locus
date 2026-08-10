@@ -138,6 +138,8 @@
       "required": [
         "pinned",
         "seal_ok",
+        "authority_anchor_ok",
+        "backing_ok",
         "binding_present",
         "binding_id_match",
         "tenant_match",
@@ -151,6 +153,11 @@
       "properties": {
         "pinned": { "type": "boolean" },
         "seal_ok": { "type": "boolean" },
+        "authority_anchor_ok": { "type": "boolean" },
+        "backing_ok": { "type": "boolean" },
+        "backing_type": { "type": ["string", "null"], "enum": ["active", "run", "ci", null] },
+        "backing_path": { "type": ["string", "null"] },
+        "authority": { "type": ["string", "null"], "enum": ["local_control", "delegated", "legacy_untrusted", null] },
         "binding_present": { "type": "boolean" },
         "binding_id_match": { "type": "boolean" },
         "tenant_match": { "type": "boolean" },

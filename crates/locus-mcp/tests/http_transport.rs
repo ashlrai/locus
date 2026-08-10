@@ -64,6 +64,18 @@ impl HttpServer {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
+        if !extra_env
+            .iter()
+            .any(|(key, _)| *key == locus_core::EXECUTOR_CAPABILITY_ENV)
+        {
+            if let Ok(store) = Store::open(home) {
+                if let Ok(Some(session)) = store.active_session() {
+                    if let Ok(capability) = store.grant_executor_capability(&session) {
+                        command.env(locus_core::EXECUTOR_CAPABILITY_ENV, capability);
+                    }
+                }
+            }
+        }
         for (key, value) in extra_env {
             command.env(key, value);
         }
@@ -256,6 +268,70 @@ fn http_jsonrpc_initialize_and_tools_list() {
     assert!(
         tools.iter().any(|t| t["name"] == "locus_whoami"),
         "expected control tools, got {tools:?}"
+    );
+}
+
+#[test]
+fn direct_http_with_pin_but_no_executor_capability_cannot_discover_or_call_provider() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let binding = Binding::from_body(BindingBody {
+        id: "bnd_http_direct".into(),
+        alias: "http-direct".into(),
+        tenant: "http-direct".into(),
+        principal: None,
+        description: None,
+        policy: Policy::default(),
+        providers: vec![ProviderBinding {
+            provider: "github".into(),
+            account: "http-direct".into(),
+            credential_ref: "phm:HTTP_DIRECT_GITHUB".into(),
+            scope: Scope::default(),
+            upstream: None,
+        }],
+    });
+    store.save_binding(&binding).unwrap();
+    store
+        .pin(
+            "http-direct",
+            dir.path(),
+            Some("local-control".into()),
+            false,
+        )
+        .unwrap();
+    let server = HttpServer::spawn_with_home(
+        "direct-no-executor",
+        dir.path(),
+        &[(locus_core::EXECUTOR_CAPABILITY_ENV, "")],
+    );
+
+    let list = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 21, "method": "tools/list", "params": {}
+    }))
+    .unwrap();
+    let (status, _, response) = server.request("POST", "/mcp", Some(&list), Some(&server.token));
+    assert_eq!(status, 200, "{response}");
+    let listed: Value = serde_json::from_str(&response).unwrap();
+    if let Some(tools) = listed["result"]["tools"].as_array() {
+        assert!(!tools.iter().any(|tool| tool["name"] == "github.scope"));
+    } else {
+        assert!(
+            listed.get("error").is_some(),
+            "unexpected tools/list: {listed}"
+        );
+    }
+
+    let call = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+        "params": {"name": "github.scope", "arguments": {}}
+    }))
+    .unwrap();
+    let (status, _, response) = server.request("POST", "/mcp", Some(&call), Some(&server.token));
+    assert_eq!(status, 200, "{response}");
+    let called: Value = serde_json::from_str(&response).unwrap();
+    assert!(
+        called.get("error").is_some() || called["result"]["isError"] == true,
+        "provider call unexpectedly succeeded without executor authority: {called}"
     );
 }
 

@@ -60,6 +60,14 @@ struct RunMode {
 }
 
 fn main() {
+    if let Some(result) = locus_core::run_authority_anchor_server_if_requested() {
+        if let Err(error) = result {
+            eprintln!("authority anchor error: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    locus_core::restrict_validation_to_executor();
     // MCP servers must not pollute stdout with logs (stdio mode).
     if let Err(e) = run() {
         eprintln!("locus-mcp error: {e:#}");
@@ -606,12 +614,10 @@ type ActiveBindings = (Session, Vec<(String, Binding)>);
 /// so callers can emit `session_frozen` tool errors.
 fn active_session_bindings() -> Result<Option<ActiveBindings>> {
     let s = store()?;
-    match s.active_session()? {
-        None => Ok(None),
-        Some(session) => {
-            let key = s.seal_key()?;
-            // Seal + expiry only here; freeze checked at tools/call / list gate.
-            session.verify_seal(&key)?;
+    match s.require_active() {
+        Err(locus_core::LocusError::NotPinned) => Ok(None),
+        Err(error) => Err(error.into()),
+        Ok(session) => {
             let mut bindings = Vec::new();
             for alias in session.all_aliases() {
                 let b = s.load_binding(&alias)?;

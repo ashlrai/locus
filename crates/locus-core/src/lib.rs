@@ -11,6 +11,7 @@
 pub mod adapters;
 pub mod agent_report;
 pub mod approval;
+mod authority_anchor;
 pub mod autopin;
 pub mod binding;
 pub mod config;
@@ -52,14 +53,17 @@ pub use approval::{
     ApprovalAuthority, ApprovalGrant, ApprovalRecord, ApprovalStatus, ExternalApprovalEnvelope,
     EXTERNAL_APPROVAL_AUTHORITY_BLOCKER,
 };
+pub use authority_anchor::{
+    restrict_validation_to_executor, run_authority_anchor_server_if_requested,
+    CONTROL_CAPABILITY_ENV, EXECUTOR_CAPABILITY_ENV,
+};
 pub use autopin::{match_remote_binding, resolve_auto_pin, AutoPinTarget};
 pub use binding::{
     validate_name_component, Binding, BindingBody, BindingSummary, Policy, PolicyRule,
     ProviderBinding, Scope, UpstreamSpec,
 };
 pub use config::{
-    load_config, save_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig,
-    NotifyConfig,
+    load_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig, NotifyConfig,
 };
 pub use credential::{
     credential_metadata, inject_keys_for_provider, phantom_on_path, resolve,
@@ -88,8 +92,8 @@ pub use graph::{
     WorkspaceTemplate, ENV_PASSPHRASE as GRAPH_PASSPHRASE_ENV, GRAPH_VERSION, MAGIC as GRAPH_MAGIC,
 };
 pub use isolation::{
-    build_ci_env_map, build_isolated_env, build_isolated_env_opts, build_isolated_env_strict,
-    ci_secrets_allowed, IsolatedEnv,
+    build_ci_env_map, build_isolated_env, build_isolated_env_for_provider_opts,
+    build_isolated_env_opts, build_isolated_env_strict, ci_secrets_allowed, IsolatedEnv,
 };
 pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
 pub use recipes::{
@@ -98,11 +102,12 @@ pub use recipes::{
 pub use seal::SealKey;
 pub use session::{
     binding_fingerprint, namespace_tool, parse_ttl, split_namespaced_tool, PinSource, Session,
-    SessionAuthority, SessionMode,
+    SessionAuthority, SessionAuthorityAnchor, SessionBackingIdentity, SessionBackingType,
+    SessionMode, CURRENT_SEAL_VERSION,
 };
 pub use store::{
     locus_home, ApprovalsHealth, AuditEvent, CredentialRefMigration, EngagementInitResult,
-    ProviderView, RuntimeDrift, Store, Whoami,
+    ProviderView, ResolvedSession, RuntimeDrift, Store, Whoami,
 };
 pub use ticket::{
     mint_ticket, verify_ticket, verify_ticket_parts, CapabilityTicket, DEFAULT_TICKET_TTL_SECS,

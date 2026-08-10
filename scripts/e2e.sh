@@ -7,6 +7,8 @@
 set -euo pipefail
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
+export LOCUS_CONTROL_CAPABILITY="${LOCUS_CONTROL_CAPABILITY:-$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')}"
+OPERATOR_CONTROL_CAPABILITY="$LOCUS_CONTROL_CAPABILITY"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
@@ -67,7 +69,11 @@ mcp_rpc() {
     body+="${line}"$'\n'
   done
   # shellcheck disable=SC2086
-  printf '%s' "$body" | LOCUS_HOME="$LOCUS_HOME" "$MCP_BIN" 2>/dev/null
+  if [[ -f "$LOCUS_HOME/sessions/active.json" ]]; then
+    printf '%s' "$body" | locus exec --no-resolve -- "$MCP_BIN" 2>/dev/null
+  else
+    printf '%s' "$body" | LOCUS_HOME="$LOCUS_HOME" "$MCP_BIN" 2>/dev/null
+  fi
 }
 
 # Extract tool names from a tools/list response line (id matching $1 if given)
@@ -374,6 +380,7 @@ ok "exec scrubs ambient + injects env: secrets"
 
 # scrub parent ambient so later steps are clean
 unset GH_TOKEN SUPABASE_ACCESS_TOKEN AWS_PROFILE UNLISTED_SECRET_CANARY
+export LOCUS_CONTROL_CAPABILITY="$OPERATOR_CONTROL_CAPABILITY"
 
 # Exact Hub/agent sessions are confinement capabilities. Reproduce the prior
 # env-i bypass with a synthetic Phantom resolver and verify every refusal occurs
@@ -390,9 +397,25 @@ esac
 SH
 chmod +x "$fake_phantom_bin/phantom"
 
-hub_session_json="$(locus ci mint -b acme --force)"
+[[ ${#OPERATOR_CONTROL_CAPABILITY} -eq 64 ]] \
+  || die "operator control capability was not preserved for exact-session probes"
+set +e
+hub_session_json="$(LOCUS_CONTROL_CAPABILITY="$OPERATOR_CONTROL_CAPABILITY" \
+  "$LOCUS_BIN" ci mint -b acme --force 2>&1)"
+hub_session_ec=$?
+set -e
+[[ $hub_session_ec -eq 0 ]] || die "exact-session CI mint failed: $hub_session_json"
 hub_session_id="$(printf '%s' "$hub_session_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
-active_before_exact="$(locus whoami --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+hub_executor_capability="$(printf '%s' "$hub_session_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["env"]["LOCUS_EXECUTOR_CAPABILITY"])')"
+set +e
+active_before_exact_json="$(LOCUS_CONTROL_CAPABILITY="$OPERATOR_CONTROL_CAPABILITY" \
+  "$LOCUS_BIN" whoami --json 2>&1)"
+active_before_exact_ec=$?
+set -e
+[[ $active_before_exact_ec -eq 0 ]] \
+  || die "operator active-session lookup failed: $active_before_exact_json"
+active_before_exact="$(printf '%s' "$active_before_exact_json" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
 exact_state_before="$(control_plane_snapshot)"
 
 run_exact() {
@@ -401,6 +424,7 @@ run_exact() {
     HOME="$HOME" \
     LOCUS_HOME="$LOCUS_HOME" \
     LOCUS_SESSION_ID="$hub_session_id" \
+    LOCUS_EXECUTOR_CAPABILITY="$hub_executor_capability" \
     "$LOCUS_BIN" "$@"
 }
 
@@ -430,12 +454,35 @@ exact_pin_ec=$?
 set -e
 [[ $exact_pin_ec -ne 0 ]] || die "exact session mutated global pin"
 echo "$exact_pin_error" | grep -Fq "local control operation" \
+  || echo "$exact_pin_error" | grep -Fq "LOCUS_CONTROL_CAPABILITY" \
   || die "exact pin refusal did not name control boundary: $exact_pin_error"
+
+stripped_mutation() {
+  env -i PATH="/usr/bin:/bin" HOME="$HOME" LOCUS_HOME="$LOCUS_HOME" \
+    LOCUS_GRAPH_PASSPHRASE="stripped-authority-probe" \
+    "$LOCUS_BIN" "$@" >/dev/null 2>&1
+}
+for mutation in \
+  "pin personal --force" \
+  "ci mint -b personal --force" \
+  "notify on" \
+  "workspace --default personal --force" \
+  "binding add stripped --tenant stripped --provider github --account stripped --credential-ref env:STRIPPED_TOKEN" \
+  "graph export --out $LOCUS_HOME/stripped-graph.locus"
+do
+  read -r -a mutation_args <<<"$mutation"
+  if stripped_mutation "${mutation_args[@]}"; then
+    die "stripped child upgraded ambient active authority: $mutation"
+  fi
+done
+[[ ! -e "$LOCUS_HOME/stripped-graph.locus" ]] \
+  || die "stripped child wrote graph output"
 
 exact_state_after="$(control_plane_snapshot)"
 [[ "$exact_state_after" == "$exact_state_before" ]] \
   || die "blocked exact-session probes changed session/audit/global state"
-active_after_exact="$(locus whoami --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+active_after_exact="$(LOCUS_CONTROL_CAPABILITY="$OPERATOR_CONTROL_CAPABILITY" \
+  "$LOCUS_BIN" whoami --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
 [[ "$active_after_exact" == "$active_before_exact" ]] || die "exact session changed global share-pin"
 
 exact_allowed_marker="$LOCUS_HOME/exact-allowed-no-resolve"
@@ -445,8 +492,10 @@ run_exact exec --no-resolve -- /bin/sh -c \
 [[ "$(cat "$exact_allowed_marker")" == "acme|missing" ]] \
   || die "exact no-resolve child escaped binding or received token"
 
-recipe_session_json="$(locus ci mint -b noresolve-recipe --force)"
+recipe_session_json="$(LOCUS_CONTROL_CAPABILITY="$OPERATOR_CONTROL_CAPABILITY" \
+  "$LOCUS_BIN" ci mint -b noresolve-recipe --force)"
 hub_session_id="$(printf '%s' "$recipe_session_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["session_id"])')"
+hub_executor_capability="$(printf '%s' "$recipe_session_json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["env"]["LOCUS_EXECUTOR_CAPABILITY"])')"
 recipe_state_before="$(control_plane_snapshot)"
 assert_exact_blocked "recipe-default-worker" "--no-resolve refused locus run" \
   run -b noresolve-recipe --no-resolve
@@ -486,7 +535,8 @@ pinned_out="$(
 )"
 pinned_names="$(echo "$pinned_out" | tool_names_from_list)"
 echo "$pinned_names" | grep -qx 'locus_whoami' || die "pinned missing locus_whoami"
-echo "$pinned_names" | grep -q 'supabase.scope' || die "pinned missing supabase.scope"
+echo "$pinned_names" | grep -q 'supabase.scope' \
+  || die "pinned missing supabase.scope: names=$pinned_names response=$pinned_out"
 echo "$pinned_names" | grep -q 'github.scope' || die "pinned missing github.scope"
 echo "$pinned_names" | grep -q 'vercel.scope' || die "pinned missing vercel.scope"
 ok "pinned tools/list includes provider tools"

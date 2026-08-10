@@ -148,7 +148,7 @@ pub fn load_config(home: &Path) -> LocusConfig {
 }
 
 /// Write config (creates parent dirs as needed).
-pub fn save_config(home: &Path, cfg: &LocusConfig) -> Result<PathBuf> {
+pub(crate) fn save_config(home: &Path, cfg: &LocusConfig) -> Result<PathBuf> {
     let path = home.join("config.toml");
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;

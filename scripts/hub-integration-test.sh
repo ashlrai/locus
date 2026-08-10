@@ -13,6 +13,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export PATH="${ROOT}/target/debug:${ROOT}/target/release:${HOME}/.cargo/bin:${PATH}"
+export LOCUS_CONTROL_CAPABILITY="${LOCUS_CONTROL_CAPABILITY:-$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')}"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq is required" >&2
@@ -168,11 +169,77 @@ if printf '%s' "$MINT" | jq -e '
   and .seal == .env.LOCUS_SEAL
   and .worker_home == .env.LOCUS_WORKER_HOME
   and .expires_at == .env.LOCUS_EXPIRES_AT
+  and (.env.LOCUS_EXECUTOR_CAPABILITY | test("^[a-f0-9]{64}$"))
   and .secrets_resolved == false
 ' >/dev/null 2>&1; then
   ok "Hub mint is exact-binding and exact-session consistent"
 else
   bad "Hub mint identity fields are not exact-session consistent"
+fi
+
+HUB_MINT_JSON="$MINT" HUB_ROOT="$ROOT" LOCUS_BIN="${ROOT}/target/debug/locus" \
+  node --experimental-strip-types --input-type=module <<'NODE'
+import { pathToFileURL } from "node:url";
+
+const root = process.env.HUB_ROOT;
+const mint = JSON.parse(process.env.HUB_MINT_JSON);
+const module = await import(pathToFileURL(`${root}/integrations/ashlr-hub/locus.ts`).href);
+const exact = { ...mint.env, LOCUS_HOME: process.env.LOCUS_HOME, LOCUS_ENFORCE: "1" };
+
+const verified = module.validateExistingLocusSession(exact);
+if (verified.sessionId !== mint.session_id || verified.binding !== mint.binding) {
+  throw new Error("live existing-session verification changed identity");
+}
+
+process.env.CROSS_BINDING_TOKEN = "ambient-cross-binding-canary";
+process.env.LOCUS_CONTROL_CAPABILITY = process.env.LOCUS_CONTROL_CAPABILITY || "a".repeat(64);
+let callbackRan = false;
+await module.runWithLocusSessionIfConfigured(async (handle) => {
+  callbackRan = true;
+  if (!handle || handle.sessionId !== mint.session_id) throw new Error("missing verified handle");
+  if (process.env.CROSS_BINDING_TOKEN !== undefined) throw new Error("ambient credential reached callback");
+  if (process.env.LOCUS_CONTROL_CAPABILITY !== undefined) throw new Error("control capability reached callback");
+  if (handle.env.CROSS_BINDING_TOKEN !== undefined) throw new Error("ambient credential reached handle");
+  if (handle.env.HOME !== mint.worker_home) throw new Error("callback HOME is not worker-scoped");
+}, { env: exact });
+if (!callbackRan) throw new Error("verified callback did not run");
+if (process.env.CROSS_BINDING_TOKEN !== "ambient-cross-binding-canary") {
+  throw new Error("callback environment was not restored");
+}
+
+for (const forged of [
+  { ...exact, LOCUS_TENANT: "forged-tenant" },
+  { ...exact, LOCUS_SEAL: "hmac-sha256:" + "0".repeat(64) },
+  { ...exact, LOCUS_SESSION_ID: "ses_" + "0".repeat(32) },
+  { ...exact, LOCUS_EXECUTOR_CAPABILITY: undefined },
+]) {
+  let rejected = false;
+  try {
+    await module.runWithLocusSessionIfConfigured(() => {
+      throw new Error("forged session reached callback");
+    }, { env: forged });
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) throw new Error("forged existing-session labels were accepted");
+}
+console.log("ok    live: Hub validates broker-backed session and scrubs callback ambient authority");
+NODE
+
+EXPIRED_MINT="$(locus ci mint -b personal --ttl 1s --json)"
+sleep 2
+if HUB_MINT_JSON="$EXPIRED_MINT" HUB_ROOT="$ROOT" LOCUS_BIN="${ROOT}/target/debug/locus" \
+  node --experimental-strip-types --input-type=module >/dev/null 2>&1 <<'NODE'
+import { pathToFileURL } from "node:url";
+const mint = JSON.parse(process.env.HUB_MINT_JSON);
+const module = await import(pathToFileURL(`${process.env.HUB_ROOT}/integrations/ashlr-hub/locus.ts`).href);
+const env = { ...mint.env, LOCUS_HOME: process.env.LOCUS_HOME, LOCUS_ENFORCE: "1" };
+module.validateExistingLocusSession(env);
+NODE
+then
+  bad "Hub accepted an expired broker-backed session"
+else
+  ok "Hub rejects expired broker-backed session before callback"
 fi
 
 # ---------------------------------------------------------------------------

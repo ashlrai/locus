@@ -20,8 +20,8 @@ use locus_core::{
     parse_ttl, phantom_on_path, probe_agent_options, recipe_toml_snippet, resolve_passphrase,
     suggest_for_provider, verify_claim, verify_session, workspace_stub_toml, AgentStatus, Binding,
     BindingBody, CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
-    EventsExportOptions, ForensicsExportOptions, Policy, ProviderBinding, Scope, Session, Store,
-    WorkspaceConfig, VERSION,
+    EventsExportOptions, ForensicsExportOptions, IsolatedEnv, Policy, ProviderBinding, Scope,
+    Session, Store, WorkspaceConfig, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -691,6 +691,13 @@ enum BindingCmd {
 }
 
 fn main() {
+    if let Some(result) = locus_core::run_authority_anchor_server_if_requested() {
+        if let Err(error) = result {
+            eprintln!("authority anchor error: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(e) = run() {
         eprintln!("{} {e:#}", "error:".red().bold());
         std::process::exit(1);
@@ -990,15 +997,11 @@ fn exact_session_selected() -> bool {
 /// sessions remain delegated even if their descriptive client labels are edited.
 fn delegated_child_session(s: &Store) -> Result<Option<Session>> {
     let selected = exact_session_selected();
-    let Some(session) = s.active_session()? else {
-        if selected {
-            bail!("selected LOCUS_SESSION_ID does not name a valid exact session");
-        }
-        return Ok(None);
+    let session = match s.require_active() {
+        Ok(session) => session,
+        Err(_) if !selected && s.active_session()?.is_none() => return Ok(None),
+        Err(error) => return Err(error).context("verify selected session authority"),
     };
-    session
-        .verify(&s.seal_key()?)
-        .context("verify selected session authority")?;
     if selected || session.is_delegated() {
         Ok(Some(session))
     } else {
@@ -1007,12 +1010,22 @@ fn delegated_child_session(s: &Store) -> Result<Option<Session>> {
 }
 
 fn require_local_control_boundary(operation: &str) -> Result<()> {
-    if exact_session_selected() {
-        bail!(
-            "{operation} is a local control operation and is unavailable inside an exact delegated session"
-        );
-    }
-    Ok(())
+    store()?
+        .require_local_control(operation)
+        .map_err(Into::into)
+}
+
+fn isolated_child_env(
+    store: &Store,
+    session: &Session,
+    binding: &Binding,
+    resolve_secrets: bool,
+) -> IsolatedEnv {
+    let mut isolated = build_isolated_env_opts(session, binding, resolve_secrets);
+    isolated
+        .vars
+        .insert("LOCUS_HOME".into(), store.home().display().to_string());
+    isolated
 }
 
 fn cwd() -> PathBuf {
@@ -1031,6 +1044,7 @@ fn cmd_serve(port: u16, token: Option<String>, open_browser: bool) -> Result<()>
 }
 
 fn cmd_init(with_samples: bool, json: bool) -> Result<()> {
+    require_local_control_boundary("locus init")?;
     let s = store()?;
     let config_written = ensure_default_config(&s)?;
     if with_samples {
@@ -2037,14 +2051,23 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     }
 
     let s = store()?;
-    let delegated = delegated_child_session(&s)?;
-    if delegated.is_some() && resolve_secrets {
-        bail!("locus exec cannot resolve credentials inside a delegated session; use --no-resolve");
+    if let Some(session) = delegated_child_session(&s)? {
+        if resolve_secrets {
+            bail!(
+                "locus exec cannot resolve credentials inside a delegated session; use --no-resolve"
+            );
+        }
+        let binding = s.load_binding(&session.binding_alias)?;
+        return run_exact_session_child(
+            &s,
+            &session,
+            &binding,
+            &args,
+            ChildLaunchSurface::Exec,
+            "session.exec.delegated",
+        );
     }
-    let session = match delegated {
-        Some(session) => session,
-        None => s.require_active().context("need active pin for exec")?,
-    };
+    let session = s.require_active().context("need active pin for exec")?;
     let binding = s.load_binding(&session.binding_alias)?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Exec)?;
 
@@ -2056,13 +2079,14 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
             drift.issues.join(", ")
         );
     }
-    let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
+    let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         bail!(
             "credential resolve failed: {}",
             format_credential_issues(&iso.secrets_failed)
         );
     }
+    let executor_capability = s.grant_executor_capability(&session)?;
 
     let program = &args[0];
     let rest = &args[1..];
@@ -2077,6 +2101,7 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     for (k, v) in &iso.vars {
         child.env(k, v);
     }
+    child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
     eprintln!(
         "{} exec as {} ({}) — scrubbed {} ambient · resolved {} secret(s)",
@@ -2159,7 +2184,11 @@ fn cmd_ci_mint(
             "warn".yellow()
         );
     }
-    let env_map = build_ci_env_map(&session, &binding, resolve);
+    let mut env_map = build_ci_env_map(&session, &binding, resolve);
+    env_map.insert(
+        locus_core::EXECUTOR_CAPABILITY_ENV.into(),
+        s.grant_executor_capability(&session)?,
+    );
     let secrets_in_output = resolve && ci_secrets_allowed();
 
     // Always emit JSON for mint (machine-first); `--json` is accepted for consistency.
@@ -2197,7 +2226,11 @@ fn cmd_ci_env(binding_alias: String, ttl: String, force: bool, resolve: bool) ->
             "warn".yellow()
         );
     }
-    let env_map = build_ci_env_map(&session, &binding, resolve);
+    let mut env_map = build_ci_env_map(&session, &binding, resolve);
+    env_map.insert(
+        locus_core::EXECUTOR_CAPABILITY_ENV.into(),
+        s.grant_executor_capability(&session)?,
+    );
     for (k, v) in &env_map {
         // Shell-safe single-quoted export; escape embedded single quotes.
         let escaped = v.replace('\'', "'\\''");
@@ -2276,7 +2309,7 @@ fn cmd_ci_run(
     }
 
     // Child gets full isolated env (may resolve secrets for the command to work).
-    let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
+    let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_ci_session(&ci_path, &session);
         bail!(
@@ -2284,6 +2317,7 @@ fn cmd_ci_run(
             format_credential_issues(&iso.secrets_failed)
         );
     }
+    let executor_capability = s.grant_executor_capability(&session)?;
 
     let program = &args[0];
     let rest = &args[1..];
@@ -2298,6 +2332,7 @@ fn cmd_ci_run(
     for (k, v) in &iso.vars {
         child.env(k, v);
     }
+    child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
     eprintln!(
         "{} ci run as {} ({}) — ttl_until={} · scrubbed {} · resolved {} secret(s)",
@@ -2420,7 +2455,7 @@ fn cmd_run(
         }
     }
 
-    let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
+    let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_run_session(&run_path, &session);
         bail!(
@@ -2428,6 +2463,7 @@ fn cmd_run(
             format_credential_issues(&iso.secrets_failed)
         );
     }
+    let executor_capability = s.grant_executor_capability(&session)?;
 
     // Ensure composite workers when upstream is present (best-effort for CLI run).
     // Child process gets LOCUS_* env; upstream MCP is primarily for locus-mcp.
@@ -2459,6 +2495,7 @@ fn cmd_run(
     for (k, v) in &iso.vars {
         child.env(k, v);
     }
+    child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
     eprintln!(
         "{} run as {} ({}) — temporary={} · scrubbed {} · resolved {} secret(s)",
@@ -2526,10 +2563,12 @@ fn run_exact_session_child(
         );
     }
 
-    let iso = build_isolated_env_opts(session, binding, false);
+    let iso = isolated_child_env(s, session, binding, false);
     if iso.secrets_resolved != 0 {
         bail!("internal: delegated no-resolve child resolved credentials");
     }
+    let executor_capability = env::var(locus_core::EXECUTOR_CAPABILITY_ENV)
+        .context("delegated child requires a supervised executor capability")?;
 
     let program = &args[0];
     let mut child = Command::new(program);
@@ -2542,6 +2581,7 @@ fn run_exact_session_child(
     for (k, v) in &iso.vars {
         child.env(k, v);
     }
+    child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
     let status = child.status().with_context(|| format!("spawn {program}"))?;
     s.audit(
@@ -2888,6 +2928,7 @@ fn cmd_workspace(
     require_pin: bool,
     force: bool,
 ) -> Result<()> {
+    require_local_control_boundary("locus workspace")?;
     let path = cwd().join(".locus.toml");
     if path.exists() && !force {
         bail!(
@@ -3506,6 +3547,9 @@ fn cmd_agent_setup(
     }
     if apply && dry_run {
         bail!("pass only one of --apply or --dry-run");
+    }
+    if apply {
+        require_local_control_boundary("locus agent setup --apply")?;
     }
     let clients: Vec<&str> = match client {
         "all" => vec!["claude", "cursor", "codex"],
@@ -4158,6 +4202,9 @@ fn resolve_mcp_bin(mcp_bin: Option<String>) -> String {
 }
 
 fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<()> {
+    if !print_only && matches!(client, "claude" | "cursor") {
+        require_local_control_boundary("locus setup")?;
+    }
     let bin = resolve_mcp_bin(mcp_bin);
     let server_entry = serde_json::json!({
         "command": bin,
@@ -4428,7 +4475,7 @@ fn cmd_forensics(sub: ForensicsCmd, json: bool) -> Result<()> {
 }
 
 fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {
-    use locus_core::{load_config, notifications_enabled, save_config};
+    use locus_core::{load_config, notifications_enabled};
 
     let s = store()?;
     let home = s.home();
@@ -4472,9 +4519,10 @@ fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {
             }
         }
         NotifyCmd::On => {
+            s.require_local_control("locus notify on")?;
             let mut cfg = load_config(home);
             cfg.notify.enabled = true;
-            let path = save_config(home, &cfg)?;
+            let path = s.save_config(&cfg)?;
             if json {
                 println!(
                     "{}",
@@ -4489,9 +4537,10 @@ fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {
             }
         }
         NotifyCmd::Off => {
+            s.require_local_control("locus notify off")?;
             let mut cfg = load_config(home);
             cfg.notify.enabled = false;
-            let path = save_config(home, &cfg)?;
+            let path = s.save_config(&cfg)?;
             if json {
                 println!(
                     "{}",

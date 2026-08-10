@@ -4,8 +4,8 @@
 //! credential refs in agent-facing output, project refs, or ambient provider env.
 
 use locus_core::{
-    build_isolated_env, build_isolated_env_opts, Binding, BindingBody, Policy, ProviderBinding,
-    Scope, Store,
+    build_isolated_env, build_isolated_env_for_provider_opts, build_isolated_env_opts, Binding,
+    BindingBody, Policy, ProviderBinding, Scope, Store,
 };
 use tempfile::tempdir;
 
@@ -195,6 +195,58 @@ fn resolution_failures_and_child_env_never_expose_locator_names() {
         .vars
         .values()
         .any(|value| value.contains("LOCUS_MISSING_LOCATOR_CANARY")));
+}
+
+#[test]
+fn provider_worker_gets_only_its_named_provider_credential_and_scope() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut scoped = binding(
+        "scoped",
+        "scoped-corp",
+        "env:LOCUS_TEST_GITHUB_CANARY",
+        "phm:VERCEL_UNUSED",
+        "env:LOCUS_TEST_SUPABASE_CANARY",
+        "project-scoped",
+        "team-scoped",
+    );
+    scoped.providers.retain(|p| p.provider != "vercel");
+    store.save_binding(&scoped).unwrap();
+    let session = store.pin("scoped", dir.path(), None, false).unwrap();
+    std::env::set_var("LOCUS_TEST_GITHUB_CANARY", "github-secret-canary");
+    std::env::set_var("LOCUS_TEST_SUPABASE_CANARY", "supabase-secret-canary");
+
+    let github =
+        build_isolated_env_for_provider_opts(&session, &scoped, &scoped.providers[0], true);
+    assert_eq!(
+        github.vars.get("GH_TOKEN").map(String::as_str),
+        Some("github-secret-canary")
+    );
+    assert!(!github.vars.contains_key("SUPABASE_ACCESS_TOKEN"));
+    assert!(!github.vars.contains_key("LOCUS_SUPABASE_PROJECT_REF"));
+    assert_eq!(
+        github.vars.get("LOCUS_PROVIDERS").map(String::as_str),
+        Some("github")
+    );
+
+    let supabase =
+        build_isolated_env_for_provider_opts(&session, &scoped, &scoped.providers[1], true);
+    assert_eq!(
+        supabase
+            .vars
+            .get("SUPABASE_ACCESS_TOKEN")
+            .map(String::as_str),
+        Some("supabase-secret-canary")
+    );
+    assert!(!supabase.vars.contains_key("GH_TOKEN"));
+    assert!(!supabase.vars.contains_key("LOCUS_GITHUB_ACCOUNT"));
+    assert_eq!(
+        supabase.vars.get("LOCUS_PROVIDERS").map(String::as_str),
+        Some("supabase")
+    );
+
+    std::env::remove_var("LOCUS_TEST_GITHUB_CANARY");
+    std::env::remove_var("LOCUS_TEST_SUPABASE_CANARY");
 }
 
 #[test]

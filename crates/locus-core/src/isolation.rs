@@ -7,7 +7,7 @@
 //! - Parent env is rebuilt from a small runtime allowlist; unknown variables
 //!   never cross into child processes.
 
-use crate::binding::Binding;
+use crate::binding::{Binding, ProviderBinding};
 use crate::credential::{resolve_binding_secrets, CredentialResolutionIssue};
 use crate::error::Result;
 use crate::session::Session;
@@ -186,6 +186,22 @@ pub fn build_isolated_env_opts(
         secrets_resolved,
         secrets_failed,
     }
+}
+
+/// Build a child environment for exactly one named provider worker.
+///
+/// This deliberately narrows both frozen scope metadata and credential
+/// resolution to `provider`; a multi-provider binding is never forwarded to
+/// an individual upstream process.
+pub fn build_isolated_env_for_provider_opts(
+    session: &Session,
+    binding: &Binding,
+    provider: &ProviderBinding,
+    resolve_secrets: bool,
+) -> IsolatedEnv {
+    let mut scoped = binding.clone();
+    scoped.providers = vec![provider.clone()];
+    build_isolated_env_opts(session, &scoped, resolve_secrets)
 }
 
 /// Fallible variant that propagates resolve errors when soft mode is off.

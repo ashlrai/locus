@@ -14,6 +14,21 @@ pub enum LocusError {
     #[error("invalid session seal")]
     InvalidSeal,
 
+    #[error("legacy session seal is incomplete; human re-pin required")]
+    LegacySessionSeal,
+
+    #[error("binding authority mismatch: {0}; human re-pin required")]
+    BindingAuthorityMismatch(String),
+
+    #[error("session authority anchor unavailable: {0}; human re-pin required")]
+    AuthorityAnchorUnavailable(String),
+
+    #[error("session authority generation is stale or unknown; human re-pin required")]
+    AuthorityAnchorMismatch,
+
+    #[error("executor authority unavailable: {0}; use an explicit supervised `locus exec`, `locus run`, or `locus ci run` boundary")]
+    ExecutorAuthorityUnavailable(String),
+
     #[error("session expired at {0}")]
     SessionExpired(String),
 

@@ -14,7 +14,7 @@ use super::stdio_client::{client_key, McpStdioClient};
 use super::{WorkerBackend, WorkerKey, WorkerSlot, WorkerState, WorkerToolResult};
 use crate::binding::{Binding, ProviderBinding};
 use crate::error::{LocusError, Result};
-use crate::isolation::build_isolated_env_opts;
+use crate::isolation::build_isolated_env_for_provider_opts;
 use crate::session::Session;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -80,7 +80,12 @@ impl McpStdioBackend {
         provider: &ProviderBinding,
         work_dir: &Path,
     ) -> Command {
-        let iso = build_isolated_env_opts(session, binding, self.config.resolve_secrets);
+        let iso = build_isolated_env_for_provider_opts(
+            session,
+            binding,
+            provider,
+            self.config.resolve_secrets,
+        );
         let sandboxed = sandbox_enabled(self.config.sandbox);
 
         let (program, args, sandbox_backend) = if sandboxed {

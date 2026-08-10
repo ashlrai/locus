@@ -13,7 +13,7 @@ use crate::binding::{Binding, UpstreamSpec};
 use crate::error::{LocusError, Result};
 use crate::session::Session;
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -321,11 +321,41 @@ impl CompositeWorkerManager {
     ) -> Result<Vec<WorkerSlot>> {
         let _ = self.reap_idle_configured()?;
         self.focus_session(&session.session_id)?;
+        let before = self.slots.keys().cloned().collect::<BTreeSet<_>>();
         let mut out = Vec::new();
         for (_, binding) in bindings {
-            out.extend(self.ensure_all(session, binding)?);
+            match self.ensure_all(session, binding) {
+                Ok(slots) => out.extend(slots),
+                Err(error) => {
+                    self.rollback_new_workers(&before)?;
+                    return Err(error);
+                }
+            }
         }
         Ok(out)
+    }
+
+    fn rollback_new_workers(&mut self, before: &BTreeSet<WorkerKey>) -> Result<()> {
+        let created = self
+            .slots
+            .keys()
+            .filter(|key| !before.contains(*key))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for key in created {
+            if let Err(error) = self.teardown(&key) {
+                failures.push(error.to_string());
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(LocusError::msg(format!(
+                "worker startup rollback failed: {}",
+                failures.join("; ")
+            )))
+        }
     }
 
     /// Route a tool call: upstream MCP when the tool is not a synthetic adapter
@@ -435,9 +465,16 @@ impl WorkerManager for CompositeWorkerManager {
     }
 
     fn ensure_all(&mut self, session: &Session, binding: &Binding) -> Result<Vec<WorkerSlot>> {
+        let before = self.slots.keys().cloned().collect::<BTreeSet<_>>();
         let mut out = Vec::with_capacity(binding.providers.len());
         for p in &binding.providers {
-            out.push(self.ensure(session, binding, &p.provider)?);
+            match self.ensure(session, binding, &p.provider) {
+                Ok(slot) => out.push(slot),
+                Err(error) => {
+                    self.rollback_new_workers(&before)?;
+                    return Err(error);
+                }
+            }
         }
         Ok(out)
     }
@@ -501,7 +538,9 @@ mod tests {
 
     fn mock_script() -> &'static str {
         r#"
-import sys, json
+import sys, json, os, pathlib
+if len(sys.argv) > 1:
+    pathlib.Path(sys.argv[1]).write_text(str(os.getpid()) + "|" + os.environ.get("GH_TOKEN", "missing") + "|" + os.environ.get("SUPABASE_ACCESS_TOKEN", "missing"))
 def send(o):
     sys.stdout.write(json.dumps(o)+"\n"); sys.stdout.flush()
 for line in sys.stdin:
@@ -684,6 +723,90 @@ for line in sys.stdin:
 
         mgr.teardown_session(&session.session_id).unwrap();
         assert!(mgr.list().is_empty());
+    }
+
+    #[test]
+    fn partial_multi_provider_startup_rolls_back_earlier_credential_child() {
+        if Command::new("python3").arg("--version").output().is_err() {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        let marker = dir.path().join("first-provider.txt");
+        std::fs::create_dir_all(&worker_home).unwrap();
+        let session = session_at(&worker_home.display().to_string());
+        std::env::set_var("LOCUS_ROLLBACK_GITHUB", "github-rollback-canary");
+        std::env::set_var("LOCUS_ROLLBACK_SUPABASE", "supabase-rollback-canary");
+        let binding = Binding::from_body(BindingBody {
+            id: "bnd_rollback".into(),
+            alias: "rollback".into(),
+            tenant: "rollback".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![
+                ProviderBinding {
+                    provider: "github".into(),
+                    account: "rollback-gh".into(),
+                    credential_ref: "env:LOCUS_ROLLBACK_GITHUB".into(),
+                    scope: Scope::default(),
+                    upstream: Some(
+                        UpstreamSpec::new("python3")
+                            .with_args(["-u", "-c", mock_script(), marker.to_str().unwrap()])
+                            .resolve_secrets(true),
+                    ),
+                },
+                ProviderBinding {
+                    provider: "supabase".into(),
+                    account: "rollback-db".into(),
+                    credential_ref: "env:LOCUS_ROLLBACK_SUPABASE".into(),
+                    scope: Scope::default(),
+                    upstream: Some(
+                        UpstreamSpec::new(
+                            dir.path().join("missing-upstream").display().to_string(),
+                        )
+                        .resolve_secrets(true),
+                    ),
+                },
+            ],
+        });
+
+        let mut mgr = CompositeWorkerManager::new();
+        let error = mgr.ensure_binding(&session, &binding).unwrap_err();
+        assert!(error.to_string().contains("failed to spawn"));
+        assert!(
+            mgr.list().is_empty(),
+            "partial startup retained worker slots"
+        );
+        let marker_body = std::fs::read_to_string(&marker).unwrap();
+        let mut fields = marker_body.split('|');
+        let pid = fields.next().unwrap().to_string();
+        assert_eq!(fields.next(), Some("github-rollback-canary"));
+        assert_eq!(fields.next(), Some("missing"));
+        #[cfg(unix)]
+        {
+            let mut stopped = false;
+            for _ in 0..20 {
+                if !Command::new("kill")
+                    .args(["-0", &pid])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+                {
+                    stopped = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(
+                stopped,
+                "earlier credential-bearing child {pid} survived rollback"
+            );
+        }
+        std::env::remove_var("LOCUS_ROLLBACK_GITHUB");
+        std::env::remove_var("LOCUS_ROLLBACK_SUPABASE");
     }
 
     #[test]

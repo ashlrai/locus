@@ -247,17 +247,17 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     let mut pin_seal_ok: Option<bool> = None;
     let mut pin: Option<DoctorPin> = None;
     if let Some(ref sess) = active {
-        let seal_only = match store.seal_key() {
-            Ok(key) => key.verify(&sess.material(), &sess.seal),
-            Err(_) => false,
-        };
-        pin_seal_ok = Some(seal_only);
+        let runtime_verified = runtime.seal_ok
+            && runtime.authority_anchor_ok
+            && runtime.backing_ok
+            && !sess.is_expired();
+        pin_seal_ok = Some(runtime_verified);
         pin = Some(DoctorPin {
             alias: sess.binding_alias.clone(),
             tenant: sess.tenant.clone(),
             binding_id: sess.binding_id.clone(),
             expires_at: sess.expires_at.to_rfc3339(),
-            seal_ok: seal_only,
+            seal_ok: runtime_verified,
             principal: sess.principal.clone(),
             client: sess.client.clone(),
             expired: sess.is_expired(),

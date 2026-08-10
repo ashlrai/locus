@@ -1,5 +1,7 @@
 //! Live session pin — exclusive or namespaced bindings for the active agent/CLI context.
 
+pub use crate::authority_anchor::SessionAuthorityAnchor;
+use crate::authority_anchor::AUTHORITY_ANCHOR_VERSION;
 use crate::binding::Binding;
 use crate::error::{LocusError, Result};
 use crate::seal::{seal_material, SealKey};
@@ -7,6 +9,7 @@ use chrono::{DateTime, Duration, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::{Component, Path};
 
 /// How the pin was established.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,7 +56,35 @@ pub enum SessionAuthority {
     LegacyUntrusted,
 }
 
-const CURRENT_SEAL_VERSION: u32 = 2;
+pub const CURRENT_SEAL_VERSION: u32 = 3;
+pub const SESSION_BACKING_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionBackingType {
+    #[default]
+    Active,
+    Run,
+    Ci,
+}
+
+impl SessionBackingType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Run => "run",
+            Self::Ci => "ci",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionBackingIdentity {
+    pub version: u32,
+    pub backing_type: SessionBackingType,
+    pub canonical_path: String,
+    pub file_name: String,
+}
 
 const fn legacy_seal_version() -> u32 {
     1
@@ -99,6 +130,12 @@ pub struct Session {
     /// Fingerprints for namespaced aliases, parallel to `namespaces`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub namespace_fps: Vec<String>,
+    /// Exact file authorized to carry this record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backing: Option<SessionBackingIdentity>,
+    /// Monotonic generation held by the live authority broker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_anchor: Option<SessionAuthorityAnchor>,
 }
 
 impl Session {
@@ -164,6 +201,8 @@ impl Session {
             binding_fp: None,
             namespaces: Vec::new(),
             namespace_fps: Vec::new(),
+            backing: None,
+            authority_anchor: None,
         };
         session.reseal(key);
         session
@@ -215,6 +254,8 @@ impl Session {
         // every authorization-relevant mutable field is covered by the HMAC.
         serde_json::to_string(&serde_json::json!({
             "authority": self.authority,
+            "authority_anchor": self.authority_anchor,
+            "backing": self.backing,
             "binding_alias": self.binding_alias,
             "binding_fp": self.binding_fp,
             "binding_id": self.binding_id,
@@ -236,6 +277,33 @@ impl Session {
         .expect("session seal tuple is serializable")
     }
 
+    /// Stable broker subject for every authorization-relevant session field.
+    /// The live anchor itself is excluded because its generation is assigned
+    /// by the broker after this subject has been constructed.
+    pub(crate) fn authority_subject_digest(&self) -> String {
+        let subject = serde_json::to_vec(&serde_json::json!({
+            "authority": self.authority,
+            "backing": self.backing,
+            "binding_alias": self.binding_alias,
+            "binding_fp": self.binding_fp,
+            "binding_id": self.binding_id,
+            "client": self.client,
+            "expires_at": self.expires_at.to_rfc3339(),
+            "mode": self.mode,
+            "namespace_fps": self.namespace_fps,
+            "namespaces": self.namespaces,
+            "pinned_at": self.pinned_at.to_rfc3339(),
+            "principal": self.principal,
+            "seal_version": self.seal_version,
+            "session_id": self.session_id,
+            "source": self.source,
+            "tenant": self.tenant,
+            "worker_home": self.worker_home,
+        }))
+        .expect("session authority subject is serializable");
+        hex::encode(Sha256::digest(subject))
+    }
+
     /// Refresh the HMAC after store-owned session state changes.
     pub fn reseal(&mut self, key: &SealKey) {
         self.seal_version = CURRENT_SEAL_VERSION;
@@ -243,6 +311,9 @@ impl Session {
     }
 
     pub fn verify(&self, key: &SealKey) -> Result<()> {
+        if self.seal_version < CURRENT_SEAL_VERSION {
+            return Err(LocusError::LegacySessionSeal);
+        }
         if self.seal_version != CURRENT_SEAL_VERSION
             || self.authority == SessionAuthority::LegacyUntrusted
         {
@@ -266,6 +337,9 @@ impl Session {
 
     /// Seal + expiry only — does not fail on frozen (for drift checks / doctor).
     pub fn verify_seal(&self, key: &SealKey) -> Result<()> {
+        if self.seal_version < CURRENT_SEAL_VERSION {
+            return Err(LocusError::LegacySessionSeal);
+        }
         if self.seal_version != CURRENT_SEAL_VERSION
             || self.authority == SessionAuthority::LegacyUntrusted
         {
@@ -290,6 +364,63 @@ impl Session {
 
     pub fn is_delegated(&self) -> bool {
         self.authority != SessionAuthority::LocalControl
+    }
+
+    pub fn set_backing(
+        &mut self,
+        backing_type: SessionBackingType,
+        canonical_path: &Path,
+    ) -> Result<()> {
+        if !canonical_path.is_absolute()
+            || canonical_path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir))
+        {
+            return Err(LocusError::InvalidSeal);
+        }
+        let file_name = canonical_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(LocusError::InvalidSeal)?
+            .to_string();
+        self.backing = Some(SessionBackingIdentity {
+            version: SESSION_BACKING_VERSION,
+            backing_type,
+            canonical_path: canonical_path.display().to_string(),
+            file_name,
+        });
+        Ok(())
+    }
+
+    pub fn verify_backing(
+        &self,
+        backing_type: SessionBackingType,
+        canonical_path: &Path,
+    ) -> Result<()> {
+        let backing = self.backing.as_ref().ok_or(LocusError::InvalidSeal)?;
+        if backing.version != SESSION_BACKING_VERSION
+            || backing.backing_type != backing_type
+            || Path::new(&backing.canonical_path) != canonical_path
+            || canonical_path.file_name().and_then(|name| name.to_str())
+                != Some(backing.file_name.as_str())
+        {
+            return Err(LocusError::InvalidSeal);
+        }
+        Ok(())
+    }
+
+    pub fn verify_authority_shape(&self) -> Result<()> {
+        let anchor = self
+            .authority_anchor
+            .as_ref()
+            .ok_or(LocusError::LegacySessionSeal)?;
+        if anchor.version != AUTHORITY_ANCHOR_VERSION
+            || anchor.epoch.is_empty()
+            || anchor.generation == 0
+        {
+            return Err(LocusError::InvalidSeal);
+        }
+        Ok(())
     }
 
     /// Mark session frozen (persist separately via store).
