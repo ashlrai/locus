@@ -5,8 +5,8 @@
 //! - A session is sealed to exactly one Binding (exclusive mode).
 //! - Unbound sessions have no provider surface.
 //! - Isolated exec env contains only the pinned binding's providers.
-//! - Credential **values** never live in MCP responses — only CredentialRefs
-//!   and resolved secrets inside worker env maps.
+//! - Credential refs and values never live in MCP responses; only safe source
+//!   metadata is exposed, and resolved values stay inside worker env maps.
 
 pub mod adapters;
 pub mod agent_report;
@@ -15,6 +15,7 @@ pub mod autopin;
 pub mod binding;
 pub mod config;
 pub mod credential;
+mod credential_migration;
 pub mod doctor;
 pub mod engagement;
 pub mod error;
@@ -58,7 +59,9 @@ pub use config::{
     NotifyConfig,
 };
 pub use credential::{
-    inject_keys_for_provider, phantom_on_path, resolve, resolve_binding_secrets, CredentialRef,
+    credential_metadata, inject_keys_for_provider, phantom_on_path, resolve,
+    resolve_binding_secrets, CredentialMetadata, CredentialRef, CredentialResolutionIssue,
+    ResolvedBindingSecrets,
 };
 pub use doctor::{
     build_doctor_report, count_near_misses, doctor_json_has_stable_keys, filter_audit_events,
@@ -83,7 +86,7 @@ pub use graph::{
 };
 pub use isolation::{
     build_ci_env_map, build_isolated_env, build_isolated_env_opts, build_isolated_env_strict,
-    ci_secrets_allowed, visible_credential_refs, IsolatedEnv,
+    ci_secrets_allowed, IsolatedEnv,
 };
 pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
 pub use recipes::{
@@ -95,8 +98,8 @@ pub use session::{
     SessionMode,
 };
 pub use store::{
-    locus_home, ApprovalsHealth, AuditEvent, EngagementInitResult, ProviderView, RuntimeDrift,
-    Store, Whoami,
+    locus_home, ApprovalsHealth, AuditEvent, CredentialRefMigration, EngagementInitResult,
+    ProviderView, RuntimeDrift, Store, Whoami,
 };
 pub use ticket::{
     mint_ticket, verify_ticket, verify_ticket_parts, CapabilityTicket, DEFAULT_TICKET_TTL_SECS,

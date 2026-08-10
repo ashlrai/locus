@@ -42,7 +42,7 @@ impl WorkerBackend for SyntheticBackend {
             binding_id: binding.id.clone(),
             binding_alias: binding.alias.clone(),
             account: provider.account.clone(),
-            credential_ref: provider.credential_ref.clone(),
+            credential: crate::credential::credential_metadata(&provider.credential_ref),
             state: WorkerState::Ready,
             work_dir: work_dir.to_path_buf(),
             backend: "synthetic".into(),

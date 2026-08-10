@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ashlrai/locus/schema/hub-gate.schema.json",
   "title": "LocusFleetGate",
-  "description": "Fleet pre-dispatch gate result from locusFleetGate() / evaluateFleetGate(). Fail closed: allowDispatch is true only when blockers is empty. Never contains resolved secret values. Nested report follows schema/agent-report.schema.json.",
+  "description": "Fleet pre-dispatch gate result from locusFleetGate() / evaluateFleetGate(). Fail closed: allowDispatch is true only when blockers is empty. Never contains credential locator names or resolved secret values. Nested report follows schema/agent-report.schema.json.",
   "type": "object",
   "additionalProperties": true,
   "required": ["allowDispatch", "blockers", "report"],

@@ -96,7 +96,7 @@ impl ProviderAdapter for StripeAdapter {
                     "livemode": livemode,
                     "mode": mode,
                     "read_only": provider.scope.read_only,
-                    "credential_ref": provider.credential_ref,
+                    "credential": crate::credential::credential_metadata(&provider.credential_ref),
                     "tenant": binding.tenant,
                     "binding": binding.alias,
                     "frozen_selectors": ["account_id", "livemode"],

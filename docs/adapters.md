@@ -102,7 +102,7 @@ let project_ref = freeze_string_arg(args, "project_ref", frozen)?;
 
 ## What not to do
 
-- **Do not** return secret values (tokens, full credential_ref resolutions) in tool content.
+- **Do not** return `credential_ref` strings or resolved secret values in tool content. Scope/identity responses may return only safe credential presence/source metadata or a digest.
 - **Do not** fall through to ambient `gh auth`, global AWS profile, or another binding’s env.
 - **Do not** call remote APIs with credentials resolved outside the pinned binding’s refs (when you add live calls).
 - **Do not** print to stdout from MCP-adjacent paths — pollutes the MCP stream.
@@ -201,7 +201,7 @@ credential_ref = "phm:SUPABASE_ACME"
 scope = { project_ref = "abcdefghij", read_only = true }
 ```
 
-Never put raw secrets in binding files — only CredentialRefs (`phm:`, `env:`, test-only `test:`).
+Never put raw secrets in binding files — only CredentialRefs (`phm:` or `env:`). Production rejects `test:`.
 
 ## Phase 1 vs later
 

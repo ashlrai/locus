@@ -95,7 +95,7 @@ impl ProviderAdapter for ResendAdapter {
                     "account": provider.account,
                     "domains": allowlist,
                     "domain": domain,
-                    "credential_ref": provider.credential_ref,
+                    "credential": crate::credential::credential_metadata(&provider.credential_ref),
                     "tenant": binding.tenant,
                     "binding": binding.alias,
                     "frozen_selectors": ["domains"],

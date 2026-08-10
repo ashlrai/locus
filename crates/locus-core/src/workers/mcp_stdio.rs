@@ -34,9 +34,10 @@ pub struct McpStdioConfig {
     pub args: Vec<String>,
     /// When false (default), `ensure` only prepares the slot + work dir.
     pub spawn: bool,
-    /// Resolve credential_refs into child env when spawning.
+    /// Resolve credentials into provider-standard child env keys when spawning.
     pub resolve_secrets: bool,
-    /// Extra env layered after isolation (non-secret config only preferred).
+    /// Deprecated compatibility field. Arbitrary env is never forwarded; use
+    /// binding scope metadata or provider credential resolution instead.
     pub extra_env: BTreeMap<String, String>,
 }
 
@@ -81,12 +82,7 @@ impl McpStdioBackend {
         }
         cmd.env("LOCUS_WORKER_PROVIDER", &provider.provider);
         cmd.env("LOCUS_WORKER_ACCOUNT", &provider.account);
-        cmd.env("LOCUS_WORKER_CREDENTIAL_REF", &provider.credential_ref);
         cmd.env("LOCUS_WORKER_DIR", work_dir);
-
-        for (k, v) in &self.config.extra_env {
-            cmd.env(k, v);
-        }
 
         cmd
     }
@@ -220,7 +216,7 @@ impl WorkerBackend for McpStdioBackend {
             binding_id: binding.id.clone(),
             binding_alias: binding.alias.clone(),
             account: provider.account.clone(),
-            credential_ref: provider.credential_ref.clone(),
+            credential: crate::credential::credential_metadata(&provider.credential_ref),
             state,
             work_dir: work_dir.to_path_buf(),
             backend: "mcp_stdio".into(),

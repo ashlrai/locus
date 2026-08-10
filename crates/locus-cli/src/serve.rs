@@ -267,6 +267,7 @@ async fn api_status(
     let s = open_store(&state)?;
     let _ = s.check_drift_and_freeze();
     let require_pin = find_workspace(&cwd())
+        .map_err(store_err)?
         .map(|(_, cfg)| cfg.require_pin)
         .unwrap_or(false);
 

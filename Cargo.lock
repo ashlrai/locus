@@ -748,6 +748,7 @@ dependencies = [
  "dirs",
  "hex",
  "hmac",
+ "libc",
  "proptest",
  "rand 0.8.7",
  "serde",

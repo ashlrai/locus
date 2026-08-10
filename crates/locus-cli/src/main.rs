@@ -19,8 +19,9 @@ use locus_core::{
     export_events, export_forensics_pack, filter_audit_events, find_workspace, mcp_agent_env,
     parse_ttl, phantom_on_path, probe_agent_options, recipe_toml_snippet, resolve_passphrase,
     suggest_for_provider, verify_claim, workspace_stub_toml, AgentStatus, Binding, BindingBody,
-    DoctorExternal, DoctorVerdict, EventsExportFormat, EventsExportOptions, ForensicsExportOptions,
-    Policy, ProviderBinding, Scope, Store, WorkspaceConfig, VERSION,
+    CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
+    EventsExportOptions, ForensicsExportOptions, Policy, ProviderBinding, Scope, Store,
+    WorkspaceConfig, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -639,6 +640,13 @@ enum BindingCmd {
     List,
     /// Show one binding
     Show { alias: String },
+    /// Convert conservative legacy bare Phantom names to explicit `phm:` refs
+    MigrateCredentialRefs {
+        alias: String,
+        /// Persist the migration; default is a dry run
+        #[arg(long)]
+        write: bool,
+    },
     /// Create a binding (minimal interactive flags)
     Add {
         alias: String,
@@ -1181,7 +1189,7 @@ fn cmd_quickstart(json: bool) -> Result<()> {
     let mut enter_note: Option<String> = None;
     let pinned = s.active_session()?.is_some();
     if !pinned {
-        let ws = find_workspace(&cwd());
+        let ws = find_workspace(&cwd())?;
         if let Some((_, ref cfg)) = ws {
             if cfg.default_binding.is_some() || !cfg.allowed_bindings.is_empty() {
                 match s.pin_auto(&cwd(), Some("cli".into()), false) {
@@ -1580,14 +1588,19 @@ fn cmd_graph(sub: GraphCmd, json: bool) -> Result<()> {
                     match e.kind.as_str() {
                         "binding" => {
                             let prov = e.providers.join(", ");
-                            let refs = e.credential_refs.join(", ");
+                            let sources = e
+                                .credentials
+                                .iter()
+                                .map(|c| c.source.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ");
                             println!(
-                                "  {} {}  tenant={}  providers=[{}]  refs=[{}]",
+                                "  {} {}  tenant={}  providers=[{}]  credential_sources=[{}]",
                                 "binding".green(),
                                 e.name.bold(),
                                 e.tenant.as_deref().unwrap_or("-"),
                                 prov,
-                                refs.dimmed()
+                                sources.dimmed()
                             );
                         }
                         "workspace" => {
@@ -1718,7 +1731,7 @@ fn cmd_engagement(sub: EngagementCmd, json: bool) -> Result<()> {
                         "binding_path": result.binding_path.display().to_string(),
                         "workspace_path": result.workspace_path.as_ref().map(|p| p.display().to_string()),
                         "readme_path": result.readme_path.as_ref().map(|p| p.display().to_string()),
-                        "credential_refs": result.credential_refs,
+                        "credentials": result.credentials,
                     })
                 );
             } else {
@@ -1735,10 +1748,7 @@ fn cmd_engagement(sub: EngagementCmd, json: bool) -> Result<()> {
                 if let Some(rp) = &result.readme_path {
                     println!("   readme    {}", rp.display());
                 }
-                println!("   phm refs  (create in Phantom — never commit values)");
-                for r in &result.credential_refs {
-                    println!("      {}", r.dimmed());
-                }
+                println!("   credentials  locators retained only in the binding file");
                 println!();
                 println!("next:");
                 println!(
@@ -1848,7 +1858,7 @@ fn cmd_whoami(json: bool) -> Result<()> {
             "    {}  {}  {}",
             p.provider.cyan(),
             bits.join("  ").dimmed(),
-            p.credential_ref.dimmed()
+            format!("credential={}", p.credential.source).dimmed()
         );
     }
     Ok(())
@@ -1857,7 +1867,7 @@ fn cmd_whoami(json: bool) -> Result<()> {
 fn cmd_status(oneline: bool, json: bool) -> Result<()> {
     let s = store()?;
     let _ = s.check_drift_and_freeze();
-    let require_pin = find_workspace(&cwd())
+    let require_pin = find_workspace(&cwd())?
         .map(|(_, cfg)| cfg.require_pin)
         .unwrap_or(false);
     match s.active_session()? {
@@ -1976,16 +1986,11 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     }
     let session = s.require_active().context("need active pin for exec")?;
     let binding = s.load_binding(&session.binding_alias)?;
-    if strict_creds {
-        std::env::set_var("LOCUS_SOFT_CREDS", "0");
-    } else {
-        std::env::set_var("LOCUS_SOFT_CREDS", "1");
-    }
     let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         bail!(
             "credential resolve failed: {}",
-            iso.secrets_failed.join("; ")
+            format_credential_issues(&iso.secrets_failed)
         );
     }
 
@@ -2013,9 +2018,9 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     );
     if !iso.secrets_failed.is_empty() {
         eprintln!(
-            "{} unresolved credential_refs: {}",
+            "{} unresolved credentials: {}",
             "warn".yellow(),
-            iso.secrets_failed.join(", ")
+            format_credential_issues(&iso.secrets_failed)
         );
     }
 
@@ -2171,18 +2176,13 @@ fn cmd_ci_run(
     }
 
     let binding = s.load_binding(&session.binding_alias)?;
-    if strict_creds {
-        std::env::set_var("LOCUS_SOFT_CREDS", "0");
-    } else {
-        std::env::set_var("LOCUS_SOFT_CREDS", "1");
-    }
     // Child gets full isolated env (may resolve secrets for the command to work).
     let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_ci_session(&ci_path, &session);
         bail!(
             "credential resolve failed: {}",
-            iso.secrets_failed.join("; ")
+            format_credential_issues(&iso.secrets_failed)
         );
     }
 
@@ -2211,9 +2211,9 @@ fn cmd_ci_run(
     );
     if !iso.secrets_failed.is_empty() {
         eprintln!(
-            "{} unresolved credential_refs: {}",
+            "{} unresolved credentials: {}",
             "warn".yellow(),
-            iso.secrets_failed.join(", ")
+            format_credential_issues(&iso.secrets_failed)
         );
     }
 
@@ -2292,17 +2292,12 @@ fn cmd_run(
     }
 
     let binding = s.load_binding(&session.binding_alias)?;
-    if strict_creds {
-        std::env::set_var("LOCUS_SOFT_CREDS", "0");
-    } else {
-        std::env::set_var("LOCUS_SOFT_CREDS", "1");
-    }
     let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_run_session(&run_path, &session);
         bail!(
             "credential resolve failed: {}",
-            iso.secrets_failed.join("; ")
+            format_credential_issues(&iso.secrets_failed)
         );
     }
 
@@ -2352,9 +2347,9 @@ fn cmd_run(
     );
     if !iso.secrets_failed.is_empty() {
         eprintln!(
-            "{} unresolved credential_refs: {}",
+            "{} unresolved credentials: {}",
             "warn".yellow(),
-            iso.secrets_failed.join(", ")
+            format_credential_issues(&iso.secrets_failed)
         );
     }
 
@@ -2544,11 +2539,41 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
             }
         }
         BindingCmd::Show { alias } => {
-            let b = s.load_binding(&alias)?;
+            let mut b = s.load_binding(&alias)?;
+            for provider in &mut b.providers {
+                let source = locus_core::credential_metadata(&provider.credential_ref).source;
+                provider.credential_ref = format!("<redacted:{source}>");
+            }
             if json {
                 println!("{}", serde_json::to_string_pretty(&b)?);
             } else {
                 println!("{}", b.to_toml()?);
+            }
+        }
+        BindingCmd::MigrateCredentialRefs { alias, write } => {
+            let result = s.migrate_legacy_credential_refs(&alias, write)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else if result.written {
+                println!(
+                    "{} migrated {} credential reference(s) in {}",
+                    "ok".green().bold(),
+                    result.migrated,
+                    result.alias
+                );
+                if result.audit_pending || result.recovery_pending {
+                    println!(
+                        "{} migration committed; run the same command again to reconcile durable audit state",
+                        "warning".yellow().bold()
+                    );
+                }
+            } else {
+                println!(
+                    "{} dry run: {} credential reference(s) can be migrated in {}; pass --write to persist",
+                    "ok".green().bold(),
+                    result.migrated,
+                    result.alias
+                );
             }
         }
         BindingCmd::Add {
@@ -3497,12 +3522,12 @@ fn print_doctor_human(report: &locus_core::DoctorReport) {
     );
     if !report.unresolved_phm.is_empty() {
         println!(
-            "  phm refs  {} unresolved: {}",
+            "  credentials  {} unavailable: {}",
             report.unresolved_phm.len(),
-            report.unresolved_phm.join(", ").dimmed()
+            format_credential_issues(&report.unresolved_phm).dimmed()
         );
     } else if report.phantom_on_path {
-        println!("  phm refs  {}", "ok".green());
+        println!("  credentials  {}", "ok".green());
     }
 
     // Autopin / config.toml
@@ -3585,13 +3610,36 @@ fn print_doctor_human(report: &locus_core::DoctorReport) {
     }
 }
 
-/// Collect `phm:NAME` credential refs from all bindings that are not present
-/// in `phantom list` output. Returns secret **names only** (never values).
-fn collect_unresolved_phm_refs(s: &Store, phantom_on_path: bool) -> Result<Vec<String>> {
+fn format_credential_issues(issues: &[CredentialResolutionIssue]) -> String {
+    issues
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn safe_provider_label(provider: &str) -> String {
+    if !provider.is_empty()
+        && provider.len() <= 64
+        && provider
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    {
+        provider.to_ascii_lowercase()
+    } else {
+        "unknown".into()
+    }
+}
+
+/// Check Phantom locators internally and return provider/source metadata only.
+fn collect_unresolved_phm_refs(
+    s: &Store,
+    phantom_on_path: bool,
+) -> Result<Vec<CredentialResolutionIssue>> {
     use locus_core::CredentialRef;
 
     let summaries = s.list_bindings()?;
-    let mut needed: Vec<String> = Vec::new();
+    let mut needed: Vec<(String, String)> = Vec::new();
     for sum in summaries {
         let b = match s.load_binding(&sum.alias) {
             Ok(b) => b,
@@ -3599,8 +3647,9 @@ fn collect_unresolved_phm_refs(s: &Store, phantom_on_path: bool) -> Result<Vec<S
         };
         for p in &b.providers {
             if let CredentialRef::Phantom { name } = CredentialRef::parse(&p.credential_ref) {
-                if !needed.iter().any(|n| n == &name) {
-                    needed.push(name);
+                let provider = safe_provider_label(&p.provider);
+                if !needed.iter().any(|(n, p)| n == &name && p == &provider) {
+                    needed.push((name, provider));
                 }
             }
         }
@@ -3610,15 +3659,31 @@ fn collect_unresolved_phm_refs(s: &Store, phantom_on_path: bool) -> Result<Vec<S
     }
     if !phantom_on_path {
         // Cannot verify — report all as unresolved so doctor surfaces the gap.
-        return Ok(needed);
+        let mut issues = needed
+            .into_iter()
+            .map(|(_, provider)| CredentialResolutionIssue {
+                provider,
+                source: "phantom".into(),
+                code: "unavailable".into(),
+            })
+            .collect::<Vec<_>>();
+        issues.sort_by(|a, b| a.provider.cmp(&b.provider));
+        issues.dedup_by(|a, b| a.provider == b.provider);
+        return Ok(issues);
     }
 
     let known = phantom_list_names()?;
-    let mut unresolved: Vec<String> = needed
+    let mut unresolved: Vec<CredentialResolutionIssue> = needed
         .into_iter()
-        .filter(|n| !known.iter().any(|k| k == n))
+        .filter(|(name, _)| !known.iter().any(|known_name| known_name == name))
+        .map(|(_, provider)| CredentialResolutionIssue {
+            provider,
+            source: "phantom".into(),
+            code: "unavailable".into(),
+        })
         .collect();
-    unresolved.sort();
+    unresolved.sort_by(|a, b| a.provider.cmp(&b.provider));
+    unresolved.dedup_by(|a, b| a.provider == b.provider);
     Ok(unresolved)
 }
 

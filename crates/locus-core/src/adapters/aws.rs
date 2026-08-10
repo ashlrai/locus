@@ -99,7 +99,7 @@ impl ProviderAdapter for AwsAdapter {
                     "profile": resolved_profile,
                     "role_arn": role_arn,
                     "region": resolved_region,
-                    "credential_ref": provider.credential_ref,
+                    "credential": crate::credential::credential_metadata(&provider.credential_ref),
                     "tenant": binding.tenant,
                     "binding": binding.alias,
                     "frozen_selectors": ["account_id", "profile", "region", "role_arn"],

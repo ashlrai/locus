@@ -589,7 +589,7 @@
       </div>
 
       <footer>
-        <span>127.0.0.1 only · no secrets in API · credential_ref aliases only</span>
+        <span>127.0.0.1 only · no secrets or credential locators in API</span>
         <span>
           <a href="https://github.com/ashlrai/locus" target="_blank" rel="noopener">locus</a>
           · sibling
@@ -777,7 +777,9 @@
           if (p.team_id) html += ` · team_id=${esc(p.team_id)}`;
           if (p.account_id) html += ` · account_id=${esc(p.account_id)}`;
           html += `</div>`;
-          html += `<div class="row-meta" style="margin-top:0.15rem;color:var(--dim)">${esc(p.credential_ref)}</div>`;
+          if (p.credential) {
+            html += `<div class="row-meta" style="margin-top:0.15rem;color:var(--dim)">credential=${esc(p.credential.source || "unsupported")} · ${p.credential.present ? "configured" : "missing"}</div>`;
+          }
           html += `</div>`;
         }
         el.innerHTML = html;

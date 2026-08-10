@@ -19,7 +19,7 @@ Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus wi
 1. Shell out to Locus CLI (or spawn `locus-mcp` stdio) — do not reimplement pin/seal.
 2. Prefer **`locusFleetGate()`** (or `ensureLocusReady()`) before agent dispatch — see [fleet-preflight.md](./fleet-preflight.md).
 3. Register MCP servers from **`required_servers`** (`locus` + `phantom` only) — `registerLocusInMcpConfig` / [mcp-gateway-snippet.md](./mcp-gateway-snippet.md).
-4. Use **`withLocusSession(binding, fn)`** for ephemeral job pins (`ci mint`; no `active.json` mutation).
+4. Use **`withLocusSession(binding, fn)`** for ephemeral job pins (`ci mint`; no `active.json` mutation or ambient credential inheritance).
 5. Add **`checkLocus`** to ashlr doctor — see [doctor-check.md](./doctor-check.md).
 6. **Never** parse or store secret values from locus/phantom output.
 
@@ -121,8 +121,8 @@ export interface AgentCommands {
 export interface ProviderView {
   provider: string;
   account: string;
-  /** Name only: phm:NAME | env:VAR — NEVER a resolved secret. */
-  credential_ref: string;
+  /** Agent-safe metadata; locator name and value are intentionally absent. */
+  credential: { present: boolean; source: string };
   project_ref?: string | null;
   team_id?: string | null;
   account_id?: string | null;
@@ -142,8 +142,8 @@ export interface DoctorReport {
   pending_approvals: number;
   dual_control_waiting: number;
   phantom_on_path: boolean;
-  /** Phantom secret *names* only. */
-  unresolved_phm: string[];
+  /** Safe resolution issues; locator names and provider stderr are absent. */
+  unresolved_phm: Array<{ provider: string; source: string; code: string }>;
   verdict: DoctorVerdict;
   ok: boolean;
   findings: Array<{ severity: "warn" | "unsafe"; code: string; message: string }>;
@@ -273,7 +273,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 | Safe to read from locus JSON | Never from locus JSON |
 |------------------------------|------------------------|
 | Binding alias, tenant, session_id | Raw API keys, PATs |
-| `credential_ref` **names** (`phm:X`) | Resolved secret values |
+| Credential presence/source metadata | Credential locator names and resolved values |
 | `project_ref` / `team_id` scopes | Worker env secret maps |
 | status / verdict / findings codes | Approval digests used as secrets |
 

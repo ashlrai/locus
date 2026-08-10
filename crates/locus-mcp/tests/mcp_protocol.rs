@@ -373,7 +373,10 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
     let (text, is_err) = McpClient::tool_text(&gh);
     assert!(!is_err, "github.scope error: {text}");
     let body: Value = serde_json::from_str(&text).expect("github body json");
-    assert_eq!(body["credential_ref"], "phm:GH_TOKEN_ACME");
+    assert!(body.get("credential_ref").is_none());
+    assert_eq!(body["credential"]["present"], true);
+    assert_eq!(body["credential"]["source"], "phantom");
+    assert!(!text.contains("GH_TOKEN_ACME"));
     assert_eq!(body["tenant"], "acme-corp");
     assert_eq!(body["binding"], "acme");
 
@@ -389,7 +392,28 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
     assert!(!is_err, "vercel.scope error: {text}");
     let body: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(body["team_id"], "team_acme");
-    assert_eq!(body["credential_ref"], "phm:VERCEL_TOKEN_ACME");
+    assert!(body.get("credential_ref").is_none());
+    assert_eq!(body["credential"]["source"], "phantom");
+    assert!(!text.contains("VERCEL_TOKEN_ACME"));
+
+    // Agent-facing identity views must not reveal any credential_ref value.
+    let whoami = client.request(
+        "tools/call",
+        json!({ "name": "locus_whoami", "arguments": {} }),
+    );
+    let (whoami_text, whoami_err) = McpClient::tool_text(&whoami);
+    assert!(!whoami_err, "locus_whoami failed: {whoami_text}");
+    for canary in [
+        "GH_TOKEN_ACME",
+        "VERCEL_TOKEN_ACME",
+        "SUPABASE_ACME",
+        "credential_ref",
+    ] {
+        assert!(
+            !whoami_text.contains(canary),
+            "locus_whoami leaked {canary}: {whoami_text}"
+        );
+    }
 
     // freeze deny — model supplies wrong team_id
     let denied = client.request(
@@ -612,7 +636,8 @@ fn pinned_upstream_auto_spawn_list_and_call() {
     );
     let (text, is_err) = McpClient::tool_text(&scope);
     assert!(!is_err, "github.scope failed: {text}");
-    assert!(text.contains("phm:GH_TOKEN_ACME") || text.contains("acme"));
+    assert!(text.contains("acme"));
+    assert!(!text.contains("GH_TOKEN_ACME"));
 }
 
 #[test]
@@ -925,13 +950,14 @@ fn resources_session_whoami_when_pinned() {
     assert_eq!(body["tenant"], "acme-corp");
     assert_eq!(body["seal_ok"], true);
     assert!(body.get("providers").is_some());
-    // CredentialRefs only — never resolved secret values
+    // Credential source/presence only — locator names are absent.
     for p in body["providers"].as_array().unwrap() {
-        let cref = p["credential_ref"].as_str().unwrap_or("");
-        assert!(
-            cref.starts_with("phm:") || cref.starts_with("env:") || cref.starts_with("test:"),
-            "credential_ref should be a ref, got {cref}"
-        );
+        assert!(p.get("credential_ref").is_none());
+        assert_eq!(p["credential"]["present"], true);
+        assert_eq!(p["credential"]["source"], "phantom");
+    }
+    for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME"] {
+        assert!(!text.contains(canary), "session resource leaked {canary}");
     }
 
     let doc = client.request("resources/read", json!({ "uri": "locus://doctor" }));
@@ -1021,6 +1047,41 @@ fn prompts_list_and_get_locus_context() {
         text.to_lowercase().contains("cannot pin"),
         "still cannot pin when pinned: {text}"
     );
+}
+
+#[test]
+fn malformed_workspace_blocks_auto_pin_and_surfaces_unsafe_prompt() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("home");
+    let project = dir.path().join("project");
+    let store = Store::open(&home).unwrap();
+    sample_bindings(&store);
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join(".locus.toml"), "allowed_bindings = [").unwrap();
+
+    let mut client = McpClient::spawn_opts(
+        &home,
+        Framing::ContentLength,
+        Some(&project),
+        &[("LOCUS_MCP_AUTO_PIN", "1")],
+    );
+    handshake(&mut client);
+    let listed = client.request("tools/list", json!({}));
+    let names: Vec<_> = listed["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(names.iter().all(|name| name.starts_with("locus_")));
+    assert!(!names.iter().any(|name| name.starts_with("github.")));
+
+    let prompt = client.request("prompts/get", json!({ "name": "locus_context" }));
+    let text = prompt["result"]["messages"][0]["content"]["text"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("status**: `unsafe`"));
+    assert!(text.contains("do not use provider tools"));
 }
 
 #[test]

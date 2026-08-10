@@ -22,7 +22,7 @@ Machine contract for **ashlr-hub** (and similar orchestrators) to shell out to L
 ## Invariants for hub agents
 
 1. **Shell out; do not reimplement seal/pin.** Use CLI JSON or MCP control tools only.
-2. **NEVER parse secrets from locus output.** Results expose aliases, tenants, CredentialRef *names* (`phm:NAME`, `env:VAR`), scopes, and issue codes — never resolved token values.
+2. **NEVER parse secrets or credential locators from locus output.** Results expose aliases, tenants, credential presence/source metadata, scopes, and issue codes only.
 3. **Register one MCP server named `locus`**, not raw `supabase` / `vercel` / `github` MCPs with ambient credentials. Provider tools come from the pin via `locus-mcp`.
 4. **REQUIRED_SERVERS:** `locus` + `phantom` (also emitted on every agent report as `required_servers`).
 5. **Agents cannot pin.** Only humans (or audited CI) run `locus pin` / `locus enter`. Agents may `locus_request_pin`; hub surfaces that to a human.
@@ -129,7 +129,7 @@ Stable keys:
 
 Optional when pinned: `pinned`, `pin`, `pin_seal_ok`.
 
-`unresolved_phm` is a list of Phantom secret **names** only — never values.
+`unresolved_phm` contains structured `{ provider, source, code }` issues. Locator names and values are absent.
 
 ---
 
@@ -143,7 +143,7 @@ locus whoami --json
 
 Fields: `session_id`, `binding_alias`, `binding_id`, `tenant`, `principal?`, `providers[]`, `expires_at`, `worker_home`, `seal_ok`, `frozen`, `frozen_reason?`, `mode`, `namespaces?`.
 
-`providers[].credential_ref` is a **name** (`phm:…` / `env:…`), never a secret value.
+`providers[].credential` contains only `{ present, source }`; locator names and values are absent.
 
 ---
 
@@ -210,7 +210,7 @@ export const REQUIRED_SERVERS = ["locus", "phantom"] as const;
 | Server | Why |
 |--------|-----|
 | `locus` | Identity plane + pinned provider tools only |
-| `phantom` | Secret vault; `phm:` CredentialRefs resolve outside the model |
+| `phantom` | Secret vault; private credential references resolve outside the model |
 
 ---
 

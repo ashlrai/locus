@@ -642,19 +642,19 @@ fn cwd() -> PathBuf {
 /// Disabled when `LOCUS_MCP_AUTO_PIN=0|false|off`.
 ///
 /// Actual pin still requires `require_pin` or `default_binding` and never uses force.
-fn mcp_auto_pin_policy_enabled(home: &Path) -> bool {
+fn mcp_auto_pin_policy_enabled(home: &Path) -> locus_core::Result<bool> {
     if let Ok(v) = std::env::var("LOCUS_MCP_AUTO_PIN") {
         let v = v.trim().to_ascii_lowercase();
         if matches!(v.as_str(), "0" | "false" | "off" | "no") {
-            return false;
+            return Ok(false);
         }
         if matches!(v.as_str(), "1" | "true" | "on" | "yes") {
-            return true;
+            return Ok(true);
         }
     }
 
     if env_truthy_cwd("LOCUS_AUTO_PIN") {
-        return true;
+        return Ok(true);
     }
 
     let cfg = load_config(home);
@@ -665,13 +665,13 @@ fn mcp_auto_pin_policy_enabled(home: &Path) -> bool {
         .map(|s| s.eq_ignore_ascii_case("cwd"))
         .unwrap_or(false)
     {
-        return true;
+        return Ok(true);
     }
 
     // Preferred default: workspace with default_binding and/or require_pin.
-    if let Some((_, ws)) = find_workspace(&cwd()) {
+    if let Some((_, ws)) = find_workspace(&cwd())? {
         if ws.require_pin {
-            return true;
+            return Ok(true);
         }
         if ws
             .default_binding
@@ -679,11 +679,11 @@ fn mcp_auto_pin_policy_enabled(home: &Path) -> bool {
             .map(|a| !a.is_empty())
             .unwrap_or(false)
         {
-            return true;
+            return Ok(true);
         }
     }
 
-    false
+    Ok(false)
 }
 
 fn env_truthy_cwd(key: &str) -> bool {
@@ -712,8 +712,13 @@ fn maybe_mcp_auto_pin() -> Option<String> {
         }
     };
 
-    if !mcp_auto_pin_policy_enabled(s.home()) {
-        return None;
+    match mcp_auto_pin_policy_enabled(s.home()) {
+        Ok(true) => {}
+        Ok(false) => return None,
+        Err(e) => {
+            eprintln!("locus-mcp: auto-pin blocked (workspace): {e}");
+            return None;
+        }
     }
 
     // Already pinned → nothing to do.
@@ -727,7 +732,13 @@ fn maybe_mcp_auto_pin() -> Option<String> {
     }
 
     let cwd = cwd();
-    let ws = find_workspace(&cwd);
+    let ws = match find_workspace(&cwd) {
+        Ok(ws) => ws,
+        Err(e) => {
+            eprintln!("locus-mcp: auto-pin blocked (workspace): {e}");
+            return None;
+        }
+    };
     let (_, ref cfg) = ws?;
     // Only pin when workspace declares require_pin or default_binding.
     let has_default = cfg
@@ -1000,8 +1011,8 @@ fn build_locus_context_prompt() -> String {
                         scope_bits.join("; ")
                     };
                     lines.push(format!(
-                        "- **{}** account=`{}` ref=`{}` — {scope}",
-                        p.provider, p.account, p.credential_ref
+                        "- **{}** account=`{}` credential=`{}` — {scope}",
+                        p.provider, p.account, p.credential.source
                     ));
                 }
             }
@@ -1016,20 +1027,28 @@ fn build_locus_context_prompt() -> String {
         }
     }
 
-    if let Some((path, cfg)) = find_workspace(&cwd()) {
-        lines.push(String::new());
-        lines.push("### Workspace".into());
-        lines.push(format!("- **path**: `{}`", path.display()));
-        if let Some(ref d) = cfg.default_binding {
-            lines.push(format!("- **default_binding**: `{d}`"));
+    match find_workspace(&cwd()) {
+        Ok(Some((path, cfg))) => {
+            lines.push(String::new());
+            lines.push("### Workspace".into());
+            lines.push(format!("- **path**: `{}`", path.display()));
+            if let Some(ref d) = cfg.default_binding {
+                lines.push(format!("- **default_binding**: `{d}`"));
+            }
+            if !cfg.allowed_bindings.is_empty() {
+                lines.push(format!(
+                    "- **allowed_bindings**: {}",
+                    cfg.allowed_bindings.join(", ")
+                ));
+            }
+            lines.push(format!("- **require_pin**: {}", cfg.require_pin));
         }
-        if !cfg.allowed_bindings.is_empty() {
-            lines.push(format!(
-                "- **allowed_bindings**: {}",
-                cfg.allowed_bindings.join(", ")
-            ));
+        Ok(None) => {}
+        Err(_) => {
+            lines.push(String::new());
+            lines.push("### Workspace".into());
+            lines.push("- **status**: `unsafe` — policy is invalid or unreadable; do not use provider tools and run `locus doctor`.".into());
         }
-        lines.push(format!("- **require_pin**: {}", cfg.require_pin));
     }
 
     lines.push(String::new());

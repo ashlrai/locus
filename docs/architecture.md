@@ -38,7 +38,7 @@ Agents inherit **ambient identity**: global `gh auth`, one Supabase MCP token, l
 ┌───▼────────────────────────────────────────────────────────┐
 │  CREDENTIAL PLANE                                             │
 │  CredentialRef → resolve only into worker/child env           │
-│  phm:NAME (Phantom) · env:VAR · test: (LOCUS_ALLOW_TEST_CREDS)│
+│  phm:NAME (Phantom) · env:VAR · test: compiled tests only      │
 │  Model never sees resolved values                             │
 └───┬────────────────────────────────────────────────────────┘
     │ spawn / inject

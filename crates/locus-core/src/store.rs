@@ -7,6 +7,7 @@ use crate::approval::{
 use crate::autopin::{self, AutoPinTarget};
 use crate::binding::{validate_name_component, Binding, BindingSummary};
 use crate::config::{self, LocusConfig};
+use crate::credential::{credential_metadata, CredentialMetadata};
 use crate::engagement::{
     self, client_binding_template, close_checklist, engagement_readme, EngagementCloseResult,
     EngagementMeta,
@@ -134,6 +135,7 @@ impl Store {
         binding.validate()?;
         // Double-check alias cannot escape bindings/ (also enforced in validate)
         validate_name_component("alias", &binding.alias)?;
+        let _lock = crate::credential_migration::lock_bindings(self)?;
         let path = self.bindings_dir().join(format!("{}.toml", binding.alias));
         ensure_under_dir(&self.bindings_dir(), &path)?;
         fs::write(&path, binding.to_toml()?)?;
@@ -153,12 +155,17 @@ impl Store {
             )));
         }
         // Prefer alias filename (alias charset validated on save; still constrain join)
+        let bindings_lock = crate::credential_migration::lock_bindings(self)?;
         let by_alias = self.bindings_dir().join(format!("{alias_or_id}.toml"));
         if by_alias.exists() {
             ensure_under_dir(&self.bindings_dir(), &by_alias)?;
-            let raw = fs::read_to_string(&by_alias)?;
-            return Binding::parse_toml(&raw);
+            let raw = fs::read_to_string(&by_alias)
+                .map_err(|_| LocusError::msg(format!("binding '{alias_or_id}' is unreadable")))?;
+            let binding = parse_binding_safely(&raw, alias_or_id)?;
+            validate_loaded_binding(&binding, alias_or_id)?;
+            return Ok(binding);
         }
+        drop(bindings_lock);
         // Scan for id match
         for b in self.list_bindings()? {
             if b.id == alias_or_id || b.alias == alias_or_id {
@@ -169,6 +176,7 @@ impl Store {
     }
 
     pub fn list_bindings(&self) -> Result<Vec<BindingSummary>> {
+        let _lock = crate::credential_migration::lock_bindings(self)?;
         let mut out = Vec::new();
         let dir = self.bindings_dir();
         if !dir.exists() {
@@ -181,20 +189,33 @@ impl Store {
             if path.extension().and_then(|s| s.to_str()) != Some("toml") {
                 continue;
             }
-            let raw = fs::read_to_string(&path)?;
-            match Binding::parse_toml(&raw) {
-                Ok(b) => out.push(BindingSummary::from(&b)),
-                Err(e) => {
-                    // Skip corrupt files but don't abort listing
-                    let _ = e;
-                }
-            }
+            let label = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .filter(|s| validate_name_component("alias", s).is_ok())
+                .unwrap_or("unknown");
+            let raw = fs::read_to_string(&path)
+                .map_err(|_| LocusError::msg(format!("binding '{label}' is unreadable")))?;
+            let binding = parse_binding_safely(&raw, label)?;
+            validate_loaded_binding(&binding, label)?;
+            out.push(BindingSummary::from(&binding));
         }
         Ok(out)
     }
 
+    /// Explicitly convert conservative legacy bare Phantom names to `phm:NAME`.
+    /// Dry-run is the default; unsafe values require manual editing and are never echoed.
+    pub fn migrate_legacy_credential_refs(
+        &self,
+        alias: &str,
+        write: bool,
+    ) -> Result<CredentialRefMigration> {
+        crate::credential_migration::migrate(self, alias, write)
+    }
+
     pub fn remove_binding(&self, alias: &str) -> Result<()> {
         validate_name_component("alias", alias)?;
+        let _lock = crate::credential_migration::lock_bindings(self)?;
         let path = self.bindings_dir().join(format!("{alias}.toml"));
         ensure_under_dir(&self.bindings_dir(), &path)?;
         if !path.exists() {
@@ -279,10 +300,10 @@ impl Store {
                     .iter()
                     .map(|p| p.provider.clone())
                     .collect(),
-                credential_refs: binding
+                credentials: binding
                     .providers
                     .iter()
-                    .map(|p| p.credential_ref.clone())
+                    .map(|p| crate::credential::credential_metadata(&p.credential_ref))
                     .collect(),
                 default_binding: None,
                 allowed_bindings: Vec::new(),
@@ -295,7 +316,7 @@ impl Store {
                 tenant: None,
                 description: None,
                 providers: Vec::new(),
-                credential_refs: Vec::new(),
+                credentials: Vec::new(),
                 default_binding: ws.config.default_binding,
                 allowed_bindings: ws.config.allowed_bindings,
             });
@@ -729,7 +750,7 @@ impl Store {
         ttl_override: Option<Duration>,
     ) -> Result<Session> {
         let binding = self.load_binding(alias_or_id)?;
-        let ws = find_workspace(cwd);
+        let ws = find_workspace(cwd)?;
 
         if let Some((_, ref cfg)) = ws {
             if !cfg.allows(&binding.alias) && !cfg.allows(&binding.id) && !force {
@@ -1037,10 +1058,10 @@ impl Store {
             binding_path: path,
             workspace_path,
             readme_path,
-            credential_refs: binding
+            credentials: binding
                 .providers
                 .iter()
-                .map(|p| p.credential_ref.clone())
+                .map(|p| crate::credential::credential_metadata(&p.credential_ref))
                 .collect(),
         })
     }
@@ -1157,7 +1178,7 @@ impl Store {
                 .map(|p| ProviderView {
                     provider: p.provider.clone(),
                     account: p.account.clone(),
-                    credential_ref: p.credential_ref.clone(),
+                    credential: credential_metadata(&p.credential_ref),
                     project_ref: p.scope.project_ref.clone(),
                     team_id: p.scope.team_id.clone(),
                     account_id: p.scope.account_id.clone(),
@@ -1275,7 +1296,7 @@ impl Store {
                     .map(|p| ProviderView {
                         provider: p.provider.clone(),
                         account: p.account.clone(),
-                        credential_ref: p.credential_ref.clone(),
+                        credential: credential_metadata(&p.credential_ref),
                         project_ref: p.scope.project_ref.clone(),
                         team_id: p.scope.team_id.clone(),
                         account_id: p.scope.account_id.clone(),
@@ -1448,18 +1469,30 @@ impl Store {
     // ── Audit ─────────────────────────────────────────────────────────────
 
     pub fn audit(&self, op: &str, binding: &str, detail: Option<serde_json::Value>) -> Result<()> {
-        use std::io::Write;
+        use std::io::{Read, Seek, SeekFrom, Write};
         let event = serde_json::json!({
             "ts": chrono::Utc::now().to_rfc3339(),
             "op": op,
             "binding": binding,
-            "detail": detail,
+            "detail": detail.map(sanitize_audit_value),
         });
         let mut f = fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(self.audit_path())?;
+        f.lock()?;
+        let len = f.metadata()?.len();
+        if len > 0 {
+            f.seek(SeekFrom::Start(len - 1))?;
+            let mut tail = [0u8; 1];
+            f.read_exact(&mut tail)?;
+            if tail[0] != b'\n' {
+                f.write_all(b"\n")?;
+            }
+        }
         writeln!(f, "{event}")?;
+        f.sync_all()?;
         Ok(())
     }
 
@@ -1844,8 +1877,44 @@ impl Store {
         })
     }
 
-    pub fn workspace_for(&self, cwd: &Path) -> Option<(PathBuf, WorkspaceConfig)> {
+    pub fn workspace_for(&self, cwd: &Path) -> Result<Option<(PathBuf, WorkspaceConfig)>> {
         find_workspace(cwd)
+    }
+}
+
+fn sanitize_audit_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| {
+                    let lower = key.to_ascii_lowercase();
+                    if lower.contains("credential_ref") {
+                        (key, serde_json::Value::String("<redacted>".into()))
+                    } else {
+                        (key, sanitize_audit_value(value))
+                    }
+                })
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(sanitize_audit_value).collect())
+        }
+        serde_json::Value::String(value)
+            if ["phm:", "env:", "test:"]
+                .iter()
+                .any(|prefix| value.contains(prefix)) =>
+        {
+            let source = if value.starts_with("phm:") {
+                "phantom"
+            } else if value.starts_with("env:") {
+                "environment"
+            } else {
+                "unsupported"
+            };
+            serde_json::Value::String(format!("<redacted:{source}>"))
+        }
+        other => other,
     }
 }
 
@@ -1929,6 +1998,40 @@ pub struct AuditEvent {
     pub detail: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CredentialRefMigration {
+    pub alias: String,
+    pub migrated: usize,
+    pub written: bool,
+    #[serde(default)]
+    pub audit_pending: bool,
+    #[serde(default)]
+    pub recovery_pending: bool,
+    #[serde(default)]
+    pub recovered: bool,
+}
+
+fn parse_binding_safely(raw: &str, label: &str) -> Result<Binding> {
+    Binding::parse_toml(raw).map_err(|_| LocusError::msg(format!("binding '{label}' is malformed")))
+}
+
+fn validate_loaded_binding(binding: &Binding, label: &str) -> Result<()> {
+    if binding
+        .providers
+        .iter()
+        .any(|p| crate::credential::migrate_legacy_phantom_ref(&p.credential_ref).is_some())
+    {
+        return Err(LocusError::msg(format!(
+            "binding '{label}' uses legacy bare Phantom names; run `locus binding migrate-credential-refs {label} --write`"
+        )));
+    }
+    binding.validate().map_err(|_| {
+        LocusError::msg(format!(
+            "binding '{label}' has invalid credential configuration; use explicit phm:NAME or env:VAR"
+        ))
+    })
+}
+
 /// Result of [`Store::engagement_init`].
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EngagementInitResult {
@@ -1939,7 +2042,7 @@ pub struct EngagementInitResult {
     pub workspace_path: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readme_path: Option<PathBuf>,
-    pub credential_refs: Vec<String>,
+    pub credentials: Vec<CredentialMetadata>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -2011,7 +2114,7 @@ fn default_true() -> bool {
 pub struct ProviderView {
     pub provider: String,
     pub account: String,
-    pub credential_ref: String,
+    pub credential: CredentialMetadata,
     pub project_ref: Option<String>,
     pub team_id: Option<String>,
     pub account_id: Option<String>,
@@ -2150,14 +2253,14 @@ mod tests {
                 .as_deref(),
             Some("proj_acme")
         );
-        // Only ACME credential refs
+        // Agent-facing view reports source metadata, never credential refs.
         for p in &w1.providers {
-            assert!(
-                p.credential_ref.to_uppercase().contains("ACME"),
-                "leaked ref: {}",
-                p.credential_ref
-            );
+            assert!(p.credential.present);
+            assert_eq!(p.credential.source, "phantom");
         }
+        assert!(!serde_json::to_string(&w1)
+            .unwrap()
+            .contains("SUPABASE_ACME"));
 
         let s2 = store
             .pin("personal", dir.path(), Some("test".into()), false)
@@ -2166,12 +2269,12 @@ mod tests {
         let w2 = store.whoami().unwrap();
         assert_eq!(w2.binding_alias, "personal");
         for p in &w2.providers {
-            assert!(
-                p.credential_ref.to_uppercase().contains("PERSONAL"),
-                "cross-binding leak: {}",
-                p.credential_ref
-            );
+            assert!(p.credential.present);
+            assert_eq!(p.credential.source, "phantom");
         }
+        let w2_json = serde_json::to_string(&w2).unwrap();
+        assert!(!w2_json.contains("GH_TOKEN_PERSONAL"));
+        assert!(!w2_json.contains("credential_ref"));
         // Acme project must not be visible
         assert!(w2
             .providers
@@ -2207,6 +2310,182 @@ allowed_bindings = ["acme"]
         assert!(matches!(err, LocusError::BindingNotAllowed(_)));
         // force overrides
         store.pin("personal", &project, None, true).unwrap();
+    }
+
+    #[test]
+    fn malformed_workspace_blocks_explicit_and_forced_pin() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let project = dir.path().join("client-acme");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join(".locus.toml"), "allowed_bindings = [").unwrap();
+
+        for force in [false, true] {
+            let err = store.pin("acme", &project, None, force).unwrap_err();
+            assert!(err.to_string().contains("workspace policy malformed"));
+            assert!(store.active_session().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn load_binding_rejects_raw_credential_ref_from_disk() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let path = store.bindings_dir().join("raw.toml");
+        fs::write(
+            path,
+            r#"
+[binding]
+id = "bnd_raw"
+alias = "raw"
+tenant = "raw-tenant"
+
+[[binding.providers]]
+provider = "github"
+account = "raw-account"
+credential_ref = "ghp_RAW_TOKEN_CANARY"
+"#,
+        )
+        .unwrap();
+
+        let err = store.load_binding("raw").unwrap_err().to_string();
+        assert!(err.contains("invalid credential configuration"));
+        assert!(!err.contains("ghp_RAW_TOKEN_CANARY"));
+    }
+
+    #[test]
+    fn legacy_bare_refs_are_actionable_and_migrate_only_explicitly() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let path = store.bindings_dir().join("legacy.toml");
+        fs::write(
+            &path,
+            r#"
+[binding]
+id = "bnd_legacy"
+alias = "legacy"
+tenant = "legacy-tenant"
+
+[[binding.providers]]
+provider = "github"
+account = "legacy-account"
+credential_ref = "LEGACY_PHANTOM_CANARY"
+"#,
+        )
+        .unwrap();
+
+        let list_error = store.list_bindings().unwrap_err().to_string();
+        assert!(list_error.contains("migrate-credential-refs legacy --write"));
+        assert!(!list_error.contains("LEGACY_PHANTOM_CANARY"));
+
+        let dry_run = store
+            .migrate_legacy_credential_refs("legacy", false)
+            .unwrap();
+        assert_eq!(dry_run.migrated, 1);
+        assert!(!dry_run.written);
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("credential_ref = \"LEGACY_PHANTOM_CANARY\""));
+
+        let written = store
+            .migrate_legacy_credential_refs("legacy", true)
+            .unwrap();
+        assert_eq!(written.migrated, 1);
+        assert!(written.written);
+        let migrated = store.load_binding("legacy").unwrap();
+        assert_eq!(
+            migrated.providers[0].credential_ref,
+            "phm:LEGACY_PHANTOM_CANARY"
+        );
+
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(!audit.contains("LEGACY_PHANTOM_CANARY"));
+        assert!(audit.contains("binding.credential_refs_migrated"));
+    }
+
+    #[test]
+    fn unsafe_legacy_ref_never_echoes_and_cannot_auto_migrate() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        fs::write(
+            store.bindings_dir().join("unsafe.toml"),
+            r#"
+[binding]
+id = "bnd_unsafe"
+alias = "unsafe"
+tenant = "unsafe-tenant"
+
+[[binding.providers]]
+provider = "github"
+account = "unsafe-account"
+credential_ref = "ghp_UNSAFE/CANARY"
+"#,
+        )
+        .unwrap();
+
+        let error = store
+            .migrate_legacy_credential_refs("unsafe", true)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("edit it manually"));
+        assert!(!error.contains("ghp_UNSAFE/CANARY"));
+    }
+
+    #[test]
+    fn audit_redacts_locator_keys_and_values_recursively() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .audit(
+                "probe",
+                "safe",
+                Some(serde_json::json!({
+                    "credential_ref": "phm:AUDIT_LOCATOR_CANARY",
+                    "nested": ["--ref=env:AUDIT_ENV_CANARY", {"value": "prefix test:AUDIT_TEST_CANARY"}],
+                })),
+            )
+            .unwrap();
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        for canary in [
+            "AUDIT_LOCATOR_CANARY",
+            "AUDIT_ENV_CANARY",
+            "AUDIT_TEST_CANARY",
+        ] {
+            assert!(!audit.contains(canary));
+        }
+        assert!(audit.contains("<redacted>"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_workspace_link_blocks_pin_force_and_run() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        symlink("missing-policy.toml", project.join(".locus.toml")).unwrap();
+
+        for force in [false, true] {
+            let pin_error = store
+                .pin("acme", &project, None, force)
+                .unwrap_err()
+                .to_string();
+            assert!(pin_error.contains("broken or unreadable"));
+            let run_error = store
+                .create_run_session("acme", &project, None, force, false, "broken")
+                .unwrap_err()
+                .to_string();
+            assert!(run_error.contains("broken or unreadable"));
+        }
+        assert!(store.active_session().unwrap().is_none());
     }
 
     #[test]
@@ -2763,9 +3042,13 @@ allowed_bindings = ["acme"]
         assert!(init.binding_path.exists());
         assert!(init.workspace_path.as_ref().unwrap().exists());
         assert!(init.readme_path.as_ref().unwrap().exists());
-        for r in &init.credential_refs {
-            assert!(r.starts_with("phm:"));
-        }
+        assert!(init.credentials.iter().all(|credential| credential.present));
+        assert!(init
+            .credentials
+            .iter()
+            .all(|credential| credential.source == "phantom"));
+        let init_json = serde_json::to_string(&init).unwrap();
+        assert!(!init_json.contains("SUPABASE_ACME"));
 
         // Pin and generate audit, then close with archive
         store.pin("acme", &project, None, false).unwrap();
@@ -3257,12 +3540,18 @@ allowed_bindings = ["acme"]
         assert!(list
             .iter()
             .any(|e| e.kind == "workspace" && e.name == "acme"));
-        // Never expose secret values — only refs
+        // List output carries sources only, never locator names.
         let acme = list
             .iter()
             .find(|e| e.name == "acme" && e.kind == "binding");
-        let refs = &acme.unwrap().credential_refs;
-        assert!(refs.iter().all(|r| r.starts_with("phm:")));
+        let credentials = &acme.unwrap().credentials;
+        assert!(credentials.iter().all(|credential| credential.present));
+        assert!(credentials
+            .iter()
+            .all(|credential| credential.source == "phantom"));
+        assert!(!serde_json::to_string(&list)
+            .unwrap()
+            .contains("SUPABASE_ACME"));
     }
 
     #[test]

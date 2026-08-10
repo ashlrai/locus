@@ -100,7 +100,7 @@ pub struct GraphListEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub providers: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub credential_refs: Vec<String>,
+    pub credentials: Vec<crate::credential::CredentialMetadata>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_binding: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -172,48 +172,15 @@ fn binding_to_body(b: &Binding) -> BindingBody {
     }
 }
 
-/// Ensure every credential_ref is a ref pointer, never a raw-looking secret blob.
-///
-/// Allowed: `phm:…`, `env:…`, `keychain:…`, `test:…` (tests), or bare Phantom names.
+/// Defense-in-depth validation with non-disclosing errors.
 fn scrub_export_credential_refs(b: &Binding) -> Result<()> {
     for p in &b.providers {
-        let r = p.credential_ref.trim();
-        if r.is_empty() {
-            return Err(LocusError::msg(format!(
-                "binding '{}': empty credential_ref",
+        crate::credential::CredentialRef::validate(&p.credential_ref).map_err(|_| {
+            LocusError::msg(format!(
+                "binding '{}': invalid credential configuration",
                 b.alias
-            )));
-        }
-        // Reject obvious raw tokens (long base64-ish without a scheme prefix)
-        if !r.contains(':') {
-            // Bare name → treated as phm:NAME (OK)
-            if r.len() > 128 {
-                return Err(LocusError::msg(format!(
-                    "binding '{}': credential_ref looks like raw material (too long bare name)",
-                    b.alias
-                )));
-            }
-            continue;
-        }
-        let scheme = r.split_once(':').map(|(s, _)| s).unwrap_or("");
-        match scheme {
-            "phm" | "env" | "keychain" | "test" => {
-                // Value after scheme must not be enormous (raw secrets often are)
-                let value = &r[scheme.len() + 1..];
-                if scheme != "test" && value.len() > 256 {
-                    return Err(LocusError::msg(format!(
-                        "binding '{}': credential_ref value for {scheme}: is suspiciously long",
-                        b.alias
-                    )));
-                }
-            }
-            _ => {
-                return Err(LocusError::msg(format!(
-                    "binding '{}': unsupported credential_ref scheme '{scheme}:' (use phm: / env:)",
-                    b.alias
-                )));
-            }
-        }
+            ))
+        })?;
     }
     Ok(())
 }
@@ -466,10 +433,7 @@ mod tests {
         let err = GraphEnvelope::build(vec![b], vec![], GraphMeta::default())
             .unwrap_err()
             .to_string();
-        assert!(
-            err.contains("unsupported") || err.contains("scheme"),
-            "{err}"
-        );
+        assert!(err.contains("invalid credential_ref"), "{err}");
     }
 
     #[test]

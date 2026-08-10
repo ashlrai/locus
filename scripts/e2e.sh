@@ -2,7 +2,7 @@
 # Locus end-to-end shell tests — pin, isolation, MCP, freeze, approval, doctor,
 # dual-control, events, optional enter/run/notify/ns; graph/ci/heartbeat,
 # dashboard health, forensics export, goal status when present (feature-detected).
-# Full 0.2 surface on current main (~38 checks, 0 skipped when all features present).
+# Full 0.2 surface plus adversarial release security probes.
 set -euo pipefail
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
@@ -51,7 +51,7 @@ ok "locus + locus-mcp release binaries"
 export LOCUS_HOME
 LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")"
 log "2. LOCUS_HOME=$LOCUS_HOME"
-trap 'rm -rf "$LOCUS_HOME" "${WS_DIR:-}"' EXIT
+trap 'rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"' EXIT
 ok "isolated home ready"
 
 # Helper: run locus with the test home
@@ -137,9 +137,13 @@ w = json.load(sys.stdin)
 assert w["binding_alias"] == "acme", w
 assert w["tenant"] == "acme-corp", w
 assert w.get("seal_ok") is True, w
-# exclusive: no personal credential refs
+# Agent-facing whoami exposes only credential presence/source metadata.
 for p in w["providers"]:
-    assert "PERSONAL" not in p["credential_ref"].upper(), p
+    assert "credential_ref" not in p, p
+    assert p["credential"] == {"present": True, "source": "phantom"}, p
+serialized = json.dumps(w)
+for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME", "PERSONAL"]:
+    assert canary not in serialized, (canary, w)
 '
 ok "pin acme + whoami exclusive"
 
@@ -199,6 +203,7 @@ export LOCUS_E2E_GH_TOKEN="e2e-gh-secret-value-$$"
 export GH_TOKEN="ambient-gh-must-not-leak"
 export SUPABASE_ACCESS_TOKEN="ambient-sb-must-not-leak"
 export AWS_PROFILE="ambient-aws-must-not-leak"
+export UNLISTED_SECRET_CANARY="arbitrary-parent-secret-must-not-leak"
 
 locus pin envtest >/dev/null
 exec_env="$(locus exec -- env 2>/dev/null || true)"
@@ -217,12 +222,16 @@ echo "$exec_env" | grep -q "ambient-sb-must-not-leak" \
   && die "ambient SUPABASE_ACCESS_TOKEN leaked" || true
 echo "$exec_env" | grep -q "AWS_PROFILE=" \
   && die "AWS_PROFILE should be scrubbed" || true
+echo "$exec_env" | grep -q "UNLISTED_SECRET_CANARY=" \
+  && die "arbitrary parent secret leaked into locus exec" || true
+echo "$exec_env" | grep -q "arbitrary-parent-secret-must-not-leak" \
+  && die "arbitrary parent secret value leaked into locus exec" || true
 echo "$exec_env" | grep -q "SUPABASE_PROJECT_REF=proj_env_e2e" \
   || die "frozen project_ref missing"
 ok "exec scrubs ambient + injects env: secrets"
 
 # scrub parent ambient so later steps are clean
-unset GH_TOKEN SUPABASE_ACCESS_TOKEN AWS_PROFILE
+unset GH_TOKEN SUPABASE_ACCESS_TOKEN AWS_PROFILE UNLISTED_SECRET_CANARY
 
 # ── 6. MCP tools/list unpinned vs pinned ─────────────────────────────────────
 log "6. MCP tools/list unpinned vs pinned (printf | locus-mcp)"
@@ -698,7 +707,7 @@ except json.JSONDecodeError:
     m = re.search(r"\{.*\}", body, re.S)
     assert m, "heartbeat body not JSON: %r" % body[:200]
     d = json.loads(m.group(0))
-# Never return resolved secret *values*. CredentialRefs (phm:NAME) are OK.
+# Never return resolved secret values or credential locator names.
 blob = json.dumps(d)
 # Bearer-style / GitHub PAT prefixes must not appear
 for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "AKIA"):
@@ -802,9 +811,9 @@ path = sys.argv[1]
 with open(path) as f:
     d = json.load(f)
 assert isinstance(d, dict), type(d)
-# Pack should never contain obvious secret *values*; names/refs OK.
+# Pack must contain neither secret values nor credential locator names.
 blob = json.dumps(d).lower()
-for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "akia", "secret_value"):
+for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "akia", "secret_value", "\"credential_ref\"", "phm:", "env:", "test:"):
     assert bad not in blob, "forensics pack must not leak secrets (%s)" % bad
 # Structural surface (keys evolve; require a few stable-ish ones)
 keys = set(d.keys())
@@ -864,6 +873,125 @@ elif "$LOCUS_BIN" help topic dashboard >/dev/null 2>&1; then
 else
   skip "topic help not available"
 fi
+# ── 24. adversarial release security probes ────────────────────────────────
+log "24. adversarial release credential/workspace probes"
+SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
+SECURITY_WS="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-ws.XXXXXX")"
+LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" init >/dev/null
+
+set +e
+test_out="$(LOCUS_HOME="$SECURITY_HOME" LOCUS_ALLOW_TEST_CREDS=1 "$LOCUS_BIN" binding add release-test \
+  --tenant release-test --provider github --account release-test \
+  --credential-ref test:RELEASE_TEST_LOCATOR_CANARY 2>&1)"
+test_ec=$?
+set -e
+[[ $test_ec -ne 0 ]] || die "release binary accepted test: credential"
+[[ "$test_out" != *"RELEASE_TEST_LOCATOR_CANARY"* ]] || die "release error leaked test locator"
+ok "release binary rejects test: even with legacy env opt-in"
+
+cat >"$SECURITY_HOME/bindings/legacy.toml" <<'EOF'
+[binding]
+id = "bnd_legacy"
+alias = "legacy"
+tenant = "legacy-tenant"
+
+[[binding.providers]]
+provider = "github"
+account = "legacy-account"
+credential_ref = "LEGACY_RELEASE_LOCATOR_CANARY"
+EOF
+set +e
+legacy_list="$(LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" binding list 2>&1)"
+legacy_ec=$?
+set -e
+[[ $legacy_ec -ne 0 ]] || die "legacy binding was silently accepted"
+[[ "$legacy_list" == *"migrate-credential-refs legacy --write"* ]] \
+  || die "legacy binding did not return migration action"
+[[ "$legacy_list" != *"LEGACY_RELEASE_LOCATOR_CANARY"* ]] || die "legacy list leaked locator"
+ok "legacy binding is actionable and non-disclosing"
+
+migrate_out="$(LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" binding migrate-credential-refs legacy --write 2>&1)"
+[[ "$migrate_out" != *"LEGACY_RELEASE_LOCATOR_CANARY"* ]] || die "migration output leaked locator"
+grep -q 'credential_ref = "phm:LEGACY_RELEASE_LOCATOR_CANARY"' "$SECURITY_HOME/bindings/legacy.toml" \
+  || die "legacy migration did not persist explicit phm ref"
+retry_migrate_out="$(LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" binding migrate-credential-refs legacy --write 2>&1)"
+[[ "$retry_migrate_out" == *"migrated 1 credential reference"* ]] \
+  || die "exact migration retry was not reconciled as committed"
+[[ "$retry_migrate_out" != *"LEGACY_RELEASE_LOCATOR_CANARY"* ]] || die "migration retry leaked locator"
+! grep -R -q 'LEGACY_RELEASE_LOCATOR_CANARY' "$SECURITY_HOME/bindings"/.*credential-migration.json 2>/dev/null \
+  || die "migration journal leaked locator"
+python3 - "$SECURITY_HOME/audit/events.jsonl" <<'PY'
+import json, sys
+events = []
+with open(sys.argv[1], encoding="utf-8") as fh:
+    for line in fh:
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+matches = [event for event in events if event.get("op") == "binding.credential_refs_migrated"]
+assert len(matches) == 1, matches
+PY
+ok "explicit legacy migration and exact retry are durable, idempotent, and non-disclosing"
+
+set +e
+phantom_error="$(PATH=/usr/bin:/bin LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" run \
+  -b legacy --strict-creds -- /usr/bin/true 2>&1)"
+phantom_ec=$?
+set -e
+[[ $phantom_ec -ne 0 ]] || die "strict resolution unexpectedly succeeded without Phantom"
+[[ "$phantom_error" == *"provider=github source=phantom code=unavailable"* ]] \
+  || die "strict Phantom error omitted safe provider/source metadata"
+[[ "$phantom_error" != *"LEGACY_RELEASE_LOCATOR_CANARY"* ]] || die "strict Phantom error leaked locator"
+ok "Phantom failures expose only provider/source metadata"
+
+ci_security="$(LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" --json ci mint -b legacy)"
+[[ "$ci_security" != *"LEGACY_RELEASE_LOCATOR_CANARY"* ]] || die "CI mint leaked locator"
+[[ "$ci_security" != *"CREDENTIAL_REF"* ]] || die "CI mint exported credential locator key"
+ok "CI mint omits credential locator names and keys"
+
+show_security="$(LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" --json binding show legacy)"
+graph_security="$(LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" --json graph list)"
+audit_security="$(cat "$SECURITY_HOME/audit/events.jsonl")"
+for surface in "$show_security" "$graph_security" "$audit_security"; do
+  [[ "$surface" != *"LEGACY_RELEASE_LOCATOR_CANARY"* ]] || die "CLI/audit surface leaked locator"
+done
+ok "binding show, graph list, and audit omit locator names"
+
+LOCUS_RELEASE_ENV_LOCATOR_CANARY="release-secret-value" \
+  LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" binding add env-probe \
+  --tenant env-probe --provider github --account env-probe \
+  --credential-ref env:LOCUS_RELEASE_ENV_LOCATOR_CANARY >/dev/null
+child_env="$(LOCUS_RELEASE_ENV_LOCATOR_CANARY="release-secret-value" \
+  LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" run -b env-probe -- env 2>/dev/null)"
+[[ "$child_env" != *"LOCUS_RELEASE_ENV_LOCATOR_CANARY"* ]] || die "child env leaked locator name"
+[[ "$child_env" != *"CREDENTIAL_REF"* ]] || die "child env exported credential locator key"
+[[ "$child_env" == *"GH_TOKEN=release-secret-value"* ]] || die "resolved provider credential missing"
+ok "child env scrubs locator key and injects only provider-standard secret keys"
+
+ln -s missing-policy.toml "$SECURITY_WS/.locus.toml"
+for command in \
+  "pin legacy --force" \
+  "run -b legacy --force -- true"; do
+  set +e
+  broken_out="$(cd "$SECURITY_WS" && LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" $command 2>&1)"
+  broken_ec=$?
+  set -e
+  [[ $broken_ec -ne 0 ]] || die "broken workspace link allowed: $command"
+  [[ "$broken_out" == *"broken or unreadable"* ]] || die "broken workspace link error not explicit"
+done
+set +e
+doctor_out="$(cd "$SECURITY_WS" && LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" --json doctor 2>/dev/null)"
+doctor_ec=$?
+set -e
+[[ $doctor_ec -eq 2 ]] || die "doctor did not report UNSAFE for broken workspace link"
+echo "$doctor_out" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+assert d["verdict"] == "UNSAFE", d
+assert d["workspace"]["valid"] is False, d["workspace"]
+'
+ok "broken workspace link blocks force/run and makes doctor UNSAFE"
 
 printf '\n========================================\n'
 printf 'e2e PASS  (%d checks, %d skipped)\n' "$pass" "$skip"

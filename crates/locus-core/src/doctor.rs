@@ -4,6 +4,7 @@
 //! includes secret values — only aliases, digests, counts, and issue codes.
 
 use crate::config::{self, AutopinStatus, LocusConfig};
+use crate::credential::CredentialResolutionIssue;
 use crate::store::{ApprovalsHealth, AuditEvent, RuntimeDrift, Store};
 use crate::verify::{
     count_low_confidence_audit_signals, doctor_low_confidence_message,
@@ -90,6 +91,8 @@ pub struct DoctorPin {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkspaceStatus {
     pub found: bool,
+    /// False when a workspace policy file was encountered but could not be read or parsed.
+    pub valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,6 +102,8 @@ pub struct WorkspaceStatus {
     /// When found: whether the active pin (if any) is on the allowlist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pin_allowed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Recent audit summary (no secret material).
@@ -183,7 +188,7 @@ fn event_in_near_miss_window(ts: &str, cutoff: DateTime<Utc>) -> bool {
 #[derive(Debug, Clone, Default)]
 pub struct DoctorExternal {
     pub phantom_on_path: bool,
-    pub unresolved_phm: Vec<String>,
+    pub unresolved_phm: Vec<CredentialResolutionIssue>,
     /// Working directory for workspace walk (defaults applied by caller).
     pub cwd: Option<std::path::PathBuf>,
 }
@@ -209,7 +214,7 @@ pub struct DoctorReport {
     pub pending_approvals: usize,
     pub dual_control_waiting: usize,
     pub phantom_on_path: bool,
-    pub unresolved_phm: Vec<String>,
+    pub unresolved_phm: Vec<CredentialResolutionIssue>,
     pub autopin: AutopinStatus,
     pub workspace: WorkspaceStatus,
     pub audit: AuditSummary,
@@ -282,6 +287,19 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     let mut findings: Vec<DoctorIssue> = Vec::new();
 
     // ── Unsafe ────────────────────────────────────────────────────────────
+    let migration_readiness = crate::credential_migration::migration_readiness(store);
+    if !migration_readiness.ready() {
+        findings.push(issue(
+            IssueSeverity::Unsafe,
+            "credential_migration_incomplete",
+            format!(
+                "credential migration reconciliation required (pending={}, invalid={}, scan_failed={})",
+                migration_readiness.pending,
+                migration_readiness.invalid,
+                migration_readiness.scan_failed
+            ),
+        ));
+    }
     if !seal_ok {
         findings.push(issue(
             IssueSeverity::Unsafe,
@@ -379,7 +397,7 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
         findings.push(issue(
             IssueSeverity::Warn,
             "phantom_missing",
-            "phantom not on PATH (install Phantom Secrets for phm: credential refs)",
+            "phantom not on PATH (install Phantom Secrets for Phantom credential references)",
         ));
     }
     if !external.unresolved_phm.is_empty() {
@@ -387,8 +405,13 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
             IssueSeverity::Warn,
             "unresolved_phm",
             format!(
-                "unresolved phm refs (names only): {}",
-                external.unresolved_phm.join(", ")
+                "unavailable credentials: {}",
+                external
+                    .unresolved_phm
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
         ));
     }
@@ -400,6 +423,16 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                 .note
                 .clone()
                 .unwrap_or_else(|| "autopin misconfigured".into()),
+        ));
+    }
+    if !workspace.valid {
+        findings.push(issue(
+            IssueSeverity::Unsafe,
+            "workspace_policy_invalid",
+            workspace
+                .error
+                .clone()
+                .unwrap_or_else(|| "workspace policy is invalid".into()),
         ));
     }
     if workspace.require_pin && active.is_none() {
@@ -523,24 +556,38 @@ fn count_dual_control_waiting(store: &Store, pending: &[crate::approval::Approva
 
 fn workspace_status(store: &Store, cwd: &Path, active_alias: Option<&str>) -> WorkspaceStatus {
     match store.workspace_for(cwd) {
-        Some((path, cfg)) => {
+        Ok(Some((path, cfg))) => {
             let pin_allowed = active_alias.map(|a| cfg.allows(a));
             WorkspaceStatus {
                 found: true,
+                valid: true,
                 path: Some(path.display().to_string()),
                 default_binding: cfg.default_binding.clone(),
                 allowed_bindings: cfg.allowed_bindings.clone(),
                 require_pin: cfg.require_pin,
                 pin_allowed,
+                error: None,
             }
         }
-        None => WorkspaceStatus {
+        Ok(None) => WorkspaceStatus {
             found: false,
+            valid: true,
             path: None,
             default_binding: None,
             allowed_bindings: Vec::new(),
             require_pin: false,
             pin_allowed: None,
+            error: None,
+        },
+        Err(e) => WorkspaceStatus {
+            found: true,
+            valid: false,
+            path: None,
+            default_binding: None,
+            allowed_bindings: Vec::new(),
+            require_pin: false,
+            pin_allowed: None,
+            error: Some(e.to_string()),
         },
     }
 }
@@ -649,7 +696,7 @@ pub fn doctor_json_has_stable_keys(value: &serde_json::Value) -> Result<(), Vec<
         }
     }
     if let Some(ws) = obj.get("workspace") {
-        for k in ["found", "allowed_bindings", "require_pin"] {
+        for k in ["found", "valid", "allowed_bindings", "require_pin"] {
             if ws.get(k).is_none() {
                 missing.push(format!("workspace.{k}"));
             }
@@ -847,6 +894,65 @@ require_pin = true
         assert!(report.workspace.require_pin);
         assert!(report.findings.iter().any(|f| f.code == "require_pin"));
         assert_eq!(report.verdict, DoctorVerdict::Warn);
+    }
+
+    #[test]
+    fn doctor_is_unsafe_for_malformed_workspace_policy() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        std::fs::write(dir.path().join(".locus.toml"), "allowed_bindings = [").unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.verdict, DoctorVerdict::Unsafe);
+        assert!(!report.ok);
+        assert!(report.workspace.found);
+        assert!(!report.workspace.valid);
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "workspace_policy_invalid"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_is_unsafe_for_broken_workspace_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        symlink("missing-policy.toml", project.join(".locus.toml")).unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(project),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.verdict, DoctorVerdict::Unsafe);
+        assert!(!report.workspace.valid);
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.code == "workspace_policy_invalid"));
     }
 
     #[test]

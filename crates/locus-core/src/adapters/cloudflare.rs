@@ -89,7 +89,7 @@ impl ProviderAdapter for CloudflareAdapter {
                     "account": provider.account,
                     "account_id": resolved,
                     "zones": zones,
-                    "credential_ref": provider.credential_ref,
+                    "credential": crate::credential::credential_metadata(&provider.credential_ref),
                     "tenant": binding.tenant,
                     "binding": binding.alias,
                     "frozen_selectors": ["account_id", "zones"],

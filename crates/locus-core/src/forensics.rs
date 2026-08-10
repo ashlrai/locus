@@ -374,7 +374,7 @@ mod tests {
                 binding: None,
                 audit_last: Some(50),
                 doctor_external: Some(DoctorExternal {
-                    phantom_on_path: true,
+                    phantom_on_path: false,
                     unresolved_phm: Vec::new(),
                     cwd: Some(dir.path().to_path_buf()),
                 }),
@@ -398,6 +398,12 @@ mod tests {
         let s = serde_json::to_string(&pack).unwrap();
         assert!(!s.contains("\"token\""));
         assert!(!s.contains("sk_live"));
+        for locator_scheme in ["phm:", "env:", "test:"] {
+            assert!(
+                !s.contains(locator_scheme),
+                "forensics pack leaked credential locator scheme {locator_scheme}"
+            );
+        }
     }
 
     #[test]

@@ -95,7 +95,7 @@ impl ProviderAdapter for SupabaseAdapter {
                     "account": provider.account,
                     "project_ref": resolved_ref,
                     "read_only": provider.scope.read_only,
-                    "credential_ref": provider.credential_ref,
+                    "credential": crate::credential::credential_metadata(&provider.credential_ref),
                     "tenant": binding.tenant,
                     "binding": binding.alias,
                     "frozen_selectors": ["project_ref", "read_only"],

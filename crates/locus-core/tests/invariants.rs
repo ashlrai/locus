@@ -8,9 +8,9 @@ use chrono::Duration;
 use locus_core::adapters::freeze_string_arg;
 use locus_core::{
     args_digest, build_isolated_env, call_tool, control_tools, decrypt_graph, encrypt_graph,
-    notifications_enabled, required_grant_count, visible_credential_refs, Binding, BindingBody,
-    GraphEnvelope, GraphMeta, LocusConfig, LocusError, NotifyConfig, PinSource, Policy,
-    ProviderBinding, Scope, SealKey, Session, Store, GRAPH_MAGIC,
+    notifications_enabled, required_grant_count, Binding, BindingBody, GraphEnvelope, GraphMeta,
+    LocusConfig, LocusError, NotifyConfig, PinSource, Policy, ProviderBinding, Scope, SealKey,
+    Session, Store, GRAPH_MAGIC,
 };
 use proptest::prelude::*;
 use serde_json::{json, Value};
@@ -175,23 +175,20 @@ fn inv_pin_switch_no_prior_credential_refs() {
         .unwrap();
     let w1 = store.whoami().unwrap();
     assert_eq!(w1.binding_alias, "acme");
-    let refs1: HashSet<_> = w1
+    assert!(w1
         .providers
         .iter()
-        .map(|p| p.credential_ref.clone())
-        .collect();
-    assert!(refs1.iter().all(|r| r.contains("ACME")));
-    assert!(refs1.iter().all(|r| !r.to_uppercase().contains("PERSONAL")));
+        .all(|p| p.credential.present && p.credential.source == "phantom"));
+    let whoami1 = serde_json::to_string(&w1).unwrap();
+    assert!(!whoami1.contains("SUPABASE_ACME"));
+    assert!(!whoami1.contains("VERCEL_ACME"));
+    assert!(!whoami1.contains("GH_ACME"));
 
     let iso1 = build_isolated_env(&s1, &acme);
     assert!(!iso1
         .vars
         .values()
         .any(|v| v.to_uppercase().contains("PERSONAL")));
-    for r in visible_credential_refs(&acme) {
-        assert!(r.contains("ACME"));
-    }
-
     // Switch pin
     let s2 = store
         .pin("personal", dir.path(), Some("inv".into()), false)
@@ -199,13 +196,14 @@ fn inv_pin_switch_no_prior_credential_refs() {
     let w2 = store.whoami().unwrap();
     assert_eq!(w2.binding_alias, "personal");
     for p in &w2.providers {
-        assert!(
-            !p.credential_ref.to_uppercase().contains("ACME"),
-            "after switch, whoami leaked prior ref: {}",
-            p.credential_ref
-        );
-        assert!(p.credential_ref.to_uppercase().contains("PERSONAL"));
+        assert!(p.credential.present);
+        assert_eq!(p.credential.source, "phantom");
     }
+    let whoami2 = serde_json::to_string(&w2).unwrap();
+    assert!(!whoami2.contains("ACME"));
+    assert!(!whoami2.contains("SUPABASE_PERSONAL"));
+    assert!(!whoami2.contains("VERCEL_PERSONAL"));
+    assert!(!whoami2.contains("GH_PERSONAL"));
     assert!(w2
         .providers
         .iter()
@@ -246,8 +244,8 @@ fn prop_pin_exclusive_refs_for_random_aliases() {
         let w = store.whoami().unwrap();
         prop_assert_eq!(&w.binding_alias, &a);
 
-        // Exact sibling credential_refs / frozen scopes — not substrings
-        // (e.g. marker "EA" is a substring of "TEAM_AA").
+        // Locator names from either binding are absent; frozen scope metadata
+        // still proves the selected tenant is exclusive.
         let sibling_refs: HashSet<_> = bb
             .providers
             .iter()
@@ -256,13 +254,13 @@ fn prop_pin_exclusive_refs_for_random_aliases() {
         let sibling_proj = format!("proj_{b}");
         let sibling_team = format!("team_{b}");
         for p in &w.providers {
-            prop_assert!(
-                !sibling_refs.contains(&p.credential_ref),
-                "whoami leaked sibling ref {} while pinned to {}",
-                p.credential_ref,
-                a
-            );
+            prop_assert!(p.credential.present);
+            prop_assert_eq!(p.credential.source.as_str(), "phantom");
             prop_assert!(p.project_ref.as_deref() != Some(sibling_proj.as_str()));
+        }
+        let whoami_json = serde_json::to_string(&w).unwrap();
+        for locator in ba.providers.iter().chain(bb.providers.iter()).map(|p| &p.credential_ref) {
+            prop_assert!(!whoami_json.contains(locator));
         }
         let iso = build_isolated_env(&sess, &ba);
         for v in iso.vars.values() {

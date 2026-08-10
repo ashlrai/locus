@@ -14,7 +14,7 @@ Wrong-account action must be **mechanically impossible** for hub-spawned agents:
 
 1. Identity plane is ready (`status=ready`, healthy pin oneline).
 2. Catalog is locus-first (`required_servers` = locus + phantom only).
-3. Job pin is ephemeral when concurrent (`ci mint` / `withLocusSession`) — no shared `active.json` races.
+3. Job pin is ephemeral when concurrent (`ci mint` / `withLocusSession`) — no shared `active.json` races or ambient credential inheritance.
 4. Secrets never enter hub logs or model context.
 
 ---
