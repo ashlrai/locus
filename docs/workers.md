@@ -56,8 +56,10 @@ provider = "github"
 account = "acme"
 credential_ref = "phm:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"] }
-# Built-in recipe (recommended) — expands to command/args:
-upstream = { recipe = "github-mcp", resolve_secrets = true }
+# Built-in recipe (recommended) — expands to command/args + hardened defaults:
+upstream = { recipe = "github-official", resolve_secrets = true, sandbox = true }
+# Legacy npx community package still works: recipe = "github-mcp"
+# Supabase: recipe = "supabase-mcp" · Vercel remote bridge: recipe = "vercel-mcp"
 
 # Explicit command/args (still supported):
 # upstream = { command = "npx", args = ["-y", "@modelcontextprotocol/server-github"], resolve_secrets = true }
@@ -70,23 +72,25 @@ upstream = { recipe = "github-mcp", resolve_secrets = true }
 
 ### Built-in recipes
 
-| Recipe | Typical use |
-|--------|-------------|
-| `github-mcp` | Community `@modelcontextprotocol/server-github` via `npx` |
-| `github-official` | Official GitHub image via Docker + `GITHUB_PERSONAL_ACCESS_TOKEN` |
-| `supabase-mcp` | `@supabase/mcp-server-supabase` stdio (see notes for remote URL style) |
-| `filesystem-mcp` | Safe filesystem demo (override root path via `args`) |
-| `everything-mcp` | MCP test/echo server for wiring checks |
+| Recipe | Typical use | Defaults (pure-recipe expand) |
+|--------|-------------|-------------------------------|
+| `github-official` | **Preferred** — official Docker image + `GITHUB_PERSONAL_ACCESS_TOKEN` | `resolve_secrets`, `sandbox` |
+| `github-mcp` | Legacy community `@modelcontextprotocol/server-github` via `npx` (deprecated package) | `resolve_secrets`, `sandbox` |
+| `supabase-mcp` | `@supabase/mcp-server-supabase` stdio (`--read-only`) | `resolve_secrets`, `sandbox` |
+| `vercel-mcp` | Official remote `https://mcp.vercel.com` via documented `mcp-remote` bridge (OAuth) | `sandbox` only |
+| `filesystem-mcp` | Safe filesystem demo (override root path via `args`) | off |
+| `everything-mcp` | MCP test/echo server for wiring checks | off |
 
 ```bash
 locus upstream list
 locus upstream suggest github
 locus upstream suggest supabase
+locus upstream suggest vercel
 ```
 
-Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` override recipe defaults when both are set.
+Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` override recipe defaults when both are set. Pure-recipe expand adopts each recipe’s `default_resolve_secrets` / `default_sandbox` (OR with binding flags).
 
-**Supabase remote URL (host MCP, not Locus workers):** `https://mcp.supabase.com/mcp` or `?project_ref=…`. Locus upstream workers are **stdio** only today.
+**Remote URLs (host MCP, not Locus workers):** Supabase `https://mcp.supabase.com/mcp` (optional `?project_ref=…`); Vercel `https://mcp.vercel.com` (OAuth). Locus upstream workers are **stdio** only today — use host-native remote MCP when the client supports it, or the `vercel-mcp` bridge when you need a stdio child.
 
 When `locus-mcp` is pinned:
 

@@ -1,7 +1,7 @@
 # Built-in upstream MCP recipes for Locus bindings.
 #
 # Use in a binding as:
-#   upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }
+#   upstream = { recipe = "github-official", resolve_secrets = true, sandbox = true }
 #
 # Or expand with `locus upstream list` / `locus upstream suggest <provider>`.
 # Recipes fill command + args when those fields are omitted. Explicit
@@ -10,12 +10,13 @@
 # demo recipes stay false so offline wiring is unblocked.
 #
 # Source of truth for `locus-core` (embedded via include_str). Keep ids stable.
+# Only well-known, documented package names — never invent npm packages.
 
 version = 1
 
 [[recipes]]
 id = "github-mcp"
-title = "GitHub (community reference)"
+title = "GitHub (community reference, legacy npx)"
 providers = ["github"]
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
@@ -23,11 +24,14 @@ default_resolve_secrets = true
 default_sandbox = true
 env_hints = ["GITHUB_PERSONAL_ACCESS_TOKEN", "GH_TOKEN"]
 notes = """
-Community MCP reference server (Anthropic / modelcontextprotocol).
-Injects the binding credential via resolve_secrets into the child env.
-Prefer a fine-scoped, vault-backed PAT per tenant — never a personal token on a client binding.
-Official GitHub-maintained local server: recipe `github-official` (Docker).
-Best-effort sandbox (restricted PATH + marker) on by pure-recipe expand; set sandbox = false to opt out.
+Legacy Anthropic / modelcontextprotocol reference server via npx.
+Package is deprecated on npm — prefer recipe `github-official` (Docker image
+ghcr.io/github/github-mcp-server) for new bindings.
+
+Pure-recipe expand sets resolve_secrets + best-effort sandbox. Locus injects
+the binding credential into the child env only (never into MCP tool results).
+Prefer a fine-scoped, vault-backed PAT per tenant — never a personal token on
+a client binding. Opt out: sandbox = false / resolve_secrets = false.
 """
 
 [[recipes]]
@@ -47,12 +51,15 @@ default_resolve_secrets = true
 default_sandbox = true
 env_hints = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
 notes = """
-Official GitHub MCP server image. Requires Docker.
-With resolve_secrets = true, Locus resolves private binding configuration and
-injects GITHUB_PERSONAL_ACCESS_TOKEN into the child only.
+Official GitHub-maintained local MCP server (Docker). Recommended github recipe.
+Image: ghcr.io/github/github-mcp-server — public; docker must be on PATH
+(sandbox restricted PATH includes /usr/local/bin where Docker Desktop usually lives).
+
+With resolve_secrets = true, Locus resolves the binding credential and injects
+GITHUB_PERSONAL_ACCESS_TOKEN into the child only (`docker -e VAR` pass-through).
 Remote hosted option (not stdio): https://api.githubcopilot.com/mcp/ — use
 host-native remote MCP when available; Locus workers today are stdio only.
-Best-effort sandbox on by pure-recipe expand; docker must be on restricted PATH (/usr/local/bin).
+Best-effort sandbox on by pure-recipe expand; set sandbox = false to opt out.
 """
 
 [[recipes]]
@@ -65,17 +72,42 @@ default_resolve_secrets = true
 default_sandbox = true
 env_hints = ["SUPABASE_ACCESS_TOKEN"]
 notes = """
-Legacy / local stdio package. Prefer project-scoped tokens and --read-only
-unless the binding is intentionally write-capable.
+Official Supabase stdio package (@supabase/mcp-server-supabase). Defaults to
+--read-only; drop that arg only when the binding is intentionally write-capable.
+Pure-recipe expand sets resolve_secrets + best-effort sandbox.
+
+Env: SUPABASE_ACCESS_TOKEN (injected when resolve_secrets = true). Prefer
+project-scoped tokens; Locus freezes project_ref on the synthetic adapter.
 
 Remote URL style (not stdio — host config, not Locus upstream workers):
   https://mcp.supabase.com/mcp
   https://mcp.supabase.com/mcp?project_ref=YOUR_REF
 Local Supabase CLI MCP often exposes http://localhost:54321/mcp.
 
-Locus freezes project_ref on the synthetic adapter; when spawning this
-stdio package, pin credentials per binding and keep resolve_secrets on.
-Best-effort sandbox on by pure-recipe expand; set sandbox = false to opt out.
+Opt out: sandbox = false / resolve_secrets = false.
+"""
+
+[[recipes]]
+id = "vercel-mcp"
+title = "Vercel (remote via mcp-remote bridge)"
+providers = ["vercel"]
+command = "npx"
+args = ["-y", "mcp-remote", "https://mcp.vercel.com"]
+default_resolve_secrets = false
+default_sandbox = true
+env_hints = ["VERCEL_TOKEN"]
+notes = """
+Official Vercel MCP is remote OAuth Streamable HTTP at https://mcp.vercel.com
+(not a token-injectable stdio package). Locus workers are stdio-only today.
+
+This recipe bridges via the documented `mcp-remote` proxy (same pattern Vercel
+docs show for Gemini Code Assist / CLI). Auth is browser/OAuth on first connect —
+resolve_secrets defaults off because the remote server does not take VERCEL_TOKEN
+via env the way github-official does. Sandbox still defaults on.
+
+Prefer host-native remote MCP (Cursor/Claude HTTP connector) when available.
+Synthetic vercel.scope / vercel.deploy.prod remain without upstream.
+If a future official stdio + VERCEL_TOKEN package ships, prefer that over this bridge.
 """
 
 [[recipes]]

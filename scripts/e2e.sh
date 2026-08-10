@@ -1204,11 +1204,27 @@ blob = json.dumps(recipes).lower()
 for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "akia", "secret_value"):
     assert bad not in blob, "upstream list must not leak secrets (%s)" % bad
 ids = []
+by_id = {}
 for r in recipes:
     assert isinstance(r, dict), r
     rid = r.get("id") or r.get("name") or r.get("recipe")
     assert rid, "recipe missing id: %s" % r
     ids.append(rid)
+    by_id[rid] = r
+# Top adapters must ship hardened recipes (M3 tail)
+for required in ("github-mcp", "github-official", "supabase-mcp", "vercel-mcp"):
+    assert required in by_id, "missing top recipe %s in %s" % (required, ids)
+for rid in ("github-mcp", "github-official", "supabase-mcp", "vercel-mcp"):
+    r = by_id[rid]
+    sandbox = r.get("default_sandbox", r.get("defaultSandbox"))
+    assert sandbox is True, "%s must default_sandbox: %s" % (rid, r)
+for rid in ("github-mcp", "github-official", "supabase-mcp"):
+    r = by_id[rid]
+    resolve = r.get("default_resolve_secrets", r.get("defaultResolveSecrets"))
+    assert resolve is True, "%s must default_resolve_secrets: %s" % (rid, r)
+v = by_id["vercel-mcp"]
+v_resolve = v.get("default_resolve_secrets", v.get("defaultResolveSecrets"))
+assert v_resolve is False, "vercel-mcp resolve_secrets must default off: %s" % v
 print("upstream list count=%d sample=%s" % (len(recipes), ",".join(ids[:6])))
 '
     ok "upstream list --json returns recipes (no secrets)"
