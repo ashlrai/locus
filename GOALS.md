@@ -116,13 +116,14 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Land drop-in inside ashlr-hub: `src/core/integrations/locus.ts` + REQUIRED_SERVERS includes `locus` (+ ecosystem discovery name `locus`)
 - [x] `ashlr doctor` calls `checkLocus` in production path (`src/core/doctor.ts`)
 - [x] Hub pre-mutate gate library + production wire-in (opt-in `LOCUS_ENFORCE=1|warn`) — hub [PR #239](https://github.com/ashlrai/ashlr-hub/pull/239) doctor/REQUIRED_SERVERS; [PR #241](https://github.com/ashlrai/ashlr-hub/pull/241) scrubbed mint + `applyLocusPreMutateGate` on `spawnEngine` / `runSwarm` / `runApiModelSandboxed`
-- [x] Drop-in `integrations/ashlr-hub/locus.ts` synced with hub: `scrubbedChildEnv`, `validateMintEnv`, `withLocusSession` scrub, `resolveLocusEnforceMode` / `decidePreMutateGate` / `assertLocusPreMutate` / `formatPreMutateBlockers` / `applyLocusPreMutateGate` / `runWithLocusSessionIfConfigured` + docs (`hub-integration.md`, `fleet-preflight.md`)
+- [x] Drop-in `integrations/ashlr-hub/locus.ts` synced with hub: `scrubbedChildEnv`, `validateMintEnv`, `withLocusSession` scrub, `resolveLocusEnforceMode` / `decidePreMutateGate` / `assertLocusPreMutate` / `formatPreMutateBlockers` / `applyLocusPreMutateGate` / `runWithLocusSessionIfConfigured` + docs (`hub-integration.md`, `fleet-preflight.md`) — locus [PR #14](https://github.com/ashlrai/locus/pull/14) (firm drop-in + runTask call sites); related locus [#15](https://github.com/ashlrai/locus/pull/15) dogfood clients · [#16](https://github.com/ashlrai/locus/pull/16) adapter registry · [#17](https://github.com/ashlrai/locus/pull/17) streamable-HTTP-lite (M3/M5)
 - [x] Ecosystem MCP write injects `locusServerSpec` env (`LOCUS_HOME` / `LOCUS_CLIENT` / `LOCUS_NOTIFY`) — hub #241
 - [x] Swarm path: `runWithLocusSessionIfConfigured` when `LOCUS_CI_BINDING` / `LOCUS_BINDING` set — hub #241
 - [x] Single-task path: `runTask` wraps `runWithLocusSessionIfConfigured` (same CI mint overlay as swarm) — hub [PR #252](https://github.com/ashlrai/ashlr-hub/pull/252)
 - [x] Firm config: `~/.ashlr/config.json` → `locus.enforce` (`off`|`warn`|`enforce`); env `LOCUS_ENFORCE` wins; drop-in `parseLocusEnforceToken` / `extractLocusConfigEnforce` / `readLocusConfigFromAshlr` — hub [PR #254](https://github.com/ashlrai/ashlr-hub/pull/254)
-- [ ] Always-on firm-mode enforce (default off until pin guaranteed on all hub paths)
-- [ ] Broader CI/job runners beyond swarm/runTask use `withLocusSession` / `ci mint` (daemon / discrete job workers)
+- [x] Firm profile: `~/.ashlr/config.json` → `locus.firm: true` enables enforce for production fleets (env `LOCUS_ENFORCE` still wins; explicit `locus.enforce` beats firm; monorepo default remains off when firm absent/false) — hub [PR #258](https://github.com/ashlrai/ashlr-hub/pull/258)
+- [ ] Always-on firm-mode enforce by default (still **off** unless `locus.firm` / `locus.enforce` / `LOCUS_ENFORCE` set — #258 lands opt-in firm profile only; do not flip monorepo default until pin is guaranteed on all hub paths)
+- [ ] Broader CI/job runners beyond swarm/runTask use `withLocusSession` / `ci mint` — **partial**: simple-conductor mint overlay hub [PR #256](https://github.com/ashlrai/ashlr-hub/pull/256) (open / pending merge); `runBestOfN` sandboxed fan-out hub [PR #257](https://github.com/ashlrai/ashlr-hub/pull/257) (open / pending merge); other daemon / discrete job workers still open
 
 ### M5 — Verification plane · **partial / in progress**
 
