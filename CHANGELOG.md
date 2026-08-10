@@ -20,6 +20,12 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 
 ### Added
 
+- **Linux worker sandbox partial (M5)** — `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`
+  on Linux prefers bubblewrap when installed (`LOCUS_WORKER_SANDBOX_BACKEND=bwrap`:
+  RO system roots, bind work tree + session worker home only, shared network for MCP,
+  no `~/.locus/bindings` bind). Falls back to best-effort `path` (restricted PATH +
+  absolute executable only — **not** kernel isolation; tag is explicit). macOS Seatbelt
+  unchanged. Docs: [docs/workers.md](./docs/workers.md). Not a full seccomp/VM.
 - **Streamable-HTTP-lite MCP (M5 partial)** — `locus-mcp --http` gains session-sized
   polish toward remote multiplexor without a full SSE rewrite:
   - `GET /mcp` (token) — capabilities + pin summary + tool **names** only (values-free)

@@ -139,7 +139,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Continuous whoami / `watch` in long agent sessions as first-class hub heartbeat (`locus watch` each tick runs `verify_session`; NDJSON `kind=watch` + `--require-ok` fail-closed)
 - [x] Audit export → SIEM / remote append — **minimal webhook sink** (`locus events export --sink webhook` / `LOCUS_AUDIT_WEBHOOK_URL`; redacted JSONL/OTLP POST; fail soft when unset; secret-scan fail closed). Full team-tier continuous append + chain verify still open
 - [x] Adapter registry v0: `adapters/manifest.toml` schema (`schema/adapter-manifest.schema.json`) + parse/list/verify in `locus-core` + `locus adapter list|verify` (+ `--require-signed` fail-closed; HMAC mock trust keys in tests; built-in catalog ships unsigned). Full plugin load + ed25519 registry root still open — see [docs/adapter-sdk.md](./docs/adapter-sdk.md)#signed-registry-roadmap
-- [ ] Hard sandbox (seccomp/VM) + bug bounty on seal/capability logic
+- [x] Hard sandbox (seccomp/VM) — **Linux session-sized partial**: `LOCUS_WORKER_SANDBOX=1` prefers bubblewrap (`LOCUS_WORKER_SANDBOX_BACKEND=bwrap`: RO system roots, bind work tree + session worker home only, network shared for MCP stdio, no host `~/.locus/bindings` bind); falls back to best-effort `path` when `bwrap` missing (restricted PATH + absolute exec; **not** kernel isolation — never claim false security). macOS Seatbelt unchanged. Full seccomp/VM + bug bounty on seal/capability logic still open
 - [ ] Streamable HTTP / remote multiplexor (platform phase) — **partial**: streamable-HTTP-lite on `locus-mcp --http` with `GET /mcp` capabilities (tool **names** + pin summary, values-free), Accept/`Content-Type` negotiation (`application/json` preferred; single-event SSE when `Accept: text/event-stream` only), remote-deploy docs (reverse proxy, `LOCUS_MCP_HTTP_TOKEN`, `LOCUS_HOME`, pin-before-serve), HTTP unit tests (health + auth fail-closed + Accept 406/SSE). Full multi-message SSE, `Mcp-Session-Id` resume, and multi-tenant remote multiplexor still open
 
 ---
@@ -183,4 +183,4 @@ locus init --with-samples && locus enter personal && locus doctor
 | M2 Firm UX | done |
 | M3 AI surface | mostly done |
 | M4 Hub composition | in progress |
-| M5 Verification plane | partial (claim+session verify, e2e/dogfood coverage, fail-closed macOS worker sandbox, conformance CI, audit webhook sink, adapter registry v0 list/verify) |
+| M5 Verification plane | partial (claim+session verify, e2e/dogfood coverage, fail-closed macOS worker sandbox, Linux bwrap/path sandbox partial, conformance CI, audit webhook sink, adapter registry v0 list/verify) |

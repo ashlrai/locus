@@ -213,8 +213,8 @@ Still open under verification plane:
 
 - Full team-tier SIEM (continuous remote append, chain verification beyond one-shot webhook)
 - Adapter SDK + signed registry
-- Harder sandbox (seccomp/VM); bounty on seal logic
-- Streamable HTTP / remote multiplexor
+- Full hard sandbox (seccomp/VM) beyond Linux bubblewrap partial; bounty on seal logic
+- Streamable HTTP / remote multiplexor (beyond streamable-HTTP-lite)
 
 Shipped as partial M5:
 
@@ -224,7 +224,8 @@ Shipped as partial M5:
 - [x] Continuous whoami / `locus watch` — each tick runs session pack; NDJSON heartbeat (`kind=watch`) + `--require-ok` fail-closed
 - [x] E2E + dogfood coverage: `scripts/e2e.sh` feature-detects `verify claim` / `verify session` / optional `watch --once --json` (shape + no secret values); `scripts/dogfood.sh` hard-requires `session_ok` at the DOGFOOD READY gate
 - [x] Doctor optional `ungrounded_claims` finding
-- [x] Fail-closed macOS worker sandbox (`LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`); unsupported platforms refuse sandboxed spawn
+- [x] Fail-closed macOS worker sandbox (`LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`)
+- [x] Linux hard-sandbox **partial**: prefer bubblewrap (`LOCUS_WORKER_SANDBOX_BACKEND=bwrap`); fallback best-effort `path` (restricted PATH only — not kernel isolation); network allowed for MCP
 - [x] Core module + unit tests (heuristics only)
 - [x] Audit webhook sink — `locus events export --sink webhook` / `LOCUS_AUDIT_WEBHOOK_URL` (redacted POST; fail soft when unset)
 
@@ -236,7 +237,7 @@ Shipped as partial M5:
 |------|------|
 | `crates/locus-core/src/verify.rs` | Heuristics + `ClaimVerification` |
 | `crates/locus-core/src/agent_report.rs` | `verify_session` → `SessionVerificationPack` |
-| `crates/locus-core/src/workers/sandbox.rs` | Deny-by-default macOS Seatbelt; no PATH-only fallback |
+| `crates/locus-core/src/workers/sandbox.rs` | macOS Seatbelt; Linux `bwrap` / best-effort `path` (tagged; not a VM) |
 | `crates/locus-core/src/events.rs` | Fleet pulse / OTLP export + optional webhook sink |
 | `crates/locus-cli` | `locus verify claim` · `locus verify session` · `locus watch` · `events export --sink webhook` |
 | `crates/locus-mcp` | `locus_verify_claim` control tool |

@@ -4,8 +4,9 @@
 //! child, handshakes MCP, and routes `tools/call` to the upstream server.
 //!
 //! When sandbox is enabled (`LOCUS_WORKER_SANDBOX=1`, [`McpStdioConfig::sandbox`],
-//! or binding `upstream.sandbox`), spawn requires a supported OS isolation
-//! backend. Missing backends and unresolved executables fail before spawn.
+//! or binding `upstream.sandbox`), spawn uses a platform backend (`sandbox-exec`
+//! on macOS; `bwrap` or best-effort `path` on Linux). Unresolved executables and
+//! unsupported platforms fail before spawn.
 
 use super::sandbox::{
     resolve_sandbox_spawn, sandbox_enabled, ENV_WORKER_SANDBOXED, ENV_WORKER_SANDBOX_BACKEND,
@@ -46,7 +47,9 @@ pub struct McpStdioConfig {
     /// Deprecated compatibility field. Arbitrary env is never forwarded; use
     /// binding scope metadata or provider credential resolution instead.
     pub extra_env: BTreeMap<String, String>,
-    /// Require OS-backed sandbox isolation. PATH/markers are diagnostics only.
+    /// Require sandbox wrapping. Backend tag is recorded in
+    /// `LOCUS_WORKER_SANDBOX_BACKEND` (`sandbox-exec` / `bwrap` / `path`).
+    /// The `path` backend is best-effort only (not kernel isolation).
     /// Also enabled when `LOCUS_WORKER_SANDBOX=1` regardless of this flag.
     pub sandbox: bool,
     /// Present when recipe metadata says sandboxing would make the command
@@ -74,7 +77,7 @@ impl McpStdioBackend {
 
     /// Build a `Command` ready to spawn with isolated env.
     ///
-    /// When sandbox is on: resolve the protected executable, require an OS
+    /// When sandbox is on: resolve the protected executable, select a platform
     /// backend, and install a private temp root before returning the command.
     pub fn build_command(
         &self,
@@ -126,7 +129,8 @@ impl McpStdioBackend {
         if let Some((backend, restricted_path)) = sandbox_backend {
             let temp_root = Path::new(&session.worker_home).join("tmp");
             std::fs::create_dir_all(&temp_root)?;
-            // These diagnostics are set only after real OS isolation resolved.
+            // Markers set only after backend resolution. Tag `path` is best-effort
+            // PATH restriction — not equivalent to sandbox-exec or bwrap.
             cmd.env("PATH", restricted_path);
             cmd.env("TMPDIR", &temp_root);
             cmd.env("TMP", &temp_root);
