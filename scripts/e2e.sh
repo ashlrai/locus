@@ -407,15 +407,21 @@ else
   [[ -n "$dual_id" ]] || die "no approval_id for dual: $dual_line"
   ok "dual_control blocked with $dual_id"
 
-  # First principal — partial grant
-  g1="$(locus approve grant "$dual_id" --as alice --json 2>/dev/null || true)"
+  # Touch ID mock: cancel must fail closed (no grant written)
+  if LOCUS_TOUCHID_MOCK=cancel locus approve grant "$dual_id" --as alice --touchid >/dev/null 2>&1; then
+    die "LOCUS_TOUCHID_MOCK=cancel --touchid should fail (exit non-zero)"
+  fi
+  ok "touchid mock cancel fails closed"
+
+  # First principal — partial grant (Touch ID mock ok)
+  g1="$(LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json 2>/dev/null || true)"
   echo "$g1" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
 assert r.get("status") in ("pending", "Pending") or r.get("status") == "pending", r
 assert len(r.get("grants") or []) == 1, r
 '
-  ok "first principal alice partial grant"
+  ok "first principal alice partial grant (touchid mock ok)"
 
   # Same principal cannot complete dual-control
   if locus approve grant "$dual_id" --as alice >/dev/null 2>&1; then

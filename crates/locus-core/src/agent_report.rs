@@ -732,8 +732,52 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
     }
 
     // Pending approvals — human grant is the gate.
+    // Dual-control: surface progress (n/required) + next distinct-principal command.
     let pending = store.pending_approvals()?;
     if let Some(rec) = pending.first() {
+        let dual = store.tool_requires_dual_control(&rec.binding, &rec.tool);
+        let required = crate::approval::required_grant_count(dual);
+        let grants_n = rec.grants.len();
+        let principals: Vec<String> = rec.grants.iter().map(|g| g.principal.clone()).collect();
+
+        if dual && grants_n < required {
+            // Still waiting on more distinct principal(s) — not the single-grant generic.
+            let cmd = crate::approval::next_grant_command(&rec.id, false);
+            let progress = crate::approval::format_dual_control_progress(
+                grants_n,
+                required,
+                &principals,
+                true,
+                false,
+            );
+            let message = if grants_n == 0 {
+                format!(
+                    "Pending dual-control approval for `{}` on binding `{}` ({progress}). \
+                     Human: `{cmd}` (need {required} distinct principals) then re-call the tool.",
+                    rec.tool, rec.binding
+                )
+            } else {
+                format!(
+                    "Pending dual-control approval for `{}` on binding `{}` — need second principal ({}/{}). \
+                     Human: `{cmd}` then re-call the tool. ({progress})",
+                    rec.tool,
+                    rec.binding,
+                    grants_n,
+                    required
+                )
+            };
+            return Ok(SafeNext {
+                action: "approve".into(),
+                command: Some(cmd),
+                agent_tool: None,
+                message,
+                ready: false,
+                approval_id: Some(rec.id.clone()),
+                binding,
+                tenant,
+            });
+        }
+
         let grant = format!("locus approve grant {} --as <principal>", rec.id);
         return Ok(SafeNext {
             action: "approve".into(),
@@ -1088,6 +1132,152 @@ require_pin = true
         assert_eq!(next.action, "init");
         assert!(!next.ready);
         assert!(next.command.as_deref().unwrap_or("").contains("locus init"));
+    }
+
+    fn dual_binding(alias: &str, tenant: &str) -> Binding {
+        Binding::from_body(BindingBody {
+            id: format!("bnd_{alias}"),
+            alias: alias.into(),
+            tenant: tenant.into(),
+            principal: None,
+            description: None,
+            policy: Policy {
+                dual_control: vec!["*.delete*".into()],
+                require_approval: vec!["*.delete*".into()],
+                ..Policy::default()
+            },
+            providers: vec![ProviderBinding {
+                provider: "github".into(),
+                account: alias.into(),
+                credential_ref: "env:GH_TOKEN".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        })
+    }
+
+    #[test]
+    fn safe_next_approve_dual_zero_grants() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&dual_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let rec = store
+            .create_pending_approval(
+                "github.delete_repo",
+                "acme",
+                &serde_json::json!({ "name": "x" }),
+                "sess_test",
+                "agent",
+            )
+            .unwrap();
+        assert!(store.tool_requires_dual_control("acme", "github.delete_repo"));
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "approve");
+        assert!(!next.ready);
+        assert_eq!(next.approval_id.as_deref(), Some(rec.id.as_str()));
+        let cmd = next.command.as_deref().unwrap_or("");
+        assert!(
+            cmd.contains(&rec.id) && cmd.contains("approve grant"),
+            "command should be dual next-grant: {cmd}"
+        );
+        assert!(
+            cmd.contains("other-principal") || cmd.contains("<principal>"),
+            "dual zero-grants command: {cmd}"
+        );
+        assert!(
+            next.message.contains("dual-control") || next.message.contains("dual_control"),
+            "message should mention dual-control: {}",
+            next.message
+        );
+        assert!(
+            next.message.contains("0/2") || next.message.contains("need 2"),
+            "message should show dual progress: {}",
+            next.message
+        );
+        // Must not be the single-grant generic only
+        assert!(
+            !next.message.starts_with("Pending approval for"),
+            "should not use single-grant generic for dual: {}",
+            next.message
+        );
+    }
+
+    #[test]
+    fn safe_next_approve_dual_partial_one_of_two() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&dual_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let rec = store
+            .create_pending_approval(
+                "github.delete_repo",
+                "acme",
+                &serde_json::json!({ "name": "y" }),
+                "sess_test",
+                "agent",
+            )
+            .unwrap();
+        let rec = store.grant_approval(&rec.id, None, "alice").unwrap();
+        assert_eq!(rec.grants.len(), 1);
+        assert_eq!(rec.status, crate::ApprovalStatus::Pending);
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "approve");
+        assert!(!next.ready);
+        assert_eq!(next.approval_id.as_deref(), Some(rec.id.as_str()));
+        let expected_cmd = crate::approval::next_grant_command(&rec.id, false);
+        assert_eq!(next.command.as_deref(), Some(expected_cmd.as_str()));
+        assert!(
+            next.message.contains("need second principal") || next.message.contains("1/2"),
+            "partial dual should show 1/2 progress: {}",
+            next.message
+        );
+        assert!(
+            next.message.contains("other-principal")
+                || next.command.as_deref().unwrap().contains("other-principal"),
+            "partial dual command/message: cmd={:?} msg={}",
+            next.command,
+            next.message
+        );
+    }
+
+    #[test]
+    fn safe_next_approve_single_control_generic() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        // Default policy: no dual_control globs
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let rec = store
+            .create_pending_approval(
+                "github.some_tool",
+                "acme",
+                &serde_json::json!({}),
+                "sess_test",
+                "agent",
+            )
+            .unwrap();
+        assert!(!store.tool_requires_dual_control("acme", "github.some_tool"));
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "approve");
+        let expected = format!("locus approve grant {} --as <principal>", rec.id);
+        assert_eq!(next.command.as_deref(), Some(expected.as_str()));
+        assert!(
+            next.message.starts_with("Pending approval for"),
+            "single-control uses generic message: {}",
+            next.message
+        );
+        assert!(!next.message.contains("dual-control"));
+        assert!(!next.message.contains("need second principal"));
     }
 
     #[test]
