@@ -1048,14 +1048,21 @@ else
   set +e
   vs_json="$(locus verify session --json 2>/dev/null)"
   vs_ec=$?
-  if [[ $vs_ec -ne 0 || -z "$vs_json" ]]; then
+  if [[ -z "$vs_json" ]]; then
     vs_json="$(locus --json verify session 2>/dev/null)"
     vs_ec=$?
   fi
   set -e
-  if [[ $vs_ec -ne 0 || -z "$vs_json" ]]; then
-    skip "verify present but session invocation failed (API may differ)"
+  if [[ -z "$vs_json" ]]; then
+    die "verify session emitted no inspection JSON (exit=$vs_ec)"
   else
+    vs_expected_ec="$(printf '%s' "$vs_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(0 if d.get("session_ok") is True else 1)
+')"
+    [[ $vs_ec -eq $vs_expected_ec ]] \
+      || die "verify session exit=$vs_ec does not match session_ok (expected $vs_expected_ec)"
     echo "$vs_json" | python3 -c '
 import json, sys
 raw = sys.stdin.read().strip()
@@ -1080,7 +1087,7 @@ print("verify session kind=%s session_ok=%s safe_next=%s doctor_ok=%s" % (
     d.get("kind"), d.get("session_ok"),
     (safe_next or {}).get("action"), (doctor or {}).get("ok")))
 '
-    ok "verify session --json pack (kind/session_ok/doctor/safe_next, no secrets)"
+    ok "verify session --json pack + truthful exit (kind/session_ok/doctor/safe_next, no secrets)"
   fi
 fi
 

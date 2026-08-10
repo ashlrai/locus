@@ -120,7 +120,7 @@ locus verify session --json   # doctor + whoami + safe_next pack for hub
 }
 ```
 
-Never includes secrets. `session_ok` is true only when doctor is ok **and** `safe_next.ready`.
+Never includes secrets. `session_ok` is true only when doctor is ok **and** `safe_next.ready`. `locus verify session` emits the pack for inspection but exits nonzero whenever `session_ok` is false; there is no success-status inspection bypass.
 
 ### MCP
 

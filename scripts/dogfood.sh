@@ -32,9 +32,22 @@ readiness_gate() {
   [[ "$verify_rc" -eq 0 ]] || return 1
   [[ "$hub_ok" -eq 1 ]] || return 1
   printf '%s' "$report" | jq -e '
+    def backing_file: gsub("\\\\"; "/") | split("/") | last;
+    def backing_ok:
+      . as $pin
+      | (($pin.session_id | type) == "string" and ($pin.session_id | length) > 0)
+      and (($pin.backing_path | type) == "string" and ($pin.backing_path | length) > 0)
+      and (($pin.backing_path | backing_file) as $file
+        | ($pin.backing_type == "active" and $file == "active.json")
+          or ($pin.backing_type == "run" and ($file | test("^run-.+\\.json$")))
+          or ($pin.backing_type == "ci"
+            and $file == ("ci-" + ($pin.session_id | sub("^ses_"; "")) + ".json")));
     .status == "ready"
     and .ready == true
     and .pin != null
+    and .pin.authority_anchor_ok == true
+    and .pin.binding_authority_ok == true
+    and (.pin | backing_ok)
     and (.status_oneline | type == "string" and contains(":"))
     and .doctor.verdict == "SAFE"
     and .doctor.ok == true
@@ -42,8 +55,22 @@ readiness_gate() {
   ' >/dev/null 2>&1 || return 1
   printf '%s' "$report" | jq -e -f "$ROOT/scripts/dogfood-ready.jq" >/dev/null 2>&1 || return 1
   printf '%s' "$verify" | jq -e '
+    def backing_file: gsub("\\\\"; "/") | split("/") | last;
+    def backing_ok:
+      . as $pin
+      | (($pin.session_id | type) == "string" and ($pin.session_id | length) > 0)
+      and (($pin.backing_path | type) == "string" and ($pin.backing_path | length) > 0)
+      and (($pin.backing_path | backing_file) as $file
+        | ($pin.backing_type == "active" and $file == "active.json")
+          or ($pin.backing_type == "run" and ($file | test("^run-.+\\.json$")))
+          or ($pin.backing_type == "ci"
+            and $file == ("ci-" + ($pin.session_id | sub("^ses_"; "")) + ".json")));
     .kind == "session"
     and .session_ok == true
+    and .whoami != null
+    and .whoami.authority_anchor_ok == true
+    and .whoami.binding_authority_ok == true
+    and (.whoami | backing_ok)
     and .doctor.verdict == "SAFE"
     and .doctor.ok == true
     and ((.doctor.unresolved_phm // []) | length == 0)
@@ -53,12 +80,18 @@ readiness_gate() {
 }
 
 dogfood_gate_self_test() {
-  local ready warn unresolved protected verify_ready
-  ready='{"status":"ready","ready":true,"pin":{"alias":"a"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[],"findings":[]}}'
-  warn='{"status":"ready","ready":true,"pin":{"alias":"a"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"WARN","ok":false,"unresolved_phm":[],"findings":[]}}'
-  unresolved='{"status":"ready","ready":true,"pin":{"alias":"a"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[{"provider":"github"}],"findings":[]}}'
-  protected='{"status":"protected","ready":false,"pin":{"alias":"a"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[],"findings":[]}}'
-  verify_ready='{"kind":"session","session_ok":true,"doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[]},"safe_next":{"ready":true,"action":"ready"}}'
+  local ready warn unresolved protected verify_ready verify_not_ready anchor_bad authority_bad backing_bad verify_authority_bad ci_mismatch
+  ready='{"status":"ready","ready":true,"pin":{"alias":"a","session_id":"ses_abc","authority_anchor_ok":true,"binding_authority_ok":true,"backing_type":"active","backing_path":"/tmp/locus/sessions/active.json"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[],"findings":[]}}'
+  warn='{"status":"ready","ready":true,"pin":{"alias":"a","session_id":"ses_abc","authority_anchor_ok":true,"binding_authority_ok":true,"backing_type":"active","backing_path":"/tmp/locus/sessions/active.json"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"WARN","ok":false,"unresolved_phm":[],"findings":[]}}'
+  unresolved='{"status":"ready","ready":true,"pin":{"alias":"a","session_id":"ses_abc","authority_anchor_ok":true,"binding_authority_ok":true,"backing_type":"active","backing_path":"/tmp/locus/sessions/active.json"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[{"provider":"github"}],"findings":[]}}'
+  protected='{"status":"protected","ready":false,"pin":{"alias":"a","session_id":"ses_abc","authority_anchor_ok":true,"binding_authority_ok":true,"backing_type":"active","backing_path":"/tmp/locus/sessions/active.json"},"status_oneline":"a:t","required_servers":["locus","phantom"],"mcp_command":"locus-mcp","doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[],"findings":[]}}'
+  verify_ready='{"kind":"session","session_ok":true,"whoami":{"session_id":"ses_abc","authority_anchor_ok":true,"binding_authority_ok":true,"backing_type":"active","backing_path":"/tmp/locus/sessions/active.json"},"doctor":{"verdict":"SAFE","ok":true,"unresolved_phm":[]},"safe_next":{"ready":true,"action":"ready"}}'
+  verify_not_ready="$(printf '%s' "$verify_ready" | jq '.session_ok = false')"
+  anchor_bad="$(printf '%s' "$ready" | jq '.pin.authority_anchor_ok = false')"
+  authority_bad="$(printf '%s' "$ready" | jq '.pin.binding_authority_ok = false')"
+  backing_bad="$(printf '%s' "$ready" | jq '.pin.backing_path = "/tmp/locus/sessions/run-wrong.json"')"
+  verify_authority_bad="$(printf '%s' "$verify_ready" | jq '.whoami.binding_authority_ok = false')"
+  ci_mismatch="$(printf '%s' "$ready" | jq '.pin.backing_type = "ci" | .pin.backing_path = "/tmp/locus/sessions/ci-wrong.json"')"
 
   readiness_gate "$ready" 0 0 "$verify_ready" 0 1 || die "self-test rejected complete readiness"
   ! readiness_gate "$warn" 0 0 "$verify_ready" 0 1 || die "self-test reproduced WARN false-ready"
@@ -66,6 +99,13 @@ dogfood_gate_self_test() {
   ! readiness_gate "$unresolved" 0 0 "$verify_ready" 0 1 || die "self-test reproduced unresolved credential false-ready"
   ! readiness_gate "$protected" 1 0 "$verify_ready" 0 1 || die "self-test reproduced protection-only false-ready"
   ! readiness_gate "$ready" 0 0 "$verify_ready" 0 0 || die "self-test reproduced skipped Hub smoke false-ready"
+  ! readiness_gate "$ready" 0 0 "$verify_not_ready" 0 1 || die "self-test accepted session_ok=false"
+  ! readiness_gate "$ready" 0 0 "$verify_ready" 1 1 || die "self-test accepted nonzero verify-session exit"
+  ! readiness_gate "$anchor_bad" 0 0 "$verify_ready" 0 1 || die "self-test accepted stale authority anchor"
+  ! readiness_gate "$authority_bad" 0 0 "$verify_ready" 0 1 || die "self-test accepted incomplete binding authority"
+  ! readiness_gate "$backing_bad" 0 0 "$verify_ready" 0 1 || die "self-test accepted mismatched backing type"
+  ! readiness_gate "$ready" 0 0 "$verify_authority_bad" 0 1 || die "self-test accepted verify-session authority mismatch"
+  ! readiness_gate "$ci_mismatch" 0 0 "$verify_ready" 0 1 || die "self-test accepted CI backing/session mismatch"
   printf 'dogfood readiness gate self-test: ok\n'
 }
 

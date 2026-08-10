@@ -5,6 +5,8 @@
 //! they are never treated as isolation by themselves.
 
 use crate::error::{LocusError, Result};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Component, Path, PathBuf};
 
 /// Env: enable sandbox for all MCP stdio workers (`1` / `true` / `yes`).
@@ -167,15 +169,114 @@ fn resolve_executable(
     Ok(executable)
 }
 
-fn executable_read_root(executable: &Path) -> &Path {
-    if let Some(node_root) = executable
-        .ancestors()
-        .find(|ancestor| ancestor.join("bin").join("node").is_file())
-    {
-        return node_root;
+#[derive(Debug)]
+struct RuntimeAccess {
+    executable: PathBuf,
+    interpreter: Option<PathBuf>,
+    read_roots: Vec<PathBuf>,
+}
+
+fn shebang_interpreter(executable: &Path, search_path: Option<&str>) -> Result<Option<PathBuf>> {
+    let mut first_line = Vec::new();
+    BufReader::new(File::open(executable)?)
+        .take(4096)
+        .read_until(b'\n', &mut first_line)?;
+    if !first_line.starts_with(b"#!") {
+        return Ok(None);
     }
-    let parent = executable.parent().unwrap_or(Path::new("/nonexistent"));
-    parent
+    let line = std::str::from_utf8(&first_line[2..])
+        .map_err(|_| LocusError::msg("sandbox executable has a non-UTF-8 shebang"))?;
+    let mut parts = line.split_whitespace();
+    let requested = parts
+        .next()
+        .ok_or_else(|| LocusError::msg("sandbox executable has an empty shebang"))?;
+    let interpreter = if Path::new(requested).file_name().and_then(|v| v.to_str()) == Some("env") {
+        parts
+            .find(|part| !part.starts_with('-'))
+            .ok_or_else(|| LocusError::msg("sandbox env shebang does not name an interpreter"))?
+    } else {
+        requested
+    };
+    resolve_executable(interpreter, Path::new("/"), search_path).map(Some)
+}
+
+fn node_package_root(executable: &Path) -> Option<PathBuf> {
+    let components: Vec<_> = executable.components().collect();
+    let node_modules = components
+        .windows(2)
+        .position(|pair| pair[0].as_os_str() == "lib" && pair[1].as_os_str() == "node_modules")?;
+    let package = node_modules + 2;
+    let package_end = if components
+        .get(package)?
+        .as_os_str()
+        .to_string_lossy()
+        .starts_with('@')
+    {
+        package + 2
+    } else {
+        package + 1
+    };
+    if package_end >= components.len() {
+        return None;
+    }
+    Some(components[..package_end].iter().collect())
+}
+
+fn resolve_runtime_access(executable: &Path, search_path: Option<&str>) -> Result<RuntimeAccess> {
+    let executable = executable.canonicalize().map_err(|e| {
+        LocusError::msg(format!(
+            "sandbox executable `{}` cannot be canonicalized: {e}",
+            executable.display()
+        ))
+    })?;
+    let interpreter = shebang_interpreter(&executable, search_path)?;
+    let node_script = interpreter
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        == Some("node");
+    let read_root = if node_script {
+        node_package_root(&executable)
+    } else {
+        None
+    }
+    .or_else(|| executable.parent().map(Path::to_path_buf))
+    .ok_or_else(|| LocusError::msg("sandbox executable has no readable parent"))?
+    .canonicalize()
+    .map_err(|e| LocusError::msg(format!("sandbox runtime root is unavailable: {e}")))?;
+
+    Ok(RuntimeAccess {
+        executable,
+        interpreter,
+        read_roots: vec![read_root],
+    })
+}
+
+fn validate_recursive_grant(path: &Path, locus_home: &Path, label: &str) -> Result<()> {
+    if path == locus_home || path.starts_with(locus_home) || locus_home.starts_with(path) {
+        return Err(LocusError::msg(format!(
+            "sandbox {label} `{}` overlaps or contains protected LOCUS_HOME authority state",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_runtime_access(runtime: &RuntimeAccess, locus_home: &Path) -> Result<()> {
+    if runtime.executable.starts_with(locus_home)
+        || runtime
+            .interpreter
+            .as_ref()
+            .is_some_and(|path| path.starts_with(locus_home))
+    {
+        return Err(LocusError::msg(
+            "sandbox executable or interpreter cannot be loaded from protected LOCUS_HOME",
+        ));
+    }
+    for root in &runtime.read_roots {
+        validate_recursive_grant(root, locus_home, "runtime root")?;
+    }
+    Ok(())
 }
 
 /// Deny-by-default Seatbelt profile for one worker.
@@ -185,32 +286,62 @@ fn executable_read_root(executable: &Path) -> &Path {
 /// approvals, and audit) and the user's ambient home remain inaccessible.
 /// Network is outbound-only because upstream MCP servers are provider clients;
 /// listening sockets are not part of the worker contract.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[allow(dead_code)]
 pub fn seatbelt_profile_for_worker(
     work_dir: &Path,
     worker_home: &Path,
     executable: &Path,
 ) -> Result<String> {
+    seatbelt_profile_for_worker_with_path(
+        work_dir,
+        worker_home,
+        executable,
+        std::env::var("PATH").ok().as_deref(),
+    )
+}
+
+fn seatbelt_profile_for_worker_with_path(
+    work_dir: &Path,
+    worker_home: &Path,
+    executable: &Path,
+    search_path: Option<&str>,
+) -> Result<String> {
+    let runtime = resolve_runtime_access(executable, search_path)?;
+    seatbelt_profile_for_runtime(work_dir, worker_home, &runtime)
+}
+
+fn seatbelt_profile_for_runtime(
+    work_dir: &Path,
+    worker_home: &Path,
+    runtime: &RuntimeAccess,
+) -> Result<String> {
     let wd = canonical_existing_dir(work_dir, "work directory")?;
     let wh = canonical_existing_dir(worker_home, "worker home")?;
     let locus_home = locus_home_from_worker_home(&wh)?;
-    if wd.starts_with(&locus_home) && !wd.starts_with(&wh) {
-        return Err(LocusError::msg(
-            "sandbox work directory overlaps protected LOCUS_HOME authority state",
-        ));
+    if !wd.starts_with(&wh) {
+        validate_recursive_grant(&wd, &locus_home, "work directory")?;
     }
-    let executable = executable.canonicalize().map_err(|e| {
-        LocusError::msg(format!(
-            "sandbox executable `{}` cannot be canonicalized: {e}",
-            executable.display()
-        ))
-    })?;
-    if executable.starts_with(&locus_home) {
-        return Err(LocusError::msg(
-            "sandbox executable cannot be loaded from protected LOCUS_HOME",
-        ));
+    validate_runtime_access(runtime, &locus_home)?;
+
+    let mut exec_rules = String::new();
+    let mut metadata_rules = String::new();
+    let mut read_rules = String::new();
+    for root in &runtime.read_roots {
+        let root = seatbelt_escape(&root.display().to_string());
+        exec_rules.push_str(&format!("    (subpath \"{root}\")\n"));
+        metadata_rules.push_str(&format!("    (path-ancestors \"{root}\")\n"));
+        read_rules.push_str(&format!("    (subpath \"{root}\")\n"));
     }
-    let executable_root = executable_read_root(&executable);
+    let mut runtime_literals = vec![runtime.executable.as_path()];
+    if let Some(interpreter) = runtime.interpreter.as_deref() {
+        runtime_literals.push(interpreter);
+    }
+    for literal in runtime_literals {
+        let literal = seatbelt_escape(&literal.display().to_string());
+        exec_rules.push_str(&format!("    (literal \"{literal}\")\n"));
+        metadata_rules.push_str(&format!("    (path-ancestors \"{literal}\")\n"));
+        read_rules.push_str(&format!("    (literal \"{literal}\")\n"));
+    }
 
     Ok(format!(
         r#"(version 1)
@@ -226,8 +357,7 @@ pub fn seatbelt_profile_for_worker(
     (subpath "/sbin")
     (subpath "{wd}")
     (subpath "{wh}")
-    (subpath "{exe_root}")
-    (literal "{exe}"))
+{exec_rules})
 (allow signal (target self))
 (allow ipc-posix*)
 (allow system-socket)
@@ -236,19 +366,15 @@ pub fn seatbelt_profile_for_worker(
 (allow file-read-metadata file-test-existence
     (path-ancestors "{wd}")
     (path-ancestors "{wh}")
-    (path-ancestors "{exe_root}")
-    (path-ancestors "{exe}"))
+{metadata_rules})
 (allow file-read* file-map-executable
     (subpath "{wd}")
     (subpath "{wh}")
-    (subpath "{exe_root}")
-    (literal "{exe}"))
+{read_rules})
 (allow file-write* (subpath "{wd}") (subpath "{wh}"))
 "#,
         wd = seatbelt_escape(&wd.display().to_string()),
         wh = seatbelt_escape(&wh.display().to_string()),
-        exe_root = seatbelt_escape(&executable_root.display().to_string()),
-        exe = seatbelt_escape(&executable.display().to_string()),
     ))
 }
 
@@ -309,30 +435,28 @@ fn resolve_sandbox_spawn_with_backend(
             backend_path.display()
         ))
     })?;
-    let executable = resolve_executable(program, work_dir, search_path)?;
-    let profile = seatbelt_profile_for_worker(work_dir, worker_home, &executable)?;
+    let requested_executable = resolve_executable(program, work_dir, search_path)?;
+    let runtime = resolve_runtime_access(&requested_executable, search_path)?;
+    let profile = seatbelt_profile_for_runtime(work_dir, worker_home, &runtime)?;
+    let executable = runtime.executable.clone();
     let mut wrapped = Vec::with_capacity(3 + args.len());
     wrapped.push("-p".into());
     wrapped.push(profile);
     wrapped.push(executable.display().to_string());
     wrapped.extend(args.iter().cloned());
 
-    let executable_dir = executable
-        .parent()
-        .unwrap_or(Path::new("/nonexistent"))
-        .display()
-        .to_string();
-    let executable_root = executable_read_root(&executable);
-    let runtime_bin = executable_root.join("bin");
-    let path = if runtime_bin.join("node").is_file() {
-        format!(
-            "{}:{executable_dir}:{}",
-            runtime_bin.display(),
-            restricted_worker_path()
-        )
-    } else {
-        format!("{executable_dir}:{}", restricted_worker_path())
-    };
+    let mut path_dirs = Vec::new();
+    if let Some(parent) = runtime.interpreter.as_deref().and_then(Path::parent) {
+        path_dirs.push(parent.display().to_string());
+    }
+    if let Some(parent) = executable.parent() {
+        let parent = parent.display().to_string();
+        if !path_dirs.contains(&parent) {
+            path_dirs.push(parent);
+        }
+    }
+    path_dirs.push(restricted_worker_path());
+    let path = path_dirs.join(":");
     Ok(SandboxSpawn {
         program: backend.display().to_string(),
         args: wrapped,
@@ -368,6 +492,13 @@ mod tests {
         let backend = dir.path().join("sandbox-exec");
         fs::write(&backend, "backend").unwrap();
         (dir, worker_home, work_dir, executable, backend)
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::write(path, contents).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
@@ -463,7 +594,8 @@ mod tests {
         assert_eq!(&spawn.args[3..], custom_args.as_slice());
         assert!(spawn
             .path
-            .starts_with(canonical.parent().unwrap().display().to_string().as_str()));
+            .split(':')
+            .any(|part| part == canonical.parent().unwrap().display().to_string()));
         let profile = &spawn.args[1];
         assert!(profile.contains(&format!(
             "(subpath \"{}\")",
@@ -473,6 +605,83 @@ mod tests {
             "(subpath \"{}\")",
             canonical.parent().unwrap().parent().unwrap().display()
         )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_root_node_layout_never_grants_the_user_root() {
+        let dir = tempdir().unwrap();
+        let user_root = dir.path().join("user-root");
+        let work_dir = user_root.join("project");
+        let worker_home = user_root.join(".locus/workers/sess_test");
+        let bin_dir = user_root.join("bin");
+        fs::create_dir_all(&work_dir).unwrap();
+        fs::create_dir_all(&worker_home).unwrap();
+        fs::create_dir_all(&bin_dir).unwrap();
+        fs::write(user_root.join(".locus/daemon.key"), "authority-canary").unwrap();
+        let executable = work_dir.join("custom-mcp");
+        let node = bin_dir.join("node");
+        make_executable(&executable, "#!/usr/bin/env node\n");
+        make_executable(&node, "#!/bin/sh\n/bin/cat \"$2\"\n");
+
+        let search_path = bin_dir.display().to_string();
+        let profile = seatbelt_profile_for_worker_with_path(
+            &work_dir,
+            &worker_home,
+            &executable,
+            Some(&search_path),
+        )
+        .unwrap();
+        let canonical_root = user_root.canonicalize().unwrap();
+        assert!(!profile.contains(&format!("(subpath \"{}\")", canonical_root.display())));
+        assert!(profile.contains(&format!(
+            "(literal \"{}\")",
+            node.canonicalize().unwrap().display()
+        )));
+        assert!(!profile.contains("daemon.key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_alias_to_broad_runtime_root_fails_closed() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let user_root = dir.path().join("user-root");
+        let work_dir = user_root.join("project");
+        let worker_home = user_root.join(".locus/workers/sess_test");
+        fs::create_dir_all(&work_dir).unwrap();
+        fs::create_dir_all(&worker_home).unwrap();
+        fs::write(user_root.join(".locus/daemon.key"), "authority-canary").unwrap();
+        let broad_target = user_root.join("custom-mcp-real");
+        make_executable(&broad_target, "#!/bin/sh\nexit 0\n");
+        let alias = work_dir.join("custom-mcp");
+        symlink(&broad_target, &alias).unwrap();
+
+        let err = seatbelt_profile_for_worker_with_path(
+            &work_dir,
+            &worker_home,
+            &alias,
+            Some("/usr/bin:/bin"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("runtime root") && err.contains("LOCUS_HOME"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn broad_work_directory_containing_locus_home_fails_closed() {
+        let (dir, worker_home, _work_dir, executable, _backend) = fixture();
+        let err = seatbelt_profile_for_worker(dir.path(), &worker_home, &executable)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("work directory") && err.contains("LOCUS_HOME"),
+            "{err}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -497,6 +706,50 @@ mod tests {
             output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("authority-canary"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn user_root_node_layout_cannot_read_daemon_key_in_real_sandbox() {
+        let dir = tempdir().unwrap();
+        let user_root = dir.path().join("user-root");
+        let work_dir = user_root.join("project");
+        let worker_home = user_root.join(".locus/workers/sess_test");
+        let bin_dir = user_root.join("bin");
+        fs::create_dir_all(&work_dir).unwrap();
+        fs::create_dir_all(&worker_home).unwrap();
+        fs::create_dir_all(&bin_dir).unwrap();
+        let daemon_key = user_root.join(".locus/daemon.key");
+        fs::write(&daemon_key, "authority-canary").unwrap();
+        make_executable(&work_dir.join("custom-mcp"), "#!/usr/bin/env node\n");
+        make_executable(&bin_dir.join("node"), "#!/bin/sh\n/bin/cat \"$2\"\n");
+
+        let spawn = resolve_sandbox_spawn_with_backend(
+            "custom-mcp",
+            &[daemon_key.display().to_string()],
+            &work_dir,
+            &worker_home,
+            Some(&format!(
+                "{}:{}:/usr/bin:/bin",
+                work_dir.display(),
+                bin_dir.display()
+            )),
+            Some(Path::new("/usr/bin/sandbox-exec")),
+        )
+        .unwrap();
+        let output = std::process::Command::new(&spawn.program)
+            .args(&spawn.args)
+            .current_dir(&work_dir)
+            .env_clear()
+            .env("PATH", &spawn.path)
+            .env("HOME", &worker_home)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "sandbox unexpectedly read daemon.key"
         );
         assert!(!String::from_utf8_lossy(&output.stdout).contains("authority-canary"));
     }

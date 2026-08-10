@@ -41,7 +41,7 @@ When enabled, on spawn Locus:
 | Step | Behavior |
 |------|----------|
 | Backend | Requires macOS `/usr/bin/sandbox-exec`; unsupported platforms fail closed |
-| Files | Deny by default; allow the work tree, current session worker home, system runtime files, and the canonical executable install root |
+| Files | Deny by default; allow the work tree, current session worker home, system runtime files, the narrow canonical executable package/parent tree, and exact shebang interpreter |
 | Authority | Denies the rest of the actual custom/default `LOCUS_HOME`, including `daemon.key`, bindings, sessions, approvals, and audit |
 | Secrets | Rebuilds env from the isolation allowlist and uses a private temp root under the worker home |
 | Network | Allows outbound provider traffic; denies inbound listeners |
@@ -76,7 +76,7 @@ upstream = { recipe = "github-official", resolve_secrets = true, sandbox = true 
 
 ### Built-in recipes
 
-| Recipe | Typical use | Defaults (pure-recipe expand) |
+| Recipe | Typical use | Defaults |
 |--------|-------------|-------------------------------|
 | `github-official` | **Preferred** — official Docker image + `GITHUB_PERSONAL_ACCESS_TOKEN` | `resolve_secrets`, `sandbox` |
 | `github-mcp` | Legacy community `@modelcontextprotocol/server-github` via `npx` (deprecated package) | `resolve_secrets`, `sandbox` |
@@ -92,7 +92,7 @@ locus upstream suggest supabase
 locus upstream suggest vercel
 ```
 
-Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` override recipe defaults when both are set. For a pure recipe, omitted `sandbox` adopts `default_sandbox`; explicit `sandbox = true` requires OS isolation and explicit `sandbox = false` opts out. `LOCUS_WORKER_SANDBOX=1` always forces isolation.
+Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` replace the recipe's command or arguments, but do not disable its sandbox policy. Omitted `sandbox` always adopts `default_sandbox`, including command-only and args-only overrides; explicit `sandbox = false` is the only recipe opt-out. `sandbox = true` requires OS isolation, and `LOCUS_WORKER_SANDBOX=1` always forces it.
 
 **Remote URLs (host MCP, not Locus workers):** Supabase `https://mcp.supabase.com/mcp` (optional `?project_ref=…`); Vercel `https://mcp.vercel.com` (OAuth). Locus upstream workers are **stdio** only today — use host-native remote MCP when the client supports it, or the `vercel-mcp` bridge when you need a stdio child.
 

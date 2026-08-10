@@ -381,7 +381,8 @@ enum VerifyCmd {
     /// Pack doctor + whoami + safe_next as one JSON object for hub heartbeats
     ///
     /// Machine contract: `{ kind: "session", version, whoami?, doctor, safe_next, session_ok }`.
-    /// Never includes secrets. Prefer `--json` for hub gates.
+    /// Never includes secrets. Exits nonzero when `session_ok` is false.
+    /// Prefer `--json` for hub gates.
     Session,
 }
 
@@ -866,7 +867,8 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                MCP: locus_verify_claim  { \"text\": \"…\" }\n\n\
              Session pack (hub heartbeat):\n\
                locus verify session [--json]\n\
-               → { kind:\"session\", whoami?, doctor, safe_next, session_ok }\n\n\
+               → { kind:\"session\", whoami?, doctor, safe_next, session_ok }\n\
+               Exit 0 only when session_ok=true; JSON is still emitted on failure.\n\n\
              Identity gate checks:\n\
                locus whoami [--json]           # active pin + seal\n\
                locus doctor [--json]           # SAFE|WARN|UNSAFE (exit 0/1/2)\n\
@@ -922,7 +924,7 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                upstream = { recipe = \"vercel-mcp\", sandbox = true }\n\
                upstream = { recipe = \"filesystem-mcp\", args = [\"-y\", \"@modelcontextprotocol/server-filesystem\", \"/tmp/demo\"] }\n\
                upstream = { command = \"npx\", args = [\"-y\", \"@pkg\"] }  # explicit still works\n\n\
-             Pure-recipe expand adopts defaults only when flags are omitted; sandbox=false explicitly opts out.\n\
+             Recipe sandbox defaults survive command/args overrides; only sandbox=false opts out.\n\
              Recipes: github-official · github-mcp · supabase-mcp · vercel-mcp · filesystem-mcp · everything-mcp\n\
              Source: adapters/recipes.toml · Docs: docs/workers.md · examples/upstream.binding.toml",
         ),
@@ -2835,7 +2837,7 @@ fn cmd_verify_session(json: bool) -> Result<()> {
 
     if json {
         println!("{}", serde_json::to_string_pretty(&pack)?);
-        return Ok(());
+        return verify_session_exit(pack.session_ok);
     }
 
     println!(
@@ -2878,7 +2880,15 @@ fn cmd_verify_session(json: bool) -> Result<()> {
     }
     // Machine JSON line for pipelines.
     println!("{}", serde_json::to_string(&pack)?);
-    Ok(())
+    verify_session_exit(pack.session_ok)
+}
+
+fn verify_session_exit(session_ok: bool) -> Result<()> {
+    if session_ok {
+        Ok(())
+    } else {
+        bail!("session verification is not ready (session_ok=false)")
+    }
 }
 
 fn cmd_goal_status(json: bool) -> Result<()> {
@@ -4786,7 +4796,7 @@ mod touchid_tests {
 
 #[cfg(test)]
 mod verify_session_tests {
-    use super::gather_doctor_external_with_phantom_status;
+    use super::{gather_doctor_external_with_phantom_status, verify_session_exit};
     use locus_core::{verify_session, Binding, Store};
     use tempfile::tempdir;
 
@@ -4824,5 +4834,11 @@ credential_ref = "phm:VERIFY_SESSION_MISSING"
             .findings
             .iter()
             .any(|finding| finding.code == "unresolved_phm"));
+    }
+
+    #[test]
+    fn verify_session_exit_follows_session_ok() {
+        assert!(verify_session_exit(true).is_ok());
+        assert!(verify_session_exit(false).is_err());
     }
 }

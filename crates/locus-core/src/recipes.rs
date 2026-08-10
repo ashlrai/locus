@@ -29,7 +29,7 @@ pub struct UpstreamRecipe {
     #[serde(default)]
     pub default_resolve_secrets: bool,
     /// Recommended required OS sandbox when the binding omits it.
-    /// Pure-recipe expand adopts this (same pattern as `default_resolve_secrets`).
+    /// Recipe expansion adopts this even when command or args are overridden.
     /// Demo / local recipes keep this false so offline wiring stays unblocked.
     #[serde(default)]
     pub default_sandbox: bool,
@@ -251,7 +251,7 @@ mod tests {
             let r = get_recipe(id).unwrap();
             assert!(
                 r.default_sandbox,
-                "{id} should default_sandbox for pure-recipe expand"
+                "{id} should default_sandbox for recipe expansion"
             );
         }
         for id in ["filesystem-mcp", "everything-mcp"] {
