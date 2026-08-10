@@ -118,8 +118,10 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Drop-in `integrations/ashlr-hub/locus.ts` synced with hub: `scrubbedChildEnv`, `validateMintEnv`, `withLocusSession` scrub, `resolveLocusEnforceMode` / `decidePreMutateGate` / `assertLocusPreMutate` / `formatPreMutateBlockers` / `applyLocusPreMutateGate` / `runWithLocusSessionIfConfigured` + docs (`hub-integration.md`, `fleet-preflight.md`)
 - [x] Ecosystem MCP write injects `locusServerSpec` env (`LOCUS_HOME` / `LOCUS_CLIENT` / `LOCUS_NOTIFY`) — hub #241
 - [x] Swarm path: `runWithLocusSessionIfConfigured` when `LOCUS_CI_BINDING` / `LOCUS_BINDING` set — hub #241
+- [x] Single-task path: `runTask` wraps `runWithLocusSessionIfConfigured` (same CI mint overlay as swarm) — hub [PR #252](https://github.com/ashlrai/ashlr-hub/pull/252)
+- [x] Firm config: `~/.ashlr/config.json` → `locus.enforce` (`off`|`warn`|`enforce`); env `LOCUS_ENFORCE` wins; drop-in `parseLocusEnforceToken` / `extractLocusConfigEnforce` / `readLocusConfigFromAshlr` — hub [PR #254](https://github.com/ashlrai/ashlr-hub/pull/254)
 - [ ] Always-on firm-mode enforce (default off until pin guaranteed on all hub paths)
-- [ ] Broader CI/job runners beyond swarm use `withLocusSession` / `ci mint` (daemon / discrete job workers)
+- [ ] Broader CI/job runners beyond swarm/runTask use `withLocusSession` / `ci mint` (daemon / discrete job workers)
 
 ### M5 — Verification plane · **partial / in progress**
 
