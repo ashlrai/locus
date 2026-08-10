@@ -18,7 +18,7 @@ Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus wi
 
 1. Shell out to Locus CLI (or spawn `locus-mcp` stdio) — do not reimplement pin/seal.
 2. Prefer **`locusFleetGate()`** (or `ensureLocusReady()`) before agent dispatch — see [fleet-preflight.md](./fleet-preflight.md).
-3. At shared spawn sites use **`applyLocusPreMutateGate()`** with opt-in `LOCUS_ENFORCE=1|warn` or firm `config.locus.enforce` (default off = monorepo-safe; env wins).
+3. At shared spawn sites use **`applyLocusPreMutateGate()`** with opt-in `LOCUS_ENFORCE=1|warn`, firm `config.locus.enforce`, or `config.locus.firm: true` (default off = monorepo-safe; env wins).
 4. Register MCP servers from **`required_servers`** (`locus` + `phantom` only) — `registerLocusInMcpConfig` / [mcp-gateway-snippet.md](./mcp-gateway-snippet.md).
 5. Use **`withLocusSession(binding, fn)`** for ephemeral job pins (`ci mint`; scrubbed child env + `validateMintEnv`; no `active.json` mutation).
 6. Add **`checkLocus`** to ashlr doctor — see [doctor-check.md](./doctor-check.md).
@@ -62,13 +62,19 @@ Example MCP config fragment:
 
 Optional env for CI children: `LOCUS_SESSION_ID` (from `locus ci mint --json`).
 
-Pre-mutate enforce at hub spawn sites (env `LOCUS_ENFORCE` wins over `~/.ashlr/config.json` → `locus.enforce`; only `enforce` after hub #254):
+Pre-mutate enforce at hub spawn sites (env `LOCUS_ENFORCE` wins over `~/.ashlr/config.json` → `locus.enforce` then `locus.firm`; hub #254 / #258):
 
-| Mode (env or config) | Behavior |
-|----------------------|----------|
-| unset / `off` / `0` / absent config | No CLI probe; allow (default) |
+| Mode (env / config) | Behavior |
+|---------------------|----------|
+| unset / `off` / `0` / absent config / `firm` false | No CLI probe; allow (default) |
 | `warn` / `log` | Probe fleet gate; log blockers; allow |
-| `1` / `true` / `enforce` | Probe fleet gate; **block** when unhealthy |
+| `1` / `true` / `enforce` / `firm: true` | Probe fleet gate; **block** when unhealthy |
+
+Firm profile (production fleets only — never monorepo default):
+
+```json
+{ "locus": { "firm": true } }
+```
 
 ---
 
@@ -245,7 +251,7 @@ import {
 const gate = locusFleetGate(); // { allowDispatch, blockers[], report }
 if (!gate.allowDispatch) throw new Error(gate.blockers.join("; "));
 
-// Shared spawn sites — opt-in via LOCUS_ENFORCE or config.locus.enforce (default off)
+// Shared spawn sites — opt-in via LOCUS_ENFORCE / locus.enforce / locus.firm (default off)
 const pre = applyLocusPreMutateGate();
 if (!pre.allow) throw new Error(formatPreMutateBlockers(pre));
 
