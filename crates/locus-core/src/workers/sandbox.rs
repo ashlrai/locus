@@ -20,18 +20,23 @@ pub const ENV_WORKER_SANDBOX_BACKEND: &str = "LOCUS_WORKER_SANDBOX_BACKEND";
 
 /// Whether global env requests sandbox mode.
 pub fn sandbox_from_env() -> bool {
-    match std::env::var(ENV_WORKER_SANDBOX) {
-        Ok(v) => {
-            let t = v.trim();
-            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
-        }
-        Err(_) => false,
-    }
+    sandbox_env_value(std::env::var(ENV_WORKER_SANDBOX).ok().as_deref())
+}
+
+fn sandbox_env_value(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.trim();
+        value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes")
+    })
 }
 
 /// Effective sandbox: config/spec flag OR env.
 pub fn sandbox_enabled(config_flag: bool) -> bool {
-    config_flag || sandbox_from_env()
+    sandbox_enabled_with_env(config_flag, sandbox_from_env())
+}
+
+pub(crate) fn sandbox_enabled_with_env(config_flag: bool, env_flag: bool) -> bool {
+    config_flag || env_flag
 }
 
 /// Restricted PATH for sandboxed workers.
@@ -285,8 +290,9 @@ fn validate_runtime_access(runtime: &RuntimeAccess, locus_home: &Path) -> Result
 /// readable. The rest of LOCUS_HOME (including daemon.key, bindings, sessions,
 /// approvals, and audit) and the user's ambient home remain inaccessible.
 /// Network is outbound TCP/UDP only because upstream MCP servers are provider
-/// clients. Listening sockets and local Unix-domain sockets are not part of the
-/// worker contract; the latter includes host daemon sockets such as Docker.
+/// clients. Application listeners and non-system Unix-domain sockets are not
+/// part of the worker contract; imported Apple system profiles retain narrowly
+/// scoped system-service IPC such as logging.
 #[allow(dead_code)]
 pub fn seatbelt_profile_for_worker(
     work_dir: &Path,
@@ -510,20 +516,16 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_from_env_truthy() {
-        let prev = std::env::var(ENV_WORKER_SANDBOX).ok();
-        std::env::set_var(ENV_WORKER_SANDBOX, "1");
-        assert!(sandbox_from_env());
-        assert!(sandbox_enabled(false));
-        std::env::set_var(ENV_WORKER_SANDBOX, "true");
-        assert!(sandbox_from_env());
-        std::env::set_var(ENV_WORKER_SANDBOX, "0");
-        assert!(!sandbox_from_env());
-        assert!(sandbox_enabled(true));
-        match prev {
-            Some(v) => std::env::set_var(ENV_WORKER_SANDBOX, v),
-            None => std::env::remove_var(ENV_WORKER_SANDBOX),
+    fn sandbox_env_values_and_config_compose_without_process_mutation() {
+        for value in [Some("1"), Some(" true "), Some("YES"), Some("yes")] {
+            assert!(sandbox_env_value(value), "value={value:?}");
         }
+        for value in [None, Some(""), Some("0"), Some("false"), Some("no")] {
+            assert!(!sandbox_env_value(value), "value={value:?}");
+        }
+        assert!(sandbox_enabled_with_env(false, true));
+        assert!(sandbox_enabled_with_env(true, false));
+        assert!(!sandbox_enabled_with_env(false, false));
     }
 
     #[test]
@@ -531,6 +533,9 @@ mod tests {
         let (_dir, worker_home, work_dir, executable, _backend) = fixture();
         let profile = seatbelt_profile_for_worker(&work_dir, &worker_home, &executable).unwrap();
         assert!(profile.contains("(deny default)"));
+        assert!(profile.contains("(import \"system.sb\")"));
+        assert!(profile.contains("(allow system-socket)"));
+        assert!(profile.contains("(system-network)"));
         assert!(profile.contains("(allow network-outbound (remote tcp) (remote udp))"));
         assert!(!profile.contains("network-inbound"));
         assert!(profile.contains(&worker_home.canonicalize().unwrap().display().to_string()));

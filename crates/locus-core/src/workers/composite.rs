@@ -4,7 +4,7 @@
 //! with `spawn=true`. All others use [`SyntheticBackend`].
 
 use super::mcp_stdio::{McpStdioBackend, McpStdioConfig};
-use super::sandbox::sandbox_enabled;
+use super::sandbox::{sandbox_enabled_with_env, sandbox_from_env};
 use super::stdio_client::UpstreamTool;
 use super::synthetic::SyntheticBackend;
 use super::{WorkerBackend, WorkerKey, WorkerManager, WorkerSlot, WorkerState, WorkerToolResult};
@@ -27,6 +27,13 @@ pub const ENV_WORKER_IDLE_SECS: &str = "LOCUS_WORKER_IDLE_SECS";
 ///
 /// Sandbox is on when `upstream.sandbox = true` **or** `LOCUS_WORKER_SANDBOX=1`.
 pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
+    mcp_config_from_upstream_with_env(spec, sandbox_from_env())
+}
+
+fn mcp_config_from_upstream_with_env(
+    spec: &UpstreamSpec,
+    env_sandbox: bool,
+) -> Result<McpStdioConfig> {
     let expanded = spec.expand()?;
     let sandbox_incompatibility = expanded
         .recipe
@@ -40,7 +47,7 @@ pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
         spawn: true,
         resolve_secrets: expanded.resolve_secrets,
         extra_env: BTreeMap::new(),
-        sandbox: sandbox_enabled(expanded.sandbox.unwrap_or(false)),
+        sandbox: sandbox_enabled_with_env(expanded.sandbox.unwrap_or(false), env_sandbox),
         sandbox_incompatibility,
     })
 }
@@ -725,23 +732,16 @@ for line in sys.stdin:
     fn mcp_config_sandbox_from_spec_or_env() {
         // Spec flag forces sandbox on regardless of env.
         let spec = UpstreamSpec::new("npx").sandbox(true);
-        let cfg = mcp_config_from_upstream(&spec).unwrap();
+        let cfg = mcp_config_from_upstream_with_env(&spec, false).unwrap();
         assert!(cfg.sandbox);
 
-        // Env-only path: force-enable, then restore prior value.
-        let key = crate::workers::ENV_WORKER_SANDBOX;
-        let prev = std::env::var(key).ok();
-        std::env::set_var(key, "1");
-        let cfg2 = mcp_config_from_upstream(&UpstreamSpec::new("false-cmd-for-test")).unwrap();
+        // Env-only path is injected so parallel tests do not mutate process state.
+        let cfg2 =
+            mcp_config_from_upstream_with_env(&UpstreamSpec::new("false-cmd-for-test"), true)
+                .unwrap();
         assert!(cfg2.sandbox);
-        // Spec false + env off
-        std::env::set_var(key, "0");
-        let cfg3 = mcp_config_from_upstream(&UpstreamSpec::new("npx")).unwrap();
+        let cfg3 = mcp_config_from_upstream_with_env(&UpstreamSpec::new("npx"), false).unwrap();
         assert!(!cfg3.sandbox);
-        match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
-        }
     }
 
     #[test]

@@ -44,7 +44,7 @@ When enabled, on spawn Locus:
 | Files | Deny by default; allow the work tree, current session worker home, system runtime files, the narrow canonical executable package/parent tree, and exact shebang interpreter |
 | Authority | Denies the rest of the actual custom/default `LOCUS_HOME`, including `daemon.key`, bindings, sessions, approvals, and audit |
 | Secrets | Rebuilds env from the isolation allowlist and uses a private temp root under the worker home |
-| Network | Allows outbound TCP/UDP provider traffic; denies inbound listeners and local Unix-domain sockets |
+| Network | Allows outbound TCP/UDP provider traffic; denies application-created inbound listeners and non-system Unix-domain sockets. Imported Apple system profiles retain OS-defined system-service IPC such as logging |
 | Provenance | Resolves the requested executable to a canonical absolute path before PATH is restricted; unavailable commands fail before spawn |
 | Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND=sandbox-exec` only after backend resolution succeeds |
 
@@ -94,7 +94,7 @@ locus upstream suggest vercel
 
 Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` replace the recipe's command or arguments, but do not disable its sandbox policy. Compatible recipes adopt `default_sandbox`, including command-only and args-only overrides; explicit `sandbox = false` remains the opt-out. Recipes whose machine-readable `readiness` is `explicit_unsandboxed_required` are unavailable when `sandbox` is omitted or true, and run only after an explicit `sandbox = false` acknowledgement. `LOCUS_WORKER_SANDBOX=1` makes those recipes fail closed instead of producing a false sandbox claim.
 
-The macOS Seatbelt profile permits outbound TCP/UDP provider connections, but denies inbound listeners and local Unix-domain sockets. Locus never grants `/var/run/docker.sock`, Docker Desktop's user socket, or blanket inbound networking. Docker therefore remains a host-level, high-authority execution path outside the filesystem boundary. The Vercel bridge remains unsandboxed until Locus can separate and attest OAuth bootstrap from a cached-auth steady state; host-native remote MCP is preferred meanwhile.
+The macOS Seatbelt profile permits outbound TCP/UDP provider connections, but denies application-created inbound listeners and non-system Unix-domain sockets. It imports Apple's `system.sb` and `system-network` baseline and allows `system-socket`, so OS-defined system-service IPC such as logging is intentionally outside the blanket denial claim. Native tests prove denial for an arbitrary external Unix socket, `/var/run/docker.sock` when present, Docker Desktop-style sockets, and TCP OAuth listeners. Locus never grants a Docker socket or blanket inbound networking. Docker therefore remains a host-level, high-authority execution path outside the filesystem boundary. The Vercel bridge remains unsandboxed until Locus can separate and attest OAuth bootstrap from a cached-auth steady state; host-native remote MCP is preferred meanwhile.
 
 **Remote URLs (host MCP, not Locus workers):** Supabase `https://mcp.supabase.com/mcp` (optional `?project_ref=…`); Vercel `https://mcp.vercel.com` (OAuth). Locus upstream workers are **stdio** only today. Use host-native remote MCP when the client supports it; the `vercel-mcp` bridge is an explicit unsandboxed fallback.
 

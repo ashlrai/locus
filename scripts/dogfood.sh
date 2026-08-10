@@ -3,6 +3,7 @@
 #
 # Steps:
 #   1. locus quickstart
+#   1b. spawn a deterministic MCP fixture through the upstream sandbox
 #   2. locus agent setup --client claude (applied in isolated mode)
 #   3. locus agent report --json | jq .status
 #   4. locus doctor
@@ -26,11 +27,12 @@ ok()   { printf '  ok  %s\n' "$*"; }
 die()  { printf '  FAIL %s\n' "$*" >&2; exit 1; }
 
 readiness_gate() {
-  local report="$1" report_rc="$2" doctor_rc="$3" verify="$4" verify_rc="$5" hub_ok="$6"
+  local report="$1" report_rc="$2" doctor_rc="$3" verify="$4" verify_rc="$5" hub_ok="$6" sandbox_ok="$7"
   [[ "$report_rc" -eq 0 ]] || return 1
   [[ "$doctor_rc" -eq 0 ]] || return 1
   [[ "$verify_rc" -eq 0 ]] || return 1
   [[ "$hub_ok" -eq 1 ]] || return 1
+  [[ "$sandbox_ok" -eq 1 ]] || return 1
   jq -ne --argjson report "$report" --argjson verify "$verify" '
     def nonempty: type == "string" and length > 0;
     def runtime_matches($runtime; $pin; $session_id):
@@ -118,19 +120,122 @@ dogfood_gate_self_test() {
   session_bad="$(printf '%s' "$verify_ready" | jq '.doctor.runtime.session_id = "ses_other"')"
   env_override="$(printf '%s' "$ready" | jq '.env_session_id = "ses_stale"')"
 
-  readiness_gate "$ready" 0 0 "$verify_ready" 0 1 || die "self-test rejected complete readiness"
-  ! readiness_gate "$warn" 0 0 "$verify_ready" 0 1 || die "self-test reproduced WARN false-ready"
-  ! readiness_gate "$ready" 0 1 "$verify_ready" 0 1 || die "self-test reproduced nonzero doctor false-ready"
-  ! readiness_gate "$unresolved" 0 0 "$verify_ready" 0 1 || die "self-test reproduced unresolved credential false-ready"
-  ! readiness_gate "$protected" 1 0 "$verify_ready" 0 1 || die "self-test reproduced protection-only false-ready"
-  ! readiness_gate "$ready" 0 0 "$verify_ready" 0 0 || die "self-test reproduced skipped Hub smoke false-ready"
-  ! readiness_gate "$ready" 0 0 "$verify_not_ready" 0 1 || die "self-test accepted session_ok=false"
-  ! readiness_gate "$ready" 0 0 "$verify_ready" 1 1 || die "self-test accepted nonzero verify-session exit"
-  ! readiness_gate "$report_identity_bad" 0 0 "$verify_ready" 0 1 || die "self-test accepted report binding mismatch"
-  ! readiness_gate "$ready" 0 0 "$verify_identity_bad" 0 1 || die "self-test accepted whoami binding mismatch"
-  ! readiness_gate "$ready" 0 0 "$session_bad" 0 1 || die "self-test accepted doctor/whoami session mismatch"
-  ! readiness_gate "$env_override" 0 0 "$verify_ready" 0 1 || die "self-test accepted env-selected identity"
+  readiness_gate "$ready" 0 0 "$verify_ready" 0 1 1 || die "self-test rejected complete readiness"
+  ! readiness_gate "$warn" 0 0 "$verify_ready" 0 1 1 || die "self-test reproduced WARN false-ready"
+  ! readiness_gate "$ready" 0 1 "$verify_ready" 0 1 1 || die "self-test reproduced nonzero doctor false-ready"
+  ! readiness_gate "$unresolved" 0 0 "$verify_ready" 0 1 1 || die "self-test reproduced unresolved credential false-ready"
+  ! readiness_gate "$protected" 1 0 "$verify_ready" 0 1 1 || die "self-test reproduced protection-only false-ready"
+  ! readiness_gate "$ready" 0 0 "$verify_ready" 0 0 1 || die "self-test reproduced skipped Hub smoke false-ready"
+  ! readiness_gate "$ready" 0 0 "$verify_not_ready" 0 1 1 || die "self-test accepted session_ok=false"
+  ! readiness_gate "$ready" 0 0 "$verify_ready" 1 1 1 || die "self-test accepted nonzero verify-session exit"
+  ! readiness_gate "$report_identity_bad" 0 0 "$verify_ready" 0 1 1 || die "self-test accepted report binding mismatch"
+  ! readiness_gate "$ready" 0 0 "$verify_identity_bad" 0 1 1 || die "self-test accepted whoami binding mismatch"
+  ! readiness_gate "$ready" 0 0 "$session_bad" 0 1 1 || die "self-test accepted doctor/whoami session mismatch"
+  ! readiness_gate "$env_override" 0 0 "$verify_ready" 0 1 1 || die "self-test accepted env-selected identity"
+  ! readiness_gate "$ready" 0 0 "$verify_ready" 0 1 0 || die "self-test accepted missing sandbox attestation"
   printf 'dogfood readiness gate self-test: ok\n'
+}
+
+sandbox_attestation() {
+  local probe_root
+  probe_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-sandbox-dogfood.XXXXXX")"
+
+  (
+    trap 'rm -rf "$probe_root"' EXIT
+    export LOCUS_HOME="$probe_root/home"
+    unset LOCUS_SESSION_ID LOCUS_DOGFOOD_SANDBOX_UNUSED || true
+
+    local project="$probe_root/project"
+    local fixture="$project/sandbox-marker-mcp"
+    local binding_file="$LOCUS_HOME/bindings/sandbox-probe.toml"
+    local stdout_file="$probe_root/mcp.stdout"
+    local stderr_file="$probe_root/mcp.stderr"
+    mkdir -p "$project"
+
+    # Shell builtins only: the fixture performs no credential lookup or network I/O.
+    printf '%s\n' \
+      '#!/bin/sh' \
+      'while IFS= read -r line; do' \
+      '  case "$line" in' \
+      '    *'\''"method":"initialize"'\''*)' \
+      '      printf '\''%s\n'\'' '\''{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"locus-sandbox-marker","version":"1"}}}'\''' \
+      '      ;;' \
+      '    *'\''"method":"tools/list"'\''*)' \
+      '      printf '\''%s\n'\'' '\''{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"sandbox_attest","description":"Return applied sandbox markers","inputSchema":{"type":"object"}}]}}'\''' \
+      '      ;;' \
+      '    *'\''"method":"tools/call"'\''*)' \
+      '      printf '\''{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"sandboxed=%s backend=%s"}],"isError":false}}\n'\'' "${LOCUS_WORKER_SANDBOXED:-unset}" "${LOCUS_WORKER_SANDBOX_BACKEND:-unset}"' \
+      '      ;;' \
+      '  esac' \
+      'done' >"$fixture"
+    chmod 700 "$fixture"
+
+    cd "$project"
+    locus init >/dev/null
+    locus binding add sandbox-probe \
+      --tenant sandbox-probe \
+      --provider github \
+      --account sandbox-probe \
+      --credential-ref env:LOCUS_DOGFOOD_SANDBOX_UNUSED \
+      --org sandbox-probe >/dev/null
+    [[ -f "$binding_file" ]] || {
+      printf '  sandbox probe binding missing at %s\n' "$binding_file" >&2
+      exit 1
+    }
+    local fixture_toml
+    fixture_toml="$(jq -Rn --arg value "$fixture" '$value')"
+    printf '\n[binding.providers.upstream]\ncommand = %s\nresolve_secrets = false\nsandbox = true\n' \
+      "$fixture_toml" >>"$binding_file"
+    locus pin sandbox-probe >/dev/null
+
+    local rpc_out rpc_rc
+    set +e
+    printf '%s\n' \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"dogfood","version":"1"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+      '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"github.sandbox_attest","arguments":{}}}' \
+      | "$MCP_BIN" >"$stdout_file" 2>"$stderr_file"
+    rpc_rc=$?
+    set -e
+    rpc_out="$(cat "$stdout_file")"
+
+    [[ "$rpc_rc" -eq 0 ]] || {
+      printf '  sandbox probe transport failed (exit=%s): %s\n' "$rpc_rc" "$(cat "$stderr_file")" >&2
+      exit 1
+    }
+    if grep -Fq 'LOCUS_DOGFOOD_SANDBOX_UNUSED' "$stdout_file" "$stderr_file"; then
+      printf '  sandbox probe leaked a credential locator\n' >&2
+      exit 1
+    fi
+
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+      if printf '%s\n' "$rpc_out" | jq -se '
+        (map(select(.id == 2))[0].result.tools | map(.name) | index("github.sandbox_attest") | not)
+        and (map(select(.id == 3))[0].result.isError == true)
+        and ((map(select(.id == 3))[0].result.content[0].text | fromjson | .detail) | contains("no supported OS isolation backend"))
+      ' >/dev/null; then
+        printf '  sandbox backend unsupported; fail-closed spawn refusal attested\n' >&2
+        exit 2
+      fi
+      printf '  unsupported platform did not return the required fail-closed refusal\n' >&2
+      cat "$stderr_file" >&2
+      exit 1
+    fi
+
+    printf '%s\n' "$rpc_out" | jq -se '
+      (map(select(.id == 2))[0].result.tools | map(.name) | index("github.sandbox_attest") != null)
+      and (map(select(.id == 3))[0].result.isError == false)
+      and ((map(select(.id == 3))[0].result.content[0].text | fromjson)
+        | .isError == false
+        and .content[0].text == "sandboxed=1 backend=sandbox-exec")
+    ' >/dev/null || {
+      printf '  sandbox marker/backend attestation failed\n' >&2
+      cat "$stdout_file" >&2
+      cat "$stderr_file" >&2
+      exit 1
+    }
+  )
 }
 
 if ! command -v jq >/dev/null 2>&1; then
@@ -142,11 +247,15 @@ if [[ "${DOGFOOD_SELF_TEST:-0}" == "1" ]]; then
   exit 0
 fi
 
-# Prefer a local build that has agent/forensics/quickstart.
-if ! command -v locus >/dev/null 2>&1 || ! locus agent report --help >/dev/null 2>&1; then
-  log "building locus-cli…"
-  (cd "$ROOT" && cargo build -q -p locus-cli)
-fi
+# DOGFOOD READY attests the checked-out source, never a stale installed binary.
+command -v cargo >/dev/null 2>&1 || die "cargo is required to build exact dogfood binaries"
+log "building exact workspace binaries"
+(cd "$ROOT" && cargo build -q -p locus-cli -p locus-mcp)
+LOCUS_BIN="$ROOT/target/debug/locus"
+MCP_BIN="$ROOT/target/debug/locus-mcp"
+[[ -x "$LOCUS_BIN" ]] || die "missing exact locus binary at $LOCUS_BIN"
+[[ -x "$MCP_BIN" ]] || die "missing exact locus-mcp binary at $MCP_BIN"
+locus() { "$LOCUS_BIN" "$@"; }
 
 USE_REAL="${DOGFOOD_USE_REAL_HOME:-0}"
 APPLY="${DOGFOOD_APPLY:-}"
@@ -190,12 +299,32 @@ else
     --org dogfood >/dev/null
 fi
 
-echo "locus: $(command -v locus) ($(locus --version 2>/dev/null || true))"
+echo "locus: $LOCUS_BIN ($(locus --version 2>/dev/null || true))"
 
 # ── 1. quickstart ────────────────────────────────────────────────────────────
 log "1. locus quickstart"
 locus quickstart
 ok "quickstart"
+
+# ── 1b. upstream worker sandbox attestation ──────────────────────────────────
+log "1b. upstream worker sandbox attestation"
+SANDBOX_OK=0
+set +e
+sandbox_attestation
+SANDBOX_RC=$?
+set -e
+case "$SANDBOX_RC" in
+  0)
+    SANDBOX_OK=1
+    ok "upstream fixture sandboxed=1 backend=sandbox-exec"
+    ;;
+  2)
+    die "sandbox backend unsupported; refusal attested and DOGFOOD READY is unavailable"
+    ;;
+  *)
+    die "upstream sandbox attestation failed"
+    ;;
+esac
 
 # ── 2. agent setup (dry-run or apply) ────────────────────────────────────────
 log "2. locus agent setup --client ${CLIENT}"
@@ -332,8 +461,8 @@ fi
 
 # ── Ready gate ───────────────────────────────────────────────────────────────
 log "dogfood gate"
-if ! readiness_gate "$REPORT" "$REPORT_RC" "$DOCTOR_RC" "$VS_JSON" "$VS_RC" "$HUB_OK"; then
-  die "readiness blocked (status=${STATUS} ready=${READY} pin=${HAS_PIN} oneline=${ONELINE} report_exit=${REPORT_RC} doctor_exit=${DOCTOR_RC} verify_exit=${VS_RC} hub_ok=${HUB_OK})"
+if ! readiness_gate "$REPORT" "$REPORT_RC" "$DOCTOR_RC" "$VS_JSON" "$VS_RC" "$HUB_OK" "$SANDBOX_OK"; then
+  die "readiness blocked (status=${STATUS} ready=${READY} pin=${HAS_PIN} oneline=${ONELINE} report_exit=${REPORT_RC} doctor_exit=${DOCTOR_RC} verify_exit=${VS_RC} hub_ok=${HUB_OK} sandbox_ok=${SANDBOX_OK})"
 fi
 ok "strict readiness evidence"
 echo "DOGFOOD READY"
