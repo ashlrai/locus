@@ -28,8 +28,12 @@ pub const EXECUTOR_CAPABILITY_ENV: &str = "LOCUS_EXECUTOR_CAPABILITY";
 const SERVER_ENV: &str = "LOCUS_INTERNAL_AUTHORITY_ANCHOR_SERVER";
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
-const START_TIMEOUT: Duration = Duration::from_secs(3);
+/// Production wait for broker handoff (spawn + SHA-256 identity + socket bind).
+/// 3s proved flaky under CI load after heavy `cargo test` + large debug binaries.
+const START_TIMEOUT: Duration = Duration::from_secs(10);
 const TEST_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// Optional override: `LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS` (clamped 500–120_000).
+const BROKER_START_TIMEOUT_ENV: &str = "LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS";
 const CONTROL_TTL: Duration = Duration::from_secs(2);
 const MAX_CLIENTS: usize = 64;
 const SUPERVISOR_POLL: Duration = Duration::from_millis(250);
@@ -573,7 +577,9 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
         .env(SERVER_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // Drain stderr so a chatty failure cannot block on a full pipe, and so
+        // timeout errors can include a short diagnostic snip.
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| {
             LocusError::AuthorityAnchorUnavailable(format!(
@@ -590,6 +596,15 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
     let stdout = child.stdout.take().ok_or_else(|| {
         LocusError::AuthorityAnchorUnavailable("broker handoff pipe unavailable".into())
     })?;
+    let stderr = child.stderr.take();
+    let (err_sender, err_receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(stderr) = stderr {
+            let _ = BufReader::new(stderr).read_to_string(&mut buf);
+        }
+        let _ = err_sender.send(buf);
+    });
     let (sender, receiver) = mpsc::sync_channel(1);
     thread::spawn(move || {
         let mut line = String::new();
@@ -601,15 +616,17 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
         Ok(Err(error)) => {
             let _ = child.kill();
             let _ = child.wait();
+            let detail = drain_broker_stderr(&err_receiver);
             return Err(LocusError::AuthorityAnchorUnavailable(format!(
-                "broker handoff failed: {error}"
+                "broker handoff failed: {error}{detail}"
             )));
         }
         Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
+            let detail = drain_broker_stderr(&err_receiver);
             return retry_current_endpoint(home, auth).map_err(|_| {
-                LocusError::AuthorityAnchorUnavailable("broker startup timed out".into())
+                LocusError::AuthorityAnchorUnavailable(format!("broker startup timed out{detail}"))
             });
         }
     };
@@ -1515,10 +1532,35 @@ fn should_host_in_process() -> bool {
 }
 
 fn broker_start_timeout() -> Duration {
+    if let Ok(raw) = std::env::var(BROKER_START_TIMEOUT_ENV) {
+        if let Ok(ms) = raw.trim().parse::<u64>() {
+            // Floor keeps accidental "0" from busy-looping; ceiling caps runaway CI.
+            return Duration::from_millis(ms.clamp(500, 120_000));
+        }
+    }
     if is_test_harness() {
         TEST_START_TIMEOUT
     } else {
         START_TIMEOUT
+    }
+}
+
+/// Collect a short stderr snip from the broker child (if any) for timeout errors.
+fn drain_broker_stderr(receiver: &mpsc::Receiver<String>) -> String {
+    let raw = match receiver.recv_timeout(Duration::from_millis(200)) {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+    let snip: String = raw
+        .chars()
+        .filter(|c| !c.is_control() || *c == '\n')
+        .take(240)
+        .collect();
+    let snip = snip.trim();
+    if snip.is_empty() {
+        String::new()
+    } else {
+        format!(" ({snip})")
     }
 }
 

@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Dogfood polish and release hygiene on top of 0.2.0. No identity-plane
 invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog.
 
+### Fixed
+
+- **Authority broker start under CI load** — production handoff wait raised from 3s → 10s;
+  optional `LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS` override; timeout errors may include a
+  short broker stderr snip. `scripts/hub-smoke.sh` retries init/pin and defaults the
+  override to 15s so hub contract smoke stays resilient after heavy test jobs (flaky
+  "broker startup timed out" unrelated to webhook export).
+
 ### Added
 
 - **`locus watch` session heartbeat (M5)** — each tick runs the same pack as
