@@ -112,19 +112,11 @@ impl McpStdioBackend {
 
         if let Some((backend, restricted_path)) = sandbox_backend {
             // Restricted PATH wins over any PATH that isolation copied from parent.
+            // Sandbox markers win over any ambient PATH; `extra_env` is never
+            // forwarded (deprecated compatibility field — fail closed).
             cmd.env("PATH", restricted_path);
             cmd.env(ENV_WORKER_SANDBOXED, "1");
             cmd.env(ENV_WORKER_SANDBOX_BACKEND, backend.as_str());
-        }
-
-        for (k, v) in &self.config.extra_env {
-            // Do not let extra_env unset sandbox markers / widen PATH silently when sandboxed.
-            if sandboxed
-                && (k == "PATH" || k == ENV_WORKER_SANDBOXED || k == ENV_WORKER_SANDBOX_BACKEND)
-            {
-                continue;
-            }
-            cmd.env(k, v);
         }
 
         cmd
