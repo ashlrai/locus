@@ -36,7 +36,8 @@ Machine contract for **ashlr-hub** (and similar orchestrators) to shell out to L
 |----------|------|
 | `LOCUS_HOME` | Store root (default `~/.locus`). Use a dedicated path in tests/CI. |
 | `LOCUS_SESSION_ID` | Optional. When set (e.g. after `locus ci mint`), locus resolves that sealed session instead of `sessions/active.json`. Echoed on agent report as `env_session_id` when present. |
-| `LOCUS_ENFORCE` | Opt-in pre-mutate gate for hub spawn sites. See [Pre-mutate enforce](#pre-mutate-enforce-locus_enforce) below. |
+| `LOCUS_ENFORCE` | Opt-in pre-mutate / CI session gate for hub spawn sites. Wins over `config.locus.enforce` when set. See [Pre-mutate enforce](#pre-mutate-enforce-locus_enforce--configlocus) below. |
+| `LOCUS_CI_BINDING` / `LOCUS_BINDING` | Optional. When set, `runWithLocusSessionIfConfigured` mints an ephemeral pin (`ci mint`) for fleet/single-task paths instead of ambient `active.json`. |
 | `LOCUS_BIN` | Optional override for the `locus` binary path. |
 | `LOCUS_NOTIFY` / `LOCUS_QUIET` | Prefer `0` / `1` in hub children (drop-in sets these on mint handles). |
 
@@ -44,22 +45,39 @@ Machine contract for **ashlr-hub** (and similar orchestrators) to shell out to L
 export LOCUS_HOME="${LOCUS_HOME:-$HOME/.locus}"
 # CI / ephemeral child only:
 # export LOCUS_SESSION_ID="$(jq -r .session_id < mint.json)"
-# Production hub mutate paths (opt-in):
+# Production hub mutate paths (opt-in env override):
 # export LOCUS_ENFORCE=1
+# export LOCUS_CI_BINDING=acme
 ```
 
 Hub children that inherit a minted session **must** pass `LOCUS_SESSION_ID` (and usually `LOCUS_HOME`) into the process env. Do not invent session ids.
 
-### Pre-mutate enforce (`LOCUS_ENFORCE`)
+### Pre-mutate enforce (`LOCUS_ENFORCE` + `config.locus`)
 
-Shared hub spawn sites should call **`assertLocusPreMutate()`** / **`applyLocusPreMutateGate()`** (not bare `ensureLocusReady`) so monorepo CI without a pin stays green by default:
+Shared hub spawn sites should call **`assertLocusPreMutate()`** / **`applyLocusPreMutateGate()`** (not bare `ensureLocusReady`) so monorepo CI without a pin stays green by default.
 
-| `LOCUS_ENFORCE` | Mode | Behavior |
-|-----------------|------|----------|
-| unset / `0` / `false` / `no` / `off` | `off` | Allow without CLI probe (monorepo-safe default) |
+**Mode resolution** (`resolveLocusEnforceMode` — first match wins; never always-on):
+
+1. Env `LOCUS_ENFORCE` when the key is present (including empty / `off` → override firm config)
+2. `~/.ashlr/config.json` → `locus.enforce` (hub firm mode; only field after #254)
+3. `off` (monorepo-safe default when both unset)
+
+| Token (env or config) | Mode | Behavior |
+|-----------------------|------|----------|
+| unset / absent config / `0` / `false` / `no` / `off` / `""` | `off` | Allow without CLI probe (monorepo-safe default) |
 | `warn` / `log` | `warn` | Shell `locusFleetGate`; log blockers; still allow |
 | `1` / `true` / `yes` / `enforce` / `block` | `enforce` | Shell fleet gate; **deny** when blocked |
 | any other non-empty value | `enforce` | Fail closed (typo ≠ soft-allow) |
+
+**Firm mode** (agencies pin once in config; no shell export required):
+
+```json
+// ~/.ashlr/config.json
+{ "locus": { "enforce": "enforce" } }
+```
+
+Soft roll-out: `{ "locus": { "enforce": "warn" } }`.  
+Local override without editing config: `LOCUS_ENFORCE=off`.
 
 ```ts
 import {
@@ -68,16 +86,27 @@ import {
   formatPreMutateBlockers,
   decidePreMutateGate,
   resolveLocusEnforceMode,
+  extractLocusConfigEnforce,
+  parseLocusEnforceToken,
 } from "../integrations/ashlr-hub/locus";
 
 // Preferred at spawn sites: logs warn/block to stderr
+// (loads ~/.ashlr locus.enforce when LOCUS_ENFORCE is unset)
 const decision = applyLocusPreMutateGate(); // or assertLocusPreMutate()
 if (!decision.allow) {
   throw new Error(formatPreMutateBlockers(decision) || "locus pre-mutate blocked");
 }
-// Pure path when you already have a fleet-gate result:
-// decidePreMutateGate(gate, resolveLocusEnforceMode(env))
+// Pure path when you already have a fleet-gate result + explicit config:
+// decidePreMutateGate(gate, resolveLocusEnforceMode(env, { locus: { enforce: "warn" } }))
+// Pass null as config to disable firm FS read in tests: assertLocusPreMutate(env, null)
 ```
+
+**Hub production call sites** (opt-in only — never always-on):
+
+| Call site | Gate |
+|-----------|------|
+| `spawnEngine` / `runSwarmInternal` / `runApiModelSandboxed` | `applyLocusPreMutateGate` (pre-mutate) |
+| `runSwarm` / `runTask` | `runWithLocusSessionIfConfigured` (CI session mint overlay; hub #252) |
 
 ### Scrubbed mint env (`withLocusSession`)
 
@@ -319,7 +348,7 @@ if (!gate.allowDispatch) {
   // do not dispatch mutating agents
 }
 
-// Opt-in spawn-site gate (default off until LOCUS_ENFORCE is set)
+// Opt-in spawn-site gate (default off until LOCUS_ENFORCE or config.locus.enforce)
 const pre = applyLocusPreMutateGate();
 if (!pre.allow) throw new Error(formatPreMutateBlockers(pre));
 
