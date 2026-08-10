@@ -132,7 +132,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Doctor optional WARN `ungrounded_claims` when audit tail has many low-confidence patterns
 - [x] Conformance pack in CI: `.github/workflows/conformance.yml` — `invariants` + `locus-mcp` tests + `hub-smoke` + `e2e` (high timeout)
 - [x] Fail-closed sandboxed workers: `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox` requires macOS Seatbelt, denies authority state and inbound network, and refuses unsupported backends
-- [ ] Continuous whoami / `watch` in long agent sessions as first-class hub heartbeat (session pack is the CLI primitive; not yet a long-lived watcher)
+- [x] Continuous whoami / `watch` in long agent sessions as first-class hub heartbeat (`locus watch` each tick runs `verify_session`; NDJSON `kind=watch` + `--require-ok` fail-closed)
 - [ ] Audit export → SIEM / remote append (team tier)
 - [ ] Adapter SDK + signed registry
 - [ ] Hard sandbox (seccomp/VM) + bug bounty on seal/capability logic

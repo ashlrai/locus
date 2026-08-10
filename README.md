@@ -343,7 +343,7 @@ approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
 - Policy: globs + structured `[[rules]]`, `require_approval`, dual-control (2 principals).
 - Upstream MCP workers start only after an authorized provider call. `tools/list` is discovery-only, multi-provider startup rolls back on partial failure, and each worker receives only its named provider's resolved credential keys.
-- Drift freeze: `locus watch` / doctor re-pin if binding changes under a session.
+- Drift freeze + hub heartbeat: `locus watch [--json] [--require-ok]` re-runs session verify each tick; doctor re-pin if binding changes under a session.
 
 Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md §9](./DESIGN.md).
 
