@@ -1,6 +1,6 @@
 # Writing a provider adapter
 
-> **SDK guide:** [adapter-sdk.md](./adapter-sdk.md) · **template:** [examples/adapters/_template/](../examples/adapters/_template/) · **catalog:** [adapters/manifest.toml](../adapters/manifest.toml)
+> **SDK guide:** [adapter-sdk.md](./adapter-sdk.md) · **template:** [examples/adapters/_template/](../examples/adapters/_template/) · **catalog:** [adapters/manifest.toml](../adapters/manifest.toml) · **schema:** [schema/adapter-manifest.schema.json](../schema/adapter-manifest.schema.json) · **CLI:** `locus adapter list` / `locus adapter verify`
 
 Adapters are the **only** place provider-specific knowledge should live in Locus. They define:
 
