@@ -136,7 +136,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Audit export → SIEM / remote append — **minimal webhook sink** (`locus events export --sink webhook` / `LOCUS_AUDIT_WEBHOOK_URL`; redacted JSONL/OTLP POST; fail soft when unset; secret-scan fail closed). Full team-tier continuous append + chain verify still open
 - [ ] Adapter SDK + signed registry
 - [ ] Hard sandbox (seccomp/VM) + bug bounty on seal/capability logic
-- [ ] Streamable HTTP / remote multiplexor (platform phase)
+- [ ] Streamable HTTP / remote multiplexor (platform phase) — **partial**: streamable-HTTP-lite on `locus-mcp --http` with `GET /mcp` capabilities (tool **names** + pin summary, values-free), Accept/`Content-Type` negotiation (`application/json` preferred; single-event SSE when `Accept: text/event-stream` only), remote-deploy docs (reverse proxy, `LOCUS_MCP_HTTP_TOKEN`, `LOCUS_HOME`, pin-before-serve), HTTP unit tests (health + auth fail-closed + Accept 406/SSE). Full multi-message SSE, `Mcp-Session-Id` resume, and multi-tenant remote multiplexor still open
 
 ---
 

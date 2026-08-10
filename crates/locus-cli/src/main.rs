@@ -968,7 +968,7 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
              HTTP (CI / remote agents, loopback by default):\n\
                LOCUS_MCP_HTTP_TOKEN=… locus-mcp --http 127.0.0.1:8742\n\
                LOCUS_MCP_HTTP=1 LOCUS_MCP_HTTP_TOKEN=… locus-mcp\n\
-               POST /mcp  (JSON-RPC) · GET /health\n\n\
+               GET /health · GET /mcp (capabilities) · POST /mcp (JSON-RPC)\n\n\
              Upstream recipes (per-provider MCP children):\n\
                locus upstream list\n\
                locus upstream suggest github\n\
@@ -1000,14 +1000,21 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
              Dashboard API:\n\
                locus serve --port 8750\n\
                curl -s http://127.0.0.1:8750/api/health\n\n\
-             MCP over HTTP (JSON-RPC POST /mcp):\n\
-               LOCUS_MCP_HTTP_TOKEN=secret locus-mcp --http 127.0.0.1:8742\n\
+             MCP streamable-HTTP-lite (token required for /mcp):\n\
+               LOCUS_MCP_HTTP_TOKEN=secret LOCUS_HOME=… locus-mcp --http 127.0.0.1:8742\n\
+               # pin first on that LOCUS_HOME: locus pin <alias>\n\
+               curl -s http://127.0.0.1:8742/health\n\
+               curl -s -H \"Authorization: Bearer secret\" http://127.0.0.1:8742/mcp\n\
                curl -s -H \"Authorization: Bearer secret\" \\\n\
                  -H 'Content-Type: application/json' \\\n\
+                 -H 'Accept: application/json, text/event-stream' \\\n\
                  -d '{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{…}}' \\\n\
                  http://127.0.0.1:8742/mcp\n\n\
+             Remote: bind loopback + reverse proxy (TLS); set LOCUS_MCP_HTTP_ALLOW_REMOTE=1\n\
+             only when necessary. Docs: docs/mcp.md § Remote deploy.\n\n\
              Env: LOCUS_MCP_HTTP · LOCUS_MCP_HTTP_ADDR · LOCUS_MCP_HTTP_TOKEN\n\
                     LOCUS_MCP_HTTP_ALLOW_REMOTE=1 (non-loopback; default refuses)\n\
+                    LOCUS_HOME (store + pin for the multiplexor process)\n\
                     LOCUS_DASHBOARD_TOKEN (optional dashboard /api gate)",
         ),
     ];

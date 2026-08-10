@@ -12,7 +12,9 @@
 //! Transports:
 //! - **stdio** (default) — Content-Length or NDJSON for Claude Code / Cursor
 //! - **HTTP** — `locus-mcp --http 127.0.0.1:8742` or `LOCUS_MCP_HTTP=1`
-//!   JSON-RPC POST `/mcp` (CI agents); requires `LOCUS_MCP_HTTP_TOKEN`
+//!   Streamable-HTTP-lite: JSON-RPC POST `/mcp`, GET `/mcp` capabilities,
+//!   GET `/health`; requires `LOCUS_MCP_HTTP_TOKEN`. Single-event SSE when
+//!   `Accept: text/event-stream` only (no multi-message stream rewrite).
 
 use anyhow::{bail, Context, Result};
 use locus_core::{
@@ -145,13 +147,18 @@ fn print_help() {
         "locus-mcp {VERSION} — MCP multiplexor (pin-scoped tools)\n\n\
          Usage:\n\
            locus-mcp                 stdio MCP (Claude Code / Cursor default)\n\
-           locus-mcp --http [ADDR]   JSON-RPC HTTP on ADDR (default {DEFAULT_HTTP_ADDR})\n\n\
+           locus-mcp --http [ADDR]   Streamable-HTTP-lite on ADDR (default {DEFAULT_HTTP_ADDR})\n\n\
+         HTTP endpoints:\n\
+           GET  /health              unauthenticated liveness\n\
+           GET  /mcp                 capabilities + tool names (token; values-free)\n\
+           POST /mcp                 JSON-RPC 2.0 (token; Accept: application/json\n\
+                                     and/or text/event-stream)\n\n\
          Env:\n\
            LOCUS_MCP_HTTP=1            enable HTTP (same as --http)\n\
            LOCUS_MCP_HTTP_ADDR         bind address when HTTP enabled\n\
            LOCUS_MCP_HTTP_TOKEN        required bearer/token for HTTP auth\n\
            LOCUS_MCP_HTTP_ALLOW_REMOTE=1  allow non-loopback bind (default: loopback only)\n\
-           LOCUS_HOME                  store root\n\
+           LOCUS_HOME                  store root (pin + bindings for remote process)\n\
            LOCUS_WORKER_IDLE_SECS      optional idle teardown for upstream workers\n\
            LOCUS_WORKER_SANDBOX=1      require supported OS isolation or fail closed\n"
     );
@@ -221,7 +228,16 @@ fn dispatch_rpc(msg: &Value) -> Option<Value> {
     })
 }
 
-// ─── HTTP transport (JSON-RPC POST /mcp) ────────────────────────────────────
+// ─── HTTP transport (Streamable-HTTP-lite: POST /mcp + GET /mcp + /health) ──
+
+/// How the client wants the MCP response encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpResponseMode {
+    /// Single JSON object (`Content-Type: application/json`) — default / preferred.
+    Json,
+    /// One SSE event carrying the JSON-RPC body, then stream end (no multi-message bus).
+    SseSingle,
+}
 
 fn run_http(addr: SocketAddr) -> Result<()> {
     if !addr.ip().is_loopback() && !env_truthy("LOCUS_MCP_HTTP_ALLOW_REMOTE") {
@@ -244,7 +260,7 @@ fn run_http(addr: SocketAddr) -> Result<()> {
 
     let listener = TcpListener::bind(addr).with_context(|| format!("bind {addr}"))?;
     eprintln!(
-        "locus-mcp: HTTP listening on http://{addr}  (POST /mcp, GET /health)  token auth required"
+        "locus-mcp: HTTP listening on http://{addr}  (GET|POST /mcp, GET /health)  token auth required"
     );
 
     for stream in listener.incoming() {
@@ -272,6 +288,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
     let (method, path, headers, body) = read_http_request(&mut reader)?;
 
     let path_only = path.split('?').next().unwrap_or(path.as_str());
+    let response_mode = http_response_mode(&headers);
 
     // Health is unauthenticated so orchestrators can probe liveness without the token.
     if method.eq_ignore_ascii_case("GET")
@@ -281,7 +298,12 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
             "ok": true,
             "service": "locus-mcp",
             "version": VERSION,
-            "transport": "http",
+            "transport": "streamable-http-lite",
+            "endpoints": {
+                "health": "GET /health",
+                "capabilities": "GET /mcp (token)",
+                "rpc": "POST /mcp (token, JSON-RPC 2.0)"
+            },
         });
         return write_http_json(&mut stream, 200, &body, None);
     }
@@ -294,15 +316,46 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
         return write_http_json(&mut stream, 401, &body, Some("unauthorized"));
     }
 
+    // Reject Accept that cannot receive either JSON or SSE (streamable clients list both).
+    if let Some(accept) = header_value(&headers, "accept") {
+        if !http_accept_allows_mcp(accept) {
+            let body = json!({
+                "error": "not_acceptable",
+                "hint": "Accept must allow application/json and/or text/event-stream (MCP streamable HTTP)",
+            });
+            return write_http_json(&mut stream, 406, &body, None);
+        }
+    }
+
+    if method.eq_ignore_ascii_case("GET")
+        && (path_only == "/mcp" || path_only == "/mcp/" || path_only == "/jsonrpc")
+    {
+        // Auth'd capabilities probe — tool *names* only, never secret values.
+        let caps = http_mcp_capabilities();
+        return write_http_mcp_body(&mut stream, 200, &caps, response_mode);
+    }
+
     if method.eq_ignore_ascii_case("POST")
         && (path_only == "/mcp" || path_only == "/mcp/" || path_only == "/jsonrpc")
     {
+        // Content-Type: prefer application/json; allow missing (legacy CI) and
+        // application/*+json. Reject clearly wrong types fail-closed.
+        if let Some(ct) = header_value(&headers, "content-type") {
+            if !http_content_type_ok(ct) {
+                let body = json!({
+                    "error": "unsupported_media_type",
+                    "hint": "Content-Type must be application/json (or application/*+json)",
+                });
+                return write_http_json(&mut stream, 415, &body, None);
+            }
+        }
+
         let msg: Value = serde_json::from_slice(&body).context("json-rpc body")?;
         match dispatch_rpc(&msg) {
-            Some(response) => write_http_json(&mut stream, 200, &response, None),
+            Some(response) => write_http_mcp_body(&mut stream, 200, &response, response_mode),
             None => {
-                // Notification — 202 Accepted, empty body.
-                write_http_response(&mut stream, 202, "application/json", b"{}", None)
+                // Notification — 202 Accepted, empty JSON object (still respect Accept).
+                write_http_mcp_body(&mut stream, 202, &json!({}), response_mode)
             }
         }
     } else if method.eq_ignore_ascii_case("OPTIONS") {
@@ -316,7 +369,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
                 ("Access-Control-Allow-Origin", "*"),
                 (
                     "Access-Control-Allow-Headers",
-                    "Authorization, Content-Type, X-Locus-Token",
+                    "Authorization, Content-Type, Accept, X-Locus-Token, Mcp-Session-Id",
                 ),
                 ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
             ]),
@@ -324,10 +377,133 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
     } else {
         let body = json!({
             "error": "not_found",
-            "hint": "GET /health or POST /mcp (JSON-RPC 2.0)",
+            "hint": "GET /health · GET /mcp (capabilities) · POST /mcp (JSON-RPC 2.0)",
         });
         write_http_json(&mut stream, 404, &body, None)
     }
+}
+
+/// Values-free GET /mcp body: pin summary + tool names + advertised capabilities.
+fn http_mcp_capabilities() -> Value {
+    let _ = maybe_mcp_auto_pin();
+
+    let pin = match store() {
+        Ok(s) => {
+            let _ = s.check_drift_and_freeze();
+            match s.whoami() {
+                Ok(w) => json!({
+                    "pinned": true,
+                    "binding_alias": w.binding_alias,
+                    "tenant": w.tenant,
+                    "mode": w.mode,
+                    "frozen": w.frozen,
+                    // Provider + account names only — no credential refs or secret values.
+                    "providers": w.providers.iter().map(|p| json!({
+                        "provider": p.provider,
+                        "account": p.account,
+                    })).collect::<Vec<_>>(),
+                }),
+                Err(_) => json!({
+                    "pinned": false,
+                    "hint": "Human must `locus pin <alias>` / `locus enter <alias>` (or CI mint). Agents cannot pin."
+                }),
+            }
+        }
+        Err(_) => json!({
+            "pinned": false,
+            "hint": "Store unavailable under LOCUS_HOME"
+        }),
+    };
+
+    // Tool *names* only via the same exclusive catalog as tools/list — no schemas,
+    // descriptions, or secret-bearing fields.
+    let tool_names: Vec<String> = match handle_tools_list() {
+        Ok(listed) => listed
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => control_tools(false).into_iter().map(|t| t.name).collect(),
+    };
+
+    json!({
+        "ok": true,
+        "service": "locus-mcp",
+        "version": VERSION,
+        "transport": "streamable-http-lite",
+        "protocolVersion": "2024-11-05",
+        "capabilities": {
+            "tools": { "listChanged": true },
+            "resources": { "subscribe": false, "listChanged": true },
+            "prompts": { "listChanged": true }
+        },
+        "pin": pin,
+        "tools": tool_names,
+        "endpoints": {
+            "health": "GET /health",
+            "capabilities": "GET /mcp",
+            "rpc": "POST /mcp"
+        },
+        "content_types": {
+            "request": ["application/json"],
+            "response": ["application/json", "text/event-stream"]
+        },
+        "streamable": {
+            "mode": "json-preferred",
+            "sse": "single-event-when-accept-sse-only",
+            "note": "Full multi-message SSE / session resume not implemented; long tool results return as one JSON object or one SSE data event"
+        }
+    })
+}
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.as_str())
+}
+
+/// Streamable HTTP Accept: allow `application/json` and/or `text/event-stream`.
+/// Also allows `*/*` and empty (legacy clients).
+fn http_accept_allows_mcp(accept: &str) -> bool {
+    let lower = accept.to_ascii_lowercase();
+    if lower.trim().is_empty() || lower.contains("*/*") {
+        return true;
+    }
+    lower.contains("application/json") || lower.contains("text/event-stream")
+}
+
+/// Prefer JSON when the client lists it (or omits Accept). SSE only when the
+/// client accepts event-stream and does **not** list application/json.
+fn http_response_mode(headers: &[(String, String)]) -> HttpResponseMode {
+    let Some(accept) = header_value(headers, "accept") else {
+        return HttpResponseMode::Json;
+    };
+    let lower = accept.to_ascii_lowercase();
+    let wants_json = lower.contains("application/json") || lower.contains("*/*");
+    let wants_sse = lower.contains("text/event-stream");
+    if wants_sse && !wants_json {
+        HttpResponseMode::SseSingle
+    } else {
+        HttpResponseMode::Json
+    }
+}
+
+fn http_content_type_ok(content_type: &str) -> bool {
+    let main = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    main.is_empty()
+        || main == "application/json"
+        || main == "application/json-rpc"
+        || main.ends_with("+json")
 }
 
 fn http_token_ok(headers: &[(String, String)], expected: &str) -> bool {
@@ -422,6 +598,37 @@ fn write_http_json(
     write_http_response(stream, status, "application/json", &bytes, None)
 }
 
+/// Write an MCP HTTP body as `application/json` or a single SSE `data:` event.
+fn write_http_mcp_body(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &Value,
+    mode: HttpResponseMode,
+) -> Result<()> {
+    match mode {
+        HttpResponseMode::Json => write_http_json(stream, status, body, None),
+        HttpResponseMode::SseSingle => {
+            let json_bytes = serde_json::to_vec(body)?;
+            // One event, then end stream. Clients that only Accept text/event-stream
+            // still get a complete JSON-RPC payload without a multi-message bus.
+            let mut sse = Vec::with_capacity(json_bytes.len() + 32);
+            sse.extend_from_slice(b"event: message\ndata: ");
+            sse.extend_from_slice(&json_bytes);
+            sse.extend_from_slice(b"\n\n");
+            write_http_response(
+                stream,
+                status,
+                "text/event-stream",
+                &sse,
+                Some(vec![
+                    ("Cache-Control", "no-cache"),
+                    ("X-Locus-Streamable", "sse-single"),
+                ]),
+            )
+        }
+    }
+}
+
 fn write_http_response(
     stream: &mut TcpStream,
     status: u16,
@@ -435,6 +642,8 @@ fn write_http_response(
         204 => "No Content",
         401 => "Unauthorized",
         404 => "Not Found",
+        406 => "Not Acceptable",
+        415 => "Unsupported Media Type",
         500 => "Internal Server Error",
         _ => "OK",
     };

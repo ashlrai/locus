@@ -20,6 +20,15 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 
 ### Added
 
+- **Streamable-HTTP-lite MCP (M5 partial)** — `locus-mcp --http` gains session-sized
+  polish toward remote multiplexor without a full SSE rewrite:
+  - `GET /mcp` (token) — capabilities + pin summary + tool **names** only (values-free)
+  - Accept negotiation: prefer `application/json`; single-event `text/event-stream`
+    when Accept is SSE-only; **406** when Accept allows neither; **415** on non-JSON body
+  - `GET /health` advertises `transport: streamable-http-lite` + endpoint map
+  - Remote deploy notes in [`docs/mcp.md`](./docs/mcp.md) (reverse proxy, token,
+    `LOCUS_HOME`, pin-before-serve)
+  - Tests: health, auth fail-closed on GET/POST `/mcp`, capabilities shape, SSE-lite, 406/415
 - **`locus watch` session heartbeat (M5)** — each tick runs the same pack as
   `locus verify session` (doctor + whoami + safe_next + `session_ok`), not drift alone.
   - `--json`: one NDJSON object per tick
