@@ -131,13 +131,38 @@ Produces an OTLP **Logs** JSON body (`resourceLogs` → `scopeLogs` → `logReco
 Attributes include `locus.op`, `locus.binding`, `service.name=locus`.  
 Scope freeze / require_approval map to severity **WARN** (13).
 
-Locus does **not** open a network connection; pipe or POST yourself:
+You can still pipe or POST yourself:
 
 ```bash
 locus events export --otlp --last 100 | \
   curl -sS -X POST -H 'Content-Type: application/json' \
     --data-binary @- http://localhost:4318/v1/logs
 ```
+
+### Webhook sink (minimal SIEM / remote append)
+
+Optional HTTP(S) POST of the same redacted export body — team-tier primitive, not a full SIEM pipeline:
+
+```bash
+# Explicit URL
+locus events export --sink webhook --url https://siem.example/ingest --last 200
+
+# Or env (fail soft when unset — exit 0, no network)
+export LOCUS_AUDIT_WEBHOOK_URL=https://siem.example/ingest
+locus events export --sink webhook --last 200
+
+# OTLP body to a collector path
+locus events export --sink webhook --otlp --url http://127.0.0.1:4318/v1/logs
+```
+
+| Behavior | Detail |
+|----------|--------|
+| Unset URL | **Fail soft** — prints skip message, exit 0 |
+| Body secret scan | **Fail closed** — refuse POST if body matches token prefixes / secret field names |
+| Content-Type | `application/x-ndjson` (JSONL) or `application/json` (OTLP) |
+| Logs | Host only (`https://hooks.example.com`) — never full URL (query may hold tokens) |
+
+Bodies are the same fleet-pulse / OTLP payloads as file export: ops, digests, aliases — never resolved credentials. Continuous chain-verified remote append remains a later team-tier item.
 
 ---
 

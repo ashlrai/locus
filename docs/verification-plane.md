@@ -211,7 +211,7 @@ Hub extension points: re-score using `signals`, require tools when `needs_tool`,
 
 Still open under verification plane:
 
-- Audit export → SIEM
+- Full team-tier SIEM (continuous remote append, chain verification beyond one-shot webhook)
 - Adapter SDK + signed registry
 - Harder sandbox (seccomp/VM); bounty on seal logic
 - Streamable HTTP / remote multiplexor
@@ -226,6 +226,7 @@ Shipped as partial M5:
 - [x] Doctor optional `ungrounded_claims` finding
 - [x] Fail-closed macOS worker sandbox (`LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`); unsupported platforms refuse sandboxed spawn
 - [x] Core module + unit tests (heuristics only)
+- [x] Audit webhook sink — `locus events export --sink webhook` / `LOCUS_AUDIT_WEBHOOK_URL` (redacted POST; fail soft when unset)
 
 ---
 
@@ -236,7 +237,8 @@ Shipped as partial M5:
 | `crates/locus-core/src/verify.rs` | Heuristics + `ClaimVerification` |
 | `crates/locus-core/src/agent_report.rs` | `verify_session` → `SessionVerificationPack` |
 | `crates/locus-core/src/workers/sandbox.rs` | Deny-by-default macOS Seatbelt; no PATH-only fallback |
-| `crates/locus-cli` | `locus verify claim` · `locus verify session` · `locus watch` (session heartbeat) |
+| `crates/locus-core/src/events.rs` | Fleet pulse / OTLP export + optional webhook sink |
+| `crates/locus-cli` | `locus verify claim` · `locus verify session` · `locus watch` · `events export --sink webhook` |
 | `crates/locus-mcp` | `locus_verify_claim` control tool |
 | `crates/locus-core/src/doctor.rs` | Optional audit signal finding |
 | `GOALS.md` | M5 checklist |

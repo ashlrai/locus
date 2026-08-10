@@ -133,7 +133,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Conformance pack in CI: `.github/workflows/conformance.yml` — `invariants` + `locus-mcp` tests + `hub-smoke` + `e2e` (high timeout)
 - [x] Fail-closed sandboxed workers: `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox` requires macOS Seatbelt, denies authority state and inbound network, and refuses unsupported backends
 - [x] Continuous whoami / `watch` in long agent sessions as first-class hub heartbeat (`locus watch` each tick runs `verify_session`; NDJSON `kind=watch` + `--require-ok` fail-closed)
-- [ ] Audit export → SIEM / remote append (team tier)
+- [x] Audit export → SIEM / remote append — **minimal webhook sink** (`locus events export --sink webhook` / `LOCUS_AUDIT_WEBHOOK_URL`; redacted JSONL/OTLP POST; fail soft when unset; secret-scan fail closed). Full team-tier continuous append + chain verify still open
 - [ ] Adapter SDK + signed registry
 - [ ] Hard sandbox (seccomp/VM) + bug bounty on seal/capability logic
 - [ ] Streamable HTTP / remote multiplexor (platform phase)
@@ -179,4 +179,4 @@ locus init --with-samples && locus enter personal && locus doctor
 | M2 Firm UX | done |
 | M3 AI surface | mostly done |
 | M4 Hub composition | in progress |
-| M5 Verification plane | partial (claim+session verify, e2e/dogfood coverage, fail-closed macOS worker sandbox, conformance CI) |
+| M5 Verification plane | partial (claim+session verify, e2e/dogfood coverage, fail-closed macOS worker sandbox, conformance CI, audit webhook sink) |

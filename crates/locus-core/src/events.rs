@@ -2,10 +2,15 @@
 //!
 //! ```text
 //! locus events export [--otlp] [--last N] [--binding acme] [--out file]
+//! locus events export --sink webhook [--url URL]   # or LOCUS_AUDIT_WEBHOOK_URL
 //! ```
 //!
 //! Never includes resolved secrets — only audit ops, digests, and metadata
 //! already present in `$LOCUS_HOME/audit/events.jsonl`.
+//!
+//! Optional **webhook sink** (team SIEM primitive): POST the same redacted body
+//! to a remote URL. Unset URL fails soft (no network). Bodies that look like
+//! they contain secrets fail closed (refuse to POST).
 
 use crate::doctor::filter_audit_events;
 use crate::store::AuditEvent;
@@ -13,6 +18,13 @@ use crate::VERSION;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::time::Duration;
+
+/// Env var for optional audit webhook URL (`locus events export --sink webhook`).
+pub const AUDIT_WEBHOOK_URL_ENV: &str = "LOCUS_AUDIT_WEBHOOK_URL";
+
+/// Default HTTP timeout for webhook POSTs.
+pub const AUDIT_WEBHOOK_TIMEOUT_SECS: u64 = 15;
 
 /// Export format for audit events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -33,6 +45,25 @@ pub struct EventsExportOptions {
     pub format: EventsExportFormat,
     /// Service name attribute (default: `locus`).
     pub service_name: Option<String>,
+}
+
+/// Where to send an events export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EventsExportSink {
+    /// Stdout or `--out` file (default).
+    #[default]
+    Local,
+    /// HTTP(S) POST of the redacted export body.
+    Webhook,
+}
+
+/// Result of a successful webhook POST (no secret material).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebhookPostResult {
+    pub status: u16,
+    pub bytes: usize,
+    /// Host:port only — never full URL (may embed tokens in query).
+    pub host: String,
 }
 
 /// One fleet-pulse JSON line (envelope around an audit event).
@@ -83,6 +114,160 @@ pub fn export_events(events: &[AuditEvent], opts: &EventsExportOptions) -> crate
     }
 }
 
+/// Content-Type for an export body (for webhook POST or file handoff).
+pub fn export_content_type(format: EventsExportFormat) -> &'static str {
+    match format {
+        EventsExportFormat::JsonLines => "application/x-ndjson",
+        EventsExportFormat::Otlp => "application/json",
+    }
+}
+
+/// Resolve webhook URL: explicit CLI arg wins, else [`AUDIT_WEBHOOK_URL_ENV`].
+///
+/// Returns `None` when unset/blank — callers must **fail soft** (skip POST, exit 0).
+pub fn resolve_audit_webhook_url(explicit: Option<&str>) -> Option<String> {
+    if let Some(u) = explicit {
+        let t = u.trim();
+        if !t.is_empty() {
+            return Some(t.to_string());
+        }
+    }
+    std::env::var(AUDIT_WEBHOOK_URL_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Safe label for logs: scheme + host[:port] only (strip userinfo / path / query).
+pub fn webhook_url_safe_label(url: &str) -> String {
+    let url = url.trim();
+    let (scheme, rest) = match url.split_once("://") {
+        Some((s, r)) => (s, r),
+        None => return "invalid-url".into(),
+    };
+    let after_auth = rest.rsplit('@').next().unwrap_or(rest);
+    let hostport = after_auth
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_auth);
+    if hostport.is_empty() {
+        return format!("{scheme}://");
+    }
+    format!("{scheme}://{hostport}")
+}
+
+/// Fail-closed secret scan on an export body. Empty issues = safe to ship.
+///
+/// Scans for known token prefixes and JSON keys that must never hold plaintext
+/// secrets in audit exports. Digests / aliases / CredentialRef **names** are fine.
+pub fn export_body_secret_issues(body: &str) -> Vec<String> {
+    let mut issues = Vec::new();
+    let lower = body.to_ascii_lowercase();
+
+    for pat in [
+        "sk_live_",
+        "sk_test_",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "xoxs-",
+        "-----begin private",
+        "-----begin rsa private",
+        "-----begin openssh private",
+        "-----begin ec private",
+    ] {
+        if lower.contains(pat) {
+            issues.push(format!("forbidden secret pattern: {pat}"));
+        }
+    }
+
+    if body.contains("AKIA") {
+        issues.push("forbidden secret pattern: AKIA".into());
+    }
+
+    for key in [
+        "\"password\"",
+        "\"api_key\"",
+        "\"apikey\"",
+        "\"secret_key\"",
+        "\"private_key\"",
+        "\"access_token\"",
+        "\"refresh_token\"",
+        "\"authorization\"",
+        "\"client_secret\"",
+        "\"aws_secret_access_key\"",
+    ] {
+        if lower.contains(key) {
+            issues.push(format!("forbidden secret field: {key}"));
+        }
+    }
+
+    issues
+}
+
+/// Return `Ok(())` only if the body passes the secret scan (fail closed).
+pub fn assert_export_body_no_secrets(body: &str) -> crate::Result<()> {
+    let issues = export_body_secret_issues(body);
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(crate::LocusError::msg(format!(
+            "refusing audit export: body failed secret scan ({})",
+            issues.join("; ")
+        )))
+    }
+}
+
+/// POST a redacted audit export body to a webhook URL.
+///
+/// - Runs [`assert_export_body_no_secrets`] first (fail closed).
+/// - Never logs the full URL (query may hold tokens).
+/// - Expects HTTP 2xx; other statuses are errors.
+pub fn post_audit_webhook(
+    url: &str,
+    body: &str,
+    content_type: &str,
+) -> crate::Result<WebhookPostResult> {
+    assert_export_body_no_secrets(body)?;
+
+    let host = webhook_url_safe_label(url);
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err(crate::LocusError::msg(format!(
+            "webhook URL must be http(s):// ({host})"
+        )));
+    }
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(AUDIT_WEBHOOK_TIMEOUT_SECS))
+        .user_agent(&format!("locus/{VERSION}"))
+        .build();
+
+    let resp = agent
+        .post(url)
+        .set("Content-Type", content_type)
+        .set("X-Locus-Export", "audit")
+        .send_string(body)
+        .map_err(|e| crate::LocusError::msg(format!("webhook post to {host} failed: {e}")))?;
+
+    let status = resp.status();
+    if !(200..300).contains(&status) {
+        return Err(crate::LocusError::msg(format!(
+            "webhook post to {host} returned HTTP {status}"
+        )));
+    }
+
+    Ok(WebhookPostResult {
+        status,
+        bytes: body.len(),
+        host,
+    })
+}
+
 fn to_json_lines(events: &[AuditEvent], exported_at: &str) -> String {
     let mut out = String::new();
     for ev in events {
@@ -113,7 +298,6 @@ fn to_otlp_json(events: &[AuditEvent], exported_at: &str, service_name: &str) ->
             ];
             if let Some(ref detail) = ev.detail {
                 if let Ok(s) = serde_json::to_string(detail) {
-                    // Truncate very large details to keep export bounded.
                     let clipped = if s.len() > 2048 {
                         format!("{}…", &s[..2048])
                     } else {
@@ -164,7 +348,6 @@ fn otlp_attr_str(key: &str, value: &str) -> Value {
 }
 
 fn severity_for_op(op: &str) -> u8 {
-    // OTLP severity numbers: INFO=9, WARN=13, ERROR=17
     if op.contains("scope_freeze")
         || op.contains("deny")
         || op.contains("freeze")
@@ -246,10 +429,8 @@ mod tests {
             assert_eq!(v["kind"], "audit");
             assert!(v.get("op").is_some());
             assert!(v.get("binding").is_some());
-            // No secret-looking keys in envelope
             assert!(v.get("token").is_none());
         }
-        // Filter binding
         let out2 = export_events(
             &sample_events(),
             &EventsExportOptions {
@@ -282,14 +463,12 @@ mod tests {
         assert!(first.get("timeUnixNano").is_some());
         assert!(first.get("body").is_some());
         assert!(first.get("attributes").is_some());
-        // service.name on resource
         let res_attrs = v["resourceLogs"][0]["resource"]["attributes"]
             .as_array()
             .unwrap();
         assert!(res_attrs
             .iter()
             .any(|a| { a["key"] == "service.name" && a["value"]["stringValue"] == "locus-test" }));
-        // scope_freeze is WARN severity
         let freeze = records
             .as_array()
             .unwrap()
@@ -319,5 +498,180 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let v: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(v["binding"], "personal");
+    }
+
+    #[test]
+    fn resolve_webhook_url_explicit_and_env() {
+        assert_eq!(
+            resolve_audit_webhook_url(Some(" http://example.test/hook ")).as_deref(),
+            Some("http://example.test/hook")
+        );
+        assert_eq!(resolve_audit_webhook_url(Some("  ")), None);
+        assert_eq!(resolve_audit_webhook_url(Some("")), None);
+
+        let prev = std::env::var_os(AUDIT_WEBHOOK_URL_ENV);
+        std::env::remove_var(AUDIT_WEBHOOK_URL_ENV);
+        assert_eq!(resolve_audit_webhook_url(None), None);
+        std::env::set_var(AUDIT_WEBHOOK_URL_ENV, "https://siem.example/ingest");
+        assert_eq!(
+            resolve_audit_webhook_url(None).as_deref(),
+            Some("https://siem.example/ingest")
+        );
+        std::env::set_var(AUDIT_WEBHOOK_URL_ENV, "   ");
+        assert_eq!(resolve_audit_webhook_url(None), None);
+        match prev {
+            Some(v) => std::env::set_var(AUDIT_WEBHOOK_URL_ENV, v),
+            None => std::env::remove_var(AUDIT_WEBHOOK_URL_ENV),
+        }
+    }
+
+    #[test]
+    fn webhook_url_safe_label_strips_secrets() {
+        assert_eq!(
+            webhook_url_safe_label("https://user:token@hooks.example.com/v1?key=secret"),
+            "https://hooks.example.com"
+        );
+        assert_eq!(
+            webhook_url_safe_label("http://127.0.0.1:9999/path"),
+            "http://127.0.0.1:9999"
+        );
+    }
+
+    #[test]
+    fn export_body_secret_scan_fail_closed() {
+        assert!(export_body_secret_issues(r#"{"op":"pin","binding":"a"}"#).is_empty());
+        let clean = export_events(
+            &sample_events(),
+            &EventsExportOptions {
+                last: Some(10),
+                format: EventsExportFormat::JsonLines,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_export_body_no_secrets(&clean).expect("fleet pulse is clean");
+
+        let dirty = r#"{"op":"x","detail":{"token":"sk_live_abc123SECRET"}}"#;
+        let issues = export_body_secret_issues(dirty);
+        assert!(
+            issues.iter().any(|i| i.contains("sk_live_")),
+            "expected sk_live_ issue, got {issues:?}"
+        );
+        assert!(assert_export_body_no_secrets(dirty).is_err());
+
+        let keyed = r#"{"password":"hunter2","op":"x"}"#;
+        assert!(assert_export_body_no_secrets(keyed).is_err());
+    }
+
+    #[test]
+    fn webhook_post_refuses_secret_body_without_network() {
+        let err = post_audit_webhook(
+            "http://127.0.0.1:1/unused",
+            r#"{"api_key":"supersecret"}"#,
+            "application/json",
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("secret scan") || msg.contains("api_key"),
+            "unexpected err: {msg}"
+        );
+    }
+
+    #[test]
+    fn webhook_posts_to_local_listener() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = vec![0u8; 65536];
+            let mut total = 0usize;
+            loop {
+                let n = stream.read(&mut buf[total..]).expect("read");
+                if n == 0 {
+                    break;
+                }
+                total += n;
+                let so_far = String::from_utf8_lossy(&buf[..total]);
+                if so_far.contains("\r\n\r\n") {
+                    if let Some(cl) = so_far
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                    {
+                        let len: usize = cl
+                            .split(':')
+                            .nth(1)
+                            .and_then(|s| s.trim().parse().ok())
+                            .unwrap_or(0);
+                        if let Some(pos) = so_far.find("\r\n\r\n") {
+                            let body_start = pos + 4;
+                            if total.saturating_sub(body_start) >= len {
+                                break;
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                if total >= buf.len() {
+                    break;
+                }
+            }
+            let req = String::from_utf8_lossy(&buf[..total]).to_string();
+            let _ = stream.write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+            req
+        });
+
+        let body = export_events(
+            &sample_events(),
+            &EventsExportOptions {
+                last: Some(10),
+                format: EventsExportFormat::JsonLines,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_export_body_no_secrets(&body).unwrap();
+
+        let url = format!("http://{addr}/locus/audit");
+        let result = post_audit_webhook(
+            &url,
+            &body,
+            export_content_type(EventsExportFormat::JsonLines),
+        )
+        .expect("post");
+        assert_eq!(result.status, 204);
+        assert_eq!(result.bytes, body.len());
+        assert!(result.host.contains("127.0.0.1"));
+
+        let req = server.join().expect("server");
+        assert!(req.starts_with("POST "), "method: {req}");
+        assert!(
+            req.to_ascii_lowercase()
+                .contains("content-type: application/x-ndjson"),
+            "content-type missing: {req}"
+        );
+        assert!(req.contains("locus.audit.v1"), "body missing schema: {req}");
+        assert!(req.contains("session.pin"), "body missing op: {req}");
+        assert!(!req.to_ascii_lowercase().contains("sk_live_"));
+        assert!(!req.to_ascii_lowercase().contains("\"password\""));
+    }
+
+    #[test]
+    fn content_type_for_formats() {
+        assert_eq!(
+            export_content_type(EventsExportFormat::JsonLines),
+            "application/x-ndjson"
+        );
+        assert_eq!(
+            export_content_type(EventsExportFormat::Otlp),
+            "application/json"
+        );
     }
 }
