@@ -91,7 +91,15 @@ enum Commands {
     #[command(next_help_heading = "Setup")]
     Doctor,
 
-    /// Continuously check active pin for binding drift (freezes on change)
+    /// Continuous session heartbeat for hub (verify_session each tick)
+    ///
+    /// Each poll runs the same pack as `locus verify session` (doctor + whoami +
+    /// safe_next + session_ok), not drift alone. With `--json`, prints one NDJSON
+    /// object per tick for hub consumers. Freezes the pin on binding drift.
+    ///
+    /// Exit: with `--require-ok`, fail closed when `session_ok` is false.
+    /// With `--once` only, fail when pin was present/expected and session is not ok
+    /// (unpinned still exits 0 unless `--require-ok`).
     #[command(next_help_heading = "Setup")]
     Watch {
         /// Poll interval (e.g. 5s, 30s, 1m). Default: 5s
@@ -100,6 +108,9 @@ enum Commands {
         /// Exit after one check
         #[arg(long)]
         once: bool,
+        /// Fail closed: exit non-zero whenever session_ok is false
+        #[arg(long)]
+        require_ok: bool,
     },
 
     /// Write a .locus.toml in the current directory
@@ -763,7 +774,11 @@ fn run() -> Result<()> {
             force,
         } => cmd_workspace(default, allow, require_pin, force),
         Commands::Doctor => cmd_doctor(cli.json),
-        Commands::Watch { interval, once } => cmd_watch(&interval, once, cli.json),
+        Commands::Watch {
+            interval,
+            once,
+            require_ok,
+        } => cmd_watch(&interval, once, require_ok, cli.json),
         Commands::Hook { shell } => cmd_hook(&shell),
         Commands::Setup {
             client,
@@ -876,6 +891,10 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus verify session [--json]\n\
                → { kind:\"session\", whoami?, doctor, safe_next, session_ok }\n\
                Exit 0 only when session_ok=true; JSON is still emitted on failure.\n\n\
+             Continuous whoami / watch (hub stream):\n\
+               locus watch [--once] [--require-ok] [--json] [--interval 5s]\n\
+               Each tick: verify_session pack → NDJSON { kind:\"watch\", session_ok,\n\
+               whoami?, doctor_verdict, safe_next, … }. --require-ok fails closed.\n\n\
              Identity gate checks:\n\
                locus whoami [--json]           # active pin + seal\n\
                locus doctor [--json]           # SAFE|WARN|UNSAFE (exit 0/1/2)\n\
@@ -3755,48 +3774,132 @@ LOCUS_CLIENT = "{client}"
     Ok(())
 }
 
-/// Poll `check_drift_and_freeze` until interrupted (or once with `--once`).
-fn cmd_watch(interval: &str, once: bool, json: bool) -> Result<()> {
+/// Compact NDJSON tick for hub continuous whoami / `locus watch`.
+///
+/// Derived from [`verify_session`]; never includes secrets — aliases and
+/// verdicts only. Distinct `kind` from the full session pack (`"session"`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct WatchHeartbeat {
+    /// Stable stream tag (`watch`).
+    kind: String,
+    /// True when doctor ok and safe_next.ready (same as session pack).
+    session_ok: bool,
+    /// Active binding alias when whoami is available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    whoami: Option<String>,
+    /// Doctor verdict: SAFE | WARN | UNSAFE.
+    doctor_verdict: String,
+    /// Machine-readable safe_next action (ready | enter | re_pin | …).
+    safe_next: String,
+    /// Whether a pin is currently present (whoami or doctor pin).
+    pinned: bool,
+    /// Runtime frozen (binding drift under live session).
+    frozen: bool,
+}
+
+impl WatchHeartbeat {
+    fn from_pack(pack: &locus_core::SessionVerificationPack) -> Self {
+        let whoami_alias = pack.whoami.as_ref().map(|w| w.binding_alias.clone());
+        let pinned =
+            whoami_alias.is_some() || pack.doctor.pin.is_some() || pack.doctor.runtime.pinned;
+        Self {
+            kind: "watch".into(),
+            session_ok: pack.session_ok,
+            whoami: whoami_alias,
+            doctor_verdict: pack.doctor.verdict.as_str().to_string(),
+            safe_next: pack.safe_next.action.clone(),
+            pinned,
+            frozen: pack.doctor.runtime.frozen,
+        }
+    }
+}
+
+/// Whether a watch tick should end the process with a non-zero exit.
+///
+/// - `require_ok`: fail closed on any `session_ok=false` (hub / CI).
+/// - otherwise (typical `--once`): fail only when a pin was expected/present.
+fn watch_should_fail(session_ok: bool, pin_expected: bool, require_ok: bool) -> bool {
+    if session_ok {
+        return false;
+    }
+    require_ok || pin_expected
+}
+
+/// Poll `verify_session` until interrupted (or once with `--once`).
+///
+/// Each tick freezes on binding drift (via doctor/verify_session) and emits a
+/// hub-suitable heartbeat. With `--json`, one NDJSON object per line.
+fn cmd_watch(interval: &str, once: bool, require_ok: bool, json: bool) -> Result<()> {
     let s = store()?;
     let sleep_dur = parse_watch_interval(interval)?;
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     loop {
-        let drift = s.check_drift_and_freeze()?;
+        let external = gather_doctor_external(&s, cwd.clone())?;
+        let pack = verify_session(&s, &cwd, external)?;
+        let hb = WatchHeartbeat::from_pack(&pack);
+        let pin_expected = hb.pinned || hb.frozen;
+
+        let binding = hb.whoami.as_deref().unwrap_or("-");
+        let _ = s.audit(
+            "watch.tick",
+            binding,
+            Some(json!({
+                "session_ok": hb.session_ok,
+                "safe_next": hb.safe_next,
+                "doctor_verdict": hb.doctor_verdict,
+                "pinned": hb.pinned,
+                "frozen": hb.frozen,
+                "once": once,
+                "require_ok": require_ok,
+            })),
+        );
+
         if json {
-            println!("{}", serde_json::to_string(&drift)?);
-        } else if !drift.pinned {
-            println!(
-                "{} watch  {}",
-                "locus".magenta().bold(),
-                "not_pinned".dimmed()
-            );
-        } else if drift.frozen {
-            println!(
-                "{} watch  {}  {}  issues={}",
-                "locus".magenta().bold(),
-                "FROZEN".red().bold(),
-                drift.binding_alias.as_deref().unwrap_or("?"),
-                drift.issues.join(",")
-            );
-        } else if drift.ok {
-            println!(
-                "{} watch  {}  {}  ok",
-                "locus".magenta().bold(),
-                "ok".green().bold(),
-                drift.binding_alias.as_deref().unwrap_or("?")
-            );
+            // NDJSON: one compact object per tick for hub stream consumers.
+            println!("{}", serde_json::to_string(&hb)?);
         } else {
+            let ok_s = if hb.session_ok {
+                "ok".green().bold().to_string()
+            } else {
+                "not_ok".yellow().bold().to_string()
+            };
+            let alias = hb.whoami.as_deref().unwrap_or("unpinned");
+            let frozen_s = if hb.frozen {
+                format!("  {}", "FROZEN".red().bold())
+            } else {
+                String::new()
+            };
             println!(
-                "{} watch  {}  {}  issues={}",
+                "{} watch  {}  {}  session_ok={}  doctor={}  safe_next={}{}",
                 "locus".magenta().bold(),
-                "drift".yellow().bold(),
-                drift.binding_alias.as_deref().unwrap_or("?"),
-                drift.issues.join(",")
+                ok_s,
+                alias.cyan(),
+                hb.session_ok,
+                hb.doctor_verdict.dimmed(),
+                hb.safe_next.cyan(),
+                frozen_s,
             );
+            if !hb.session_ok {
+                println!(
+                    "  next  {} — {}",
+                    pack.safe_next.action, pack.safe_next.message
+                );
+                if let Some(ref cmd) = pack.safe_next.command {
+                    println!("  run   {}", cmd.cyan());
+                }
+            }
         }
-        if once {
-            if drift.frozen || (!drift.ok && drift.pinned) {
-                std::process::exit(1);
+
+        // Exit after one tick (`--once`) or fail-closed on first bad tick (`--require-ok`).
+        if once || (require_ok && !hb.session_ok) {
+            if watch_should_fail(hb.session_ok, pin_expected, require_ok) {
+                bail!(
+                    "watch session_ok=false (doctor={} safe_next={} pinned={})",
+                    hb.doctor_verdict,
+                    hb.safe_next,
+                    hb.pinned
+                );
             }
             return Ok(());
         }
@@ -3809,16 +3912,17 @@ fn parse_watch_interval(s: &str) -> Result<std::time::Duration> {
     if s.is_empty() {
         return Ok(std::time::Duration::from_secs(5));
     }
+    // Bare seconds (including multi-digit) before unit split so "10" → 10s not 1s.
+    if s.chars().all(|c| c.is_ascii_digit()) {
+        let n: u64 = s.parse().context("invalid watch interval")?;
+        return Ok(std::time::Duration::from_secs(n));
+    }
     let (num, unit) = s.split_at(s.len().saturating_sub(1));
-    let n: u64 = num
-        .parse()
-        .or_else(|_| s.parse())
-        .context("invalid watch interval")?;
+    let n: u64 = num.parse().context("invalid watch interval")?;
     match unit {
         "s" | "S" => Ok(std::time::Duration::from_secs(n)),
         "m" | "M" => Ok(std::time::Duration::from_secs(n.saturating_mul(60))),
         "h" | "H" => Ok(std::time::Duration::from_secs(n.saturating_mul(3600))),
-        _ if s.chars().all(|c| c.is_ascii_digit()) => Ok(std::time::Duration::from_secs(n)),
         _ => bail!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)"),
     }
 }
@@ -5172,5 +5276,177 @@ credential_ref = "phm:VERIFY_SESSION_MISSING"
     fn verify_session_exit_follows_session_ok() {
         assert!(verify_session_exit(true).is_ok());
         assert!(verify_session_exit(false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod watch_heartbeat_tests {
+    use super::{
+        gather_doctor_external_with_phantom_status, parse_watch_interval, watch_should_fail,
+        WatchHeartbeat,
+    };
+    use locus_core::{verify_session, Binding, Store};
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    #[test]
+    fn parse_watch_interval_units() {
+        assert_eq!(parse_watch_interval("5s").unwrap(), Duration::from_secs(5));
+        assert_eq!(
+            parse_watch_interval("30s").unwrap(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(parse_watch_interval("1m").unwrap(), Duration::from_secs(60));
+        assert_eq!(
+            parse_watch_interval("2h").unwrap(),
+            Duration::from_secs(7200)
+        );
+        assert_eq!(parse_watch_interval("10").unwrap(), Duration::from_secs(10));
+        assert_eq!(parse_watch_interval("").unwrap(), Duration::from_secs(5));
+        assert!(parse_watch_interval("nope").is_err());
+        assert!(parse_watch_interval("5x").is_err());
+    }
+
+    #[test]
+    fn watch_should_fail_policy() {
+        // Healthy tick never fails.
+        assert!(!watch_should_fail(true, false, false));
+        assert!(!watch_should_fail(true, true, true));
+
+        // Unpinned / not ok without require_ok: soft (exit 0 on --once).
+        assert!(!watch_should_fail(false, false, false));
+
+        // Pin present and not ok: fail on --once.
+        assert!(watch_should_fail(false, true, false));
+
+        // --require-ok fail-closed regardless of pin.
+        assert!(watch_should_fail(false, false, true));
+        assert!(watch_should_fail(false, true, true));
+    }
+
+    #[test]
+    fn watch_heartbeat_from_unpinned_pack() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        store
+            .save_binding(
+                &Binding::parse_toml(
+                    r#"
+[binding]
+id = "bnd_watch"
+alias = "watchme"
+tenant = "tenant"
+
+[[binding.providers]]
+provider = "github"
+account = "tenant"
+credential_ref = "env:GH_TOKEN"
+"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let external =
+            gather_doctor_external_with_phantom_status(&store, dir.path().to_path_buf(), true)
+                .unwrap();
+        let pack = verify_session(&store, dir.path(), external).unwrap();
+        let hb = WatchHeartbeat::from_pack(&pack);
+
+        assert_eq!(hb.kind, "watch");
+        assert!(!hb.session_ok, "unpinned must not be session_ok");
+        assert!(hb.whoami.is_none());
+        assert!(!hb.pinned);
+        assert!(!hb.frozen);
+        assert!(!hb.doctor_verdict.is_empty());
+        assert_eq!(hb.safe_next, "enter");
+
+        // NDJSON shape: required hub fields present, no secret-looking values.
+        let line = serde_json::to_string(&hb).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["kind"], "watch");
+        assert_eq!(v["session_ok"], false);
+        assert!(v.get("doctor_verdict").is_some());
+        assert_eq!(v["safe_next"], "enter");
+        assert!(v.get("whoami").is_none() || v["whoami"].is_null());
+        let blob = line.to_lowercase();
+        for bad in ["sk-", "ghp_", "gho_", "github_pat_", "secret_value"] {
+            assert!(
+                !blob.contains(bad),
+                "heartbeat must not leak secrets: {bad}"
+            );
+        }
+
+        // Soft --once without pin does not fail; require_ok does.
+        assert!(!watch_should_fail(
+            hb.session_ok,
+            hb.pinned || hb.frozen,
+            false
+        ));
+        assert!(watch_should_fail(
+            hb.session_ok,
+            hb.pinned || hb.frozen,
+            true
+        ));
+    }
+
+    #[test]
+    fn watch_heartbeat_from_pinned_pack() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        store
+            .save_binding(
+                &Binding::parse_toml(
+                    r#"
+[binding]
+id = "bnd_watch_pin"
+alias = "watchpin"
+tenant = "tenant-a"
+
+[[binding.providers]]
+provider = "github"
+account = "tenant-a"
+credential_ref = "env:GH_TOKEN"
+"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        store
+            .pin("watchpin", dir.path(), Some("test".into()), false)
+            .unwrap();
+
+        let external =
+            gather_doctor_external_with_phantom_status(&store, dir.path().to_path_buf(), true)
+                .unwrap();
+        let pack = verify_session(&store, dir.path(), external).unwrap();
+        let hb = WatchHeartbeat::from_pack(&pack);
+
+        assert_eq!(hb.kind, "watch");
+        assert_eq!(hb.whoami.as_deref(), Some("watchpin"));
+        assert!(hb.pinned);
+        // session_ok depends on doctor (phantom/mcp may WARN); pin must be reported either way.
+        let line = serde_json::to_string(&hb).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["kind"], "watch");
+        assert_eq!(v["whoami"], "watchpin");
+        assert!(v["session_ok"].is_boolean());
+        assert!(v["doctor_verdict"].is_string());
+        assert!(v["safe_next"].is_string());
+
+        if !hb.session_ok {
+            // Pinned but not ok → --once fails without needing --require-ok.
+            assert!(watch_should_fail(
+                hb.session_ok,
+                hb.pinned || hb.frozen,
+                false
+            ));
+        } else {
+            assert!(!watch_should_fail(
+                hb.session_ok,
+                hb.pinned || hb.frozen,
+                false
+            ));
+        }
     }
 }

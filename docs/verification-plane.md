@@ -83,6 +83,8 @@ locus verify claim --text "Error rate is 12% on https://api.example.com"
 locus verify claim --text "We are pinned to acme" --json
 locus verify claim --text "This always costs $500" --json
 locus verify session --json   # doctor + whoami + safe_next pack for hub
+locus watch --once --json     # one heartbeat tick (same pack, compact NDJSON)
+locus watch --json --require-ok --interval 30s   # continuous hub stream; fail closed
 ```
 
 **Claim result shape** (always; human mode also prints a compact summary):
@@ -121,6 +123,38 @@ locus verify session --json   # doctor + whoami + safe_next pack for hub
 ```
 
 Never includes secrets. `session_ok` is true only when doctor is ok **and** `safe_next.ready`. `locus verify session` emits the pack for inspection but exits nonzero whenever `session_ok` is false; there is no success-status inspection bypass.
+
+### Continuous watch (hub heartbeat stream)
+
+`locus watch` re-runs the session pack each tick (not drift alone). Suitable for long agent sessions and hub heartbeats.
+
+```bash
+locus watch --once --json
+locus watch --json --require-ok --interval 30s
+```
+
+**Tick shape** (`--json` → one NDJSON object per line):
+
+```json
+{
+  "kind": "watch",
+  "session_ok": true,
+  "whoami": "acme",
+  "doctor_verdict": "SAFE",
+  "safe_next": "ready",
+  "pinned": true,
+  "frozen": false
+}
+```
+
+| Flag | Behavior |
+|------|----------|
+| `--once` | Single tick then exit |
+| `--require-ok` | Fail closed: non-zero exit whenever `session_ok` is false (including unpinned) |
+| `--once` only | Non-zero when pin was present/expected **and** `session_ok` is false; unpinned soft-exits 0 |
+| `--interval` | Poll period (`5s`, `30s`, `1m`; default `5s`) |
+
+Binding drift still freezes the pin (same as doctor / `verify_session`). Never includes secrets. Prefer `locus verify session --json` when hub needs the full doctor + whoami objects; use `watch` for continuous compact ticks.
 
 ### MCP
 
@@ -177,7 +211,6 @@ Hub extension points: re-score using `signals`, require tools when `needs_tool`,
 
 Still open under verification plane:
 
-- Continuous whoami / watch as first-class hub heartbeat (session pack is the CLI primitive)
 - Audit export → SIEM
 - Adapter SDK + signed registry
 - Harder sandbox (seccomp/VM); bounty on seal logic
@@ -188,7 +221,8 @@ Shipped as partial M5:
 - [x] Architecture doc (this file)
 - [x] `locus verify claim` + `locus_verify_claim` (currency / % / absolute language signals)
 - [x] `locus verify session` — doctor + whoami + safe_next JSON pack
-- [x] E2E + dogfood coverage: `scripts/e2e.sh` feature-detects `verify claim` / `verify session` (shape + no secret values); `scripts/dogfood.sh` hard-requires `session_ok` at the DOGFOOD READY gate
+- [x] Continuous whoami / `locus watch` — each tick runs session pack; NDJSON heartbeat (`kind=watch`) + `--require-ok` fail-closed
+- [x] E2E + dogfood coverage: `scripts/e2e.sh` feature-detects `verify claim` / `verify session` / optional `watch --once --json` (shape + no secret values); `scripts/dogfood.sh` hard-requires `session_ok` at the DOGFOOD READY gate
 - [x] Doctor optional `ungrounded_claims` finding
 - [x] Fail-closed macOS worker sandbox (`LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`); unsupported platforms refuse sandboxed spawn
 - [x] Core module + unit tests (heuristics only)
@@ -202,7 +236,7 @@ Shipped as partial M5:
 | `crates/locus-core/src/verify.rs` | Heuristics + `ClaimVerification` |
 | `crates/locus-core/src/agent_report.rs` | `verify_session` → `SessionVerificationPack` |
 | `crates/locus-core/src/workers/sandbox.rs` | Deny-by-default macOS Seatbelt; no PATH-only fallback |
-| `crates/locus-cli` | `locus verify claim` · `locus verify session` |
+| `crates/locus-cli` | `locus verify claim` · `locus verify session` · `locus watch` (session heartbeat) |
 | `crates/locus-mcp` | `locus_verify_claim` control tool |
 | `crates/locus-core/src/doctor.rs` | Optional audit signal finding |
 | `GOALS.md` | M5 checklist |

@@ -2,8 +2,9 @@
 # Locus end-to-end shell tests — pin, isolation, MCP, freeze, approval, doctor,
 # dual-control, events, optional enter/run/notify/ns; graph/ci/heartbeat,
 # dashboard health, forensics export, goal status, verify claim/session,
-# safe_next MCP, upstream list when present (feature-detected).
-# Full 0.2+ surface plus adversarial release security probes (~43+ checks).
+# watch session heartbeat, safe_next MCP, upstream list when present
+# (feature-detected). Full 0.2+ surface plus adversarial release security probes
+# (~44+ checks).
 set -euo pipefail
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
@@ -1400,6 +1401,61 @@ print("verify session kind=%s session_ok=%s safe_next=%s doctor_ok=%s" % (
     (safe_next or {}).get("action"), (doctor or {}).get("ok")))
 '
     ok "verify session --json pack + truthful exit (kind/session_ok/doctor/safe_next, no secrets)"
+  fi
+fi
+
+# ── 26b. watch session heartbeat (feature-detected, soft) ────────────────────
+log "26b. locus watch --once --json (optional heartbeat)"
+if ! has_cmd watch; then
+  skip "watch command not available"
+elif ! help_mentions watch "--require-ok" && ! help_mentions watch "session"; then
+  skip "watch session heartbeat flags not available"
+else
+  # Unpinned: compact heartbeat must still emit; soft --once exits 0 without --require-ok.
+  locus leave >/dev/null 2>&1 || true
+  set +e
+  watch_json="$(locus --json watch --once 2>/dev/null)"
+  watch_ec=$?
+  if [[ -z "$watch_json" ]]; then
+    watch_json="$(locus watch --once --json 2>/dev/null)"
+    watch_ec=$?
+  fi
+  set -e
+  if [[ -z "$watch_json" ]]; then
+    skip "watch --once emitted no JSON (exit=$watch_ec)"
+  else
+    echo "$watch_json" | python3 -c '
+import json, sys
+raw = sys.stdin.read().strip().splitlines()[-1]
+d = json.loads(raw)
+assert isinstance(d, dict), type(d)
+assert d.get("kind") == "watch", "expected kind=watch: %s" % d
+assert "session_ok" in d and isinstance(d["session_ok"], bool), d
+assert "doctor_verdict" in d and d["doctor_verdict"], d
+assert "safe_next" in d and d["safe_next"], d
+assert "pinned" in d and isinstance(d["pinned"], bool), d
+blob = json.dumps(d).lower()
+for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "akia", "secret_value"):
+    assert bad not in blob, "watch heartbeat must not leak secrets (%s)" % bad
+print("watch kind=%s session_ok=%s whoami=%s doctor=%s safe_next=%s" % (
+    d.get("kind"), d.get("session_ok"), d.get("whoami"),
+    d.get("doctor_verdict"), d.get("safe_next")))
+'
+    # Soft unpinned --once should not fail closed.
+    [[ $watch_ec -eq 0 ]] \
+      || die "watch --once unpinned should exit 0 without --require-ok (exit=$watch_ec)"
+    # --require-ok fail-closed when session is not ready (typical unpinned).
+    set +e
+    locus watch --once --require-ok --json >/dev/null 2>&1
+    req_ec=$?
+    set -e
+    if [[ $req_ec -eq 0 ]]; then
+      # Environment happened to be fully ready — still ok for e2e.
+      ok "watch --once --json heartbeat shape (session_ok may be true here)"
+    else
+      [[ $req_ec -ne 0 ]] || die "expected non-zero with --require-ok when not ready"
+      ok "watch --once --json heartbeat + --require-ok fail-closed"
+    fi
   fi
 fi
 

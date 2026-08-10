@@ -12,6 +12,13 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 
 ### Added
 
+- **`locus watch` session heartbeat (M5)** — each tick runs the same pack as
+  `locus verify session` (doctor + whoami + safe_next + `session_ok`), not drift alone.
+  - `--json`: one NDJSON object per tick
+    `{ kind:"watch", session_ok, whoami?, doctor_verdict, safe_next, pinned, frozen }`
+  - `--require-ok`: fail closed whenever `session_ok` is false (hub / CI)
+  - `--once` without `--require-ok`: non-zero only when a pin was present/expected and not ok
+  - Docs: [docs/verification-plane.md](./docs/verification-plane.md)
 - **`scripts/dogfood.sh`** — after forensics export, also prints **`locus goal status`**
   (from repo `GOALS.md` when present) and runs **`scripts/hub-smoke.sh`** (own throwaway
   home; skip with `DOGFOOD_SKIP_HUB_SMOKE=1`)
@@ -19,6 +26,7 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
   - **`locus verify claim --text … --json`** (URL claims → `needs_tool`)
   - MCP **`locus_safe_next`** unpinned (`action=enter`) + pinned (no secrets)
   - **`locus upstream list --json`** (recipe catalog)
+  - Optional **`locus watch --once --json`** heartbeat shape (no secrets)
   - Re-asserts **notify disabled by default** after the full suite
 - Landing page ([`apps/web/`](./apps/web/)) — verify claim + `locus_safe_next` callouts
   alongside dashboard / forensics / HTTP MCP / goal status
@@ -26,7 +34,8 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 ### Tests
 
 - Shell e2e (`scripts/e2e.sh`): prior 0.2 surface **plus** verify / safe_next / upstream /
-  notify late re-check — **43 checks** (0 skipped) on full current command set
+  watch heartbeat / notify late re-check — **44+ checks** on full current command set
+- CLI unit tests: watch interval parse, fail policy, heartbeat from pinned/unpinned packs
 - Core unit `inv_notify_default_false` + e2e step 15/27 keep desktop notifications **OFF**
   by default under clean `LOCUS_HOME`
 
