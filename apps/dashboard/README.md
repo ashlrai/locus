@@ -54,3 +54,4 @@ Design language matches [`apps/web`](../web/) (dark terminal grid, mono labels, 
 - Agents cannot re-pin from the dashboard.
 - Dashboard assertions are `local_advisory`; a bearer/dashboard token is not human identity and cannot satisfy approval or dual-control authority.
 - External cryptographic approval authority is not implemented, so gated provider execution remains fail-closed.
+- `/api/status.capabilities` reports the live pin-dependent CLI/MCP surfaces. Manual `exec`/`run` can inject credentials into their child by default; the UI renders missing capability data as `unknown / degraded` rather than inferring a security assurance.

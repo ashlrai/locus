@@ -261,6 +261,26 @@ fn cwd() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
+fn dashboard_capabilities(manual_state: &str) -> Value {
+    json!({
+        "reporting": "live_runtime",
+        "scope": "locus_surfaces_only",
+        "manual_cli_command_execution": {
+            "state": manual_state,
+            "surfaces": ["locus exec", "locus run"]
+        },
+        "agent_command_execution": {
+            "state": "not_exposed",
+            "surface": "locus-mcp"
+        },
+        "provider_credential_injection": {
+            "state": if manual_state == "available" { "available_to_manual_cli_children" } else { manual_state },
+            "default_for_manual_exec_run": true,
+            "no_resolve": "credential_free_or_fail_closed_for_resolving_upstreams"
+        }
+    })
+}
+
 async fn api_status(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
@@ -275,10 +295,16 @@ async fn api_status(
         None => Ok(Json(json!({
             "pinned": false,
             "require_pin": require_pin,
+            "capabilities": dashboard_capabilities("blocked_unpinned"),
         }))),
         Some(session) => {
             let key = s.seal_key().map_err(store_err)?;
             let seal_ok = session.verify_seal(&key).is_ok();
+            let manual_state = if seal_ok && !session.frozen && !session.is_expired() {
+                "available"
+            } else {
+                "blocked_unhealthy_session"
+            };
             Ok(Json(json!({
                 "pinned": true,
                 "binding": session.binding_alias,
@@ -291,6 +317,7 @@ async fn api_status(
                 "require_pin": require_pin,
                 "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
                 "namespaces": session.all_aliases(),
+                "capabilities": dashboard_capabilities(manual_state),
             })))
         }
     }
@@ -603,7 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn health_is_public_and_status_works() {
-        let (_dir, s, state) = temp_store();
+        let (dir, s, state) = temp_store();
         let mut b = sample_binding("acme", "acme-corp");
         b.policy.require_approval = vec!["github.delete_repo".into()];
         b.policy.dual_control = vec!["github.delete_repo".into()];
@@ -623,6 +650,7 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
 
         let res = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/status")
@@ -637,6 +665,47 @@ mod tests {
             .unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["pinned"], false);
+        assert_eq!(v["capabilities"]["reporting"], "live_runtime");
+        assert_eq!(
+            v["capabilities"]["manual_cli_command_execution"]["state"],
+            "blocked_unpinned"
+        );
+        assert_eq!(
+            v["capabilities"]["agent_command_execution"]["state"],
+            "not_exposed"
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["state"],
+            "blocked_unpinned"
+        );
+
+        s.pin("acme", dir.path(), None, false).unwrap();
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(res.into_body(), 1 << 16)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["pinned"], true);
+        assert_eq!(
+            v["capabilities"]["manual_cli_command_execution"]["state"],
+            "available"
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["state"],
+            "available_to_manual_cli_children"
+        );
+        assert_eq!(
+            v["capabilities"]["provider_credential_injection"]["default_for_manual_exec_run"],
+            true
+        );
     }
 
     #[tokio::test]
@@ -695,6 +764,9 @@ mod tests {
         let html = String::from_utf8(body.to_vec()).unwrap();
         assert!(html.contains("Locus"));
         assert!(html.contains("dashboard"));
+        assert!(html.contains("status.capabilities"));
+        assert!(html.contains("unknown / degraded"));
+        assert!(!html.contains("manual_identity_only"));
     }
 
     #[tokio::test]

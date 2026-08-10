@@ -209,10 +209,11 @@ Approvals:
 ```bash
 # After an agent hits require_approval (MCP returns appr_…)
 locus approve list
-locus approve grant appr_… --as alice
-# dual_control tools need a second distinct principal:
-locus approve grant appr_… --as bob
-locus events --last 20 --op approval.grant --json
+locus approve grant appr_… --as alice  # advisory review label only
+# A second local label still cannot satisfy dual_control:
+locus approve grant appr_… --as bob    # authority remains 0/2
+locus events --last 20 --op approval.advisory --json
+# Provider execution stays blocked pending a closed external authorization envelope.
 ```
 
 Graph share (bindings + workspace templates only — CredentialRefs, never secret values):
@@ -316,7 +317,7 @@ locus run -b personal -- npm test    # one-shot; global pin unchanged
 locus leave
 
 locus approve list
-locus approve grant appr_… --as mason
+locus approve grant appr_… --as mason  # advisory only; never execution authority
 locus notify status                  # OFF by default (no spam)
 locus doctor                         # SAFE | WARN | UNSAFE
 
@@ -337,7 +338,7 @@ approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
 
 - Session pins are **HMAC-sealed**; tampering fails closed.
 - Workspace `allowed_bindings` blocks wrong-tenant pins (unless `--force`, audited).
-- `locus exec` / `locus run` scrub ambient identity; secrets only in the child.
+- `locus exec` / `locus run` scrub ambient identity; resolved credentials are injected into the manual child by default. `run --no-resolve` fails before start when a declared upstream can resolve credentials.
 - MCP never returns secret values; agents cannot pin (request only).
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
 - Policy: globs + structured `[[rules]]`, `require_approval`, dual-control (2 principals).

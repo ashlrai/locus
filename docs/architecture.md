@@ -162,4 +162,7 @@ Optional later: fleet gateway discovers **only** Locus, not raw personal MCP ser
 Manual `locus exec --no-resolve` and `locus run --no-resolve` sit outside the
 provider data plane. They expose frozen identity metadata in a private,
 allowlisted environment, never provider credentials. Hub, CI, and
-agent-originated sessions cannot invoke arbitrary commands through Locus.
+agent-originated sessions cannot invoke arbitrary commands through Locus. A
+`run --no-resolve` request fails before session or child creation when a
+declared upstream (including a recipe default) resolves credentials; otherwise
+the command runs credential-free and Locus skips its eager upstream probe.

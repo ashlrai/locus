@@ -231,7 +231,7 @@ enum Commands {
         /// Also update active.json (default: temporary session only)
         #[arg(long)]
         share_pin: bool,
-        /// Do not resolve phm:/env: credential refs into secret env vars
+        /// Do not resolve credentials; fail before start if an upstream worker can resolve them
         #[arg(long)]
         no_resolve: bool,
         /// Fail if any credential_ref cannot be resolved
@@ -266,7 +266,7 @@ enum Commands {
     Ci(CiCmd),
 
     // ────────────────────────── Approvals ────────────────────────────
-    /// Manage require_approval / dual-control grants for blocked tool calls
+    /// Manage advisory review labels and blocked external authorization records
     #[command(next_help_heading = "Approvals", subcommand)]
     Approve(ApproveCmd),
 
@@ -1151,7 +1151,7 @@ description = "Acme client engagement — sample"
 [binding.policy]
 default = "allow"
 max_ttl = "8h"
-# Human must grant before these globs run (locus approve grant …).
+# Closed external authorization is required; local approve labels are advisory only.
 require_approval = ["*.delete*", "vercel.deploy.prod"]
 
 [[binding.providers]]
@@ -2281,6 +2281,18 @@ fn cmd_run(
     }
 
     let s = store()?;
+    let binding = s.load_binding(&binding_alias)?;
+    if !resolve_secrets {
+        let resolving_upstreams = credential_resolving_upstreams(&binding)
+            .context("inspect upstreams for --no-resolve")?;
+        if !resolving_upstreams.is_empty() {
+            bail!(
+                "--no-resolve refused binding `{}`: credential-resolving upstream(s) declared for {}; no session, upstream worker, or child command was started",
+                binding.alias,
+                resolving_upstreams.join(", ")
+            );
+        }
+    }
     // Capture parent pin (if any) so we can prove it is unchanged after run
     // when share_pin is false.
     let parent_before = s.active_session()?;
@@ -2312,7 +2324,6 @@ fn cmd_run(
         }
     }
 
-    let binding = s.load_binding(&session.binding_alias)?;
     let iso = build_isolated_env_opts(&session, &binding, resolve_secrets);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_run_session(&run_path, &session);
@@ -2324,7 +2335,7 @@ fn cmd_run(
 
     // Ensure composite workers when upstream is present (best-effort for CLI run).
     // Child process gets LOCUS_* env; upstream MCP is primarily for locus-mcp.
-    {
+    if resolve_secrets {
         use locus_core::CompositeWorkerManager;
         if binding.providers.iter().any(|p| p.has_upstream()) {
             let mut mgr = CompositeWorkerManager::new();
@@ -2397,6 +2408,22 @@ fn cmd_run(
         std::process::exit(status.code().unwrap_or(1));
     }
     Ok(())
+}
+
+/// Providers whose upstream worker would independently resolve credentials.
+/// Recipe defaults are expanded before classification so `--no-resolve`
+/// cannot be bypassed by omitting `resolve_secrets` from a recipe declaration.
+fn credential_resolving_upstreams(binding: &Binding) -> Result<Vec<String>> {
+    let mut providers = Vec::new();
+    for provider in &binding.providers {
+        let Some(upstream) = provider.upstream.as_ref().filter(|u| u.is_declared()) else {
+            continue;
+        };
+        if upstream.expand()?.resolve_secrets {
+            providers.push(provider.provider.clone());
+        }
+    }
+    Ok(providers)
 }
 
 fn cmd_mcp() -> Result<()> {
@@ -4707,7 +4734,8 @@ fn merge_mcp_json(path: &std::path::Path, name: &str, server: &serde_json::Value
 
 #[cfg(test)]
 mod touchid_tests {
-    use super::confirm_grant_touchid;
+    use super::{confirm_grant_touchid, credential_resolving_upstreams};
+    use locus_core::Binding;
     use std::sync::Mutex;
 
     /// Serialize env-var mutations across tests in this binary.
@@ -4744,5 +4772,64 @@ mod touchid_tests {
         let r = confirm_grant_touchid("bob", "appr_aabbccddeeff001122334455", "t", "b");
         std::env::remove_var("LOCUS_TOUCHID_MOCK");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn no_resolve_detects_explicit_and_recipe_default_secret_workers() {
+        let explicit = Binding::parse_toml(
+            r#"
+id = "bnd_explicit"
+alias = "explicit"
+tenant = "tenant"
+
+[[providers]]
+provider = "github"
+account = "acme"
+credential_ref = "env:GH_TOKEN"
+upstream = { command = "provider-worker", resolve_secrets = true }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            credential_resolving_upstreams(&explicit).unwrap(),
+            vec!["github"]
+        );
+
+        let recipe = Binding::parse_toml(
+            r#"
+id = "bnd_recipe"
+alias = "recipe"
+tenant = "tenant"
+
+[[providers]]
+provider = "github"
+account = "acme"
+credential_ref = "env:GH_TOKEN"
+upstream = { recipe = "github-official" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            credential_resolving_upstreams(&recipe).unwrap(),
+            vec!["github"]
+        );
+
+        let credential_free = Binding::parse_toml(
+            r#"
+id = "bnd_free"
+alias = "free"
+tenant = "tenant"
+
+[[providers]]
+provider = "filesystem"
+account = "local"
+credential_ref = "env:UNUSED"
+upstream = { command = "credential-free-worker", resolve_secrets = false }
+"#,
+        )
+        .unwrap();
+        assert!(credential_resolving_upstreams(&credential_free)
+            .unwrap()
+            .is_empty());
     }
 }

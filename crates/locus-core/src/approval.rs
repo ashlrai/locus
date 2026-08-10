@@ -378,8 +378,9 @@ pub fn try_notify_partial_grant(rec: &ApprovalRecord) {
     if !notifications_enabled() {
         return;
     }
-    // Only meaningful for partial dual-control (at least one grant, still pending).
-    if rec.grants.is_empty() || rec.status != ApprovalStatus::Pending {
+    // The store calls this only for dual-control. Notify exactly on the first
+    // advisory label; later labels cannot manufacture authority or more alerts.
+    if !is_first_pending_advisory(rec) {
         return;
     }
     if !rate_limit_allow(&format!("partial::{}", rec.id)) {
@@ -393,6 +394,12 @@ pub fn try_notify_partial_grant(rec: &ApprovalRecord) {
     {
         let _ = rec;
     }
+}
+
+fn is_first_pending_advisory(rec: &ApprovalRecord) -> bool {
+    rec.status == ApprovalStatus::Pending
+        && rec.grants.len() == 1
+        && rec.grants[0].authority == ApprovalAuthority::LocalAdvisory
 }
 
 /// Simple process-local rate limit keyed by an arbitrary string.
@@ -1001,6 +1008,40 @@ mod tests {
             "partial body must name tool/binding: {body}"
         );
         assert!(body.contains(id), "partial body must name approval: {body}");
+    }
+
+    #[test]
+    fn partial_notification_is_only_eligible_for_first_advisory_label() {
+        let mut rec = ApprovalRecord {
+            id: "appr_aabbccddeeff001122334455".into(),
+            tool: "supabase.table.delete".into(),
+            binding: "acme".into(),
+            args_digest: "sha256:x".into(),
+            created_at: Utc::now(),
+            status: ApprovalStatus::Pending,
+            session_id: "ses".into(),
+            requester: "agent".into(),
+            grants: vec![],
+            expires_at: None,
+            granted_at: None,
+        };
+        assert!(!is_first_pending_advisory(&rec));
+
+        rec.grants.push(ApprovalGrant {
+            principal: "alice".into(),
+            granted_at: Utc::now(),
+            authority: ApprovalAuthority::LocalAdvisory,
+            envelope_id: None,
+        });
+        assert!(is_first_pending_advisory(&rec));
+
+        rec.grants.push(ApprovalGrant {
+            principal: "bob".into(),
+            granted_at: Utc::now(),
+            authority: ApprovalAuthority::LocalAdvisory,
+            envelope_id: None,
+        });
+        assert!(!is_first_pending_advisory(&rec));
     }
 
     #[test]

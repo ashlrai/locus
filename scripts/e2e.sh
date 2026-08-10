@@ -223,6 +223,37 @@ echo "$exec_env" | grep -q "ambient-sb-must-not-leak" \
   && die "ambient SUPABASE_ACCESS_TOKEN leaked" || true
 echo "$exec_env" | grep -q "AWS_PROFILE=" \
   && die "AWS_PROFILE should be scrubbed" || true
+
+# `run --no-resolve` must fail before both worker and requested child start when
+# a declared upstream can independently resolve credentials.
+no_resolve_worker_marker="$LOCUS_HOME/no-resolve-worker-started"
+no_resolve_child_marker="$LOCUS_HOME/no-resolve-child-started"
+cat >"$LOCUS_HOME/bindings/noresolve.toml" <<EOF
+[binding]
+id = "bnd_noresolve"
+alias = "noresolve"
+tenant = "noresolve-tenant"
+
+[binding.policy]
+default = "allow"
+
+[[binding.providers]]
+provider = "github"
+account = "noresolve-account"
+credential_ref = "env:LOCUS_E2E_GH_TOKEN"
+upstream = { command = "/bin/sh", args = ["-c", "printf worker > '$no_resolve_worker_marker'"], resolve_secrets = true }
+EOF
+
+set +e
+no_resolve_err="$(locus run -b noresolve --no-resolve --force -- /bin/sh -c "printf child > '$no_resolve_child_marker'" 2>&1)"
+no_resolve_ec=$?
+set -e
+[[ $no_resolve_ec -ne 0 ]] || die "run --no-resolve allowed credential-resolving upstream"
+echo "$no_resolve_err" | grep -q "no session, upstream worker, or child command was started" \
+  || die "run --no-resolve did not report fail-closed boundary: $no_resolve_err"
+[[ ! -e "$no_resolve_worker_marker" ]] || die "run --no-resolve started resolving upstream worker"
+[[ ! -e "$no_resolve_child_marker" ]] || die "run --no-resolve started requested child"
+ok "run --no-resolve blocks resolving upstream before worker and child start"
 echo "$exec_env" | grep -q "UNLISTED_SECRET_CANARY=" \
   && die "arbitrary parent secret leaked into locus exec" || true
 echo "$exec_env" | grep -q "arbitrary-parent-secret-must-not-leak" \

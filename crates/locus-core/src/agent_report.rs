@@ -438,8 +438,8 @@ Pin a Binding; every CLI command and MCP tool is hard-scoped to that tenant unti
 2. Treat the active pin as authoritative — do not invent `project_ref`, `team_id`, orgs, or repos.
 3. **You cannot re-pin.** Use `locus_request_pin` / `locus_enter_hint` only; a human runs `locus pin` / `locus enter`.
 4. If tools are missing or the wrong tenant: ask the human to pin. Do not claim you can switch accounts.
-5. Destructive tools may block on `require_approval` — human grants via `locus approve grant <id>`.
-6. Prefer `locus_safe_next` when stuck — it returns the single best human/agent action (enter, approve, doctor fix).
+5. Destructive tools may block on `require_approval`. Only a closed, independently authenticated external authorization envelope can release provider execution; local `locus approve grant` labels are advisory only.
+6. Prefer `locus_safe_next` when stuck. Never retry a blocked tool after a local advisory label.
 
 ## Human commands
 
@@ -569,7 +569,8 @@ pub fn verify_session(
 
 /// Single best next human/agent action for identity readiness.
 ///
-/// Machine `action` values: `init` | `enter` | `re_pin` | `approve` | `doctor_fix` | `ready`.
+/// Machine `action` values: `init` | `enter` | `re_pin` |
+/// `external_authorization` | `doctor_fix` | `ready`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SafeNext {
     /// Machine-readable action id.
@@ -584,7 +585,7 @@ pub struct SafeNext {
     pub message: String,
     /// True only when identity plane is safe to proceed under the pin.
     pub ready: bool,
-    /// Pending approval id when `action == "approve"`.
+    /// Pending approval id when `action == "external_authorization"`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_id: Option<String>,
     /// Active binding alias when known.
@@ -597,7 +598,7 @@ pub struct SafeNext {
 
 /// Compute the single best next action from store state (fail closed, no secrets).
 ///
-/// Priority: init → enter → re_pin → approve → doctor_fix → ready.
+/// Priority: init → enter → re_pin → external authorization → doctor_fix → ready.
 pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
     let seal_ok = store.seal_key().is_ok();
     if !seal_ok {
@@ -731,61 +732,24 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
         });
     }
 
-    // Pending approvals — human grant is the gate.
-    // Dual-control: surface progress (n/required) + next distinct-principal command.
+    // Pending approvals require authority from outside the caller-controlled
+    // CLI/dashboard plane. Never turn local advisory labels into a retry loop.
     let pending = store.pending_approvals()?;
     if let Some(rec) = pending.first() {
         let dual = store.tool_requires_dual_control(&rec.binding, &rec.tool);
         let required = crate::approval::required_grant_count(dual);
-        let grants_n = rec.grants.len();
-        let principals: Vec<String> = rec.grants.iter().map(|g| g.principal.clone()).collect();
-
-        if dual && grants_n < required {
-            // Still waiting on more distinct principal(s) — not the single-grant generic.
-            let cmd = crate::approval::next_grant_command(&rec.id, false);
-            let progress = crate::approval::format_dual_control_progress(
-                grants_n,
-                required,
-                &principals,
-                true,
-                false,
-            );
-            let message = if grants_n == 0 {
-                format!(
-                    "Pending dual-control approval for `{}` on binding `{}` ({progress}). \
-                     Human: `{cmd}` (need {required} distinct principals) then re-call the tool.",
-                    rec.tool, rec.binding
-                )
-            } else {
-                format!(
-                    "Pending dual-control approval for `{}` on binding `{}` — need second principal ({}/{}). \
-                     Human: `{cmd}` then re-call the tool. ({progress})",
-                    rec.tool,
-                    rec.binding,
-                    grants_n,
-                    required
-                )
-            };
-            return Ok(SafeNext {
-                action: "approve".into(),
-                command: Some(cmd),
-                agent_tool: None,
-                message,
-                ready: false,
-                approval_id: Some(rec.id.clone()),
-                binding,
-                tenant,
-            });
-        }
-
-        let grant = format!("locus approve grant {} --as <principal>", rec.id);
+        let mode = if dual {
+            "dual-control"
+        } else {
+            "single-approval"
+        };
         return Ok(SafeNext {
-            action: "approve".into(),
-            command: Some(grant),
+            action: "external_authorization".into(),
+            command: None,
             agent_tool: None,
             message: format!(
-                "Pending approval for `{}` on binding `{}`. Human: `locus approve grant {} --as <principal>` then re-call the tool.",
-                rec.tool, rec.binding, rec.id
+                "Provider execution for `{}` on binding `{}` is blocked pending a closed, independently authenticated external authorization envelope ({mode}, {required} authoritative approver(s)). This release has no external verifier. Local CLI/dashboard labels are advisory only; do not retry the tool after recording one.",
+                rec.tool, rec.binding
             ),
             ready: false,
             approval_id: Some(rec.id.clone()),
@@ -1176,34 +1140,22 @@ require_pin = true
         assert!(store.tool_requires_dual_control("acme", "github.delete_repo"));
 
         let next = compute_safe_next(&store, dir.path()).unwrap();
-        assert_eq!(next.action, "approve");
+        assert_eq!(next.action, "external_authorization");
         assert!(!next.ready);
         assert_eq!(next.approval_id.as_deref(), Some(rec.id.as_str()));
-        let cmd = next.command.as_deref().unwrap_or("");
-        assert!(
-            cmd.contains(&rec.id) && cmd.contains("approve grant"),
-            "command should be dual next-grant: {cmd}"
-        );
-        assert!(
-            cmd.contains("other-principal") || cmd.contains("<principal>"),
-            "dual zero-grants command: {cmd}"
-        );
+        assert!(next.command.is_none());
         assert!(
             next.message.contains("dual-control") || next.message.contains("dual_control"),
             "message should mention dual-control: {}",
             next.message
         );
         assert!(
-            next.message.contains("0/2") || next.message.contains("need 2"),
-            "message should show dual progress: {}",
+            next.message.contains("2 authoritative approver"),
+            "message should show external authority threshold: {}",
             next.message
         );
-        // Must not be the single-grant generic only
-        assert!(
-            !next.message.starts_with("Pending approval for"),
-            "should not use single-grant generic for dual: {}",
-            next.message
-        );
+        assert!(next.message.contains("do not retry"));
+        assert!(!next.message.contains("then re-call"));
     }
 
     #[test]
@@ -1228,23 +1180,15 @@ require_pin = true
         assert_eq!(rec.status, crate::ApprovalStatus::Pending);
 
         let next = compute_safe_next(&store, dir.path()).unwrap();
-        assert_eq!(next.action, "approve");
+        assert_eq!(next.action, "external_authorization");
         assert!(!next.ready);
         assert_eq!(next.approval_id.as_deref(), Some(rec.id.as_str()));
-        let expected_cmd = crate::approval::next_grant_command(&rec.id, false);
-        assert_eq!(next.command.as_deref(), Some(expected_cmd.as_str()));
-        assert!(
-            next.message.contains("need second principal") || next.message.contains("1/2"),
-            "partial dual should show 1/2 progress: {}",
-            next.message
-        );
-        assert!(
-            next.message.contains("other-principal")
-                || next.command.as_deref().unwrap().contains("other-principal"),
-            "partial dual command/message: cmd={:?} msg={}",
-            next.command,
-            next.message
-        );
+        assert!(next.command.is_none());
+        assert!(next.message.contains("external authorization envelope"));
+        assert!(next
+            .message
+            .contains("Local CLI/dashboard labels are advisory only"));
+        assert!(next.message.contains("do not retry"));
     }
 
     #[test]
@@ -1256,7 +1200,7 @@ require_pin = true
             .save_binding(&sample_binding("acme", "acme-corp"))
             .unwrap();
         store.pin("acme", dir.path(), None, false).unwrap();
-        let rec = store
+        let _rec = store
             .create_pending_approval(
                 "github.some_tool",
                 "acme",
@@ -1268,14 +1212,10 @@ require_pin = true
         assert!(!store.tool_requires_dual_control("acme", "github.some_tool"));
 
         let next = compute_safe_next(&store, dir.path()).unwrap();
-        assert_eq!(next.action, "approve");
-        let expected = format!("locus approve grant {} --as <principal>", rec.id);
-        assert_eq!(next.command.as_deref(), Some(expected.as_str()));
-        assert!(
-            next.message.starts_with("Pending approval for"),
-            "single-control uses generic message: {}",
-            next.message
-        );
+        assert_eq!(next.action, "external_authorization");
+        assert!(next.command.is_none());
+        assert!(next.message.contains("closed, independently authenticated"));
+        assert!(next.message.contains("do not retry"));
         assert!(!next.message.contains("dual-control"));
         assert!(!next.message.contains("need second principal"));
     }

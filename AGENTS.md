@@ -15,7 +15,7 @@ Rust workspace (`locus-core`, `locus-cli`, `locus-mcp`) implementing:
 - **Isolation** — scrub ambient identity; inject only pinned providers into child env / workers
 - **MCP multiplexor** — `locus-mcp` exposes control tools + tools for the active pin only
 - **Scope freeze** — model cannot override frozen `project_ref` / `team_id` / org allowlists
-- **Policy** — allow/deny + `require_approval` globs; human grant via CLI
+- **Policy** — allow/deny + `require_approval` globs; local CLI labels are advisory and external authorization is fail-closed
 
 Codename directory may still be `mmcp`; product name is **Locus**.
 
@@ -137,7 +137,7 @@ When the **user** has Locus wired (not when hacking this repo):
 1. Call `locus_whoami` / `locus whoami` before infrastructure mutations if context is unclear.
 2. Treat pin as authoritative — do not invent alternate `project_ref` / teams.
 3. If tools are missing or wrong tenant: ask the human to `locus pin <alias>`; do not claim you can re-pin.
-4. Destructive tools may block on `require_approval` — human runs approval grant; do not loop-spam confirm.
+4. Destructive tools may block on `require_approval`. Only a closed external authorization envelope can release provider execution. Local CLI labels are advisory; do not retry after recording one.
 
 Firm / multi-client workflow: [docs/firm-mode.md](./docs/firm-mode.md).
 

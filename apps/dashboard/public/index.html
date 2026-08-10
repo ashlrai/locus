@@ -719,6 +719,21 @@
         return id.slice(0, 10) + "…" + id.slice(-4);
       }
 
+      function renderCapability(status, key) {
+        const capabilities = status && status.capabilities;
+        const item = capabilities && capabilities.reporting === "live_runtime"
+          ? capabilities[key]
+          : null;
+        if (!item || typeof item.state !== "string" || !item.state) {
+          return `<span class="warn">unknown / degraded</span>`;
+        }
+        const state = item.state;
+        const cls = state === "available" || state === "available_to_manual_cli_children"
+          ? "err"
+          : "warn";
+        return `<span class="${cls}">${esc(state.replace(/_/g, " "))}</span>`;
+      }
+
       function renderPin(status, whoami) {
         const el = $("pin-body");
         if (!status || !status.pinned) {
@@ -744,9 +759,9 @@
         html += kv("frozen", frozen);
         if (status.expired) html += kv("expired", `<span class="err">yes</span>`);
         html += kv("mode", esc(status.mode || "exclusive"));
-        html += kv("command authority", `<span class="warn">${esc(status.command_execution_authority || "manual_identity_only")}</span>`);
-        html += kv("agent exec", status.agent_command_execution_enabled ? `<span class="err">enabled</span>` : `<span class="ok">disabled</span>`);
-        html += kv("credential export", status.provider_credential_export_enabled ? `<span class="err">enabled</span>` : `<span class="ok">disabled</span>`);
+        html += kv("manual cli exec", renderCapability(status, "manual_cli_command_execution"));
+        html += kv("agent command exec", renderCapability(status, "agent_command_execution"));
+        html += kv("credential injection", renderCapability(status, "provider_credential_injection"));
         if (status.namespaces && status.namespaces.length) {
           html += kv("namespaces", esc(status.namespaces.join(", ")));
         }

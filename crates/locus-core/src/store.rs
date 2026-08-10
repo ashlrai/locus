@@ -1715,6 +1715,11 @@ impl Store {
                 "status": "pending",
             })),
         )?;
+        if dual && rec.grants.len() == 1 {
+            // Best-effort UX only: opt-in, rate-limited, async on macOS, and
+            // explicitly non-authoritative. Delivery cannot affect the record.
+            crate::approval::try_notify_partial_grant(&rec);
+        }
         Ok(rec)
     }
 

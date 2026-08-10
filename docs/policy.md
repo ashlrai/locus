@@ -96,8 +96,9 @@ Because rules are ordered, a more-specific `allow` listed **above** a broader `r
    ```
 
    Banners are silent (no sound) and rate-limited to one per tool+binding per 60s.
-   When dual-control reaches a **partial** grant (1/2), an opt-in banner asks for
-   the second principal (separate rate limit per approval id).
+   On the first dual-control advisory label, an opt-in banner reports the local
+   review activity and says external broker authority is still required
+   (separate rate limit per approval id).
    Disable anytime: `locus notify off` or `LOCUS_NOTIFY=0` / `LOCUS_QUIET=1`.
 3. A local operator may record advisory evidence:
    ```bash

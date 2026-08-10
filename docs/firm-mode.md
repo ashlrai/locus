@@ -237,7 +237,7 @@ locus approve wait <id> --timeout 120
 locus approve deny <id>
 ```
 
-After each grant, the CLI prints **dual-control progress** clearly (`grants 1/2`, who granted, next command). Partial grants stay `status=pending` until a second distinct principal grants.
+After each local label, the CLI prints advisory progress separately from authoritative progress. The record stays `status=pending` even after two distinct local labels; only a future verified external envelope can change execution authority.
 
 **Mechanisms:**
 
