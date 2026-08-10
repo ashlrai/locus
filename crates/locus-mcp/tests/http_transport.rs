@@ -183,6 +183,137 @@ fn http_health_unauthenticated() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["service"], "locus-mcp");
     assert!(v["version"].as_str().is_some());
+    assert_eq!(v["transport"], "streamable-http-lite");
+    assert!(v["endpoints"]["rpc"].as_str().is_some());
+}
+
+#[test]
+fn http_get_mcp_capabilities_requires_token() {
+    let srv = HttpServer::spawn("caps-token-required");
+    let (status, _, resp) = srv.request("GET", "/mcp", None, None);
+    assert_eq!(status, 401, "expected unauthorized, got {status}: {resp}");
+    assert!(
+        resp.contains("unauthorized") || resp.contains("Unauthorized"),
+        "{resp}"
+    );
+}
+
+#[test]
+fn http_get_mcp_capabilities_values_free() {
+    let srv = HttpServer::spawn("caps-token-ok");
+    let (status, headers, body) = srv.request("GET", "/mcp", None, Some(&srv.token));
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"),
+        "headers={headers}"
+    );
+    let v: Value = serde_json::from_str(&body).expect("capabilities json");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["service"], "locus-mcp");
+    assert_eq!(v["transport"], "streamable-http-lite");
+    assert_eq!(v["protocolVersion"], "2024-11-05");
+    assert!(v["capabilities"]["tools"].is_object());
+    assert_eq!(v["pin"]["pinned"], false);
+    let tools = v["tools"].as_array().expect("tools names array");
+    assert!(
+        tools.iter().any(|t| t.as_str() == Some("locus_whoami")),
+        "expected control tool names, got {tools:?}"
+    );
+    // Values-free: no secret-looking material, no credential fields.
+    let lower = body.to_ascii_lowercase();
+    assert!(!lower.contains("phm_"), "{body}");
+    assert!(!lower.contains("\"credential_ref\""), "{body}");
+    assert!(!lower.contains("secret-token"), "{body}");
+    // Tool entries are bare names, not full schemas.
+    assert!(
+        tools.iter().all(|t| t.is_string()),
+        "tools must be name strings only: {tools:?}"
+    );
+}
+
+#[test]
+fn http_accept_sse_only_returns_single_event() {
+    let srv = HttpServer::spawn("sse-token");
+    let mut stream = TcpStream::connect(srv.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let body = br#"{"jsonrpc":"2.0","id":3,"method":"ping","params":{}}"#;
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nContent-Length: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        body.len(),
+        srv.token
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.write_all(body).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (status, headers, resp_body) = parse_http_response(&raw);
+    assert_eq!(status, 200, "{raw}");
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("content-type: text/event-stream"),
+        "headers={headers}"
+    );
+    assert!(
+        resp_body.contains("event: message") && resp_body.contains("data: "),
+        "{resp_body}"
+    );
+    // Extract JSON after "data: "
+    let data = resp_body
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .expect("sse data line");
+    let v: Value = serde_json::from_str(data).expect("jsonrpc in sse");
+    assert_eq!(v["id"], 3);
+    assert!(v.get("result").is_some(), "{v}");
+}
+
+#[test]
+fn http_accept_not_acceptable() {
+    let srv = HttpServer::spawn("accept-406");
+    let mut stream = TcpStream::connect(srv.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let body = br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#;
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nAccept: text/plain\r\nContent-Length: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        body.len(),
+        srv.token
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.write_all(body).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (status, _, resp_body) = parse_http_response(&raw);
+    assert_eq!(status, 406, "{raw}");
+    assert!(resp_body.contains("not_acceptable"), "{resp_body}");
+}
+
+#[test]
+fn http_content_type_reject_non_json() {
+    let srv = HttpServer::spawn("ct-415");
+    let mut stream = TcpStream::connect(srv.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let body = br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#;
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        body.len(),
+        srv.token
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.write_all(body).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (status, _, resp_body) = parse_http_response(&raw);
+    assert_eq!(status, 415, "{raw}");
+    assert!(resp_body.contains("unsupported_media_type"), "{resp_body}");
 }
 
 #[test]

@@ -138,7 +138,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Audit export → SIEM / remote append — **minimal webhook sink** (`locus events export --sink webhook` / `LOCUS_AUDIT_WEBHOOK_URL`; redacted JSONL/OTLP POST; fail soft when unset; secret-scan fail closed). Full team-tier continuous append + chain verify still open
 - [x] Adapter registry v0: `adapters/manifest.toml` schema (`schema/adapter-manifest.schema.json`) + parse/list/verify in `locus-core` + `locus adapter list|verify` (+ `--require-signed` fail-closed; HMAC mock trust keys in tests; built-in catalog ships unsigned). Full plugin load + ed25519 registry root still open — see [docs/adapter-sdk.md](./docs/adapter-sdk.md)#signed-registry-roadmap
 - [ ] Hard sandbox (seccomp/VM) + bug bounty on seal/capability logic
-- [ ] Streamable HTTP / remote multiplexor (platform phase)
+- [ ] Streamable HTTP / remote multiplexor (platform phase) — **partial**: streamable-HTTP-lite on `locus-mcp --http` with `GET /mcp` capabilities (tool **names** + pin summary, values-free), Accept/`Content-Type` negotiation (`application/json` preferred; single-event SSE when `Accept: text/event-stream` only), remote-deploy docs (reverse proxy, `LOCUS_MCP_HTTP_TOKEN`, `LOCUS_HOME`, pin-before-serve), HTTP unit tests (health + auth fail-closed + Accept 406/SSE). Full multi-message SSE, `Mcp-Session-Id` resume, and multi-tenant remote multiplexor still open
 
 ---
 
