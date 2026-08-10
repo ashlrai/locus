@@ -38,6 +38,10 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 - CLI unit tests: watch interval parse, fail policy, heartbeat from pinned/unpinned packs
 - Core unit `inv_notify_default_false` + e2e step 15/27 keep desktop notifications **OFF**
   by default under clean `LOCUS_HOME`
+- Composite worker tests for top-adapter recipe expansion (`github-mcp`,
+  `supabase-mcp`, `vercel-mcp` sandbox gates), exclusive synthetic catalog +
+  scope freeze alongside recipe-shaped upstream, and ambient provider-secret
+  exclusion when `resolve_secrets = false`
 
 ### Security
 
