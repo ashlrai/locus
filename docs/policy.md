@@ -96,6 +96,8 @@ Because rules are ordered, a more-specific `allow` listed **above** a broader `r
    ```
 
    Banners are silent (no sound) and rate-limited to one per tool+binding per 60s.
+   When dual-control reaches a **partial** grant (1/2), an opt-in banner asks for
+   the second principal (separate rate limit per approval id).
    Disable anytime: `locus notify off` or `LOCUS_NOTIFY=0` / `LOCUS_QUIET=1`.
 3. Human grants:
    ```bash

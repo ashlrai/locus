@@ -836,10 +836,23 @@
           html += `<div class="row-meta">grants ${grants}/${required}${dual ? " · dual_control" : ""}`;
           if (a.requester) html += ` · requester=${esc(a.requester)}`;
           html += `</div>`;
+          // Next-principal hint for partial dual-control (1 of 2 grants in).
+          if (dual && grants > 0 && grants < required) {
+            const who = (a.grants || [])
+              .map((g) => (g && g.principal) || "")
+              .filter(Boolean)
+              .join(", ");
+            html += `<div class="row-meta"><span class="warn">need second principal</span>`;
+            if (who) html += ` · granted: <span class="y">${esc(who)}</span>`;
+            html += ` · next: locus approve grant ${esc(a.id)} --as &lt;other-principal&gt;</div>`;
+          }
           html += `<div class="row-actions">`;
           html += `<input type="text" class="principal" placeholder="principal" value="" />`;
           html += `<button class="btn sm primary grant-btn" type="button">grant</button>`;
-          html += `<button class="btn sm" type="button" data-copy="locus approve grant ${esc(a.id)} --as $USER">cli</button>`;
+          // Entity-escape angle brackets in the attribute; getAttribute decodes for clipboard.
+          const cliAs =
+            dual && grants > 0 && grants < required ? "&lt;other-principal&gt;" : "$USER";
+          html += `<button class="btn sm" type="button" data-copy="locus approve grant ${esc(a.id)} --as ${cliAs}">cli</button>`;
           html += `</div></div>`;
         }
         el.innerHTML = html;
