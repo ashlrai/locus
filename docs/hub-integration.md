@@ -36,7 +36,7 @@ Machine contract for **ashlr-hub** (and similar orchestrators) to shell out to L
 |----------|------|
 | `LOCUS_HOME` | Store root (default `~/.locus`). Use a dedicated path in tests/CI. |
 | `LOCUS_SESSION_ID` | Optional. When set (e.g. after `locus ci mint`), locus resolves that sealed session instead of `sessions/active.json`. Echoed on agent report as `env_session_id` when present. |
-| `LOCUS_ENFORCE` | Opt-in pre-mutate / CI session gate for hub spawn sites. Wins over `config.locus.enforce` when set. See [Pre-mutate enforce](#pre-mutate-enforce-locus_enforce--configlocus) below. |
+| `LOCUS_ENFORCE` | Opt-in pre-mutate / CI session gate for hub spawn sites. Wins over `config.locus.enforce` / `config.locus.firm` when set. See [Pre-mutate enforce](#pre-mutate-enforce-locus_enforce--configlocus) below. |
 | `LOCUS_CI_BINDING` / `LOCUS_BINDING` | Optional. When set, `runWithLocusSessionIfConfigured` mints an ephemeral pin (`ci mint`) for fleet/single-task paths instead of ambient `active.json`. |
 | `LOCUS_BIN` | Optional override for the `locus` binary path. |
 | `LOCUS_NOTIFY` / `LOCUS_QUIET` | Prefer `0` / `1` in hub children (drop-in sets these on mint handles). |
@@ -59,23 +59,28 @@ Shared hub spawn sites should call **`assertLocusPreMutate()`** / **`applyLocusP
 **Mode resolution** (`resolveLocusEnforceMode` — first match wins; never always-on):
 
 1. Env `LOCUS_ENFORCE` when the key is present (including empty / `off` → override firm config)
-2. `~/.ashlr/config.json` → `locus.enforce` (hub firm mode; only field after #254)
-3. `off` (monorepo-safe default when both unset)
+2. `~/.ashlr/config.json` → `locus.enforce` when set explicitly (`off`|`warn`|`enforce`)
+3. `locus.firm === true` → `enforce` (production fleet profile; hub #258)
+4. `off` (monorepo-safe default — firm defaults false)
 
-| Token (env or config) | Mode | Behavior |
-|-----------------------|------|----------|
+| Token (env or config.enforce) | Mode | Behavior |
+|-------------------------------|------|----------|
 | unset / absent config / `0` / `false` / `no` / `off` / `""` | `off` | Allow without CLI probe (monorepo-safe default) |
 | `warn` / `log` | `warn` | Shell `locusFleetGate`; log blockers; still allow |
 | `1` / `true` / `yes` / `enforce` / `block` | `enforce` | Shell fleet gate; **deny** when blocked |
 | any other non-empty value | `enforce` | Fail closed (typo ≠ soft-allow) |
 
-**Firm mode** (agencies pin once in config; no shell export required):
+Env always beats firm/enforce config (including `LOCUS_ENFORCE=off`). Explicit `locus.enforce` beats `locus.firm`. Do not flip monorepo defaults to firm.
+
+**Firm profile** (production fleets — opt-in; no shell export required):
 
 ```json
 // ~/.ashlr/config.json
-{ "locus": { "enforce": "enforce" } }
+{ "locus": { "firm": true } }
+// # ashlr config set locus.firm true
 ```
 
+Explicit enforce mode (overrides firm when set): `{ "locus": { "enforce": "enforce" } }`.  
 Soft roll-out: `{ "locus": { "enforce": "warn" } }`.  
 Local override without editing config: `LOCUS_ENFORCE=off`.
 
@@ -87,17 +92,18 @@ import {
   decidePreMutateGate,
   resolveLocusEnforceMode,
   extractLocusConfigEnforce,
+  extractLocusConfigFirm,
   parseLocusEnforceToken,
 } from "../integrations/ashlr-hub/locus";
 
 // Preferred at spawn sites: logs warn/block to stderr
-// (loads ~/.ashlr locus.enforce when LOCUS_ENFORCE is unset)
+// (loads ~/.ashlr locus.enforce / locus.firm when LOCUS_ENFORCE is unset)
 const decision = applyLocusPreMutateGate(); // or assertLocusPreMutate()
 if (!decision.allow) {
   throw new Error(formatPreMutateBlockers(decision) || "locus pre-mutate blocked");
 }
 // Pure path when you already have a fleet-gate result + explicit config:
-// decidePreMutateGate(gate, resolveLocusEnforceMode(env, { locus: { enforce: "warn" } }))
+// decidePreMutateGate(gate, resolveLocusEnforceMode(env, { locus: { firm: true } }))
 // Pass null as config to disable firm FS read in tests: assertLocusPreMutate(env, null)
 ```
 
@@ -348,7 +354,7 @@ if (!gate.allowDispatch) {
   // do not dispatch mutating agents
 }
 
-// Opt-in spawn-site gate (default off until LOCUS_ENFORCE or config.locus.enforce)
+// Opt-in spawn-site gate (default off until LOCUS_ENFORCE, config.locus.enforce, or locus.firm)
 const pre = applyLocusPreMutateGate();
 if (!pre.allow) throw new Error(formatPreMutateBlockers(pre));
 

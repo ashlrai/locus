@@ -35,18 +35,19 @@ export LOCUS_QUIET=1
 |----------|----------|--------|
 | `LOCUS_HOME` | yes (default `~/.locus`) | Job-local path preferred in CI |
 | `LOCUS_SESSION_ID` | CI children | From `locus ci mint` / `withLocusSession` |
-| `LOCUS_ENFORCE` | opt-in at spawn sites | Env wins over firm config. `1`/`enforce` fail closed; `warn` log-only; unset → consult `config.locus.enforce` then off |
+| `LOCUS_ENFORCE` | opt-in at spawn sites | Env wins over firm config. `1`/`enforce` fail closed; `warn` log-only; unset → `locus.enforce` then `locus.firm` then off |
 | `LOCUS_CI_BINDING` / `LOCUS_BINDING` | CI mint overlay | When set, `runWithLocusSessionIfConfigured` mints ephemeral pin (hub `runSwarm` / `runTask`) |
 | `LOCUS_NOTIFY` | recommended `0` | Quiet hub children |
 | `PATH` | `locus` + `locus-mcp` | Or set `LOCUS_BIN` |
 
-**Firm config** (`~/.ashlr/config.json`, hub #254 — only `enforce` today):
+**Firm config** (`~/.ashlr/config.json`, hub #254 / #258):
 
 ```json
-{ "locus": { "enforce": "enforce" } }
+{ "locus": { "firm": true } }
+// or explicit: { "locus": { "enforce": "enforce" } }
 ```
 
-Resolution: env `LOCUS_ENFORCE` (if set) → `locus.enforce` → `off`. Never always-on.
+Resolution: env `LOCUS_ENFORCE` (if set) → `locus.enforce` → `locus.firm === true` → `off`. Never always-on; firm defaults false.
 
 ### 1. CLI present
 
@@ -86,7 +87,7 @@ if (!gate.allowDispatch) {
 **Shared spawn sites** (fleet/run engines) should use the opt-in pre-mutate wrapper so unset enforce mode does not break monorepo CI:
 
 ```ts
-const pre = applyLocusPreMutateGate(); // mode from LOCUS_ENFORCE or config.locus.enforce
+const pre = applyLocusPreMutateGate(); // mode from LOCUS_ENFORCE / locus.enforce / locus.firm
 if (!pre.allow) {
   throw new Error(formatPreMutateBlockers(pre) || "locus pre-mutate blocked");
 }
@@ -94,9 +95,9 @@ if (!pre.allow) {
 
 | Mode source | Result |
 |-------------|--------|
-| env unset **and** no `config.locus.enforce` / off | `allow: true`, no CLI probe |
-| `warn` / `log` (env or config) | probes fleet gate; `allow: true` + `shouldWarn` when blocked |
-| `1` / `enforce` / … (env or config) | probes fleet gate; `allow: false` when blocked |
+| env unset **and** no `locus.enforce` / firm false / off | `allow: true`, no CLI probe |
+| `warn` / `log` (env or config.enforce) | probes fleet gate; `allow: true` + `shouldWarn` when blocked |
+| `1` / `enforce` / … (env or config) **or** `locus.firm: true` | probes fleet gate; `allow: false` when blocked |
 
 Hub call sites (opt-in): pre-mutate on `spawnEngine` / `runSwarmInternal` / `runApiModelSandboxed`; CI session mint on `runSwarm` / `runTask` via `runWithLocusSessionIfConfigured`.
 
