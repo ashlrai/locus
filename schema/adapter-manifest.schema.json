@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ashlrai/locus/schema/adapter-manifest.schema.json",
+  "title": "Locus Adapter Manifest",
+  "description": "Catalog of built-in (and future registry) provider adapters. Source TOML: adapters/manifest.toml. Consumed by `locus adapter list` / `locus adapter verify`. Never contains credential values — ids, tools, freeze selectors, and optional detached signatures only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "providers"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Manifest schema version. Current: 1."
+    },
+    "signature": {
+      "type": ["string", "null"],
+      "description": "Optional whole-file detached signature (roadmap). Prefer per-provider signatures in v0."
+    },
+    "signed_by": {
+      "type": ["string", "null"],
+      "description": "Key id for the whole-file signature."
+    },
+    "providers": {
+      "type": "array",
+      "minItems": 0,
+      "items": { "$ref": "#/$defs/provider" }
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Stable provider id (supabase, github, vercel, …)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable provider title."
+        },
+        "status": {
+          "type": "string",
+          "description": "Lifecycle label: built-in | experimental | deprecated | …",
+          "default": "built-in"
+        },
+        "synthetic": {
+          "type": "boolean",
+          "description": "True when tools are in-tree identity stubs (not upstream MCP workers)."
+        },
+        "capabilities": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Capability tags (scope, identity, repo_allowlist, …)."
+        },
+        "frozen_selectors": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Account/tenant selectors this adapter freezes (project_ref, team_id, orgs, …)."
+        },
+        "tools": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "MCP tool names owned by this adapter."
+        },
+        "destructive_tools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Subset of tools marked destructive (policy require_approval hints)."
+        },
+        "description": {
+          "type": "string",
+          "description": "Operator-facing notes."
+        },
+        "signature": {
+          "type": ["string", "null"],
+          "description": "Detached signature over canonical entry material. Format: hmac-sha256:<hex> (v0). Future: ed25519:<base64>."
+        },
+        "signed_by": {
+          "type": ["string", "null"],
+          "description": "Trust-store key id that produced signature."
+        }
+      }
+    }
+  }
+}
