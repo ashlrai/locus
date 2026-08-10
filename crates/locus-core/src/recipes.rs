@@ -28,6 +28,11 @@ pub struct UpstreamRecipe {
     /// Recommended `resolve_secrets` when the binding omits it.
     #[serde(default)]
     pub default_resolve_secrets: bool,
+    /// Recommended best-effort worker sandbox when the binding omits it.
+    /// Pure-recipe expand adopts this (same pattern as `default_resolve_secrets`).
+    /// Demo / local recipes keep this false so offline wiring stays unblocked.
+    #[serde(default)]
+    pub default_sandbox: bool,
     /// Env var names the upstream server typically reads (hints only).
     #[serde(default)]
     pub env_hints: Vec<String>,
@@ -86,13 +91,35 @@ pub fn suggest_for_provider(provider: &str) -> Result<Vec<UpstreamRecipe>> {
 }
 
 /// Copy-paste TOML fragment for a recipe (for CLI suggest).
+///
+/// Non-demo recipes include `sandbox = true` when `default_sandbox` is set
+/// (or when secrets are recommended — real provider recipes), so operators
+/// copy a hardened binding by default. Demo recipes stay sandbox-off.
 pub fn recipe_toml_snippet(recipe: &UpstreamRecipe) -> String {
     let mut line = format!("upstream = {{ recipe = \"{}\"", recipe.id);
     if recipe.default_resolve_secrets {
         line.push_str(", resolve_secrets = true");
     }
+    // Prefer explicit sandbox when the recipe defaults to it, or for real
+    // provider recipes (secrets-on) so snippets stay hardened even if
+    // default_sandbox is still false in recipes.toml.
+    if recipe.default_sandbox || (recipe.default_resolve_secrets && !is_demo_recipe(recipe)) {
+        line.push_str(", sandbox = true");
+    }
     line.push_str(" }");
     line
+}
+
+/// Demo / offline wiring recipes — never auto-suggest sandbox.
+fn is_demo_recipe(recipe: &UpstreamRecipe) -> bool {
+    let id = recipe.id.to_ascii_lowercase();
+    id.contains("demo")
+        || id == "filesystem-mcp"
+        || id == "everything-mcp"
+        || recipe
+            .providers
+            .iter()
+            .any(|p| matches!(p.to_ascii_lowercase().as_str(), "demo" | "mock" | "local"))
 }
 
 #[cfg(test)]
@@ -153,5 +180,35 @@ mod tests {
         let snip = recipe_toml_snippet(&r);
         assert!(snip.contains("recipe = \"github-mcp\""));
         assert!(snip.contains("resolve_secrets = true"));
+        assert!(
+            snip.contains("sandbox = true"),
+            "real provider recipes should suggest sandbox: {snip}"
+        );
+    }
+
+    #[test]
+    fn snippet_demo_skips_sandbox() {
+        let r = get_recipe("everything-mcp").unwrap();
+        let snip = recipe_toml_snippet(&r);
+        assert!(
+            !snip.contains("sandbox"),
+            "demo recipe must not force sandbox: {snip}"
+        );
+        assert!(!r.default_sandbox);
+    }
+
+    #[test]
+    fn real_recipes_default_sandbox() {
+        for id in ["github-mcp", "github-official", "supabase-mcp"] {
+            let r = get_recipe(id).unwrap();
+            assert!(
+                r.default_sandbox,
+                "{id} should default_sandbox for pure-recipe expand"
+            );
+        }
+        for id in ["filesystem-mcp", "everything-mcp"] {
+            let r = get_recipe(id).unwrap();
+            assert!(!r.default_sandbox, "{id} demo must stay sandbox-off");
+        }
     }
 }

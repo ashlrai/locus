@@ -141,18 +141,13 @@ impl UpstreamSpec {
     /// - No recipe → requires non-empty `command`.
     /// - Recipe set → look up builtins; empty `command`/`args` take recipe
     ///   defaults; non-empty fields win (full override, not merge).
-    /// - `resolve_secrets`: if still false and the recipe defaults to true,
-    ///   adopt the recipe default (binding can force false only by setting
-    ///   command explicitly without recipe, or we keep user false when they
-    ///   wrote `resolve_secrets = false` — see note below).
+    /// - Pure recipe path (empty command *and* empty args): adopt
+    ///   `recipe.default_resolve_secrets` / `recipe.default_sandbox` via OR
+    ///   (`binding_flag || recipe.default_*`). Explicit command/args keep
+    ///   the binding's flags as written.
     ///
-    /// Note: TOML bool default is false, so `resolve_secrets` omitted means
-    /// false. Recipes that need secrets should be used with
-    /// `resolve_secrets = true` in the binding (CLI snippets include it).
-    /// We only auto-enable `default_resolve_secrets` when the user did not
-    /// set command/args (pure recipe expansion path) *and* resolve_secrets
-    /// is still false — actually we always leave resolve_secrets as written
-    /// so explicit `false` is honored.
+    /// Note: TOML bool default is false, so omitted flags mean false until
+    /// pure-recipe expand. CLI snippets include recommended flags.
     pub fn expand(&self) -> crate::Result<Self> {
         let recipe_name = self
             .recipe
@@ -185,13 +180,19 @@ impl UpstreamSpec {
                 "upstream recipe `{name}` resolved to an empty command"
             )));
         }
-        // Pure recipe path: adopt recommended resolve_secrets when the binding
-        // did not set command (recipe-only). If the user wrote an explicit
-        // command, keep resolve_secrets as given.
-        let resolve_secrets = if self.command.trim().is_empty() && self.args.is_empty() {
+        // Pure recipe path: adopt recommended resolve_secrets / sandbox when
+        // the binding did not set command (recipe-only). If the user wrote an
+        // explicit command, keep flags as given.
+        let pure_recipe = self.command.trim().is_empty() && self.args.is_empty();
+        let resolve_secrets = if pure_recipe {
             self.resolve_secrets || recipe.default_resolve_secrets
         } else {
             self.resolve_secrets
+        };
+        let sandbox = if pure_recipe {
+            self.sandbox || recipe.default_sandbox
+        } else {
+            self.sandbox
         };
 
         Ok(Self {
@@ -199,7 +200,7 @@ impl UpstreamSpec {
             command,
             args,
             resolve_secrets,
-            sandbox: self.sandbox,
+            sandbox,
         })
     }
 
@@ -664,7 +665,47 @@ upstream = { recipe = "github-mcp" }
         assert_eq!(expanded.command, "npx");
         assert!(expanded.args.iter().any(|a| a.contains("server-github")));
         assert!(expanded.resolve_secrets, "recipe default_resolve_secrets");
+        assert!(expanded.sandbox, "recipe default_sandbox on real providers");
         assert!(b.provider("github").unwrap().has_upstream());
+    }
+
+    #[test]
+    fn expand_pure_recipe_adopts_default_sandbox() {
+        // Real provider recipe: default_sandbox = true → pure expand enables it.
+        let up = UpstreamSpec::from_recipe("github-mcp");
+        assert!(!up.sandbox, "raw from_recipe starts sandbox-off");
+        let expanded = up.expand().unwrap();
+        assert!(expanded.sandbox, "pure recipe adopts default_sandbox");
+        assert!(expanded.resolve_secrets);
+
+        // Explicit sandbox = true still true after expand.
+        let forced = UpstreamSpec::from_recipe("github-mcp").sandbox(true);
+        assert!(forced.expand().unwrap().sandbox);
+
+        // Demo recipe stays sandbox-off unless the binding forces it.
+        let demo = UpstreamSpec::from_recipe("everything-mcp");
+        assert!(!demo.expand().unwrap().sandbox);
+        let demo_on = UpstreamSpec::from_recipe("everything-mcp").sandbox(true);
+        assert!(demo_on.expand().unwrap().sandbox);
+
+        // Explicit command path does not auto-adopt recipe defaults.
+        let override_cmd = UpstreamSpec {
+            recipe: Some("github-mcp".into()),
+            command: "custom-mcp".into(),
+            args: vec!["--flag".into()],
+            resolve_secrets: false,
+            sandbox: false,
+        };
+        let expanded = override_cmd.expand().unwrap();
+        assert_eq!(expanded.command, "custom-mcp");
+        assert!(
+            !expanded.sandbox,
+            "explicit command keeps sandbox as written"
+        );
+        assert!(
+            !expanded.resolve_secrets,
+            "explicit command keeps resolve_secrets as written"
+        );
     }
 
     #[test]

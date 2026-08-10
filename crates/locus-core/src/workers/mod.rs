@@ -456,12 +456,42 @@ mod tests {
             sandbox: true,
         });
         assert!(backend.sandbox_active());
-        // build_command is side-effect free for spawn=false; we only assert config path.
-        let _cmd = backend.build_command(&session, &binding, pb, &work_dir);
-        // Restricted PATH composition is unit-tested in sandbox module; here ensure
-        // config flag enables sandbox without panicking.
-        assert!(crate::workers::sandbox_enabled(true));
-        assert!(crate::workers::restricted_worker_path().contains("/usr/bin"));
+
+        let command = backend.build_command(&session, &binding, pb, &work_dir);
+        let env = command
+            .get_envs()
+            .filter_map(|(key, value)| value.map(|value| (key, value)))
+            .map(|(key, value)| {
+                (
+                    key.to_string_lossy().into_owned(),
+                    value.to_string_lossy().into_owned(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let restricted = crate::workers::restricted_worker_path();
+        let path = env.get("PATH").expect("sandboxed worker must set PATH");
+        assert_eq!(
+            path, &restricted,
+            "PATH must equal restricted_worker_path()"
+        );
+        assert!(path.contains("/usr/bin"));
+        assert!(path.contains("/bin"));
+
+        assert_eq!(
+            env.get(crate::workers::ENV_WORKER_SANDBOXED)
+                .map(String::as_str),
+            Some("1"),
+            "LOCUS_WORKER_SANDBOXED marker required"
+        );
+        let backend_tag = env
+            .get(crate::workers::ENV_WORKER_SANDBOX_BACKEND)
+            .map(String::as_str)
+            .expect("LOCUS_WORKER_SANDBOX_BACKEND required");
+        assert!(
+            backend_tag == "path" || backend_tag == "sandbox-exec",
+            "unexpected sandbox backend: {backend_tag}"
+        );
     }
 
     #[test]
