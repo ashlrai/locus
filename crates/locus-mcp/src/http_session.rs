@@ -88,10 +88,7 @@ impl HttpSessionMap {
         self
     }
 
-    pub fn with_pin_summary_fn(
-        mut self,
-        f: Option<fn() -> Option<HttpSessionPinSummary>>,
-    ) -> Self {
+    pub fn with_pin_summary_fn(mut self, f: Option<fn() -> Option<HttpSessionPinSummary>>) -> Self {
         self.pin_summary_fn = f;
         self
     }
@@ -260,10 +257,7 @@ impl HttpSessionMap {
                 return None;
             }
         };
-        if rec.v != HTTP_SESSION_DISK_VERSION
-            || rec.id != id
-            || !is_safe_http_session_id(&rec.id)
-        {
+        if rec.v != HTTP_SESSION_DISK_VERSION || rec.id != id || !is_safe_http_session_id(&rec.id) {
             let _ = fs::remove_file(&path);
             return None;
         }
@@ -365,9 +359,7 @@ fn is_expired(last_seen: SystemTime, now: SystemTime, ttl: Duration) -> bool {
 }
 
 pub fn system_time_to_unix(t: SystemTime) -> u64 {
-    t.duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
 pub fn unix_to_system_time(secs: u64) -> Option<SystemTime> {
@@ -549,10 +541,7 @@ mod tests {
         assert!(map.touch(&id));
         map.clear_memory();
         assert_eq!(map.len(), 0);
-        assert!(
-            map.touch(&id),
-            "fresh map must resume session id from disk"
-        );
+        assert!(map.touch(&id), "fresh map must resume session id from disk");
         assert_eq!(map.len(), 1);
 
         let mut map2 = HttpSessionMap::new(Duration::from_secs(60), 8)
