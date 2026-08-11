@@ -9,12 +9,15 @@ no cross-binding credentials.
 
 - Automated walk: [`scripts/dogfood-multi-account.sh`](../scripts/dogfood-multi-account.sh)
 - IDE install probe (Claude/Cursor paths only): [`scripts/dogfood-clients.sh`](../scripts/dogfood-clients.sh)
+- Dual-IDE matrix (no secrets): [`scripts/dogfood-dual-ide.sh`](../scripts/dogfood-dual-ide.sh)
 - Firm ops: [firm-mode.md](./firm-mode.md) · [agency-starter.md](./agency-starter.md)
 - MCP wire-up: [mcp.md](./mcp.md)
 
 This path **does not** require Claude Code *and* Cursor at once. Wire **at
 least one** supported client so `locus agent report` can reach `ready`; the
-script itself is CLI-only.
+multi-account script itself is CLI-only. For a combined dual-IDE **matrix**
+(client found? locus registered? multi-account walked?) without printing
+secrets, use [`scripts/dogfood-dual-ide.sh`](../scripts/dogfood-dual-ide.sh).
 
 ---
 
@@ -106,6 +109,17 @@ Optional install probe (detects configs, dry-run only):
 scripts/dogfood-clients.sh
 ```
 
+Dual-IDE matrix (dry-run setup + MCP path has `"locus"` + optional multi walk):
+
+```bash
+# No aliases: probe clients only; multi column = skipped
+scripts/dogfood-dual-ide.sh
+
+# With personal + client: multi-account walk + client probe + matrix
+LOCUS_PERSONAL_ALIAS=personal LOCUS_CLIENT_ALIAS=client-a \
+  scripts/dogfood-dual-ide.sh
+```
+
 Restart the IDE once after first setup so the catalog reloads. Further pin
 walks are pure CLI.
 
@@ -184,17 +198,74 @@ MULTI-ACCOUNT DOGFOOD: ok
 
 ---
 
-## 6. What this does **not** cover
+## 6. Dual-IDE matrix (no secrets)
+
+Combines client install detection, setup dry-run, MCP `"locus"` registration
+checks, and an optional multi-account walk into one report. **Never** prints
+MCP env maps, CredentialRefs, or secret values — only paths and yes/no flags.
+
+```bash
+# Env form
+export LOCUS_PERSONAL_ALIAS=personal
+export LOCUS_CLIENT_ALIAS=client-a
+scripts/dogfood-dual-ide.sh
+
+# Args form
+scripts/dogfood-dual-ide.sh personal client-a
+
+# Soft-skip missing clients/aliases (exit 0 + matrix)
+unset LOCUS_PERSONAL_ALIAS LOCUS_CLIENT_ALIAS
+scripts/dogfood-dual-ide.sh
+
+# Hard-fail: no supported client, setup dry-run fail, multi walk fail,
+# or no client has locus registered in MCP JSON
+LOCUS_DOGFOOD_REQUIRE_DUAL=1 \
+  LOCUS_PERSONAL_ALIAS=personal LOCUS_CLIENT_ALIAS=client-a \
+  scripts/dogfood-dual-ide.sh
+```
+
+**Per found client (claude, cursor)**
+
+1. Detect install/config markers (same family of paths as `dogfood-clients.sh`).
+2. `locus agent setup --dry-run --client <name>` (never `--apply`).
+3. Resolve MCP config JSON path(s) and check for a `mcpServers.locus` key
+   (via `jq` when available, else a `"locus":` string match). Bodies are not printed.
+
+**When aliases are set**
+
+- Runs `scripts/dogfood-multi-account.sh` (enter → doctor → verify → agent report → leave).
+- Also runs `scripts/dogfood-clients.sh` (doctor off) for the install probe.
+
+**Matrix columns**
+
+| Column | Meaning |
+|--------|---------|
+| `client` | `claude` or `cursor` |
+| `found` | Install/config marker present |
+| `setup_dry` | `locus agent setup --dry-run` result |
+| `locus_reg` | MCP JSON has `locus` server entry (`yes`/`no`/`n/a`) |
+| `multi_account` | `walked` / `skipped` / `FAIL` (same status on every row) |
+
+Success line:
+
+```text
+DUAL-IDE DOGFOOD: ok (matrix above; secrets never printed)
+```
+
+---
+
+## 7. What this does **not** cover
 
 | Still manual / separate | Tool |
 |-------------------------|------|
-| Detect Claude/Cursor install paths | `scripts/dogfood-clients.sh` |
+| Detect Claude/Cursor install paths only | `scripts/dogfood-clients.sh` |
+| Dual-IDE matrix (found + locus reg + multi walk) | `scripts/dogfood-dual-ide.sh` |
 | Full isolated `DOGFOOD READY` (sandbox, hub smoke, …) | `scripts/dogfood.sh` |
 | Live dual-IDE UI confirmation (both apps open, catalogs reload) | Operator eyes |
 | Cross-binding credential isolation e2e | `cargo test -p locus-core --test isolation` |
 
-M3 checkbox: operator multi-account script + playbook landed; **live dual-IDE**
-dogfood remains an operator-manual confirmation.
+M3: multi-account playbook + dual-IDE **matrix script** (no secrets) landed;
+**live dual-IDE UI** dogfood remains an operator-manual confirmation.
 
 ---
 
@@ -203,6 +274,8 @@ dogfood remains an operator-manual confirmation.
 | Symptom | Fix |
 |---------|-----|
 | Soft-skip / missing aliases | Set `LOCUS_PERSONAL_ALIAS` + `LOCUS_CLIENT_ALIAS` or pass args; create bindings |
+| Dual matrix `locus_reg=no` | `locus agent setup --apply --client claude` (or `cursor`); re-run dual-ide script |
+| Dual matrix soft-skip / no clients | Install Claude Code or Cursor, or unset `LOCUS_DOGFOOD_REQUIRE_DUAL` |
 | `agent report` `protected` | Pin first; run `locus agent setup --apply --client claude` (or cursor) once |
 | `session_ok=false` / doctor WARN | Resolve PHM secrets; `locus doctor --json \| jq .unresolved_phm` (no values) |
 | `unsafe` / seal invalid | `locus leave` then `locus enter <alias>`; re-run `locus init` if home corrupt |
@@ -218,5 +291,6 @@ dogfood remains an operator-manual confirmation.
 - [ ] Phantom (or env) secrets resolve — doctor SAFE under each pin  
 - [ ] One IDE wired (`locus agent setup --apply --client claude|cursor`)  
 - [ ] Manual or `scripts/dogfood-multi-account.sh` walk: personal ready → leave → client ready → leave  
-- [ ] Optional hard CI: `LOCUS_DOGFOOD_REQUIRE_MULTI=1`  
+- [ ] Optional matrix: `scripts/dogfood-dual-ide.sh` (found / locus_reg / multi_account)  
+- [ ] Optional hard CI: `LOCUS_DOGFOOD_REQUIRE_MULTI=1` / `LOCUS_DOGFOOD_REQUIRE_DUAL=1`  
 - [ ] Dual-IDE UI still eyeballed when claiming full M3 multi-client dogfood  
