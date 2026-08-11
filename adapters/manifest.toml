@@ -5,9 +5,11 @@
 # Schema: schema/adapter-manifest.schema.json
 # CLI:    locus adapter list | locus adapter verify [--require-signed]
 #
-# Optional per-provider signature fields (v0 — HMAC stand-in for future ed25519):
-#   signature = "hmac-sha256:<hex>"   # over canonical entry material
-#   signed_by = "key-id"              # trust-store key id
+# Optional per-provider signature fields:
+#   signature = "ed25519:<base64>"       # preferred
+#   signature = "hmac-sha256:<hex>"      # backcompat stand-in
+#   signed_by = "key-id"                 # trust-store key id
+# Trust: LOCUS_ADAPTER_TRUST_KEYS=id:ed25519:<base64-pubkey>[,id:hmac-sha256:<64-hex>]
 # Built-in entries ship unsigned until a registry root is published.
 # `locus adapter verify --require-signed` is fail-closed when any entry is unsigned.
 

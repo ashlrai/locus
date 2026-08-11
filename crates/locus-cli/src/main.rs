@@ -1027,10 +1027,14 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
              Catalog source: adapters/manifest.toml (embedded).\n\
              Schema:         schema/adapter-manifest.schema.json\n\n\
              Per-entry optional fields:\n\
-               signature = \"hmac-sha256:<hex>\"   # v0 HMAC stand-in for future ed25519\n\
+               signature = \"ed25519:<base64>\"       # preferred\n\
+               signature = \"hmac-sha256:<hex>\"      # backcompat stand-in\n\
                signed_by = \"key-id\"\n\n\
+             Trust keys (process env):\n\
+               LOCUS_ADAPTER_TRUST_KEYS=id:ed25519:<base64-pubkey>[,id:hmac-sha256:<64-hex>]\n\n\
              Soft verify (default): unsigned OK; invalid/malformed signatures fail.\n\
-             --require-signed: fail closed unless every entry has a valid trusted signature.\n\
+             --require-signed: fail closed unless every entry has a valid trusted signature\n\
+             (ed25519 or hmac-sha256 when the key id is trusted).\n\
              Not a plugin loader — in-tree ProviderAdapter registration is still manual.\n\
              Docs: docs/adapter-sdk.md · sibling: locus upstream (recipes)",
         ),
