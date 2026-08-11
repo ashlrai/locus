@@ -43,14 +43,18 @@ Discovery and signature verification over the catalog — **not** a plugin loade
 ```bash
 locus adapter list [--json]
 locus adapter verify [--path FILE] [--require-signed] [--json]
+locus adapter trust list [--json]
+locus adapter trust add --id root --ed25519-pub <b64> [--json]
 locus topic adapter
 ```
 
 | Command | Behavior |
 |---------|----------|
 | `adapter list` | Print every provider in the embedded manifest (tools, freeze selectors, caps) |
-| `adapter verify` | Soft by default: unsigned entries OK; **invalid/malformed** signatures fail |
+| `adapter verify` | Soft by default: unsigned entries OK; **invalid/malformed** signatures fail. Uses **merged** trust keys (file + env). |
 | `adapter verify --require-signed` | **Fail closed** unless every entry has a valid trusted signature |
+| `adapter trust list` | List keys from `$LOCUS_HOME/trust/adapter-keys.toml` + `LOCUS_ADAPTER_TRUST_KEYS` overlay |
+| `adapter trust add` | Pin an ed25519 public key under the file store (mode `0600`) |
 
 Sibling: `locus upstream list` covers **spawn recipes** (`adapters/recipes.toml`); `locus adapter` covers the **provider catalog**.
 
@@ -280,7 +284,7 @@ impl ProviderAdapter for MyProviderAdapter {
 |-----|--------|
 | In-tree `ProviderAdapter`, synthetic identity tools | Upstream MCP / REST workers (partially landed via recipes) |
 | Manual `adapter_for` match | Optional out-of-tree packages / dynamic load |
-| Catalog parse + **ed25519** (preferred) / HMAC-SHA256 (backcompat) verify (`locus adapter`) | Production trust store under `~/.locus/trust/` + signed release manifests |
+| Catalog parse + **ed25519** (preferred) / HMAC-SHA256 (backcompat) verify (`locus adapter`) | Signed release manifests + registry root publication |
 | Policy + approval CLI | Elevation TTL, dual-control UX polish |
 
 Prefer **wrapping** official upstream MCP servers with frozen env over reimplementing APIs — see [workers.md](./workers.md).
@@ -321,7 +325,7 @@ JSON Schema: [`schema/adapter-manifest.schema.json`](../schema/adapter-manifest.
 | Algorithm | ed25519 detached over canonical entry material | HMAC-SHA256 over the same material |
 | Wire form | `ed25519:<base64>` (64-byte sig) | `hmac-sha256:<hex>` (32-byte MAC) |
 | Trust material | 32-byte public key, standard base64 | 32-byte secret, 64 hex chars |
-| Trust load | `LOCUS_ADAPTER_TRUST_KEYS` / test fixtures (`verify_*_with_keys`) | same |
+| Trust load | `$LOCUS_HOME/trust/adapter-keys.toml` + `LOCUS_ADAPTER_TRUST_KEYS` (env overlays file) / test fixtures (`verify_*_with_keys`) | same |
 | Built-in catalog | **Unsigned** (soft verify passes; `--require-signed` fails closed) until CI signs with the registry root | same |
 
 `locus adapter verify --require-signed` accepts **either** scheme when the `signed_by` key id is present and trusted and the signature verifies.
@@ -332,16 +336,37 @@ JSON Schema: [`schema/adapter-manifest.schema.json`](../schema/adapter-manifest.
 v1|{id}|{name}|{status}|{synthetic 0|1}|{caps sorted}|{selectors sorted}|{tools sorted}|{destructive sorted}
 ```
 
-### Trust keys env
+### Production trust store (`$LOCUS_HOME/trust/`)
+
+File path: **`$LOCUS_HOME/trust/adapter-keys.toml`** (directory mode `0700`, file mode `0600`).
+
+```toml
+version = 1
+
+[[keys]]
+id = "root"
+scheme = "ed25519"
+public_key_b64 = "<standard-base64 of 32-byte verifying key>"
+
+# Optional HMAC backcompat (prefer ed25519 in production):
+# [[keys]]
+# id = "mock"
+# scheme = "hmac-sha256"
+# secret_hex = "<64 hex chars>"
+```
 
 ```bash
-# Comma- or semicolon-separated. Scheme must match the signature on the entry.
+# Pin a registry root (writes adapter-keys.toml with mode 0600)
+locus adapter trust add --id root --ed25519-pub '<base64-pubkey>'
+locus adapter trust list
+
+# Optional env overlay (wins on same id — useful for CI)
 export LOCUS_ADAPTER_TRUST_KEYS="root:ed25519:<base64-pubkey>,mock:hmac-sha256:<64-hex-secret>"
 
 locus adapter verify --require-signed
 ```
 
-Production ships **no** baked-in keys. An empty / unset trust store keeps soft verify OK for the unsigned built-in catalog; strict mode fails closed.
+**Merge order:** load file keys, then overlay `LOCUS_ADAPTER_TRUST_KEYS` (same id → env replaces). Production ships **no** baked-in keys. An empty / unset trust store keeps soft verify OK for the unsigned built-in catalog; strict mode fails closed.
 
 ### Verify semantics
 
@@ -360,11 +385,21 @@ Production ships **no** baked-in keys. An empty / unset trust store keeps soft v
 - Returning or storing credential values in the catalog  
 - Baked-in production root keys (must be operator-supplied)
 
-### Production trust store (roadmap)
+### Production trust store (status)
+
+| Item | Status |
+|------|--------|
+| File store `$LOCUS_HOME/trust/adapter-keys.toml` | **Landed** |
+| `locus adapter trust add|list` | **Landed** |
+| Merge with `LOCUS_ADAPTER_TRUST_KEYS` | **Landed** (env overlays file) |
+| Publish registry root + sign release manifests in CI | Roadmap |
+| Offline pin rotation / revoke / expiry | Roadmap |
+| Optional remote signed index | Roadmap |
+| Out-of-tree packages | Roadmap |
+| Whole-file signature + transparency log | Roadmap |
 
 1. **Publish a registry root** (ed25519) and sign release manifests in CI; ship the public key as a well-known pin, not a private secret.  
-2. **Trust pin UX** — `locus adapter trust add|list` writing under `~/.locus/trust/` (file-backed store superseding / complementing `LOCUS_ADAPTER_TRUST_KEYS`).  
-3. **Offline pin + rotation** — multiple concurrent roots, expiry, and explicit revoke without soft-allow on unknown keys under `--require-signed`.  
-4. **Optional remote index** — signed HTTP feed of community adapters (still no auto-exec).  
-5. **Out-of-tree packages** — crate or MCP child declared in the catalog, still gated by pin + policy + freeze.  
-6. **Whole-file signature** + optional transparency log once per-entry roots are stable.  
+2. **Offline pin + rotation** — multiple concurrent roots, expiry, and explicit revoke without soft-allow on unknown keys under `--require-signed`.  
+3. **Optional remote index** — signed HTTP feed of community adapters (still no auto-exec).  
+4. **Out-of-tree packages** — crate or MCP child declared in the catalog, still gated by pin + policy + freeze.  
+5. **Whole-file signature** + optional transparency log once per-entry roots are stable.  

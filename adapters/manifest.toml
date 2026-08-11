@@ -3,13 +3,15 @@
 # crates/locus-core/src/adapters/. See docs/adapter-sdk.md.
 #
 # Schema: schema/adapter-manifest.schema.json
-# CLI:    locus adapter list | locus adapter verify [--require-signed]
+# CLI:    locus adapter list | verify [--require-signed] | trust list|add
 #
 # Optional per-provider signature fields:
 #   signature = "ed25519:<base64>"       # preferred
 #   signature = "hmac-sha256:<hex>"      # backcompat stand-in
 #   signed_by = "key-id"                 # trust-store key id
-# Trust: LOCUS_ADAPTER_TRUST_KEYS=id:ed25519:<base64-pubkey>[,id:hmac-sha256:<64-hex>]
+# Trust (merged; env wins on same id):
+#   $LOCUS_HOME/trust/adapter-keys.toml  # locus adapter trust add --id root --ed25519-pub <b64>
+#   LOCUS_ADAPTER_TRUST_KEYS=id:ed25519:<base64-pubkey>[,id:hmac-sha256:<64-hex>]
 # Built-in entries ship unsigned until a registry root is published.
 # `locus adapter verify --require-signed` is fail-closed when any entry is unsigned.
 

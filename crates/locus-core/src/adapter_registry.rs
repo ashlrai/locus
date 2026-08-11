@@ -11,10 +11,15 @@
 //! - `signed_by` — key id from the local trust store
 //!
 //! Verification accepts either scheme when the matching key is trusted.
-//! Production builds ship **no** baked-in trust keys; load keys via
-//! [`LOCUS_ADAPTER_TRUST_KEYS`] or [`install_trust_keys`] / explicit
-//! [`verify_entry_with_keys`]. `--require-signed` is fail-closed: unsigned
-//! or invalid → error.
+//! Production builds ship **no** baked-in trust keys; load keys via:
+//!
+//! 1. **File store** — `$LOCUS_HOME/trust/adapter-keys.toml` (mode `0600`; see [`crate::adapter_trust`])
+//! 2. **Env** — [`LOCUS_ADAPTER_TRUST_KEYS`] (overlays file on same id)
+//! 3. Tests / tooling — [`install_trust_keys`] / explicit [`verify_entry_with_keys`]
+//!
+//! `--require-signed` is fail-closed: unsigned or invalid → error.
+//!
+//! CLI: `locus adapter trust list` · `locus adapter trust add --id root --ed25519-pub <b64>`
 //!
 //! ### `LOCUS_ADAPTER_TRUST_KEYS`
 //!
@@ -165,21 +170,12 @@ impl RegistryTrustKey {
     }
 }
 
-/// Process-wide trust keys (optional; production default is empty unless env set).
+/// Process-wide trust keys (optional; production default is empty unless file/env set).
 static TRUST_KEYS: OnceLock<Vec<RegistryTrustKey>> = OnceLock::new();
 
-/// Default production trust store: `LOCUS_ADAPTER_TRUST_KEYS` or empty.
+/// Default production trust store: `$LOCUS_HOME/trust/adapter-keys.toml` then env overlay.
 fn default_trust_keys() -> Vec<RegistryTrustKey> {
-    match std::env::var(LOCUS_ADAPTER_TRUST_KEYS_ENV) {
-        Ok(raw) if !raw.trim().is_empty() => parse_trust_keys_env(&raw).unwrap_or_else(|e| {
-            // Fail closed on bad env: empty trust store (unsigned still soft-ok;
-            // --require-signed will fail). Log path is unavailable here; callers
-            // see UnknownKey / unsigned outcomes.
-            let _ = e;
-            Vec::new()
-        }),
-        _ => Vec::new(),
-    }
+    crate::adapter_trust::load_merged_trust_keys_default()
 }
 
 fn trust_keys() -> &'static [RegistryTrustKey] {

@@ -14,16 +14,18 @@ use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
 use locus_core::{
-    agent_md_content, agent_md_path, agent_report_from_doctor, all_recipes, build_ci_env_map,
-    build_doctor_report, build_isolated_env_opts, builtin_manifest, ci_secrets_allowed,
-    default_export_filename, export_content_type, export_events, export_forensics_pack,
-    filter_audit_events, find_workspace, list_adapters, mcp_agent_env, parse_manifest, parse_ttl,
-    phantom_on_path, post_audit_webhook, probe_agent_options, recipe_toml_snippet,
-    resolve_audit_webhook_url, resolve_passphrase, suggest_for_provider, verify_claim,
-    verify_manifest, verify_session, workspace_stub_toml, AgentStatus, Binding, BindingBody,
-    CredentialResolutionIssue, DoctorExternal, DoctorVerdict, EventsExportFormat,
-    EventsExportOptions, EventsExportSink, ForensicsExportOptions, IsolatedEnv, Policy,
-    ProviderBinding, Scope, Session, Store, WorkspaceConfig, AUDIT_WEBHOOK_URL_ENV, VERSION,
+    adapter_trust_keys_path, add_ed25519_trust_key, agent_md_content, agent_md_path,
+    agent_report_from_doctor, all_recipes, build_ci_env_map, build_doctor_report,
+    build_isolated_env_opts, builtin_manifest, ci_secrets_allowed, default_export_filename,
+    export_content_type, export_events, export_forensics_pack, filter_audit_events, find_workspace,
+    list_adapters, list_trust_keys_with_origin, load_merged_trust_keys, mcp_agent_env,
+    parse_manifest, parse_ttl, phantom_on_path, post_audit_webhook, probe_agent_options,
+    recipe_toml_snippet, resolve_audit_webhook_url, resolve_passphrase, suggest_for_provider,
+    verify_claim, verify_manifest_with_keys, verify_session, workspace_stub_toml, AgentStatus,
+    Binding, BindingBody, CredentialResolutionIssue, DoctorExternal, DoctorVerdict,
+    EventsExportFormat, EventsExportOptions, EventsExportSink, ForensicsExportOptions, IsolatedEnv,
+    Policy, ProviderBinding, Scope, Session, Store, TrustKeyOrigin, WorkspaceConfig,
+    AUDIT_WEBHOOK_URL_ENV, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -706,6 +708,24 @@ enum AdapterCmd {
         #[arg(long)]
         require_signed: bool,
     },
+    /// Manage local adapter registry trust pins (`$LOCUS_HOME/trust/adapter-keys.toml`)
+    #[command(subcommand)]
+    Trust(AdapterTrustCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum AdapterTrustCmd {
+    /// List trusted registry keys (file store + LOCUS_ADAPTER_TRUST_KEYS overlay)
+    List,
+    /// Pin an ed25519 public trust key under `$LOCUS_HOME/trust/adapter-keys.toml` (mode 0600)
+    Add {
+        /// Key id recorded in manifest `signed_by` (e.g. `root`)
+        #[arg(long)]
+        id: String,
+        /// Standard base64 of the 32-byte ed25519 verifying key
+        #[arg(long = "ed25519-pub")]
+        ed25519_pub: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1023,15 +1043,19 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
             "Built-in adapter registry catalog (discovery + signature verify).\n\n\
              Commands:\n\
                locus adapter list [--json]\n\
-               locus adapter verify [--path FILE] [--require-signed] [--json]\n\n\
+               locus adapter verify [--path FILE] [--require-signed] [--json]\n\
+               locus adapter trust list [--json]\n\
+               locus adapter trust add --id root --ed25519-pub <b64> [--json]\n\n\
              Catalog source: adapters/manifest.toml (embedded).\n\
-             Schema:         schema/adapter-manifest.schema.json\n\n\
+             Schema:         schema/adapter-manifest.schema.json\n\
+             Trust store:    $LOCUS_HOME/trust/adapter-keys.toml (mode 0600)\n\n\
              Per-entry optional fields:\n\
                signature = \"ed25519:<base64>\"       # preferred\n\
                signature = \"hmac-sha256:<hex>\"      # backcompat stand-in\n\
                signed_by = \"key-id\"\n\n\
-             Trust keys (process env):\n\
-               LOCUS_ADAPTER_TRUST_KEYS=id:ed25519:<base64-pubkey>[,id:hmac-sha256:<64-hex>]\n\n\
+             Trust keys (merged; env wins on same id):\n\
+               1) $LOCUS_HOME/trust/adapter-keys.toml\n\
+               2) LOCUS_ADAPTER_TRUST_KEYS=id:ed25519:<base64-pubkey>[,id:hmac-sha256:<64-hex>]\n\n\
              Soft verify (default): unsigned OK; invalid/malformed signatures fail.\n\
              --require-signed: fail closed unless every entry has a valid trusted signature\n\
              (ed25519 or hmac-sha256 when the key id is trusted).\n\
@@ -2878,6 +2902,11 @@ fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
             );
             println!(
                 "{}",
+                "Trust:   locus adapter trust list | trust add --id <id> --ed25519-pub <b64>"
+                    .dimmed()
+            );
+            println!(
+                "{}",
                 "Schema:  schema/adapter-manifest.schema.json · docs/adapter-sdk.md".dimmed()
             );
             Ok(())
@@ -2899,11 +2928,28 @@ fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
                     builtin_manifest().context("load built-in adapter manifest")?,
                 )
             };
-            let report = verify_manifest(&manifest, require_signed);
+            // Fresh merge of file + env each invocation (not process OnceLock).
+            let store = Store::open_default().context("open LOCUS_HOME")?;
+            let keys = load_merged_trust_keys(store.home());
+            let report = verify_manifest_with_keys(&manifest, require_signed, &keys);
             if json {
                 let mut v = serde_json::to_value(&report)?;
                 if let Some(obj) = v.as_object_mut() {
                     obj.insert("source".into(), json!(source_label));
+                    obj.insert(
+                        "trust_keys".into(),
+                        json!(keys
+                            .iter()
+                            .map(|k| json!({
+                                "id": k.id,
+                                "scheme": k.scheme(),
+                            }))
+                            .collect::<Vec<_>>()),
+                    );
+                    obj.insert(
+                        "trust_file".into(),
+                        json!(adapter_trust_keys_path(store.home()).display().to_string()),
+                    );
                 }
                 println!("{}", serde_json::to_string_pretty(&v)?);
             } else {
@@ -2918,6 +2964,14 @@ fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
                     verdict
                 );
                 println!("  source          {}", source_label.dimmed());
+                println!(
+                    "  trust_keys      {}  ·  {}",
+                    keys.len(),
+                    adapter_trust_keys_path(store.home())
+                        .display()
+                        .to_string()
+                        .dimmed()
+                );
                 println!(
                     "  providers       {}  ·  trusted {}  ·  unsigned {}  ·  failed {}",
                     report.provider_count, report.trusted, report.unsigned, report.failed
@@ -2961,7 +3015,12 @@ fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
                     println!();
                     println!(
                         "{}",
-                        "hint: built-in catalog ships unsigned in v0; sign entries or omit --require-signed"
+                        "hint: pin a registry root with `locus adapter trust add --id root --ed25519-pub <b64>`,"
+                            .dimmed()
+                    );
+                    println!(
+                        "{}",
+                        "      or set LOCUS_ADAPTER_TRUST_KEYS; built-in catalog ships unsigned in v0"
                             .dimmed()
                     );
                 }
@@ -2969,6 +3028,101 @@ fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
             if !report.ok {
                 bail!("adapter registry verify failed");
             }
+            Ok(())
+        }
+        AdapterCmd::Trust(trust_sub) => cmd_adapter_trust(trust_sub, json),
+    }
+}
+
+fn cmd_adapter_trust(sub: AdapterTrustCmd, json: bool) -> Result<()> {
+    let store = Store::open_default().context("open LOCUS_HOME")?;
+    let home = store.home();
+    let path = adapter_trust_keys_path(home);
+    match sub {
+        AdapterTrustCmd::List => {
+            let listings = list_trust_keys_with_origin(home).context("list adapter trust keys")?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "trust_file": path.display().to_string(),
+                        "keys": listings,
+                    }))?
+                );
+                return Ok(());
+            }
+            println!(
+                "{} adapter registry trust store\n",
+                "locus adapter trust".cyan().bold()
+            );
+            println!("  file  {}", path.display().to_string().dimmed());
+            if listings.is_empty() {
+                println!();
+                println!("{} no trust keys pinned", "->".dimmed());
+                println!(
+                    "{}",
+                    "Add:  locus adapter trust add --id root --ed25519-pub <base64-pubkey>"
+                        .dimmed()
+                );
+                println!(
+                    "{}",
+                    "Env:  LOCUS_ADAPTER_TRUST_KEYS=id:ed25519:<b64>[,id:hmac-sha256:<64-hex>]"
+                        .dimmed()
+                );
+                return Ok(());
+            }
+            println!();
+            for k in &listings {
+                let origin = match k.origin {
+                    TrustKeyOrigin::File => "file",
+                    TrustKeyOrigin::Env => "env",
+                };
+                println!(
+                    "  {}  {}  ·  {}  ·  {}",
+                    k.id.green().bold(),
+                    k.scheme.yellow(),
+                    origin.dimmed(),
+                    k.material.dimmed()
+                );
+            }
+            println!();
+            println!(
+                "{}",
+                "Verify uses merged keys (file + LOCUS_ADAPTER_TRUST_KEYS; env wins on same id)."
+                    .dimmed()
+            );
+            Ok(())
+        }
+        AdapterTrustCmd::Add { id, ed25519_pub } => {
+            let result = add_ed25519_trust_key(home, &id, &ed25519_pub)
+                .with_context(|| format!("add trust key `{id}`"))?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "ok": true,
+                        "id": result.key.id,
+                        "scheme": result.key.scheme(),
+                        "replaced": result.replaced,
+                        "path": result.path.display().to_string(),
+                    }))?
+                );
+                return Ok(());
+            }
+            let action = if result.replaced { "updated" } else { "added" };
+            println!(
+                "{} trust key {} `{}` ({})",
+                "✓".green().bold(),
+                action,
+                result.key.id.green().bold(),
+                result.key.scheme().yellow()
+            );
+            println!("  path  {}", result.path.display().to_string().dimmed());
+            println!(
+                "{}",
+                "List:  locus adapter trust list · Verify: locus adapter verify --require-signed"
+                    .dimmed()
+            );
             Ok(())
         }
     }
