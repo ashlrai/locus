@@ -100,7 +100,7 @@ Any client that can spawn a stdio MCP server can use:
 
 ## HTTP transport (CI / remote agents)
 
-Stdio remains the default for Claude Code and Cursor. For CI runners and agents that prefer HTTP, enable the **streamable-HTTP-lite** server (JSON-RPC over HTTP with streamable Accept negotiation; not a full multi-message SSE bus):
+Stdio remains the default for Claude Code and Cursor. For CI runners and agents that prefer HTTP, enable the **streamable-HTTP-lite** server (JSON-RPC over HTTP with streamable Accept negotiation + multi-message SSE for large results):
 
 ```bash
 export LOCUS_MCP_HTTP_TOKEN="$(openssl rand -hex 16)"   # required shared secret
@@ -115,7 +115,8 @@ LOCUS_MCP_HTTP=1 LOCUS_MCP_HTTP_ADDR=127.0.0.1:8742 locus-mcp
 |----------|------|----------|
 | `GET /health` (`/healthz`, `/`) | none | Liveness JSON: `{ ok, service, version, transport, endpoints }` |
 | `GET /mcp` (also `/jsonrpc`) | **required** | Capabilities + pin summary + **tool names only** (values-free); advertises `Mcp-Session-Id` support |
-| `POST /mcp` (also `/jsonrpc`) | **required** | One JSON-RPC 2.0 request body → one JSON or single SSE event; mints/binds `Mcp-Session-Id` |
+| `GET /mcp/sse` | **required** | Long-lived SSE hub heartbeat: `locus.session_tick` (`session_ok`, doctor verdict, safe_next). Query: `?once=1`, `?interval=5s` |
+| `POST /mcp` (also `/jsonrpc`) | **required** | One JSON-RPC 2.0 request → JSON, single SSE event, or **multi-message SSE** for large bodies; mints/binds `Mcp-Session-Id` |
 | `DELETE /mcp` | **required** | Terminate the session named by `Mcp-Session-Id` (**204** / **404**) |
 | `OPTIONS /mcp` | none | Minimal CORS preflight for local tooling |
 
@@ -141,31 +142,67 @@ Streamable clients get an opaque process-local session id (MCP streamable HTTP).
 
 `GET /mcp` does **not** require a session (capabilities probe). If a client sends `Mcp-Session-Id` on GET, unknown ids still fail closed with **404**. Capabilities JSON lists `streamable.session` (`header`, `ttl_seconds`, `max_sessions`, mint rule).
 
-This is **not** multi-message SSE resume and **not** multi-process affinity — restarting `locus-mcp` drops the map. Full multi-event streaming remains open.
+This is **not** multi-process affinity — restarting `locus-mcp` drops the map. Multi-message SSE (progress/chunks + final) is available on POST when Accept allows event-stream; cross-process session resume remains open.
 
 ### Streamable Accept / Content-Type
 
-Compatible with MCP streamable HTTP **without** a full multi-message SSE rewrite:
+Compatible with MCP streamable HTTP. Partial multi-message SSE (not a full remote multiplexor rewrite):
 
 | Header | Server behavior |
 |--------|-----------------|
 | `Content-Type: application/json` | Required for POST when present; missing Content-Type still accepted (legacy CI). Non-JSON → **415**. |
-| `Accept: application/json` (and/or `*/*`) | Response `Content-Type: application/json` (default / preferred). |
-| `Accept: text/event-stream` only | Response `Content-Type: text/event-stream` with **one** `event: message` + `data: <json-rpc>` then close. |
-| `Accept` lists both | Prefer JSON. |
+| `Accept: application/json` (and/or `*/*`) | Response `Content-Type: application/json` (default / preferred for small bodies). |
+| `Accept: text/event-stream` only | Response `Content-Type: text/event-stream`. Small bodies → **one** `event: message`. Large bodies / large `tools/call` → **multi-message** stream (see below). |
+| `Accept` lists both | Prefer JSON for small responses; **upgrade to multi-message SSE** when the JSON-RPC body exceeds `LOCUS_MCP_SSE_MULTI_BYTES` (default 4096). |
 | `Accept` that allows neither | **406** not acceptable. |
 | `Mcp-Session-Id` | See table above; echoed on successful POST (and GET when provided + valid). |
 
-Long tool results still return as **one** JSON object (or one SSE data event). Multi-message SSE streaming is **not** implemented yet.
+#### Multi-message SSE (POST `/mcp`)
+
+When SSE is selected and the response is large (or `tools/call` crosses the soft threshold):
+
+1. `event: message` + `notifications/message` with `data.kind = "locus.sse.progress"` (start)
+2. Optional progressive chunks: `data.kind = "locus.sse.chunk"` with `{ index, total, text }` for large tool text
+3. Final `event: message` carrying the **complete** JSON-RPC response (`id` + full `result`/`error`)
+
+Header `X-Locus-Streamable: sse-multi` (or `sse-single` for one-event replies). Intermediate events are JSON-RPC notifications (no `id`); only the final event is the authoritative response. Env: `LOCUS_MCP_SSE_MULTI_BYTES`, `LOCUS_MCP_SSE_CHUNK_BYTES`. Successful responses also echo `Mcp-Session-Id` when a session was minted/bound.
+
+#### Session SSE (GET `/mcp/sse`)
+
+Hub-friendly continuous identity ticks without CLI `locus watch`:
+
+```bash
+curl -N -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN"   -H "Accept: text/event-stream"   "http://127.0.0.1:8742/mcp/sse?interval=5s"
+# one-shot smoke:
+curl -N -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN"   -H "Accept: text/event-stream"   "http://127.0.0.1:8742/mcp/sse?once=1"
+```
+
+Each tick is a JSON-RPC `notifications/message` with values-free `data`:
+
+```json
+{
+  "kind": "locus.session_tick",
+  "session_ok": true,
+  "whoami": "acme",
+  "doctor_verdict": "SAFE",
+  "safe_next": "ready",
+  "pinned": true,
+  "frozen": false
+}
+```
+
+`X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets.
+
+Cross-process `Mcp-Session-Id` resume and multi-tenant remote multiplexor remain open.
 
 **Hard rules:**
 
 1. **Loopback only by default** — non-`127.0.0.1` / non-loopback binds refuse unless `LOCUS_MCP_HTTP_ALLOW_REMOTE=1`.
 2. **Token required** — HTTP mode will not start without a non-empty `LOCUS_MCP_HTTP_TOKEN`.
-3. Missing/wrong token → **401**; never soft-allow. Applies to `GET /mcp`, `POST /mcp`, and `DELETE /mcp`.
+3. Missing/wrong token → **401**; never soft-allow. Applies to `GET /mcp`, `GET /mcp/sse`, `POST /mcp`, and `DELETE /mcp`.
 4. Unknown / expired `Mcp-Session-Id` → **404**; never soft-allow.
 5. Same pin/policy/seal gate as stdio — HTTP is only a transport.
-6. `GET /mcp` never returns secret values or credential refs — tool **names** and pin alias/tenant only.
+6. `GET /mcp` / session ticks never return secret values or credential refs — tool **names** and pin alias/tenant only.
 
 Example (CI):
 
@@ -184,6 +221,12 @@ curl -sS -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Mcp-Session-Id: $SESSION_ID" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  http://127.0.0.1:8742/mcp
+# SSE-only Accept (may multi-message for large tools/list):
+curl -N -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
   http://127.0.0.1:8742/mcp
 ```
 

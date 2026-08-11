@@ -285,6 +285,12 @@ fn http_accept_sse_only_returns_single_event() {
         "headers={headers}"
     );
     assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("x-locus-streamable: sse-single"),
+        "headers={headers}"
+    );
+    assert!(
         resp_body.contains("event: message") && resp_body.contains("data: "),
         "{resp_body}"
     );
@@ -296,6 +302,303 @@ fn http_accept_sse_only_returns_single_event() {
     let v: Value = serde_json::from_str(data).expect("jsonrpc in sse");
     assert_eq!(v["id"], 3);
     assert!(v.get("result").is_some(), "{v}");
+}
+
+/// Count SSE `event: message` frames and parse each `data:` JSON payload.
+fn parse_sse_message_events(body: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut expect_data = false;
+    for line in body.lines() {
+        if line.starts_with("event:") {
+            expect_data = line.trim_start_matches("event:").trim() == "message";
+            continue;
+        }
+        if expect_data {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(v) = serde_json::from_str::<Value>(data) {
+                    out.push(v);
+                }
+                expect_data = false;
+            } else if line.is_empty() {
+                expect_data = false;
+            }
+        }
+    }
+    // Fallback: any data: line (some frames omit event:).
+    if out.is_empty() {
+        for line in body.lines() {
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Ok(v) = serde_json::from_str::<Value>(data) {
+                    out.push(v);
+                }
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn http_tools_call_large_body_streams_multi_sse() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("locus-home");
+    std::fs::create_dir_all(&home).unwrap();
+    // Low thresholds so control-tool results cross multi + chunk boundaries.
+    let srv = HttpServer::spawn_with_home(
+        "sse-multi-token",
+        &home,
+        &[
+            ("LOCUS_MCP_SSE_MULTI_BYTES", "64"),
+            ("LOCUS_MCP_SSE_CHUNK_BYTES", "32"),
+        ],
+    );
+
+    // tools/list schemas are large enough with a low multi threshold.
+    let body = br#"{"jsonrpc":"2.0","id":42,"method":"tools/list","params":{}}"#;
+    let mut stream = TcpStream::connect(srv.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nContent-Length: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        body.len(),
+        srv.token
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.write_all(body).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (status, headers, resp_body) = parse_http_response(&raw);
+    assert_eq!(status, 200, "{raw}");
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("content-type: text/event-stream"),
+        "headers={headers}"
+    );
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("x-locus-streamable: sse-multi"),
+        "expected multi SSE header, headers={headers}"
+    );
+
+    let events = parse_sse_message_events(&resp_body);
+    assert!(
+        events.len() >= 2,
+        "expected progress + final, got {} events: {resp_body}",
+        events.len()
+    );
+
+    // First event: progress notification (no id).
+    let progress = &events[0];
+    assert_eq!(progress["method"], "notifications/message");
+    assert!(progress.get("id").is_none(), "{progress}");
+    assert_eq!(
+        progress["params"]["data"]["kind"], "locus.sse.progress",
+        "{progress}"
+    );
+
+    // Final event: complete JSON-RPC response with original id.
+    let final_msg = events.last().expect("final");
+    assert_eq!(final_msg["id"], 42, "{final_msg}");
+    assert!(final_msg.get("result").is_some(), "{final_msg}");
+    assert!(final_msg.get("error").is_none(), "{final_msg}");
+    let tools = final_msg["result"]["tools"]
+        .as_array()
+        .expect("tools array");
+    assert!(
+        tools.iter().any(|t| t["name"] == "locus_whoami"),
+        "final result must include control tools: {tools:?}"
+    );
+}
+
+#[test]
+fn http_tools_call_sse_progress_and_chunks() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("locus-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let srv = HttpServer::spawn_with_home(
+        "sse-chunk-token",
+        &home,
+        &[
+            ("LOCUS_MCP_SSE_MULTI_BYTES", "48"),
+            ("LOCUS_MCP_SSE_CHUNK_BYTES", "24"),
+        ],
+    );
+
+    let body = br#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"locus_list_bindings","arguments":{}}}"#;
+    let mut stream = TcpStream::connect(srv.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nAccept: text/event-stream\r\nContent-Length: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        body.len(),
+        srv.token
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.write_all(body).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (status, headers, resp_body) = parse_http_response(&raw);
+    assert_eq!(status, 200, "{raw}");
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("x-locus-streamable: sse-multi")
+            || headers
+                .to_ascii_lowercase()
+                .contains("x-locus-streamable: sse-single"),
+        "headers={headers}"
+    );
+    let events = parse_sse_message_events(&resp_body);
+    assert!(!events.is_empty(), "{resp_body}");
+    let final_msg = events.last().unwrap();
+    assert_eq!(final_msg["id"], 9, "{final_msg}");
+    assert!(
+        final_msg.get("result").is_some() || final_msg.get("error").is_some(),
+        "{final_msg}"
+    );
+    if events.len() > 1 {
+        assert_eq!(events[0]["method"], "notifications/message");
+        assert_eq!(
+            events[0]["params"]["data"]["kind"], "locus.sse.progress",
+            "{}",
+            events[0]
+        );
+    }
+}
+
+#[test]
+fn http_large_tools_call_upgrades_to_sse_when_accept_lists_both() {
+    let dir = tempdir().unwrap();
+    let home = dir.path().join("locus-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let srv = HttpServer::spawn_with_home(
+        "sse-upgrade-token",
+        &home,
+        &[("LOCUS_MCP_SSE_MULTI_BYTES", "64")],
+    );
+
+    // Accept lists both JSON and SSE — small ping stays JSON; large tools/list upgrades.
+    let ping = br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#;
+    let mut stream = TcpStream::connect(srv.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        ping.len(),
+        srv.token
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.write_all(ping).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (status, headers, body) = parse_http_response(&raw);
+    assert_eq!(status, 200, "{raw}");
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("content-type: application/json"),
+        "small response should stay JSON when Accept lists both: {headers}"
+    );
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["id"], 1);
+
+    let list = br#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
+    let mut stream = TcpStream::connect(srv.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let req = format!(
+        "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        list.len(),
+        srv.token
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.write_all(list).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (status, headers, resp_body) = parse_http_response(&raw);
+    assert_eq!(status, 200, "{raw}");
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("content-type: text/event-stream"),
+        "large body should upgrade to SSE when Accept includes event-stream: {headers}"
+    );
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("x-locus-streamable: sse-multi"),
+        "headers={headers}"
+    );
+    let events = parse_sse_message_events(&resp_body);
+    assert!(events.len() >= 2, "{resp_body}");
+    assert_eq!(events.last().unwrap()["id"], 2);
+}
+
+#[test]
+fn http_mcp_sse_requires_token() {
+    let srv = HttpServer::spawn("sse-session-auth");
+    let (status, _, body) = srv.request("GET", "/mcp/sse?once=1", None, None);
+    assert_eq!(status, 401, "{body}");
+    assert!(body.contains("unauthorized"), "{body}");
+}
+
+#[test]
+fn http_mcp_sse_once_session_tick() {
+    let srv = HttpServer::spawn("sse-session-ok");
+    let mut stream = TcpStream::connect(srv.addr).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let req = format!(
+        "GET /mcp/sse?once=1 HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        srv.token
+    );
+    stream.write_all(req.as_bytes()).unwrap();
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).unwrap();
+    let (status, headers, resp_body) = parse_http_response(&raw);
+    assert_eq!(status, 200, "{raw}");
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("content-type: text/event-stream"),
+        "headers={headers}"
+    );
+    assert!(
+        headers
+            .to_ascii_lowercase()
+            .contains("x-locus-streamable: sse-session"),
+        "headers={headers}"
+    );
+    let events = parse_sse_message_events(&resp_body);
+    assert_eq!(events.len(), 1, "once=1 should emit one tick: {resp_body}");
+    let tick = &events[0];
+    assert_eq!(tick["method"], "notifications/message");
+    let data = &tick["params"]["data"];
+    assert_eq!(data["kind"], "locus.session_tick");
+    assert!(data.get("session_ok").is_some(), "{tick}");
+    assert!(data.get("doctor_verdict").is_some(), "{tick}");
+    assert!(data.get("safe_next").is_some(), "{tick}");
+    assert_eq!(data["pinned"], false); // unpinned test home
+                                       // Values-free: no secret material.
+    let lower = resp_body.to_ascii_lowercase();
+    assert!(!lower.contains("phm_"), "{resp_body}");
+    assert!(!lower.contains("secret"), "{resp_body}");
+}
+
+#[test]
+fn http_get_mcp_advertises_session_sse() {
+    let srv = HttpServer::spawn("caps-sse-endpoint");
+    let (status, _, body) = srv.request("GET", "/mcp", None, Some(&srv.token));
+    assert_eq!(status, 200, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["endpoints"]["session_sse"], "GET /mcp/sse");
+    assert_eq!(v["streamable"]["sse"], "multi-message-for-large-tools-call");
 }
 
 #[test]

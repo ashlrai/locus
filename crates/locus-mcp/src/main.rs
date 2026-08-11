@@ -13,15 +13,16 @@
 //! - **stdio** (default) — Content-Length or NDJSON for Claude Code / Cursor
 //! - **HTTP** — `locus-mcp --http 127.0.0.1:8742` or `LOCUS_MCP_HTTP=1`
 //!   Streamable-HTTP-lite: JSON-RPC POST `/mcp`, GET `/mcp` capabilities,
-//!   GET `/health`; requires `LOCUS_MCP_HTTP_TOKEN`. `Mcp-Session-Id` in-memory
-//!   sessions (TTL + max N). Single-event SSE when `Accept: text/event-stream`
-//!   only (no multi-message stream rewrite).
+//!   GET `/mcp/sse` session ticks, GET `/health`; requires `LOCUS_MCP_HTTP_TOKEN`.
+//!   `Mcp-Session-Id` in-memory sessions (TTL + max N). SSE: single-event by
+//!   default; multi-message (progress/chunks + final) for large `tools/call`
+//!   results when Accept prefers `text/event-stream`.
 
 use anyhow::{bail, Context, Result};
 use locus_core::{
     build_doctor_report, call_tool_gated, compute_safe_next, control_tools, enforce_policy,
     find_workspace, load_config, split_namespaced_tool, tools_for_binding, verify_claim,
-    AdapterTool, ApprovalGate, Binding, DoctorExternal, Session, Store, VERSION,
+    verify_session, AdapterTool, ApprovalGate, Binding, DoctorExternal, Session, Store, VERSION,
 };
 use rand::RngCore;
 use serde_json::{json, Value};
@@ -53,6 +54,14 @@ const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:8742";
 const HTTP_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 /// Cap concurrent opaque `Mcp-Session-Id` entries (process-local; no redis).
 const HTTP_SESSION_MAX: usize = 256;
+
+/// Serialized JSON-RPC body size (bytes) above which SSE prefers multi-message
+/// (progress / progressive text chunks + final complete response).
+const DEFAULT_SSE_MULTI_THRESHOLD: usize = 4096;
+/// Progressive `locus.sse.chunk` text slice size when multi-message SSE is used.
+const DEFAULT_SSE_CHUNK_BYTES: usize = 2048;
+/// Default tick interval for GET `/mcp/sse` hub heartbeats.
+const DEFAULT_SSE_SESSION_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Wire framing chosen per message so mixed clients stay happy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,14 +168,19 @@ fn print_help() {
          HTTP endpoints:\n\
            GET  /health              unauthenticated liveness\n\
            GET  /mcp                 capabilities + tool names (token; values-free)\n\
+           GET  /mcp/sse             session_ok SSE ticks (token; hub heartbeat)\n\
            POST /mcp                 JSON-RPC 2.0 (token; Accept: application/json\n\
-                                     and/or text/event-stream; mints/binds Mcp-Session-Id)\n\
+                                     and/or text/event-stream; mints/binds Mcp-Session-Id;\n\
+                                     multi-event SSE for large tools/call)\n\
            DELETE /mcp               terminate Mcp-Session-Id (token)\n\n\
          Env:\n\
            LOCUS_MCP_HTTP=1            enable HTTP (same as --http)\n\
            LOCUS_MCP_HTTP_ADDR         bind address when HTTP enabled\n\
            LOCUS_MCP_HTTP_TOKEN        required bearer/token for HTTP auth\n\
            LOCUS_MCP_HTTP_ALLOW_REMOTE=1  allow non-loopback bind (default: loopback only)\n\
+           LOCUS_MCP_SSE_MULTI_BYTES   multi-message SSE threshold (default 4096)\n\
+           LOCUS_MCP_SSE_CHUNK_BYTES   progressive text chunk size (default 2048)\n\
+           LOCUS_MCP_SSE_INTERVAL      GET /mcp/sse tick interval (default 5s)\n\
            LOCUS_HOME                  store root (pin + bindings for remote process)\n\
            LOCUS_WORKER_IDLE_SECS      optional idle teardown for upstream workers\n\
            LOCUS_WORKER_SANDBOX=1      require supported OS isolation or fail closed\n           LOCUS_WORKER_SANDBOX_NO_NETWORK=1  opt-in deny network (bwrap/Seatbelt)\n"
@@ -237,15 +251,16 @@ fn dispatch_rpc(msg: &Value) -> Option<Value> {
     })
 }
 
-// ─── HTTP transport (Streamable-HTTP-lite: POST /mcp + GET /mcp + /health) ──
+// ─── HTTP transport (Streamable-HTTP-lite: POST /mcp + GET /mcp[/sse] + /health) ──
 
 /// How the client wants the MCP response encoded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HttpResponseMode {
     /// Single JSON object (`Content-Type: application/json`) — default / preferred.
     Json,
-    /// One SSE event carrying the JSON-RPC body, then stream end (no multi-message bus).
-    SseSingle,
+    /// SSE stream (`text/event-stream`): single event, or multi-message when the
+    /// JSON-RPC body is large / `tools/call` exceeds the multi threshold.
+    Sse,
 }
 
 /// Process-local opaque MCP HTTP sessions (`Mcp-Session-Id`). No redis / disk.
@@ -414,7 +429,7 @@ fn run_http(addr: SocketAddr) -> Result<()> {
 
     let listener = TcpListener::bind(addr).with_context(|| format!("bind {addr}"))?;
     eprintln!(
-        "locus-mcp: HTTP listening on http://{addr}  (GET|POST|DELETE /mcp, GET /health)  token auth + Mcp-Session-Id"
+        "locus-mcp: HTTP listening on http://{addr}  (GET|POST|DELETE /mcp, GET /mcp/sse, GET /health)  token auth + Mcp-Session-Id"
     );
 
     for stream in listener.incoming() {
@@ -442,7 +457,9 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
     let (method, path, headers, body) = read_http_request(&mut reader)?;
 
     let path_only = path.split('?').next().unwrap_or(path.as_str());
-    let response_mode = http_response_mode(&headers);
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let accept_caps = http_accept_caps(&headers);
+    let response_mode = http_response_mode_from_caps(accept_caps);
     let is_mcp_path = path_only == "/mcp" || path_only == "/mcp/" || path_only == "/jsonrpc";
 
     // Health is unauthenticated so orchestrators can probe liveness without the token.
@@ -457,6 +474,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
             "endpoints": {
                 "health": "GET /health",
                 "capabilities": "GET /mcp (token)",
+                "session_sse": "GET /mcp/sse (token)",
                 "rpc": "POST /mcp (token, JSON-RPC 2.0)",
                 "session": "Mcp-Session-Id header (mint on initialize/first POST)"
             },
@@ -473,7 +491,22 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
     }
 
     // Reject Accept that cannot receive either JSON or SSE (streamable clients list both).
-    if let Some(accept) = header_value(&headers, "accept") {
+    // GET /mcp/sse is SSE-only — require event-stream (or */* / missing).
+    if path_only == "/mcp/sse" || path_only == "/mcp/sse/" {
+        if let Some(accept) = header_value(&headers, "accept") {
+            let lower = accept.to_ascii_lowercase();
+            if !lower.trim().is_empty()
+                && !lower.contains("*/*")
+                && !lower.contains("text/event-stream")
+            {
+                let body = json!({
+                    "error": "not_acceptable",
+                    "hint": "GET /mcp/sse requires Accept: text/event-stream",
+                });
+                return write_http_json(&mut stream, 406, &body, None);
+            }
+        }
+    } else if let Some(accept) = header_value(&headers, "accept") {
         if !http_accept_allows_mcp(accept) {
             let body = json!({
                 "error": "not_acceptable",
@@ -481,6 +514,10 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
             });
             return write_http_json(&mut stream, 406, &body, None);
         }
+    }
+
+    if method.eq_ignore_ascii_case("GET") && (path_only == "/mcp/sse" || path_only == "/mcp/sse/") {
+        return handle_mcp_sse_session_stream(&mut stream, query);
     }
 
     if method.eq_ignore_ascii_case("GET") && is_mcp_path {
@@ -495,6 +532,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
                 }
             }
         };
+        // Auth'd capabilities probe — tool *names* only, never secret values.
         let caps = http_mcp_capabilities();
         return write_http_mcp_body(
             &mut stream,
@@ -502,6 +540,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
             &caps,
             response_mode,
             session_id.as_deref(),
+            None,
         );
     }
 
@@ -557,14 +596,21 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
         };
 
         let msg: Value = serde_json::from_slice(&body).context("json-rpc body")?;
+        let rpc_method = msg.get("method").and_then(|m| m.as_str());
         match dispatch_rpc(&msg) {
-            Some(response) => write_http_mcp_body(
-                &mut stream,
-                200,
-                &response,
-                response_mode,
-                Some(session_id.as_str()),
-            ),
+            Some(response) => {
+                // When Accept lists both JSON and SSE, still upgrade large tools/call
+                // to multi-message SSE so hubs get progressive chunks without SSE-only Accept.
+                let mode = resolve_post_response_mode(accept_caps, rpc_method, &response);
+                write_http_mcp_body(
+                    &mut stream,
+                    200,
+                    &response,
+                    mode,
+                    Some(session_id.as_str()),
+                    rpc_method,
+                )
+            }
             None => {
                 // Notification — 202 Accepted, empty JSON object (still respect Accept).
                 write_http_mcp_body(
@@ -573,6 +619,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
                     &json!({}),
                     response_mode,
                     Some(session_id.as_str()),
+                    rpc_method,
                 )
             }
         }
@@ -599,7 +646,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
     } else {
         let body = json!({
             "error": "not_found",
-            "hint": "GET /health · GET /mcp (capabilities) · POST /mcp (JSON-RPC 2.0) · DELETE /mcp (session)",
+            "hint": "GET /health · GET /mcp (capabilities) · GET /mcp/sse (session ticks) · POST /mcp (JSON-RPC 2.0) · DELETE /mcp (session)",
         });
         write_http_json(&mut stream, 404, &body, None)
     }
@@ -668,6 +715,7 @@ fn http_mcp_capabilities() -> Value {
         "endpoints": {
             "health": "GET /health",
             "capabilities": "GET /mcp",
+            "session_sse": "GET /mcp/sse",
             "rpc": "POST /mcp",
             "session_delete": "DELETE /mcp"
         },
@@ -677,7 +725,9 @@ fn http_mcp_capabilities() -> Value {
         },
         "streamable": {
             "mode": "json-preferred",
-            "sse": "single-event-when-accept-sse-only",
+            "sse": "multi-message-for-large-tools-call",
+            "session_sse": "GET /mcp/sse heartbeats session_ok ticks",
+            "multi_threshold_bytes": sse_multi_threshold(),
             "session": {
                 "header": "Mcp-Session-Id",
                 "ttl_seconds": HTTP_SESSION_TTL.as_secs(),
@@ -685,7 +735,7 @@ fn http_mcp_capabilities() -> Value {
                 "mint": "initialize or first POST /mcp without header",
                 "storage": "in-memory-process-local"
             },
-            "note": "Mcp-Session-Id in-memory sessions landed; full multi-message SSE / cross-process resume still open. Long tool results return as one JSON object or one SSE data event"
+            "note": "Mcp-Session-Id in-memory sessions + multi-message SSE for large tools/call landed. Cross-process session resume and multi-tenant remote multiplexor still open."
         }
     })
 }
@@ -695,6 +745,34 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case(name))
         .map(|(_, v)| v.as_str())
+}
+
+/// Parsed Accept capabilities for streamable MCP responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HttpAcceptCaps {
+    json: bool,
+    sse: bool,
+}
+
+fn http_accept_caps(headers: &[(String, String)]) -> HttpAcceptCaps {
+    let Some(accept) = header_value(headers, "accept") else {
+        // Missing Accept → JSON legacy clients.
+        return HttpAcceptCaps {
+            json: true,
+            sse: false,
+        };
+    };
+    let lower = accept.to_ascii_lowercase();
+    if lower.trim().is_empty() || lower.contains("*/*") {
+        return HttpAcceptCaps {
+            json: true,
+            sse: true,
+        };
+    }
+    HttpAcceptCaps {
+        json: lower.contains("application/json"),
+        sse: lower.contains("text/event-stream"),
+    }
 }
 
 /// Streamable HTTP Accept: allow `application/json` and/or `text/event-stream`.
@@ -707,20 +785,30 @@ fn http_accept_allows_mcp(accept: &str) -> bool {
     lower.contains("application/json") || lower.contains("text/event-stream")
 }
 
-/// Prefer JSON when the client lists it (or omits Accept). SSE only when the
-/// client accepts event-stream and does **not** list application/json.
-fn http_response_mode(headers: &[(String, String)]) -> HttpResponseMode {
-    let Some(accept) = header_value(headers, "accept") else {
-        return HttpResponseMode::Json;
-    };
-    let lower = accept.to_ascii_lowercase();
-    let wants_json = lower.contains("application/json") || lower.contains("*/*");
-    let wants_sse = lower.contains("text/event-stream");
-    if wants_sse && !wants_json {
-        HttpResponseMode::SseSingle
+/// Prefer JSON when the client lists it (or omits Accept). SSE when the client
+/// accepts event-stream and does **not** list application/json.
+fn http_response_mode_from_caps(caps: HttpAcceptCaps) -> HttpResponseMode {
+    if caps.sse && !caps.json {
+        HttpResponseMode::Sse
     } else {
         HttpResponseMode::Json
     }
+}
+
+/// POST response mode: SSE-only Accept → SSE; both allowed → JSON unless
+/// body exceeds multi threshold and SSE is allowed.
+fn resolve_post_response_mode(
+    caps: HttpAcceptCaps,
+    rpc_method: Option<&str>,
+    response: &Value,
+) -> HttpResponseMode {
+    if caps.sse && !caps.json {
+        return HttpResponseMode::Sse;
+    }
+    if caps.sse && should_use_multi_sse(rpc_method, response) {
+        return HttpResponseMode::Sse;
+    }
+    HttpResponseMode::Json
 }
 
 fn http_content_type_ok(content_type: &str) -> bool {
@@ -772,6 +860,301 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+fn sse_multi_threshold() -> usize {
+    std::env::var("LOCUS_MCP_SSE_MULTI_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(DEFAULT_SSE_MULTI_THRESHOLD)
+}
+
+fn sse_chunk_bytes() -> usize {
+    std::env::var("LOCUS_MCP_SSE_CHUNK_BYTES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(DEFAULT_SSE_CHUNK_BYTES)
+}
+
+fn sse_session_interval() -> Duration {
+    let raw = std::env::var("LOCUS_MCP_SSE_INTERVAL").unwrap_or_default();
+    parse_sse_interval(&raw).unwrap_or(DEFAULT_SSE_SESSION_INTERVAL)
+}
+
+fn parse_sse_interval(s: &str) -> Option<Duration> {
+    let s = s.trim().to_ascii_lowercase();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(n) = s.parse::<u64>() {
+        return Some(Duration::from_secs(n.max(1)));
+    }
+    if let Some(num) = s.strip_suffix('s') {
+        let n: u64 = num.parse().ok()?;
+        return Some(Duration::from_secs(n.max(1)));
+    }
+    if let Some(num) = s.strip_suffix('m') {
+        let n: u64 = num.parse().ok()?;
+        return Some(Duration::from_secs(n.saturating_mul(60).max(1)));
+    }
+    None
+}
+
+fn query_flag(query: &str, name: &str) -> bool {
+    for part in query.split('&') {
+        let part = part.trim();
+        if part == name {
+            return true;
+        }
+        if let Some((k, v)) = part.split_once('=') {
+            if k == name {
+                let v = v.trim().to_ascii_lowercase();
+                return matches!(v.as_str(), "1" | "true" | "yes" | "on");
+            }
+        }
+    }
+    false
+}
+
+fn query_value<'a>(query: &'a str, name: &str) -> Option<&'a str> {
+    for part in query.split('&') {
+        if let Some((k, v)) = part.split_once('=') {
+            if k == name {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Whether this JSON-RPC response should use multi-message SSE framing.
+fn should_use_multi_sse(rpc_method: Option<&str>, response: &Value) -> bool {
+    let bytes = serde_json::to_vec(response).map(|b| b.len()).unwrap_or(0);
+    let threshold = sse_multi_threshold();
+    if bytes >= threshold {
+        return true;
+    }
+    // tools/call: multi when over a soft floor, or primary text exceeds chunk size.
+    if rpc_method == Some("tools/call") {
+        if bytes >= threshold / 2 && threshold > 1 {
+            return true;
+        }
+        if let Some(text) = extract_tool_result_text(response) {
+            if text.len() >= sse_chunk_bytes() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Pull the first text content blob from a tools/call JSON-RPC response (if any).
+fn extract_tool_result_text(response: &Value) -> Option<&str> {
+    response
+        .get("result")?
+        .get("content")?
+        .as_array()?
+        .iter()
+        .find_map(|c| {
+            if c.get("type").and_then(|t| t.as_str()) == Some("text") {
+                c.get("text").and_then(|t| t.as_str())
+            } else {
+                None
+            }
+        })
+}
+
+/// Split `text` into ~`chunk_size` byte slices on UTF-8 char boundaries.
+fn split_text_chunks(text: &str, chunk_size: usize) -> Vec<String> {
+    if chunk_size == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    for ch in text.chars() {
+        buf.push(ch);
+        if buf.len() >= chunk_size {
+            out.push(std::mem::take(&mut buf));
+        }
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
+/// Build the ordered list of JSON-RPC messages for an SSE response body.
+///
+/// Multi-message layout (JSON-RPC correct: intermediate events are notifications
+/// without `id`; final event is the complete response with the original `id`):
+/// 1. optional `notifications/message` progress (start)
+/// 2. optional progressive text chunks for large tool results
+/// 3. final complete JSON-RPC response (authoritative)
+fn build_sse_rpc_messages(body: &Value, rpc_method: Option<&str>) -> Vec<Value> {
+    if !should_use_multi_sse(rpc_method, body) {
+        return vec![body.clone()];
+    }
+
+    let mut events = Vec::new();
+    let rpc_id = body.get("id").cloned().unwrap_or(Value::Null);
+    let total_bytes = serde_json::to_vec(body).map(|b| b.len()).unwrap_or(0);
+
+    events.push(json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/message",
+        "params": {
+            "level": "info",
+            "data": {
+                "kind": "locus.sse.progress",
+                "phase": "start",
+                "rpc_id": rpc_id,
+                "rpc_method": rpc_method,
+                "bytes": total_bytes
+            }
+        }
+    }));
+
+    // Progressive text chunks for large tools/call bodies (display only).
+    // Final event always carries the complete JSON-RPC result for correctness.
+    // Char-aware packing keeps UTF-8 intact at chunk boundaries.
+    if let Some(text) = extract_tool_result_text(body) {
+        let chunk_size = sse_chunk_bytes();
+        if text.len() >= chunk_size {
+            let chunks = split_text_chunks(text, chunk_size);
+            let total = chunks.len();
+            for (index, chunk) in chunks.into_iter().enumerate() {
+                events.push(json!({
+                    "jsonrpc": "2.0",
+                    "method": "notifications/message",
+                    "params": {
+                        "level": "info",
+                        "data": {
+                            "kind": "locus.sse.chunk",
+                            "index": index,
+                            "total": total,
+                            "text": chunk
+                        }
+                    }
+                }));
+            }
+        }
+    }
+
+    // Authoritative final JSON-RPC response (keeps id + full result/error).
+    events.push(body.clone());
+    events
+}
+
+fn encode_sse_messages(messages: &[Value]) -> Result<Vec<u8>> {
+    let mut sse = Vec::new();
+    for msg in messages {
+        let json_bytes = serde_json::to_vec(msg)?;
+        sse.extend_from_slice(b"event: message\ndata: ");
+        sse.extend_from_slice(&json_bytes);
+        sse.extend_from_slice(b"\n\n");
+    }
+    Ok(sse)
+}
+
+/// Compact values-free session tick for GET `/mcp/sse` (hub heartbeat over HTTP).
+///
+/// Shape mirrors `locus watch` NDJSON: `session_ok`, pin alias, doctor verdict,
+/// safe_next action — never secrets or credential refs.
+fn http_session_tick() -> Value {
+    let pack = match store() {
+        Ok(s) => {
+            let external = DoctorExternal {
+                phantom_on_path: false,
+                unresolved_phm: Vec::new(),
+                cwd: Some(cwd()),
+            };
+            verify_session(&s, &cwd(), external).ok()
+        }
+        Err(_) => None,
+    };
+
+    match pack {
+        Some(pack) => {
+            let whoami_alias = pack.whoami.as_ref().map(|w| w.binding_alias.clone());
+            let pinned =
+                whoami_alias.is_some() || pack.doctor.pin.is_some() || pack.doctor.runtime.pinned;
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/message",
+                "params": {
+                    "level": "info",
+                    "data": {
+                        "kind": "locus.session_tick",
+                        "session_ok": pack.session_ok,
+                        "whoami": whoami_alias,
+                        "doctor_verdict": pack.doctor.verdict.as_str(),
+                        "safe_next": pack.safe_next.action,
+                        "pinned": pinned,
+                        "frozen": pack.doctor.runtime.frozen,
+                        "version": VERSION
+                    }
+                }
+            })
+        }
+        None => json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/message",
+            "params": {
+                "level": "info",
+                "data": {
+                    "kind": "locus.session_tick",
+                    "session_ok": false,
+                    "whoami": null,
+                    "doctor_verdict": "UNSAFE",
+                    "safe_next": "init",
+                    "pinned": false,
+                    "frozen": false,
+                    "version": VERSION,
+                    "hint": "store unavailable under LOCUS_HOME"
+                }
+            }
+        }),
+    }
+}
+
+/// Long-lived (or `?once=1`) SSE stream of session_ok ticks for hub heartbeats.
+///
+/// Auth is checked by the caller before this runs. Fail closed: no soft-allow path.
+fn handle_mcp_sse_session_stream(stream: &mut TcpStream, query: &str) -> Result<()> {
+    let once = query_flag(query, "once");
+    let interval = query_value(query, "interval")
+        .and_then(parse_sse_interval)
+        .unwrap_or_else(sse_session_interval);
+
+    // Long-lived streams need a generous write timeout; read side stays idle.
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(120)));
+    write_http_sse_headers(
+        stream,
+        200,
+        &[
+            ("Cache-Control", "no-cache"),
+            ("X-Locus-Streamable", "sse-session"),
+        ],
+    )?;
+    // Comment preamble so proxies flush headers.
+    stream.write_all(b": locus-mcp session stream\n\n")?;
+    stream.flush()?;
+
+    loop {
+        let tick = http_session_tick();
+        write_sse_event(stream, "message", &tick)?;
+        if once {
+            break;
+        }
+        // Keepalive comment between ticks (clients ignore `:` lines).
+        stream.write_all(b": heartbeat\n\n")?;
+        stream.flush()?;
+        thread::sleep(interval);
+        // Next write failure (client gone) ends the loop via ? below.
+    }
+    Ok(())
 }
 
 #[allow(clippy::type_complexity)]
@@ -847,28 +1230,24 @@ fn write_http_json_with_session(
     )
 }
 
-/// Write an MCP HTTP body as `application/json` or a single SSE `data:` event.
+/// Write an MCP HTTP body as `application/json` or SSE `event: message` frame(s).
 fn write_http_mcp_body(
     stream: &mut TcpStream,
     status: u16,
     body: &Value,
     mode: HttpResponseMode,
     session_id: Option<&str>,
+    rpc_method: Option<&str>,
 ) -> Result<()> {
     match mode {
         HttpResponseMode::Json => write_http_json_with_session(stream, status, body, session_id),
-        HttpResponseMode::SseSingle => {
-            let json_bytes = serde_json::to_vec(body)?;
-            // One event, then end stream. Clients that only Accept text/event-stream
-            // still get a complete JSON-RPC payload without a multi-message bus.
-            let mut sse = Vec::with_capacity(json_bytes.len() + 32);
-            sse.extend_from_slice(b"event: message\ndata: ");
-            sse.extend_from_slice(&json_bytes);
-            sse.extend_from_slice(b"\n\n");
-            let mut extra: Vec<(&str, &str)> = vec![
-                ("Cache-Control", "no-cache"),
-                ("X-Locus-Streamable", "sse-single"),
-            ];
+        HttpResponseMode::Sse => {
+            let messages = build_sse_rpc_messages(body, rpc_method);
+            let multi = messages.len() > 1;
+            let sse = encode_sse_messages(&messages)?;
+            let tag = if multi { "sse-multi" } else { "sse-single" };
+            let mut extra: Vec<(&str, &str)> =
+                vec![("Cache-Control", "no-cache"), ("X-Locus-Streamable", tag)];
             if let Some(id) = session_id {
                 extra.push(("Mcp-Session-Id", id));
             }
@@ -877,14 +1256,8 @@ fn write_http_mcp_body(
     }
 }
 
-fn write_http_response(
-    stream: &mut TcpStream,
-    status: u16,
-    content_type: &str,
-    body: &[u8],
-    extra_headers: Option<Vec<(&str, &str)>>,
-) -> Result<()> {
-    let reason = match status {
+fn http_status_reason(status: u16) -> &'static str {
+    match status {
         200 => "OK",
         202 => "Accepted",
         204 => "No Content",
@@ -896,7 +1269,17 @@ fn write_http_response(
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "OK",
-    };
+    }
+}
+
+fn write_http_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    extra_headers: Option<Vec<(&str, &str)>>,
+) -> Result<()> {
+    let reason = http_status_reason(status);
     let mut head = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
         body.len()
@@ -909,6 +1292,38 @@ fn write_http_response(
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     stream.write_all(body)?;
+    stream.flush()?;
+    Ok(())
+}
+
+/// SSE response headers without Content-Length (long-lived stream until client disconnect).
+fn write_http_sse_headers(
+    stream: &mut TcpStream,
+    status: u16,
+    extra: &[(&str, &str)],
+) -> Result<()> {
+    let reason = http_status_reason(status);
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\n"
+    );
+    for (k, v) in extra {
+        // Avoid duplicating Cache-Control if callers pass it.
+        if k.eq_ignore_ascii_case("cache-control") || k.eq_ignore_ascii_case("content-type") {
+            continue;
+        }
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
+    stream.write_all(head.as_bytes())?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn write_sse_event(stream: &mut TcpStream, event: &str, data: &Value) -> Result<()> {
+    let json_bytes = serde_json::to_vec(data)?;
+    stream.write_all(format!("event: {event}\ndata: ").as_bytes())?;
+    stream.write_all(&json_bytes)?;
+    stream.write_all(b"\n\n")?;
     stream.flush()?;
     Ok(())
 }

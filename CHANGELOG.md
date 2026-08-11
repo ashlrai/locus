@@ -25,6 +25,18 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
   default (network still **allowed** unless opted in). Linux `bwrap` gets `--unshare-net`;
   macOS Seatbelt omits outbound allows (best-effort). The Linux `path` backend fails closed
   when no-network is requested. Docs: [docs/workers.md](./docs/workers.md).
+- **Multi-message SSE on `locus-mcp --http` (M5 partial)** — when Accept prefers
+  `text/event-stream` (or lists SSE and the JSON-RPC body is large), POST `/mcp`
+  streams multiple `event: message` frames: `locus.sse.progress` (+ optional
+  `locus.sse.chunk` text slices) then the complete JSON-RPC result. Header
+  `X-Locus-Streamable: sse-multi|sse-single`. Env: `LOCUS_MCP_SSE_MULTI_BYTES`,
+  `LOCUS_MCP_SSE_CHUNK_BYTES`.
+- **`GET /mcp/sse` session heartbeat** — token-auth SSE stream of values-free
+  `locus.session_tick` (`session_ok`, doctor verdict, safe_next, pin alias).
+  Query `?once=1` / `?interval=5s`; env `LOCUS_MCP_SSE_INTERVAL`. Fail-closed auth.
+  Hub alternative to CLI `locus watch` over HTTP.
+- Docs: [`docs/mcp.md`](./docs/mcp.md) multi-SSE + session stream; GOALS M5 partial updated.
+- Tests: multi-SSE tools/list, Accept dual upgrade, `/mcp/sse` auth + once tick.
 
 - **Linux worker sandbox partial (M5)** — `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`
   on Linux prefers bubblewrap when installed (`LOCUS_WORKER_SANDBOX_BACKEND=bwrap`:
