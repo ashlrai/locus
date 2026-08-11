@@ -126,23 +126,32 @@ Auth headers (any one):
 - `X-Locus-Token: <token>`
 - `X-Locus-Mcp-Token: <token>`
 
-### `Mcp-Session-Id` (in-memory)
+### `Mcp-Session-Id` (memory + disk resume)
 
-Streamable clients get an opaque process-local session id (MCP streamable HTTP). Storage is **in-process only** (no Redis / disk).
+Streamable clients get an opaque session id (MCP streamable HTTP). Locus keeps an **in-memory cache** and a **file-backed map** so restarts and multiple `locus-mcp` workers on the same `LOCUS_HOME` can resume the same id.
 
 | Step | Behavior |
 |------|----------|
-| `POST /mcp` **without** `Mcp-Session-Id` | Mint a new opaque id (initialize / first POST path). Response includes `Mcp-Session-Id: <id>`. |
-| `POST /mcp` **with** a known id | Bind to that session, refresh idle TTL, echo the same header. |
-| Unknown / expired id | **404** `{ "error": "unknown_session", ... }` — fail closed. |
+| `POST /mcp` **without** `Mcp-Session-Id` | Mint a new opaque id (initialize / first POST path). Response includes `Mcp-Session-Id: <id>`. Persists under the session dir. |
+| `POST /mcp` **with** a known id | Bind to that session (memory hit, or **load-on-miss from disk**), refresh idle TTL, echo the same header. |
+| Unknown / expired / **corrupt** id | **404** `{ "error": "unknown_session", ... }` — fail closed (corrupt files are removed, never soft-allowed). |
 | Empty id | **400** `{ "error": "invalid_session", ... }`. |
-| `DELETE /mcp` + id | Drop the session (**204**); further use of that id → **404**. |
-| Capacity | Hard cap (default 256). Further mints → **503** `session_capacity`. |
-| Idle TTL | Default **30 minutes** from last successful bind. |
+| `DELETE /mcp` + id | Drop memory **and** disk (**204**); further use of that id → **404**. |
+| Capacity | Hard cap (default 256 across memory + live disk files). Further mints → **503** `session_capacity`. |
+| Idle TTL | Default **30 minutes** from last successful bind (wall clock; pruned on touch/mint). |
 
-`GET /mcp` does **not** require a session (capabilities probe). If a client sends `Mcp-Session-Id` on GET, unknown ids still fail closed with **404**. Capabilities JSON lists `streamable.session` (`header`, `ttl_seconds`, `max_sessions`, mint rule).
+**Disk layout** (never secrets):
 
-This is **not** multi-process affinity — restarting `locus-mcp` drops the map. Multi-message SSE (progress/chunks + final) is available on POST when Accept allows event-stream; cross-process session resume remains open.
+| Path | Contents |
+|------|----------|
+| `$LOCUS_HOME/http-sessions/<id>.json` | Default map (one file per id) |
+| `LOCUS_MCP_SESSION_DIR/<id>.json` | Optional override of the session directory |
+
+Each JSON file stores only: schema version, session `id`, `created_at_unix`, `last_seen_unix`, and optional **pin summary** (`binding_alias` / `tenant` / `mode` / `seal_ok`). Atomic write (temp + rename, mode `0600`). No tokens, credential refs, or resolved secrets.
+
+`GET /mcp` does **not** require a session (capabilities probe). If a client sends `Mcp-Session-Id` on GET, unknown ids still fail closed with **404**. Capabilities JSON lists `streamable.session` (`header`, `ttl_seconds`, `max_sessions`, `storage`, mint rule).
+
+Multi-message SSE (progress/chunks + final) is available on POST when Accept allows event-stream. Multi-tenant remote multiplexor remains open.
 
 ### Streamable Accept / Content-Type
 
@@ -193,7 +202,7 @@ Each tick is a JSON-RPC `notifications/message` with values-free `data`:
 
 `X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets.
 
-Cross-process `Mcp-Session-Id` resume and multi-tenant remote multiplexor remain open.
+Cross-process `Mcp-Session-Id` resume is **on** when workers share the same `LOCUS_HOME` (or `LOCUS_MCP_SESSION_DIR`). Multi-tenant remote multiplexor remains open.
 
 **Hard rules:**
 

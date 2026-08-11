@@ -28,6 +28,10 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
   only — never a hard blocker alone). Firm onboard soft-offer remains hub CLI-only (#274).
   Docs: [docs/hub-integration.md](./docs/hub-integration.md),
   [docs/verification-plane.md](./docs/verification-plane.md).
+- **HTTP `Mcp-Session-Id` file-backed resume (M5)** — in-memory cache plus disk map under
+  `$LOCUS_HOME/http-sessions/` (override `LOCUS_MCP_SESSION_DIR`). Atomic write, idle TTL
+  prune, fail-closed corrupt files; stores id + timestamps + optional pin summary only
+  (never secrets). Restarts / multi-worker resume via load-on-miss. Docs: [docs/mcp.md](./docs/mcp.md).
 
 - **Opt-in worker sandbox network deny** — `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` or
   `upstream.sandbox_no_network = true` applies harder isolation without changing the MCP

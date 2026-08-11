@@ -14,26 +14,31 @@
 //! - **HTTP** — `locus-mcp --http 127.0.0.1:8742` or `LOCUS_MCP_HTTP=1`
 //!   Streamable-HTTP-lite: JSON-RPC POST `/mcp`, GET `/mcp` capabilities,
 //!   GET `/mcp/sse` session ticks, GET `/health`; requires `LOCUS_MCP_HTTP_TOKEN`.
-//!   `Mcp-Session-Id` in-memory sessions (TTL + max N). SSE: single-event by
-//!   default; multi-message (progress/chunks + final) for large `tools/call`
-//!   results when Accept prefers `text/event-stream`.
+//!   `Mcp-Session-Id` memory cache + file-backed resume under
+//!   `$LOCUS_HOME/http-sessions/` (or `LOCUS_MCP_SESSION_DIR`; TTL + max N;
+//!   no secrets on disk). SSE: single-event by default; multi-message
+//!   (progress/chunks + final) for large `tools/call` when Accept prefers
+//!   `text/event-stream`.
+
+mod http_session;
 
 use anyhow::{bail, Context, Result};
+use http_session::{
+    resolve_http_session_dir, HttpSessionError, HttpSessionMap, HttpSessionPinSummary,
+};
 use locus_core::{
     build_doctor_report, call_tool_gated, compute_safe_next, control_tools, enforce_policy,
     find_workspace, load_config, split_namespaced_tool, tools_for_binding, verify_claim,
     verify_session, AdapterTool, ApprovalGate, Binding, DoctorExternal, Session, Store, VERSION,
 };
-use rand::RngCore;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Process-wide worker manager (synthetic + per-provider upstream MCP).
 fn worker_manager() -> &'static Mutex<CompositeWorkerManagerGuard> {
@@ -50,9 +55,9 @@ static AUTO_PIN_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 /// Default HTTP bind when `--http` / `LOCUS_MCP_HTTP=1` without an address.
 const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:8742";
 
-/// In-memory MCP HTTP session TTL (idle). Clients must re-initialize after expiry.
+/// MCP HTTP session idle TTL. Clients must re-initialize after expiry.
 const HTTP_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
-/// Cap concurrent opaque `Mcp-Session-Id` entries (process-local; no redis).
+/// Cap concurrent opaque `Mcp-Session-Id` entries (memory + on-disk resume map).
 const HTTP_SESSION_MAX: usize = 256;
 
 /// Serialized JSON-RPC body size (bytes) above which SSE prefers multi-message
@@ -181,9 +186,12 @@ fn print_help() {
            LOCUS_MCP_SSE_MULTI_BYTES   multi-message SSE threshold (default 4096)\n\
            LOCUS_MCP_SSE_CHUNK_BYTES   progressive text chunk size (default 2048)\n\
            LOCUS_MCP_SSE_INTERVAL      GET /mcp/sse tick interval (default 5s)\n\
-           LOCUS_HOME                  store root (pin + bindings for remote process)\n\
+           LOCUS_HOME                  store root (pin + bindings + http-sessions)\n\
+           LOCUS_MCP_SESSION_DIR       override HTTP Mcp-Session-Id disk map\n\
+                                       (default: $LOCUS_HOME/http-sessions)\n\
            LOCUS_WORKER_IDLE_SECS      optional idle teardown for upstream workers\n\
-           LOCUS_WORKER_SANDBOX=1      require supported OS isolation or fail closed\n           LOCUS_WORKER_SANDBOX_NO_NETWORK=1  opt-in deny network (bwrap/Seatbelt)\n"
+           LOCUS_WORKER_SANDBOX=1      require supported OS isolation or fail closed\n\
+           LOCUS_WORKER_SANDBOX_NO_NETWORK=1  opt-in deny network (bwrap/Seatbelt)\n"
     );
 }
 
@@ -263,98 +271,27 @@ enum HttpResponseMode {
     Sse,
 }
 
-/// Process-local opaque MCP HTTP sessions (`Mcp-Session-Id`). No redis / disk.
-#[derive(Debug)]
-struct HttpSessionEntry {
-    last_seen: Instant,
-}
-
-/// In-memory map of streamable-HTTP session ids with idle TTL + hard capacity.
-#[derive(Debug)]
-struct HttpSessionMap {
-    sessions: HashMap<String, HttpSessionEntry>,
-    ttl: Duration,
-    max: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum HttpSessionError {
-    /// Client sent a non-empty id that is unknown or past TTL (fail closed).
-    Unknown,
-    /// Client sent an empty / whitespace-only id.
-    Invalid,
-    /// Map is at capacity after purge (mint refused).
-    Capacity,
-}
-
-impl HttpSessionMap {
-    fn new(ttl: Duration, max: usize) -> Self {
-        Self {
-            sessions: HashMap::new(),
-            ttl,
-            max: max.max(1),
-        }
-    }
-
-    fn purge_expired(&mut self, now: Instant) {
-        let ttl = self.ttl;
-        self.sessions
-            .retain(|_, e| now.duration_since(e.last_seen) < ttl);
-    }
-
-    fn mint(&mut self) -> Result<String, HttpSessionError> {
-        let now = Instant::now();
-        self.purge_expired(now);
-        if self.sessions.len() >= self.max {
-            return Err(HttpSessionError::Capacity);
-        }
-        // Opaque 128-bit id (hex). Collision retry is extremely unlikely.
-        for _ in 0..8 {
-            let mut bytes = [0u8; 16];
-            rand::thread_rng().fill_bytes(&mut bytes);
-            let id = hex::encode(bytes);
-            if self.sessions.contains_key(&id) {
-                continue;
-            }
-            self.sessions
-                .insert(id.clone(), HttpSessionEntry { last_seen: now });
-            return Ok(id);
-        }
-        Err(HttpSessionError::Capacity)
-    }
-
-    /// Touch an existing non-expired session. Returns false if unknown/expired.
-    fn touch(&mut self, id: &str) -> bool {
-        let now = Instant::now();
-        self.purge_expired(now);
-        if let Some(entry) = self.sessions.get_mut(id) {
-            entry.last_seen = now;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn remove(&mut self, id: &str) -> bool {
-        self.sessions.remove(id).is_some()
-    }
-
-    #[cfg(test)]
-    fn len(&self) -> usize {
-        self.sessions.len()
-    }
-
-    /// Test helper: insert with an explicit last_seen (for TTL).
-    #[cfg(test)]
-    fn insert_for_test(&mut self, id: impl Into<String>, last_seen: Instant) {
-        self.sessions
-            .insert(id.into(), HttpSessionEntry { last_seen });
-    }
+/// Values-free pin summary for optional HTTP session disk annotation.
+fn current_http_session_pin_summary() -> Option<HttpSessionPinSummary> {
+    let s = store().ok()?;
+    let w = s.whoami().ok()?;
+    Some(HttpSessionPinSummary {
+        binding_alias: Some(w.binding_alias),
+        tenant: Some(w.tenant),
+        mode: Some(w.mode),
+        seal_ok: Some(w.seal_ok),
+    })
 }
 
 fn http_session_map() -> &'static Mutex<HttpSessionMap> {
     static MAP: OnceLock<Mutex<HttpSessionMap>> = OnceLock::new();
-    MAP.get_or_init(|| Mutex::new(HttpSessionMap::new(HTTP_SESSION_TTL, HTTP_SESSION_MAX)))
+    MAP.get_or_init(|| {
+        Mutex::new(
+            HttpSessionMap::new(HTTP_SESSION_TTL, HTTP_SESSION_MAX)
+                .with_persist_dir(resolve_http_session_dir())
+                .with_pin_summary_fn(Some(current_http_session_pin_summary)),
+        )
+    })
 }
 
 /// Resolve `Mcp-Session-Id` for an authenticated MCP HTTP request.
@@ -733,9 +670,11 @@ fn http_mcp_capabilities() -> Value {
                 "ttl_seconds": HTTP_SESSION_TTL.as_secs(),
                 "max_sessions": HTTP_SESSION_MAX,
                 "mint": "initialize or first POST /mcp without header",
-                "storage": "in-memory-process-local"
+                "storage": "memory-cache-plus-disk",
+                "disk": "$LOCUS_HOME/http-sessions or LOCUS_MCP_SESSION_DIR",
+                "disk_fields": "id + timestamps + optional pin summary (never secrets)"
             },
-            "note": "Mcp-Session-Id in-memory sessions + multi-message SSE for large tools/call landed. Cross-process session resume and multi-tenant remote multiplexor still open."
+            "note": "Mcp-Session-Id file-backed resume + multi-message SSE for large tools/call landed. Multi-tenant remote multiplexor still open."
         }
     })
 }
@@ -2577,25 +2516,7 @@ fn tool_text(value: Value, is_error: bool) -> Value {
 #[cfg(test)]
 mod http_session_tests {
     use super::*;
-
-    #[test]
-    fn mint_issues_opaque_hex_id() {
-        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8);
-        let id = map.mint().expect("mint");
-        assert_eq!(id.len(), 32, "16-byte hex id expected, got {id}");
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
-        assert_eq!(map.len(), 1);
-    }
-
-    #[test]
-    fn touch_reuses_and_unknown_rejects() {
-        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8);
-        let id = map.mint().unwrap();
-        assert!(map.touch(&id), "fresh id must touch");
-        assert!(map.touch(&id), "second touch must succeed");
-        assert!(!map.touch("deadbeefdeadbeefdeadbeefdeadbeef"));
-        assert!(!map.touch("not-a-real-session"));
-    }
+    use std::time::SystemTime;
 
     #[test]
     fn resolve_mints_when_missing_and_reuses_header() {
@@ -2628,39 +2549,7 @@ mod http_session_tests {
             resolve_mcp_http_session(&mut map, &empty, true),
             Err(HttpSessionError::Invalid)
         );
-        // Missing without mint is ok (GET capabilities).
         assert_eq!(resolve_mcp_http_session(&mut map, &[], false), Ok(None));
-    }
-
-    #[test]
-    fn capacity_blocks_new_mints() {
-        let mut map = HttpSessionMap::new(Duration::from_secs(60), 2);
-        assert!(map.mint().is_ok());
-        assert!(map.mint().is_ok());
-        assert_eq!(map.mint(), Err(HttpSessionError::Capacity));
-        assert_eq!(map.len(), 2);
-    }
-
-    #[test]
-    fn ttl_expiry_purges_and_rejects() {
-        let mut map = HttpSessionMap::new(Duration::from_millis(50), 8);
-        let id = map.mint().unwrap();
-        // Force last_seen into the past beyond TTL.
-        map.insert_for_test(&id, Instant::now() - Duration::from_secs(10));
-        assert!(!map.touch(&id), "expired session must not touch");
-        assert_eq!(map.len(), 0, "purge should drop expired entry");
-        // Fresh mint after expiry works.
-        let id2 = map.mint().unwrap();
-        assert!(map.touch(&id2));
-    }
-
-    #[test]
-    fn remove_terminates_session() {
-        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8);
-        let id = map.mint().unwrap();
-        assert!(map.remove(&id));
-        assert!(!map.touch(&id));
-        assert!(!map.remove(&id));
     }
 
     #[test]
@@ -2668,5 +2557,36 @@ mod http_session_tests {
         assert_eq!(session_error_body(&HttpSessionError::Unknown).0, 404);
         assert_eq!(session_error_body(&HttpSessionError::Invalid).0, 400);
         assert_eq!(session_error_body(&HttpSessionError::Capacity).0, 503);
+    }
+
+    #[test]
+    fn resolve_resumes_from_disk_after_memory_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8)
+            .with_persist_dir(Some(dir.path().to_path_buf()));
+        let minted = resolve_mcp_http_session(&mut map, &[], true)
+            .unwrap()
+            .unwrap();
+        map.clear_memory();
+        let with_id = vec![("Mcp-Session-Id".into(), minted.clone())];
+        let resumed = resolve_mcp_http_session(&mut map, &with_id, true)
+            .expect("resume")
+            .expect("id");
+        assert_eq!(minted, resumed);
+    }
+
+    #[test]
+    fn resolve_expired_disk_session_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut map = HttpSessionMap::new(Duration::from_millis(50), 8)
+            .with_persist_dir(Some(dir.path().to_path_buf()));
+        let id = map.mint().unwrap();
+        map.insert_for_test(&id, SystemTime::now() - Duration::from_secs(10));
+        map.clear_memory();
+        let with_id = vec![("Mcp-Session-Id".into(), id)];
+        assert_eq!(
+            resolve_mcp_http_session(&mut map, &with_id, true),
+            Err(HttpSessionError::Unknown)
+        );
     }
 }
