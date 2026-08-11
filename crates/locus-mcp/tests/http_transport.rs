@@ -128,6 +128,17 @@ impl HttpServer {
         body: Option<&[u8]>,
         auth: Option<&str>,
     ) -> (u16, String, String) {
+        self.request_with_headers(method, path, body, auth, &[])
+    }
+
+    fn request_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        auth: Option<&str>,
+        extra_headers: &[(&str, &str)],
+    ) -> (u16, String, String) {
         let mut stream = TcpStream::connect(self.addr).expect("connect");
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -143,6 +154,9 @@ impl HttpServer {
         if let Some(t) = auth {
             req.push_str(&format!("Authorization: Bearer {t}\r\n"));
         }
+        for (k, v) in extra_headers {
+            req.push_str(&format!("{k}: {v}\r\n"));
+        }
         req.push_str("\r\n");
         stream.write_all(req.as_bytes()).unwrap();
         if !body.is_empty() {
@@ -154,6 +168,18 @@ impl HttpServer {
         let (status, headers, body) = parse_http_response(&raw);
         (status, headers, body)
     }
+}
+
+fn header_lookup(headers: &str, name: &str) -> Option<String> {
+    let name_l = name.to_ascii_lowercase();
+    for line in headers.lines().skip(1) {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().to_ascii_lowercase() == name_l {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
 }
 
 impl Drop for HttpServer {
@@ -380,10 +406,13 @@ fn http_jsonrpc_initialize_and_tools_list() {
         }
     });
     let body = serde_json::to_vec(&init).unwrap();
-    let (status, _, resp) = srv.request("POST", "/mcp", Some(&body), Some(&srv.token));
+    let (status, headers, resp) = srv.request("POST", "/mcp", Some(&body), Some(&srv.token));
     assert_eq!(status, 200, "{resp}");
     let v: Value = serde_json::from_str(&resp).unwrap();
     assert_eq!(v["result"]["serverInfo"]["name"], "locus-mcp");
+    let session_id =
+        header_lookup(&headers, "Mcp-Session-Id").expect("initialize must mint Mcp-Session-Id");
+    assert_eq!(session_id.len(), 32, "opaque hex session id: {session_id}");
 
     let list = json!({
         "jsonrpc": "2.0",
@@ -392,14 +421,125 @@ fn http_jsonrpc_initialize_and_tools_list() {
         "params": {}
     });
     let body = serde_json::to_vec(&list).unwrap();
-    let (status, _, resp) = srv.request("POST", "/mcp", Some(&body), Some(&srv.token));
+    let (status, headers, resp) = srv.request_with_headers(
+        "POST",
+        "/mcp",
+        Some(&body),
+        Some(&srv.token),
+        &[("Mcp-Session-Id", &session_id)],
+    );
     assert_eq!(status, 200, "{resp}");
+    assert_eq!(
+        header_lookup(&headers, "Mcp-Session-Id").as_deref(),
+        Some(session_id.as_str())
+    );
     let v: Value = serde_json::from_str(&resp).unwrap();
     let tools = v["result"]["tools"].as_array().expect("tools");
     assert!(
         tools.iter().any(|t| t["name"] == "locus_whoami"),
         "expected control tools, got {tools:?}"
     );
+}
+
+#[test]
+fn http_mcp_session_id_mint_reuse_reject() {
+    let srv = HttpServer::spawn("session-id-token");
+    let ping = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}
+    }))
+    .unwrap();
+
+    // First POST without session → mint.
+    let (status, headers, body) = srv.request("POST", "/mcp", Some(&ping), Some(&srv.token));
+    assert_eq!(status, 200, "{body}");
+    let sid = header_lookup(&headers, "Mcp-Session-Id").expect("minted session");
+    assert!(
+        sid.chars().all(|c| c.is_ascii_hexdigit()) && sid.len() == 32,
+        "sid={sid}"
+    );
+
+    // Reuse same id.
+    let (status, headers, body) = srv.request_with_headers(
+        "POST",
+        "/mcp",
+        Some(&ping),
+        Some(&srv.token),
+        &[("Mcp-Session-Id", &sid)],
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        header_lookup(&headers, "Mcp-Session-Id").as_deref(),
+        Some(sid.as_str())
+    );
+
+    // Unknown id → 404 fail closed.
+    let (status, _, body) = srv.request_with_headers(
+        "POST",
+        "/mcp",
+        Some(&ping),
+        Some(&srv.token),
+        &[("Mcp-Session-Id", "ffffffffffffffffffffffffffffffff")],
+    );
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("unknown_session"), "{body}");
+
+    // Empty id → 400.
+    let (status, _, body) = srv.request_with_headers(
+        "POST",
+        "/mcp",
+        Some(&ping),
+        Some(&srv.token),
+        &[("Mcp-Session-Id", "")],
+    );
+    assert_eq!(status, 400, "{body}");
+    assert!(body.contains("invalid_session"), "{body}");
+}
+
+#[test]
+fn http_mcp_session_delete_and_capabilities_advertise() {
+    let srv = HttpServer::spawn("session-delete-token");
+    let (status, _, body) = srv.request("GET", "/mcp", None, Some(&srv.token));
+    assert_eq!(status, 200, "{body}");
+    let caps: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        caps["streamable"]["session"]["header"], "Mcp-Session-Id",
+        "{caps}"
+    );
+    assert!(
+        caps["streamable"]["session"]["ttl_seconds"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+
+    let ping = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}
+    }))
+    .unwrap();
+    let (status, headers, _) = srv.request("POST", "/mcp", Some(&ping), Some(&srv.token));
+    assert_eq!(status, 200);
+    let sid = header_lookup(&headers, "Mcp-Session-Id").unwrap();
+
+    // DELETE terminates.
+    let (status, _, body) = srv.request_with_headers(
+        "DELETE",
+        "/mcp",
+        None,
+        Some(&srv.token),
+        &[("Mcp-Session-Id", &sid)],
+    );
+    assert_eq!(status, 204, "{body}");
+
+    // Reuse after delete → 404.
+    let (status, _, body) = srv.request_with_headers(
+        "POST",
+        "/mcp",
+        Some(&ping),
+        Some(&srv.token),
+        &[("Mcp-Session-Id", &sid)],
+    );
+    assert_eq!(status, 404, "{body}");
+    assert!(body.contains("unknown_session"), "{body}");
 }
 
 #[test]

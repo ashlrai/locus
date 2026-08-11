@@ -114,8 +114,9 @@ LOCUS_MCP_HTTP=1 LOCUS_MCP_HTTP_ADDR=127.0.0.1:8742 locus-mcp
 | Endpoint | Auth | Behavior |
 |----------|------|----------|
 | `GET /health` (`/healthz`, `/`) | none | Liveness JSON: `{ ok, service, version, transport, endpoints }` |
-| `GET /mcp` (also `/jsonrpc`) | **required** | Capabilities + pin summary + **tool names only** (values-free) |
-| `POST /mcp` (also `/jsonrpc`) | **required** | One JSON-RPC 2.0 request body → one JSON or single SSE event |
+| `GET /mcp` (also `/jsonrpc`) | **required** | Capabilities + pin summary + **tool names only** (values-free); advertises `Mcp-Session-Id` support |
+| `POST /mcp` (also `/jsonrpc`) | **required** | One JSON-RPC 2.0 request body → one JSON or single SSE event; mints/binds `Mcp-Session-Id` |
+| `DELETE /mcp` | **required** | Terminate the session named by `Mcp-Session-Id` (**204** / **404**) |
 | `OPTIONS /mcp` | none | Minimal CORS preflight for local tooling |
 
 Auth headers (any one):
@@ -123,6 +124,24 @@ Auth headers (any one):
 - `Authorization: Bearer <LOCUS_MCP_HTTP_TOKEN>`
 - `X-Locus-Token: <token>`
 - `X-Locus-Mcp-Token: <token>`
+
+### `Mcp-Session-Id` (in-memory)
+
+Streamable clients get an opaque process-local session id (MCP streamable HTTP). Storage is **in-process only** (no Redis / disk).
+
+| Step | Behavior |
+|------|----------|
+| `POST /mcp` **without** `Mcp-Session-Id` | Mint a new opaque id (initialize / first POST path). Response includes `Mcp-Session-Id: <id>`. |
+| `POST /mcp` **with** a known id | Bind to that session, refresh idle TTL, echo the same header. |
+| Unknown / expired id | **404** `{ "error": "unknown_session", ... }` — fail closed. |
+| Empty id | **400** `{ "error": "invalid_session", ... }`. |
+| `DELETE /mcp` + id | Drop the session (**204**); further use of that id → **404**. |
+| Capacity | Hard cap (default 256). Further mints → **503** `session_capacity`. |
+| Idle TTL | Default **30 minutes** from last successful bind. |
+
+`GET /mcp` does **not** require a session (capabilities probe). If a client sends `Mcp-Session-Id` on GET, unknown ids still fail closed with **404**. Capabilities JSON lists `streamable.session` (`header`, `ttl_seconds`, `max_sessions`, mint rule).
+
+This is **not** multi-message SSE resume and **not** multi-process affinity — restarting `locus-mcp` drops the map. Full multi-event streaming remains open.
 
 ### Streamable Accept / Content-Type
 
@@ -135,16 +154,18 @@ Compatible with MCP streamable HTTP **without** a full multi-message SSE rewrite
 | `Accept: text/event-stream` only | Response `Content-Type: text/event-stream` with **one** `event: message` + `data: <json-rpc>` then close. |
 | `Accept` lists both | Prefer JSON. |
 | `Accept` that allows neither | **406** not acceptable. |
+| `Mcp-Session-Id` | See table above; echoed on successful POST (and GET when provided + valid). |
 
-Long tool results still return as **one** JSON object (or one SSE data event). Session resume, multi-event streaming, and `Mcp-Session-Id` continuity are **not** implemented yet.
+Long tool results still return as **one** JSON object (or one SSE data event). Multi-message SSE streaming is **not** implemented yet.
 
 **Hard rules:**
 
 1. **Loopback only by default** — non-`127.0.0.1` / non-loopback binds refuse unless `LOCUS_MCP_HTTP_ALLOW_REMOTE=1`.
 2. **Token required** — HTTP mode will not start without a non-empty `LOCUS_MCP_HTTP_TOKEN`.
-3. Missing/wrong token → **401**; never soft-allow. Applies to `GET /mcp` and `POST /mcp`.
-4. Same pin/policy/seal gate as stdio — HTTP is only a transport.
-5. `GET /mcp` never returns secret values or credential refs — tool **names** and pin alias/tenant only.
+3. Missing/wrong token → **401**; never soft-allow. Applies to `GET /mcp`, `POST /mcp`, and `DELETE /mcp`.
+4. Unknown / expired `Mcp-Session-Id` → **404**; never soft-allow.
+5. Same pin/policy/seal gate as stdio — HTTP is only a transport.
+6. `GET /mcp` never returns secret values or credential refs — tool **names** and pin alias/tenant only.
 
 Example (CI):
 
@@ -152,10 +173,17 @@ Example (CI):
 curl -sS http://127.0.0.1:8742/health
 curl -sS -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
   http://127.0.0.1:8742/mcp
-curl -sS -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
+# Initialize / first POST mints Mcp-Session-Id (inspect response headers):
+curl -sS -D - -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+  http://127.0.0.1:8742/mcp
+# Subsequent RPC with the minted id:
+curl -sS -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Mcp-Session-Id: $SESSION_ID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
   http://127.0.0.1:8742/mcp
 ```
 
@@ -183,6 +211,7 @@ HTTP mode is safe for **remote** agents only when you treat the process like any
    Terminate TLS and auth at the proxy (nginx, Caddy, Envoy, cloud LB). Forward:
    - `Authorization` (or `X-Locus-Token`)
    - `Content-Type`, `Accept`
+   - `Mcp-Session-Id` (and expose it on responses for browser clients)
    - path `/mcp` and `/health` (health may stay internal)
 
    Example nginx sketch:
@@ -192,6 +221,8 @@ HTTP mode is safe for **remote** agents only when you treat the process like any
      proxy_set_header Authorization $http_authorization;
      proxy_set_header Content-Type $http_content_type;
      proxy_set_header Accept $http_accept;
+     proxy_set_header Mcp-Session-Id $http_mcp_session_id;
+     proxy_pass_header Mcp-Session-Id;
      proxy_http_version 1.1;
    }
    location /health {

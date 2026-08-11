@@ -13,8 +13,9 @@
 //! - **stdio** (default) — Content-Length or NDJSON for Claude Code / Cursor
 //! - **HTTP** — `locus-mcp --http 127.0.0.1:8742` or `LOCUS_MCP_HTTP=1`
 //!   Streamable-HTTP-lite: JSON-RPC POST `/mcp`, GET `/mcp` capabilities,
-//!   GET `/health`; requires `LOCUS_MCP_HTTP_TOKEN`. Single-event SSE when
-//!   `Accept: text/event-stream` only (no multi-message stream rewrite).
+//!   GET `/health`; requires `LOCUS_MCP_HTTP_TOKEN`. `Mcp-Session-Id` in-memory
+//!   sessions (TTL + max N). Single-event SSE when `Accept: text/event-stream`
+//!   only (no multi-message stream rewrite).
 
 use anyhow::{bail, Context, Result};
 use locus_core::{
@@ -22,14 +23,16 @@ use locus_core::{
     find_workspace, load_config, split_namespaced_tool, tools_for_binding, verify_claim,
     AdapterTool, ApprovalGate, Binding, DoctorExternal, Session, Store, VERSION,
 };
+use rand::RngCore;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Process-wide worker manager (synthetic + per-provider upstream MCP).
 fn worker_manager() -> &'static Mutex<CompositeWorkerManagerGuard> {
@@ -45,6 +48,11 @@ static AUTO_PIN_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 
 /// Default HTTP bind when `--http` / `LOCUS_MCP_HTTP=1` without an address.
 const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:8742";
+
+/// In-memory MCP HTTP session TTL (idle). Clients must re-initialize after expiry.
+const HTTP_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+/// Cap concurrent opaque `Mcp-Session-Id` entries (process-local; no redis).
+const HTTP_SESSION_MAX: usize = 256;
 
 /// Wire framing chosen per message so mixed clients stay happy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +160,8 @@ fn print_help() {
            GET  /health              unauthenticated liveness\n\
            GET  /mcp                 capabilities + tool names (token; values-free)\n\
            POST /mcp                 JSON-RPC 2.0 (token; Accept: application/json\n\
-                                     and/or text/event-stream)\n\n\
+                                     and/or text/event-stream; mints/binds Mcp-Session-Id)\n\
+           DELETE /mcp               terminate Mcp-Session-Id (token)\n\n\
          Env:\n\
            LOCUS_MCP_HTTP=1            enable HTTP (same as --http)\n\
            LOCUS_MCP_HTTP_ADDR         bind address when HTTP enabled\n\
@@ -239,6 +248,151 @@ enum HttpResponseMode {
     SseSingle,
 }
 
+/// Process-local opaque MCP HTTP sessions (`Mcp-Session-Id`). No redis / disk.
+#[derive(Debug)]
+struct HttpSessionEntry {
+    last_seen: Instant,
+}
+
+/// In-memory map of streamable-HTTP session ids with idle TTL + hard capacity.
+#[derive(Debug)]
+struct HttpSessionMap {
+    sessions: HashMap<String, HttpSessionEntry>,
+    ttl: Duration,
+    max: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HttpSessionError {
+    /// Client sent a non-empty id that is unknown or past TTL (fail closed).
+    Unknown,
+    /// Client sent an empty / whitespace-only id.
+    Invalid,
+    /// Map is at capacity after purge (mint refused).
+    Capacity,
+}
+
+impl HttpSessionMap {
+    fn new(ttl: Duration, max: usize) -> Self {
+        Self {
+            sessions: HashMap::new(),
+            ttl,
+            max: max.max(1),
+        }
+    }
+
+    fn purge_expired(&mut self, now: Instant) {
+        let ttl = self.ttl;
+        self.sessions
+            .retain(|_, e| now.duration_since(e.last_seen) < ttl);
+    }
+
+    fn mint(&mut self) -> Result<String, HttpSessionError> {
+        let now = Instant::now();
+        self.purge_expired(now);
+        if self.sessions.len() >= self.max {
+            return Err(HttpSessionError::Capacity);
+        }
+        // Opaque 128-bit id (hex). Collision retry is extremely unlikely.
+        for _ in 0..8 {
+            let mut bytes = [0u8; 16];
+            rand::thread_rng().fill_bytes(&mut bytes);
+            let id = hex::encode(bytes);
+            if self.sessions.contains_key(&id) {
+                continue;
+            }
+            self.sessions
+                .insert(id.clone(), HttpSessionEntry { last_seen: now });
+            return Ok(id);
+        }
+        Err(HttpSessionError::Capacity)
+    }
+
+    /// Touch an existing non-expired session. Returns false if unknown/expired.
+    fn touch(&mut self, id: &str) -> bool {
+        let now = Instant::now();
+        self.purge_expired(now);
+        if let Some(entry) = self.sessions.get_mut(id) {
+            entry.last_seen = now;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remove(&mut self, id: &str) -> bool {
+        self.sessions.remove(id).is_some()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.sessions.len()
+    }
+
+    /// Test helper: insert with an explicit last_seen (for TTL).
+    #[cfg(test)]
+    fn insert_for_test(&mut self, id: impl Into<String>, last_seen: Instant) {
+        self.sessions
+            .insert(id.into(), HttpSessionEntry { last_seen });
+    }
+}
+
+fn http_session_map() -> &'static Mutex<HttpSessionMap> {
+    static MAP: OnceLock<Mutex<HttpSessionMap>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(HttpSessionMap::new(HTTP_SESSION_TTL, HTTP_SESSION_MAX)))
+}
+
+/// Resolve `Mcp-Session-Id` for an authenticated MCP HTTP request.
+///
+/// - Missing header + `mint_if_missing` → mint (initialize / first POST path).
+/// - Present valid → touch idle TTL and reuse.
+/// - Present unknown/expired → fail closed (`Unknown`).
+/// - Present empty → `Invalid`.
+fn resolve_mcp_http_session(
+    map: &mut HttpSessionMap,
+    headers: &[(String, String)],
+    mint_if_missing: bool,
+) -> Result<Option<String>, HttpSessionError> {
+    match header_value(headers, "mcp-session-id").map(str::trim) {
+        Some("") => Err(HttpSessionError::Invalid),
+        Some(id) => {
+            if map.touch(id) {
+                Ok(Some(id.to_string()))
+            } else {
+                Err(HttpSessionError::Unknown)
+            }
+        }
+        None if mint_if_missing => map.mint().map(Some),
+        None => Ok(None),
+    }
+}
+
+fn session_error_body(err: &HttpSessionError) -> (u16, Value) {
+    match err {
+        HttpSessionError::Unknown => (
+            404,
+            json!({
+                "error": "unknown_session",
+                "hint": "Mcp-Session-Id not found or expired; POST initialize (or first POST /mcp) without the header to mint a new session",
+            }),
+        ),
+        HttpSessionError::Invalid => (
+            400,
+            json!({
+                "error": "invalid_session",
+                "hint": "Mcp-Session-Id must be a non-empty opaque id",
+            }),
+        ),
+        HttpSessionError::Capacity => (
+            503,
+            json!({
+                "error": "session_capacity",
+                "hint": "Too many concurrent MCP HTTP sessions; retry later or DELETE /mcp with an idle Mcp-Session-Id",
+            }),
+        ),
+    }
+}
+
 fn run_http(addr: SocketAddr) -> Result<()> {
     if !addr.ip().is_loopback() && !env_truthy("LOCUS_MCP_HTTP_ALLOW_REMOTE") {
         bail!(
@@ -260,7 +414,7 @@ fn run_http(addr: SocketAddr) -> Result<()> {
 
     let listener = TcpListener::bind(addr).with_context(|| format!("bind {addr}"))?;
     eprintln!(
-        "locus-mcp: HTTP listening on http://{addr}  (GET|POST /mcp, GET /health)  token auth required"
+        "locus-mcp: HTTP listening on http://{addr}  (GET|POST|DELETE /mcp, GET /health)  token auth + Mcp-Session-Id"
     );
 
     for stream in listener.incoming() {
@@ -289,6 +443,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
 
     let path_only = path.split('?').next().unwrap_or(path.as_str());
     let response_mode = http_response_mode(&headers);
+    let is_mcp_path = path_only == "/mcp" || path_only == "/mcp/" || path_only == "/jsonrpc";
 
     // Health is unauthenticated so orchestrators can probe liveness without the token.
     if method.eq_ignore_ascii_case("GET")
@@ -302,7 +457,8 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
             "endpoints": {
                 "health": "GET /health",
                 "capabilities": "GET /mcp (token)",
-                "rpc": "POST /mcp (token, JSON-RPC 2.0)"
+                "rpc": "POST /mcp (token, JSON-RPC 2.0)",
+                "session": "Mcp-Session-Id header (mint on initialize/first POST)"
             },
         });
         return write_http_json(&mut stream, 200, &body, None);
@@ -327,17 +483,54 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
         }
     }
 
-    if method.eq_ignore_ascii_case("GET")
-        && (path_only == "/mcp" || path_only == "/mcp/" || path_only == "/jsonrpc")
-    {
-        // Auth'd capabilities probe — tool *names* only, never secret values.
+    if method.eq_ignore_ascii_case("GET") && is_mcp_path {
+        // Capabilities probe: session optional. Unknown id fails closed.
+        let session_id = {
+            let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
+            match resolve_mcp_http_session(&mut map, &headers, false) {
+                Ok(id) => id,
+                Err(err) => {
+                    let (status, body) = session_error_body(&err);
+                    return write_http_json(&mut stream, status, &body, None);
+                }
+            }
+        };
         let caps = http_mcp_capabilities();
-        return write_http_mcp_body(&mut stream, 200, &caps, response_mode);
+        return write_http_mcp_body(
+            &mut stream,
+            200,
+            &caps,
+            response_mode,
+            session_id.as_deref(),
+        );
     }
 
-    if method.eq_ignore_ascii_case("POST")
-        && (path_only == "/mcp" || path_only == "/mcp/" || path_only == "/jsonrpc")
-    {
+    if method.eq_ignore_ascii_case("DELETE") && is_mcp_path {
+        // Explicit session teardown (MCP streamable HTTP).
+        let provided = header_value(&headers, "mcp-session-id").map(str::trim);
+        match provided {
+            None | Some("") => {
+                let body = json!({
+                    "error": "invalid_session",
+                    "hint": "DELETE /mcp requires a non-empty Mcp-Session-Id header",
+                });
+                return write_http_json(&mut stream, 400, &body, None);
+            }
+            Some(id) => {
+                let removed = {
+                    let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
+                    map.remove(id)
+                };
+                if removed {
+                    return write_http_response(&mut stream, 204, "text/plain", b"", None);
+                }
+                let (status, body) = session_error_body(&HttpSessionError::Unknown);
+                return write_http_json(&mut stream, status, &body, None);
+            }
+        }
+    }
+
+    if method.eq_ignore_ascii_case("POST") && is_mcp_path {
         // Content-Type: prefer application/json; allow missing (legacy CI) and
         // application/*+json. Reject clearly wrong types fail-closed.
         if let Some(ct) = header_value(&headers, "content-type") {
@@ -350,12 +543,37 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
             }
         }
 
+        // Mint on initialize / first POST when header absent; bind when present.
+        let session_id = {
+            let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
+            match resolve_mcp_http_session(&mut map, &headers, true) {
+                Ok(Some(id)) => id,
+                Ok(None) => unreachable!("mint_if_missing always yields an id or error"),
+                Err(err) => {
+                    let (status, body) = session_error_body(&err);
+                    return write_http_json(&mut stream, status, &body, None);
+                }
+            }
+        };
+
         let msg: Value = serde_json::from_slice(&body).context("json-rpc body")?;
         match dispatch_rpc(&msg) {
-            Some(response) => write_http_mcp_body(&mut stream, 200, &response, response_mode),
+            Some(response) => write_http_mcp_body(
+                &mut stream,
+                200,
+                &response,
+                response_mode,
+                Some(session_id.as_str()),
+            ),
             None => {
                 // Notification — 202 Accepted, empty JSON object (still respect Accept).
-                write_http_mcp_body(&mut stream, 202, &json!({}), response_mode)
+                write_http_mcp_body(
+                    &mut stream,
+                    202,
+                    &json!({}),
+                    response_mode,
+                    Some(session_id.as_str()),
+                )
             }
         }
     } else if method.eq_ignore_ascii_case("OPTIONS") {
@@ -371,13 +589,17 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
                     "Access-Control-Allow-Headers",
                     "Authorization, Content-Type, Accept, X-Locus-Token, Mcp-Session-Id",
                 ),
-                ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+                (
+                    "Access-Control-Expose-Headers",
+                    "Mcp-Session-Id, X-Locus-Streamable",
+                ),
+                ("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"),
             ]),
         )
     } else {
         let body = json!({
             "error": "not_found",
-            "hint": "GET /health · GET /mcp (capabilities) · POST /mcp (JSON-RPC 2.0)",
+            "hint": "GET /health · GET /mcp (capabilities) · POST /mcp (JSON-RPC 2.0) · DELETE /mcp (session)",
         });
         write_http_json(&mut stream, 404, &body, None)
     }
@@ -446,7 +668,8 @@ fn http_mcp_capabilities() -> Value {
         "endpoints": {
             "health": "GET /health",
             "capabilities": "GET /mcp",
-            "rpc": "POST /mcp"
+            "rpc": "POST /mcp",
+            "session_delete": "DELETE /mcp"
         },
         "content_types": {
             "request": ["application/json"],
@@ -455,7 +678,14 @@ fn http_mcp_capabilities() -> Value {
         "streamable": {
             "mode": "json-preferred",
             "sse": "single-event-when-accept-sse-only",
-            "note": "Full multi-message SSE / session resume not implemented; long tool results return as one JSON object or one SSE data event"
+            "session": {
+                "header": "Mcp-Session-Id",
+                "ttl_seconds": HTTP_SESSION_TTL.as_secs(),
+                "max_sessions": HTTP_SESSION_MAX,
+                "mint": "initialize or first POST /mcp without header",
+                "storage": "in-memory-process-local"
+            },
+            "note": "Mcp-Session-Id in-memory sessions landed; full multi-message SSE / cross-process resume still open. Long tool results return as one JSON object or one SSE data event"
         }
     })
 }
@@ -594,8 +824,27 @@ fn write_http_json(
     body: &Value,
     _reason: Option<&str>,
 ) -> Result<()> {
+    write_http_json_with_session(stream, status, body, None)
+}
+
+fn write_http_json_with_session(
+    stream: &mut TcpStream,
+    status: u16,
+    body: &Value,
+    session_id: Option<&str>,
+) -> Result<()> {
     let bytes = serde_json::to_vec(body)?;
-    write_http_response(stream, status, "application/json", &bytes, None)
+    let mut extra: Vec<(&str, &str)> = Vec::new();
+    if let Some(id) = session_id {
+        extra.push(("Mcp-Session-Id", id));
+    }
+    write_http_response(
+        stream,
+        status,
+        "application/json",
+        &bytes,
+        if extra.is_empty() { None } else { Some(extra) },
+    )
 }
 
 /// Write an MCP HTTP body as `application/json` or a single SSE `data:` event.
@@ -604,9 +853,10 @@ fn write_http_mcp_body(
     status: u16,
     body: &Value,
     mode: HttpResponseMode,
+    session_id: Option<&str>,
 ) -> Result<()> {
     match mode {
-        HttpResponseMode::Json => write_http_json(stream, status, body, None),
+        HttpResponseMode::Json => write_http_json_with_session(stream, status, body, session_id),
         HttpResponseMode::SseSingle => {
             let json_bytes = serde_json::to_vec(body)?;
             // One event, then end stream. Clients that only Accept text/event-stream
@@ -615,16 +865,14 @@ fn write_http_mcp_body(
             sse.extend_from_slice(b"event: message\ndata: ");
             sse.extend_from_slice(&json_bytes);
             sse.extend_from_slice(b"\n\n");
-            write_http_response(
-                stream,
-                status,
-                "text/event-stream",
-                &sse,
-                Some(vec![
-                    ("Cache-Control", "no-cache"),
-                    ("X-Locus-Streamable", "sse-single"),
-                ]),
-            )
+            let mut extra: Vec<(&str, &str)> = vec![
+                ("Cache-Control", "no-cache"),
+                ("X-Locus-Streamable", "sse-single"),
+            ];
+            if let Some(id) = session_id {
+                extra.push(("Mcp-Session-Id", id));
+            }
+            write_http_response(stream, status, "text/event-stream", &sse, Some(extra))
         }
     }
 }
@@ -640,11 +888,13 @@ fn write_http_response(
         200 => "OK",
         202 => "Accepted",
         204 => "No Content",
+        400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
         406 => "Not Acceptable",
         415 => "Unsupported Media Type",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "OK",
     };
     let mut head = format!(
@@ -1907,4 +2157,101 @@ fn tool_text(value: Value, is_error: bool) -> Value {
         "content": [{ "type": "text", "text": text }],
         "isError": is_error
     })
+}
+
+#[cfg(test)]
+mod http_session_tests {
+    use super::*;
+
+    #[test]
+    fn mint_issues_opaque_hex_id() {
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8);
+        let id = map.mint().expect("mint");
+        assert_eq!(id.len(), 32, "16-byte hex id expected, got {id}");
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn touch_reuses_and_unknown_rejects() {
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8);
+        let id = map.mint().unwrap();
+        assert!(map.touch(&id), "fresh id must touch");
+        assert!(map.touch(&id), "second touch must succeed");
+        assert!(!map.touch("deadbeefdeadbeefdeadbeefdeadbeef"));
+        assert!(!map.touch("not-a-real-session"));
+    }
+
+    #[test]
+    fn resolve_mints_when_missing_and_reuses_header() {
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8);
+        let headers: Vec<(String, String)> = vec![];
+        let minted = resolve_mcp_http_session(&mut map, &headers, true)
+            .expect("mint")
+            .expect("id");
+        let with_id = vec![("Mcp-Session-Id".into(), minted.clone())];
+        let reused = resolve_mcp_http_session(&mut map, &with_id, true)
+            .expect("reuse")
+            .expect("id");
+        assert_eq!(minted, reused);
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn resolve_unknown_and_invalid_fail_closed() {
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8);
+        let unknown = vec![(
+            "mcp-session-id".into(),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+        )];
+        assert_eq!(
+            resolve_mcp_http_session(&mut map, &unknown, true),
+            Err(HttpSessionError::Unknown)
+        );
+        let empty = vec![("Mcp-Session-Id".into(), "   ".into())];
+        assert_eq!(
+            resolve_mcp_http_session(&mut map, &empty, true),
+            Err(HttpSessionError::Invalid)
+        );
+        // Missing without mint is ok (GET capabilities).
+        assert_eq!(resolve_mcp_http_session(&mut map, &[], false), Ok(None));
+    }
+
+    #[test]
+    fn capacity_blocks_new_mints() {
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 2);
+        assert!(map.mint().is_ok());
+        assert!(map.mint().is_ok());
+        assert_eq!(map.mint(), Err(HttpSessionError::Capacity));
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn ttl_expiry_purges_and_rejects() {
+        let mut map = HttpSessionMap::new(Duration::from_millis(50), 8);
+        let id = map.mint().unwrap();
+        // Force last_seen into the past beyond TTL.
+        map.insert_for_test(&id, Instant::now() - Duration::from_secs(10));
+        assert!(!map.touch(&id), "expired session must not touch");
+        assert_eq!(map.len(), 0, "purge should drop expired entry");
+        // Fresh mint after expiry works.
+        let id2 = map.mint().unwrap();
+        assert!(map.touch(&id2));
+    }
+
+    #[test]
+    fn remove_terminates_session() {
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8);
+        let id = map.mint().unwrap();
+        assert!(map.remove(&id));
+        assert!(!map.touch(&id));
+        assert!(!map.remove(&id));
+    }
+
+    #[test]
+    fn session_error_status_codes() {
+        assert_eq!(session_error_body(&HttpSessionError::Unknown).0, 404);
+        assert_eq!(session_error_body(&HttpSessionError::Invalid).0, 400);
+        assert_eq!(session_error_body(&HttpSessionError::Capacity).0, 503);
+    }
 }
