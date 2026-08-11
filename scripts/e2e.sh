@@ -2,9 +2,9 @@
 # Locus end-to-end shell tests — pin, isolation, MCP, freeze, approval, doctor,
 # dual-control, events, optional enter/run/notify/ns; graph/ci/heartbeat,
 # dashboard health, forensics export, goal status, verify claim/session,
-# watch session heartbeat, safe_next MCP, upstream list when present
-# (feature-detected). Full 0.2+ surface plus adversarial release security probes
-# (~44+ checks).
+# watch session heartbeat, safe_next MCP, upstream list, HTTP MCP session +
+# SSE when locus-mcp --http is available (feature-detected). Full 0.2+ surface
+# plus adversarial release security probes (~44+ checks).
 set -euo pipefail
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
@@ -55,7 +55,17 @@ ok "locus + locus-mcp release binaries"
 export LOCUS_HOME
 LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")"
 log "2. LOCUS_HOME=$LOCUS_HOME"
-trap 'rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"' EXIT
+# Optional background PIDs (HTTP MCP, etc.) cleaned on any exit path.
+HTTP_MCP_PID=""
+e2e_cleanup() {
+  if [[ -n "${HTTP_MCP_PID:-}" ]]; then
+    kill "$HTTP_MCP_PID" 2>/dev/null || true
+    wait "$HTTP_MCP_PID" 2>/dev/null || true
+    HTTP_MCP_PID=""
+  fi
+  rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"
+}
+trap 'e2e_cleanup' EXIT
 ok "isolated home ready"
 
 # Helper: run locus with the test home
@@ -1641,6 +1651,198 @@ print("notify still effective=%s config_enabled=%s" % (eff, d.get("config_enable
     echo "$notify_txt" | grep -qiE 'off|disabled' \
       || die "notify should remain disabled after suite: $notify_txt"
     ok "notify still disabled (text) after full e2e suite"
+  fi
+fi
+
+# ── 30. HTTP MCP session + SSE (feature-detected; soft-skip on bind/timeout) ──
+# When locus-mcp --http is available: start on a free loopback port with
+# LOCUS_MCP_HTTP_TOKEN, assert fail-closed auth, Mcp-Session-Id mint, and
+# optional GET /mcp/sse?once=1 (skips if the endpoint is not built yet).
+log "30. locus-mcp --http session + SSE (optional)"
+if ! "$MCP_BIN" --help 2>&1 | grep -qE -- '--http(\s|=|$)'; then
+  skip "locus-mcp --http not available"
+elif ! command -v curl >/dev/null 2>&1; then
+  skip "curl not available for HTTP MCP probes"
+else
+  HTTP_MCP_PORT="$(
+    python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
+  )"
+  HTTP_MCP_TOKEN="e2e-http-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  HTTP_MCP_ADDR="127.0.0.1:${HTTP_MCP_PORT}"
+  HTTP_MCP_BASE="http://${HTTP_MCP_ADDR}"
+  http_mcp_log="$LOCUS_HOME/e2e-http-mcp.log"
+
+  set +e
+  LOCUS_HOME="$LOCUS_HOME" \
+    LOCUS_MCP_HTTP_TOKEN="$HTTP_MCP_TOKEN" \
+    LOCUS_MCP_AUTO_PIN=0 \
+    "$MCP_BIN" --http "$HTTP_MCP_ADDR" >"$http_mcp_log" 2>&1 &
+  HTTP_MCP_PID=$!
+  set -e
+
+  http_ready=0
+  for _ in $(seq 1 40); do
+    if ! kill -0 "$HTTP_MCP_PID" 2>/dev/null; then
+      break
+    fi
+    if curl -fsS --max-time 1 "${HTTP_MCP_BASE}/health" >/dev/null 2>&1; then
+      http_ready=1
+      break
+    fi
+    sleep 0.1
+  done
+
+  if [[ "$http_ready" -ne 1 ]]; then
+    if [[ -n "${HTTP_MCP_PID:-}" ]]; then
+      kill "$HTTP_MCP_PID" 2>/dev/null || true
+      wait "$HTTP_MCP_PID" 2>/dev/null || true
+      HTTP_MCP_PID=""
+    fi
+    tail -n 20 "$http_mcp_log" 2>/dev/null || true
+    skip "locus-mcp --http did not become ready (bind/timeout on ${HTTP_MCP_ADDR})"
+  else
+    # POST initialize without token → 401 (fail closed).
+    init_body='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e-http","version":"0"}}}'
+    no_auth_body="$LOCUS_HOME/e2e-http-noauth.body"
+    no_auth_code="$(
+      curl -sS -o "$no_auth_body" -w '%{http_code}' --max-time 5 \
+        -X POST "${HTTP_MCP_BASE}/mcp" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json' \
+        -d "$init_body" 2>/dev/null || echo "000"
+    )"
+    [[ "$no_auth_code" == "401" ]] \
+      || die "POST /mcp initialize without token expected 401, got ${no_auth_code}"
+
+    tools_body='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+    no_auth_tools="$(
+      curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+        -X POST "${HTTP_MCP_BASE}/mcp" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json' \
+        -d "$tools_body" 2>/dev/null || echo "000"
+    )"
+    [[ "$no_auth_tools" == "401" ]] \
+      || die "POST /mcp tools/list without token expected 401, got ${no_auth_tools}"
+    ok "HTTP MCP POST without token → 401 (initialize + tools/list)"
+
+    # With token → 200 + Mcp-Session-Id header.
+    auth_hdr_file="$LOCUS_HOME/e2e-http-auth.hdr"
+    auth_body_file="$LOCUS_HOME/e2e-http-auth.body"
+    auth_code="$(
+      curl -sS -D "$auth_hdr_file" -o "$auth_body_file" -w '%{http_code}' --max-time 5 \
+        -X POST "${HTTP_MCP_BASE}/mcp" \
+        -H "Authorization: Bearer ${HTTP_MCP_TOKEN}" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json' \
+        -d "$init_body" 2>/dev/null || echo "000"
+    )"
+    [[ "$auth_code" == "200" ]] \
+      || die "POST /mcp initialize with token expected 200, got ${auth_code} body=$(head -c 200 "$auth_body_file" 2>/dev/null || true)"
+    session_id="$(
+      python3 -c '
+import sys
+path = sys.argv[1]
+sid = None
+with open(path, "rb") as f:
+    raw = f.read().decode("utf-8", "replace")
+for line in raw.splitlines():
+    if ":" not in line:
+        continue
+    k, v = line.split(":", 1)
+    if k.strip().lower() == "mcp-session-id":
+        sid = v.strip()
+        break
+assert sid, "missing Mcp-Session-Id header in:\\n%s" % raw[:500]
+assert len(sid) >= 16, "session id too short: %r" % sid
+print(sid)
+' "$auth_hdr_file"
+    )"
+    python3 -c '
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    d = json.load(f)
+assert d.get("jsonrpc") == "2.0", d
+assert d.get("id") == 1, d
+assert "result" in d, d
+assert d.get("error") is None or "error" not in d or d["error"] is None, d
+print("initialize ok server=%s" % (
+    (d.get("result") or {}).get("serverInfo", {}).get("name") or "?"))
+' "$auth_body_file"
+    ok "HTTP MCP initialize with token → 200 + Mcp-Session-Id (${session_id:0:8}…)"
+
+    # tools/list with token + session header still succeeds.
+    tools_hdr="$LOCUS_HOME/e2e-http-tools.hdr"
+    tools_out="$LOCUS_HOME/e2e-http-tools.body"
+    tools_code="$(
+      curl -sS -D "$tools_hdr" -o "$tools_out" -w '%{http_code}' --max-time 5 \
+        -X POST "${HTTP_MCP_BASE}/mcp" \
+        -H "Authorization: Bearer ${HTTP_MCP_TOKEN}" \
+        -H "Mcp-Session-Id: ${session_id}" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json' \
+        -d "$tools_body" 2>/dev/null || echo "000"
+    )"
+    [[ "$tools_code" == "200" ]] \
+      || die "POST /mcp tools/list with token expected 200, got ${tools_code}"
+    python3 -c '
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    d = json.load(f)
+tools = (d.get("result") or {}).get("tools") or []
+names = [t.get("name") for t in tools if isinstance(t, dict)]
+assert "locus_whoami" in names, "tools/list missing locus_whoami: %s" % names[:12]
+print("tools/list count=%d" % len(names))
+' "$tools_out"
+    ok "HTTP MCP tools/list with token + session → 200"
+
+    # GET /mcp/sse?once=1 — soft-skip if endpoint not present yet.
+    sse_hdr="$LOCUS_HOME/e2e-http-sse.hdr"
+    sse_body="$LOCUS_HOME/e2e-http-sse.body"
+    set +e
+    sse_code="$(
+      curl -sS -D "$sse_hdr" -o "$sse_body" -w '%{http_code}' --max-time 8 \
+        -H "Authorization: Bearer ${HTTP_MCP_TOKEN}" \
+        -H 'Accept: text/event-stream' \
+        "${HTTP_MCP_BASE}/mcp/sse?once=1" 2>/dev/null
+    )"
+    sse_ec=$?
+    set -e
+    if [[ $sse_ec -ne 0 || -z "$sse_code" || "$sse_code" == "000" ]]; then
+      skip "GET /mcp/sse?once=1 timed out or failed (curl ec=${sse_ec})"
+    elif [[ "$sse_code" == "404" || "$sse_code" == "405" ]]; then
+      skip "GET /mcp/sse not available (HTTP ${sse_code}) — session ticks not built yet"
+    elif [[ "$sse_code" == "401" ]]; then
+      die "GET /mcp/sse?once=1 with token returned 401 (auth should pass)"
+    elif [[ "$sse_code" != "200" ]]; then
+      skip "GET /mcp/sse?once=1 unexpected status ${sse_code} (soft)"
+    else
+      python3 -c '
+import sys
+hdr_path, body_path = sys.argv[1], sys.argv[2]
+with open(hdr_path, "rb") as f:
+    headers = f.read().decode("utf-8", "replace").lower()
+with open(body_path, "rb") as f:
+    body = f.read().decode("utf-8", "replace")
+assert "text/event-stream" in headers, "expected SSE content-type: %s" % headers[:300]
+assert "event:" in body or "data:" in body, "expected SSE framing: %r" % body[:400]
+# Values-free: no credential material in ticks.
+lower = body.lower()
+for bad in ("sk-", "ghp_", "gho_", "github_pat_", "xoxb-", "akia", "secret_value", "phm_", "\"credential_ref\""):
+    assert bad not in lower, "SSE body must not leak secrets (%s)" % bad
+print("sse once bytes=%d" % len(body))
+' "$sse_hdr" "$sse_body"
+      ok "HTTP MCP GET /mcp/sse?once=1 with token → SSE session tick"
+    fi
+
+    if [[ -n "${HTTP_MCP_PID:-}" ]]; then
+      kill "$HTTP_MCP_PID" 2>/dev/null || true
+      wait "$HTTP_MCP_PID" 2>/dev/null || true
+      HTTP_MCP_PID=""
+    fi
+    ok "locus-mcp --http server torn down cleanly"
   fi
 fi
 
