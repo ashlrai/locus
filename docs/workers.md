@@ -36,6 +36,29 @@ Or per-provider in binding TOML:
 upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }
 ```
 
+### Opt-in network isolation (harder sandbox)
+
+Default remains **network allowed** so MCP workers can call provider APIs. For offline fixtures, local tools, or deliberate hard isolation:
+
+```bash
+export LOCUS_WORKER_SANDBOX=1
+export LOCUS_WORKER_SANDBOX_NO_NETWORK=1
+```
+
+Or per-provider:
+
+```toml
+upstream = { recipe = "filesystem-mcp", sandbox = true, sandbox_no_network = true }
+```
+
+| Backend | Effect when no-network is set |
+|---------|-------------------------------|
+| `bwrap` | Adds `--unshare-net` (real net namespace) |
+| `sandbox-exec` | Omits `(system-network)` / outbound TCP·UDP allows (macOS best-effort under imported `system.sb`) |
+| `path` | **Fail closed** — cannot enforce network isolation; install bubblewrap or disable the flag |
+
+No-network has no effect unless sandbox is also on.
+
 ### Backend matrix
 
 | Platform | Tag | Strength | When |
@@ -54,9 +77,9 @@ upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }
 | Files (`path`) | No mount namespace — only PATH restriction + canonical absolute executable |
 | Authority | Work trees that overlap or contain `LOCUS_HOME` are refused before spawn |
 | Secrets | Rebuilds env from the isolation allowlist and uses a private temp root under the worker home |
-| Network | **Allowed** for MCP stdio → provider APIs (Seatbelt: outbound TCP/UDP; bwrap: shared netns — no `--unshare-net`; path: host network) |
+| Network | **Allowed by default** for MCP stdio → provider APIs (Seatbelt: outbound TCP/UDP; bwrap: shared netns — no `--unshare-net`; path: host network). Opt-in deny: `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` or `upstream.sandbox_no_network = true` → bwrap `--unshare-net` / Seatbelt omit outbound allows (macOS best-effort). The Linux `path` backend **fails closed** if no-network is requested (cannot enforce). |
 | Provenance | Resolves the requested executable to a canonical absolute path before PATH is restricted; unavailable commands fail before spawn |
-| Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND=<tag>` only after backend resolution succeeds |
+| Marker | Sets `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND=<tag>` only after backend resolution succeeds; when no-network applies, also sets `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` on the child |
 
 ### Linux bubblewrap profile (when `bwrap` is used)
 
@@ -65,7 +88,8 @@ Minimal session-sized profile (not a VM):
 - `--ro-bind-try` for `/usr`, `/bin`, `/lib`, `/lib64`, `/sbin`, `/usr/local`, `/etc` (TLS/DNS)
 - `--bind` work directory + session worker home only (not `~/.locus/bindings` or host home)
 - `--tmpfs /tmp`, `--proc`, `--dev`, `--unshare-pid`, `--die-with-parent`
-- Network **shared** so upstream MCP can reach provider APIs
+- Network **shared by default** so upstream MCP can reach provider APIs
+- When `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` / `sandbox_no_network = true`: adds `--unshare-net`
 - Extra runtime roots (e.g. node package trees outside `/usr`) bound RO as needed
 
 Bubblewrap still depends on host user namespaces and may fail at spawn on locked-down kernels — that is a hard error, not a silent downgrade. If `bwrap` is simply **not installed**, Locus uses the `path` backend instead and tags it clearly.
@@ -191,6 +215,7 @@ let backend = McpStdioBackend::new(McpStdioConfig {
     resolve_secrets: true,
     extra_env: Default::default(),
     sandbox: false, // or true / LOCUS_WORKER_SANDBOX=1
+    sandbox_no_network: false, // or true / LOCUS_WORKER_SANDBOX_NO_NETWORK=1
 });
 let mut mgr = InMemoryWorkerManager::new(Box::new(backend));
 let slot = mgr.ensure(&session, &binding, "github")?;

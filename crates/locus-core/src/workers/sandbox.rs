@@ -9,6 +9,12 @@
 //! | Linux | `path` | Restricted PATH + absolute executable only (**best-effort**, not kernel isolation) |
 //! | other | — | Fail closed |
 //!
+//! Network defaults to **allowed** so MCP stdio workers can reach provider APIs.
+//! Opt in to deny with `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` or
+//! `upstream.sandbox_no_network = true` (bwrap `--unshare-net`; Seatbelt omit
+//! outbound allows — macOS best-effort). The Linux `path` backend cannot enforce
+//! network isolation and fails closed when no-network is requested.
+//!
 //! `LOCUS_WORKER_SANDBOXED=1` and `LOCUS_WORKER_SANDBOX_BACKEND=<tag>` are set only
 //! after backend resolution. The `path` tag must never be treated as equivalent to
 //! Seatbelt or bubblewrap. This is **not** a VM or full seccomp profile.
@@ -27,9 +33,21 @@ pub const ENV_WORKER_SANDBOXED: &str = "LOCUS_WORKER_SANDBOXED";
 /// Applied sandbox backend tag (`sandbox-exec` / `bwrap` / `path`).
 pub const ENV_WORKER_SANDBOX_BACKEND: &str = "LOCUS_WORKER_SANDBOX_BACKEND";
 
+/// Env: opt-in network isolation for sandboxed workers (`1` / `true` / `yes`).
+///
+/// Default is network **allowed** (MCP needs provider HTTPS). When set with an
+/// OS isolation backend: bwrap gets `--unshare-net`; Seatbelt omits outbound
+/// network allows (macOS best-effort). Has no effect unless sandbox is also on.
+pub const ENV_WORKER_SANDBOX_NO_NETWORK: &str = "LOCUS_WORKER_SANDBOX_NO_NETWORK";
+
 /// Whether global env requests sandbox mode.
 pub fn sandbox_from_env() -> bool {
     sandbox_env_value(std::env::var(ENV_WORKER_SANDBOX).ok().as_deref())
+}
+
+/// Whether global env requests network deny for sandboxed workers.
+pub fn sandbox_no_network_from_env() -> bool {
+    sandbox_env_value(std::env::var(ENV_WORKER_SANDBOX_NO_NETWORK).ok().as_deref())
 }
 
 fn sandbox_env_value(value: Option<&str>) -> bool {
@@ -48,6 +66,15 @@ pub(crate) fn sandbox_enabled_with_env(config_flag: bool, env_flag: bool) -> boo
     config_flag || env_flag
 }
 
+/// Effective no-network: config/spec flag OR env (only meaningful when sandboxed).
+pub fn sandbox_no_network_enabled(config_flag: bool) -> bool {
+    sandbox_enabled_with_env(config_flag, sandbox_no_network_from_env())
+}
+
+pub(crate) fn sandbox_no_network_enabled_with_env(config_flag: bool, env_flag: bool) -> bool {
+    config_flag || env_flag
+}
+
 /// Restricted PATH for sandboxed workers.
 ///
 /// The resolved executable's directory is prepended separately so a protected
@@ -62,7 +89,7 @@ pub fn restricted_worker_path() -> String {
 pub enum SandboxBackend {
     /// macOS Seatbelt via `/usr/bin/sandbox-exec`.
     SandboxExec,
-    /// Linux bubblewrap (`bwrap`) — mount/pid namespace; network shared for MCP.
+    /// Linux bubblewrap (`bwrap`) — mount/pid namespace; network shared unless no_network.
     Bwrap,
     /// Restricted PATH + absolute executable only. **Best-effort**, not OS isolation.
     Path,
@@ -372,15 +399,16 @@ fn validate_runtime_access(runtime: &RuntimeAccess, locus_home: &Path) -> Result
     Ok(())
 }
 
-/// Deny-by-default Seatbelt profile for one worker.
+/// Deny-by-default Seatbelt profile for one worker (network allowed by default).
 ///
 /// The current work tree and worker home are the only caller-owned trees made
 /// readable. The rest of LOCUS_HOME (including daemon.key, bindings, sessions,
 /// approvals, and audit) and the user's ambient home remain inaccessible.
-/// Network is outbound TCP/UDP only because upstream MCP servers are provider
-/// clients. Application listeners and non-system Unix-domain sockets are not
-/// part of the worker contract; imported Apple system profiles retain narrowly
-/// scoped system-service IPC such as logging.
+/// Network defaults to outbound TCP/UDP only because upstream MCP servers are
+/// provider clients. Pass `no_network = true` (or set
+/// [`ENV_WORKER_SANDBOX_NO_NETWORK`]) to omit outbound allows — macOS best-effort
+/// under imported Apple system profiles. Application listeners and non-system
+/// Unix-domain sockets are not part of the worker contract.
 #[allow(dead_code)]
 pub fn seatbelt_profile_for_worker(
     work_dir: &Path,
@@ -401,8 +429,18 @@ fn seatbelt_profile_for_worker_with_path(
     executable: &Path,
     search_path: Option<&str>,
 ) -> Result<String> {
+    seatbelt_profile_for_worker_with_opts(work_dir, worker_home, executable, search_path, false)
+}
+
+fn seatbelt_profile_for_worker_with_opts(
+    work_dir: &Path,
+    worker_home: &Path,
+    executable: &Path,
+    search_path: Option<&str>,
+    no_network: bool,
+) -> Result<String> {
     let runtime = resolve_runtime_access(executable, search_path)?;
-    seatbelt_profile_for_runtime(work_dir, worker_home, &runtime)
+    seatbelt_profile_for_runtime(work_dir, worker_home, &runtime, no_network)
 }
 
 /// Canonical work dir, worker home, and LOCUS_HOME after authority overlap checks.
@@ -436,6 +474,7 @@ fn seatbelt_profile_for_runtime(
     work_dir: &Path,
     worker_home: &Path,
     runtime: &RuntimeAccess,
+    no_network: bool,
 ) -> Result<String> {
     let paths = validate_sandbox_paths(work_dir, worker_home, runtime)?;
     let wd = &paths.work_dir;
@@ -461,11 +500,30 @@ fn seatbelt_profile_for_runtime(
         read_rules.push_str(&format!("    (literal \"{literal}\")\n"));
     }
 
+    // Default: outbound TCP/UDP for MCP → provider APIs.
+    // Opt-in no_network: omit allows (deny default). macOS best-effort —
+    // imported system.sb may still permit narrow system-service IPC.
+    let network_rules = if no_network {
+        "; Locus worker: network deny (LOCUS_WORKER_SANDBOX_NO_NETWORK / sandbox_no_network)\n\
+         ; (no system-network / outbound TCP-UDP allows; deny default applies)\n"
+            .to_string()
+    } else {
+        "(system-network)\n\
+         (allow network-outbound (remote tcp) (remote udp))\n"
+            .to_string()
+    };
+
+    let network_comment = if no_network {
+        "deny-by-default filesystem + network (opt-in no_network; macOS best-effort)"
+    } else {
+        "deny-by-default filesystem, outbound provider network only"
+    };
+
     Ok(format!(
         r#"(version 1)
 (deny default)
 (import "system.sb")
-; Locus worker: deny-by-default filesystem, outbound provider network only.
+; Locus worker: {network_comment}.
 (allow process-fork)
 (allow process-info*)
 (allow process-exec
@@ -479,9 +537,7 @@ fn seatbelt_profile_for_runtime(
 (allow signal (target self))
 (allow ipc-posix*)
 (allow system-socket)
-(system-network)
-(allow network-outbound (remote tcp) (remote udp))
-(allow file-read-metadata file-test-existence
+{network_rules}(allow file-read-metadata file-test-existence
     (path-ancestors "{wd}")
     (path-ancestors "{wh}")
 {metadata_rules})
@@ -512,6 +568,8 @@ pub struct SandboxSpawn {
     /// Canonical executable selected before the child environment is rebuilt.
     #[allow(dead_code)]
     pub executable: PathBuf,
+    /// Whether network isolation was applied (bwrap unshare-net / Seatbelt deny).
+    pub no_network: bool,
 }
 
 fn restricted_path_for_runtime(runtime: &RuntimeAccess) -> String {
@@ -532,7 +590,8 @@ fn restricted_path_for_runtime(runtime: &RuntimeAccess) -> String {
 /// Read-only system roots for the Linux bubblewrap profile.
 ///
 /// Uses `--ro-bind-try` so missing merged-usr paths do not fail the wrap.
-/// Network stays shared (no `--unshare-net`) so MCP provider HTTPS works.
+/// Network stays shared by default (no `--unshare-net`) so MCP provider HTTPS
+/// works; opt-in [`ENV_WORKER_SANDBOX_NO_NETWORK`] adds `--unshare-net`.
 const BWRAP_RO_ROOTS: &[&str] = &[
     "/usr",
     "/bin",
@@ -549,25 +608,29 @@ const BWRAP_RO_ROOTS: &[&str] = &[
 /// - RO system roots
 /// - RW bind of work tree + session worker home only (not full `LOCUS_HOME`)
 /// - tmpfs `/tmp`; private HOME via env (worker home)
-/// - network allowed (shared netns) for MCP stdio → provider APIs
+/// - network allowed by default (shared netns) for MCP stdio → provider APIs
+/// - when `no_network`: `--unshare-net`
 /// - no bind of `LOCUS_HOME/bindings` or host ambient home
 fn bwrap_args_for_runtime(
     work_dir: &Path,
     worker_home: &Path,
     runtime: &RuntimeAccess,
     args: &[String],
+    no_network: bool,
 ) -> Vec<String> {
-    let mut out: Vec<String> = vec![
-        "--die-with-parent".into(),
-        "--unshare-pid".into(),
-        // Intentionally no --unshare-net: MCP servers need outbound provider traffic.
+    let mut out: Vec<String> = vec!["--die-with-parent".into(), "--unshare-pid".into()];
+    if no_network {
+        out.push("--unshare-net".into());
+    }
+    // Default: no --unshare-net so MCP servers can reach provider APIs.
+    out.extend([
         "--proc".into(),
         "/proc".into(),
         "--dev".into(),
         "/dev".into(),
         "--tmpfs".into(),
         "/tmp".into(),
-    ];
+    ]);
 
     for root in BWRAP_RO_ROOTS {
         out.push("--ro-bind-try".into());
@@ -634,11 +697,16 @@ fn bwrap_args_for_runtime(
 ///
 /// Platform rules: macOS requires Seatbelt; Linux prefers bubblewrap and falls
 /// back to best-effort `path` when `bwrap` is missing; other OS fail closed.
+///
+/// Network is allowed by default. When `no_network` is true:
+/// bwrap adds `--unshare-net`, Seatbelt omits outbound network allows.
+/// The `path` backend cannot enforce network isolation and fails closed.
 pub fn resolve_sandbox_spawn(
     program: &str,
     args: &[String],
     work_dir: &Path,
     worker_home: &Path,
+    no_network: bool,
 ) -> Result<SandboxSpawn> {
     let selection = select_sandbox_backend()?;
     resolve_sandbox_spawn_for(
@@ -648,6 +716,7 @@ pub fn resolve_sandbox_spawn(
         worker_home,
         std::env::var("PATH").ok().as_deref(),
         selection,
+        no_network,
     )
 }
 
@@ -661,6 +730,27 @@ fn resolve_sandbox_spawn_with_backend(
     search_path: Option<&str>,
     backend_path: Option<&Path>,
 ) -> Result<SandboxSpawn> {
+    resolve_sandbox_spawn_with_backend_opts(
+        program,
+        args,
+        work_dir,
+        worker_home,
+        search_path,
+        backend_path,
+        false,
+    )
+}
+
+#[cfg(test)]
+fn resolve_sandbox_spawn_with_backend_opts(
+    program: &str,
+    args: &[String],
+    work_dir: &Path,
+    worker_home: &Path,
+    search_path: Option<&str>,
+    backend_path: Option<&Path>,
+    no_network: bool,
+) -> Result<SandboxSpawn> {
     let selection = match backend_path {
         Some(path) => BackendSelection {
             backend: SandboxBackend::SandboxExec,
@@ -672,7 +762,15 @@ fn resolve_sandbox_spawn_with_backend(
             ));
         }
     };
-    resolve_sandbox_spawn_for(program, args, work_dir, worker_home, search_path, selection)
+    resolve_sandbox_spawn_for(
+        program,
+        args,
+        work_dir,
+        worker_home,
+        search_path,
+        selection,
+        no_network,
+    )
 }
 
 fn resolve_sandbox_spawn_for(
@@ -682,6 +780,7 @@ fn resolve_sandbox_spawn_for(
     worker_home: &Path,
     search_path: Option<&str>,
     selection: BackendSelection,
+    no_network: bool,
 ) -> Result<SandboxSpawn> {
     let requested_executable = resolve_executable(program, work_dir, search_path)?;
     let runtime = resolve_runtime_access(&requested_executable, search_path)?;
@@ -691,7 +790,8 @@ fn resolve_sandbox_spawn_for(
 
     match selection.backend {
         SandboxBackend::SandboxExec => {
-            let profile = seatbelt_profile_for_runtime(work_dir, worker_home, &runtime)?;
+            let profile =
+                seatbelt_profile_for_runtime(work_dir, worker_home, &runtime, no_network)?;
             let wrapper = selection.wrapper.ok_or_else(|| {
                 LocusError::msg("sandbox-exec backend selected without wrapper path")
             })?;
@@ -712,6 +812,7 @@ fn resolve_sandbox_spawn_for(
                 backend: SandboxBackend::SandboxExec,
                 path,
                 executable,
+                no_network,
             })
         }
         SandboxBackend::Bwrap => {
@@ -724,17 +825,29 @@ fn resolve_sandbox_spawn_for(
                     wrapper.display()
                 ))
             })?;
-            let wrapped =
-                bwrap_args_for_runtime(&paths.work_dir, &paths.worker_home, &runtime, args);
+            let wrapped = bwrap_args_for_runtime(
+                &paths.work_dir,
+                &paths.worker_home,
+                &runtime,
+                args,
+                no_network,
+            );
             Ok(SandboxSpawn {
                 program: backend.display().to_string(),
                 args: wrapped,
                 backend: SandboxBackend::Bwrap,
                 path,
                 executable,
+                no_network,
             })
         }
         SandboxBackend::Path => {
+            if no_network {
+                return Err(LocusError::msg(
+                    "sandbox no_network requested but backend `path` cannot enforce network isolation; \
+                     install bubblewrap (bwrap) or disable LOCUS_WORKER_SANDBOX_NO_NETWORK / sandbox_no_network",
+                ));
+            }
             // Best-effort only: absolute executable + restricted PATH.
             Ok(SandboxSpawn {
                 program: executable.display().to_string(),
@@ -742,6 +855,7 @@ fn resolve_sandbox_spawn_for(
                 backend: SandboxBackend::Path,
                 path,
                 executable,
+                no_network: false,
             })
         }
     }
@@ -800,6 +914,21 @@ mod tests {
         assert!(sandbox_enabled_with_env(false, true));
         assert!(sandbox_enabled_with_env(true, false));
         assert!(!sandbox_enabled_with_env(false, false));
+        assert!(sandbox_no_network_enabled_with_env(false, true));
+        assert!(sandbox_no_network_enabled_with_env(true, false));
+        assert!(!sandbox_no_network_enabled_with_env(false, false));
+    }
+
+    #[test]
+    fn profile_no_network_omits_outbound_allows() {
+        let (_dir, worker_home, work_dir, executable, _backend) = fixture();
+        let profile =
+            seatbelt_profile_for_worker_with_opts(&work_dir, &worker_home, &executable, None, true)
+                .unwrap();
+        assert!(profile.contains("(deny default)"));
+        assert!(!profile.contains("(system-network)"));
+        assert!(!profile.contains("(allow network-outbound"));
+        assert!(profile.contains("network deny") || profile.contains("no_network"));
     }
 
     #[test]
@@ -896,12 +1025,14 @@ mod tests {
                 backend: SandboxBackend::Path,
                 wrapper: None,
             },
+            false,
         )
         .unwrap();
         let canonical = executable.canonicalize().unwrap();
         assert_eq!(spawn.backend, SandboxBackend::Path);
         assert_eq!(spawn.backend.as_str(), "path");
         assert!(!spawn.backend.is_os_isolation());
+        assert!(!spawn.no_network);
         assert_eq!(spawn.program, canonical.display().to_string());
         assert_eq!(spawn.args, custom_args);
         assert_eq!(spawn.executable, canonical);
@@ -926,11 +1057,36 @@ mod tests {
                 backend: SandboxBackend::Path,
                 wrapper: None,
             },
+            false,
         )
         .unwrap_err()
         .to_string();
         assert!(
             err.contains("work directory") && err.contains("LOCUS_HOME"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn path_backend_fails_closed_when_no_network_requested() {
+        let (_dir, worker_home, work_dir, executable, _backend) = fixture();
+        let search_path = executable.parent().unwrap().display().to_string();
+        let err = resolve_sandbox_spawn_for(
+            "custom-mcp",
+            &[],
+            &work_dir,
+            &worker_home,
+            Some(&search_path),
+            BackendSelection {
+                backend: SandboxBackend::Path,
+                wrapper: None,
+            },
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("path") && err.contains("network isolation"),
             "{err}"
         );
     }
@@ -946,7 +1102,7 @@ mod tests {
         let runtime = resolve_runtime_access(&executable, None).unwrap();
         let wd = work_dir.canonicalize().unwrap();
         let wh = worker_home.canonicalize().unwrap();
-        let args = bwrap_args_for_runtime(&wd, &wh, &runtime, &["--ping".into()]);
+        let args = bwrap_args_for_runtime(&wd, &wh, &runtime, &["--ping".into()], false);
 
         assert!(args.iter().any(|a| a == "--die-with-parent"));
         assert!(args.iter().any(|a| a == "--unshare-pid"));
@@ -998,9 +1154,11 @@ mod tests {
                 backend: SandboxBackend::Bwrap,
                 wrapper: Some(bwrap.clone()),
             },
+            false,
         )
         .unwrap();
         assert_eq!(spawn.backend, SandboxBackend::Bwrap);
+        assert!(!spawn.no_network);
         assert_eq!(
             spawn.program,
             bwrap.canonicalize().unwrap().display().to_string()
@@ -1008,6 +1166,64 @@ mod tests {
         assert!(spawn.args.iter().any(|a| a == "--die-with-parent"));
         assert!(!spawn.args.iter().any(|a| a == "--unshare-net"));
         assert_eq!(spawn.args.last().map(String::as_str), Some("a"));
+    }
+
+    #[test]
+    fn bwrap_args_unshare_net_when_no_network() {
+        let (_dir, worker_home, work_dir, executable, _backend) = fixture();
+        let runtime = resolve_runtime_access(&executable, None).unwrap();
+        let wd = work_dir.canonicalize().unwrap();
+        let wh = worker_home.canonicalize().unwrap();
+        let args = bwrap_args_for_runtime(&wd, &wh, &runtime, &[], true);
+        assert!(
+            args.iter().any(|a| a == "--unshare-net"),
+            "no_network must add --unshare-net: {args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--unshare-pid"));
+    }
+
+    #[test]
+    fn bwrap_backend_resolve_unshare_net_when_no_network() {
+        let (dir, worker_home, work_dir, executable, _backend) = fixture();
+        let bwrap = dir.path().join("bwrap");
+        fs::write(&bwrap, "wrapper").unwrap();
+        let search_path = executable.parent().unwrap().display().to_string();
+        let spawn = resolve_sandbox_spawn_for(
+            "custom-mcp",
+            &[],
+            &work_dir,
+            &worker_home,
+            Some(&search_path),
+            BackendSelection {
+                backend: SandboxBackend::Bwrap,
+                wrapper: Some(bwrap),
+            },
+            true,
+        )
+        .unwrap();
+        assert!(spawn.no_network);
+        assert!(spawn.args.iter().any(|a| a == "--unshare-net"));
+    }
+
+    #[test]
+    fn seatbelt_backend_resolve_omits_outbound_when_no_network() {
+        let (_dir, worker_home, work_dir, executable, backend) = fixture();
+        let search_path = executable.parent().unwrap().display().to_string();
+        let spawn = resolve_sandbox_spawn_with_backend_opts(
+            "custom-mcp",
+            &[],
+            &work_dir,
+            &worker_home,
+            Some(&search_path),
+            Some(&backend),
+            true,
+        )
+        .unwrap();
+        assert!(spawn.no_network);
+        assert_eq!(spawn.backend, SandboxBackend::SandboxExec);
+        let profile = &spawn.args[1];
+        assert!(!profile.contains("(system-network)"));
+        assert!(!profile.contains("(allow network-outbound"));
     }
 
     #[test]
@@ -1150,6 +1366,7 @@ mod tests {
             &[daemon_key.display().to_string()],
             &work_dir,
             &worker_home,
+            false,
         )
         .unwrap();
         let output = std::process::Command::new(&spawn.program)
@@ -1222,6 +1439,7 @@ mod tests {
             &["-l".into(), "127.0.0.1".into(), "0".into()],
             &work_dir,
             &worker_home,
+            false,
         )
         .unwrap();
         let mut child = std::process::Command::new(&spawn.program)
@@ -1274,6 +1492,7 @@ mod tests {
             &["-U".into(), socket_path.display().to_string()],
             &work_dir,
             &worker_home,
+            false,
         )
         .unwrap();
         let output = std::process::Command::new(&spawn.program)
@@ -1303,6 +1522,7 @@ mod tests {
             &["-U".into(), socket_path.display().to_string()],
             &work_dir,
             &worker_home,
+            false,
         )
         .unwrap();
         let output = std::process::Command::new(&spawn.program)
@@ -1333,8 +1553,10 @@ mod tests {
             ],
             &work_dir,
             &worker_home,
+            false,
         )
         .unwrap();
+        assert!(!spawn.no_network);
         let output = std::process::Command::new(&spawn.program)
             .args(&spawn.args)
             .current_dir(&work_dir)
@@ -1349,13 +1571,50 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn no_network_policy_blocks_outbound_connections() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        let (_dir, worker_home, work_dir, _executable, _backend) = fixture();
+        let spawn = resolve_sandbox_spawn(
+            "/usr/bin/nc",
+            &[
+                "-z".into(),
+                "-w".into(),
+                "1".into(),
+                "127.0.0.1".into(),
+                port,
+            ],
+            &work_dir,
+            &worker_home,
+            true,
+        )
+        .unwrap();
+        assert!(spawn.no_network);
+        let profile = &spawn.args[1];
+        assert!(!profile.contains("(allow network-outbound"));
+        let output = std::process::Command::new(&spawn.program)
+            .args(&spawn.args)
+            .current_dir(&work_dir)
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "no_network sandbox unexpectedly allowed outbound connection: status={} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn available_npx_keeps_canonical_provenance_inside_real_sandbox() {
         let (_dir, worker_home, work_dir, _executable, _backend) = fixture();
         if resolve_executable("npx", &work_dir, std::env::var("PATH").ok().as_deref()).is_err() {
             return;
         }
         let spawn =
-            resolve_sandbox_spawn("npx", &["--version".into()], &work_dir, &worker_home).unwrap();
+            resolve_sandbox_spawn("npx", &["--version".into()], &work_dir, &worker_home, false)
+                .unwrap();
         fs::create_dir_all(worker_home.join("tmp")).unwrap();
         let output = std::process::Command::new(&spawn.program)
             .args(&spawn.args)

@@ -4,7 +4,10 @@
 //! with `spawn=true`. All others use [`SyntheticBackend`].
 
 use super::mcp_stdio::{McpStdioBackend, McpStdioConfig};
-use super::sandbox::{sandbox_enabled_with_env, sandbox_from_env};
+use super::sandbox::{
+    sandbox_enabled_with_env, sandbox_from_env, sandbox_no_network_enabled_with_env,
+    sandbox_no_network_from_env,
+};
 use super::stdio_client::UpstreamTool;
 use super::synthetic::SyntheticBackend;
 use super::{WorkerBackend, WorkerKey, WorkerManager, WorkerSlot, WorkerState, WorkerToolResult};
@@ -26,13 +29,16 @@ pub const ENV_WORKER_IDLE_SECS: &str = "LOCUS_WORKER_IDLE_SECS";
 /// unknown or neither recipe nor command is usable.
 ///
 /// Sandbox is on when `upstream.sandbox = true` **or** `LOCUS_WORKER_SANDBOX=1`.
+/// Network deny is on when `upstream.sandbox_no_network = true` **or**
+/// `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` (default remains network allowed for MCP).
 pub fn mcp_config_from_upstream(spec: &UpstreamSpec) -> Result<McpStdioConfig> {
-    mcp_config_from_upstream_with_env(spec, sandbox_from_env())
+    mcp_config_from_upstream_with_env(spec, sandbox_from_env(), sandbox_no_network_from_env())
 }
 
 fn mcp_config_from_upstream_with_env(
     spec: &UpstreamSpec,
     env_sandbox: bool,
+    env_no_network: bool,
 ) -> Result<McpStdioConfig> {
     let expanded = spec.expand()?;
     let sandbox_incompatibility = expanded
@@ -48,6 +54,10 @@ fn mcp_config_from_upstream_with_env(
         resolve_secrets: expanded.resolve_secrets,
         extra_env: BTreeMap::new(),
         sandbox: sandbox_enabled_with_env(expanded.sandbox.unwrap_or(false), env_sandbox),
+        sandbox_no_network: sandbox_no_network_enabled_with_env(
+            expanded.sandbox_no_network,
+            env_no_network,
+        ),
         sandbox_incompatibility,
     })
 }
@@ -869,16 +879,36 @@ for line in sys.stdin:
     fn mcp_config_sandbox_from_spec_or_env() {
         // Spec flag forces sandbox on regardless of env.
         let spec = UpstreamSpec::new("npx").sandbox(true);
-        let cfg = mcp_config_from_upstream_with_env(&spec, false).unwrap();
+        let cfg = mcp_config_from_upstream_with_env(&spec, false, false).unwrap();
         assert!(cfg.sandbox);
+        assert!(!cfg.sandbox_no_network);
 
         // Env-only path is injected so parallel tests do not mutate process state.
-        let cfg2 =
-            mcp_config_from_upstream_with_env(&UpstreamSpec::new("false-cmd-for-test"), true)
-                .unwrap();
+        let cfg2 = mcp_config_from_upstream_with_env(
+            &UpstreamSpec::new("false-cmd-for-test"),
+            true,
+            false,
+        )
+        .unwrap();
         assert!(cfg2.sandbox);
-        let cfg3 = mcp_config_from_upstream_with_env(&UpstreamSpec::new("npx"), false).unwrap();
+        let cfg3 =
+            mcp_config_from_upstream_with_env(&UpstreamSpec::new("npx"), false, false).unwrap();
         assert!(!cfg3.sandbox);
+    }
+
+    #[test]
+    fn mcp_config_no_network_from_spec_or_env() {
+        let base = UpstreamSpec::new("npx").sandbox(true);
+        let cfg = mcp_config_from_upstream_with_env(&base, false, false).unwrap();
+        assert!(!cfg.sandbox_no_network);
+
+        let cfg_spec =
+            mcp_config_from_upstream_with_env(&base.clone().sandbox_no_network(true), false, false)
+                .unwrap();
+        assert!(cfg_spec.sandbox_no_network);
+
+        let cfg_env = mcp_config_from_upstream_with_env(&base, false, true).unwrap();
+        assert!(cfg_env.sandbox_no_network);
     }
 
     #[test]
@@ -900,8 +930,9 @@ for line in sys.stdin:
             ("github-mcp", "@modelcontextprotocol/server-github"),
             ("supabase-mcp", "@supabase/mcp-server-supabase"),
         ] {
-            let cfg = mcp_config_from_upstream_with_env(&UpstreamSpec::from_recipe(id), false)
-                .unwrap_or_else(|e| panic!("{id} expand failed: {e}"));
+            let cfg =
+                mcp_config_from_upstream_with_env(&UpstreamSpec::from_recipe(id), false, false)
+                    .unwrap_or_else(|e| panic!("{id} expand failed: {e}"));
             assert_eq!(cfg.command, "npx", "{id}");
             assert!(
                 cfg.args.iter().any(|a| a.contains(package_needle)),
@@ -915,6 +946,10 @@ for line in sys.stdin:
             );
             assert!(cfg.sandbox, "{id} pure-recipe must default sandbox");
             assert!(
+                !cfg.sandbox_no_network,
+                "{id} must default to network allowed for MCP"
+            );
+            assert!(
                 cfg.sandbox_incompatibility.is_none(),
                 "{id} must be sandbox-compatible"
             );
@@ -923,12 +958,17 @@ for line in sys.stdin:
         // Vercel remote bridge is intentionally unavailable until explicit
         // sandbox = false; OAuth defaults leave resolve_secrets off.
         assert!(
-            mcp_config_from_upstream_with_env(&UpstreamSpec::from_recipe("vercel-mcp"), false)
-                .is_err(),
+            mcp_config_from_upstream_with_env(
+                &UpstreamSpec::from_recipe("vercel-mcp"),
+                false,
+                false
+            )
+            .is_err(),
             "vercel-mcp must fail closed without sandbox = false"
         );
         let vercel = mcp_config_from_upstream_with_env(
             &UpstreamSpec::from_recipe("vercel-mcp").sandbox(false),
+            false,
             false,
         )
         .expect("vercel-mcp with sandbox=false");
@@ -1103,6 +1143,7 @@ for line in sys.stdin:
                     args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
                     resolve_secrets: false,
                     sandbox: Some(false),
+                    sandbox_no_network: false,
                 }),
             }],
         });
@@ -1115,6 +1156,7 @@ for line in sys.stdin:
 
         let cfg = mcp_config_from_upstream_with_env(
             binding.providers[0].upstream.as_ref().unwrap(),
+            false,
             false,
         )
         .unwrap();

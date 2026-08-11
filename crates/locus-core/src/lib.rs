@@ -134,10 +134,11 @@ pub use verify::{
 pub use workers::{
     idle_timeout_from_env, mcp_config_from_upstream, namespace_upstream_tool,
     provider_from_tool_name, restricted_worker_path, sandbox_enabled, sandbox_from_env,
-    strip_provider_prefix, CompositeWorkerManager, InMemoryWorkerManager, McpStdioBackend,
-    McpStdioClient, McpStdioConfig, SyntheticBackend, UpstreamTool, WorkerBackend, WorkerKey,
-    WorkerManager, WorkerSlot, WorkerState, WorkerToolResult, ENV_WORKER_IDLE_SECS,
-    ENV_WORKER_SANDBOX, ENV_WORKER_SANDBOXED, ENV_WORKER_SANDBOX_BACKEND,
+    sandbox_no_network_enabled, sandbox_no_network_from_env, strip_provider_prefix,
+    CompositeWorkerManager, InMemoryWorkerManager, McpStdioBackend, McpStdioClient, McpStdioConfig,
+    SyntheticBackend, UpstreamTool, WorkerBackend, WorkerKey, WorkerManager, WorkerSlot,
+    WorkerState, WorkerToolResult, ENV_WORKER_IDLE_SECS, ENV_WORKER_SANDBOX, ENV_WORKER_SANDBOXED,
+    ENV_WORKER_SANDBOX_BACKEND, ENV_WORKER_SANDBOX_NO_NETWORK,
 };
 pub use workspace::{find_workspace, WorkspaceConfig};
 
