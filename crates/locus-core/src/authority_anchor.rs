@@ -1761,6 +1761,35 @@ mod tests {
         thread::sleep(Duration::from_millis(40));
     }
 
+    /// Wait until two consecutive process-identity snapshots agree.
+    ///
+    /// Linux `Command::spawn` is fork+exec: immediately after `spawn` returns,
+    /// `/proc/<pid>/exe` can still point at the pre-exec image under scheduler
+    /// load. Production supervisors are long-lived parents (no race); this only
+    /// stabilizes short-lived children used by unit tests.
+    fn wait_stable_process_identity(pid: u32) -> SupervisorIdentity {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut previous: Option<SupervisorIdentity> = None;
+        while Instant::now() < deadline {
+            match platform::process_identity_for_test(pid) {
+                Ok(current) => {
+                    if previous.as_ref() == Some(&current)
+                        && platform::supervisor_matches_identity(&current).unwrap_or(false)
+                        && platform::supervisor_is_current(&current).unwrap_or(false)
+                    {
+                        return current;
+                    }
+                    previous = Some(current);
+                }
+                Err(_) => {
+                    previous = None;
+                }
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("process identity for pid {pid} did not stabilize before deadline");
+    }
+
     #[test]
     fn endpoint_contains_no_bearer_or_control_capability() {
         let dir = tempdir().unwrap();
@@ -2072,13 +2101,29 @@ mod tests {
 
     #[test]
     fn supervisor_start_identity_rejects_pid_reuse_shape() {
-        let mut child = Command::new("/bin/sleep").arg("5").spawn().unwrap();
-        let identity = platform::process_identity_for_test(child.id()).unwrap();
+        // Long enough that CI scheduling delay cannot exit before we sample.
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let identity = wait_stable_process_identity(child.id());
         assert!(platform::supervisor_matches_identity(&identity).unwrap());
         assert!(platform::supervisor_is_current(&identity).unwrap());
         child.kill().unwrap();
         child.wait().unwrap();
-        assert!(!platform::supervisor_is_current(&identity).unwrap_or(false));
+        // Reaped PIDs (and later PID-reuse of the same number) must not match
+        // the captured start-token binding. Poll briefly: procfs teardown is
+        // not always visible on the very next read under load.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut stale = false;
+        while Instant::now() < deadline {
+            if !platform::supervisor_is_current(&identity).unwrap_or(false) {
+                stale = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            stale,
+            "supervisor identity remained current after process reaped"
+        );
     }
 
     #[test]
