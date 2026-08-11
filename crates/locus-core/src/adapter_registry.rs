@@ -799,7 +799,8 @@ mod tests {
     fn gen_ed25519() -> (SigningKey, RegistryTrustKey) {
         let signing = SigningKey::generate(&mut OsRng);
         let vk = signing.verifying_key();
-        let trust = RegistryTrustKey::ed25519_public("locus-ed25519-test", ed25519_public_key_b64(&vk));
+        let trust =
+            RegistryTrustKey::ed25519_public("locus-ed25519-test", ed25519_public_key_b64(&vk));
         (signing, trust)
     }
 
@@ -1065,9 +1066,7 @@ name = "Empty"
     fn parse_trust_keys_env_ed25519_and_hmac() {
         let (signing, _) = gen_ed25519();
         let pub_b64 = ed25519_public_key_b64(&signing.verifying_key());
-        let raw = format!(
-            "root:ed25519:{pub_b64};mock:hmac-sha256:{MOCK_SECRET_HEX}"
-        );
+        let raw = format!("root:ed25519:{pub_b64};mock:hmac-sha256:{MOCK_SECRET_HEX}");
         let keys = parse_trust_keys_env(&raw).expect("parse env keys");
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].id, "root");
