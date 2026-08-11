@@ -43,6 +43,7 @@ use std::path::{Path, PathBuf};
 ///   approvals/{id}.json
 ///   engagements/<alias>.json
 ///   archives/<alias>-<date>.jsonl
+///   trust/adapter-keys.toml  # adapter registry trust pins (0600; lazy)
 /// ```
 #[derive(Debug, Clone)]
 pub struct Store {

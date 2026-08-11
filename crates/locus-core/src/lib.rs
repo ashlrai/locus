@@ -9,6 +9,7 @@
 //!   metadata is exposed, and resolved values stay inside worker env maps.
 
 pub mod adapter_registry;
+pub mod adapter_trust;
 pub mod adapters;
 pub mod agent_report;
 pub mod approval;
@@ -42,6 +43,14 @@ pub use adapter_registry::{
     verify_manifest, verify_manifest_with_keys, AdapterManifest, AdapterManifestEntry,
     EntryVerifyReport, EntryVerifyStatus, ManifestVerifyReport, RegistryKeyMaterial,
     RegistryTrustKey, LOCUS_ADAPTER_TRUST_KEYS_ENV, SIG_SCHEME_ED25519, SIG_SCHEME_HMAC_SHA256,
+};
+pub use adapter_trust::{
+    adapter_trust_dir, adapter_trust_keys_path, add_ed25519_trust_key, add_trust_key,
+    list_trust_keys_file, list_trust_keys_with_origin, load_merged_trust_keys,
+    load_merged_trust_keys_default, load_trust_keys_file, merge_trust_keys, parse_trust_keys_file,
+    save_trust_keys_file, AdapterTrustKeyFileEntry, AdapterTrustKeysFile, TrustKeyAddResult,
+    TrustKeyListing, TrustKeyOrigin, ADAPTER_TRUST_DIR_NAME, ADAPTER_TRUST_KEYS_FILE_NAME,
+    ADAPTER_TRUST_KEYS_VERSION,
 };
 pub use adapters::{
     call_tool, call_tool_gated, control_tools, enforce_policy, tools_for_binding, AdapterTool,
