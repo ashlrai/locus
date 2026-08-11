@@ -280,7 +280,7 @@ impl ProviderAdapter for MyProviderAdapter {
 |-----|--------|
 | In-tree `ProviderAdapter`, synthetic identity tools | Upstream MCP / REST workers (partially landed via recipes) |
 | Manual `adapter_for` match | Optional out-of-tree packages / dynamic load |
-| Catalog parse + HMAC signature verify (`locus adapter`) | Signed registry root (ed25519) + published trust anchors |
+| Catalog parse + **ed25519** (preferred) / HMAC-SHA256 (backcompat) verify (`locus adapter`) | Production trust store under `~/.locus/trust/` + signed release manifests |
 | Policy + approval CLI | Elevation TTL, dual-control UX polish |
 
 Prefer **wrapping** official upstream MCP servers with frozen env over reimplementing APIs — see [workers.md](./workers.md).
@@ -289,9 +289,9 @@ Prefer **wrapping** official upstream MCP servers with frozen env over reimpleme
 
 ## Signed registry roadmap
 
-The adapter **catalog** (`adapters/manifest.toml`) is the first registry primitive. v0 ships parse + list + verify; it does **not** load plugins or replace `adapter_for()`.
+The adapter **catalog** (`adapters/manifest.toml`) is the first registry primitive. It ships parse + list + multi-scheme verify; it does **not** load plugins or replace `adapter_for()`.
 
-### Manifest fields (v0)
+### Manifest fields
 
 ```toml
 version = 1
@@ -307,27 +307,41 @@ tools = ["github.scope", "github.whoami", "github.check_repo"]
 destructive_tools = []
 description = "…"
 # Optional detached signature (omit until a registry root is published):
-# signature = "hmac-sha256:<64-hex>"
-# signed_by = "locus-registry-mock"
+# signature = "ed25519:<base64>"          # preferred
+# signature = "hmac-sha256:<64-hex>"      # backcompat
+# signed_by = "locus-registry-root"
 ```
 
 JSON Schema: [`schema/adapter-manifest.schema.json`](../schema/adapter-manifest.schema.json).
 
-### Signature scheme (v0)
+### Signature schemes
 
-| Item | v0 (now) | Later |
-|------|----------|--------|
-| Algorithm | HMAC-SHA256 over canonical entry material | ed25519 detached sig |
-| Wire form | `hmac-sha256:<hex>` | `ed25519:<base64>` |
-| Trust store | Process-local keys (tests inject a mock key; production default = empty) | Published registry root key(s) under `~/.locus/trust/` + offline pin |
-| Built-in catalog | **Unsigned** (soft verify passes; `--require-signed` fails closed) | Signed at release with the registry root |
-| Scope | Per-provider entry | + whole-file signature, transparency log optional |
+| Item | Preferred | Backcompat |
+|------|-----------|------------|
+| Algorithm | ed25519 detached over canonical entry material | HMAC-SHA256 over the same material |
+| Wire form | `ed25519:<base64>` (64-byte sig) | `hmac-sha256:<hex>` (32-byte MAC) |
+| Trust material | 32-byte public key, standard base64 | 32-byte secret, 64 hex chars |
+| Trust load | `LOCUS_ADAPTER_TRUST_KEYS` / test fixtures (`verify_*_with_keys`) | same |
+| Built-in catalog | **Unsigned** (soft verify passes; `--require-signed` fails closed) until CI signs with the registry root | same |
+
+`locus adapter verify --require-signed` accepts **either** scheme when the `signed_by` key id is present and trusted and the signature verifies.
 
 **Canonical material** (stable, excludes signature fields):
 
 ```text
 v1|{id}|{name}|{status}|{synthetic 0|1}|{caps sorted}|{selectors sorted}|{tools sorted}|{destructive sorted}
 ```
+
+### Trust keys env
+
+```bash
+# Comma- or semicolon-separated. Scheme must match the signature on the entry.
+export LOCUS_ADAPTER_TRUST_KEYS="root:ed25519:<base64-pubkey>,mock:hmac-sha256:<64-hex-secret>"
+
+locus adapter verify --require-signed
+```
+
+Production ships **no** baked-in keys. An empty / unset trust store keeps soft verify OK for the unsigned built-in catalog; strict mode fails closed.
 
 ### Verify semantics
 
@@ -338,16 +352,19 @@ v1|{id}|{name}|{status}|{synthetic 0|1}|{caps sorted}|{selectors sorted}|{tools 
 
 `--require-signed` is intentionally fail-closed so CI / firm policy can require a trusted catalog before enabling experimental adapters.
 
-### What is intentionally out of scope (v0)
+### What is intentionally out of scope (now)
 
 - Dynamic `.so` / WASM / script adapter loading  
 - Network fetch of remote registries  
 - Replacing in-tree `adapter_for()` registration  
 - Returning or storing credential values in the catalog  
+- Baked-in production root keys (must be operator-supplied)
 
-### Next slices
+### Production trust store (roadmap)
 
-1. **Publish a registry root** (ed25519) and sign release manifests in CI.  
-2. **Trust pin UX** — `locus adapter trust add|list` writing under `~/.locus/trust/`.  
-3. **Optional remote index** — signed HTTP feed of community adapters (still no auto-exec).  
-4. **Out-of-tree packages** — crate or MCP child declared in the catalog, still gated by pin + policy + freeze.  
+1. **Publish a registry root** (ed25519) and sign release manifests in CI; ship the public key as a well-known pin, not a private secret.  
+2. **Trust pin UX** — `locus adapter trust add|list` writing under `~/.locus/trust/` (file-backed store superseding / complementing `LOCUS_ADAPTER_TRUST_KEYS`).  
+3. **Offline pin + rotation** — multiple concurrent roots, expiry, and explicit revoke without soft-allow on unknown keys under `--require-signed`.  
+4. **Optional remote index** — signed HTTP feed of community adapters (still no auto-exec).  
+5. **Out-of-tree packages** — crate or MCP child declared in the catalog, still gated by pin + policy + freeze.  
+6. **Whole-file signature** + optional transparency log once per-entry roots are stable.  

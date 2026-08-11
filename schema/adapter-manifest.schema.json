@@ -76,7 +76,7 @@
         },
         "signature": {
           "type": ["string", "null"],
-          "description": "Detached signature over canonical entry material. Format: hmac-sha256:<hex> (v0). Future: ed25519:<base64>."
+          "description": "Detached signature over canonical entry material. Preferred: ed25519:<base64>. Backcompat: hmac-sha256:<hex>. Trust keys via LOCUS_ADAPTER_TRUST_KEYS or test fixtures."
         },
         "signed_by": {
           "type": ["string", "null"],

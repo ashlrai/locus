@@ -36,10 +36,12 @@ pub mod workers;
 pub mod workspace;
 
 pub use adapter_registry::{
-    builtin_manifest, canonical_entry_material, list_adapters, parse_manifest, sign_entry,
-    sign_entry_material, verify_builtin, verify_entry, verify_entry_with_keys, verify_manifest,
-    verify_manifest_with_keys, AdapterManifest, AdapterManifestEntry, EntryVerifyReport,
-    EntryVerifyStatus, ManifestVerifyReport, RegistryTrustKey, SIG_SCHEME_HMAC_SHA256,
+    builtin_manifest, canonical_entry_material, ed25519_public_key_b64, list_adapters,
+    parse_manifest, parse_trust_keys_env, sign_entry, sign_entry_ed25519, sign_entry_material,
+    sign_entry_material_ed25519, verify_builtin, verify_entry, verify_entry_with_keys,
+    verify_manifest, verify_manifest_with_keys, AdapterManifest, AdapterManifestEntry,
+    EntryVerifyReport, EntryVerifyStatus, ManifestVerifyReport, RegistryKeyMaterial,
+    RegistryTrustKey, LOCUS_ADAPTER_TRUST_KEYS_ENV, SIG_SCHEME_ED25519, SIG_SCHEME_HMAC_SHA256,
 };
 pub use adapters::{
     call_tool, call_tool_gated, control_tools, enforce_policy, tools_for_binding, AdapterTool,
