@@ -25,8 +25,9 @@ pub use composite::{
 };
 pub use mcp_stdio::{McpStdioBackend, McpStdioConfig};
 pub use sandbox::{
-    restricted_worker_path, sandbox_enabled, sandbox_from_env, ENV_WORKER_SANDBOX,
-    ENV_WORKER_SANDBOXED, ENV_WORKER_SANDBOX_BACKEND,
+    restricted_worker_path, sandbox_enabled, sandbox_from_env, sandbox_no_network_enabled,
+    sandbox_no_network_from_env, ENV_WORKER_SANDBOX, ENV_WORKER_SANDBOXED,
+    ENV_WORKER_SANDBOX_BACKEND, ENV_WORKER_SANDBOX_NO_NETWORK,
 };
 pub use stdio_client::{McpStdioClient, UpstreamTool};
 pub use synthetic::SyntheticBackend;
@@ -407,6 +408,7 @@ mod tests {
                 "configured-mcp-secret".into(),
             )]),
             sandbox: false,
+            sandbox_no_network: false,
             sandbox_incompatibility: None,
         });
         let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();
@@ -461,9 +463,11 @@ mod tests {
             resolve_secrets: false,
             extra_env: BTreeMap::new(),
             sandbox: true,
+            sandbox_no_network: false,
             sandbox_incompatibility: None,
         });
         assert!(backend.sandbox_active());
+        assert!(!backend.sandbox_no_network_active());
 
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
@@ -503,6 +507,11 @@ mod tests {
             assert!(
                 backend_tag == "bwrap" || backend_tag == "path",
                 "linux backend must be bwrap or path, got {backend_tag}"
+            );
+            // Default remains network allowed for MCP — no NO_NETWORK marker.
+            assert!(
+                !env.contains_key(crate::workers::ENV_WORKER_SANDBOX_NO_NETWORK),
+                "default sandboxed spawn must leave network allowed"
             );
             let expected_tmp = worker_home.join("tmp").display().to_string();
             assert_eq!(env.get("TMPDIR"), Some(&expected_tmp));
@@ -561,6 +570,7 @@ for line in sys.stdin:
             resolve_secrets: false,
             extra_env: BTreeMap::new(),
             sandbox: false,
+            sandbox_no_network: false,
             sandbox_incompatibility: None,
         });
         let slot = backend.ensure(&session, &binding, pb, &work_dir).unwrap();

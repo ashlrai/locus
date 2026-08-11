@@ -20,6 +20,12 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 
 ### Added
 
+- **Opt-in worker sandbox network deny** — `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` or
+  `upstream.sandbox_no_network = true` applies harder isolation without changing the MCP
+  default (network still **allowed** unless opted in). Linux `bwrap` gets `--unshare-net`;
+  macOS Seatbelt omits outbound allows (best-effort). The Linux `path` backend fails closed
+  when no-network is requested. Docs: [docs/workers.md](./docs/workers.md).
+
 - **Linux worker sandbox partial (M5)** — `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox`
   on Linux prefers bubblewrap when installed (`LOCUS_WORKER_SANDBOX_BACKEND=bwrap`:
   RO system roots, bind work tree + session worker home only, shared network for MCP,

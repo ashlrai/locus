@@ -88,6 +88,13 @@ pub struct UpstreamSpec {
     /// isolation globally. See docs/workers.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<bool>,
+    /// Opt-in network isolation for sandboxed workers (default: network allowed).
+    ///
+    /// When true (or `LOCUS_WORKER_SANDBOX_NO_NETWORK=1`): bwrap `--unshare-net`,
+    /// Seatbelt omits outbound allows (macOS best-effort). Only applies when
+    /// sandbox is on; the Linux `path` backend fails closed if this is set.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sandbox_no_network: bool,
 }
 
 impl UpstreamSpec {
@@ -98,6 +105,7 @@ impl UpstreamSpec {
             args: Vec::new(),
             resolve_secrets: false,
             sandbox: None,
+            sandbox_no_network: false,
         }
     }
 
@@ -109,6 +117,7 @@ impl UpstreamSpec {
             args: Vec::new(),
             resolve_secrets: false,
             sandbox: None,
+            sandbox_no_network: false,
         }
     }
 
@@ -130,6 +139,12 @@ impl UpstreamSpec {
     /// Explicitly enable or disable the OS sandbox.
     pub fn sandbox(mut self, yes: bool) -> Self {
         self.sandbox = Some(yes);
+        self
+    }
+
+    /// Opt in to network isolation inside the sandbox (default remains allowed).
+    pub fn sandbox_no_network(mut self, yes: bool) -> Self {
+        self.sandbox_no_network = yes;
         self
     }
 
@@ -202,6 +217,7 @@ impl UpstreamSpec {
             args,
             resolve_secrets,
             sandbox,
+            sandbox_no_network: self.sandbox_no_network,
         })
     }
 
@@ -702,6 +718,7 @@ upstream = { recipe = "github-mcp" }
             args: Vec::new(),
             resolve_secrets: false,
             sandbox: None,
+            sandbox_no_network: false,
         };
         let expanded = command_only.expand().unwrap();
         assert_eq!(expanded.command, "custom-mcp");
@@ -726,6 +743,7 @@ upstream = { recipe = "github-mcp" }
             args: vec!["--custom-arg".into()],
             resolve_secrets: false,
             sandbox: None,
+            sandbox_no_network: false,
         };
         let expanded = args_only.expand().unwrap();
         assert_eq!(expanded.command, "npx");
@@ -768,6 +786,7 @@ upstream = { recipe = "github-mcp" }
                 args: Vec::new(),
                 resolve_secrets: false,
                 sandbox: None,
+                sandbox_no_network: false,
             };
             assert!(command_override.expand().is_err());
             assert_eq!(

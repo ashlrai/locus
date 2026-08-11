@@ -7,9 +7,13 @@
 //! or binding `upstream.sandbox`), spawn uses a platform backend (`sandbox-exec`
 //! on macOS; `bwrap` or best-effort `path` on Linux). Unresolved executables and
 //! unsupported platforms fail before spawn.
+//!
+//! Network stays **allowed** by default for MCP → provider APIs. Opt in to deny
+//! with `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` or [`McpStdioConfig::sandbox_no_network`].
 
 use super::sandbox::{
-    resolve_sandbox_spawn, sandbox_enabled, ENV_WORKER_SANDBOXED, ENV_WORKER_SANDBOX_BACKEND,
+    resolve_sandbox_spawn, sandbox_enabled, sandbox_no_network_enabled, ENV_WORKER_SANDBOXED,
+    ENV_WORKER_SANDBOX_BACKEND, ENV_WORKER_SANDBOX_NO_NETWORK,
 };
 use super::stdio_client::{client_key, McpStdioClient};
 use super::{WorkerBackend, WorkerKey, WorkerSlot, WorkerState, WorkerToolResult};
@@ -52,6 +56,10 @@ pub struct McpStdioConfig {
     /// The `path` backend is best-effort only (not kernel isolation).
     /// Also enabled when `LOCUS_WORKER_SANDBOX=1` regardless of this flag.
     pub sandbox: bool,
+    /// Opt-in network isolation (default false — MCP needs provider HTTPS).
+    /// Also enabled when `LOCUS_WORKER_SANDBOX_NO_NETWORK=1`. Only applies when
+    /// sandboxed; `path` backend fails closed if this is set.
+    pub sandbox_no_network: bool,
     /// Present when recipe metadata says sandboxing would make the command
     /// unusable or would require authority the profile intentionally denies.
     pub sandbox_incompatibility: Option<String>,
@@ -93,6 +101,7 @@ impl McpStdioBackend {
             self.config.resolve_secrets,
         );
         let sandboxed = sandbox_enabled(self.config.sandbox);
+        let no_network = sandbox_no_network_enabled(self.config.sandbox_no_network);
         if sandboxed {
             if let Some(reason) = &self.config.sandbox_incompatibility {
                 return Err(LocusError::msg(reason.clone()));
@@ -105,8 +114,13 @@ impl McpStdioBackend {
                 &self.config.args,
                 work_dir,
                 Path::new(&session.worker_home),
+                no_network,
             )?;
-            (spawn.program, spawn.args, Some((spawn.backend, spawn.path)))
+            (
+                spawn.program,
+                spawn.args,
+                Some((spawn.backend, spawn.path, spawn.no_network)),
+            )
         } else {
             (self.config.command.clone(), self.config.args.clone(), None)
         };
@@ -126,7 +140,7 @@ impl McpStdioBackend {
         cmd.env("LOCUS_WORKER_ACCOUNT", &provider.account);
         cmd.env("LOCUS_WORKER_DIR", work_dir);
 
-        if let Some((backend, restricted_path)) = sandbox_backend {
+        if let Some((backend, restricted_path, applied_no_network)) = sandbox_backend {
             let temp_root = Path::new(&session.worker_home).join("tmp");
             std::fs::create_dir_all(&temp_root)?;
             // Markers set only after backend resolution. Tag `path` is best-effort
@@ -137,6 +151,9 @@ impl McpStdioBackend {
             cmd.env("TEMP", &temp_root);
             cmd.env(ENV_WORKER_SANDBOXED, "1");
             cmd.env(ENV_WORKER_SANDBOX_BACKEND, backend.as_str());
+            if applied_no_network {
+                cmd.env(ENV_WORKER_SANDBOX_NO_NETWORK, "1");
+            }
         }
 
         Ok(cmd)
@@ -145,6 +162,11 @@ impl McpStdioBackend {
     /// Whether this backend will apply sandbox on spawn (config or env).
     pub fn sandbox_active(&self) -> bool {
         sandbox_enabled(self.config.sandbox)
+    }
+
+    /// Whether network isolation is requested (config or env); only applied when sandboxed.
+    pub fn sandbox_no_network_active(&self) -> bool {
+        sandbox_no_network_enabled(self.config.sandbox_no_network)
     }
 
     /// List tools from a live upstream client (handshake if needed).
