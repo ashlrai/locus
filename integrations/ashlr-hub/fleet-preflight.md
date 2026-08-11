@@ -3,7 +3,7 @@
 Exact steps ashlr-hub (or any fleet orchestrator) must run **before** dispatching a mutating agent job. Fail closed.
 
 Contract: [`docs/hub-integration.md`](../../docs/hub-integration.md)  
-Drop-in: [`locus.ts`](./locus.ts) → `locusFleetGate()` / `evaluateFleetGate()` / `assertLocusPreMutate()`  
+Drop-in: [`locus.ts`](./locus.ts) → `locusFleetGate()` / `evaluateFleetGate()` / `assertLocusPreMutate()` / `locusWatchOnce()` / `locusVerifySession()`  
 Schema: [`schema/hub-gate.schema.json`](../../schema/hub-gate.schema.json)
 
 ---
@@ -257,6 +257,38 @@ Full composition smoke: [`scripts/hub-integration-test.sh`](../../scripts/hub-in
 
 ---
 
+## Optional: session heartbeat (soft)
+
+For continuous fleet whoami / doctor annotation (not a substitute for the hard
+pre-mutate gate), shell the verification plane:
+
+```ts
+import {
+  locusWatchOnce,
+  locusVerifySession,
+  locusSoftWatchHeartbeat,
+  parseWatchHeartbeat,
+} from "./locus";
+
+// Compact tick — aliases/verdicts only
+const tick = locusWatchOnce();
+// Full pack when doctor/whoami objects are needed
+const pack = locusVerifySession();
+// Soft-only under LOCUS_ENFORCE=warn (null when mode≠warn; never hard-blocks alone)
+const soft = locusSoftWatchHeartbeat();
+```
+
+```bash
+locus watch --once --json
+locus verify session --json
+```
+
+Do **not** treat a soft watch tick as the sole hard gate — keep
+`applyLocusPreMutateGate` / `locusFleetGate` as the mutate fence. Shapes:
+[docs/verification-plane.md](../../docs/verification-plane.md).
+
+---
+
 ## What hub must never do at preflight
 
 | Forbidden | Why |
@@ -268,6 +300,7 @@ Full composition smoke: [`scripts/hub-integration-test.sh`](../../scripts/hub-in
 | Register ambient provider MCPs alongside locus for same accounts | Bypasses pin + freeze |
 | Let the model call `locus pin` | Agents request only |
 | Share one `active.json` pin across parallel mutate jobs | Race / cross-tenant |
+| Hard-block solely on soft watch under `LOCUS_ENFORCE=warn` | Soft path is annotation-only |
 
 ---
 
@@ -275,7 +308,7 @@ Full composition smoke: [`scripts/hub-integration-test.sh`](../../scripts/hub-in
 
 | Doc | Topic |
 |-----|--------|
-| [locus.ts](./locus.ts) | `locusFleetGate`, `assertLocusPreMutate`, `scrubbedChildEnv`, `validateMintEnv`, pure parsers |
+| [locus.ts](./locus.ts) | `locusFleetGate`, `assertLocusPreMutate`, `locusWatchOnce`, `locusVerifySession`, pure parsers |
 | [mcp-gateway-snippet.md](./mcp-gateway-snippet.md) | REQUIRED_SERVERS + discovery |
 | [doctor-check.md](./doctor-check.md) | `checkLocus` for ashlr doctor |
 | [docs/hub-integration.md](../../docs/hub-integration.md) | Full CLI contract |

@@ -20,6 +20,15 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 
 ### Added
 
+- **Hub drop-in watch/verify session heartbeat** — port pure + shell helpers from hub
+  [PR #273](https://github.com/ashlrai/ashlr-hub/pull/273) into
+  [`integrations/ashlr-hub/locus.ts`](./integrations/ashlr-hub/locus.ts):
+  `parseWatchHeartbeat`, `parseSessionVerificationPack`, `locusVerifySession`,
+  `locusWatchOnce`, `locusSoftWatchHeartbeat` (soft annotation under `LOCUS_ENFORCE=warn`
+  only — never a hard blocker alone). Firm onboard soft-offer remains hub CLI-only (#274).
+  Docs: [docs/hub-integration.md](./docs/hub-integration.md),
+  [docs/verification-plane.md](./docs/verification-plane.md).
+
 - **Opt-in worker sandbox network deny** — `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` or
   `upstream.sandbox_no_network = true` applies harder isolation without changing the MCP
   default (network still **allowed** unless opted in). Linux `bwrap` gets `--unshare-net`;

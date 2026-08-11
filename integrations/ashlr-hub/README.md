@@ -5,7 +5,7 @@ Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus wi
 | Artifact | Path |
 |----------|------|
 | Full contract | [`docs/hub-integration.md`](../../docs/hub-integration.md) |
-| TypeScript probe | [`locus.ts`](./locus.ts) — `locusFleetGate`, `assertLocusPreMutate`, `ensureLocusReady`, `withLocusSession` (scrubbed mint env), `registerLocusInMcpConfig`, pure parsers |
+| TypeScript probe | [`locus.ts`](./locus.ts) — `locusFleetGate`, `assertLocusPreMutate`, `ensureLocusReady`, `withLocusSession` (scrubbed mint env), `locusVerifySession` / `locusWatchOnce` (fleet heartbeat), `registerLocusInMcpConfig`, pure parsers |
 | Fleet preflight | [`fleet-preflight.md`](./fleet-preflight.md) — exact steps before agent dispatch |
 | MCP gateway patch | [`mcp-gateway-snippet.md`](./mcp-gateway-snippet.md) |
 | Doctor check | [`doctor-check.md`](./doctor-check.md) |
@@ -21,8 +21,9 @@ Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus wi
 3. At shared spawn sites use **`applyLocusPreMutateGate()`** with opt-in `LOCUS_ENFORCE=1|warn`, firm `config.locus.enforce`, or `config.locus.firm: true` (default off = monorepo-safe; env wins).
 4. Register MCP servers from **`required_servers`** (`locus` + `phantom` only) — `registerLocusInMcpConfig` / [mcp-gateway-snippet.md](./mcp-gateway-snippet.md).
 5. Use **`withLocusSession(binding, fn)`** for ephemeral job pins (`ci mint`; scrubbed child env + `validateMintEnv`; no `active.json` mutation).
-6. Add **`checkLocus`** to ashlr doctor — see [doctor-check.md](./doctor-check.md).
-7. **Never** parse or store secret values from locus/phantom output.
+6. For continuous session health, shell **`locusWatchOnce()`** / **`locusVerifySession()`** (or pure `parseWatchHeartbeat` / `parseSessionVerificationPack`) — soft annotation under `LOCUS_ENFORCE=warn` via `locusSoftWatchHeartbeat`; never a hard blocker alone.
+7. Add **`checkLocus`** to ashlr doctor — see [doctor-check.md](./doctor-check.md).
+8. **Never** parse or store secret values from locus/phantom output.
 
 ## What hub must not do
 
@@ -88,6 +89,8 @@ locus doctor --json         # full mission-control pane (SAFE|WARN|UNSAFE)
 locus whoami --json         # requires pin
 locus status --oneline      # unpinned | alias:tenant | frozen | invalid
 locus status --json
+locus verify session --json # doctor + whoami + safe_next pack (hub heartbeat)
+locus watch --once --json   # compact NDJSON tick (kind=watch)
 ```
 
 | Command | Exit 0 | Exit 1 | Exit 2 |
@@ -241,6 +244,11 @@ import {
   scrubbedChildEnv,
   validateMintEnv,
   parseStatusOneline,
+  parseWatchHeartbeat,
+  parseSessionVerificationPack,
+  locusVerifySession,
+  locusWatchOnce,
+  locusSoftWatchHeartbeat,
   canMutate,
   evaluateFleetGate,
   registerLocusInMcpConfig,
@@ -254,6 +262,12 @@ if (!gate.allowDispatch) throw new Error(gate.blockers.join("; "));
 // Shared spawn sites — opt-in via LOCUS_ENFORCE / locus.enforce / locus.firm (default off)
 const pre = applyLocusPreMutateGate();
 if (!pre.allow) throw new Error(formatPreMutateBlockers(pre));
+
+// Session heartbeat (aliases/verdicts only — never secrets)
+const tick = locusWatchOnce(); // compact kind=watch NDJSON
+const pack = locusVerifySession(); // full doctor + whoami + safe_next
+// Soft annotation under LOCUS_ENFORCE=warn only (never hard-blocks alone)
+const soft = locusSoftWatchHeartbeat(); // null when mode≠warn
 
 // Or throw-style readiness (always probes)
 ensureLocusReady();

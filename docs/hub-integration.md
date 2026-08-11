@@ -346,6 +346,11 @@ import {
   formatPreMutateBlockers,
   registerLocusInMcpConfig,
   withLocusSession,
+  locusVerifySession,
+  locusWatchOnce,
+  locusSoftWatchHeartbeat,
+  parseWatchHeartbeat,
+  parseSessionVerificationPack,
 } from "../integrations/ashlr-hub/locus";
 
 // Strict preflight (always probes CLI)
@@ -366,6 +371,34 @@ await withLocusSession("acme", async ({ env }) => {
   if (!g.allowDispatch) throw new Error(g.blockers.join("; "));
 });
 ```
+
+### Session heartbeat (`verify session` / `watch`)
+
+Hub fleets can consume the verification plane as a **values-free** session heartbeat
+(aliases + verdicts only — never secrets). Drop-in helpers mirror hub PR
+[#273](https://github.com/ashlrai/ashlr-hub/pull/273):
+
+| Helper | CLI | Shape |
+|--------|-----|-------|
+| `locusVerifySession()` | `locus verify session --json` | Full doctor + whoami + safe_next pack (`session_ok`) |
+| `locusWatchOnce()` | `locus watch --once --json` | Compact NDJSON tick (`kind=watch`) |
+| `parseSessionVerificationPack` / `parseWatchHeartbeat` | pure | Unit-testable parsers (fail closed on empty/non-object) |
+| `locusSoftWatchHeartbeat()` | watch once | Soft annotation **only** when `LOCUS_ENFORCE=warn` — never a hard blocker alone |
+
+```ts
+const tick = locusWatchOnce();
+if (tick.available && tick.heartbeat && !tick.ok) {
+  // annotate readiness / doctor — do not hard-block from this alone
+}
+const pack = locusVerifySession();
+// pack.sessionOk mirrors CLI session_ok (doctor ok ∧ safe_next.ready)
+
+// Soft roll-out path (monorepo default remains off):
+const soft = locusSoftWatchHeartbeat(process.env, "warn");
+```
+
+`parseWatchHeartbeat` also maps legacy runtime-drift ticks (`ok` / `binding_alias` /
+`seal_ok`) for older installed CLIs. Full wire shapes: [docs/verification-plane.md](./verification-plane.md).
 
 Schema: [`schema/hub-gate.schema.json`](../schema/hub-gate.schema.json).  
 Exact steps: [`integrations/ashlr-hub/fleet-preflight.md`](../integrations/ashlr-hub/fleet-preflight.md).
@@ -394,6 +427,8 @@ locus agent report --json | jq -e '
 locus doctor --json        | jq -e '.verdict and (.ok | type == "boolean")'
 locus whoami --json        | jq -e '.binding_alias and .session_id'
 locus status --oneline
+locus verify session --json | jq -e '.kind == "session" and (.session_ok | type == "boolean")'
+locus watch --once --json   | jq -e '.kind == "watch" and (.session_ok | type == "boolean")'
 ```
 
 ---

@@ -496,6 +496,199 @@ assert(
   "formatPreMutateBlockers includes mode + blockers",
 );
 
+// --- parseWatchHeartbeat / parseSessionVerificationPack (mirror locus.ts; hub #273) ---
+function coerceBool(v) {
+  return v === true || v === 1 || v === "1" || v === "true";
+}
+function coerceOptionalString(v) {
+  if (typeof v === "string" && v.trim()) return v.trim();
+  return undefined;
+}
+function coerceSafeNextAction(v) {
+  if (typeof v === "string" && v.trim()) return v.trim();
+  if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+    const action = v.action;
+    if (typeof action === "string" && action.trim()) return action.trim();
+  }
+  return undefined;
+}
+function parseWatchHeartbeat(raw) {
+  let obj;
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    if (!text) throw new Error("empty watch heartbeat JSON");
+    const line =
+      text
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .pop() ?? text;
+    const v = JSON.parse(line);
+    if (v === null || typeof v !== "object" || Array.isArray(v)) {
+      throw new Error("watch heartbeat root is not an object");
+    }
+    obj = v;
+  } else if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
+    obj = raw;
+  } else {
+    throw new Error("watch heartbeat root is not an object");
+  }
+  const kindRaw = typeof obj.kind === "string" ? obj.kind.trim().toLowerCase() : "";
+  if (
+    kindRaw === "watch" ||
+    ("session_ok" in obj &&
+      ("doctor_verdict" in obj || "safe_next" in obj || kindRaw === "watch"))
+  ) {
+    const sessionOk = coerceBool(obj.session_ok);
+    const whoami = coerceOptionalString(obj.whoami);
+    const doctorVerdict =
+      coerceOptionalString(obj.doctor_verdict) ??
+      coerceOptionalString(obj.doctorVerdict) ??
+      "unknown";
+    const safeNext =
+      coerceSafeNextAction(obj.safe_next) ??
+      coerceSafeNextAction(obj.safeNext) ??
+      "unknown";
+    const pinned = coerceBool(obj.pinned) || (whoami != null && whoami.length > 0);
+    const frozen = coerceBool(obj.frozen);
+    return {
+      kind: "watch",
+      session_ok: sessionOk,
+      whoami: whoami ?? null,
+      doctor_verdict: doctorVerdict,
+      safe_next: safeNext,
+      pinned,
+      frozen,
+      source: "watch",
+    };
+  }
+  if (
+    "ok" in obj ||
+    "binding_alias" in obj ||
+    "binding_present" in obj ||
+    "seal_ok" in obj
+  ) {
+    const ok = coerceBool(obj.ok);
+    const pinned = coerceBool(obj.pinned) || coerceBool(obj.binding_present);
+    const frozen = coerceBool(obj.frozen);
+    const whoami =
+      coerceOptionalString(obj.binding_alias) ??
+      coerceOptionalString(obj.whoami) ??
+      null;
+    const issues = Array.isArray(obj.issues)
+      ? obj.issues.filter((i) => typeof i === "string")
+      : [];
+    const safeNext = pinned ? (ok ? "ready" : issues[0] ?? "re_pin") : "enter";
+    return {
+      kind: "watch",
+      session_ok: ok && pinned && !frozen,
+      whoami,
+      doctor_verdict: ok && pinned && !frozen ? "SAFE" : frozen ? "UNSAFE" : "WARN",
+      safe_next: safeNext,
+      pinned,
+      frozen,
+      source: "legacy-runtime",
+    };
+  }
+  throw new Error("unrecognized watch heartbeat shape");
+}
+function parseSessionVerificationPack(raw) {
+  const text = (raw ?? "").trim();
+  if (!text) throw new Error("empty session verification JSON");
+  const v = JSON.parse(text);
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    throw new Error("session verification root is not an object");
+  }
+  const sessionOk =
+    v.session_ok === true || v.session_ok === "true" || v.session_ok === 1;
+  return {
+    ...v,
+    kind: "session",
+    version: typeof v.version === "string" ? v.version : "",
+    session_ok: sessionOk,
+  };
+}
+
+const modernHb = parseWatchHeartbeat(
+  JSON.stringify({
+    kind: "watch",
+    session_ok: true,
+    whoami: "acme",
+    doctor_verdict: "SAFE",
+    safe_next: "ready",
+    pinned: true,
+    frozen: false,
+  }),
+);
+assert(modernHb.kind === "watch" && modernHb.session_ok === true, "watch modern session_ok");
+assert(modernHb.whoami === "acme" && modernHb.source === "watch", "watch modern whoami/source");
+const nestedHb = parseWatchHeartbeat(
+  [
+    '{"kind":"watch","session_ok":false,"doctor_verdict":"WARN","safe_next":"enter","pinned":false,"frozen":false}',
+    JSON.stringify({
+      kind: "watch",
+      session_ok: true,
+      whoami: "personal",
+      doctor_verdict: "SAFE",
+      safe_next: { action: "ready", ready: true },
+      pinned: true,
+      frozen: false,
+    }),
+  ].join("\n"),
+);
+assert(nestedHb.session_ok === true && nestedHb.safe_next === "ready", "watch last NDJSON + nested safe_next");
+const legacyHb = parseWatchHeartbeat({
+  pinned: true,
+  seal_ok: true,
+  binding_present: true,
+  frozen: false,
+  binding_alias: "personal",
+  issues: [],
+  ok: true,
+});
+assert(legacyHb.source === "legacy-runtime" && legacyHb.session_ok === true, "watch legacy ok");
+assert(legacyHb.whoami === "personal" && legacyHb.safe_next === "ready", "watch legacy whoami");
+let threw = false;
+try {
+  parseWatchHeartbeat("");
+} catch {
+  threw = true;
+}
+assert(threw, "watch empty fails closed");
+threw = false;
+try {
+  parseWatchHeartbeat('{ "foo": 1 }');
+} catch {
+  threw = true;
+}
+assert(threw, "watch unrecognized fails closed");
+const packOk = parseSessionVerificationPack(
+  JSON.stringify({
+    kind: "session",
+    version: "0.2.0",
+    session_ok: true,
+    safe_next: { action: "ready", ready: true },
+  }),
+);
+assert(packOk.session_ok === true && packOk.kind === "session", "session pack ok");
+const packMissing = parseSessionVerificationPack(JSON.stringify({ kind: "session", version: "1" }));
+assert(packMissing.session_ok === false, "session pack missing session_ok → false");
+const secretish = parseWatchHeartbeat({
+  kind: "watch",
+  session_ok: true,
+  whoami: "acme",
+  doctor_verdict: "SAFE",
+  safe_next: "ready",
+  pinned: true,
+  frozen: false,
+  token: "should-be-ignored",
+  credential: "phm:NAME",
+});
+assert(
+  secretish.whoami === "acme" && !JSON.stringify(secretish).match(/phm:|token|credential/),
+  "watch never promotes secret-shaped keys",
+);
+
 // --- mergeLocusIntoMcpConfig ---
 function mergeLocusIntoMcpConfig(config, opts = {}) {
   const serverName = opts.name ?? "locus";
@@ -665,7 +858,7 @@ do
 done
 
 # locus.ts exports (static grep)
-for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv validateMintBinding parseLocusEnforceToken extractLocusConfigEnforce readLocusConfigFromAshlr resolveLocusEnforceMode decidePreMutateGate assertLocusPreMutate formatPreMutateBlockers applyLocusPreMutateGate decideLocusSessionRun runWithLocusSessionIfConfigured; do
+for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv validateMintBinding parseLocusEnforceToken extractLocusConfigEnforce readLocusConfigFromAshlr resolveLocusEnforceMode decidePreMutateGate assertLocusPreMutate formatPreMutateBlockers applyLocusPreMutateGate decideLocusSessionRun runWithLocusSessionIfConfigured parseWatchHeartbeat parseSessionVerificationPack locusVerifySession locusWatchOnce locusSoftWatchHeartbeat; do
   if grep -qE "export (async )?function $sym" "$ROOT/integrations/ashlr-hub/locus.ts"; then
     ok "locus.ts exports $sym"
   else
@@ -679,10 +872,20 @@ if grep -q "LOCUS_ENFORCE" "$ROOT/docs/hub-integration.md" && grep -q "scrubbedC
 else
   bad "hub-integration.md missing LOCUS_ENFORCE / config.locus / scrubbedChildEnv notes"
 fi
+if grep -qE "locusWatchOnce|locusVerifySession|parseWatchHeartbeat" "$ROOT/docs/hub-integration.md"; then
+  ok "hub-integration.md documents watch/verify session heartbeat helpers"
+else
+  bad "hub-integration.md missing watch/verify session heartbeat notes"
+fi
 if grep -qE "assertLocusPreMutate|applyLocusPreMutateGate" "$ROOT/integrations/ashlr-hub/fleet-preflight.md" && grep -q "validateMintEnv" "$ROOT/integrations/ashlr-hub/fleet-preflight.md" && grep -q "locus.enforce" "$ROOT/integrations/ashlr-hub/fleet-preflight.md"; then
   ok "fleet-preflight.md documents pre-mutate + validateMintEnv + locus.enforce"
 else
   bad "fleet-preflight.md missing pre-mutate / mint scrub / firm config notes"
+fi
+if grep -qE "locusWatchOnce|locusVerifySession" "$ROOT/integrations/ashlr-hub/fleet-preflight.md"; then
+  ok "fleet-preflight.md documents session heartbeat helpers"
+else
+  bad "fleet-preflight.md missing session heartbeat notes"
 fi
 
 if [[ "$fail" -ne 0 ]]; then
