@@ -138,11 +138,17 @@ locus whoami
 
 # Multi-client install probe (optional dogfood): detect Claude Code / Cursor /
 # Continue config paths and dry-run setup for each found client. Soft-skips
-# missing installs; never prints secrets. Real personal+client dual-account
-# dogfood still needs an operator with both pins wired in the IDE.
+# missing installs; never prints secrets.
 #   scripts/dogfood-clients.sh
 #   DOGFOOD_CLIENTS=1 scripts/dogfood.sh
 #   LOCUS_DOGFOOD_REQUIRE_CLIENTS=1  # hard-fail if none found / setup fails
+#
+# Multi-account pin walk (personal + client) without both IDEs open:
+#   docs/dogfood-multi-account.md
+#   LOCUS_PERSONAL_ALIAS=personal LOCUS_CLIENT_ALIAS=client-a \
+#     scripts/dogfood-multi-account.sh
+#   LOCUS_DOGFOOD_REQUIRE_MULTI=1  # hard-fail if aliases missing / walk fails
+# Live dual-IDE UI confirmation remains operator-manual.
 
 # Manual identity diagnostics under the pin (no provider credentials)
 locus exec --no-resolve -- env | grep LOCUS_

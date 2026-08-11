@@ -98,7 +98,8 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] `quickstart` + shell hook frozen/require_pin UX
 - [x] `scripts/dogfood.sh` — quickstart → agent setup → report → doctor → forensics → verify session → Hub smoke; `DOGFOOD READY` only when every required probe is green
 - [x] Automated multi-client install probe — `scripts/dogfood-clients.sh` detects Claude Code / Cursor / Continue paths (macOS+Linux), dry-runs `locus agent setup` for found supported clients, soft-skips missing; optional `DOGFOOD_CLIENTS=1` step in `dogfood.sh`; `LOCUS_DOGFOOD_REQUIRE_CLIENTS=1` hard-fails when none found or setup fails
-- [ ] Dogfood: agent report `ready` on real Claude Code + Cursor installs (personal + client) — automated probe landed; real multi-account installs still operator manual
+- [x] Multi-account dogfood operator path — `docs/dogfood-multi-account.md` + `scripts/dogfood-multi-account.sh` walks personal+client pins (enter → doctor/verify → agent report ready → leave) without requiring both IDEs; soft-skip missing aliases; `LOCUS_DOGFOOD_REQUIRE_MULTI=1` hard-fails
+- [ ] Dogfood: agent report `ready` on real Claude Code + Cursor installs (personal + client) — operator multi-account script landed; live dual-IDE still manual
 - [x] Upstream MCP workers for top adapters (not only synthetic freeze tools) — composite expands `github-mcp` / `supabase-mcp` / `vercel-mcp` recipes with sandbox defaults; exclusive catalog + `resolve_secrets=false` ambient scrub covered in `locus-core` worker tests
 
 ### M4 — Hub composition · **in progress**

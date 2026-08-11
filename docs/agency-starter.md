@@ -158,9 +158,24 @@ dry-run `locus agent setup --client <x>` for each found supported client.
 Missing installs soft-skip (exit 0 + summary); set
 `LOCUS_DOGFOOD_REQUIRE_CLIENTS=1` only when you expect clients on the host.
 Optional soft step from the main dogfood path: `DOGFOOD_CLIENTS=1 scripts/dogfood.sh`.
-The probe never mutates MCP configs and never prints secrets. Confirming
-`agent report ready` across real personal + client accounts in the IDE remains
-an operator-manual check.
+The probe never mutates MCP configs and never prints secrets.
+
+## Multi-account pin walk (personal + client)
+
+Walk both pins at the CLI without keeping both IDEs open — step-by-step
+playbook: [dogfood-multi-account.md](./dogfood-multi-account.md).
+
+```bash
+export LOCUS_PERSONAL_ALIAS=personal
+export LOCUS_CLIENT_ALIAS=client-a
+scripts/dogfood-multi-account.sh
+# Soft-skips when aliases missing; hard-fail:
+#   LOCUS_DOGFOOD_REQUIRE_MULTI=1 scripts/dogfood-multi-account.sh personal client-a
+```
+
+For each alias: enter → doctor → `verify session` → `agent report` ready gate →
+leave. Wire **one** of Claude/Cursor once so report can reach `ready`. Live
+dual-IDE UI confirmation remains operator-manual.
 
 ## Operator checklist
 
@@ -171,12 +186,14 @@ an operator-manual check.
 - [ ] Shell hook; `whoami` / `doctor` before risky sessions  
 - [ ] Offboard = binding + secrets + access + audit  
 - [ ] Optional: `scripts/dogfood-clients.sh` after IDE MCP setup  
+- [ ] Optional: `scripts/dogfood-multi-account.sh` personal + client ready walk  
 
 
 ## Related
 
 - Kit: [examples/agency-starter/](../examples/agency-starter/)  
 - [firm-mode.md](./firm-mode.md)  
+- [dogfood-multi-account.md](./dogfood-multi-account.md)  
 - [agency-certainty.md](./agency-certainty.md)  
 - [SECURITY.md](../SECURITY.md)  
 - [DESIGN.md](../DESIGN.md)  
