@@ -1014,7 +1014,9 @@ name = "locus-mcp"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "hex",
  "locus-core",
+ "rand 0.8.7",
  "serde",
  "serde_json",
  "tempfile",
