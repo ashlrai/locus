@@ -6,8 +6,16 @@
  * firm-mode config.locus.enforce / locus.firm, watch/verify session heartbeat —
  * hub #241 / #252 / #254 / #258 / #273).
  *
- * Firm onboard soft-offer (hub #274) is hub CLI-only (`ashlr onboard` /
- * first enroll) — not part of this drop-in.
+ * Hub-only (docs reference; do NOT port into this drop-in):
+ *   - Firm onboard soft-offer (hub #274) — `ashlr onboard` / first enroll
+ *   - Firm soft-warn checkLocusFirm (hub #277) — doctor/readiness only when
+ *     enrolled>0 + locus available + locus.firm false; never hard-blocks mutate;
+ *     monorepo firm default stays off. See docs/hub-integration.md +
+ *     integrations/ashlr-hub/doctor-check.md; hub docs/LOCUS-FIRM-FLEET.md
+ *
+ * This file may be AHEAD of hub on capability/mint validators — do not regress
+ * pure helpers when syncing. Hub doctor/readiness firm soft-warn is intentionally
+ * out of scope here.
  *
  * SECURITY:
  *   - Never parse or persist secret VALUES from locus/phantom output.
@@ -70,6 +78,7 @@
  * Call sites (opt-in only — never always-on; hub production wire-in):
  *   - spawnEngine / runSwarmInternal / runApiModelSandboxed — pre-mutate gate
  *   - runSwarm / runTask — CI session mint overlay (fleet + single-task paths; hub #252)
+ *   - simple-conductor / runBestOfN — same CI session mint overlay (hub #256 / #257)
  *
  * @see docs/hub-integration.md
  * @see schema/agent-report.schema.json

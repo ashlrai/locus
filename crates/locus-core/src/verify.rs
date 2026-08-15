@@ -571,6 +571,7 @@ mod tests {
                 repos: vec![],
             }],
             expires_at: "2099-01-01T00:00:00Z".into(),
+            expires_in_secs: 3600,
             worker_home: "/tmp".into(),
             seal_ok,
             seal: "hmac-sha256:test".into(),

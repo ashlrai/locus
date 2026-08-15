@@ -184,6 +184,7 @@ mod tests {
             dual_control: vec![],
             dual_control_all_approvals: false,
             max_ttl: None,
+            default_ttl: None,
             parallel_sessions: 4,
         }
     }

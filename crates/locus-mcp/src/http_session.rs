@@ -4,6 +4,7 @@
 //! Records store only session id, timestamps, and an optional values-free pin
 //! summary. **Never** tokens, credential refs, or resolved secrets.
 
+use crate::anchor::{self, AnchorDecision, SessionAnchor};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -22,6 +23,12 @@ pub struct HttpSessionEntry {
     pub last_seen: SystemTime,
     /// Values-free pin snapshot when known (alias/tenant/mode/seal_ok only).
     pub pin: Option<HttpSessionPinSummary>,
+    /// Identity anchored at initialize / first healthy pinned observation.
+    /// Enforced fail-closed on provider tools/call (see `crate::anchor`).
+    pub anchor: Option<SessionAnchor>,
+    /// In-memory only: dedupe for `mcp.anchor_mismatch` audits
+    /// (anchored_session_id, current_session_id). Never persisted.
+    pub last_reported_mismatch: Option<(String, String)>,
 }
 
 /// Optional pin seal summary persisted with the HTTP session (no secrets).
@@ -47,6 +54,12 @@ pub struct HttpSessionDiskRecord {
     pub last_seen_unix: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pin: Option<HttpSessionPinSummary>,
+    /// Optional session identity anchor (aliases/ids only — never secrets).
+    /// Serde-optional so v1 records round-trip both ways (old binaries ignore
+    /// it; old records load as `None` and anchor at the next healthy
+    /// observation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor: Option<SessionAnchor>,
 }
 
 /// In-memory map of streamable-HTTP session ids with idle TTL, hard capacity,
@@ -119,6 +132,8 @@ impl HttpSessionMap {
                 created_at: now,
                 last_seen: now,
                 pin,
+                anchor: None,
+                last_reported_mismatch: None,
             };
             self.persist_entry(&id, &entry);
             self.sessions.insert(id.clone(), entry);
@@ -133,7 +148,16 @@ impl HttpSessionMap {
         let now = SystemTime::now();
         self.purge_expired(now);
         let pin = self.current_pin();
-        if let Some(entry) = self.sessions.get_mut(id) {
+        if self.sessions.contains_key(id) {
+            // Multi-worker: the disk anchor is authoritative. A sibling worker
+            // may have established or reset it since this worker cached the
+            // entry, so adopt the disk anchor before persisting — the
+            // per-request pin refresh must never write a stale in-memory
+            // anchor back over a sibling's establishment or initialize-time
+            // reset. Only Established/Repinned (`observe_anchor`) and
+            // `reset_anchor` author new anchor values.
+            self.adopt_disk_anchor(id, now);
+            let entry = self.sessions.get_mut(id).expect("checked contains_key");
             entry.last_seen = now;
             if let Some(pin) = pin {
                 entry.pin = Some(pin);
@@ -161,6 +185,110 @@ impl HttpSessionMap {
         let mem = self.sessions.remove(id).is_some();
         let disk = self.remove_disk(id);
         mem || disk
+    }
+
+    /// Load an entry into memory (disk resume on miss) without refreshing the
+    /// pin summary. Returns false when unknown/expired/corrupt (fail closed).
+    fn ensure_loaded(&mut self, id: &str, now: SystemTime) -> bool {
+        if self.sessions.contains_key(id) {
+            return true;
+        }
+        match self.load_disk_entry(id, now) {
+            Some(entry) => {
+                self.sessions.insert(id.to_string(), entry);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Adopt the on-disk anchor into the memory entry — across workers the
+    /// disk record is authoritative (a sibling may have established or reset
+    /// it after this worker cached the entry). No-op when persistence is off
+    /// or the record cannot be read (keep the memory anchor — fail closed
+    /// rather than silently un-anchoring on a transient read error).
+    fn adopt_disk_anchor(&mut self, id: &str, now: SystemTime) {
+        let Some(disk_entry) = self.load_disk_entry(id, now) else {
+            return;
+        };
+        if let Some(entry) = self.sessions.get_mut(id) {
+            entry.anchor = disk_entry.anchor;
+        }
+    }
+
+    /// Current anchor for a session (disk-loading on memory miss; the disk
+    /// anchor is adopted on a memory hit too — see [`Self::adopt_disk_anchor`]).
+    pub fn anchor(&mut self, id: &str) -> Option<SessionAnchor> {
+        let now = SystemTime::now();
+        if !self.ensure_loaded(id, now) {
+            return None;
+        }
+        self.adopt_disk_anchor(id, now);
+        self.sessions.get(id).and_then(|e| e.anchor.clone())
+    }
+
+    /// Compare-and-set the session anchor against a healthy observation.
+    ///
+    /// Persists via the atomic writer only on `Established` / `Repinned`
+    /// (write-once establishment — concurrent workers cannot rotate each
+    /// other's anchors); `Mismatch` never writes. Returns `None` when the
+    /// session id is unknown (fail closed) or no decision applies.
+    pub fn observe_anchor(
+        &mut self,
+        id: &str,
+        obs: &SessionAnchor,
+        allow_establish: bool,
+    ) -> Option<AnchorDecision> {
+        let now = SystemTime::now();
+        if !self.ensure_loaded(id, now) {
+            return None;
+        }
+        // Cross-worker establishment race: re-read the disk anchor first so a
+        // sibling's just-persisted establishment (or initialize-time reset) is
+        // enforced here instead of being clobbered by a fresh establishment
+        // from this worker's stale memory view.
+        self.adopt_disk_anchor(id, now);
+        let entry = self.sessions.get_mut(id)?;
+        let decision = anchor::decide(&mut entry.anchor, obs, allow_establish)?;
+        if matches!(
+            decision,
+            AnchorDecision::Established | AnchorDecision::Repinned
+        ) {
+            let snapshot = entry.clone();
+            self.persist_entry(id, &snapshot);
+        }
+        Some(decision)
+    }
+
+    /// Initialize-only anchor overwrite (adoption path). Persisted.
+    /// Returns false when the session id is unknown (fail closed).
+    pub fn reset_anchor(&mut self, id: &str, new_anchor: Option<SessionAnchor>) -> bool {
+        let now = SystemTime::now();
+        if !self.ensure_loaded(id, now) {
+            return false;
+        }
+        let Some(entry) = self.sessions.get_mut(id) else {
+            return false;
+        };
+        entry.anchor = new_anchor;
+        entry.last_reported_mismatch = None;
+        let snapshot = entry.clone();
+        self.persist_entry(id, &snapshot);
+        true
+    }
+
+    /// Mismatch audit dedupe: true when this (anchored_session_id,
+    /// current_session_id) pair has not been reported yet for this session.
+    /// In-memory only — a restarted worker may re-report once (acceptable).
+    pub fn note_mismatch(&mut self, id: &str, key: (String, String)) -> bool {
+        let Some(entry) = self.sessions.get_mut(id) else {
+            return false;
+        };
+        if entry.last_reported_mismatch.as_ref() == Some(&key) {
+            return false;
+        }
+        entry.last_reported_mismatch = Some(key);
+        true
     }
 
     /// Memory entries + non-expired disk files (for capacity across workers).
@@ -192,6 +320,8 @@ impl HttpSessionMap {
             created_at: last_seen,
             last_seen,
             pin: None,
+            anchor: None,
+            last_reported_mismatch: None,
         };
         if self.persist_dir.is_some() {
             self.persist_entry(&id, &entry);
@@ -234,6 +364,7 @@ impl HttpSessionMap {
             created_at_unix: system_time_to_unix(entry.created_at),
             last_seen_unix: system_time_to_unix(entry.last_seen),
             pin: entry.pin.clone(),
+            anchor: entry.anchor.clone(),
         };
         if let Err(e) = write_http_session_atomic(dir, &path, &rec) {
             // Persistence is best-effort for the minting process; resume may
@@ -276,6 +407,8 @@ impl HttpSessionMap {
             created_at,
             last_seen,
             pin: rec.pin,
+            anchor: rec.anchor,
+            last_reported_mismatch: None,
         })
     }
 
@@ -452,6 +585,38 @@ pub fn resolve_http_session_dir() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    fn sample_anchor(alias: &str, binding_id: &str, session_id: &str) -> SessionAnchor {
+        SessionAnchor {
+            binding_id: binding_id.into(),
+            binding_alias: alias.into(),
+            tenant: format!("{alias}-corp"),
+            mode: "exclusive".into(),
+            namespaces: Vec::new(),
+            session_id: session_id.into(),
+            backing: Some("active".into()),
+            anchored_at_unix: 1,
+        }
+    }
+
+    fn assert_values_free(raw: &str) {
+        let lower = raw.to_ascii_lowercase();
+        for banned in [
+            "phm:",
+            "credential",
+            "token",
+            "password",
+            "secret",
+            "authorization",
+            "api_key",
+            "service_role",
+        ] {
+            assert!(
+                !lower.contains(banned),
+                "disk record must not contain {banned}: {raw}"
+            );
+        }
+    }
+
     #[test]
     fn mint_issues_opaque_hex_id() {
         let mut map = HttpSessionMap::new(Duration::from_secs(60), 8);
@@ -530,6 +695,12 @@ mod tests {
                 "disk record must not contain {banned}: {raw}"
             );
         }
+
+        // A record carrying an anchor stays values-free too.
+        assert!(map.reset_anchor(&id, Some(sample_anchor("acme", "bnd_acme", "sess_1"))));
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("\"anchor\""), "anchor must persist: {raw}");
+        assert_values_free(&raw);
     }
 
     #[test]
@@ -589,6 +760,7 @@ mod tests {
             created_at_unix: system_time_to_unix(SystemTime::now()),
             last_seen_unix: system_time_to_unix(SystemTime::now()),
             pin: None,
+            anchor: None,
         };
         fs::write(&path2, serde_json::to_vec(&bad).unwrap()).unwrap();
         assert!(!map.touch(id2));
@@ -640,5 +812,238 @@ mod tests {
         assert_eq!(pin.tenant.as_deref(), Some("home"));
         assert_eq!(pin.seal_ok, Some(true));
         assert!(!raw.to_ascii_lowercase().contains("phm:"));
+
+        // Anchor + pin summary together remain values-free.
+        assert!(map.reset_anchor(&id, Some(sample_anchor("personal", "bnd_personal", "s1"))));
+        let raw = fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+        assert!(raw.contains("\"anchor\""));
+        assert_values_free(&raw);
+    }
+
+    #[test]
+    fn touch_preserves_anchor_while_refreshing_pin() {
+        fn sample_pin() -> Option<HttpSessionPinSummary> {
+            Some(HttpSessionPinSummary {
+                binding_alias: Some("personal".into()),
+                tenant: Some("home".into()),
+                mode: Some("exclusive".into()),
+                seal_ok: Some(true),
+            })
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8)
+            .with_persist_dir(Some(dir.path().to_path_buf()))
+            .with_pin_summary_fn(Some(sample_pin));
+        let id = map.mint().unwrap();
+        let anchor = sample_anchor("acme", "bnd_acme", "sess_1");
+        assert!(map.reset_anchor(&id, Some(anchor.clone())));
+
+        // Every touch refreshes the informational pin — the anchor must survive
+        // both the memory-hit persist and the disk resume path.
+        assert!(map.touch(&id));
+        assert!(map.touch(&id));
+        let raw = fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+        let rec: HttpSessionDiskRecord = serde_json::from_str(&raw).unwrap();
+        let disk_anchor = rec.anchor.expect("touch clobbered the anchor");
+        assert!(disk_anchor.same_identity(&anchor));
+
+        map.clear_memory();
+        assert!(map.touch(&id), "resume from disk");
+        assert!(map
+            .anchor(&id)
+            .expect("anchor survives resume")
+            .same_identity(&anchor));
+
+        // Sibling worker resumes with the anchor enforced from disk.
+        let mut map2 = HttpSessionMap::new(Duration::from_secs(60), 8)
+            .with_persist_dir(Some(dir.path().to_path_buf()));
+        assert!(map2
+            .anchor(&id)
+            .expect("sibling sees anchor")
+            .same_identity(&anchor));
+    }
+
+    /// Regression (multi-worker): a sibling worker's initialize-time anchor
+    /// reset must never be clobbered by another worker's touch() re-persisting
+    /// its stale in-memory anchor on the next request.
+    #[test]
+    fn touch_never_clobbers_sibling_anchor_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker1 = HttpSessionMap::new(Duration::from_secs(60), 8)
+            .with_persist_dir(Some(dir.path().to_path_buf()));
+        let mut worker2 = HttpSessionMap::new(Duration::from_secs(60), 8)
+            .with_persist_dir(Some(dir.path().to_path_buf()));
+
+        let id = worker1.mint().unwrap();
+        let anchor_a = sample_anchor("acme", "bnd_acme", "sess_a");
+        assert!(worker1.reset_anchor(&id, Some(anchor_a.clone())));
+
+        // worker2 caches the entry (anchor A in memory).
+        assert!(worker2.touch(&id));
+        assert!(worker2.anchor(&id).unwrap().same_identity(&anchor_a));
+
+        // worker1 handles a re-initialize: anchor reset to B on disk.
+        let anchor_b = sample_anchor("beta", "bnd_beta", "sess_b");
+        assert!(worker1.reset_anchor(&id, Some(anchor_b.clone())));
+
+        // worker2's next request touches — it must adopt B, never write A back.
+        assert!(worker2.touch(&id));
+        let raw = fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+        let rec: HttpSessionDiskRecord = serde_json::from_str(&raw).unwrap();
+        let disk_anchor = rec.anchor.expect("anchor must survive");
+        assert!(
+            disk_anchor.same_identity(&anchor_b),
+            "touch clobbered the sibling's reset: disk={} expected beta",
+            disk_anchor.binding_alias
+        );
+        assert!(
+            worker2.anchor(&id).unwrap().same_identity(&anchor_b),
+            "worker2 memory must converge to the disk anchor"
+        );
+
+        // Reset to None (unpinned re-initialize) is adopted too.
+        assert!(worker1.reset_anchor(&id, None));
+        assert!(worker2.touch(&id));
+        let raw = fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+        let rec: HttpSessionDiskRecord = serde_json::from_str(&raw).unwrap();
+        assert!(rec.anchor.is_none(), "cleared anchor must stay cleared");
+    }
+
+    /// Regression (multi-worker): a worker observing with a stale anchorless
+    /// memory entry must enforce the sibling's just-persisted anchor —
+    /// Mismatch, never a clobbering fresh establishment.
+    #[test]
+    fn observe_anchor_enforces_sibling_established_anchor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut worker1 = HttpSessionMap::new(Duration::from_secs(60), 8)
+            .with_persist_dir(Some(dir.path().to_path_buf()));
+        let mut worker2 = HttpSessionMap::new(Duration::from_secs(60), 8)
+            .with_persist_dir(Some(dir.path().to_path_buf()));
+
+        let id = worker1.mint().unwrap();
+        // worker2 loads the entry while no anchor exists yet.
+        assert!(worker2.touch(&id));
+        assert!(worker2.anchor(&id).is_none());
+
+        // worker1 establishes acme on disk.
+        let obs_a = sample_anchor("acme", "bnd_acme", "sess_a");
+        assert_eq!(
+            worker1.observe_anchor(&id, &obs_a, true),
+            Some(AnchorDecision::Established)
+        );
+
+        // worker2 observes a different identity: must see the sibling's anchor
+        // and refuse — not establish beta over it.
+        let obs_b = sample_anchor("beta", "bnd_beta", "sess_b");
+        match worker2.observe_anchor(&id, &obs_b, true) {
+            Some(AnchorDecision::Mismatch { anchored }) => {
+                assert_eq!(anchored.binding_alias, "acme");
+            }
+            other => panic!("expected mismatch against sibling anchor, got {other:?}"),
+        }
+        let rec: HttpSessionDiskRecord = serde_json::from_str(
+            &fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rec.anchor.unwrap().binding_alias, "acme");
+
+        // Same identity from worker2 is a Match (adopted, not re-established).
+        assert_eq!(
+            worker2.observe_anchor(&id, &sample_anchor("acme", "bnd_acme", "sess_a"), true),
+            Some(AnchorDecision::Match)
+        );
+    }
+
+    #[test]
+    fn legacy_record_without_anchor_loads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        let now = system_time_to_unix(SystemTime::now());
+        // Hand-written v1 record predating the anchor field.
+        let legacy = format!(
+            "{{\"v\":1,\"id\":\"{id}\",\"created_at_unix\":{now},\"last_seen_unix\":{now}}}"
+        );
+        fs::create_dir_all(dir.path()).unwrap();
+        fs::write(dir.path().join(format!("{id}.json")), legacy).unwrap();
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8)
+            .with_persist_dir(Some(dir.path().to_path_buf()));
+        assert!(map.touch(id), "legacy record must resume");
+        assert!(map.anchor(id).is_none(), "legacy record anchors later");
+
+        // Adopt-once at the next healthy observation.
+        let obs = sample_anchor("acme", "bnd_acme", "sess_1");
+        assert_eq!(
+            map.observe_anchor(id, &obs, true),
+            Some(AnchorDecision::Established)
+        );
+        let raw = fs::read_to_string(dir.path().join(format!("{id}.json"))).unwrap();
+        assert!(raw.contains("\"anchor\""), "establishment must persist");
+    }
+
+    #[test]
+    fn observe_anchor_persists_only_established_and_repinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8)
+            .with_persist_dir(Some(dir.path().to_path_buf()));
+        let id = map.mint().unwrap();
+        let path = dir.path().join(format!("{id}.json"));
+
+        let obs = sample_anchor("acme", "bnd_acme", "sess_1");
+        // allow_establish=false never establishes (and never writes an anchor).
+        assert_eq!(map.observe_anchor(&id, &obs, false), None);
+        assert!(map.anchor(&id).is_none());
+
+        assert_eq!(
+            map.observe_anchor(&id, &obs, true),
+            Some(AnchorDecision::Established)
+        );
+        let after_establish = fs::read_to_string(&path).unwrap();
+        assert!(after_establish.contains("\"anchor\""));
+
+        // Match does not rewrite the record.
+        assert_eq!(
+            map.observe_anchor(&id, &obs, true),
+            Some(AnchorDecision::Match)
+        );
+
+        // Same identity, new session id → Repinned, persisted session_id.
+        let repin = sample_anchor("acme", "bnd_acme", "sess_2");
+        assert_eq!(
+            map.observe_anchor(&id, &repin, true),
+            Some(AnchorDecision::Repinned)
+        );
+        let rec: HttpSessionDiskRecord =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(rec.anchor.as_ref().unwrap().session_id, "sess_2");
+
+        // Mismatch never rotates or rewrites the anchor.
+        let evil = sample_anchor("beta", "bnd_beta", "sess_3");
+        match map.observe_anchor(&id, &evil, true) {
+            Some(AnchorDecision::Mismatch { anchored }) => {
+                assert_eq!(anchored.binding_alias, "acme");
+            }
+            other => panic!("expected mismatch, got {other:?}"),
+        }
+        let rec: HttpSessionDiskRecord =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(rec.anchor.as_ref().unwrap().binding_alias, "acme");
+
+        // Unknown session id → fail closed.
+        assert_eq!(
+            map.observe_anchor("ffffffffffffffffffffffffffffffff", &obs, true),
+            None
+        );
+    }
+
+    #[test]
+    fn note_mismatch_dedupes_per_session_pair() {
+        let mut map = HttpSessionMap::new(Duration::from_secs(60), 8);
+        let id = map.mint().unwrap();
+        let key = ("anchored-sess".to_string(), "current-sess".to_string());
+        assert!(map.note_mismatch(&id, key.clone()), "first report");
+        assert!(!map.note_mismatch(&id, key), "repeat suppressed");
+        let key2 = ("anchored-sess".to_string(), "another-sess".to_string());
+        assert!(map.note_mismatch(&id, key2), "new pair reports again");
+        assert!(!map.note_mismatch("ffffffffffffffffffffffffffffffff", ("a".into(), "b".into())));
     }
 }

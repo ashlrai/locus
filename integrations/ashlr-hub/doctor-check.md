@@ -128,6 +128,12 @@ export function checkLocusDetailed(): DoctorCheck & {
 
 Stable keys on `locus agent report --json`: see [`schema/agent-report.schema.json`](../../schema/agent-report.schema.json).
 
+Additive fields (tolerate unknown keys): `locus whoami --json` and the doctor
+`pin` slice now carry `expires_in_secs` (seconds until pin expiry, `0` when
+expired). Doctor also emits a transient `pin_expiring` **WARN** finding during
+the last 5 minutes of any pin — fleet dashboards should treat it as a nudge to
+re-pin (`locus enter <alias>`), not an incident.
+
 ---
 
 ## Pre-flight for mutating hub jobs
@@ -188,11 +194,76 @@ Never point CI doctor at the developer's real `~/.locus` when tests mint/teardow
 
 ---
 
+## `checkLocusFirm` (hub-only soft-warn — hub #277)
+
+**Observational only.** Surfaces a non-blocking “consider firm for production” nudge when a fleet has enrolled repos, Locus is installed, and `locus.firm` is not yet enabled. **Never hard-blocks mutate.** Not exported from monorepo [`locus.ts`](./locus.ts) — lives in hub doctor/readiness only.
+
+Contract sketch (hub production; illustrative):
+
+```ts
+// hub: doctor / readiness — do NOT port into monorepo locus.ts
+
+export type FirmDoctorCheck = {
+  id: "locus-firm";
+  ok: boolean;          // true = pass (no nudge) or firm already on
+  severity: "info" | "warn";
+  detail: string;
+  fix?: string;         // e.g. `ashlr config set locus.firm true`
+};
+
+/**
+ * Soft-warn when ALL of:
+ *   1. enrolled repos > 0
+ *   2. locus CLI available
+ *   3. config.locus.firm is not true
+ * → id "locus-firm": consider locus.firm for production
+ *
+ * Never a blocker. Doctor exit stays driven by fails, not this warn.
+ * Monorepo / 0-enrolled / locus-absent / firm=true → quiet pass.
+ */
+export function checkLocusFirm(opts: {
+  enrolledCount: number;
+  locusAvailable: boolean;
+  firm: boolean; // config.locus.firm === true
+}): FirmDoctorCheck {
+  if (opts.enrolledCount > 0 && opts.locusAvailable && !opts.firm) {
+    return {
+      id: "locus-firm",
+      ok: true, // non-blocking — still "ok" so doctor exit is not fail
+      severity: "warn",
+      detail: "consider locus.firm for production",
+      fix: "ashlr config set locus.firm true  # or { locus: { firm: true } }",
+    };
+  }
+  return {
+    id: "locus-firm",
+    ok: true,
+    severity: "info",
+    detail: opts.firm
+      ? "locus.firm enabled"
+      : "firm soft-warn quiet (0 enrolled, locus absent, or firm on)",
+  };
+}
+```
+
+| Case | Result |
+|------|--------|
+| Fresh install (0 enrolled) | pass / no warn |
+| Locus absent | pass on firm check (`checkLocus` handles install) |
+| `locus.firm=true` | pass / info |
+| enrolled>0 + locus + firm false | **warn only** (`locus-firm`) — never blocks mutate |
+| Degraded enrollment probe | quiet `info` — pass `enrolledCount: 0`; the sketch has no separate skip branch |
+
+Hub production fleet checklist: `docs/LOCUS-FIRM-FLEET.md` on [ashlr-hub](https://github.com/ashlrai/ashlr-hub) (PR [#277](https://github.com/ashlrai/ashlr-hub/pull/277)).
+
+---
+
 ## Checklist for the hub PR
 
 - [ ] `checkLocus()` calls `locusDoctorLine()` (or equivalent shell-out)
 - [ ] Aggregated doctor includes `id: "locus"`
 - [ ] Fail detail includes `fix` command when `ok === false`
 - [ ] Mutating jobs call `ensureLocusReady()` (not doctor-only soft warn)
+- [ ] `checkLocusFirm` (if present) is **warn-only** — never contributes to mutate hard-block
 - [ ] `LOCUS_HOME` overridable for tests
 - [ ] No secret values in doctor JSON/logs

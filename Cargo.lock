@@ -1052,6 +1052,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml",
+ "toml_edit",
  "tower",
  "tower-http",
 ]

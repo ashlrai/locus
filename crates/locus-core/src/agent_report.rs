@@ -7,7 +7,7 @@
 //!   "ready": true,
 //!   "status": "unsafe|protected|ready",
 //!   "pin": { ... },
-//!   "mcp_registered": { "claude": true, "cursor": false, "codex": false },
+//!   "mcp_registered": { "claude": true, "cursor": false, "codex": false, "grok": false },
 //!   "doctor": { ... },
 //!   "commands": { "enter": "locus enter …", "whoami": "locus whoami" }
 //! }
@@ -62,11 +62,18 @@ pub struct McpRegistered {
     pub claude: bool,
     pub cursor: bool,
     pub codex: bool,
+    /// Grok Build. Probed at its documented config path
+    /// `~/.grok/config.toml` (`[mcp_servers.locus]`, Codex-style TOML);
+    /// `LOCUS_GROK_MCP_CONFIG=<path>` overrides the location (JSON `mcpServers`
+    /// or TOML `[mcp_servers]` shapes both accepted) — see
+    /// `probe_mcp_registered`.
+    #[serde(default)]
+    pub grok: bool,
 }
 
 impl McpRegistered {
     pub fn any(&self) -> bool {
-        self.claude || self.cursor || self.codex
+        self.claude || self.cursor || self.codex || self.grok
     }
 }
 
@@ -147,7 +154,7 @@ pub fn agent_report_json_has_stable_keys(value: &serde_json::Value) -> Result<()
         }
     }
     if let Some(mcp) = obj.get("mcp_registered") {
-        for k in ["claude", "cursor", "codex"] {
+        for k in ["claude", "cursor", "codex", "grok"] {
             if mcp.get(k).is_none() {
                 missing.push(format!("mcp_registered.{k}"));
             }
@@ -359,7 +366,22 @@ fn build_commands(project_dir: Option<&Path>, pin: Option<&DoctorPin>) -> AgentC
 /// - Claude: project `.mcp.json` → `mcpServers.locus`
 /// - Cursor: project `.cursor/mcp.json` or `~/.cursor/mcp.json`
 /// - Codex: `~/.codex/config.toml` → `[mcp_servers.locus]`
+/// - Grok Build: `~/.grok/config.toml` → `[mcp_servers.locus]` (documented
+///   Codex-style TOML path); `LOCUS_GROK_MCP_CONFIG=<path>` overrides the
+///   location and accepts either the JSON `mcpServers` shape (Grok's
+///   compat-loaded mcp.json files) or the native TOML shape.
 pub fn probe_mcp_registered(project_dir: &Path, user_home: Option<&Path>) -> McpRegistered {
+    let grok_config = std::env::var_os("LOCUS_GROK_MCP_CONFIG").map(PathBuf::from);
+    probe_mcp_registered_with_grok(project_dir, user_home, grok_config.as_deref())
+}
+
+/// `probe_mcp_registered` with an explicit Grok Build config path (test seam;
+/// production callers read `LOCUS_GROK_MCP_CONFIG`).
+pub fn probe_mcp_registered_with_grok(
+    project_dir: &Path,
+    user_home: Option<&Path>,
+    grok_config: Option<&Path>,
+) -> McpRegistered {
     let claude = mcp_json_has_locus(&project_dir.join(".mcp.json"));
 
     let cursor_project = project_dir.join(".cursor").join("mcp.json");
@@ -374,10 +396,22 @@ pub fn probe_mcp_registered(project_dir: &Path, user_home: Option<&Path>) -> Mcp
         .map(|h| codex_config_has_locus(&h.join(".codex").join("config.toml")))
         .unwrap_or(false);
 
+    // Grok Build: default probe at its documented `~/.grok/config.toml`
+    // (Codex-style TOML). An explicit override path may be either shape —
+    // Grok also compat-loads mcp.json-style files. Unreadable/unparseable
+    // stays false (fail closed), never a guessed positive.
+    let grok = match grok_config {
+        Some(p) => mcp_json_has_locus(p) || codex_config_has_locus(p),
+        None => user_home
+            .map(|h| codex_config_has_locus(&h.join(".grok").join("config.toml")))
+            .unwrap_or(false),
+    };
+
     McpRegistered {
         claude,
         cursor,
         codex,
+        grok,
     }
 }
 
@@ -454,23 +488,23 @@ locus leave                 # clear pin
 
 | Var | Value | Notes |
 |-----|--------|--------|
-| `LOCUS_AUTO_PIN` | `cwd` | Prefer workspace `.locus.toml` / autopin when supported |
-| `LOCUS_CLIENT` | claude\|cursor\|codex | Session label |
+| `LOCUS_AUTO_PIN` | `cwd` | Advisory only — parsed, but the server never pins itself |
+| `LOCUS_CLIENT` | claude\|cursor\|codex\|grok | Session label |
 | `LOCUS_NOTIFY` | **unset** | Desktop banners stay opt-in (`locus notify on`) |
 
-### MCP auto-pin kill switches
+### MCP auto-pin knobs (advisory only)
 
-`locus-mcp` may silently pin once at start from workspace `default_binding` / `require_pin` (never force past allowlist). Disable or force:
+MCP auto-pin **never grants authority**: `locus-mcp` parses these knobs, but an agent-facing process cannot self-issue session authority, so the server stays unpinned and audits `session.auto_pin_denied` instead of pinning. A human must run `locus enter <alias>` / `locus pin <alias>`. The knobs remain parsed (and are honored as an advisory probe / kill switch) pending an operator-delegation design:
 
 | Signal | Effect |
 |--------|--------|
-| `LOCUS_MCP_AUTO_PIN=0` / `false` / `off` | **Kill switch** — never auto-pin |
-| `LOCUS_MCP_AUTO_PIN=1` / `true` / `on` | Explicit enable |
-| `LOCUS_AUTO_PIN=cwd` | Enable cwd-based auto-pin (also set by agent setup) |
+| `LOCUS_MCP_AUTO_PIN=0` / `false` / `off` | **Kill switch** — skip the advisory probe entirely |
+| `LOCUS_MCP_AUTO_PIN=1` / `true` / `on` | Explicit probe enable |
+| `LOCUS_AUTO_PIN=cwd` | cwd-based probe enable (also set by agent setup) |
 | `clients.auto_pin = "cwd"` in `$LOCUS_HOME/config.toml` | Same as cwd enable |
-| `.locus.toml` `default_binding` / `require_pin = true` | Preferred enable when cwd sees the workspace |
+| `.locus.toml` `default_binding` / `require_pin = true` | Probe enable when cwd sees the workspace |
 
-Agents still **cannot** call pin — only the server may auto-pin, and only when unpinned.
+Agents **cannot** pin, and neither can the server on their behalf.
 
 Sibling: [Phantom](https://phm.dev) answers *can this secret enter the model?* Locus answers *as whom, against which tenant?*
 "#
@@ -916,6 +950,7 @@ mod tests {
                     claude: true,
                     cursor: false,
                     codex: false,
+                    grok: false,
                 },
                 project_dir: Some(dir.path().to_path_buf()),
                 home_ready: true,
@@ -997,7 +1032,43 @@ mod tests {
         assert!(m.claude);
         assert!(m.cursor);
         assert!(m.codex);
+        assert!(
+            !m.grok,
+            "grok stays false without ~/.grok/config.toml or an override"
+        );
         assert!(m.any());
+
+        // Grok Build default probe: documented `~/.grok/config.toml`
+        // (Codex-style TOML). Env seam covered via the _with_grok variant to
+        // avoid process-global env mutation in parallel tests.
+        fs::create_dir_all(home.join(".grok")).unwrap();
+        fs::write(
+            home.join(".grok").join("config.toml"),
+            "[mcp_servers.locus]\ncommand = \"locus-mcp\"\n",
+        )
+        .unwrap();
+        let m = probe_mcp_registered_with_grok(&project, Some(&home), None);
+        assert!(m.grok, "default probe reads ~/.grok/config.toml");
+
+        // Override path: JSON mcpServers shape (compat files) …
+        let grok_cfg = home.join("grok-mcp.json");
+        fs::write(
+            &grok_cfg,
+            r#"{"mcpServers":{"locus":{"command":"locus-mcp"}}}"#,
+        )
+        .unwrap();
+        let m = probe_mcp_registered_with_grok(&project, Some(&home), Some(&grok_cfg));
+        assert!(m.grok);
+        // … or native TOML shape at a nonstandard location.
+        let grok_toml = home.join("grok-config.toml");
+        fs::write(&grok_toml, "[mcp_servers.locus]\ncommand = \"x\"\n").unwrap();
+        let m = probe_mcp_registered_with_grok(&project, Some(&home), Some(&grok_toml));
+        assert!(m.grok);
+        // Missing/unreadable override fails closed even when the default
+        // location would match — an explicit signal always wins.
+        let m =
+            probe_mcp_registered_with_grok(&project, Some(&home), Some(&home.join("missing.json")));
+        assert!(!m.grok);
     }
 
     #[test]

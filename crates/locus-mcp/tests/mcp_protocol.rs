@@ -239,6 +239,29 @@ fn sample_bindings(store: &Store) {
     store.save_binding(&acme).unwrap();
 }
 
+/// Second sample binding (different tenant + binding id) for pin-swap tests.
+fn beta_binding(store: &Store) {
+    let beta = Binding::from_body(BindingBody {
+        id: "bnd_beta".into(),
+        alias: "beta".into(),
+        tenant: "beta-corp".into(),
+        principal: None,
+        description: None,
+        policy: Policy::default(),
+        providers: vec![ProviderBinding {
+            provider: "github".into(),
+            account: "beta-gh".into(),
+            credential_ref: "phm:GH_TOKEN_BETA".into(),
+            scope: Scope {
+                orgs: vec!["beta-corp".into()],
+                ..Scope::default()
+            },
+            upstream: None,
+        }],
+    });
+    store.save_binding(&beta).unwrap();
+}
+
 fn handshake(client: &mut McpClient) -> Value {
     let init = client.request(
         "initialize",
@@ -1462,6 +1485,29 @@ allowed_bindings = ["acme"]
     assert!(store.active_session().unwrap().is_none());
     let events = store.read_audit_events().unwrap();
     assert!(!events.iter().any(|event| event.op == "session.auto_pin"));
+    // The refusal is honest and audited: the advisory workspace binding is
+    // recorded, and the reason states operator delegation is required.
+    let denied = events
+        .iter()
+        .find(|event| event.op == "session.auto_pin_denied")
+        .expect("advisory auto-pin probe must audit session.auto_pin_denied");
+    assert_eq!(denied.binding, "acme");
+    let reason = denied
+        .detail
+        .as_ref()
+        .and_then(|d| d["reason"].as_str())
+        .unwrap_or("");
+    assert!(
+        reason.contains("auto-pin requires operator delegation"),
+        "denial reason must be the honest operator-delegation error: {reason}"
+    );
+    assert_eq!(
+        denied
+            .detail
+            .as_ref()
+            .and_then(|d| d["advisory_binding"].as_str()),
+        Some("acme")
+    );
 }
 
 #[test]
@@ -1591,6 +1637,11 @@ default_binding = "acme"
         assert!(t["name"].as_str().unwrap().starts_with("locus_"));
     }
     assert!(store.active_session().unwrap().is_none());
+    // Kill switch skips the advisory probe entirely — not even a denial audit.
+    let events = store.read_audit_events().unwrap();
+    assert!(!events
+        .iter()
+        .any(|event| event.op.starts_with("session.auto_pin")));
 }
 
 #[test]
@@ -1648,6 +1699,13 @@ auto_pin = "cwd"
         .collect();
     assert!(names.iter().all(|name| name.starts_with("locus_")));
     assert!(store.active_session().unwrap().is_none());
+    // clients.auto_pin=cwd enables only the advisory probe: honest denial audit,
+    // never a session.auto_pin grant.
+    let events = store.read_audit_events().unwrap();
+    assert!(!events.iter().any(|event| event.op == "session.auto_pin"));
+    assert!(events
+        .iter()
+        .any(|event| event.op == "session.auto_pin_denied"));
 }
 
 #[test]
@@ -1815,4 +1873,531 @@ require_pin = true
         "still cannot pin: {ptext}"
     );
     assert!(store.active_session().unwrap().is_none());
+}
+
+/// Dispatch-level regression net for the always-false session_ok bug: a healthy
+/// pinned fixture with deterministic external facts (fake `phantom` shim on
+/// PATH listing every phm: ref) must verify with session_ok=true over
+/// tools/call — same pack as `locus verify session --json`.
+#[cfg(unix)]
+#[test]
+fn locus_verify_session_session_ok_true_on_healthy_pin() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    store
+        .pin("acme", dir.path(), Some("mcp-verify".into()), false)
+        .unwrap();
+
+    // Fake phantom shim: --version ok + list prints every phm: name the
+    // sample bindings reference, so unresolved_phm is deterministically empty.
+    let shim_dir = dir.path().join("shim-bin");
+    std::fs::create_dir_all(&shim_dir).unwrap();
+    let shim = shim_dir.join("phantom");
+    std::fs::write(
+        &shim,
+        "#!/bin/sh\nif [ \"$1\" = \"list\" ]; then\n  echo GH_TOKEN_ACME\n  echo VERCEL_TOKEN_ACME\n  echo SUPABASE_ACME\nfi\nexit 0\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let path_env = format!(
+        "{}:{}",
+        shim_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let mut client = McpClient::spawn_opts(
+        dir.path(),
+        Framing::Ndjson,
+        Some(dir.path()),
+        &[("PATH", path_env.as_str())],
+    );
+    handshake(&mut client);
+
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "locus_verify_session", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&call);
+    assert!(!is_err, "verify_session should not error: {text}");
+    let body: Value = serde_json::from_str(&text).expect("session pack json");
+    assert_eq!(body["kind"], "session");
+    assert_eq!(
+        body["session_ok"], true,
+        "healthy pinned fixture must verify session_ok=true: {body}"
+    );
+    assert_eq!(body["doctor"]["ok"], true, "doctor must be SAFE: {body}");
+    assert_eq!(body["doctor"]["phantom_on_path"], true, "{body}");
+    assert!(
+        body["doctor"]["unresolved_phm"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        "no unresolved phm refs expected: {body}"
+    );
+    assert_eq!(body["safe_next"]["action"], "ready", "{body}");
+    assert_eq!(body["safe_next"]["ready"], true, "{body}");
+    assert_eq!(body["whoami"]["binding_alias"], "acme", "{body}");
+    // Never secrets or credential refs in the pack.
+    for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME"] {
+        assert!(!text.contains(canary), "pack leaked locator {canary}");
+    }
+}
+
+/// Same tool without the shim (phantom absent / refs unresolved) must fail
+/// closed: session_ok=false but the tool itself still returns a pack.
+#[cfg(unix)]
+#[test]
+fn locus_verify_session_session_ok_false_when_phantom_missing() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    store
+        .pin("acme", dir.path(), Some("mcp-verify-miss".into()), false)
+        .unwrap();
+
+    // Empty PATH dir only — phantom probe must fail deterministically.
+    let empty_bin = dir.path().join("empty-bin");
+    std::fs::create_dir_all(&empty_bin).unwrap();
+    let path_env = empty_bin.display().to_string();
+
+    let mut client = McpClient::spawn_opts(
+        dir.path(),
+        Framing::Ndjson,
+        Some(dir.path()),
+        &[("PATH", path_env.as_str())],
+    );
+    handshake(&mut client);
+
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "locus_verify_session", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&call);
+    assert!(!is_err, "pack returns even when unhealthy: {text}");
+    let body: Value = serde_json::from_str(&text).expect("session pack json");
+    assert_eq!(body["session_ok"], false, "{body}");
+    assert_eq!(body["doctor"]["phantom_on_path"], false, "{body}");
+    assert!(
+        body["doctor"]["unresolved_phm"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
+        "phm refs must be flagged unresolved: {body}"
+    );
+}
+
+// ─── MCP session pin-anchoring (pin-swap protection) ────────────────────────
+
+/// Cross-alias re-pin under a live MCP session: provider tools refuse with a
+/// structured `pin_changed` (outranking `runtime_unhealthy` from the staled
+/// executor grant), control tools keep working and report the mismatch, the
+/// catalog collapses to control tools tagged with the ANCHORED alias, and the
+/// refusal never mutates or freezes the store session.
+#[test]
+fn stdio_cross_alias_repin_refuses_with_pin_changed() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    beta_binding(&store);
+    store
+        .pin("acme", dir.path(), Some("anchor-swap".into()), false)
+        .unwrap();
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    // Healthy anchored call under acme.
+    let ok = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&ok);
+    assert!(!is_err, "pre-swap github.scope failed: {text}");
+    assert!(text.contains("acme-corp"), "{text}");
+
+    // Human re-pins to a different alias in another terminal.
+    store.leave().unwrap();
+    store
+        .pin("beta", dir.path(), Some("anchor-swap".into()), false)
+        .unwrap();
+
+    // Provider call now fails closed with pin_changed — not runtime_unhealthy.
+    let refused = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&refused);
+    assert!(is_err, "expected pin_changed refusal: {text}");
+    let body: Value = serde_json::from_str(&text).expect("pin_changed json");
+    assert_eq!(body["error"], "pin_changed", "{body}");
+    assert_eq!(body["anchored"]["alias"], "acme", "{body}");
+    assert_eq!(body["anchored"]["tenant"], "acme-corp", "{body}");
+    assert_eq!(body["current"]["alias"], "beta", "{body}");
+    assert_eq!(body["current"]["tenant"], "beta-corp", "{body}");
+    assert_eq!(body["safe_next"]["action"], "reinitialize_client", "{body}");
+    assert_eq!(body["safe_next"]["ready"], false, "{body}");
+    assert_eq!(body["safe_next"]["command"], "locus enter acme", "{body}");
+    // Authority-plane facts stay visible, not masked.
+    assert!(
+        body["underlying_issues"].as_array().is_some(),
+        "underlying drift issues should ride along: {body}"
+    );
+
+    // Repeat call: still refused; the mismatch audit is deduped below.
+    let refused2 = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text2, is_err2) = McpClient::tool_text(&refused2);
+    assert!(is_err2 && text2.contains("pin_changed"), "{text2}");
+
+    // Control tools keep working and carry the additive mcp_anchor block.
+    let whoami = client.request(
+        "tools/call",
+        json!({ "name": "locus_whoami", "arguments": {} }),
+    );
+    let (text, _) = McpClient::tool_text(&whoami);
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["mcp_anchor"]["anchored_alias"], "acme", "{body}");
+    assert_eq!(body["mcp_anchor"]["match"], false, "{body}");
+
+    // Catalog collapses to control tools tagged with the ANCHORED alias.
+    let list = client.request("tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().expect("tools");
+    for t in tools {
+        let name = t["name"].as_str().unwrap();
+        assert!(
+            name.starts_with("locus_"),
+            "anchored-mismatch catalog must be control-only, got {name}"
+        );
+        let desc = t["description"].as_str().unwrap_or("");
+        assert!(
+            desc.starts_with("[locus:acme]"),
+            "catalog must be tagged with the anchored alias: {desc}"
+        );
+    }
+
+    // Session-local refusal: active.json is NOT frozen, no session.freeze audit.
+    let active = store.active_session().unwrap().expect("beta pin stays");
+    assert_eq!(active.binding_alias, "beta");
+    assert!(
+        !active.frozen,
+        "anchor refusal must not freeze the store pin"
+    );
+    let events = store.read_audit_events().unwrap();
+    assert!(
+        !events.iter().any(|e| e.op == "session.freeze"),
+        "anchor refusal must not freeze"
+    );
+    // Anchor lifecycle audits: established once, mismatch deduped to one
+    // report per (anchored_session_id, current_session_id) pair.
+    assert!(
+        events.iter().any(|e| e.op == "mcp.anchor_established"),
+        "expected mcp.anchor_established: {:?}",
+        events.iter().map(|e| &e.op).collect::<Vec<_>>()
+    );
+    let mismatches = events
+        .iter()
+        .filter(|e| e.op == "mcp.anchor_mismatch")
+        .count();
+    assert_eq!(mismatches, 1, "mcp.anchor_mismatch must be deduped");
+    // Values-free audit trail.
+    for e in events.iter().filter(|e| e.op.starts_with("mcp.anchor")) {
+        let raw = serde_json::to_string(e).unwrap().to_ascii_lowercase();
+        for banned in ["phm:", "token", "secret", "credential"] {
+            assert!(!raw.contains(banned), "audit leaked `{banned}`: {raw}");
+        }
+    }
+}
+
+/// Same-alias re-pin (TTL refresh) is never refused by the anchor layer. The
+/// stale process-bound executor grant may still fail the call — that is the
+/// documented authority-plane behavior and must surface as
+/// runtime_unhealthy/executor_authority_unavailable, never `pin_changed`.
+#[test]
+fn stdio_same_alias_repin_not_refused_by_anchor() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    store
+        .pin("acme", dir.path(), Some("anchor-same".into()), false)
+        .unwrap();
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+    let ok = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&ok);
+    assert!(!is_err, "pre-repin call failed: {text}");
+
+    // TTL-refresh flow: same alias, new sealed session.
+    store.leave().unwrap();
+    store
+        .pin("acme", dir.path(), Some("anchor-same".into()), false)
+        .unwrap();
+
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, _) = McpClient::tool_text(&call);
+    assert!(
+        !text.contains("pin_changed"),
+        "same-alias re-pin must not trip the anchor: {text}"
+    );
+
+    // Anchor still reports acme as the anchored identity.
+    let whoami = client.request(
+        "tools/call",
+        json!({ "name": "locus_whoami", "arguments": {} }),
+    );
+    let (text, _) = McpClient::tool_text(&whoami);
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["mcp_anchor"]["anchored_alias"], "acme", "{body}");
+}
+
+/// A pin created after spawn is never anchored (the observation is unhealthy —
+/// no executor grant for the new session), and the refusal is the plain
+/// authority-plane error, not pin_changed. whoami carries no mcp_anchor block
+/// when nothing was ever anchored.
+#[test]
+fn stdio_post_spawn_pin_never_anchors() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    // Unpinned refusal without anchor context.
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&call);
+    assert!(is_err && text.contains("not_pinned"), "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        body.get("anchor").is_none(),
+        "never-anchored session must not report anchor context: {body}"
+    );
+
+    // Pin after spawn: process has no executor grant for this session.
+    store
+        .pin("acme", dir.path(), Some("post-spawn".into()), false)
+        .unwrap();
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&call);
+    assert!(is_err, "{text}");
+    assert!(
+        !text.contains("pin_changed"),
+        "no anchor exists — must not report pin_changed: {text}"
+    );
+
+    let whoami = client.request(
+        "tools/call",
+        json!({ "name": "locus_whoami", "arguments": {} }),
+    );
+    let (text, _) = McpClient::tool_text(&whoami);
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert!(
+        body.get("mcp_anchor").is_none(),
+        "mcp_anchor must be omitted when no anchor exists: {body}"
+    );
+}
+
+/// The anchor survives `locus leave`: the not_pinned refusal gains anchor
+/// context (distinguishing "pin vanished" from "never pinned"), and a later
+/// re-pin to a different alias still refuses with pin_changed.
+#[test]
+fn stdio_anchor_survives_leave_and_refuses_new_alias() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    beta_binding(&store);
+    store
+        .pin("acme", dir.path(), Some("anchor-leave".into()), false)
+        .unwrap();
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+    let ok = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&ok);
+    assert!(!is_err, "pre-leave call failed: {text}");
+
+    store.leave().unwrap();
+
+    // Unpinned gap: not_pinned WITH anchor context (anchor is not cleared).
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&call);
+    assert!(is_err, "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["error"], "not_pinned", "{body}");
+    assert_eq!(body["anchor"]["anchored_alias"], "acme", "{body}");
+    assert!(
+        body["hint"].as_str().unwrap_or("").contains("vanished"),
+        "hint should say the previous pin vanished: {body}"
+    );
+
+    // Re-pin to a different alias: the surviving anchor still refuses.
+    store
+        .pin("beta", dir.path(), Some("anchor-leave".into()), false)
+        .unwrap();
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&call);
+    assert!(is_err, "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["error"], "pin_changed", "{body}");
+    assert_eq!(body["anchored"]["alias"], "acme", "{body}");
+    assert_eq!(body["current"]["alias"], "beta", "{body}");
+}
+
+/// An explicit second initialize adopts the current global pin: healthy →
+/// re-anchor (audited mcp.anchor_reset); unhealthy (stale executor grant after
+/// the swap) → the anchor clears and errors fall back to the plain
+/// authority-plane refusal.
+#[test]
+fn stdio_second_initialize_adopts_current_pin() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    beta_binding(&store);
+    store
+        .pin("acme", dir.path(), Some("anchor-reinit".into()), false)
+        .unwrap();
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+    let ok = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&ok);
+    assert!(!is_err, "pre-swap call failed: {text}");
+
+    store.leave().unwrap();
+    store
+        .pin("beta", dir.path(), Some("anchor-reinit".into()), false)
+        .unwrap();
+
+    // Anchored refusal first.
+    let refused = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, _) = McpClient::tool_text(&refused);
+    assert!(text.contains("pin_changed"), "{text}");
+
+    // Explicit re-initialize: this stdio process cannot become healthy for the
+    // new session (executor grant is process-bound), so the anchor clears and
+    // subsequent errors are the plain authority-plane refusal.
+    let reinit = client.request(
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "locus-test", "version": "0.0.1" }
+        }),
+    );
+    assert!(reinit.get("result").is_some(), "{reinit}");
+
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&call);
+    assert!(is_err, "{text}");
+    assert!(
+        !text.contains("pin_changed"),
+        "re-initialize must adopt/clear the anchor: {text}"
+    );
+
+    let events = store.read_audit_events().unwrap();
+    assert!(
+        events.iter().any(|e| e.op == "mcp.anchor_reset"),
+        "expected mcp.anchor_reset audit: {:?}",
+        events.iter().map(|e| &e.op).collect::<Vec<_>>()
+    );
+}
+
+/// `LOCUS_SESSION_ID` overlay sessions (ci mint / withLocusSession) never read
+/// active.json, so global re-pins cannot drift them: the anchor is a permanent
+/// Match and provider calls keep operating under the sealed ci identity.
+#[test]
+fn stdio_env_session_immune_to_active_json_rewrites() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    beta_binding(&store);
+
+    let (ci_session, _ci_path) = store
+        .create_ci_session("acme", dir.path(), false, None)
+        .unwrap();
+    let capability = store.grant_executor_capability(&ci_session).unwrap();
+
+    let mut client = McpClient::spawn_opts(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[
+            ("LOCUS_SESSION_ID", ci_session.session_id.as_str()),
+            (locus_core::EXECUTOR_CAPABILITY_ENV, capability.as_str()),
+        ],
+    );
+    handshake(&mut client);
+
+    let ok = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&ok);
+    assert!(!is_err, "ci-session github.scope failed: {text}");
+    assert!(text.contains("acme-corp"), "{text}");
+
+    // Rewrite active.json to a different alias — the env session is exclusive
+    // and must not drift or trip its anchor.
+    store
+        .pin("beta", dir.path(), Some("ci-immune".into()), false)
+        .unwrap();
+
+    let ok = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&ok);
+    assert!(
+        !is_err,
+        "env-session call must survive active.json rewrite: {text}"
+    );
+    assert!(text.contains("acme-corp"), "{text}");
+    assert!(!text.contains("pin_changed"), "{text}");
+
+    let whoami = client.request(
+        "tools/call",
+        json!({ "name": "locus_whoami", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&whoami);
+    assert!(!is_err, "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["binding_alias"], "acme", "{body}");
+    assert_eq!(body["mcp_anchor"]["match"], true, "{body}");
+    // Observability: the anchor records its non-active backing.
+    assert_eq!(body["mcp_anchor"]["anchored_alias"], "acme", "{body}");
 }

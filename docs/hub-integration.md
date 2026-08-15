@@ -113,6 +113,29 @@ if (!decision.allow) {
 |-----------|------|
 | `spawnEngine` / `runSwarmInternal` / `runApiModelSandboxed` | `applyLocusPreMutateGate` (pre-mutate) |
 | `runSwarm` / `runTask` | `runWithLocusSessionIfConfigured` (CI session mint overlay; hub #252) |
+| simple-conductor / `runBestOfN` | same CI session mint overlay (hub #256 / #257) |
+
+### Firm soft-warn (hub doctor / readiness — hub #277)
+
+Production fleets that have enrolled repos but have **not** set `locus.firm: true` get a **non-blocking** doctor/readiness warning. This is hub-side only (`checkLocusFirm` in ashlr doctor + readiness); it is **not** part of the monorepo `locus.ts` drop-in and must **never** hard-block mutate paths.
+
+**Warn when all of:**
+
+1. enrolled repos &gt; 0
+2. `locus` CLI is available
+3. `config.locus.firm` is not `true`
+
+→ warning id `locus-firm`: *consider locus.firm for production*
+
+| Case | Result |
+|------|--------|
+| Fresh install (0 enrolled) | pass / no warn (monorepo-safe) |
+| Locus absent | pass on firm check (install handled by `checkLocus`) |
+| `locus.firm=true` | pass / info |
+| Degraded enrollment probe | firm check skipped |
+| Mutating job preflight | **unchanged** — soft-warn does not gate dispatch |
+
+Firm remains **opt-in** (`locus.firm` / `locus.enforce` / `LOCUS_ENFORCE`). Monorepo default stays off. Production checklist lives on the hub as `docs/LOCUS-FIRM-FLEET.md` (hub [PR #277](https://github.com/ashlrai/ashlr-hub/pull/277)).
 
 ### Scrubbed mint env (`withLocusSession`)
 
@@ -399,6 +422,14 @@ const soft = locusSoftWatchHeartbeat(process.env, "warn");
 
 `parseWatchHeartbeat` also maps legacy runtime-drift ticks (`ok` / `binding_alias` /
 `seal_ok`) for older installed CLIs. Full wire shapes: [docs/verification-plane.md](./verification-plane.md).
+
+**MCP-native heartbeat (no shell-out):** hubs already speaking MCP can skip the CLI
+entirely — the `locus_verify_session` tool (stdio or HTTP `POST /mcp`) returns the
+identical `{ kind: "session", …, session_ok }` pack, and `GET /mcp/sse` streams
+values-free `locus.session_tick` events (`session_ok`, doctor verdict, safe_next;
+`?once=1` / `?interval=5s`). Both run the same external probes as the CLI (Phantom on
+PATH, unresolved `phm:` refs), so `session_ok` matches `locus verify session --json`.
+See [docs/mcp.md](./mcp.md).
 
 Schema: [`schema/hub-gate.schema.json`](../schema/hub-gate.schema.json).  
 Exact steps: [`integrations/ashlr-hub/fleet-preflight.md`](../integrations/ashlr-hub/fleet-preflight.md).

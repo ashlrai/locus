@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # dogfood-clients.sh — probe real AI client installs for multi-client dogfood.
 #
-# Detects Claude Code / Cursor / Continue config (or install) paths on common
-# macOS + Linux locations. For each found *supported* client (claude, cursor),
+# Detects Claude Code / Cursor / Grok Build / Continue config (or install)
+# paths on common macOS + Linux locations. For each found *supported* client
+# (claude, cursor, grok),
 # runs `locus agent setup --client X --dry-run` (never mutates host configs).
 # Optionally runs `locus agent doctor` once when any client is present.
 #
@@ -100,6 +101,34 @@ detect_cursor() {
   done
   if [[ "$PROBE_ISOLATED" != "1" ]] && command -v cursor >/dev/null 2>&1; then
     command -v cursor
+    return 0
+  fi
+  return 1
+}
+
+detect_grok() {
+  # Grok Build — documented config: ~/.grok/config.toml (Codex-style TOML;
+  # locus agent setup --client grok writes [mcp_servers.locus] there).
+  local candidates=(
+    "${PROBE_HOME}/.grok/config.toml"
+    "${PROBE_HOME}/.grok"
+    "${PROBE_HOME}/.config/grok"
+    "${PROBE_HOME}/Library/Application Support/Grok"
+  )
+  if [[ "$PROBE_ISOLATED" != "1" ]]; then
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+      candidates+=("/Applications/Grok.app")
+    fi
+  fi
+  local p
+  for p in "${candidates[@]}"; do
+    if path_exists "$p"; then
+      printf '%s\n' "$p"
+      return 0
+    fi
+  done
+  if [[ "$PROBE_ISOLATED" != "1" ]] && command -v grok >/dev/null 2>&1; then
+    command -v grok
     return 0
   fi
   return 1
@@ -227,6 +256,27 @@ else
   SUMMARY+=("cursor:missing")
 fi
 
+# Grok Build (soft-skip when absent; setup writes ~/.grok/config.toml on
+# --apply; dry-run here stays read-only)
+GROK_PATH=""
+if GROK_PATH="$(detect_grok)"; then
+  FOUND_ANY=1
+  FOUND_SUPPORTED=$((FOUND_SUPPORTED + 1))
+  ok "grok detected @ ${GROK_PATH}"
+  log "locus agent setup --dry-run --client grok"
+  if run_setup_dry grok; then
+    ok "agent setup dry-run grok (would merge ~/.grok/config.toml; nothing written)"
+    SUMMARY+=("grok:found+setup-ok (${GROK_PATH})")
+  else
+    warn "agent setup dry-run failed for grok"
+    FAILED=1
+    SUMMARY+=("grok:found+setup-FAIL (${GROK_PATH})")
+  fi
+else
+  skip "grok (no config/install markers)"
+  SUMMARY+=("grok:missing")
+fi
+
 # Continue (detect only — no setup client yet)
 CONTINUE_PATH=""
 if CONTINUE_PATH="$(detect_continue)"; then
@@ -270,7 +320,7 @@ fi
 
 if [[ "$FOUND_SUPPORTED" -eq 0 ]]; then
   if [[ "$REQUIRE" == "1" ]]; then
-    die "no supported clients found (claude/cursor) and LOCUS_DOGFOOD_REQUIRE_CLIENTS=1"
+    die "no supported clients found (claude/cursor/grok) and LOCUS_DOGFOOD_REQUIRE_CLIENTS=1"
   fi
   printf '\nCLIENT PROBE: none found (soft-skip; set LOCUS_DOGFOOD_REQUIRE_CLIENTS=1 to hard-fail)\n'
   exit 0

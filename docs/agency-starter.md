@@ -24,6 +24,14 @@ One laptop, many clients: **never** one mega-MCP with all accounts. One pin, one
 
 ## Install the kit
 
+Prerequisite — operator control capability: control commands (`init`, `enter`,
+`pin`, `leave`) require `LOCUS_CONTROL_CAPABILITY` in the shell. `locus init` /
+`locus quickstart` mint and persist one (0600 at `~/.locus/control_capability`,
+respects `LOCUS_HOME`) when nothing exists; export it in new shells with
+`eval "$(locus hook zsh)"`, or manage it yourself:
+`export LOCUS_CONTROL_CAPABILITY="$(openssl rand -hex 32)"`. `locus doctor`
+flags missing/invalid/mismatched capabilities with the exact fix.
+
 ```bash
 locus init
 cp examples/agency-starter/bindings/*.toml ~/.locus/bindings/
@@ -36,6 +44,13 @@ cp examples/agency-starter/workspaces/client-b.locus.toml /path/to/client-b/.loc
 ```
 
 Create Phantom secrets named like the binding refs (`phm:SUPABASE_CLIENT_A`, …). Never put values in TOML or git.
+
+Onboarding a new client without hand-editing TOML: `locus client add <alias>`
+walks alias → tenant → provider → scope → credential *pointer* (`phm:NAME` /
+`env:VAR` — raw secrets are rejected) and writes the binding via the same
+validated path as `locus binding add`. Every prompt has a flag for scripting
+(`--non-interactive`, `--dry-run`). Then `locus enter <alias> --ttl 2h` pins
+with an auto-leave TTL (see [policy.md](./policy.md#session-ttl-auto-leave)).
 
 ## Binding graph
 

@@ -49,6 +49,8 @@ export LOCUS_QUIET=1
 
 Resolution: env `LOCUS_ENFORCE` (if set) → `locus.enforce` → `locus.firm === true` → `off`. Never always-on; firm defaults false.
 
+**Observational (not a preflight gate):** hub doctor/readiness soft-warns via hub-only `checkLocusFirm` when enrolled&gt;0 + locus available + `locus.firm` not true (hub [#277](https://github.com/ashlrai/ashlr-hub/pull/277), warning id `locus-firm`). That warn is **annotation only** — it must not appear in `blockers[]`, must not flip `allowDispatch`, and must not cause `applyLocusPreMutateGate` to deny. See [doctor-check.md](./doctor-check.md) and hub `docs/LOCUS-FIRM-FLEET.md`.
+
 ### 1. CLI present
 
 ```ts
@@ -301,6 +303,7 @@ Do **not** treat a soft watch tick as the sole hard gate — keep
 | Let the model call `locus pin` | Agents request only |
 | Share one `active.json` pin across parallel mutate jobs | Race / cross-tenant |
 | Hard-block solely on soft watch under `LOCUS_ENFORCE=warn` | Soft path is annotation-only |
+| Hard-block on hub `locus-firm` soft-warn (#277) | Doctor/readiness nudge only; never a mutate gate |
 
 ---
 
