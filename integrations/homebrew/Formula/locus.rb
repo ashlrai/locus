@@ -4,15 +4,27 @@
 # ashlrai/homebrew-ashlr (or ashlrai/homebrew-locus). See
 # integrations/homebrew/README.md and docs/RELEASE.md.
 #
-# === v0.2.0 (this formula version) ===
-# 1. Tag:  git tag -a v0.2.0 -m "Locus v0.2.0" && git push origin v0.2.0
+# === v0.3.0 (this formula version) ===
+# 1. Tag:  git tag -a v0.3.0 -m "Locus v0.3.0" && git push origin v0.3.0
 #    (do not force-push tags)
 # 2. Wait for .github/workflows/release.yml to attach locus-*.tar.gz assets.
 # 3. Source formula sha256 (this file's default install path):
-#      curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v0.2.0.tar.gz" | shasum -a 256
-#    Verify the checked-in sha256 below, then PR into the live tap.
+#      curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v0.3.0.tar.gz" | shasum -a 256
+#    Replace the REPLACE placeholder sha256 below, then PR into the live tap.
 # 4. Optional: switch to prebuilt binary formula (commented block at bottom)
 #    once you have per-target digests of the release assets.
+#
+# === v0.2.0 reference digests (published 2026-08-09) ===
+# Source archive (GitHub tag tarball):
+#   https://github.com/ashlrai/locus/archive/refs/tags/v0.2.0.tar.gz
+#   sha256: 257c9a5427e5cbd106c6fae5a324f6a921fdb15e7e49441bae2106ec6ed8826f
+# Release assets (gh release download v0.2.0 -R ashlrai/locus):
+#   locus-aarch64-apple-darwin.tar.gz
+#     sha256: 25f30770368ce460105c3accbe24bb0dafa9d709be4017e4e419b61b1db1eaea
+#   locus-x86_64-apple-darwin.tar.gz
+#     sha256: cb4c89a36302dd23e916f54b80c8522d830bb61e385f9e76d1ee68257ac8367a
+#   locus-x86_64-unknown-linux-gnu.tar.gz
+#     sha256: d275f31f0d344c4b25ef20b4365a5a8e1cde7fdc4f50fc7c76c8dc3ca1b20a2e
 #
 # === v0.1.0 reference digests (published 2026-08-07) ===
 # Source archive (GitHub tag tarball):
@@ -34,14 +46,15 @@
 class Locus < Formula
   desc "Identity plane for coding agents — wrong account, impossible"
   homepage "https://github.com/ashlrai/locus"
-  url "https://github.com/ashlrai/locus/archive/refs/tags/v0.2.0.tar.gz"
-  version "0.2.0"
-  sha256 "257c9a5427e5cbd106c6fae5a324f6a921fdb15e7e49441bae2106ec6ed8826f"
+  url "https://github.com/ashlrai/locus/archive/refs/tags/v0.3.0.tar.gz"
+  version "0.3.0"
+  sha256 "REPLACE" # fill after tagging v0.3.0 (see step 3 above)
   license "MIT"
   head "https://github.com/ashlrai/locus.git", branch: "main"
 
-  # Stable source tarball (verified after publishing v0.2.0):
+  # Stable source tarball (verify after publishing v0.3.0):
   #   curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v#{version}.tar.gz" | shasum -a 256
+  # v0.2.0 source sha256 (reference): 257c9a5427e5cbd106c6fae5a324f6a921fdb15e7e49441bae2106ec6ed8826f
   # v0.1.0 source sha256 (reference): a0a8e9e14bd9b3322faca27d2efe42a2dcc473d84a40aab3497a4296b8d68cce
 
   depends_on "rust" => :build
@@ -85,9 +98,9 @@ end
 # After a release is tagged and release.yml has published locus-<triple>.tar.gz,
 # replace the class body above with the following and fill real sha256 digests:
 #
-#   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.2.0/locus-aarch64-apple-darwin.tar.gz" | shasum -a 256
-#   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.2.0/locus-x86_64-apple-darwin.tar.gz" | shasum -a 256
-#   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.2.0/locus-x86_64-unknown-linux-gnu.tar.gz" | shasum -a 256
+#   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.3.0/locus-aarch64-apple-darwin.tar.gz" | shasum -a 256
+#   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.3.0/locus-x86_64-apple-darwin.tar.gz" | shasum -a 256
+#   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.3.0/locus-x86_64-unknown-linux-gnu.tar.gz" | shasum -a 256
 #
 # v0.2.0 asset digests (reference only):
 #   aarch64-apple-darwin: 25f30770368ce460105c3accbe24bb0dafa9d709be4017e4e419b61b1db1eaea
@@ -97,7 +110,7 @@ end
 # class Locus < Formula
 #   desc "Identity plane for coding agents — wrong account, impossible"
 #   homepage "https://github.com/ashlrai/locus"
-#   version "0.2.0"
+#   version "0.3.0"
 #   license "MIT"
 #
 #   on_macos do
