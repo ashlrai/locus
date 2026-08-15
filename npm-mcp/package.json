@@ -1,6 +1,6 @@
 {
   "name": "locus-mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "MCP multiplexor for Locus — tools hard-scoped to the active pin so agents cannot act in the wrong tenant.",
   "bin": {
     "locus-mcp": "bin/locus-mcp.js"
