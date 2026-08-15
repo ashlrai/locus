@@ -49,6 +49,11 @@ Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
 ```bash
 # First 60 seconds
 locus quickstart                 # samples · enter · whoami · doctor
+# quickstart also mints the operator control capability if missing, persists it
+# 0600 at ~/.locus/control_capability (respects LOCUS_HOME), and adopts it for
+# the run. Export it in new shells (value never echoed):
+eval "$(locus hook zsh)"
+# Manual alternative: export LOCUS_CONTROL_CAPABILITY="$(openssl rand -hex 32)"
 
 # Or explicit pin
 locus init --with-samples
@@ -78,6 +83,7 @@ locus pin          # uses .locus.toml
 ```bash
 eval "$(locus hook zsh)"
 # shows [locus:acme:acme-corp] or [locus:unpinned]
+# also exports the persisted LOCUS_CONTROL_CAPABILITY when the shell lacks one
 ```
 
 ---
@@ -186,17 +192,24 @@ locus run -b <alias> -- <command>     # one-shot; global pin unchanged
 locus binding list|show|add|rm
 locus workspace --default <alias> [--allow a,b] [--require-pin]
 locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2)
+locus watch [--once] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
 locus dashboard · serve               # local identity UI + API (127.0.0.1)
 locus forensics export                # shareable pack (no secrets)
-locus approve list|grant|status|deny  # require_approval / dual-control
+locus verify claim|session            # verification plane: claim score · session pack
+locus approve list|grant|status|wait|deny  # require_approval / dual-control
 locus notify status|on|off            # desktop banners OFF by default
 locus events --last N · events export # audit tail / fleet pulse / OTLP
 locus graph list|export|import        # encrypted binding graph share (no secrets)
 locus ci mint|env|run                 # short-lived sealed sessions for pipelines
+locus engagement init|close           # client engagement lifecycle (binding + workspace)
+locus upstream list|suggest           # built-in upstream MCP recipes
+locus adapter list|verify|trust       # provider adapter catalog + signature trust
 locus hook zsh|bash|fish
-locus setup --client claude|cursor|codex
+locus setup --client claude|cursor|codex|grok
+locus mcp                             # run the stdio MCP server (same as locus-mcp)
 locus agent report|setup|doctor       # AI-native readiness (hub JSON)
 locus goal status                     # northstar progress from GOALS.md
+locus completion zsh|bash|fish        # shell completions
 locus topic <name>                    # dashboard · forensics · serve · goal · verify · …
 ```
 
@@ -298,6 +311,7 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
 | [examples/agency-starter/](./examples/agency-starter/) | Bindings, workspaces, dual-control, offboarding |
 | [docs/mcp.md](./docs/mcp.md) | `locus-mcp` with Claude Code / Cursor |
+| [docs/onboarding.md](./docs/onboarding.md) | Agency onboarding: 3 agent clients × 3 tenants end-to-end |
 | [docs/adapters.md](./docs/adapters.md) | Writing a provider adapter |
 | [docs/workers.md](./docs/workers.md) | Synthetic vs MCP stdio workers |
 | [SECURITY.md](./SECURITY.md) | Threat model summary & reporting |

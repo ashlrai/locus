@@ -242,6 +242,17 @@ impl Store {
         binding.validate()?;
         // Double-check alias cannot escape bindings/ (also enforced in validate)
         validate_name_component("alias", &binding.alias)?;
+        // Reserved prefix: the MCP gate never routes `locus*__tool` names
+        // (session::split_namespaced_tool), so a `locus*` alias would be
+        // silently unreachable from agents. Fail closed at create/import;
+        // legacy hand-written files are flagged by doctor (`reserved_alias`).
+        if binding.alias.starts_with("locus") {
+            return Err(LocusError::msg(format!(
+                "alias '{}' is reserved: aliases starting with 'locus' collide with the control-tool \
+                 namespace and cannot be routed through the MCP gate — choose a different alias",
+                binding.alias
+            )));
+        }
         let _lock = crate::credential_migration::lock_bindings(self)?;
         let path = self.bindings_dir().join(format!("{}.toml", binding.alias));
         ensure_under_dir(&self.bindings_dir(), &path)?;
@@ -612,7 +623,21 @@ impl Store {
         client: Option<String>,
         force: bool,
     ) -> Result<Session> {
-        self.pin_with_opts(alias_or_id, cwd, client, force, None, true, None)
+        self.pin_with_ttl(alias_or_id, cwd, client, force, None)
+    }
+
+    /// [`Store::pin`] with an explicit auto-leave TTL request (`locus enter
+    /// --ttl`). The request is capped by the binding's `policy.max_ttl` —
+    /// never extended (fail closed).
+    pub fn pin_with_ttl(
+        &self,
+        alias_or_id: &str,
+        cwd: &Path,
+        client: Option<String>,
+        force: bool,
+        ttl: Option<Duration>,
+    ) -> Result<Session> {
+        self.pin_with_opts(alias_or_id, cwd, client, force, None, true, ttl)
     }
 
     /// Experimental namespaced multi-binding pin.
@@ -626,6 +651,19 @@ impl Store {
         cwd: &Path,
         client: Option<String>,
         force: bool,
+    ) -> Result<Session> {
+        self.pin_namespaced_with_ttl(aliases, cwd, client, force, None)
+    }
+
+    /// [`Store::pin_namespaced`] with an explicit auto-leave TTL request,
+    /// capped by the primary binding's `policy.max_ttl`.
+    pub fn pin_namespaced_with_ttl(
+        &self,
+        aliases: &[String],
+        cwd: &Path,
+        client: Option<String>,
+        force: bool,
+        ttl: Option<Duration>,
     ) -> Result<Session> {
         if aliases.len() < 2 {
             return Err(LocusError::msg(
@@ -649,7 +687,7 @@ impl Store {
         }
         let primary = seen[0].clone();
         let rest = seen[1..].to_vec();
-        self.pin_with_opts(&primary, cwd, client, force, Some(rest), true, None)
+        self.pin_with_opts(&primary, cwd, client, force, Some(rest), true, ttl)
     }
 
     /// Create a session for `locus run` — sealed temporary pin that does **not**
@@ -962,11 +1000,23 @@ impl Store {
             .map(parse_ttl)
             .transpose()?
             .unwrap_or_else(|| Duration::hours(8));
-        // Requested TTL is capped by binding max_ttl (fail closed on over-long CI pins).
-        let ttl = match ttl_override {
+        let default_ttl = binding
+            .policy
+            .default_ttl
+            .as_deref()
+            .map(parse_ttl)
+            .transpose()?;
+        // Precedence: explicit request (--ttl / CI mint) > binding
+        // policy.default_ttl > policy.max_ttl. The winner is always capped by
+        // max_ttl (fail closed on over-long pins).
+        let (requested, ttl_source) = match (ttl_override, default_ttl) {
+            (Some(req), _) => (Some(req), "flag"),
+            (None, Some(d)) => (Some(d), "binding_default"),
+            (None, None) => (None, "max_ttl"),
+        };
+        let ttl = match requested {
             Some(req) if req <= max_ttl => req,
-            Some(_) => max_ttl,
-            None => max_ttl,
+            _ => max_ttl,
         };
 
         let key = self.seal_key()?;
@@ -1029,6 +1079,8 @@ impl Store {
                         SessionMode::Namespaced => "namespaced",
                     },
                     "namespaces": session.namespaces,
+                    "ttl_secs": ttl.num_seconds(),
+                    "ttl_source": ttl_source,
                 })),
             )?;
         }
@@ -1118,6 +1170,18 @@ impl Store {
     ///
     /// Autopin never uses `force` — allowlist blocks are skipped at resolve time.
     pub fn pin_auto(&self, cwd: &Path, client: Option<String>, force: bool) -> Result<Session> {
+        self.pin_auto_with_ttl(cwd, client, force, None)
+    }
+
+    /// [`Store::pin_auto`] with an explicit auto-leave TTL request, capped by
+    /// the resolved binding's `policy.max_ttl`.
+    pub fn pin_auto_with_ttl(
+        &self,
+        cwd: &Path,
+        client: Option<String>,
+        force: bool,
+        ttl: Option<Duration>,
+    ) -> Result<Session> {
         let target = self.resolve_auto_pin(cwd)?;
         let use_force = match &target.source {
             PinSource::Autopin { .. } => false,
@@ -1133,21 +1197,32 @@ impl Store {
             SessionBackingType::Active,
             Some(self.active_session_path()),
             Some(target.source),
-            None,
+            ttl,
             SessionAuthority::LocalControl,
         )
     }
 
-    /// Auto-pin for an agent/MCP runtime. Authority is sealed as delegated;
-    /// the caller-provided client label is descriptive only.
+    /// Auto-pin requested by an agent/MCP runtime — always refused.
+    ///
+    /// Workspace `.locus.toml` defaults and the `LOCUS_AUTO_PIN` /
+    /// `LOCUS_MCP_AUTO_PIN` knobs are advisory hints only: the workspace file
+    /// is repo-local (agent-writable), and executor authority is bound to an
+    /// operator-supervised launch of a specific session generation, so an
+    /// agent-facing process can neither prove operator intent nor validate a
+    /// session it minted for itself. Until an explicit operator-delegation
+    /// design exists, this fails closed with an honest error instead of a
+    /// transient-looking "unavailable".
     pub fn pin_auto_delegated(
         &self,
         _cwd: &Path,
         _client: Option<String>,
         _force: bool,
     ) -> Result<Session> {
-        Err(LocusError::ExecutorAuthorityUnavailable(
-            "agent/MCP auto-pin cannot acquire local-control session authority".into(),
+        Err(LocusError::msg(
+            "auto-pin requires operator delegation, which is not available: an agent/MCP \
+             process cannot self-issue session authority (workspace `.locus.toml` defaults \
+             are advisory hints only) — a human must run `locus enter <alias>` or \
+             `locus pin <alias>`",
         ))
     }
 
@@ -1474,6 +1549,7 @@ impl Store {
                 })
                 .collect(),
             expires_at: session.expires_at.to_rfc3339(),
+            expires_in_secs: (session.expires_at - Utc::now()).num_seconds().max(0),
             worker_home: session.worker_home,
             seal_ok: true,
             seal: session.seal,
@@ -2374,6 +2450,9 @@ pub struct Whoami {
     pub principal: Option<String>,
     pub providers: Vec<ProviderView>,
     pub expires_at: String,
+    /// Seconds until expiry (0 when already expired). Additive field.
+    #[serde(default)]
+    pub expires_in_secs: i64,
     pub worker_home: String,
     pub seal_ok: bool,
     pub seal: String,
@@ -3572,6 +3651,52 @@ credential_ref = "ghp_UNSAFE/CANARY"
     }
 
     #[test]
+    fn save_binding_rejects_reserved_locus_prefix() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        for alias in ["locus", "locusx", "locus-client"] {
+            let b = Binding::from_body(BindingBody {
+                id: format!("bnd_{alias}"),
+                alias: (*alias).into(),
+                tenant: "t".into(),
+                principal: None,
+                description: None,
+                policy: Policy::default(),
+                providers: vec![ProviderBinding {
+                    provider: "github".into(),
+                    account: "a".into(),
+                    credential_ref: "phm:X".into(),
+                    scope: Scope::default(),
+                    upstream: None,
+                }],
+            });
+            let err = store.save_binding(&b).unwrap_err();
+            assert!(
+                err.to_string().contains("reserved"),
+                "alias {alias} must be rejected as reserved: {err}"
+            );
+            assert!(!store.bindings_dir().join(format!("{alias}.toml")).exists());
+        }
+        // Non-prefixed alias containing "locus" elsewhere is fine.
+        let ok = Binding::from_body(BindingBody {
+            id: "bnd_my-locus".into(),
+            alias: "my-locus".into(),
+            tenant: "t".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "github".into(),
+                account: "a".into(),
+                credential_ref: "phm:X".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        });
+        store.save_binding(&ok).unwrap();
+    }
+
+    #[test]
     fn engagement_init_and_close_archives_audit() {
         let dir = tempdir().unwrap();
         let home = dir.path().join("locus-home");
@@ -3632,6 +3757,39 @@ default_binding = "acme"
         let s = store.pin_auto(&project, None, false).unwrap();
         assert_eq!(s.binding_alias, "acme");
         assert!(matches!(s.source, PinSource::Dir { .. }));
+    }
+
+    #[test]
+    fn pin_auto_delegated_refuses_with_honest_operator_delegation_error() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("home")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let project = dir.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        // Even a fully operator-shaped workspace (default + allowlist) cannot
+        // let an agent/MCP runtime self-pin.
+        fs::write(
+            project.join(".locus.toml"),
+            r#"
+version = 1
+default_binding = "acme"
+allowed_bindings = ["acme"]
+"#,
+        )
+        .unwrap();
+        let err = store
+            .pin_auto_delegated(&project, Some("mcp-auto".into()), false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("auto-pin requires operator delegation"),
+            "unexpected: {err}"
+        );
+        assert!(err.contains("locus enter"), "unexpected: {err}");
+        // Fail closed: nothing was pinned.
+        assert!(store.active_session().unwrap().is_none());
     }
 
     #[test]
@@ -3788,6 +3946,100 @@ default_binding = "acme"
         let span = ci.expires_at - ci.pinned_at;
         assert!(span <= Duration::hours(1) + Duration::seconds(5));
         store.cleanup_ci_session(&path, &ci).unwrap();
+    }
+
+    #[test]
+    fn pin_with_ttl_shortens_expiry() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let s = store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(2)))
+            .unwrap();
+        let span = s.expires_at - s.pinned_at;
+        assert!(span <= Duration::minutes(2) + Duration::seconds(5));
+        assert!(span >= Duration::minutes(1) + Duration::seconds(55));
+    }
+
+    #[test]
+    fn pin_with_ttl_capped_by_max_ttl() {
+        // sample_binding has max_ttl = 1h; a 48h request must be clamped.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let s = store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::hours(48)))
+            .unwrap();
+        let span = s.expires_at - s.pinned_at;
+        assert!(span <= Duration::hours(1) + Duration::seconds(5));
+    }
+
+    #[test]
+    fn default_ttl_used_when_no_flag_and_flag_beats_default() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        b.policy.default_ttl = Some("30m".into());
+        store.save_binding(&b).unwrap();
+
+        // No explicit request → policy.default_ttl wins over max_ttl.
+        let s = store.pin("acme", dir.path(), None, false).unwrap();
+        let span = s.expires_at - s.pinned_at;
+        assert!(span <= Duration::minutes(30) + Duration::seconds(5));
+        assert!(span >= Duration::minutes(29));
+
+        // Explicit request beats default_ttl.
+        let s = store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(5)))
+            .unwrap();
+        let span = s.expires_at - s.pinned_at;
+        assert!(span <= Duration::minutes(5) + Duration::seconds(5));
+
+        // Audit trail records ttl_secs + ttl_source (values-free).
+        let events = store.read_audit_events().unwrap();
+        let sources: Vec<String> = events
+            .iter()
+            .filter(|e| e.op == "session.pin")
+            .filter_map(|e| e.detail.as_ref())
+            .filter_map(|d| d.get("ttl_source"))
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(sources, vec!["binding_default", "flag"]);
+    }
+
+    #[test]
+    fn default_ttl_capped_by_max_ttl() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        b.policy.default_ttl = Some("4h".into()); // max_ttl = 1h
+        store.save_binding(&b).unwrap();
+        let s = store.pin("acme", dir.path(), None, false).unwrap();
+        let span = s.expires_at - s.pinned_at;
+        assert!(span <= Duration::hours(1) + Duration::seconds(5));
+    }
+
+    #[test]
+    fn expired_ttl_session_fails_verify_without_timer() {
+        // Auto-leave needs no timer: expiry is enforced passively by verify()
+        // on the next privileged op.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let s = store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::seconds(1)))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let key = store.seal_key().unwrap();
+        assert!(matches!(s.verify(&key), Err(LocusError::SessionExpired(_))));
+        // Fail closed on the store surface too.
+        assert!(store.require_active().is_err());
     }
 
     #[test]

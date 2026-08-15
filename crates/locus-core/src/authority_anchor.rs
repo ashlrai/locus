@@ -465,7 +465,12 @@ fn control_auth() -> Result<RequestAuth> {
         None if is_test_harness() => test_control_capability(),
         None => {
             return Err(LocusError::ExecutorAuthorityUnavailable(
-                "LOCUS_CONTROL_CAPABILITY is required for control-plane authority".into(),
+                "LOCUS_CONTROL_CAPABILITY is required for control-plane authority.\n  \
+                 fix (fresh setup): locus quickstart   # mints + persists an operator capability (0600), then adopts it\n  \
+                 fix (manual):      export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"\n  \
+                 fix (persisted):   eval \"$(locus hook zsh)\"   # exports $LOCUS_HOME/control_capability if present\n  \
+                 check:             locus doctor"
+                    .into(),
             ))
         }
     };
@@ -507,6 +512,211 @@ fn decode_capability(value: &str, label: &str) -> Result<[u8; 32]> {
 fn test_control_capability() -> String {
     static CAPABILITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     CAPABILITY.get_or_init(|| random_hex(32)).clone()
+}
+
+// ── Operator capability persistence (onboarding convenience) ───────────────
+//
+// The control gate itself stays env-only: `control_auth` never reads durable
+// state. What *is* persisted (with explicit operator intent via
+// `locus quickstart` / `locus init`) is a 0600 operator-owned file that
+// `locus hook` exports back into the shell — the same trust boundary as the
+// seal key living in the same directory. Fail closed: an existing file is
+// never silently replaced.
+
+/// Path of the persisted operator control capability under a Locus home.
+pub fn control_capability_file(home: &Path) -> PathBuf {
+    home.join("control_capability")
+}
+
+/// Read + validate the persisted operator control capability, if present.
+pub fn read_persisted_control_capability(home: &Path) -> Result<Option<String>> {
+    let path = control_capability_file(home);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(&path).map_err(|error| {
+        LocusError::msg(format!(
+            "cannot read control capability at {}: {error}",
+            path.display()
+        ))
+    })?;
+    let value = raw.trim().to_string();
+    decode_capability(&value, "persisted control").map_err(|_| {
+        LocusError::msg(format!(
+            "persisted control capability at {} is invalid (expected 64 lowercase hex chars) — \
+             delete it deliberately and re-run `locus quickstart` to mint a fresh one",
+            path.display()
+        ))
+    })?;
+    Ok(Some(value))
+}
+
+/// Mint a fresh operator control capability and persist it 0600.
+///
+/// Fail closed: never overwrites an existing file (silently replacing a
+/// mismatched capability would mask a real control-plane conflict).
+pub fn mint_persisted_control_capability(home: &Path) -> Result<String> {
+    let path = control_capability_file(home);
+    if path.exists() {
+        return Err(LocusError::msg(format!(
+            "refusing to overwrite existing control capability at {} — export it instead \
+             (eval \"$(locus hook zsh)\") or delete the file deliberately before re-minting",
+            path.display()
+        )));
+    }
+    let value = random_hex(32);
+    write_control_capability_file(home, &value)?;
+    Ok(value)
+}
+
+/// Mint a fresh control capability value WITHOUT persisting it.
+///
+/// Strict-posture onboarding (`locus init --no-persist-capability`): the value
+/// lives only in the process env; the operator keeps a copy via the printed
+/// export line in their shell profile.
+pub fn mint_ephemeral_control_capability() -> String {
+    random_hex(32)
+}
+
+/// Persist an already-held control capability 0600 (`locus capability persist`).
+///
+/// Idempotent when the persisted file already carries the same value; fail
+/// closed on any mismatch or invalid existing file — Locus never silently
+/// replaces a capability.
+pub fn persist_control_capability(home: &Path, value: &str) -> Result<()> {
+    let value = value.trim();
+    decode_capability(value, "control")?;
+    if let Some(existing) = read_persisted_control_capability(home)? {
+        if existing == value {
+            return Ok(());
+        }
+        return Err(LocusError::msg(format!(
+            "refusing to overwrite existing control capability at {} with a different value — \
+             remove it deliberately first (locus capability unpersist)",
+            control_capability_file(home).display()
+        )));
+    }
+    write_control_capability_file(home, value)
+}
+
+/// Remove the persisted control capability file (`locus capability unpersist`).
+///
+/// Returns whether a file was removed. Removal only narrows durable state —
+/// the capability already exported in operator shells keeps working.
+pub fn unpersist_control_capability(home: &Path) -> Result<bool> {
+    let path = control_capability_file(home);
+    if !path.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&path).map_err(|error| {
+        LocusError::msg(format!(
+            "cannot remove control capability at {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(true)
+}
+
+fn write_control_capability_file(home: &Path, value: &str) -> Result<()> {
+    fs::create_dir_all(home)?;
+    let path = control_capability_file(home);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(|error| {
+        LocusError::msg(format!(
+            "cannot create control capability at {}: {error}",
+            path.display()
+        ))
+    })?;
+    file.write_all(value.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+/// Operator-facing control-capability readiness (never carries bearer values).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlCapabilityStatus {
+    /// `LOCUS_CONTROL_CAPABILITY` is set (non-empty).
+    pub env_present: bool,
+    /// Env value decodes as a valid capability (64 lowercase hex chars).
+    pub env_valid: bool,
+    /// A persisted capability file exists under the home.
+    pub persisted: bool,
+    /// The persisted file decodes as a valid capability.
+    pub persisted_valid: bool,
+    /// Persisted file is not readable by group/other (unix only; true elsewhere).
+    pub persisted_permissions_ok: bool,
+    /// Some(true/false) only when both env and file are valid.
+    pub matches_persisted: Option<bool>,
+    /// Test-harness fallback capability is in effect (mirrors `control_auth`).
+    pub test_fallback: bool,
+}
+
+impl ControlCapabilityStatus {
+    /// Whether `control_auth()` would succeed in this process right now.
+    pub fn satisfied(&self) -> bool {
+        self.env_valid || self.test_fallback
+    }
+}
+
+/// Compute control-capability readiness for `home` from the process env.
+pub fn control_capability_status(home: &Path) -> ControlCapabilityStatus {
+    let env_value = std::env::var(CONTROL_CAPABILITY_ENV).ok();
+    control_capability_status_with_env(home, env_value.as_deref())
+}
+
+fn control_capability_status_with_env(
+    home: &Path,
+    env_value: Option<&str>,
+) -> ControlCapabilityStatus {
+    let env_present = env_value.map(|v| !v.trim().is_empty()).unwrap_or(false);
+    let env_valid = env_value
+        .map(|v| decode_capability(v, "control").is_ok())
+        .unwrap_or(false);
+
+    let path = control_capability_file(home);
+    let persisted_raw = fs::read_to_string(&path).ok();
+    let persisted = path.exists();
+    let persisted_valid = persisted_raw
+        .as_deref()
+        .map(|v| decode_capability(v.trim(), "control").is_ok())
+        .unwrap_or(false);
+
+    let persisted_permissions_ok = if !persisted {
+        true
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(&path)
+                .map(|m| m.mode() & 0o077 == 0)
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    };
+
+    let matches_persisted = match (env_valid, persisted_valid) {
+        (true, true) => Some(env_value.map(str::trim) == persisted_raw.as_deref().map(str::trim)),
+        _ => None,
+    };
+
+    ControlCapabilityStatus {
+        env_present,
+        env_valid,
+        persisted,
+        persisted_valid,
+        persisted_permissions_ok,
+        matches_persisted,
+        test_fallback: !env_present && is_test_harness(),
+    }
 }
 
 fn begin_control(
@@ -1759,6 +1969,101 @@ mod tests {
     fn retire(home: &Path) {
         let _ = retire_for_test(home);
         thread::sleep(Duration::from_millis(40));
+    }
+
+    #[test]
+    fn mint_persists_0600_and_never_overwrites() {
+        let dir = tempdir().unwrap();
+        let value = mint_persisted_control_capability(dir.path()).unwrap();
+        decode_capability(&value, "control").expect("minted value is a valid capability");
+
+        let path = control_capability_file(dir.path());
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+
+        // Round-trips through the persisted reader.
+        assert_eq!(
+            read_persisted_control_capability(dir.path()).unwrap(),
+            Some(value.clone())
+        );
+
+        // Fail closed: a second mint must refuse rather than replace.
+        let err = mint_persisted_control_capability(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("refusing to overwrite"));
+        assert_eq!(
+            read_persisted_control_capability(dir.path()).unwrap(),
+            Some(value)
+        );
+    }
+
+    #[test]
+    fn persist_unpersist_round_trip_is_fail_closed() {
+        let dir = tempdir().unwrap();
+
+        // Ephemeral mint never touches the filesystem.
+        let value = mint_ephemeral_control_capability();
+        decode_capability(&value, "control").expect("ephemeral value is a valid capability");
+        assert!(!control_capability_file(dir.path()).exists());
+
+        // Persist writes 0600 and round-trips.
+        persist_control_capability(dir.path(), &value).unwrap();
+        let path = control_capability_file(dir.path());
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(
+            read_persisted_control_capability(dir.path()).unwrap(),
+            Some(value.clone())
+        );
+
+        // Idempotent for the same value; fail closed for a different one.
+        persist_control_capability(dir.path(), &value).unwrap();
+        let err = persist_control_capability(dir.path(), &random_hex(32)).unwrap_err();
+        assert!(err.to_string().contains("refusing to overwrite"));
+
+        // Invalid values are rejected before any write.
+        assert!(persist_control_capability(dir.path(), "beef").is_err());
+
+        // Unpersist removes the file exactly once.
+        assert!(unpersist_control_capability(dir.path()).unwrap());
+        assert!(!path.exists());
+        assert!(!unpersist_control_capability(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn read_persisted_rejects_invalid_content() {
+        let dir = tempdir().unwrap();
+        fs::write(control_capability_file(dir.path()), "not-hex\n").unwrap();
+        let err = read_persisted_control_capability(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn capability_status_reflects_env_and_persisted_state() {
+        let dir = tempdir().unwrap();
+
+        // Nothing anywhere (env injected as None; test fallback mirrors the gate).
+        let s = control_capability_status_with_env(dir.path(), None);
+        assert!(!s.env_present && !s.env_valid && !s.persisted);
+        assert!(s.test_fallback, "cfg(test) mirrors control_auth fallback");
+        assert!(s.satisfied());
+        assert_eq!(s.matches_persisted, None);
+
+        // Invalid env value.
+        let s = control_capability_status_with_env(dir.path(), Some("beef"));
+        assert!(s.env_present && !s.env_valid && !s.test_fallback);
+        assert!(!s.satisfied());
+
+        // Valid env + matching persisted file.
+        let minted = mint_persisted_control_capability(dir.path()).unwrap();
+        let s = control_capability_status_with_env(dir.path(), Some(minted.as_str()));
+        assert!(s.env_valid && s.persisted && s.persisted_valid);
+        assert!(s.persisted_permissions_ok);
+        assert_eq!(s.matches_persisted, Some(true));
+
+        // Valid env that mismatches the persisted file.
+        let other = random_hex(32);
+        let s = control_capability_status_with_env(dir.path(), Some(other.as_str()));
+        assert_eq!(s.matches_persisted, Some(false));
     }
 
     /// Wait until two consecutive process-identity snapshots agree.

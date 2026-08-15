@@ -8,18 +8,116 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 Dogfood polish and release hygiene on top of 0.2.0. No identity-plane
-invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog.
-
-### Fixed
-
-- **Authority broker start under CI load** — production handoff wait raised from 3s → 10s;
-  optional `LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS` override; timeout errors may include a
-  short broker stderr snip. `scripts/hub-smoke.sh` retries init/pin and defaults the
-  override to 15s so hub contract smoke stays resilient after heavy test jobs (flaky
-  "broker startup timed out" unrelated to webhook export).
+invariant weakens — same fail-closed pin, freeze, scrub, and exclusive catalog,
+now also anchored per MCP session (`pin_changed`).
 
 ### Added
 
+- **Auto-leave TTL on `enter`/`pin` (`--ttl`)** — `locus enter <alias> --ttl 30m`
+  requests a shorter pin (min 1m, max 24h), riding the existing sealed
+  `expires_at` + passive fail-closed expiry check (no timer). Precedence:
+  `--ttl` flag > new optional binding `policy.default_ttl` > `policy.max_ttl`,
+  always capped by `max_ttl` (silent clamp + CLI warning). `default_ttl` is
+  excluded from the binding fingerprint so tuning it never freezes a live
+  session. Surfacing: expiry line with local time + remaining on enter/pin,
+  additive `expires_in_secs` on `whoami` and the doctor `pin` slice,
+  `* pinned (… left)` in `binding list`, a `pin_expiring` Warn doctor finding
+  under 5 minutes remaining, and `ttl_secs`/`ttl_source` on the `session.pin`
+  audit event.
+- **Guided client onboarding (`locus client add`)** — interactive front door
+  over the `binding add` primitive (which is now flags-first with prompts only
+  for missing values on a TTY; `--guided`, `--non-interactive`, `--dry-run`).
+  Prompts reuse existing validators: alias charset + reserved `locus*` prefix +
+  exists/did-you-mean, provider menu from new `known_providers()`, per-provider
+  scope fields, and `CredentialRef::validate` so a pasted raw secret is never
+  accepted (bare Phantom names get a `phm:NAME` suggestion). Writes through the
+  existing `Store::save_binding` path (validation, lock, audit) and ends with
+  next steps (`enter --ttl`, `agent setup --apply`, `doctor`, `phantom add`).
+  New optional flags: `--account-id`, `--repos`, `--default-ttl`. Guide:
+  [docs/onboarding.md](./docs/onboarding.md).
+- **Fail-closed MCP session pin-anchoring (`pin_changed`)** — every MCP session
+  (stdio process / HTTP `Mcp-Session-Id`) anchors to the *identity* of the
+  binding observed at initialize (or first healthy pinned observation):
+  primary `binding_id` + tenant + mode + sorted `(alias, binding_id)`
+  namespace pairs — never the session id. A **cross-alias re-pin under a live
+  MCP session now returns a structured `pin_changed` tool error** (anchored vs
+  current identity + `safe_next.action=reinitialize_client`) instead of
+  silently adopting the new identity, and it outranks the
+  `runtime_unhealthy`/`executor_authority_unavailable` noise from the staled
+  executor grant. Same-alias re-pin (TTL refresh) is unaffected at the anchor
+  layer (a stdio process whose executor capability was granted for the old
+  session may still need a client restart — authority-plane fact, not masked).
+  The refusal is session-local: it never mutates or freezes `active.json`.
+  Recovery: re-initialize/restart the client to adopt the new pin (HTTP: POST
+  `initialize` with the existing `Mcp-Session-Id` re-anchors in place), or
+  `locus enter <anchored>` to restore. Control tools
+  (whoami/status/heartbeat/safe_next/verify_session) gain an additive
+  `mcp_anchor` block (omitted when no anchor exists); `locus_verify_session`
+  forces `session_ok=false` on mismatch so hub gating fails closed per
+  session; `tools/list` collapses to control tools tagged with the anchored
+  alias; `GET /mcp` reports `anchor_ok` when a session id is presented. The
+  anchor survives `locus leave` (not_pinned refusals gain anchor context),
+  `LOCUS_SESSION_ID` overlay sessions are structurally immune, and the HTTP
+  session disk format gains an optional serde-default `anchor` field (still
+  v1 — old binaries ignore it, old records adopt-once; enforced across
+  process restarts from disk). New audits: `mcp.anchor_established`,
+  `mcp.anchor_repin`, `mcp.anchor_reset`, `mcp.anchor_mismatch` (deduped;
+  aliases/tenants/binding_ids/session_ids only). Sessionless HTTP POSTs
+  (no `Mcp-Session-Id`) share a **process-level anchor** (same decide()
+  machinery, stdio parity) so stateless provider `tools/call` is pin-swap
+  protected too; a fresh sessionless `initialize` re-anchors it (adoption
+  path). Optional `LOCUS_MCP_HTTP_REQUIRE_SESSION=1` still refuses
+  sessionless provider `tools/call` outright (default off — stateless CI
+  POSTs keep working, anchored at process scope).
+- **Grok Build write path + Claude user scope** — `locus setup --client grok`
+  and `locus agent setup --apply --client grok` now write Grok Build's
+  documented `~/.grok/config.toml` (`[mcp_servers.locus]`, Codex-style TOML)
+  with the same fail-closed `toml_edit` merge as Codex (unparseable ⇒ abort
+  untouched); grok joins `--client all` and the registration probe
+  (`mcp_registered.grok`) reads `~/.grok/config.toml` by default
+  (`LOCUS_GROK_MCP_CONFIG` still overrides; JSON or TOML);
+  `scripts/dogfood-clients.sh` detects Grok. `--client generic`
+  stays print-only for clients without a known config path. New
+  `locus agent setup --claude-scope user|project` (default `project`):
+  user scope registers for all projects via the claude CLI
+  (`claude mcp add-json locus … --scope user`, verified with
+  `claude mcp get locus`) — `~/.claude.json` is never hand-edited, and setup
+  fails closed with instructions when the `claude` CLI is absent. JSON server
+  entries for Claude/Cursor now carry `"type": "stdio"` (documented as
+  required by Cursor; harmless elsewhere).
+
+- **`locus_verify_session` MCP tool (M5)** — hub session pack over MCP, same JSON as
+  `locus verify session --json` (`{ kind: "session", version, whoami?, doctor, safe_next,
+  session_ok }`). Available unpinned; gate on `session_ok`; `isError` only on hard store
+  failures. Values-free — aliases, verdicts, scopes only. Audit keys
+  (`session_ok` / `safe_next` / `doctor_verdict` / `doctor_ok` / `has_whoami`) aligned with
+  the CLI. Docs: [docs/mcp.md](./docs/mcp.md), [docs/hub-integration.md](./docs/hub-integration.md).
+- **Control-capability onboarding** — `locus init` / `locus quickstart` mint and persist
+  `LOCUS_CONTROL_CAPABILITY` (`$LOCUS_HOME/control_capability`, mode `0600`, never
+  overwritten, value never printed); `locus hook zsh|bash|fish` exports it when the shell
+  lacks one; `locus doctor` flags missing / not-exported / invalid / mismatched capability
+  with the exact fix. Docs: README quick start, [docs/mcp.md](./docs/mcp.md),
+  [docs/agency-starter.md](./docs/agency-starter.md).
+- **Control-capability posture management** — persistence stays the fresh-store
+  default; strict operators opt out with `--no-persist-capability` on
+  `init` / `quickstart` (mint to process env only, print the export line, never
+  write the file) and manage posture with the new
+  `locus capability status|persist|unpersist` subcommand (`status` never prints
+  the bearer; `persist` writes 0600, idempotent, fail-closed on mismatch;
+  `unpersist` removes the file and prints the export line). New doctor severity
+  **Info** — can never escalate the verdict — carries the INFO finding
+  `control_capability_persisted` whenever a valid capability file exists, with
+  the exact strict-posture fix. Docs: new "Control-plane authority boundary"
+  section in [SECURITY.md](./SECURITY.md) (the capability file is ambient for
+  same-user processes, `LOCUS_HOME` is same-user-readable regardless, and the
+  MCP surface — not the CLI — is the agent boundary).
+- **Post-write verification in `locus agent setup --apply`** — re-reads every client
+  config it wrote via the registration probe and exits 1 naming each failing client+path;
+  warns when the `locus-mcp` path falls back to a bare name; explicit `--mcp-bin` must exist.
+- **Alias ergonomics** — `enter` / `pin` unknown-alias errors list known aliases with a
+  did-you-mean suggestion; `binding list` marks the pinned alias; the `locus*` alias prefix
+  is reserved at create/import (unroutable through the MCP gate), with a doctor warn for
+  legacy bindings.
 - **Hub drop-in watch/verify session heartbeat** — port pure + shell helpers from hub
   [PR #273](https://github.com/ashlrai/ashlr-hub/pull/273) into
   [`integrations/ashlr-hub/locus.ts`](./integrations/ashlr-hub/locus.ts):
@@ -90,6 +188,91 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 - Landing page ([`apps/web/`](./apps/web/)) — verify claim + `locus_safe_next` callouts
   alongside dashboard / forensics / HTTP MCP / goal status
 
+### Changed
+
+- **MCP auto-pin is now honestly advisory-only (`locus-mcp`)** — the server
+  never pins. The once-per-process probe resolves the workspace target
+  read-only and audits **`session.auto_pin_denied`** (advisory binding +
+  operator-delegation refusal reason) instead of minting authority;
+  `pin_auto_delegated` fails closed with a clear "auto-pin requires operator
+  delegation, which is not available" error (workspace `.locus.toml` defaults
+  are advisory hints only — an agent/MCP process cannot self-issue session
+  authority). `LOCUS_AUTO_PIN` / `LOCUS_MCP_AUTO_PIN` knobs stay parsed as
+  probe enable / kill switches pending an operator-delegation design. All
+  advertising surfaces (tool/resource descriptions, `.locus/AGENT.md`, setup
+  notes, [docs/mcp.md](./docs/mcp.md)) now say the server never pins; the
+  session-anchor layer anchors only after a human pin.
+- **Docs: hub #277 firm soft-warn + goals sync** — document ashlr-hub
+  [PR #277](https://github.com/ashlrai/ashlr-hub/pull/277) firm fleet soft-warn
+  (doctor/readiness only: enrolled&gt;0 + locus available + `locus.firm` false →
+  non-blocking `locus-firm` warn; **never hard-blocks mutate**; monorepo firm
+  default stays off). Hub-only `checkLocusFirm` contract sketch; do **not** port
+  into [`integrations/ashlr-hub/locus.ts`](./integrations/ashlr-hub/locus.ts).
+  GOALS M4 marks #277 landed; always-on firm default remains open. GOALS M5 notes
+  cross-process HTTP session resume landed ([#31](https://github.com/ashlrai/locus/pull/31));
+  still open only multi-tenant remote multiplexor. Docs:
+  [GOALS.md](./GOALS.md), [docs/hub-integration.md](./docs/hub-integration.md),
+  [integrations/ashlr-hub/doctor-check.md](./integrations/ashlr-hub/doctor-check.md),
+  [integrations/ashlr-hub/README.md](./integrations/ashlr-hub/README.md),
+  [integrations/ashlr-hub/fleet-preflight.md](./integrations/ashlr-hub/fleet-preflight.md).
+
+### Fixed
+
+- **MCP anchor health surfaces use the gate's identity comparison** —
+  `mcp_anchor` / `anchor_ok` / `locus_verify_session` overrides now compare
+  the full anchored identity (binding_id + tenant + **mode + namespace
+  triples**) when a full observation is available, primary-only just when only
+  the drift identity exists — so `session_ok=false` whenever provider tools
+  would refuse with `pin_changed` (a mode/namespace re-pin no longer reads
+  healthy while tools are wedged).
+- **Multi-worker HTTP anchor writes are last-writer-safe** — the per-request
+  session touch and cross-worker observations adopt the on-disk anchor
+  (authoritative) before persisting, so one worker's initialize-time reset or
+  just-persisted establishment is never clobbered by a sibling's stale
+  in-memory anchor. Anchor values are only authored by
+  establish/repin/initialize-reset paths.
+- **Claude user-scope registration is add-first** — `locus agent setup
+  --claude-scope user` no longer removes the existing `locus` entry before
+  adding: a failing add leaves any previous registration intact (and says
+  so); only a CLI "already exists" refusal triggers remove + re-add, and a
+  failure after that removal is reported honestly (entry removed, currently
+  unregistered) instead of claiming nothing changed.
+- **TOML paste output escapes interpolated values** — `[mcp_servers.locus]`
+  snippets (`agent setup --client generic|grok`, `setup --print`)
+  basic-string-escape the `locus-mcp` path and env values, so quotes /
+  backslashes in the binary path can no longer emit invalid TOML.
+- **Phantom deadline runner cannot leak blocked reader threads** — the child
+  runs in its own process group and the deadline kill takes out grandchildren
+  holding the stdout pipe (wrapper shells); the reader thread is reaped with
+  a bounded join, and a hard cap on live helper threads fails closed instead
+  of accumulating leaks against a repeatedly wedged `phantom`.
+- **Doctor reports an honest authority-anchor verification status** — new
+  additive `pin.authority_anchor_verified` field: `false` (with `seal_ok`
+  still `true` and the existing `executor_authority_unavailable` Warn
+  finding, never a false UNSAFE) when the anchor check was skipped because no
+  control capability was present; `true` only when the check actually passed.
+- **MCP doctor packs run real external probes** — `locus_verify_session`, the
+  `locus://doctor` resource, and `GET /mcp/sse` session ticks now share core
+  `gather_doctor_external` (Phantom on PATH + unresolved `phm:` refs — provider/source
+  metadata only, locator names never leak) instead of a hardcoded conservative failure.
+  `session_ok` can be `true` on a healthy pin and MCP output matches
+  `locus verify session --json`.
+- **Fail-closed MCP config merges** — a malformed `.mcp.json` / `~/.cursor/mcp.json` is
+  left byte-for-byte unchanged with a remediation error (previously it was silently
+  replaced, destroying other registered servers); the Codex merge is now a
+  format-preserving `toml_edit` upsert of `[mcp_servers.locus]` that heals stale command
+  paths and missing env tables, preserves other tables/comments, and cannot produce
+  duplicate keys.
+- **`locus setup` parity with `agent setup`** — writes the same agent env
+  (`LOCUS_AUTO_PIN=cwd`, `LOCUS_CLIENT`) instead of an empty `env: {}`; the codex arm
+  actually merges `~/.codex/config.toml` (`--print` emits the full `[mcp_servers.locus]`
+  + env TOML); quickstart/doctor hints standardize on `locus agent setup --apply`.
+- **Authority broker start under CI load** — production handoff wait raised from 3s → 10s;
+  optional `LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS` override; timeout errors may include a
+  short broker stderr snip. `scripts/hub-smoke.sh` retries init/pin and defaults the
+  override to 15s so hub contract smoke stays resilient after heavy test jobs (flaky
+  "broker startup timed out" unrelated to webhook export).
+
 ### Tests
 
 - Core: webhook POST against local `TcpListener`, secret-scan fail-closed, URL resolve
@@ -106,6 +289,21 @@ invariants change — same fail-closed pin, freeze, scrub, and exclusive catalog
 
 ### Security
 
+- **HTTP pre-auth hardening (`locus-mcp --http`)** — request caps enforced before any body
+  allocation or the token check: **413** above 8 MB `Content-Length`, **431** above 32 KB
+  header bytes or 128 header fields; an unparseable JSON-RPC body returns **400** with
+  JSON-RPC `-32700` instead of a dropped connection; `Mcp-Session-Id` is minted **only on
+  `initialize`** (other POSTs without the header are served statelessly), so garbage POSTs
+  can no longer exhaust session capacity.
+- **Scope freeze covers provider-native selector spellings** — the upstream-worker
+  preflight now freezes camelCase and provider-native aliases
+  (`projectRef`/`project_id`/`projectId`, `teamId`, `accountId`, `aws_account_id`/`awsAccountId`,
+  `stripe_account`/`stripeAccount`) alongside the canonical snake_case keys at any depth
+  inside object **and array** args (bounded scan — args nesting past the limit deny fail
+  closed); non-string values under a frozen selector key and Stripe `livemode` flips are
+  denied at any depth too; `org`/`owner`/`organization` args must be members of the frozen
+  `scope.orgs`; tools whose
+  provider prefix is not declared on the pinned binding are explicitly denied (fail closed).
 - Local CLI/dashboard approval assertions are now explicit `local_advisory` evidence and can no longer unlock provider execution or satisfy dual control. Stdio MCP, HTTP MCP, dashboard, doctor, and forensics expose the disabled external-authority state; gated calls fail closed until an independent cryptographic verifier exists.
 - Caller-controlled principal strings, Touch ID mocks, dashboard mutations, and unsigned same-user JSON never count as human authority. Provider execution remains blocked until a peer-authenticated OS broker verifies a non-agent-accessible issue capability.
 

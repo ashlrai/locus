@@ -9,7 +9,7 @@
 
 mod serve;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
 use colored::Colorize;
@@ -18,19 +18,20 @@ use locus_core::{
     agent_report_from_doctor, all_recipes, build_ci_env_map, build_doctor_report,
     build_isolated_env_opts, builtin_manifest, ci_secrets_allowed, default_export_filename,
     export_content_type, export_events, export_forensics_pack, filter_audit_events, find_workspace,
-    list_adapters, list_trust_keys_with_origin, load_merged_trust_keys, mcp_agent_env,
-    parse_manifest, parse_ttl, phantom_on_path, post_audit_webhook, probe_agent_options,
-    recipe_toml_snippet, resolve_audit_webhook_url, resolve_passphrase, suggest_for_provider,
+    known_providers, list_adapters, list_trust_keys_with_origin, load_merged_trust_keys,
+    mcp_agent_env, migrate_legacy_phantom_ref, parse_manifest, parse_ttl, phantom_on_path,
+    post_audit_webhook, probe_agent_options, probe_mcp_registered, recipe_toml_snippet,
+    resolve_audit_webhook_url, resolve_passphrase, suggest_for_provider, validate_name_component,
     verify_claim, verify_manifest_with_keys, verify_session, workspace_stub_toml, AgentStatus,
-    Binding, BindingBody, CredentialResolutionIssue, DoctorExternal, DoctorVerdict,
+    Binding, BindingBody, CredentialRef, CredentialResolutionIssue, DoctorExternal, DoctorVerdict,
     EventsExportFormat, EventsExportOptions, EventsExportSink, ForensicsExportOptions, IsolatedEnv,
-    Policy, ProviderBinding, Scope, Session, Store, TrustKeyOrigin, WorkspaceConfig,
+    McpRegistered, Policy, ProviderBinding, Scope, Session, Store, TrustKeyOrigin, WorkspaceConfig,
     AUDIT_WEBHOOK_URL_ENV, VERSION,
 };
 use serde_json::json;
 use std::env;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 #[derive(Parser, Debug)]
@@ -71,16 +72,29 @@ enum Commands {
         /// Also write a sample personal + acme binding pair
         #[arg(long)]
         with_samples: bool,
+        /// Strict posture: mint the control capability to this process env only
+        /// (prints the export line for your shell profile; never writes the file)
+        #[arg(long)]
+        no_persist_capability: bool,
     },
 
     /// First 60 seconds: init samples if needed, enter workspace default, whoami + doctor
     #[command(next_help_heading = "Setup")]
-    Quickstart,
+    Quickstart {
+        /// Strict posture: mint the control capability to this process env only
+        /// (prints the export line for your shell profile; never writes the file)
+        #[arg(long)]
+        no_persist_capability: bool,
+    },
+
+    /// Operator control-capability posture: status / persist / unpersist
+    #[command(next_help_heading = "Setup", subcommand)]
+    Capability(CapabilityCmd),
 
     /// Register locus-mcp with an AI client config
     #[command(next_help_heading = "Setup")]
     Setup {
-        /// Client: claude | cursor | codex
+        /// Client: claude | cursor | codex | grok (generic: print-only paste entry)
         #[arg(long, default_value = "claude")]
         client: String,
         /// Print config JSON instead of writing
@@ -160,6 +174,10 @@ enum Commands {
         /// Client label recorded on the session (claude, cursor, cli)
         #[arg(long)]
         client: Option<String>,
+        /// Auto-expire this pin after DUR (e.g. 30m, 2h; min 1m, max 24h;
+        /// capped by the binding's policy.max_ttl)
+        #[arg(long, value_name = "DUR")]
+        ttl: Option<String>,
         /// Print `export LOCUS_*=…` lines for eval
         #[arg(long)]
         exports: bool,
@@ -180,6 +198,10 @@ enum Commands {
         /// Tools appear as `alias__tool` in locus-mcp. e.g. `--ns personal,acme`
         #[arg(long = "ns")]
         ns: Option<String>,
+        /// Auto-expire this pin after DUR (e.g. 30m, 2h; min 1m, max 24h;
+        /// capped by the binding's policy.max_ttl)
+        #[arg(long, value_name = "DUR")]
+        ttl: Option<String>,
     },
 
     /// Leave the active pin (clear identity) and suggest re-enter
@@ -263,6 +285,10 @@ enum Commands {
     /// Manage bindings
     #[command(next_help_heading = "Daily use", subcommand)]
     Binding(BindingCmd),
+
+    /// Guided client onboarding — walk through adding a client binding
+    #[command(next_help_heading = "Setup", subcommand)]
+    Client(ClientCmd),
 
     /// Built-in upstream MCP recipes (command/args for common servers)
     ///
@@ -379,6 +405,16 @@ enum Commands {
 }
 
 #[derive(Subcommand, Debug)]
+enum CapabilityCmd {
+    /// Where control authority lives right now (env / persisted / neither) — never prints the value
+    Status,
+    /// Persist this shell's LOCUS_CONTROL_CAPABILITY to $LOCUS_HOME/control_capability (0600)
+    Persist,
+    /// Remove the persisted file (strict posture) — prints the export line so you keep a copy
+    Unpersist,
+}
+
+#[derive(Subcommand, Debug)]
 enum GoalCmd {
     /// Print northstar progress from GOALS.md (or embedded milestones)
     ///
@@ -415,9 +451,14 @@ enum AgentCmd {
     /// Requires `--apply` or `--dry-run`. Registers locus-mcp with
     /// `LOCUS_AUTO_PIN=cwd` + `LOCUS_CLIENT=<client>` (never `LOCUS_NOTIFY=1`).
     Setup {
-        /// Client: claude | cursor | codex | all
+        /// Client: claude | cursor | codex | grok | all (generic: print-only paste entry)
         #[arg(long, default_value = "all")]
         client: String,
+        /// Claude Code scope: project (.mcp.json) | user (all projects, via the
+        /// claude CLI — `claude mcp add-json … --scope user`; requires `claude`
+        /// on PATH)
+        #[arg(long, default_value = "project", value_parser = ["project", "user"])]
+        claude_scope: String,
         /// Apply changes (write MCP configs, AGENT.md, optional workspace stub)
         #[arg(long)]
         apply: bool,
@@ -729,6 +770,8 @@ enum AdapterTrustCmd {
 }
 
 #[derive(Subcommand, Debug)]
+// Parsed once at startup; boxing BindingAddArgs would cost clap::Args impls.
+#[allow(clippy::large_enum_variant)]
 enum BindingCmd {
     /// List configured bindings
     List,
@@ -741,34 +784,73 @@ enum BindingCmd {
         #[arg(long)]
         write: bool,
     },
-    /// Create a binding (minimal interactive flags)
-    Add {
-        alias: String,
-        #[arg(long)]
-        tenant: String,
-        #[arg(long)]
-        provider: String,
-        #[arg(long)]
-        account: String,
-        #[arg(long)]
-        credential_ref: String,
-        #[arg(long)]
-        project_ref: Option<String>,
-        #[arg(long)]
-        team_id: Option<String>,
-        #[arg(long)]
-        org: Option<String>,
-        #[arg(long)]
-        read_only: bool,
-        #[arg(long)]
-        description: Option<String>,
-    },
+    /// Create a binding (flags-first; prompts only for missing values on a TTY)
+    Add(BindingAddArgs),
     /// Remove a binding file
     Rm {
         alias: String,
         #[arg(long)]
         yes: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ClientCmd {
+    /// Walk through adding a client binding (interactive; every prompt has a flag for scripting)
+    Add(BindingAddArgs),
+}
+
+/// Shared flags for `locus binding add` and `locus client add`. Every prompt
+/// has a flag so the flow stays scriptable; values are only prompted for when
+/// missing and stdin is a TTY.
+#[derive(clap::Args, Debug, Clone, Default)]
+struct BindingAddArgs {
+    /// Binding alias (e.g. cash-margin)
+    alias: Option<String>,
+    /// Tenant label (defaults to the alias when prompted)
+    #[arg(long)]
+    tenant: Option<String>,
+    /// Provider: supabase | github | vercel | cloudflare | aws | resend | stripe | custom
+    #[arg(long)]
+    provider: Option<String>,
+    /// Provider account label (e.g. cmp-prod)
+    #[arg(long)]
+    account: Option<String>,
+    /// Credential pointer — phm:NAME or env:VAR (never the raw secret)
+    #[arg(long)]
+    credential_ref: Option<String>,
+    /// Provider scope: Supabase project ref / Vercel project id
+    #[arg(long)]
+    project_ref: Option<String>,
+    /// Provider scope: Vercel team id
+    #[arg(long)]
+    team_id: Option<String>,
+    /// Provider scope: AWS / Stripe / Cloudflare account id
+    #[arg(long)]
+    account_id: Option<String>,
+    /// Provider scope: GitHub org
+    #[arg(long)]
+    org: Option<String>,
+    /// Provider scope: comma-separated GitHub repo allowlist
+    #[arg(long)]
+    repos: Option<String>,
+    /// Freeze the scope read-only
+    #[arg(long)]
+    read_only: bool,
+    #[arg(long)]
+    description: Option<String>,
+    /// Default pin TTL written to policy.default_ttl (e.g. 2h; min 1m, max 24h)
+    #[arg(long, value_name = "DUR")]
+    default_ttl: Option<String>,
+    /// Prompt through every value even when flags are present
+    #[arg(long)]
+    guided: bool,
+    /// Never prompt — fail listing the missing flags instead
+    #[arg(long)]
+    non_interactive: bool,
+    /// Validate and print the binding TOML without writing
+    #[arg(long)]
+    dry_run: bool,
 }
 
 fn main() {
@@ -797,20 +879,28 @@ fn run() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.command {
-        Commands::Init { with_samples } => cmd_init(with_samples, cli.json),
-        Commands::Quickstart => cmd_quickstart(cli.json),
+        Commands::Init {
+            with_samples,
+            no_persist_capability,
+        } => cmd_init(with_samples, !no_persist_capability, cli.json),
+        Commands::Quickstart {
+            no_persist_capability,
+        } => cmd_quickstart(!no_persist_capability, cli.json),
+        Commands::Capability(sub) => cmd_capability(sub, cli.json),
         Commands::Enter {
             alias,
             force,
             client,
+            ttl,
             exports,
-        } => cmd_enter(alias, force, client, exports, cli.json),
+        } => cmd_enter(alias, force, client, exports, ttl, cli.json),
         Commands::Pin {
             alias,
             force,
             client,
             ns,
-        } => cmd_pin(alias, force, client, ns, cli.json),
+            ttl,
+        } => cmd_pin(alias, force, client, ns, ttl, cli.json),
         Commands::Leave => cmd_leave(cli.json),
         Commands::Engagement(sub) => cmd_engagement(sub, cli.json),
         Commands::Graph(sub) => cmd_graph(sub, cli.json),
@@ -835,6 +925,7 @@ fn run() -> Result<()> {
         Commands::Ci(sub) => cmd_ci(sub, cli.json),
         Commands::Mcp => cmd_mcp(),
         Commands::Binding(sub) => cmd_binding(sub, cli.json),
+        Commands::Client(sub) => cmd_client(sub, cli.json),
         Commands::Upstream(sub) => cmd_upstream(sub, cli.json),
         Commands::Adapter(sub) => cmd_adapter(sub, cli.json),
         Commands::Workspace {
@@ -992,7 +1083,8 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
             "agent",
             "AI-native setup + hub readiness.\n\n\
              Commands:\n\
-               locus agent setup --apply|--dry-run [--client all|claude|cursor|codex]\n\
+               locus agent setup --apply|--dry-run [--client all|claude|cursor|codex|grok]\n\
+               locus agent setup --apply --client claude --claude-scope user  # via claude CLI\n\
                locus agent report --json       # hub gate (exit ready=0 protected=1 unsafe=2)\n\
                locus agent doctor              # human-readable ladder\n\n\
              MCP (when pinned):\n\
@@ -1007,7 +1099,7 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
              Stdio (default for Claude Code / Cursor):\n\
                locus mcp\n\
                locus-mcp\n\
-               locus setup --client claude|cursor|codex\n\
+               locus setup --client claude|cursor|codex|grok\n\
                locus agent setup --apply\n\n\
              HTTP (CI / remote agents, loopback by default):\n\
                LOCUS_MCP_HTTP_TOKEN=… locus-mcp --http 127.0.0.1:8742\n\
@@ -1151,6 +1243,240 @@ fn require_local_control_boundary(operation: &str) -> Result<()> {
         .map_err(Into::into)
 }
 
+/// Fresh-operator onboarding for `LOCUS_CONTROL_CAPABILITY` (init/quickstart only).
+///
+/// - env already set (valid or not): leave it alone — `control_auth` errors are
+///   actionable, and silently replacing a mismatched capability is forbidden.
+/// - persisted file exists: adopt it for this process (same trust boundary as
+///   `eval "$(locus hook zsh)"`), reminding the operator to persist the export.
+/// - nothing anywhere: mint + persist 0600 and adopt it — minting a NEW
+///   capability for a store without one never weakens the gate (a live broker
+///   under a different capability still refuses control, fail closed).
+///
+/// The bearer value is never printed; returned notes carry paths + commands only.
+fn bootstrap_control_capability(s: &Store, persist: bool) -> Result<Option<String>> {
+    if env::var_os(locus_core::CONTROL_CAPABILITY_ENV).is_some() {
+        return Ok(None);
+    }
+    match bootstrap_control_capability_plan(s.home(), persist)? {
+        Some((value, note)) => {
+            env::set_var(locus_core::CONTROL_CAPABILITY_ENV, value);
+            Ok(Some(note))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Env-free core of [`bootstrap_control_capability`]: decide the capability to
+/// adopt for this process and the operator-facing note. Separated so the
+/// no-persist path is testable without mutating process-global env state.
+fn bootstrap_control_capability_plan(
+    home: &Path,
+    persist: bool,
+) -> Result<Option<(String, String)>> {
+    if let Some(value) = locus_core::read_persisted_control_capability(home)? {
+        let mut note = format!(
+            "adopted persisted control capability from {} for this run — persist for new shells: eval \"$(locus hook zsh)\"",
+            locus_core::control_capability_file(home).display()
+        );
+        if !persist {
+            note.push_str(" (already persisted; strict posture: locus capability unpersist)");
+        }
+        return Ok(Some((value, note)));
+    }
+    if persist {
+        let value = locus_core::mint_persisted_control_capability(home)?;
+        let note = format!(
+            "minted control capability → {} (0600) — export in new shells: eval \"$(locus hook zsh)\"",
+            locus_core::control_capability_file(home).display()
+        );
+        return Ok(Some((value, note)));
+    }
+    // Strict posture: env-only. The export line is the operator's only durable
+    // copy — printing the bearer here is the explicit point of the flag.
+    let value = locus_core::mint_ephemeral_control_capability();
+    let note = format!(
+        "minted control capability (env-only, NOT persisted) — add to your shell profile now or \
+         this shell is its only copy: export {}=\"{}\"",
+        locus_core::CONTROL_CAPABILITY_ENV,
+        value
+    );
+    Ok(Some((value, note)))
+}
+
+/// `locus capability` — operator posture over the control capability.
+///
+/// `status` never prints the bearer value. `persist`/`unpersist` are the
+/// explicit levers between the onboarding default (persisted 0600, ambient for
+/// same-user processes) and the strict posture (shell-profile export only).
+/// See SECURITY.md § Control-plane authority boundary.
+fn cmd_capability(sub: CapabilityCmd, json: bool) -> Result<()> {
+    let s = store()?;
+    let home = s.home();
+    match sub {
+        CapabilityCmd::Status => {
+            let status = locus_core::control_capability_status(home);
+            let posture = capability_posture(&status);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "posture": posture,
+                        "env_present": status.env_present,
+                        "env_valid": status.env_valid,
+                        "persisted": status.persisted,
+                        "persisted_valid": status.persisted_valid,
+                        "persisted_permissions_ok": status.persisted_permissions_ok,
+                        "matches_persisted": status.matches_persisted,
+                        "file": locus_core::control_capability_file(home).display().to_string(),
+                    })
+                );
+            } else {
+                println!(
+                    "{} control capability  {}",
+                    "locus".magenta().bold(),
+                    posture.bold()
+                );
+                println!(
+                    "  env        {}",
+                    if status.env_valid {
+                        "present (valid)".green().to_string()
+                    } else if status.env_present {
+                        "present but INVALID (need 64 lowercase hex)"
+                            .red()
+                            .to_string()
+                    } else {
+                        "not set".yellow().to_string()
+                    }
+                );
+                let file = locus_core::control_capability_file(home);
+                println!(
+                    "  persisted  {}",
+                    if status.persisted_valid {
+                        format!("{} (0600)", file.display()).green().to_string()
+                    } else if status.persisted {
+                        format!("{} INVALID", file.display()).red().to_string()
+                    } else {
+                        "no".to_string()
+                    }
+                );
+                if status.persisted && !status.persisted_permissions_ok {
+                    println!(
+                        "  {} file readable by group/other — fix: chmod 600 {}",
+                        "!".red().bold(),
+                        file.display()
+                    );
+                }
+                if status.matches_persisted == Some(false) {
+                    println!(
+                        "  {} env does not match the persisted file",
+                        "!".red().bold()
+                    );
+                }
+                match posture {
+                    "persisted" | "env+persisted" => println!(
+                        "  {}",
+                        "same-user processes can run control commands — strict posture: \
+                         locus capability unpersist"
+                            .dimmed()
+                    ),
+                    "env-only" => println!(
+                        "  {}",
+                        "strict posture — keep the export line in your shell profile".dimmed()
+                    ),
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        CapabilityCmd::Persist => {
+            require_local_control_boundary("locus capability persist")?;
+            let value = env::var(locus_core::CONTROL_CAPABILITY_ENV).map_err(|_| {
+                anyhow::anyhow!(
+                    "{} is not set in this shell — nothing to persist",
+                    locus_core::CONTROL_CAPABILITY_ENV
+                )
+            })?;
+            locus_core::persist_control_capability(home, &value)?;
+            let file = locus_core::control_capability_file(home);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "persisted": true,
+                        "file": file.display().to_string(),
+                    })
+                );
+            } else {
+                println!(
+                    "{} persisted control capability → {} (0600)",
+                    "ok".green().bold(),
+                    file.display()
+                );
+                println!(
+                    "   {}",
+                    "new shells pick it up via: eval \"$(locus hook zsh)\"".dimmed()
+                );
+            }
+            Ok(())
+        }
+        CapabilityCmd::Unpersist => {
+            require_local_control_boundary("locus capability unpersist")?;
+            // Read the value BEFORE removal so the operator keeps a copy —
+            // once the file is gone, live shells hold the only instances.
+            let value = locus_core::read_persisted_control_capability(home)
+                .ok()
+                .flatten();
+            let removed = locus_core::unpersist_control_capability(home)?;
+            let file = locus_core::control_capability_file(home);
+            let export_line =
+                value.map(|v| format!("export {}=\"{}\"", locus_core::CONTROL_CAPABILITY_ENV, v));
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "ok": true,
+                        "removed": removed,
+                        "file": file.display().to_string(),
+                        "export_line": export_line,
+                    })
+                );
+            } else if removed {
+                println!("{} removed {}", "ok".green().bold(), file.display());
+                if let Some(line) = export_line {
+                    println!("   add to your shell profile now — this output is your only copy:");
+                    println!("   {line}");
+                } else {
+                    println!(
+                        "   {} the removed file was invalid; mint fresh: export {}=\"$(openssl rand -hex 32)\"",
+                        "note:".yellow(),
+                        locus_core::CONTROL_CAPABILITY_ENV
+                    );
+                }
+            } else {
+                println!(
+                    "{} nothing persisted at {} — already strict",
+                    "ok".green().bold(),
+                    file.display()
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// One-word posture label for `locus capability status` (never the value).
+fn capability_posture(status: &locus_core::ControlCapabilityStatus) -> &'static str {
+    match (status.env_valid, status.persisted) {
+        (true, true) => "env+persisted",
+        (true, false) => "env-only",
+        (false, true) => "persisted",
+        (false, false) => "absent",
+    }
+}
+
 fn isolated_child_env(
     store: &Store,
     session: &Session,
@@ -1168,6 +1494,60 @@ fn cwd() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Levenshtein distance over chars (small alias strings only).
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// Closest known alias to a typo, if plausibly close (at most 3 edits and not
+/// a completely different word).
+fn nearest_alias<'a>(missing: &str, aliases: &'a [String]) -> Option<&'a str> {
+    let needle = missing.to_lowercase();
+    aliases
+        .iter()
+        .map(|c| (edit_distance(&needle, &c.to_lowercase()), c))
+        .filter(|(d, c)| *d <= 3 && *d < c.chars().count().max(needle.chars().count()))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c.as_str())
+}
+
+/// Alias ergonomics for enter/pin: a bare BindingNotFound becomes a message
+/// listing known aliases plus a nearest-match suggestion. Never alters the
+/// fail-closed outcome — only the operator-facing text.
+fn with_alias_suggestions(s: &Store, err: locus_core::LocusError) -> anyhow::Error {
+    if let locus_core::LocusError::BindingNotFound(missing) = &err {
+        if let Ok(list) = s.list_bindings() {
+            let aliases: Vec<String> = list.into_iter().map(|b| b.alias).collect();
+            if aliases.is_empty() {
+                return anyhow::anyhow!(
+                    "binding not found: {missing} — no bindings exist yet \
+                     (run `locus init --with-samples` or `locus binding add`)"
+                );
+            }
+            let mut msg = format!(
+                "binding not found: {missing} (known aliases: {})",
+                aliases.join(", ")
+            );
+            if let Some(best) = nearest_alias(missing, &aliases) {
+                msg.push_str(&format!(" — did you mean `{best}`?"));
+            }
+            return anyhow::anyhow!(msg);
+        }
+    }
+    err.into()
+}
+
 /// Local identity dashboard HTTP server (blocks until Ctrl-C).
 fn cmd_serve(port: u16, token: Option<String>, open_browser: bool) -> Result<()> {
     // Fail early if home is unreadable so users get a clear error before bind.
@@ -1179,9 +1559,12 @@ fn cmd_serve(port: u16, token: Option<String>, open_browser: bool) -> Result<()>
     rt.block_on(serve::run_serve(port, token, open_browser))
 }
 
-fn cmd_init(with_samples: bool, json: bool) -> Result<()> {
-    require_local_control_boundary("locus init")?;
+fn cmd_init(with_samples: bool, persist_capability: bool, json: bool) -> Result<()> {
     let s = store()?;
+    // Mint/adopt the operator control capability BEFORE the control boundary,
+    // or a fresh operator can never get past step zero.
+    let capability_note = bootstrap_control_capability(&s, persist_capability)?;
+    require_local_control_boundary("locus init")?;
     let config_written = ensure_default_config(&s)?;
     if with_samples {
         write_sample_bindings(&s)?;
@@ -1194,11 +1577,15 @@ fn cmd_init(with_samples: bool, json: bool) -> Result<()> {
                 "home": s.home().display().to_string(),
                 "samples": with_samples,
                 "config_written": config_written,
+                "control_capability": capability_note,
             })
         );
     } else {
         println!("{} locus home {}", "ok".green().bold(), s.home().display());
         println!("   seal key {}", s.seal_key_path().display());
+        if let Some(note) = &capability_note {
+            println!("   capability {note}");
+        }
         if config_written {
             println!(
                 "   config   {}  {}",
@@ -1218,7 +1605,7 @@ fn cmd_init(with_samples: bool, json: bool) -> Result<()> {
         println!("{}", "next (AI-native path):".bold());
         println!(
             "  {}  {}",
-            "locus setup --client claude".cyan(),
+            "locus agent setup --apply".cyan(),
             "# wire locus-mcp into the agent".dimmed()
         );
         println!(
@@ -1377,12 +1764,18 @@ fn write_annotated_binding(s: &Store, alias: &str, toml: &str) -> Result<()> {
 }
 
 /// First 60 seconds: ensure home + samples, enter workspace default if unpinned, whoami + doctor.
-fn cmd_quickstart(json: bool) -> Result<()> {
-    require_local_control_boundary("locus quickstart")?;
+fn cmd_quickstart(persist_capability: bool, json: bool) -> Result<()> {
     let s = store()?;
+    // Mint/adopt the operator control capability BEFORE the control boundary,
+    // or a fresh operator can never get past step zero.
+    let capability_note = bootstrap_control_capability(&s, persist_capability)?;
+    require_local_control_boundary("locus quickstart")?;
     let config_written = ensure_default_config(&s)?;
 
     let mut actions: Vec<String> = Vec::new();
+    if let Some(note) = &capability_note {
+        actions.push(note.clone());
+    }
     if config_written {
         actions.push("wrote config.toml (notify.enabled=false)".into());
     }
@@ -1451,17 +1844,9 @@ fn cmd_quickstart(json: bool) -> Result<()> {
     let _ = s.check_drift_and_freeze();
     let whoami = s.whoami().ok();
 
-    // Doctor (do not hard-exit here — quickstart should finish printing)
-    let phantom = phantom_on_path();
-    let unresolved_phm = collect_unresolved_phm_refs(&s, phantom).unwrap_or_default();
-    let report = build_doctor_report(
-        &s,
-        DoctorExternal {
-            phantom_on_path: phantom,
-            unresolved_phm,
-            cwd: Some(cwd()),
-        },
-    )?;
+    // Doctor (do not hard-exit here — quickstart should finish printing).
+    // Same pack as `locus doctor`, including control-capability findings.
+    let report = gather_doctor_report(&s)?;
 
     if json {
         println!(
@@ -1540,6 +1925,7 @@ fn cmd_quickstart(json: bool) -> Result<()> {
         let mark = match f.severity {
             locus_core::IssueSeverity::Unsafe => "!".red().bold().to_string(),
             locus_core::IssueSeverity::Warn => "!".yellow().to_string(),
+            locus_core::IssueSeverity::Info => "i".dimmed().to_string(),
         };
         println!("   {mark} [{}] {}", f.code, f.message);
     }
@@ -1561,7 +1947,7 @@ fn cmd_quickstart(json: bool) -> Result<()> {
     );
     println!(
         "  {}  ·  {}",
-        "locus setup --client claude".dimmed(),
+        "locus agent setup --apply".dimmed(),
         "eval \"$(locus hook zsh)\"".dimmed()
     );
 
@@ -1577,17 +1963,27 @@ fn cmd_enter(
     force: bool,
     client: Option<String>,
     exports: bool,
+    ttl: Option<String>,
     json: bool,
 ) -> Result<()> {
     require_local_control_boundary("locus enter")?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
+    let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
     let session = match alias {
-        Some(a) => s.pin(&a, &cwd(), client, force)?,
-        None => s.pin_auto(&cwd(), client, force)?,
+        Some(a) => s
+            .pin_with_ttl(&a, &cwd(), client, force, requested_ttl)
+            .map_err(|e| with_alias_suggestions(&s, e))?,
+        None => s
+            .pin_auto_with_ttl(&cwd(), client, force, requested_ttl)
+            .map_err(|e| with_alias_suggestions(&s, e))?,
     };
     let binding = s.load_binding(&session.binding_alias)?;
     let providers_n = binding.providers.len();
+    // The store caps requests at policy.max_ttl silently; surface it here.
+    // 5s slack avoids false "capped" warnings from pin-time skew.
+    let granted = session.expires_at - session.pinned_at;
+    let ttl_capped = requested_ttl.is_some_and(|req| granted + chrono::Duration::seconds(5) < req);
 
     if json {
         println!(
@@ -1598,6 +1994,8 @@ fn cmd_enter(
                 "tenant": session.tenant,
                 "session_id": session.session_id,
                 "expires_at": session.expires_at.to_rfc3339(),
+                "expires_in_secs": (session.expires_at - chrono::Utc::now()).num_seconds().max(0),
+                "ttl_capped": ttl_capped,
                 "providers": providers_n,
                 "prompt": format!("[locus:{}:{}]", session.binding_alias, session.tenant),
             })
@@ -1623,7 +2021,28 @@ fn cmd_enter(
         format!("[locus:{}:{}]", session.binding_alias, session.tenant).cyan()
     );
     println!("   session  {}", session.session_id.dimmed());
-    println!("   expires  {}", session.expires_at.to_rfc3339().dimmed());
+    println!(
+        "   expires  {}  {}",
+        session.expires_at.to_rfc3339().dimmed(),
+        format!(
+            "(at {} — in {})",
+            session
+                .expires_at
+                .with_timezone(&chrono::Local)
+                .format("%H:%M"),
+            human_dur(session.expires_at - chrono::Utc::now())
+        )
+        .yellow()
+    );
+    if let (true, Some(req)) = (ttl_capped, requested_ttl) {
+        println!(
+            "   {} requested ttl {} capped to {} by policy.max_ttl on '{}'",
+            "warning:".yellow().bold(),
+            human_dur(req),
+            human_dur(granted),
+            session.binding_alias
+        );
+    }
     println!("   providers {}", providers_n);
     println!();
     println!(
@@ -1640,11 +2059,13 @@ fn cmd_pin(
     force: bool,
     client: Option<String>,
     ns: Option<String>,
+    ttl: Option<String>,
     json: bool,
 ) -> Result<()> {
     require_local_control_boundary("locus pin")?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
+    let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
     let session = if let Some(ns_raw) = ns {
         let mut aliases: Vec<String> = Vec::new();
         if let Some(a) = alias {
@@ -1659,13 +2080,21 @@ fn cmd_pin(
         if aliases.len() < 2 {
             bail!("--ns requires at least two distinct bindings (e.g. --ns personal,acme)");
         }
-        s.pin_namespaced(&aliases, &cwd(), client, force)?
+        s.pin_namespaced_with_ttl(&aliases, &cwd(), client, force, requested_ttl)
+            .map_err(|e| with_alias_suggestions(&s, e))?
     } else {
         match alias {
-            Some(a) => s.pin(&a, &cwd(), client, force)?,
-            None => s.pin_auto(&cwd(), client, force)?,
+            Some(a) => s
+                .pin_with_ttl(&a, &cwd(), client, force, requested_ttl)
+                .map_err(|e| with_alias_suggestions(&s, e))?,
+            None => s
+                .pin_auto_with_ttl(&cwd(), client, force, requested_ttl)
+                .map_err(|e| with_alias_suggestions(&s, e))?,
         }
     };
+    // Surface a silent policy.max_ttl clamp (5s slack for pin-time skew).
+    let granted = session.expires_at - session.pinned_at;
+    let ttl_capped = requested_ttl.is_some_and(|req| granted + chrono::Duration::seconds(5) < req);
     // Policy surface for the pinned binding (counts only — never secrets)
     let binding = s.load_binding(&session.binding_alias)?;
     let require_approval_n = binding.policy.require_approval.len();
@@ -1687,6 +2116,13 @@ fn cmd_pin(
                     "providers": providers_n,
                 }),
             );
+            obj.insert(
+                "expires_in_secs".into(),
+                json!((session.expires_at - chrono::Utc::now())
+                    .num_seconds()
+                    .max(0)),
+            );
+            obj.insert("ttl_capped".into(), json!(ttl_capped));
         }
         println!("{}", serde_json::to_string_pretty(&v)?);
     } else {
@@ -1697,7 +2133,28 @@ fn cmd_pin(
             session.tenant.dimmed()
         );
         println!("   session  {}", session.session_id);
-        println!("   expires  {}", session.expires_at.to_rfc3339());
+        println!(
+            "   expires  {}  {}",
+            session.expires_at.to_rfc3339(),
+            format!(
+                "(at {} — in {})",
+                session
+                    .expires_at
+                    .with_timezone(&chrono::Local)
+                    .format("%H:%M"),
+                human_dur(session.expires_at - chrono::Utc::now())
+            )
+            .yellow()
+        );
+        if let (true, Some(req)) = (ttl_capped, requested_ttl) {
+            println!(
+                "   {} requested ttl {} capped to {} by policy.max_ttl on '{}'",
+                "warning:".yellow().bold(),
+                human_dur(req),
+                human_dur(granted),
+                session.binding_alias
+            );
+        }
         println!("   worker   {}", session.worker_home);
         if session.is_namespaced() {
             println!(
@@ -2022,7 +2479,25 @@ fn cmd_whoami(json: bool) -> Result<()> {
     if let Some(p) = &w.principal {
         println!("  principal {}", p);
     }
-    println!("  expires   {}", w.expires_at);
+    println!(
+        "  expires   {}  {}",
+        w.expires_at,
+        format!(
+            "(in {})",
+            human_dur(chrono::Duration::seconds(w.expires_in_secs))
+        )
+        .dimmed()
+    );
+    if w.expires_in_secs > 0 && w.expires_in_secs < 300 {
+        println!(
+            "            {}",
+            format!(
+                "expiring soon — re-pin: locus enter {} --ttl 2h",
+                w.binding_alias
+            )
+            .yellow()
+        );
+    }
     println!(
         "  seal      {}",
         if w.seal_ok { "ok".green() } else { "BAD".red() }
@@ -3244,8 +3719,30 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
     match sub {
         BindingCmd::List => {
             let list = s.list_bindings()?;
+            // Active-pin marker (display only; a read failure just drops it).
+            let active = s.active_session().ok().flatten();
+            let pinned_aliases: Vec<String> = active
+                .as_ref()
+                .map(|sess| sess.all_aliases())
+                .unwrap_or_default();
+            // Remaining-TTL suffix; skipped when expired/unreadable.
+            let pinned_left: Option<String> = active.as_ref().and_then(|sess| {
+                let rem = sess.expires_at - chrono::Utc::now();
+                (rem > chrono::Duration::zero()).then(|| human_dur(rem))
+            });
             if json {
-                println!("{}", serde_json::to_string_pretty(&list)?);
+                let mut rows: Vec<serde_json::Value> = Vec::with_capacity(list.len());
+                for b in &list {
+                    let mut v = serde_json::to_value(b)?;
+                    if let Some(obj) = v.as_object_mut() {
+                        obj.insert(
+                            "pinned".into(),
+                            json!(pinned_aliases.iter().any(|a| a == &b.alias)),
+                        );
+                    }
+                    rows.push(v);
+                }
+                println!("{}", serde_json::to_string_pretty(&rows)?);
             } else if list.is_empty() {
                 println!(
                     "{} no bindings — try `locus init --with-samples`",
@@ -3253,8 +3750,18 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
                 );
             } else {
                 for b in list {
+                    let marker = if pinned_aliases.iter().any(|a| a == &b.alias) {
+                        match &pinned_left {
+                            Some(left) => {
+                                format!("  {}", format!("* pinned ({left} left)").green().bold())
+                            }
+                            None => format!("  {}", "* pinned".green().bold()),
+                        }
+                    } else {
+                        String::new()
+                    };
                     println!(
-                        "  {}  {}  [{}]",
+                        "  {}  {}  [{}]{marker}",
                         b.alias.cyan().bold(),
                         b.tenant.yellow(),
                         b.providers.join(", ").dimmed()
@@ -3303,52 +3810,7 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
                 );
             }
         }
-        BindingCmd::Add {
-            alias,
-            tenant,
-            provider,
-            account,
-            credential_ref,
-            project_ref,
-            team_id,
-            org,
-            read_only,
-            description,
-        } => {
-            let mut scope = Scope {
-                project_ref,
-                team_id,
-                read_only: if read_only { Some(true) } else { None },
-                ..Scope::default()
-            };
-            if let Some(o) = org {
-                scope.orgs = vec![o];
-            }
-            let b = Binding::from_body(BindingBody {
-                id: format!("bnd_{alias}"),
-                alias: alias.clone(),
-                tenant,
-                principal: None,
-                description,
-                policy: Policy::default(),
-                providers: vec![ProviderBinding {
-                    provider,
-                    account,
-                    credential_ref,
-                    scope,
-                    upstream: None,
-                }],
-            });
-            let path = s.save_binding(&b)?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "ok": true, "path": path.display().to_string() })
-                );
-            } else {
-                println!("{} wrote {}", "ok".green().bold(), path.display());
-            }
-        }
+        BindingCmd::Add(args) => cmd_binding_add(args, false, json)?,
         BindingCmd::Rm { alias, yes } => {
             if !yes {
                 bail!("refusing to remove without --yes");
@@ -3362,6 +3824,497 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_client(sub: ClientCmd, json: bool) -> Result<()> {
+    match sub {
+        ClientCmd::Add(args) => cmd_binding_add(args, true, json),
+    }
+}
+
+/// Resolved answers for a binding-add flow (flags + prompts). Everything
+/// downstream of the prompt loop is pure and unit-testable.
+#[derive(Debug, Clone, Default)]
+struct AddAnswers {
+    alias: String,
+    tenant: String,
+    provider: String,
+    account: String,
+    credential_ref: String,
+    project_ref: Option<String>,
+    team_id: Option<String>,
+    account_id: Option<String>,
+    org: Option<String>,
+    repos: Vec<String>,
+    read_only: bool,
+    description: Option<String>,
+    default_ttl: Option<String>,
+}
+
+fn missing_add_flags(args: &BindingAddArgs) -> Vec<&'static str> {
+    let mut m = Vec::new();
+    if args.alias.is_none() {
+        m.push("<alias>");
+    }
+    if args.tenant.is_none() {
+        m.push("--tenant");
+    }
+    if args.provider.is_none() {
+        m.push("--provider");
+    }
+    if args.account.is_none() {
+        m.push("--account");
+    }
+    if args.credential_ref.is_none() {
+        m.push("--credential-ref");
+    }
+    m
+}
+
+fn split_repos(raw: Option<&str>) -> Vec<String> {
+    raw.map(|r| {
+        r.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// A credential_ref is a pointer, never the secret. Rejects raw values with
+/// the core error and adds a did-you-mean for conservative bare Phantom names.
+fn validate_credential_ref_input(raw: &str) -> Result<()> {
+    if let Err(e) = CredentialRef::validate(raw) {
+        if let Some(suggest) = migrate_legacy_phantom_ref(raw) {
+            bail!("{e} — did you mean '{suggest}'?");
+        }
+        bail!("{e}");
+    }
+    Ok(())
+}
+
+/// Resolve answers from flags alone (non-interactive / piped stdin / --json).
+/// Fails closed listing every absent required flag.
+fn resolve_add_answers(args: &BindingAddArgs) -> Result<AddAnswers> {
+    let missing = missing_add_flags(args);
+    if !missing.is_empty() {
+        bail!("missing {} (non-interactive)", missing.join(" "));
+    }
+    let alias = args.alias.clone().expect("presence checked");
+    validate_name_component("alias", &alias)?;
+    let credential_ref = args.credential_ref.clone().expect("presence checked");
+    validate_credential_ref_input(&credential_ref)?;
+    if let Some(ref v) = args.default_ttl {
+        parse_pin_ttl(v).map_err(|e| anyhow!("invalid --default-ttl: {e}"))?;
+    }
+    Ok(AddAnswers {
+        alias,
+        tenant: args.tenant.clone().expect("presence checked"),
+        provider: args.provider.clone().expect("presence checked"),
+        account: args.account.clone().expect("presence checked"),
+        credential_ref,
+        project_ref: args.project_ref.clone(),
+        team_id: args.team_id.clone(),
+        account_id: args.account_id.clone(),
+        org: args.org.clone(),
+        repos: split_repos(args.repos.as_deref()),
+        read_only: args.read_only,
+        description: args.description.clone(),
+        default_ttl: args.default_ttl.clone(),
+    })
+}
+
+/// Guided resolution: reuse every flag that was passed, prompt for the rest.
+/// Only reachable when stdin is a TTY.
+fn resolve_add_answers_interactive(s: &Store, args: &BindingAddArgs) -> Result<AddAnswers> {
+    let known: Vec<String> = s
+        .list_bindings()
+        .map(|l| l.into_iter().map(|b| b.alias).collect())
+        .unwrap_or_default();
+
+    let alias = match &args.alias {
+        Some(a) => a.clone(),
+        None => {
+            let v = prompt_value("alias", "<alias>", None, &|v| {
+                if let Err(e) = validate_name_component("alias", v) {
+                    return Err(format!("{e}"));
+                }
+                if v.starts_with("locus") {
+                    return Err(format!(
+                        "alias '{v}' is reserved: aliases starting with 'locus' collide with \
+                         the control-tool namespace — choose a different alias"
+                    ));
+                }
+                if known.iter().any(|k| k == v) {
+                    return Err(format!(
+                        "alias '{v}' already exists — edit it (locus binding show {v}) or pick another"
+                    ));
+                }
+                Ok(())
+            })?;
+            if let Some(best) = nearest_alias(&v, &known) {
+                // Soft nudge only — never a hard block (short aliases collide easily).
+                if !prompt_confirm(
+                    &format!("similar alias '{best}' already exists — continue with '{v}'?"),
+                    false,
+                )? {
+                    bail!("aborted — nothing written");
+                }
+            }
+            v
+        }
+    };
+
+    let tenant = match &args.tenant {
+        Some(t) => t.clone(),
+        None => prompt_value("tenant", "--tenant", Some(&alias), &|_| Ok(()))?,
+    };
+
+    let provider = match &args.provider {
+        Some(p) => p.clone(),
+        None => {
+            println!(
+                "  providers with built-in adapters: {}",
+                known_providers().join(", ").cyan()
+            );
+            let v = prompt_value("provider", "--provider", None, &|_| Ok(()))?;
+            if !known_providers().contains(&v.as_str()) {
+                println!(
+                    "{} no built-in adapter for '{}' — tools require an upstream MCP recipe (locus upstream list)",
+                    "warning:".yellow().bold(),
+                    v
+                );
+            }
+            v
+        }
+    };
+
+    let account = match &args.account {
+        Some(a) => a.clone(),
+        None => prompt_value("account", "--account", None, &|_| Ok(()))?,
+    };
+
+    // Provider scope fields (CLI-side convenience table; scope freeze at the
+    // gate stays the enforcement).
+    let mut project_ref = args.project_ref.clone();
+    let mut team_id = args.team_id.clone();
+    let mut account_id = args.account_id.clone();
+    let mut org = args.org.clone();
+    let mut repos = split_repos(args.repos.as_deref());
+    for &(field, required) in scope_prompts(&provider) {
+        if field == "repos" {
+            if repos.is_empty() {
+                let v = prompt_optional("repos (comma-separated allowlist, empty = all in org)")?;
+                repos = split_repos(v.as_deref());
+            }
+            continue;
+        }
+        let slot: &mut Option<String> = match field {
+            "project_ref" => &mut project_ref,
+            "team_id" => &mut team_id,
+            "account_id" => &mut account_id,
+            "org" => &mut org,
+            _ => continue,
+        };
+        if slot.is_none() {
+            let flag = format!("--{}", field.replace('_', "-"));
+            *slot = if required {
+                Some(prompt_value(field, &flag, None, &|_| Ok(()))?)
+            } else {
+                prompt_optional(&format!("{field} (optional)"))?
+            };
+        }
+    }
+    let read_only = args.read_only || prompt_confirm("freeze scope read-only?", false)?;
+
+    let credential_ref = match &args.credential_ref {
+        Some(c) => {
+            validate_credential_ref_input(c)?;
+            c.clone()
+        }
+        None => {
+            println!("  credential_ref is a pointer, never the secret itself:");
+            println!(
+                "    {}  Phantom vault (recommended — phantom add NAME, https://phm.dev)",
+                "phm:NAME".cyan()
+            );
+            println!(
+                "    {}   read from the environment at exec time",
+                "env:VAR".cyan()
+            );
+            prompt_value("credential_ref", "--credential-ref", None, &|v| {
+                match CredentialRef::validate(v) {
+                    Ok(_) => Ok(()),
+                    Err(e) => match migrate_legacy_phantom_ref(v) {
+                        Some(suggest) => Err(format!("{e} — did you mean '{suggest}'?")),
+                        None => Err(format!("{e}")),
+                    },
+                }
+            })?
+        }
+    };
+
+    let default_ttl = match &args.default_ttl {
+        Some(v) => {
+            parse_pin_ttl(v).map_err(|e| anyhow!("invalid --default-ttl: {e}"))?;
+            Some(v.clone())
+        }
+        None => loop {
+            match prompt_optional("default pin ttl (e.g. 2h; empty = policy max_ttl)")? {
+                None => break None,
+                Some(t) => match parse_pin_ttl(&t) {
+                    Ok(_) => break Some(t),
+                    Err(e) => eprintln!("  {e}"),
+                },
+            }
+        },
+    };
+
+    Ok(AddAnswers {
+        alias,
+        tenant,
+        provider,
+        account,
+        credential_ref,
+        project_ref,
+        team_id,
+        account_id,
+        org,
+        repos,
+        read_only,
+        description: args.description.clone(),
+        default_ttl,
+    })
+}
+
+/// Pure mapping from resolved answers to a Binding (unit-testable).
+fn binding_from_answers(a: &AddAnswers) -> Binding {
+    let mut scope = Scope {
+        project_ref: a.project_ref.clone(),
+        team_id: a.team_id.clone(),
+        account_id: a.account_id.clone(),
+        read_only: if a.read_only { Some(true) } else { None },
+        ..Scope::default()
+    };
+    if let Some(o) = &a.org {
+        scope.orgs = vec![o.clone()];
+    }
+    scope.repos = a.repos.clone();
+    Binding::from_body(BindingBody {
+        id: format!("bnd_{}", a.alias),
+        alias: a.alias.clone(),
+        tenant: a.tenant.clone(),
+        principal: None,
+        description: a.description.clone(),
+        policy: Policy {
+            default_ttl: a.default_ttl.clone(),
+            ..Policy::default()
+        },
+        providers: vec![ProviderBinding {
+            provider: a.provider.clone(),
+            account: a.account.clone(),
+            credential_ref: a.credential_ref.clone(),
+            scope,
+            upstream: None,
+        }],
+    })
+}
+
+/// Per-provider guided scope prompts: (field, required).
+fn scope_prompts(provider: &str) -> &'static [(&'static str, bool)] {
+    match provider.to_ascii_lowercase().as_str() {
+        "supabase" => &[("project_ref", true)],
+        "vercel" => &[("team_id", true), ("project_ref", false)],
+        "github" => &[("org", true), ("repos", false)],
+        "aws" | "stripe" | "cloudflare" => &[("account_id", true)],
+        _ => &[],
+    }
+}
+
+/// Shared handler for `locus binding add` (guided_default=false) and
+/// `locus client add` (guided_default=true). The write path is exactly
+/// `Store::save_binding` — validation, bindings lock, reserved-alias check,
+/// audit `binding.save`.
+fn cmd_binding_add(args: BindingAddArgs, guided_default: bool, json: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    let s = store()?;
+    let guided = guided_default || args.guided;
+    let can_prompt = !args.non_interactive && !json && io::stdin().is_terminal();
+    let answers = if can_prompt && (guided || !missing_add_flags(&args).is_empty()) {
+        resolve_add_answers_interactive(&s, &args)?
+    } else {
+        resolve_add_answers(&args)?
+    };
+    let b = binding_from_answers(&answers);
+    let toml = b.to_toml()?;
+
+    if args.dry_run {
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "ok": true, "dry_run": true, "alias": answers.alias, "toml": toml })
+            );
+        } else {
+            println!("{toml}");
+            println!("{} dry run — nothing written", "ok".green().bold());
+        }
+        return Ok(());
+    }
+
+    if can_prompt && guided {
+        println!();
+        println!("{toml}");
+        if !prompt_confirm(&format!("write binding '{}'?", answers.alias), true)? {
+            bail!("aborted — nothing written");
+        }
+    }
+
+    let path = s.save_binding(&b)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({ "ok": true, "path": path.display().to_string() })
+        );
+        return Ok(());
+    }
+    println!("{} wrote {}", "ok".green().bold(), path.display());
+    println!();
+    println!("   next steps:");
+    println!(
+        "   {}",
+        format!("locus enter {} --ttl 2h", answers.alias).cyan()
+    );
+    println!("   {}", "locus agent setup --apply".dimmed());
+    println!(
+        "   {}  {}",
+        "locus doctor".dimmed(),
+        "(unresolved phm: refs are flagged)".dimmed()
+    );
+    if let Some(name) = answers.credential_ref.strip_prefix("phm:") {
+        println!(
+            "   {}  {}",
+            format!("phantom add {name}").dimmed(),
+            "(store the secret in Phantom — https://phm.dev)".dimmed()
+        );
+    }
+    Ok(())
+}
+
+/// Prompt for a required value on a TTY; fail closed when stdin is not a TTY.
+fn prompt_value(
+    label: &str,
+    flag_hint: &str,
+    default: Option<&str>,
+    validate: &dyn Fn(&str) -> std::result::Result<(), String>,
+) -> Result<String> {
+    use std::io::{IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        bail!("missing {label} — pass {flag_hint} (stdin is not a TTY)");
+    }
+    loop {
+        match default {
+            Some(d) => print!("  {label} [{d}]: "),
+            None => print!("  {label}: "),
+        }
+        io::stdout().flush()?;
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line)? == 0 {
+            bail!("missing {label} — input closed (pass {flag_hint})");
+        }
+        let trimmed = line.trim();
+        let v = if trimmed.is_empty() {
+            match default {
+                Some(d) => d,
+                None => {
+                    eprintln!("  {label} is required");
+                    continue;
+                }
+            }
+        } else {
+            trimmed
+        };
+        match validate(v) {
+            Ok(()) => return Ok(v.to_string()),
+            Err(msg) => eprintln!("  {msg}"),
+        }
+    }
+}
+
+/// Optional prompt: empty input → None. Non-TTY → None (flags rule).
+fn prompt_optional(label: &str) -> Result<Option<String>> {
+    use std::io::{IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        return Ok(None);
+    }
+    print!("  {label}: ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let t = line.trim();
+    Ok(if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
+    })
+}
+
+/// Y/n confirm. Non-TTY returns the default (never blocks scripts).
+fn prompt_confirm(question: &str, default_yes: bool) -> Result<bool> {
+    use std::io::{IsTerminal, Write};
+    if !io::stdin().is_terminal() {
+        return Ok(default_yes);
+    }
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    print!("  {question} {hint} ");
+    io::stdout().flush()?;
+    let mut line = String::new();
+    io::stdin().read_line(&mut line)?;
+    let t = line.trim().to_ascii_lowercase();
+    Ok(match t.as_str() {
+        "" => default_yes,
+        "y" | "yes" => true,
+        _ => false,
+    })
+}
+
+/// Bounds-checked `--ttl` parse. `locus_core::parse_ttl` is lenient (accepts
+/// "", zero, negatives) — this wrapper is the fail-closed gate for operator
+/// input: min 1m, max 24h.
+fn parse_pin_ttl(raw: &str) -> Result<chrono::Duration> {
+    let trimmed = raw.trim();
+    let invalid = || anyhow!("invalid --ttl '{raw}': use 30m / 2h / 1d (min 1m, max 24h)");
+    if trimmed.is_empty() {
+        return Err(invalid());
+    }
+    let d = parse_ttl(trimmed).map_err(|_| invalid())?;
+    if d < chrono::Duration::minutes(1) {
+        bail!("--ttl {raw} is too short: minimum is 1m");
+    }
+    if d > chrono::Duration::hours(24) {
+        bail!(
+            "--ttl {raw} is too long: maximum is 24h — for standing access set policy.max_ttl \
+             in the binding TOML instead"
+        );
+    }
+    Ok(d)
+}
+
+/// "2h", "1h30m", "45m", "90s" — humanized duration for operator output.
+fn human_dur(d: chrono::Duration) -> String {
+    let secs = d.num_seconds().max(0);
+    if secs < 120 {
+        return format!("{secs}s");
+    }
+    let mins = secs / 60;
+    let (h, m) = (mins / 60, mins % 60);
+    if h > 0 && m > 0 {
+        format!("{h}h{m}m")
+    } else if h > 0 {
+        format!("{h}h")
+    } else {
+        format!("{m}m")
+    }
 }
 
 fn cmd_workspace(
@@ -3424,11 +4377,20 @@ fn cmd_agent(sub: AgentCmd, json: bool) -> Result<()> {
     match sub {
         AgentCmd::Setup {
             client,
+            claude_scope,
             apply,
             dry_run,
             workspace,
             mcp_bin,
-        } => cmd_agent_setup(&client, apply, dry_run, workspace, mcp_bin, json),
+        } => cmd_agent_setup(
+            &client,
+            &claude_scope,
+            apply,
+            dry_run,
+            workspace,
+            mcp_bin,
+            json,
+        ),
         AgentCmd::Doctor => cmd_agent_doctor(json),
         AgentCmd::Report { json: report_json } => cmd_agent_report(json || report_json),
     }
@@ -3832,7 +4794,15 @@ fn embedded_goal_milestones() -> Vec<GoalMilestone> {
 }
 
 fn gather_doctor_report(s: &Store) -> Result<locus_core::DoctorReport> {
-    build_doctor_report(s, gather_doctor_external(s, cwd())?).map_err(Into::into)
+    let mut report = build_doctor_report(s, gather_doctor_external(s, cwd())?)?;
+    // Operator-shell control capability readiness. CLI-only by design:
+    // locus-mcp runs executor-restricted and legitimately lacks the control
+    // capability, so these findings never attach to MCP doctor surfaces.
+    let status = locus_core::control_capability_status(s.home());
+    for f in locus_core::control_capability_findings(&status, s.home()) {
+        report.push_finding(f.severity, &f.code, f.message);
+    }
+    Ok(report)
 }
 
 fn gather_doctor_external(s: &Store, cwd: PathBuf) -> Result<DoctorExternal> {
@@ -3925,10 +4895,11 @@ fn print_agent_report_human(report: &locus_core::AgentReport) {
         }
     };
     println!(
-        "  mcp       claude={}  cursor={}  codex={}",
+        "  mcp       claude={}  cursor={}  codex={}  grok={}",
         yn(report.mcp_registered.claude),
         yn(report.mcp_registered.cursor),
-        yn(report.mcp_registered.codex)
+        yn(report.mcp_registered.codex),
+        yn(report.mcp_registered.grok)
     );
     if report.findings.is_empty() {
         println!(
@@ -3986,6 +4957,7 @@ fn cmd_agent_report(json: bool) -> Result<()> {
 
 fn cmd_agent_setup(
     client: &str,
+    claude_scope: &str,
     apply: bool,
     dry_run: bool,
     write_workspace: bool,
@@ -4001,18 +4973,61 @@ fn cmd_agent_setup(
     if apply {
         require_local_control_boundary("locus agent setup --apply")?;
     }
+    let claude_user_scope = match claude_scope {
+        "project" => false,
+        "user" => true,
+        other => bail!("unknown --claude-scope '{other}' (use project|user)"),
+    };
     let clients: Vec<&str> = match client {
-        "all" => vec!["claude", "cursor", "codex"],
-        "claude" | "cursor" | "codex" => vec![client],
-        other => bail!("unknown client '{other}' (use claude|cursor|codex|all)"),
+        // `all` covers clients with a known on-disk config path — including
+        // Grok Build (`~/.grok/config.toml`, Codex-style TOML). `generic`
+        // stays print-only and must be asked for explicitly.
+        "all" => vec!["claude", "cursor", "codex", "grok"],
+        "claude" | "cursor" | "codex" | "grok" | "generic" => vec![client],
+        other => bail!("unknown client '{other}' (use claude|cursor|codex|grok|generic|all)"),
+    };
+    // User-scope Claude registration goes through the claude CLI — Locus
+    // never hand-edits `~/.claude.json` (mixed runtime state owned by Claude
+    // Code, no stability guarantee). Resolve the CLI up front; refuse to
+    // apply without it.
+    let claude_cli: Option<PathBuf> = if claude_user_scope && clients.contains(&"claude") {
+        let found = find_on_path("claude");
+        if apply && found.is_none() {
+            bail!(
+                "--claude-scope user requires the `claude` CLI on PATH \
+                 (user-scope servers live in ~/.claude.json, which Locus never \
+                 edits directly).\n  \
+                 Install Claude Code, or register manually:\n    \
+                 claude mcp add-json locus '<server-json>' --scope user\n  \
+                 Or use --claude-scope project (writes project .mcp.json)."
+            );
+        }
+        found
+    } else {
+        None
     };
 
     // Ensure ~/.locus (or LOCUS_HOME) exists — init layout + seal key if needed.
     let s = store()?;
-    let bin = resolve_mcp_bin(mcp_bin);
+    if let Some(b) = mcp_bin.as_deref() {
+        validate_explicit_mcp_bin(b)?;
+    }
+    let (bin, bin_fallback) = resolve_mcp_bin_with_fallback(mcp_bin);
+    if bin_fallback {
+        eprintln!(
+            "{} mcp bin resolved to bare 'locus-mcp' (no sibling next to the locus binary) — \
+             GUI clients launched with a minimal PATH may fail to start it; \
+             pass --mcp-bin /path/to/locus-mcp to pin an absolute path",
+            "warn:".yellow().bold()
+        );
+    }
     let mut actions: Vec<String> = Vec::new();
     let project = cwd();
     actions.push(format!("ensure locus home → {}", s.home().display()));
+
+    // Grok Build / generic stdio clients: canonical entry emitted for paste
+    // (JSON + TOML shapes) — never a guessed config-path write.
+    let mut paste_entry: Option<(serde_json::Value, String)> = None;
 
     for c in &clients {
         let env_map = mcp_agent_env(c);
@@ -4021,12 +5036,31 @@ fn cmd_agent_setup(
             !env_map.contains_key("LOCUS_NOTIFY"),
             "LOCUS_NOTIFY must not be set by agent setup"
         );
+        // `type: "stdio"` is documented as required by Cursor and accepted by
+        // Claude Code / mcpServers-style clients — harmless where optional.
         let server_entry = json!({
+            "type": "stdio",
             "command": &bin,
             "args": [],
             "env": env_map,
         });
         match *c {
+            "claude" if claude_user_scope => {
+                actions.push(format!(
+                    "mcp claude (user scope) → claude mcp add-json locus … --scope user \
+                     (CLI-managed ~/.claude.json; claude CLI: {})",
+                    claude_cli
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "NOT FOUND on PATH".into())
+                ));
+                if apply {
+                    let cli = claude_cli
+                        .as_ref()
+                        .expect("claude CLI resolved before apply");
+                    claude_user_scope_register(cli, &server_entry)?;
+                }
+            }
             "claude" => {
                 let path = project.join(".mcp.json");
                 actions.push(format!(
@@ -4068,6 +5102,32 @@ fn cmd_agent_setup(
                     merge_codex_mcp(&path, &bin, c)?;
                 }
             }
+            "grok" => {
+                // Grok Build's documented config: ~/.grok/config.toml with
+                // Codex-style [mcp_servers.<name>] tables — same fail-closed
+                // toml_edit merge as codex (parse error ⇒ abort untouched).
+                let home = dirs::home_dir().context("home dir for grok config")?;
+                let path = home.join(".grok").join("config.toml");
+                actions.push(format!(
+                    "mcp grok → {} (LOCUS_AUTO_PIN=cwd, LOCUS_CLIENT=grok)",
+                    path.display()
+                ));
+                if apply {
+                    merge_codex_mcp(&path, &bin, c)?;
+                }
+            }
+            "generic" => {
+                actions.push(
+                    "mcp generic → print-only (no known on-disk config path — paste the \
+                     emitted server entry into the client's MCP settings; register the \
+                     probe with LOCUS_GROK_MCP_CONFIG=<path-to-its-config>)"
+                        .to_string(),
+                );
+                paste_entry = Some((
+                    json!({ "mcpServers": { "locus": server_entry.clone() } }),
+                    stdio_server_entry_toml(&bin, c),
+                ));
+            }
             _ => {}
         }
     }
@@ -4096,17 +5156,66 @@ fn cmd_agent_setup(
         }
     }
 
+    // Post-write verification: re-read what we just wrote via the same probe
+    // doctor uses. A merge no-op or unwritable config must not report ok.
+    let mut verified: Option<McpRegistered> = None;
+    let mut verify_failures: Vec<String> = Vec::new();
+    if apply {
+        let user_home = dirs::home_dir();
+        let probe = probe_mcp_registered(&project, user_home.as_deref());
+        // User-scope claude is CLI-managed (~/.claude.json) — the file probe
+        // cannot see it, so it is verified via the claude CLI below instead.
+        let probe_clients: Vec<&str> = clients
+            .iter()
+            .copied()
+            .filter(|c| !(claude_user_scope && *c == "claude"))
+            .collect();
+        for c in mcp_verify_failures(&probe_clients, &probe) {
+            let path = match c {
+                "claude" => project.join(".mcp.json").display().to_string(),
+                "cursor" => project
+                    .join(".cursor")
+                    .join("mcp.json")
+                    .display()
+                    .to_string(),
+                "codex" => user_home
+                    .as_ref()
+                    .map(|h| h.join(".codex").join("config.toml").display().to_string())
+                    .unwrap_or_else(|| "~/.codex/config.toml".into()),
+                "grok" => user_home
+                    .as_ref()
+                    .map(|h| h.join(".grok").join("config.toml").display().to_string())
+                    .unwrap_or_else(|| "~/.grok/config.toml".into()),
+                _ => continue,
+            };
+            verify_failures.push(format!("{c}: {path}"));
+        }
+        if claude_user_scope && clients.contains(&"claude") {
+            let cli = claude_cli.as_ref().expect("claude CLI resolved for apply");
+            if !claude_user_scope_verify(cli).unwrap_or(false) {
+                verify_failures
+                    .push("claude: user scope (`claude mcp get locus` did not confirm)".into());
+            }
+        }
+        verified = Some(probe);
+    }
+
     if json {
         println!(
             "{}",
             json!({
-                "ok": true,
+                "ok": verify_failures.is_empty(),
                 "apply": apply,
                 "dry_run": dry_run,
                 "clients": clients,
                 "home": s.home().display().to_string(),
                 "mcp_bin": bin,
+                "mcp_bin_fallback": bin_fallback,
                 "actions": actions,
+                "verified": verified,
+                "verify_failures": verify_failures,
+                "paste_server_entry": paste_entry.as_ref().map(|(j, _)| j.clone()),
+                "paste_server_toml": paste_entry.as_ref().map(|(_, t)| t.clone()),
                 "env": {
                     "LOCUS_AUTO_PIN": "cwd",
                     "LOCUS_CLIENT": "<client>",
@@ -4114,11 +5223,38 @@ fn cmd_agent_setup(
                 },
             })
         );
+        if !verify_failures.is_empty() {
+            std::process::exit(1);
+        }
+    } else if !verify_failures.is_empty() {
+        eprintln!(
+            "{} agent setup wrote config, but post-write verification failed:",
+            "error:".red().bold()
+        );
+        for f in &verify_failures {
+            eprintln!("   · locus entry not found after write — {f}");
+        }
+        eprintln!("   inspect the file(s) above, then re-run `locus agent setup --apply`");
+        std::process::exit(1);
     } else {
         let mode = if dry_run { "dry-run" } else { "applied" };
         println!("{} agent setup ({mode})", "ok".green().bold());
         for a in &actions {
             println!("   · {a}");
+        }
+        if let Some((entry_json, entry_toml)) = &paste_entry {
+            println!();
+            println!(
+                "{}",
+                "Paste ONE of the following into the client's MCP settings:".bold()
+            );
+            println!("# JSON shape (mcpServers-style clients):");
+            println!("{}", serde_json::to_string_pretty(entry_json)?);
+            println!();
+            println!("# TOML shape (Codex-style clients):");
+            println!("{entry_toml}");
+            println!("# Then restart the client. Optional: export LOCUS_GROK_MCP_CONFIG=<path>");
+            println!("# so `locus agent doctor` can verify the registration (JSON or TOML).");
         }
         if dry_run {
             println!("   {}", "re-run with --apply to write".dimmed());
@@ -4138,7 +5274,7 @@ fn cmd_agent_setup(
                 "note:".dimmed()
             );
             println!(
-                "  {} auto-pin kill switch: LOCUS_MCP_AUTO_PIN=0 (see .locus/AGENT.md)",
+                "  {} MCP auto-pin is advisory only — the server never pins itself; a human runs `locus enter` (kill switch: LOCUS_MCP_AUTO_PIN=0, see .locus/AGENT.md)",
                 "note:".dimmed()
             );
         }
@@ -4147,35 +5283,161 @@ fn cmd_agent_setup(
 }
 
 /// Merge/write `[mcp_servers.locus]` into Codex config.toml with agent env.
+///
+/// Format-preserving upsert via `toml_edit`: an existing locus entry is healed
+/// in place (stale `command`, missing env) instead of being skipped, every
+/// other table/server is preserved verbatim, and a duplicate `locus` key is
+/// structurally impossible. Fail closed: an unparseable file is left
+/// unchanged and the merge errors with a remediation hint.
 fn merge_codex_mcp(path: &std::path::Path, bin: &str, client: &str) -> Result<()> {
-    let section = format!(
-        r#"
-[mcp_servers.locus]
-command = "{bin}"
+    use toml_edit::{value, DocumentMut, Item, Table};
 
-[mcp_servers.locus.env]
-LOCUS_AUTO_PIN = "cwd"
-LOCUS_CLIENT = "{client}"
-"#
-    );
-    if path.exists() {
+    let mut doc: DocumentMut = if path.exists() {
         let raw = std::fs::read_to_string(path)?;
-        if raw.contains("[mcp_servers.locus]") {
-            return Ok(());
-        }
-        let mut out = raw;
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str(&section);
-        std::fs::write(path, out)?;
+        raw.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "refusing to modify {}: not valid TOML ({e}).\n  \
+                 Fix the file or move it aside, then re-run.\n  \
+                 Locus never overwrites a config it cannot parse — other MCP servers \
+                 registered there would be lost.",
+                path.display()
+            )
+        })?
     } else {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        DocumentMut::new()
+    };
+
+    let servers = doc
+        .entry("mcp_servers")
+        .or_insert(Item::Table(Table::new()));
+    let servers = servers.as_table_like_mut().ok_or_else(|| {
+        anyhow::anyhow!(
+            "refusing to modify {}: `mcp_servers` is not a table.\n  \
+             Fix the file or move it aside, then re-run.",
+            path.display()
+        )
+    })?;
+    let locus = servers.entry("locus").or_insert(Item::Table(Table::new()));
+    // Normalize an inline-table entry (`locus = { command = "…" }`) to a
+    // standard table so the nested `env` table can be attached.
+    if let Some(inline) = locus.as_inline_table() {
+        *locus = Item::Table(inline.clone().into_table());
+    }
+    let locus = locus.as_table_like_mut().ok_or_else(|| {
+        anyhow::anyhow!(
+            "refusing to modify {}: `mcp_servers.locus` is not a table.\n  \
+             Fix the file or move it aside, then re-run.",
+            path.display()
+        )
+    })?;
+    locus.insert("command", value(bin));
+    let env = locus.entry("env").or_insert(Item::Table(Table::new()));
+    let env = env.as_table_like_mut().ok_or_else(|| {
+        anyhow::anyhow!(
+            "refusing to modify {}: `mcp_servers.locus.env` is not a table.\n  \
+             Fix the file or move it aside, then re-run.",
+            path.display()
+        )
+    })?;
+    env.insert("LOCUS_AUTO_PIN", value("cwd"));
+    env.insert("LOCUS_CLIENT", value(client));
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, doc.to_string())?;
+    Ok(())
+}
+
+/// Register the locus server at Claude Code **user scope** by shelling out to
+/// the claude CLI (`claude mcp add-json locus '<json>' --scope user`).
+///
+/// `~/.claude.json` is a mixed-state file owned by Claude Code (per-project
+/// state, approval lists, runtime state) with no documented stability
+/// guarantee, and a running session may write it concurrently — Locus never
+/// hand-edits it.
+///
+/// Add-first: the add is attempted **without** removing anything, so a
+/// failing add (not signed in, CLI broken, …) leaves a previous working
+/// registration untouched. Only when the CLI refuses with "already exists"
+/// (it never upserts) is the stale entry removed and the add retried — and
+/// if that retry then fails, the error reports honestly that the previous
+/// registration was removed and `locus` is currently unregistered at user
+/// scope (the CLI gives us no restorable snapshot of the old entry).
+fn claude_user_scope_register(
+    claude_bin: &std::path::Path,
+    server_entry: &serde_json::Value,
+) -> Result<()> {
+    let payload = serde_json::to_string(server_entry)?;
+    let run_add = || -> Result<std::process::Output> {
+        Command::new(claude_bin)
+            .args(["mcp", "add-json", "locus", &payload, "--scope", "user"])
+            .stdin(Stdio::null())
+            .output()
+            .with_context(|| format!("failed to run {} mcp add-json", claude_bin.display()))
+    };
+    let cli_error_text = |out: &std::process::Output| -> String {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if stderr.is_empty() {
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        } else {
+            stderr
         }
-        std::fs::write(path, section.trim_start())?;
+    };
+
+    let first = run_add()?;
+    if first.status.success() {
+        return Ok(());
+    }
+    let first_error = cli_error_text(&first);
+    if !first_error.to_ascii_lowercase().contains("already exists") {
+        // Nothing was removed — the previous registration (if any) is intact.
+        bail!(
+            "`claude mcp add-json locus … --scope user` failed ({}):\n{}\n  \
+             Nothing was changed (any existing registration is intact). Fix \
+             the claude CLI error above and re-run, or use \
+             --claude-scope project.",
+            first.status,
+            first_error
+        );
+    }
+
+    // Stale entry: the CLI refuses to overwrite an existing name, so heal by
+    // removing it and re-adding. Only now is the previous registration
+    // touched. Remove failure falls through to the re-add, which reports the
+    // real error.
+    let _ = Command::new(claude_bin)
+        .args(["mcp", "remove", "locus", "--scope", "user"])
+        .stdin(Stdio::null())
+        .output();
+
+    let second = run_add()?;
+    if !second.status.success() {
+        bail!(
+            "`claude mcp add-json locus … --scope user` failed ({}) after the \
+             existing `locus` entry was removed to replace it:\n{}\n  \
+             The previous user-scope registration was removed and could not \
+             be restored — `locus` is currently NOT registered at user scope. \
+             Fix the claude CLI error above and re-run, register manually \
+             (`claude mcp add-json locus '<server-json>' --scope user`), or \
+             use --claude-scope project.",
+            second.status,
+            cli_error_text(&second)
+        );
     }
     Ok(())
+}
+
+/// Post-write verification for user-scope Claude registration: the config
+/// lives in CLI-managed `~/.claude.json`, so ask the CLI (`claude mcp get
+/// locus`) instead of probing files. Exit 0 ⇒ registered.
+fn claude_user_scope_verify(claude_bin: &std::path::Path) -> Result<bool> {
+    let out = Command::new(claude_bin)
+        .args(["mcp", "get", "locus"])
+        .stdin(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to run {} mcp get locus", claude_bin.display()))?;
+    Ok(out.status.success())
 }
 
 /// Compact NDJSON tick for hub continuous whoami / `locus watch`.
@@ -4507,6 +5769,7 @@ fn print_doctor_human(report: &locus_core::DoctorReport) {
             let mark = match f.severity {
                 locus_core::IssueSeverity::Unsafe => "!".red().bold().to_string(),
                 locus_core::IssueSeverity::Warn => "!".yellow().to_string(),
+                locus_core::IssueSeverity::Info => "i".dimmed().to_string(),
             };
             println!("  {mark} [{}] {}", f.code, f.message);
         }
@@ -4521,114 +5784,15 @@ fn format_credential_issues(issues: &[CredentialResolutionIssue]) -> String {
         .join(", ")
 }
 
-fn safe_provider_label(provider: &str) -> String {
-    if !provider.is_empty()
-        && provider.len() <= 64
-        && provider
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-    {
-        provider.to_ascii_lowercase()
-    } else {
-        "unknown".into()
-    }
-}
-
 /// Check Phantom locators internally and return provider/source metadata only.
+///
+/// Delegates to `locus_core` so the timeout-hardened, TTL-cached
+/// `phantom list` path is shared with the MCP doctor/heartbeat surfaces.
 fn collect_unresolved_phm_refs(
     s: &Store,
     phantom_on_path: bool,
 ) -> Result<Vec<CredentialResolutionIssue>> {
-    use locus_core::CredentialRef;
-
-    let summaries = s.list_bindings()?;
-    let mut needed: Vec<(String, String)> = Vec::new();
-    for sum in summaries {
-        let b = match s.load_binding(&sum.alias) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-        for p in &b.providers {
-            if let CredentialRef::Phantom { name } = CredentialRef::parse(&p.credential_ref) {
-                let provider = safe_provider_label(&p.provider);
-                if !needed.iter().any(|(n, p)| n == &name && p == &provider) {
-                    needed.push((name, provider));
-                }
-            }
-        }
-    }
-    if needed.is_empty() {
-        return Ok(Vec::new());
-    }
-    if !phantom_on_path {
-        // Cannot verify — report all as unresolved so doctor surfaces the gap.
-        let mut issues = needed
-            .into_iter()
-            .map(|(_, provider)| CredentialResolutionIssue {
-                provider,
-                source: "phantom".into(),
-                code: "unavailable".into(),
-            })
-            .collect::<Vec<_>>();
-        issues.sort_by(|a, b| a.provider.cmp(&b.provider));
-        issues.dedup_by(|a, b| a.provider == b.provider);
-        return Ok(issues);
-    }
-
-    let known = phantom_list_names()?;
-    let mut unresolved: Vec<CredentialResolutionIssue> = needed
-        .into_iter()
-        .filter(|(name, _)| !known.iter().any(|known_name| known_name == name))
-        .map(|(_, provider)| CredentialResolutionIssue {
-            provider,
-            source: "phantom".into(),
-            code: "unavailable".into(),
-        })
-        .collect();
-    unresolved.sort_by(|a, b| a.provider.cmp(&b.provider));
-    unresolved.dedup_by(|a, b| a.provider == b.provider);
-    Ok(unresolved)
-}
-
-/// Parse secret names from `phantom list` (best-effort; stdout shape may vary).
-fn phantom_list_names() -> Result<Vec<String>> {
-    let output = Command::new("phantom")
-        .arg("list")
-        .output()
-        .context("run phantom list")?;
-    if !output.status.success() {
-        // Treat as empty known set — doctor will flag all phm refs.
-        return Ok(Vec::new());
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut names = Vec::new();
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        // Common formats: bare NAME, "NAME ...", "  NAME", JSON-ish "name": "NAME"
-        let token = line
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == ':');
-        if token.is_empty() || token.contains('=') {
-            continue;
-        }
-        // Skip table headers / chrome
-        let lower = token.to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "name" | "secret" | "secrets" | "key" | "---" | "total"
-        ) {
-            continue;
-        }
-        if !names.iter().any(|n| n == token) {
-            names.push(token.to_string());
-        }
-    }
-    Ok(names)
+    Ok(locus_core::collect_unresolved_phm_refs(s, phantom_on_path)?)
 }
 
 fn cmd_hook(shell: &str) -> Result<()> {
@@ -4645,6 +5809,15 @@ fn cmd_hook(shell: &str) -> Result<()> {
 #   [locus:alias:tenant]    healthy pin
 # LOCUS_AUTO_ENTER=1 → on directory change, try `locus enter` (workspace default / autopin).
 # Never forces allowlist; never overrides with secrets.
+# Control capability: export the persisted operator capability (0600 file
+# minted by `locus quickstart`) when this shell does not already carry one.
+if [[ -z "${{LOCUS_CONTROL_CAPABILITY:-}}" ]]; then
+  _locus_cap="${{LOCUS_HOME:-$HOME/.locus}}/control_capability"
+  if [[ -r "$_locus_cap" ]]; then
+    export LOCUS_CONTROL_CAPABILITY="$(cat "$_locus_cap")"
+  fi
+  unset _locus_cap
+fi
 _locus_prompt() {{
   local s
   s="$(locus status --oneline 2>/dev/null)" || s="unpinned"
@@ -4683,6 +5856,11 @@ fi
                 r#"# Locus prompt helper for fish
 # [locus:enter] | [locus:enter!] (require_pin) | [locus:FROZEN] | [locus:alias:tenant]
 # LOCUS_AUTO_ENTER=1 → try enter when changing directories
+# Control capability: export the persisted operator capability if unset.
+set -l _locus_cap (test -n "$LOCUS_HOME"; and echo "$LOCUS_HOME"; or echo "$HOME/.locus")/control_capability
+if test -z "$LOCUS_CONTROL_CAPABILITY"; and test -r "$_locus_cap"
+  set -gx LOCUS_CONTROL_CAPABILITY (cat "$_locus_cap")
+end
 function locus_prompt
   set -l s (locus status --oneline 2>/dev/null; or echo unpinned)
   if test "$s" = "require_pin"
@@ -4722,29 +5900,128 @@ end
 }
 
 fn resolve_mcp_bin(mcp_bin: Option<String>) -> String {
+    resolve_mcp_bin_with_fallback(mcp_bin).0
+}
+
+/// Escape a string for interpolation into a TOML basic (double-quoted)
+/// string: backslashes, quotes, and control characters — a binary path with
+/// a quote or backslash must never produce invalid (or value-mangling) TOML.
+fn toml_basic_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{000C}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c == '\u{007F}' => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Canonical `[mcp_servers.locus]` TOML shape for paste into any stdio MCP
+/// client (Grok Build, Codex-style configs). Env comes from `mcp_agent_env`
+/// (LOCUS_AUTO_PIN=cwd + LOCUS_CLIENT — never LOCUS_NOTIFY). All interpolated
+/// values are TOML basic-string escaped.
+fn stdio_server_entry_toml(bin: &str, client: &str) -> String {
+    let mut out = String::new();
+    out.push_str("[mcp_servers.locus]\n");
+    out.push_str(&format!("command = \"{}\"\n", toml_basic_escape(bin)));
+    out.push_str("args = []\n\n[mcp_servers.locus.env]\n");
+    for (k, v) in mcp_agent_env(client) {
+        if let Some(value) = v.as_str() {
+            out.push_str(&format!("{k} = \"{}\"\n", toml_basic_escape(value)));
+        }
+    }
+    out
+}
+
+/// Resolve the locus-mcp launch command. The bool is true when resolution
+/// fell back to the bare name `locus-mcp` (no explicit `--mcp-bin`, no
+/// sibling binary next to the CLI) — GUI clients with a minimal PATH may
+/// fail to launch that.
+fn resolve_mcp_bin_with_fallback(mcp_bin: Option<String>) -> (String, bool) {
     if let Some(p) = mcp_bin {
-        return p;
+        return (p, false);
     }
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
             let candidate = dir.join("locus-mcp");
             if candidate.exists() {
-                return candidate.display().to_string();
+                return (candidate.display().to_string(), false);
             }
         }
     }
-    "locus-mcp".into()
+    ("locus-mcp".into(), true)
+}
+
+/// Fail closed on an explicit `--mcp-bin` that cannot launch: the path must
+/// exist, or a bare command name must be findable on PATH.
+fn validate_explicit_mcp_bin(bin: &str) -> Result<()> {
+    let p = std::path::Path::new(bin);
+    if p.exists() {
+        return Ok(());
+    }
+    let is_bare = !bin.contains(std::path::MAIN_SEPARATOR) && !bin.contains('/');
+    if is_bare && find_on_path(bin).is_some() {
+        return Ok(());
+    }
+    bail!(
+        "--mcp-bin {bin} does not exist{} — pass the path to a built locus-mcp \
+         (e.g. ./target/release/locus-mcp) or omit --mcp-bin to auto-resolve",
+        if is_bare {
+            " and was not found on PATH"
+        } else {
+            ""
+        }
+    );
+}
+
+/// Locate a bare command name on PATH (first hit wins).
+fn find_on_path(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|d| d.join(name))
+        .find(|c| c.is_file())
+}
+
+/// Requested clients whose registration the post-write probe could not
+/// confirm — the regression net for merge no-ops and unwritable configs.
+fn mcp_verify_failures<'a>(clients: &[&'a str], probe: &McpRegistered) -> Vec<&'a str> {
+    clients
+        .iter()
+        .copied()
+        .filter(|c| match *c {
+            "claude" => !probe.claude,
+            "cursor" => !probe.cursor,
+            "codex" => !probe.codex,
+            "grok" => !probe.grok,
+            _ => false,
+        })
+        .collect()
 }
 
 fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<()> {
-    if !print_only && matches!(client, "claude" | "cursor") {
+    if !print_only && matches!(client, "claude" | "cursor" | "codex" | "grok") {
         require_local_control_boundary("locus setup")?;
     }
     let bin = resolve_mcp_bin(mcp_bin);
+    // Same env path as `locus agent setup` — LOCUS_AUTO_PIN=cwd + LOCUS_CLIENT,
+    // never LOCUS_NOTIFY. Keeps first-run `locus setup` from silently diverging
+    // from the agent-setup playbooks (auto-pin missing = ambient identity).
+    // `type: "stdio"` is documented as required by Cursor; harmless elsewhere.
     let server_entry = serde_json::json!({
+        "type": "stdio",
         "command": bin,
         "args": [],
-        "env": {}
+        "env": mcp_agent_env(client),
     });
 
     match client {
@@ -4794,22 +6071,56 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
                 }
             }
         }
-        "codex" => {
-            println!("{}", "Codex setup".magenta().bold());
-            println!("Add to ~/.codex/config.toml:");
-            println!();
-            println!("[mcp_servers.locus]");
-            println!("command = \"{bin}\"");
+        "grok" => {
+            // Grok Build: documented config at ~/.grok/config.toml with
+            // Codex-style [mcp_servers.<name>] tables — same fail-closed
+            // toml_edit merge as codex.
             if print_only {
+                println!("{}", stdio_server_entry_toml(&bin, client));
                 return Ok(());
             }
-            println!();
-            println!(
-                "{} printed instructions (codex uses TOML — merge manually)",
-                "->".dimmed()
-            );
+            let home = dirs::home_dir().context("home dir for grok config")?;
+            let path = home.join(".grok").join("config.toml");
+            merge_codex_mcp(&path, &bin, "grok")?;
+            println!("{} wrote/merged {}", "ok".green().bold(), path.display());
+            println!("   verify: locus agent doctor   # mcp_registered.grok");
         }
-        other => bail!("unknown client: {other} (claude|cursor|codex)"),
+        "generic" => {
+            // Any generic stdio MCP client: no known on-disk config path, so
+            // never write — emit both shapes for paste (`--print` implied).
+            println!("# Locus MCP server entry — paste into the client's MCP settings.");
+            println!("# Generic client config path unknown; nothing was written.");
+            println!("# JSON shape (mcpServers-style clients):");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "mcpServers": { "locus": server_entry }
+                }))?
+            );
+            println!();
+            println!("# TOML shape (Codex-style clients):");
+            println!("{}", stdio_server_entry_toml(&bin, client));
+            println!("# Optional: export LOCUS_GROK_MCP_CONFIG=<path-to-its-config> so");
+            println!("# `locus agent doctor` / `locus agent report` can verify registration");
+            println!("# (JSON mcpServers shape or TOML [mcp_servers] shape).");
+            return Ok(());
+        }
+        "codex" => {
+            if print_only {
+                println!("[mcp_servers.locus]");
+                println!("command = \"{bin}\"");
+                println!();
+                println!("[mcp_servers.locus.env]");
+                println!("LOCUS_AUTO_PIN = \"cwd\"");
+                println!("LOCUS_CLIENT = \"codex\"");
+                return Ok(());
+            }
+            let home = dirs::home_dir().context("home dir for codex config")?;
+            let path = home.join(".codex").join("config.toml");
+            merge_codex_mcp(&path, &bin, "codex")?;
+            println!("{} wrote/merged {}", "ok".green().bold(), path.display());
+        }
+        other => bail!("unknown client: {other} (claude|cursor|codex|grok|generic)"),
     }
 
     println!();
@@ -5530,15 +6841,33 @@ fn escape_applescript_dialog(s: &str) -> String {
 }
 
 /// Merge a single server entry into an mcpServers JSON file.
+///
+/// Fail closed: a malformed file (bad JSON, non-object root, non-object
+/// `mcpServers`) is left byte-for-byte unchanged and the merge errors with a
+/// remediation hint — replacing it would silently destroy every other
+/// registered MCP server.
 fn merge_mcp_json(path: &std::path::Path, name: &str, server: &serde_json::Value) -> Result<()> {
     let mut root: serde_json::Value = if path.exists() {
         let raw = std::fs::read_to_string(path)?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| json!({ "mcpServers": {} }))
+        serde_json::from_str(&raw).map_err(|e| {
+            anyhow::anyhow!(
+                "refusing to modify {}: not valid JSON ({e}).\n  \
+                 Fix the file (check it with `jq . {}`) or move it aside, then re-run.\n  \
+                 Locus never overwrites a config it cannot parse — other MCP servers \
+                 registered there would be lost.",
+                path.display(),
+                path.display()
+            )
+        })?
     } else {
         json!({ "mcpServers": {} })
     };
     if !root.is_object() {
-        root = json!({ "mcpServers": {} });
+        bail!(
+            "refusing to modify {}: JSON root is not an object.\n  \
+             Expected {{ \"mcpServers\": {{ ... }} }}. Fix the file or move it aside, then re-run.",
+            path.display()
+        );
     }
     let servers = root
         .as_object_mut()
@@ -5546,7 +6875,11 @@ fn merge_mcp_json(path: &std::path::Path, name: &str, server: &serde_json::Value
         .entry("mcpServers")
         .or_insert_with(|| json!({}));
     if !servers.is_object() {
-        *servers = json!({});
+        bail!(
+            "refusing to modify {}: \"mcpServers\" is not an object.\n  \
+             Fix the file or move it aside, then re-run.",
+            path.display()
+        );
     }
     servers
         .as_object_mut()
@@ -5554,6 +6887,895 @@ fn merge_mcp_json(path: &std::path::Path, name: &str, server: &serde_json::Value
         .insert(name.to_string(), server.clone());
     std::fs::write(path, serde_json::to_string_pretty(&root)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod setup_merge_tests {
+    use super::{
+        claude_user_scope_register, claude_user_scope_verify, mcp_verify_failures, merge_codex_mcp,
+        merge_mcp_json, resolve_mcp_bin_with_fallback, validate_explicit_mcp_bin,
+    };
+    use locus_core::McpRegistered;
+    use serde_json::json;
+
+    fn server_entry() -> serde_json::Value {
+        json!({"command": "/bin/locus-mcp", "args": [], "env": {"LOCUS_AUTO_PIN": "cwd"}})
+    }
+
+    // ── merge_mcp_json: fail closed on malformed input ──────────────────
+
+    #[test]
+    fn mcp_json_malformed_file_left_unchanged_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".mcp.json");
+        let malformed = "{ this is not json";
+        std::fs::write(&path, malformed).unwrap();
+        let r = merge_mcp_json(&path, "locus", &server_entry());
+        assert!(r.is_err(), "malformed JSON must fail closed");
+        let msg = r.unwrap_err().to_string();
+        assert!(msg.contains("refusing to modify"), "remediation msg: {msg}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            malformed,
+            "file must be byte-for-byte unchanged"
+        );
+    }
+
+    #[test]
+    fn mcp_json_non_object_root_left_unchanged_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".mcp.json");
+        std::fs::write(&path, "[1, 2, 3]").unwrap();
+        let r = merge_mcp_json(&path, "locus", &server_entry());
+        assert!(r.is_err(), "non-object root must fail closed");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[1, 2, 3]");
+    }
+
+    #[test]
+    fn mcp_json_non_object_mcp_servers_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".mcp.json");
+        std::fs::write(&path, r#"{"mcpServers": "oops"}"#).unwrap();
+        assert!(merge_mcp_json(&path, "locus", &server_entry()).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            r#"{"mcpServers": "oops"}"#
+        );
+    }
+
+    #[test]
+    fn mcp_json_preserves_other_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".mcp.json");
+        std::fs::write(
+            &path,
+            r#"{"mcpServers": {"phantom": {"command": "phm-mcp"}}, "otherKey": true}"#,
+        )
+        .unwrap();
+        merge_mcp_json(&path, "locus", &server_entry()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["mcpServers"]["phantom"]["command"], "phm-mcp");
+        assert_eq!(v["mcpServers"]["locus"]["command"], "/bin/locus-mcp");
+        assert_eq!(v["otherKey"], true);
+    }
+
+    #[test]
+    fn mcp_json_creates_fresh_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".mcp.json");
+        merge_mcp_json(&path, "locus", &server_entry()).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["mcpServers"]["locus"]["env"]["LOCUS_AUTO_PIN"], "cwd");
+    }
+
+    // ── merge_codex_mcp: format-preserving upsert ───────────────────────
+
+    #[test]
+    fn codex_malformed_file_left_unchanged_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let malformed = "[mcp_servers.locus\ncommand=";
+        std::fs::write(&path, malformed).unwrap();
+        let r = merge_codex_mcp(&path, "/bin/locus-mcp", "codex");
+        assert!(r.is_err(), "malformed TOML must fail closed");
+        assert!(r.unwrap_err().to_string().contains("refusing to modify"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), malformed);
+    }
+
+    #[test]
+    fn codex_stale_entry_updated_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Pre-env-era entry with a stale binary path and no env table.
+        std::fs::write(
+            &path,
+            "[mcp_servers.locus]\ncommand = \"/old/gone/locus-mcp\"\n",
+        )
+        .unwrap();
+        merge_codex_mcp(&path, "/new/locus-mcp", "codex").unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let v: toml::Value = raw.parse().unwrap();
+        let locus = &v["mcp_servers"]["locus"];
+        assert_eq!(locus["command"].as_str(), Some("/new/locus-mcp"));
+        assert_eq!(locus["env"]["LOCUS_AUTO_PIN"].as_str(), Some("cwd"));
+        assert_eq!(locus["env"]["LOCUS_CLIENT"].as_str(), Some("codex"));
+        assert!(!raw.contains("/old/gone/"), "stale command must be healed");
+    }
+
+    #[test]
+    fn codex_other_servers_and_comments_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my codex config\nmodel = \"o4\"\n\n[mcp_servers.phantom]\ncommand = \"phm-mcp\"\n",
+        )
+        .unwrap();
+        merge_codex_mcp(&path, "/bin/locus-mcp", "codex").unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# my codex config"), "comments preserved");
+        let v: toml::Value = raw.parse().unwrap();
+        assert_eq!(v["model"].as_str(), Some("o4"));
+        assert_eq!(
+            v["mcp_servers"]["phantom"]["command"].as_str(),
+            Some("phm-mcp")
+        );
+        assert_eq!(
+            v["mcp_servers"]["locus"]["command"].as_str(),
+            Some("/bin/locus-mcp")
+        );
+    }
+
+    #[test]
+    fn codex_repeat_merge_no_duplicate_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        merge_codex_mcp(&path, "/bin/locus-mcp", "codex").unwrap();
+        merge_codex_mcp(&path, "/bin/locus-mcp-v2", "codex").unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // Must stay valid TOML (duplicate table headers would fail the parse).
+        let v: toml::Value = raw.parse().unwrap();
+        assert_eq!(
+            v["mcp_servers"]["locus"]["command"].as_str(),
+            Some("/bin/locus-mcp-v2")
+        );
+        assert_eq!(raw.matches("[mcp_servers.locus]").count(), 1);
+    }
+
+    #[test]
+    fn codex_inline_table_entry_upserted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[mcp_servers]\nlocus = { command = \"/old/locus-mcp\" }\n",
+        )
+        .unwrap();
+        merge_codex_mcp(&path, "/new/locus-mcp", "codex").unwrap();
+        let v: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            v["mcp_servers"]["locus"]["command"].as_str(),
+            Some("/new/locus-mcp")
+        );
+        assert_eq!(
+            v["mcp_servers"]["locus"]["env"]["LOCUS_CLIENT"].as_str(),
+            Some("codex")
+        );
+    }
+
+    #[test]
+    fn codex_creates_parent_dir_and_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".codex").join("config.toml");
+        merge_codex_mcp(&path, "/bin/locus-mcp", "codex").unwrap();
+        let v: toml::Value = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            v["mcp_servers"]["locus"]["env"]["LOCUS_AUTO_PIN"].as_str(),
+            Some("cwd")
+        );
+    }
+
+    // ── agent setup post-write verification helpers ─────────────────────
+
+    #[test]
+    fn verify_failures_name_unregistered_clients_only() {
+        let probe = McpRegistered {
+            claude: true,
+            cursor: false,
+            codex: false,
+            grok: false,
+        };
+        assert_eq!(
+            mcp_verify_failures(&["claude", "cursor", "codex"], &probe),
+            vec!["cursor", "codex"]
+        );
+        assert!(mcp_verify_failures(&["claude"], &probe).is_empty());
+        // Grok Build now has a real write path (~/.grok/config.toml) and is
+        // verified like the other on-disk clients.
+        assert_eq!(
+            mcp_verify_failures(&["claude", "grok"], &probe),
+            vec!["grok"]
+        );
+        let probe_grok = McpRegistered {
+            grok: true,
+            ..probe.clone()
+        };
+        assert!(mcp_verify_failures(&["grok"], &probe_grok).is_empty());
+    }
+
+    // ── claude user scope: CLI-managed registration (mock PATH shim) ────
+
+    /// Executable `claude` stand-in recording its argv; unix-only (shebang).
+    #[cfg(unix)]
+    fn write_claude_shim(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("claude");
+        std::fs::write(&p, body).unwrap();
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&p, perms).unwrap();
+        p
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_user_scope_register_adds_first_without_touching_existing_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls.log");
+        let shim = write_claude_shim(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+                log.display()
+            ),
+        );
+        let entry = json!({
+            "type": "stdio",
+            "command": "/bin/locus-mcp",
+            "args": [],
+            "env": {"LOCUS_AUTO_PIN": "cwd", "LOCUS_CLIENT": "claude"},
+        });
+        claude_user_scope_register(&shim, &entry).unwrap();
+
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = calls.lines().collect();
+        // Add-first: a clean add never removes anything.
+        assert_eq!(lines.len(), 1, "no removal on a clean add: {calls}");
+        let add = lines[0];
+        let payload = add
+            .strip_prefix("mcp add-json locus ")
+            .and_then(|r| r.strip_suffix(" --scope user"))
+            .unwrap_or_else(|| panic!("unexpected add-json argv: {add}"));
+        // Payload is the exact server entry — stdio type, agent env, never
+        // LOCUS_NOTIFY.
+        let v: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(v, entry);
+        assert!(v["env"].get("LOCUS_NOTIFY").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_user_scope_register_heals_stale_entry_with_remove_then_readd() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls.log");
+        let marker = dir.path().join("removed.marker");
+        // "already exists" until the entry is removed; then adds succeed.
+        let shim = write_claude_shim(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\n\
+                 printf '%s\\n' \"$*\" >> '{log}'\n\
+                 if [ \"$2\" = \"remove\" ]; then touch '{marker}'; exit 0; fi\n\
+                 if [ \"$2\" = \"add-json\" ] && [ ! -f '{marker}' ]; then\n\
+                   echo 'MCP server locus already exists in user config' >&2; exit 1\n\
+                 fi\n\
+                 exit 0\n",
+                log = log.display(),
+                marker = marker.display()
+            ),
+        );
+        let entry = json!({"type": "stdio", "command": "/bin/locus-mcp"});
+        claude_user_scope_register(&shim, &entry).unwrap();
+
+        let calls = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = calls.lines().collect();
+        assert_eq!(lines.len(), 3, "{calls}");
+        assert!(lines[0].starts_with("mcp add-json locus "), "{calls}");
+        assert_eq!(lines[1], "mcp remove locus --scope user", "{calls}");
+        assert!(lines[2].starts_with("mcp add-json locus "), "{calls}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_user_scope_register_fails_closed_with_cli_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("calls.log");
+        let shim = write_claude_shim(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\n\
+                 printf '%s\\n' \"$*\" >> '{}'\n\
+                 if [ \"$2\" = \"add-json\" ]; then echo 'boom: not signed in' >&2; exit 3; fi\n\
+                 exit 0\n",
+                log.display()
+            ),
+        );
+        let entry = json!({"type": "stdio", "command": "/bin/locus-mcp"});
+        let err = claude_user_scope_register(&shim, &entry)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("claude mcp add-json"),
+            "names the command: {err}"
+        );
+        assert!(
+            err.contains("boom: not signed in"),
+            "surfaces stderr: {err}"
+        );
+        // Honest: nothing was removed, and the error says so.
+        assert!(err.contains("Nothing was changed"), "{err}");
+        let calls = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            !calls.contains("mcp remove"),
+            "a failing add must never delete the previous registration: {calls}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_user_scope_register_reports_honestly_when_readd_fails_after_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("removed.marker");
+        // First add: "already exists". Remove succeeds. Re-add: hard failure.
+        let shim = write_claude_shim(
+            dir.path(),
+            &format!(
+                "#!/bin/sh\n\
+                 if [ \"$2\" = \"remove\" ]; then touch '{marker}'; exit 0; fi\n\
+                 if [ \"$2\" = \"add-json\" ] && [ ! -f '{marker}' ]; then\n\
+                   echo 'MCP server locus already exists in user config' >&2; exit 1\n\
+                 fi\n\
+                 if [ \"$2\" = \"add-json\" ]; then echo 'boom: broke mid-heal' >&2; exit 3; fi\n\
+                 exit 0\n",
+                marker = marker.display()
+            ),
+        );
+        let entry = json!({"type": "stdio", "command": "/bin/locus-mcp"});
+        let err = claude_user_scope_register(&shim, &entry)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("boom: broke mid-heal"), "{err}");
+        // Honest about the resulting state: previous entry removed, not restored.
+        assert!(err.contains("was removed"), "{err}");
+        assert!(err.contains("NOT registered"), "{err}");
+        assert!(
+            !err.contains("Nothing was changed"),
+            "must not claim nothing changed after the removal: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_user_scope_verify_reflects_cli_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let ok = write_claude_shim(dir.path(), "#!/bin/sh\nexit 0\n");
+        assert!(claude_user_scope_verify(&ok).unwrap());
+        let dir2 = tempfile::tempdir().unwrap();
+        let missing = write_claude_shim(dir2.path(), "#!/bin/sh\nexit 1\n");
+        assert!(!claude_user_scope_verify(&missing).unwrap());
+    }
+
+    #[test]
+    fn explicit_mcp_bin_must_exist() {
+        let r = validate_explicit_mcp_bin("/definitely/not/a/real/locus-mcp");
+        assert!(r.is_err(), "nonexistent explicit --mcp-bin must error");
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("locus-mcp");
+        std::fs::write(&f, "").unwrap();
+        assert!(validate_explicit_mcp_bin(&f.display().to_string()).is_ok());
+    }
+
+    #[test]
+    fn resolve_mcp_bin_reports_explicit_as_non_fallback() {
+        let (bin, fallback) = resolve_mcp_bin_with_fallback(Some("/x/locus-mcp".into()));
+        assert_eq!(bin, "/x/locus-mcp");
+        assert!(!fallback);
+    }
+}
+
+#[cfg(test)]
+mod capability_posture_tests {
+    use super::{bootstrap_control_capability_plan, capability_posture};
+    use locus_core::{Binding, BindingBody, Policy, ProviderBinding, Scope, Store};
+
+    fn sample_binding(alias: &str) -> Binding {
+        Binding::from_body(BindingBody {
+            id: format!("bnd_{alias}"),
+            alias: alias.into(),
+            tenant: "t".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "github".into(),
+                account: "a".into(),
+                credential_ref: "phm:X".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        })
+    }
+
+    #[test]
+    fn no_persist_flag_mints_env_only_and_pin_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).unwrap();
+
+        let (value, note) = bootstrap_control_capability_plan(s.home(), false)
+            .unwrap()
+            .expect("fresh store must mint");
+        // Never written to disk; the export line is the operator's copy.
+        assert!(!locus_core::control_capability_file(s.home()).exists());
+        assert_eq!(value.len(), 64);
+        assert!(note.contains("NOT persisted"), "{note}");
+        assert!(
+            note.contains(&format!("export LOCUS_CONTROL_CAPABILITY=\"{value}\"")),
+            "{note}"
+        );
+
+        // Control-plane operations keep working under the strict posture.
+        s.save_binding(&sample_binding("personal")).unwrap();
+        s.pin("personal", dir.path(), None, false).unwrap();
+        assert!(s.active_session().unwrap().is_some());
+        assert!(!locus_core::control_capability_file(s.home()).exists());
+    }
+
+    #[test]
+    fn default_plan_persists_and_never_prints_the_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).unwrap();
+
+        let (value, note) = bootstrap_control_capability_plan(s.home(), true)
+            .unwrap()
+            .expect("fresh store must mint");
+        assert!(locus_core::control_capability_file(s.home()).exists());
+        assert!(
+            !note.contains(&value),
+            "persisted note must not carry the bearer: {note}"
+        );
+        assert!(note.contains("(0600)"), "{note}");
+
+        // Second run adopts the persisted value (both postures).
+        for persist in [true, false] {
+            let (adopted, note) = bootstrap_control_capability_plan(s.home(), persist)
+                .unwrap()
+                .expect("persisted value adopted");
+            assert_eq!(adopted, value);
+            assert!(note.contains("adopted persisted"), "{note}");
+            if !persist {
+                assert!(note.contains("locus capability unpersist"), "{note}");
+            }
+        }
+    }
+
+    #[test]
+    fn persist_unpersist_round_trip_via_core() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let value = locus_core::mint_ephemeral_control_capability();
+
+        locus_core::persist_control_capability(home, &value).unwrap();
+        assert_eq!(
+            locus_core::read_persisted_control_capability(home).unwrap(),
+            Some(value.clone())
+        );
+        assert!(locus_core::unpersist_control_capability(home).unwrap());
+        assert_eq!(
+            locus_core::read_persisted_control_capability(home).unwrap(),
+            None
+        );
+        assert!(!locus_core::unpersist_control_capability(home).unwrap());
+    }
+
+    #[test]
+    fn status_posture_labels() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+
+        // Neither env nor file (status reads real process env for the control
+        // var, which test runs leave unset).
+        let status = locus_core::control_capability_status(home);
+        let label = capability_posture(&status);
+        assert!(label == "absent" || label == "env+persisted" || label == "env-only");
+        if !status.env_present {
+            assert_eq!(label, "absent");
+
+            // Persisted only.
+            let value = locus_core::mint_ephemeral_control_capability();
+            locus_core::persist_control_capability(home, &value).unwrap();
+            let status = locus_core::control_capability_status(home);
+            assert_eq!(capability_posture(&status), "persisted");
+            assert!(status.persisted_valid && status.persisted_permissions_ok);
+        }
+    }
+}
+
+#[cfg(test)]
+mod alias_ux_tests {
+    use super::{edit_distance, nearest_alias, stdio_server_entry_toml, with_alias_suggestions};
+    use locus_core::{Binding, BindingBody, LocusError, Policy, ProviderBinding, Scope, Store};
+
+    fn binding(alias: &str) -> Binding {
+        Binding::from_body(BindingBody {
+            id: format!("bnd_{alias}"),
+            alias: alias.into(),
+            tenant: "t".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "github".into(),
+                account: "a".into(),
+                credential_ref: "phm:X".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        })
+    }
+
+    #[test]
+    fn edit_distance_and_nearest_alias() {
+        assert_eq!(edit_distance("personal", "personal"), 0);
+        assert_eq!(edit_distance("personol", "personal"), 1);
+        assert_eq!(edit_distance("", "abc"), 3);
+
+        let aliases = vec![
+            "personal".to_string(),
+            "ashlrai".to_string(),
+            "cash-margin-partners".to_string(),
+        ];
+        assert_eq!(nearest_alias("personol", &aliases), Some("personal"));
+        assert_eq!(nearest_alias("ashlari", &aliases), Some("ashlrai"));
+        // Case-insensitive.
+        assert_eq!(nearest_alias("Personal", &aliases), Some("personal"));
+        // A completely different word gets no suggestion.
+        assert_eq!(nearest_alias("zzzzzzzzzz", &aliases), None);
+    }
+
+    #[test]
+    fn binding_not_found_lists_aliases_and_suggests() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).unwrap();
+        s.save_binding(&binding("personal")).unwrap();
+        s.save_binding(&binding("ashlrai")).unwrap();
+
+        let err = with_alias_suggestions(&s, LocusError::BindingNotFound("personol".into()));
+        let msg = format!("{err:#}");
+        assert!(msg.contains("binding not found: personol"), "{msg}");
+        assert!(msg.contains("personal") && msg.contains("ashlrai"), "{msg}");
+        assert!(msg.contains("did you mean `personal`?"), "{msg}");
+
+        // Other error kinds pass through untouched.
+        let err = with_alias_suggestions(&s, LocusError::NotPinned);
+        assert!(format!("{err:#}").contains("no active pin"));
+    }
+
+    #[test]
+    fn binding_not_found_empty_store_points_at_init() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).unwrap();
+        let err = with_alias_suggestions(&s, LocusError::BindingNotFound("acme".into()));
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no bindings exist yet"), "{msg}");
+        assert!(msg.contains("locus init --with-samples"), "{msg}");
+    }
+
+    #[test]
+    fn stdio_toml_entry_carries_agent_env() {
+        let toml = stdio_server_entry_toml("/usr/local/bin/locus-mcp", "grok");
+        assert!(toml.contains("[mcp_servers.locus]"));
+        assert!(toml.contains("command = \"/usr/local/bin/locus-mcp\""));
+        assert!(toml.contains("[mcp_servers.locus.env]"));
+        assert!(toml.contains("LOCUS_AUTO_PIN = \"cwd\""));
+        assert!(toml.contains("LOCUS_CLIENT = \"grok\""));
+        assert!(!toml.contains("LOCUS_NOTIFY"));
+    }
+
+    /// Regression: a binary path containing quotes/backslashes must produce
+    /// valid TOML that round-trips the exact path (basic-string escaping).
+    #[test]
+    fn stdio_toml_entry_escapes_hostile_paths() {
+        for bin in [
+            "/we\"ird/pa\\th/locus-mcp",
+            "C:\\Program Files\\locus\\locus-mcp.exe",
+            "/tab\there/locus-mcp",
+        ] {
+            let toml = stdio_server_entry_toml(bin, "grok");
+            let doc: toml_edit::DocumentMut = toml
+                .parse()
+                .unwrap_or_else(|e| panic!("emitted TOML must parse ({bin}): {e}\n{toml}"));
+            let command = doc["mcp_servers"]["locus"]["command"]
+                .as_str()
+                .expect("command is a string");
+            assert_eq!(command, bin, "escaped value must round-trip:\n{toml}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod ttl_and_client_add_tests {
+    use super::{
+        binding_from_answers, human_dur, missing_add_flags, parse_pin_ttl, resolve_add_answers,
+        scope_prompts, split_repos, AddAnswers, BindingAddArgs,
+    };
+    use locus_core::Store;
+
+    fn full_args() -> BindingAddArgs {
+        BindingAddArgs {
+            alias: Some("cmp".into()),
+            tenant: Some("cash-margin-partners".into()),
+            provider: Some("supabase".into()),
+            account: Some("cmp-prod".into()),
+            credential_ref: Some("phm:CMP_SUPABASE".into()),
+            project_ref: Some("abcdefghij".into()),
+            ..BindingAddArgs::default()
+        }
+    }
+
+    #[test]
+    fn parse_pin_ttl_bounds() {
+        assert_eq!(parse_pin_ttl("90m").unwrap(), chrono::Duration::minutes(90));
+        assert_eq!(parse_pin_ttl("2h").unwrap(), chrono::Duration::hours(2));
+        assert_eq!(parse_pin_ttl("1d").unwrap(), chrono::Duration::hours(24));
+        assert_eq!(parse_pin_ttl("1m").unwrap(), chrono::Duration::minutes(1));
+
+        for (bad, frag) in [
+            ("0m", "too short"),
+            ("-5m", "too short"),
+            ("30s", "too short"),
+            ("25h", "too long"),
+            ("abc", "invalid --ttl"),
+            ("", "invalid --ttl"),
+        ] {
+            let err = parse_pin_ttl(bad).unwrap_err().to_string();
+            assert!(err.contains(frag), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn human_dur_table() {
+        use chrono::Duration as D;
+        assert_eq!(human_dur(D::seconds(90)), "90s");
+        assert_eq!(human_dur(D::minutes(45)), "45m");
+        assert_eq!(human_dur(D::minutes(90)), "1h30m");
+        assert_eq!(human_dur(D::hours(2)), "2h");
+        assert_eq!(human_dur(D::seconds(-5)), "0s");
+    }
+
+    #[test]
+    fn missing_flags_enumerated() {
+        let args = BindingAddArgs::default();
+        let err = resolve_add_answers(&args).unwrap_err().to_string();
+        assert!(err.contains("<alias>"), "{err}");
+        for f in ["--tenant", "--provider", "--account", "--credential-ref"] {
+            assert!(err.contains(f), "{err}");
+        }
+        assert!(err.contains("non-interactive"), "{err}");
+        assert!(missing_add_flags(&full_args()).is_empty());
+    }
+
+    #[test]
+    fn raw_secrets_never_accepted_as_credential_ref() {
+        for raw in ["sk-live-abc123", "some raw secret", "test:x"] {
+            let mut args = full_args();
+            args.credential_ref = Some(raw.into());
+            let err = resolve_add_answers(&args).unwrap_err().to_string();
+            assert!(err.contains("invalid credential_ref"), "{raw}: {err}");
+        }
+        // Conservative bare Phantom name → did-you-mean, still rejected.
+        let mut args = full_args();
+        args.credential_ref = Some("MYSECRET".into());
+        let err = resolve_add_answers(&args).unwrap_err().to_string();
+        assert!(err.contains("did you mean 'phm:MYSECRET'"), "{err}");
+        // Pointers accepted.
+        for good in ["phm:CMP_SUPABASE", "env:CMP_TOKEN"] {
+            let mut args = full_args();
+            args.credential_ref = Some(good.into());
+            assert!(resolve_add_answers(&args).is_ok(), "{good}");
+        }
+    }
+
+    #[test]
+    fn binding_from_answers_maps_provider_scopes() {
+        let base = AddAnswers {
+            alias: "cmp".into(),
+            tenant: "cmp".into(),
+            account: "acct".into(),
+            credential_ref: "phm:X".into(),
+            ..AddAnswers::default()
+        };
+
+        let b = binding_from_answers(&AddAnswers {
+            provider: "supabase".into(),
+            project_ref: Some("ref123".into()),
+            read_only: true,
+            ..base.clone()
+        });
+        let p = &b.providers[0];
+        assert_eq!(p.scope.project_ref.as_deref(), Some("ref123"));
+        assert_eq!(p.scope.read_only, Some(true));
+
+        let b = binding_from_answers(&AddAnswers {
+            provider: "github".into(),
+            org: Some("cmp-org".into()),
+            repos: split_repos(Some("a, b,,c")),
+            ..base.clone()
+        });
+        let p = &b.providers[0];
+        assert_eq!(p.scope.orgs, vec!["cmp-org"]);
+        assert_eq!(p.scope.repos, vec!["a", "b", "c"]);
+        assert_eq!(p.scope.read_only, None, "read_only only when set");
+
+        for prov in ["aws", "stripe", "cloudflare"] {
+            let b = binding_from_answers(&AddAnswers {
+                provider: prov.into(),
+                account_id: Some("acct-1".into()),
+                ..base.clone()
+            });
+            assert_eq!(b.providers[0].scope.account_id.as_deref(), Some("acct-1"));
+        }
+
+        let b = binding_from_answers(&AddAnswers {
+            provider: "vercel".into(),
+            team_id: Some("team_1".into()),
+            ..base.clone()
+        });
+        assert_eq!(b.providers[0].scope.team_id.as_deref(), Some("team_1"));
+
+        let b = binding_from_answers(&AddAnswers {
+            provider: "resend".into(),
+            default_ttl: Some("2h".into()),
+            ..base
+        });
+        assert_eq!(b.policy.default_ttl.as_deref(), Some("2h"));
+        assert_eq!(b.id, "bnd_cmp");
+    }
+
+    #[test]
+    fn scope_prompt_table_covers_known_providers() {
+        assert_eq!(scope_prompts("supabase"), &[("project_ref", true)]);
+        assert_eq!(scope_prompts("github"), &[("org", true), ("repos", false)]);
+        assert_eq!(
+            scope_prompts("vercel"),
+            &[("team_id", true), ("project_ref", false)]
+        );
+        assert_eq!(scope_prompts("aws"), &[("account_id", true)]);
+        assert!(scope_prompts("resend").is_empty());
+        assert!(scope_prompts("custom-x").is_empty());
+    }
+
+    #[test]
+    fn non_interactive_add_writes_binding_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).unwrap();
+        let mut args = full_args();
+        args.default_ttl = Some("2h".into());
+        let answers = resolve_add_answers(&args).unwrap();
+        let b = binding_from_answers(&answers);
+        let path = s.save_binding(&b).unwrap();
+        let toml = std::fs::read_to_string(&path).unwrap();
+        assert!(toml.contains("alias = \"cmp\""), "{toml}");
+        assert!(toml.contains("tenant = \"cash-margin-partners\""), "{toml}");
+        assert!(
+            toml.contains("credential_ref = \"phm:CMP_SUPABASE\""),
+            "{toml}"
+        );
+        assert!(toml.contains("default_ttl = \"2h\""), "{toml}");
+        assert!(toml.contains("project_ref = \"abcdefghij\""), "{toml}");
+
+        // Reserved ^locus alias fails closed at save (store-side check).
+        let mut answers2 = answers.clone();
+        answers2.alias = "locus-cmp".into();
+        let err = s
+            .save_binding(&binding_from_answers(&answers2))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("reserved"), "{err}");
+
+        // Bad default_ttl fails closed at resolve, before any write.
+        let mut args3 = full_args();
+        args3.default_ttl = Some("nonsense".into());
+        assert!(resolve_add_answers(&args3).is_err());
+    }
+
+    #[test]
+    fn cli_surface_parses_old_and_new_invocations() {
+        use clap::Parser;
+        // Old flags-first binding add form (required→optional is accept-superset).
+        let cli = super::Cli::try_parse_from([
+            "locus",
+            "binding",
+            "add",
+            "cmp2",
+            "--tenant",
+            "t",
+            "--provider",
+            "github",
+            "--account",
+            "a",
+            "--credential-ref",
+            "phm:X",
+            "--org",
+            "o",
+            "--read-only",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Binding(super::BindingCmd::Add(args)) => {
+                assert_eq!(args.alias.as_deref(), Some("cmp2"));
+                assert_eq!(args.tenant.as_deref(), Some("t"));
+                assert!(args.read_only);
+                assert!(!args.guided && !args.non_interactive && !args.dry_run);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // New guided front door.
+        let cli = super::Cli::try_parse_from(["locus", "client", "add", "cmp3"]).unwrap();
+        match cli.command {
+            super::Commands::Client(super::ClientCmd::Add(args)) => {
+                assert_eq!(args.alias.as_deref(), Some("cmp3"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // enter/pin --ttl.
+        let cli = super::Cli::try_parse_from(["locus", "enter", "cmp", "--ttl", "2h"]).unwrap();
+        match cli.command {
+            super::Commands::Enter { ttl, .. } => assert_eq!(ttl.as_deref(), Some("2h")),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let cli = super::Cli::try_parse_from(["locus", "pin", "cmp", "--ttl", "45m"]).unwrap();
+        match cli.command {
+            super::Commands::Pin { ttl, .. } => assert_eq!(ttl.as_deref(), Some("45m")),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // agent setup --claude-scope: defaults to project; user accepted;
+        // anything else rejected at parse time.
+        let cli = super::Cli::try_parse_from(["locus", "agent", "setup", "--dry-run"]).unwrap();
+        match cli.command {
+            super::Commands::Agent(super::AgentCmd::Setup { claude_scope, .. }) => {
+                assert_eq!(claude_scope, "project")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let cli = super::Cli::try_parse_from([
+            "locus",
+            "agent",
+            "setup",
+            "--dry-run",
+            "--client",
+            "claude",
+            "--claude-scope",
+            "user",
+        ])
+        .unwrap();
+        match cli.command {
+            super::Commands::Agent(super::AgentCmd::Setup { claude_scope, .. }) => {
+                assert_eq!(claude_scope, "user")
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(super::Cli::try_parse_from([
+            "locus",
+            "agent",
+            "setup",
+            "--dry-run",
+            "--claude-scope",
+            "global",
+        ])
+        .is_err());
+    }
 }
 
 #[cfg(test)]

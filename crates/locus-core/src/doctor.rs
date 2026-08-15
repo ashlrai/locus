@@ -59,6 +59,8 @@ impl DoctorVerdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueSeverity {
+    /// Posture information; never escalates the verdict (stays SAFE).
+    Info,
     Warn,
     Unsafe,
 }
@@ -79,7 +81,20 @@ pub struct DoctorPin {
     pub tenant: String,
     pub binding_id: String,
     pub expires_at: String,
+    /// Seconds until expiry (0 when already expired). Additive field.
+    #[serde(default)]
+    pub expires_in_secs: i64,
+    /// Runtime-verified pin health (seal + backing + expiry, with the
+    /// authority anchor counted as healthy when its check could not run for
+    /// lack of a control capability — see `authority_anchor_verified` for the
+    /// honest verification status).
     pub seal_ok: bool,
+    /// Whether the authority anchor was actually verified (additive field).
+    /// `Some(false)` with `seal_ok=true` means verification was **skipped**
+    /// (no control capability in this environment — surfaced as the Warn
+    /// finding `executor_authority_unavailable`), not that it passed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority_anchor_verified: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub principal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -231,11 +246,180 @@ pub struct DoctorReport {
     pub ok: bool,
 }
 
+/// Gather real external facts: Phantom PATH probe + unresolved `phm:` refs.
+///
+/// Shared by CLI and MCP surfaces so doctor verdicts and `session_ok` agree
+/// across transports (`locus verify session --json` == `locus_verify_session`).
+pub fn gather_doctor_external(
+    store: &Store,
+    cwd: std::path::PathBuf,
+) -> crate::Result<DoctorExternal> {
+    let phantom = crate::credential::phantom_on_path();
+    let unresolved_phm = crate::credential::collect_unresolved_phm_refs(store, phantom)?;
+    Ok(DoctorExternal {
+        phantom_on_path: phantom,
+        unresolved_phm,
+        cwd: Some(cwd),
+    })
+}
+
+impl DoctorReport {
+    /// Append a finding after construction, re-deriving `issues`, `verdict`,
+    /// and `ok`. Used by operator-facing surfaces (CLI doctor/quickstart) to
+    /// attach environment checks — e.g. `LOCUS_CONTROL_CAPABILITY` — that do
+    /// not apply to executor-restricted transports like locus-mcp.
+    pub fn push_finding(&mut self, severity: IssueSeverity, code: &str, message: String) {
+        let escalate = match severity {
+            IssueSeverity::Unsafe => DoctorVerdict::Unsafe,
+            IssueSeverity::Warn => DoctorVerdict::Warn,
+            IssueSeverity::Info => DoctorVerdict::Safe,
+        };
+        self.issues.push(message.clone());
+        self.findings.push(DoctorIssue {
+            severity,
+            code: code.into(),
+            message,
+        });
+        self.verdict = self.verdict.escalate(escalate);
+        self.ok = self.verdict == DoctorVerdict::Safe;
+    }
+}
+
+/// Operator-shell findings for `LOCUS_CONTROL_CAPABILITY` readiness.
+///
+/// Only meaningful where the operator is expected to hold control authority
+/// (the CLI shell) — agent transports legitimately run without the capability
+/// and must not attach these. Messages carry exact fix commands, never bearer
+/// values.
+pub fn control_capability_findings(
+    status: &crate::authority_anchor::ControlCapabilityStatus,
+    home: &Path,
+) -> Vec<DoctorIssue> {
+    let mut out = Vec::new();
+    let mut push = |code: &str, message: String| {
+        out.push(DoctorIssue {
+            severity: IssueSeverity::Warn,
+            code: code.into(),
+            message,
+        });
+    };
+    let file = crate::authority_anchor::control_capability_file(home);
+
+    if status.env_present && !status.env_valid {
+        push(
+            "control_capability_invalid",
+            "LOCUS_CONTROL_CAPABILITY is set but invalid (need 32 bytes as 64 lowercase hex) — \
+             mint a valid one: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\""
+                .into(),
+        );
+    } else if !status.satisfied() {
+        if status.persisted_valid {
+            push(
+                "control_capability_not_exported",
+                format!(
+                    "control capability persisted at {} but LOCUS_CONTROL_CAPABILITY is not \
+                     exported — run: eval \"$(locus hook zsh)\"  (or export \
+                     LOCUS_CONTROL_CAPABILITY=\"$(cat {})\")",
+                    file.display(),
+                    file.display()
+                ),
+            );
+        } else {
+            push(
+                "control_capability_missing",
+                "LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) \
+                 will fail. Fix: locus quickstart (mints + persists one), or: export \
+                 LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new \
+                 shells with eval \"$(locus hook zsh)\""
+                    .into(),
+            );
+        }
+    }
+
+    if status.persisted && !status.persisted_valid {
+        push(
+            "control_capability_file_invalid",
+            format!(
+                "persisted control capability at {} is invalid (expected 64 lowercase hex) — \
+                 delete it deliberately, then re-mint via locus quickstart",
+                file.display()
+            ),
+        );
+    }
+    if status.persisted && !status.persisted_permissions_ok {
+        push(
+            "control_capability_file_permissions",
+            format!(
+                "persisted control capability at {} is readable by group/other — fix: chmod 600 {}",
+                file.display(),
+                file.display()
+            ),
+        );
+    }
+    if status.matches_persisted == Some(false) {
+        push(
+            "control_capability_mismatch",
+            format!(
+                "LOCUS_CONTROL_CAPABILITY does not match the persisted capability at {} — control \
+                 operations may be refused. Locus never silently replaces a capability: export \
+                 the persisted value (eval \"$(locus hook zsh)\") or deliberately remove the \
+                 stale side",
+                file.display()
+            ),
+        );
+    }
+    // Posture note (default trade-off, not a defect): a persisted capability
+    // makes control authority ambient for same-user processes.
+    if status.persisted && status.persisted_valid {
+        out.push(DoctorIssue {
+            severity: IssueSeverity::Info,
+            code: "control_capability_persisted".into(),
+            message: "control capability persisted — same-user processes can run control \
+                      commands; use locus capability unpersist + shell export for strict posture"
+                .into(),
+        });
+    }
+    out
+}
+
+/// True when the runtime authority-anchor check failed *only* because this
+/// process had no control/executor capability to authenticate the check with
+/// (`executor_authority_unavailable`) — the check never ran, rather than ran
+/// and mismatched.
+///
+/// Read-only contexts (doctor) must treat that as an environment gap — report
+/// `control_capability_not_exported` and leave the pin intact — never as pin
+/// tamper. Distinguishing rule, fail closed on ambiguity:
+/// - capability **absent** from the environment → the anchor client errors
+///   before contacting the broker (`executor_authority_unavailable`) and
+///   `control_env_present` is false → not tamper evidence;
+/// - capability **present but wrong/tampered** → it authenticates against the
+///   live anchor and surfaces as `authority_anchor_mismatch` /
+///   `authority_anchor_unavailable` (or is present-but-malformed, i.e.
+///   `control_env_present` is true) → stays fail-closed (UNSAFE), and the
+///   store freeze path for real binding drift is untouched.
+fn anchor_unverified_due_to_absent_capability(
+    issues: &[String],
+    control_env_present: bool,
+) -> bool {
+    if control_env_present {
+        return false;
+    }
+    let could_not_authenticate = issues.iter().any(|i| i == "executor_authority_unavailable");
+    let anchor_or_seal_evidence = issues.iter().any(|i| {
+        i == "authority_anchor_mismatch"
+            || i == "authority_anchor_unavailable"
+            || i == "invalid_seal"
+    });
+    could_not_authenticate && !anchor_or_seal_evidence
+}
+
 /// Build a complete doctor report from the store + external facts.
 pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Result<DoctorReport> {
     let home = store.home().display().to_string();
     let seal_ok = store.seal_key().is_ok();
-    let bindings = store.list_bindings()?.len();
+    let binding_summaries = store.list_bindings()?;
+    let bindings = binding_summaries.len();
     // Freeze on drift first so findings reflect the frozen session state.
     let runtime = store.check_drift_and_freeze()?;
     let active = store.active_session()?;
@@ -244,11 +428,24 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     let pending_approvals = pending.len();
     let dual_control_waiting = count_dual_control_waiting(store, &pending);
 
+    // A missing operator capability in this (read-only) process means the
+    // anchor check could not authenticate itself — an environment gap
+    // (`control_capability_not_exported` already covers it), not evidence of
+    // pin tamper. A wrong or tampered capability reaches the live anchor and
+    // fails as `authority_anchor_mismatch` / `authority_anchor_unavailable`,
+    // which stay fail-closed (UNSAFE) below.
+    let capability_status = crate::authority_anchor::control_capability_status(store.home());
+    let anchor_capability_absent = !runtime.authority_anchor_ok
+        && anchor_unverified_due_to_absent_capability(
+            &runtime.issues,
+            capability_status.env_present,
+        );
+
     let mut pin_seal_ok: Option<bool> = None;
     let mut pin: Option<DoctorPin> = None;
     if let Some(ref sess) = active {
         let runtime_verified = runtime.seal_ok
-            && runtime.authority_anchor_ok
+            && (runtime.authority_anchor_ok || anchor_capability_absent)
             && runtime.backing_ok
             && !sess.is_expired();
         pin_seal_ok = Some(runtime_verified);
@@ -257,7 +454,13 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
             tenant: sess.tenant.clone(),
             binding_id: sess.binding_id.clone(),
             expires_at: sess.expires_at.to_rfc3339(),
+            expires_in_secs: (sess.expires_at - Utc::now()).num_seconds().max(0),
             seal_ok: runtime_verified,
+            // Honest verification status: true only when the anchor check
+            // actually ran and passed. A capability-absent skip keeps
+            // `seal_ok=true` (no false UNSAFE) but reports `Some(false)` here
+            // alongside the `executor_authority_unavailable` Warn finding.
+            authority_anchor_verified: Some(runtime.authority_anchor_ok),
             principal: sess.principal.clone(),
             client: sess.client.clone(),
             expired: sess.is_expired(),
@@ -348,6 +551,15 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                     "active pin is expired — re-pin before acting",
                 ));
             }
+            "executor_authority_unavailable" if anchor_capability_absent => {
+                findings.push(issue(
+                    IssueSeverity::Warn,
+                    "executor_authority_unavailable",
+                    "authority anchor unverified: no control capability in this environment \
+                     (read-only check; pin left intact) — eval \"$(locus hook zsh)\" and re-run \
+                     doctor to verify the anchor",
+                ));
+            }
             other => {
                 findings.push(issue(
                     IssueSeverity::Warn,
@@ -355,6 +567,22 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                     format!("runtime drift: {other}"),
                 ));
             }
+        }
+    }
+    // Expiring-soon pin (auto-leave TTL): warn in the final 5 minutes so the
+    // operator can re-pin before fail-closed expiry cuts tool access mid-task.
+    if let Some(ref p) = pin {
+        if !p.expired && p.expires_in_secs > 0 && p.expires_in_secs < 300 {
+            findings.push(issue(
+                IssueSeverity::Warn,
+                "pin_expiring",
+                format!(
+                    "active pin '{}' expires in {} — re-pin: locus enter {} (or set policy.default_ttl)",
+                    p.alias,
+                    human_remaining(p.expires_in_secs),
+                    p.alias
+                ),
+            ));
         }
     }
     if approvals.exists && !approvals.writable {
@@ -424,6 +652,23 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                 .clone()
                 .unwrap_or_else(|| "autopin misconfigured".into()),
         ));
+    }
+    // Aliases starting with "locus" collide with the control-tool namespace:
+    // the MCP gate never routes `locus*__tool` names, so such a binding is
+    // silently unreachable from agents. New saves are rejected; flag legacy
+    // files created by hand.
+    for summary in &binding_summaries {
+        if summary.alias.starts_with("locus") {
+            findings.push(issue(
+                IssueSeverity::Warn,
+                "reserved_alias",
+                format!(
+                    "binding alias '{}' starts with reserved prefix 'locus' — its tools cannot be \
+                     routed through the MCP gate; rename the binding file under bindings/",
+                    summary.alias
+                ),
+            ));
+        }
     }
     if !workspace.valid {
         findings.push(issue(
@@ -525,6 +770,7 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
         let v = match f.severity {
             IssueSeverity::Unsafe => DoctorVerdict::Unsafe,
             IssueSeverity::Warn => DoctorVerdict::Warn,
+            IssueSeverity::Info => DoctorVerdict::Safe,
         };
         verdict = verdict.escalate(v);
     }
@@ -555,6 +801,18 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
         verdict,
         ok: verdict == DoctorVerdict::Safe,
     })
+}
+
+/// "4m59s" / "45s" — short remaining-time label for findings.
+fn human_remaining(secs: i64) -> String {
+    let secs = secs.max(0);
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs % 60 == 0 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}m{}s", secs / 60, secs % 60)
+    }
 }
 
 fn issue(
@@ -812,6 +1070,211 @@ mod tests {
     }
 
     #[test]
+    fn reserved_locus_alias_is_flagged() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        // Simulate a hand-written legacy binding file (save_binding rejects these).
+        let b = sample_binding("locusx", "acme-corp");
+        std::fs::write(
+            store.bindings_dir().join("locusx.toml"),
+            b.to_toml().unwrap(),
+        )
+        .unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        let flagged: Vec<_> = report
+            .findings
+            .iter()
+            .filter(|f| f.code == "reserved_alias")
+            .collect();
+        assert_eq!(flagged.len(), 1);
+        assert!(flagged[0].message.contains("locusx"));
+        assert_eq!(report.verdict, DoctorVerdict::Warn);
+    }
+
+    #[test]
+    fn push_finding_re_escalates_verdict() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let mut report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.verdict, DoctorVerdict::Safe);
+        assert!(report.ok);
+
+        // Info never escalates: SAFE stays SAFE.
+        report.push_finding(
+            IssueSeverity::Info,
+            "control_capability_persisted",
+            "posture".into(),
+        );
+        assert_eq!(report.verdict, DoctorVerdict::Safe);
+        assert!(report.ok);
+
+        report.push_finding(
+            IssueSeverity::Warn,
+            "control_capability_missing",
+            "test".into(),
+        );
+        assert_eq!(report.verdict, DoctorVerdict::Warn);
+        assert!(!report.ok);
+        assert_eq!(report.findings.len(), report.issues.len());
+
+        report.push_finding(IssueSeverity::Unsafe, "x", "y".into());
+        assert_eq!(report.verdict, DoctorVerdict::Unsafe);
+    }
+
+    #[test]
+    fn absent_capability_is_environment_gap_not_tamper_evidence() {
+        let s = |tags: &[&str]| tags.iter().map(|t| (*t).to_string()).collect::<Vec<_>>();
+
+        // Regression: doctor against a healthy pin with LOCUS_CONTROL_CAPABILITY
+        // absent must read as "anchor unverified (env gap)", never as seal
+        // tamper — the anchor check errored before it could authenticate.
+        let absent_only = s(&["executor_authority_unavailable"]);
+        assert!(anchor_unverified_due_to_absent_capability(
+            &absent_only,
+            false
+        ));
+
+        // Capability present (even malformed → same error tag) stays
+        // fail-closed: present-but-wrong is not "absent".
+        assert!(!anchor_unverified_due_to_absent_capability(
+            &absent_only,
+            true
+        ));
+
+        // Any authenticated anchor/seal evidence keeps the tamper verdict,
+        // capability absent or not.
+        for tamper in [
+            "authority_anchor_mismatch",
+            "authority_anchor_unavailable",
+            "invalid_seal",
+        ] {
+            let mixed = s(&["executor_authority_unavailable", tamper]);
+            assert!(
+                !anchor_unverified_due_to_absent_capability(&mixed, false),
+                "{tamper} must stay fail-closed"
+            );
+        }
+
+        // Binding drift alongside absence: the seal verdict is still not
+        // "tampered" (drift keeps its own UNSAFE finding + freeze path in the
+        // store, which requires an authenticated anchor).
+        let drift = s(&["executor_authority_unavailable", "providers_drift"]);
+        assert!(anchor_unverified_due_to_absent_capability(&drift, false));
+
+        // No anchor failure at all → nothing to excuse.
+        assert!(!anchor_unverified_due_to_absent_capability(&s(&[]), false));
+    }
+
+    #[test]
+    fn control_capability_findings_cover_all_states() {
+        use crate::authority_anchor::ControlCapabilityStatus;
+        let home = Path::new("/tmp/locus-test-home");
+        let base = ControlCapabilityStatus {
+            env_present: false,
+            env_valid: false,
+            persisted: false,
+            persisted_valid: false,
+            persisted_permissions_ok: true,
+            matches_persisted: None,
+            test_fallback: false,
+        };
+
+        // Missing everywhere → actionable missing finding.
+        let f = control_capability_findings(&base, home);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].code, "control_capability_missing");
+        assert!(f[0].message.contains("openssl rand -hex 32"));
+
+        // Persisted but not exported → hook hint, includes the file path,
+        // plus the ambient-authority posture info.
+        let s = ControlCapabilityStatus {
+            persisted: true,
+            persisted_valid: true,
+            ..base.clone()
+        };
+        let f = control_capability_findings(&s, home);
+        assert_eq!(f[0].code, "control_capability_not_exported");
+        assert!(f[0].message.contains("control_capability"));
+        assert_eq!(f[1].code, "control_capability_persisted");
+        assert_eq!(f[1].severity, IssueSeverity::Info);
+
+        // Invalid env value.
+        let s = ControlCapabilityStatus {
+            env_present: true,
+            ..base.clone()
+        };
+        let f = control_capability_findings(&s, home);
+        assert_eq!(f[0].code, "control_capability_invalid");
+
+        // Mismatch env vs persisted (both individually valid).
+        let s = ControlCapabilityStatus {
+            env_present: true,
+            env_valid: true,
+            persisted: true,
+            persisted_valid: true,
+            matches_persisted: Some(false),
+            ..base.clone()
+        };
+        let f = control_capability_findings(&s, home);
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].code, "control_capability_mismatch");
+        assert!(f[0].message.contains("never silently replaces"));
+        assert_eq!(f[1].code, "control_capability_persisted");
+
+        // Healthy default posture: env valid + matching persisted → only the
+        // INFO posture note (never a warning; persistence is the default).
+        let s = ControlCapabilityStatus {
+            env_present: true,
+            env_valid: true,
+            persisted: true,
+            persisted_valid: true,
+            matches_persisted: Some(true),
+            ..base.clone()
+        };
+        let f = control_capability_findings(&s, home);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].code, "control_capability_persisted");
+        assert_eq!(f[0].severity, IssueSeverity::Info);
+        assert!(f[0].message.contains("locus capability unpersist"));
+
+        // Strict posture: env-only, nothing persisted → no findings at all.
+        let s = ControlCapabilityStatus {
+            env_present: true,
+            env_valid: true,
+            ..base.clone()
+        };
+        assert!(control_capability_findings(&s, home).is_empty());
+
+        // Test-harness fallback alone is satisfied → no missing finding.
+        let s = ControlCapabilityStatus {
+            test_fallback: true,
+            ..base
+        };
+        assert!(control_capability_findings(&s, home).is_empty());
+    }
+
+    #[test]
     fn doctor_json_schema_stable_unpinned() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -834,6 +1297,48 @@ mod tests {
         assert_eq!(report.dual_control_waiting, 0);
         assert_eq!(report.near_miss_count, 0);
         assert_eq!(report.near_miss.count, 0);
+    }
+
+    #[test]
+    fn pin_expiring_warns_under_5m_only() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        let external = || DoctorExternal {
+            phantom_on_path: true,
+            unresolved_phm: Vec::new(),
+            cwd: Some(dir.path().to_path_buf()),
+        };
+
+        // 10m remaining → no pin_expiring finding.
+        store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(10)))
+            .unwrap();
+        let report = build_doctor_report(&store, external()).unwrap();
+        assert!(
+            !report.findings.iter().any(|f| f.code == "pin_expiring"),
+            "10m left must not warn: {:?}",
+            report.findings
+        );
+
+        // 2m remaining → Warn finding with remediation, expires_in_secs in (0, 300].
+        store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(2)))
+            .unwrap();
+        let report = build_doctor_report(&store, external()).unwrap();
+        let f = report
+            .findings
+            .iter()
+            .find(|f| f.code == "pin_expiring")
+            .expect("pin_expiring finding");
+        assert_eq!(f.severity, IssueSeverity::Warn);
+        assert!(f.message.contains("locus enter acme"), "{}", f.message);
+        let pin = report.pin.expect("pin slice");
+        assert!(pin.expires_in_secs > 0 && pin.expires_in_secs <= 300);
+        assert!(!pin.expired);
+        assert_ne!(report.verdict, DoctorVerdict::Unsafe);
     }
 
     #[test]
@@ -862,6 +1367,11 @@ mod tests {
             Some("acme-corp")
         );
         assert_eq!(report.pin_seal_ok, Some(true));
+        // The anchor check actually ran here (runtime.ok) — verified.
+        assert_eq!(
+            report.pin.as_ref().unwrap().authority_anchor_verified,
+            Some(true)
+        );
         assert!(report.seal_ok);
         assert!(report.runtime.ok);
         assert_ne!(report.verdict, DoctorVerdict::Unsafe);

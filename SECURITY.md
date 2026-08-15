@@ -73,6 +73,51 @@ Flow:
 
 **Rate limiting:** Locus does not yet enforce request rate limits on advisory-label or pending-record creation in process. Operators should treat approval files as sensitive control-plane state. External envelope replay protection, expiry, identity binding, and OS attestation are required before authoritative approvals can be enabled.
 
+### Control-plane authority boundary
+
+Be honest about what `LOCUS_CONTROL_CAPABILITY` does and does not protect.
+
+**What it gates.** The control capability authenticates *control-plane* commands
+to the live authority broker: `init`, `enter`, `pin`, `leave`, binding and
+config mutation. Holding it means "this process may change who Locus acts as."
+It is not a provider secret and never reaches workers.
+
+**Persistence is a deliberate trade.** By default `locus init` / `locus
+quickstart` mint the capability and persist it `0600` at
+`$LOCUS_HOME/control_capability` so `eval "$(locus hook zsh)"` and fresh shells
+just work. The cost is stated plainly: **any process running as your user can
+read that file and run control commands** — including a terminal agent with
+shell access (`locus pin …`). Persistence trades strictness for onboarding; it
+does not create a *new* class of exposure, because same-user code can already
+read everything in `$LOCUS_HOME` (the session seal key and `daemon.key` live
+there, mode `0600`, which never isolates same-UID code — see non-goals below).
+
+**Strict posture.** Operators who want control authority to exist only in
+shells they opened can opt out:
+
+```bash
+locus init --no-persist-capability   # mint to process env only; prints the
+                                     # export line for your shell profile
+locus capability unpersist           # remove an already-persisted file
+                                     # (prints the export line — keep it)
+locus capability status              # env-only / persisted / absent — never
+                                     # prints the value
+locus capability persist             # return to the onboarding default
+```
+
+`locus doctor` reports an INFO-level `control_capability_persisted` finding
+while the file exists — informational, not a warning, because persistence is
+the supported default. The strict posture narrows *durable* same-user access;
+it does not stop same-UID code from reading another process's environment or
+memory through OS debugging interfaces (also a stated non-goal).
+
+**The real agent boundary is the MCP surface, not the CLI.** locus-mcp runs
+executor-restricted and deliberately without the control capability: agents
+speaking MCP cannot pin, re-pin, or elevate — `locus_request_pin` only asks a
+human. An agent granted arbitrary shell access as your user was never inside
+Locus's threat model for capability secrecy; choose the strict posture to
+raise the bar, and keep truly untrusted agents behind the MCP surface.
+
 ### Explicit non-goals (out of scope)
 
 - **Root / malware on the developer machine** — if the OS is fully compromised, all local tools are in scope for the attacker.

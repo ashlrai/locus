@@ -20,16 +20,18 @@
 //!   (progress/chunks + final) for large `tools/call` when Accept prefers
 //!   `text/event-stream`.
 
+mod anchor;
 mod http_session;
 
+use anchor::{AnchorDecision, SessionAnchor};
 use anyhow::{bail, Context, Result};
 use http_session::{
     resolve_http_session_dir, HttpSessionError, HttpSessionMap, HttpSessionPinSummary,
 };
 use locus_core::{
     build_doctor_report, call_tool_gated, compute_safe_next, control_tools, enforce_policy,
-    find_workspace, load_config, split_namespaced_tool, tools_for_binding, verify_claim,
-    verify_session, AdapterTool, ApprovalGate, Binding, DoctorExternal, Session, Store, VERSION,
+    find_workspace, gather_doctor_external, load_config, split_namespaced_tool, tools_for_binding,
+    verify_claim, verify_session, AdapterTool, ApprovalGate, Binding, Session, Store, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -49,8 +51,239 @@ fn worker_manager() -> &'static Mutex<CompositeWorkerManagerGuard> {
 /// Thin alias so we can keep the type local without re-export noise.
 type CompositeWorkerManagerGuard = locus_core::CompositeWorkerManager;
 
-/// MCP auto-pin attempted once per process (start / first tools/list).
+/// Advisory auto-pin probe attempted once per process (start / first tools/list).
+/// The probe never pins — see [`maybe_mcp_auto_pin`].
 static AUTO_PIN_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+/// Process-wide stdio session anchor: the pinned identity this MCP session
+/// observed at initialize (or first healthy pinned observation), plus the
+/// mismatch-audit dedupe pair. See [`anchor`].
+#[derive(Debug, Default)]
+struct ProcessAnchorState {
+    anchor: Option<SessionAnchor>,
+    last_reported_mismatch: Option<(String, String)>,
+}
+
+fn process_anchor() -> &'static Mutex<ProcessAnchorState> {
+    static STATE: OnceLock<Mutex<ProcessAnchorState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(ProcessAnchorState::default()))
+}
+
+/// Where the current MCP session stores its identity anchor.
+#[derive(Debug, Clone)]
+enum AnchorScope {
+    /// stdio transport — one anchor per process.
+    Process,
+    /// HTTP transport — per `Mcp-Session-Id`, file-backed via [`HttpSessionMap`].
+    Http(String),
+    /// Anchorless read-only context (GET /mcp capabilities probe without an
+    /// `Mcp-Session-Id`). Never used for POSTs: stateless JSON-RPC requests
+    /// share the process-level anchor ([`AnchorScope::Process`]) so provider
+    /// `tools/call` stays pin-swap protected even without the header.
+    None,
+}
+
+impl AnchorScope {
+    fn get(&self) -> Option<SessionAnchor> {
+        match self {
+            AnchorScope::Process => process_anchor()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .anchor
+                .clone(),
+            AnchorScope::Http(id) => http_session_map()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .anchor(id),
+            AnchorScope::None => None,
+        }
+    }
+
+    /// Compare-and-set against a healthy full observation (see [`anchor::decide`]).
+    fn observe(&self, obs: &SessionAnchor, allow_establish: bool) -> Option<AnchorDecision> {
+        match self {
+            AnchorScope::Process => {
+                let mut state = process_anchor().lock().unwrap_or_else(|e| e.into_inner());
+                anchor::decide(&mut state.anchor, obs, allow_establish)
+            }
+            AnchorScope::Http(id) => http_session_map()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .observe_anchor(id, obs, allow_establish),
+            AnchorScope::None => None,
+        }
+    }
+
+    /// Initialize-only overwrite (explicit re-initialize adopts the current pin).
+    fn reset(&self, new_anchor: Option<SessionAnchor>) {
+        match self {
+            AnchorScope::Process => {
+                let mut state = process_anchor().lock().unwrap_or_else(|e| e.into_inner());
+                state.anchor = new_anchor;
+                state.last_reported_mismatch = None;
+            }
+            AnchorScope::Http(id) => {
+                let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
+                let _ = map.reset_anchor(id, new_anchor);
+            }
+            AnchorScope::None => {}
+        }
+    }
+
+    /// Mismatch audit dedupe: true when this (anchored_session_id,
+    /// current_session_id) pair has not been reported yet.
+    fn note_mismatch(&self, anchored: &SessionAnchor, current: &SessionAnchor) -> bool {
+        let key = anchor::mismatch_key(anchored, current);
+        match self {
+            AnchorScope::Process => {
+                let mut state = process_anchor().lock().unwrap_or_else(|e| e.into_inner());
+                if state.last_reported_mismatch.as_ref() == Some(&key) {
+                    return false;
+                }
+                state.last_reported_mismatch = Some(key);
+                true
+            }
+            AnchorScope::Http(id) => http_session_map()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .note_mismatch(id, key),
+            AnchorScope::None => false,
+        }
+    }
+}
+
+/// Audit an anchor event — aliases/tenants/binding_ids/session_ids only,
+/// never secrets. Best-effort (anchor enforcement never depends on audit IO).
+fn audit_anchor_event(op: &str, alias: &str, detail: Value) {
+    if let Ok(s) = store() {
+        let _ = s.audit(op, alias, Some(detail));
+    }
+}
+
+/// Current healthy pinned identity for anchor establishment / initialize
+/// adoption. Requires `drift.ok` and a loaded unfrozen session — an anchor is
+/// never established from an unhealthy runtime.
+fn current_healthy_anchor() -> Option<SessionAnchor> {
+    let s = store().ok()?;
+    let drift = s.check_drift_and_freeze().ok()?;
+    if !drift.ok {
+        return None;
+    }
+    let (session, bindings) = active_session_bindings().ok()??;
+    if session.is_frozen() {
+        return None;
+    }
+    Some(anchor::observation(&session, &bindings))
+}
+
+/// `pin_changed` refusal body + deduped `mcp.anchor_mismatch` audit.
+/// Session-local: never mutates or freezes the store session.
+fn pin_changed_refusal(
+    scope: &AnchorScope,
+    anchored: &SessionAnchor,
+    current: &SessionAnchor,
+    underlying_issues: &[String],
+) -> Value {
+    if scope.note_mismatch(anchored, current) {
+        audit_anchor_event(
+            "mcp.anchor_mismatch",
+            &anchored.binding_alias,
+            json!({
+                "anchored": anchor::identity_json(anchored),
+                "current": anchor::identity_json(current),
+                "underlying_issues": underlying_issues,
+            }),
+        );
+    }
+    tool_text(
+        anchor::pin_changed_error(anchored, current, underlying_issues),
+        true,
+    )
+}
+
+/// Anchor context for `not_pinned` refusals: distinguishes "pin vanished after
+/// this session anchored" from "never pinned". Unpinned observations never
+/// clear the anchor — a later re-pin to a different alias still refuses.
+fn attach_anchor_context(body: &mut Value, session_anchor: Option<&SessionAnchor>) {
+    if let Some(a) = session_anchor {
+        body["anchor"] = json!({
+            "anchored_alias": a.binding_alias,
+            "anchored_tenant": a.tenant,
+            "anchored_session_id": a.session_id,
+        });
+        body["hint"] = json!(format!(
+            "previous pin `{}` vanished (locus leave?); this session stays locked to it. \
+             Human: `locus enter {}` to restore, or re-initialize this client after pinning a different alias.",
+            a.binding_alias, a.binding_alias
+        ));
+    }
+}
+
+/// Current pin identity for health surfaces — built from the SAME inputs the
+/// provider gate compares against: a full observation (mode + namespaces)
+/// when the active session + bindings load, else the primary-only drift
+/// identity, else `None` (unpinned / vanished pin).
+fn current_identity_observation(s: &Store) -> Option<SessionAnchor> {
+    if let Ok(Some((session, bindings))) = active_session_bindings() {
+        return Some(anchor::observation(&session, &bindings));
+    }
+    let drift = s.check_drift_and_freeze().ok()?;
+    anchor::drift_observation(&drift)
+}
+
+/// Gate-equivalent identity comparison for health surfaces: full
+/// `same_identity` when a full observation is available; primary-only
+/// (`same_primary_identity`) only when just the drift identity exists (empty
+/// mode). No observation never matches (fail closed) — health surfaces must
+/// report unhealthy whenever provider tools would refuse with `pin_changed`.
+fn anchor_matches_current(a: &SessionAnchor, current: Option<&SessionAnchor>) -> bool {
+    match current {
+        Some(obs) if obs.mode.is_empty() && obs.namespaces.is_empty() => {
+            a.same_primary_identity(obs)
+        }
+        Some(obs) => a.same_identity(obs),
+        None => false,
+    }
+}
+
+/// Additive `mcp_anchor` block for control tools (omitted when no anchor
+/// exists). Returns the report plus whether the current pin matches the
+/// anchored identity — using the SAME comparison as the provider gate
+/// (`anchor_matches_current`), so a mode/namespace identity change that would
+/// refuse provider tools also reads as a mismatch here. `who` is display-only.
+fn mcp_anchor_report(
+    a: &SessionAnchor,
+    who: Option<&locus_core::Whoami>,
+    current: Option<&SessionAnchor>,
+) -> (Value, bool) {
+    let matches = anchor_matches_current(a, current);
+    let hint = if matches {
+        Value::Null
+    } else if who.is_some() {
+        json!(format!(
+            "global pin changed after this MCP session anchored to `{}`; re-initialize this client to adopt, or `locus enter {}` to restore",
+            a.binding_alias, a.binding_alias
+        ))
+    } else {
+        json!(format!(
+            "previous pin `{}` vanished; this session stays locked to it",
+            a.binding_alias
+        ))
+    };
+    (
+        json!({
+            "anchored_alias": a.binding_alias,
+            "anchored_tenant": a.tenant,
+            "anchored_binding_id": a.binding_id,
+            "anchored_session_id": a.session_id,
+            "current_alias": who.map(|w| w.binding_alias.clone()),
+            "current_tenant": who.map(|w| w.tenant.clone()),
+            "match": matches,
+            "hint": hint,
+        }),
+        matches,
+    )
+}
 
 /// Default HTTP bind when `--http` / `LOCUS_MCP_HTTP=1` without an address.
 const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:8742";
@@ -59,6 +292,14 @@ const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:8742";
 const HTTP_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
 /// Cap concurrent opaque `Mcp-Session-Id` entries (memory + on-disk resume map).
 const HTTP_SESSION_MAX: usize = 256;
+
+/// Max HTTP request body accepted pre-auth (413 above this) — prevents a
+/// trivial OOM DoS via a huge Content-Length before the token check runs.
+const HTTP_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+/// Max total bytes for the request line + headers (431 above this).
+const HTTP_MAX_HEADER_BYTES: usize = 32 * 1024;
+/// Max number of header fields (431 above this).
+const HTTP_MAX_HEADER_COUNT: usize = 128;
 
 /// Serialized JSON-RPC body size (bytes) above which SSE prefers multi-message
 /// (progress / progressive text chunks + final complete response).
@@ -214,7 +455,7 @@ fn run_stdio() -> Result<()> {
             break; // EOF
         };
 
-        if let Some(response) = dispatch_rpc(&msg) {
+        if let Some(response) = dispatch_rpc(&msg, &AnchorScope::Process) {
             write_message(&mut stdout, &response, framing)?;
         }
     }
@@ -223,7 +464,7 @@ fn run_stdio() -> Result<()> {
 
 /// Dispatch one JSON-RPC request/notification.
 /// Returns `None` for notifications (no response).
-fn dispatch_rpc(msg: &Value) -> Option<Value> {
+fn dispatch_rpc(msg: &Value, scope: &AnchorScope) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(json!({}));
@@ -234,12 +475,12 @@ fn dispatch_rpc(msg: &Value) -> Option<Value> {
     }
 
     let result = match method {
-        "initialize" => Ok(handle_initialize(&params)),
+        "initialize" => Ok(handle_initialize(&params, scope)),
         "ping" => Ok(json!({})),
-        "tools/list" => handle_tools_list(),
-        "tools/call" => handle_tools_call(&params),
+        "tools/list" => handle_tools_list(scope),
+        "tools/call" => handle_tools_call(&params, scope),
         "resources/list" => handle_resources_list(),
-        "resources/read" => handle_resources_read(&params),
+        "resources/read" => handle_resources_read(&params, scope),
         "prompts/list" => handle_prompts_list(),
         "prompts/get" => handle_prompts_get(&params),
         other => Err(rpc_error(-32601, format!("method not found: {other}"))),
@@ -325,7 +566,7 @@ fn session_error_body(err: &HttpSessionError) -> (u16, Value) {
             404,
             json!({
                 "error": "unknown_session",
-                "hint": "Mcp-Session-Id not found or expired; POST initialize (or first POST /mcp) without the header to mint a new session",
+                "hint": "Mcp-Session-Id not found or expired; POST initialize without the header to mint a new session",
             }),
         ),
         HttpSessionError::Invalid => (
@@ -391,7 +632,30 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
     let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
 
     let mut reader = io::BufReader::new(stream.try_clone().context("clone stream")?);
-    let (method, path, headers, body) = read_http_request(&mut reader)?;
+    // Size caps run pre-auth and fail closed with an explicit HTTP status
+    // (never an unbounded allocation or a silently dropped connection).
+    let (method, path, headers, body) = match read_http_request(&mut reader) {
+        Ok(req) => req,
+        Err(HttpReadError::PayloadTooLarge { content_length }) => {
+            let body = json!({
+                "error": "payload_too_large",
+                "hint": format!(
+                    "Content-Length {content_length} exceeds max {HTTP_MAX_BODY_BYTES} bytes"
+                ),
+            });
+            return write_http_json(&mut stream, 413, &body, None);
+        }
+        Err(HttpReadError::HeadersTooLarge) => {
+            let body = json!({
+                "error": "request_header_fields_too_large",
+                "hint": format!(
+                    "headers exceed {HTTP_MAX_HEADER_COUNT} fields / {HTTP_MAX_HEADER_BYTES} bytes"
+                ),
+            });
+            return write_http_json(&mut stream, 431, &body, None);
+        }
+        Err(HttpReadError::Fatal(e)) => return Err(e),
+    };
 
     let path_only = path.split('?').next().unwrap_or(path.as_str());
     let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
@@ -413,7 +677,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
                 "capabilities": "GET /mcp (token)",
                 "session_sse": "GET /mcp/sse (token)",
                 "rpc": "POST /mcp (token, JSON-RPC 2.0)",
-                "session": "Mcp-Session-Id header (mint on initialize/first POST)"
+                "session": "Mcp-Session-Id header (minted on initialize)"
             },
         });
         return write_http_json(&mut stream, 200, &body, None);
@@ -470,7 +734,12 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
             }
         };
         // Auth'd capabilities probe — tool *names* only, never secret values.
-        let caps = http_mcp_capabilities();
+        // Read-only anchor report when an Mcp-Session-Id was presented.
+        let anchor_scope = match session_id.as_deref() {
+            Some(id) => AnchorScope::Http(id.to_string()),
+            None => AnchorScope::None,
+        };
+        let caps = http_mcp_capabilities(&anchor_scope);
         return write_http_mcp_body(
             &mut stream,
             200,
@@ -519,12 +788,29 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
             }
         }
 
-        // Mint on initialize / first POST when header absent; bind when present.
+        // Parse JSON-RPC before any session work: garbage must not mint or
+        // persist session state (capacity wedge), and parse failures get an
+        // explicit 400 instead of a dropped connection.
+        let msg: Value = match serde_json::from_slice(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                let body = json!({
+                    "jsonrpc": "2.0",
+                    "id": Value::Null,
+                    "error": { "code": -32700, "message": format!("parse error: {e}") },
+                });
+                return write_http_json(&mut stream, 400, &body, None);
+            }
+        };
+        let rpc_method = msg.get("method").and_then(|m| m.as_str());
+
+        // Bind an existing Mcp-Session-Id when the header is present; mint only
+        // on initialize so arbitrary POSTs cannot exhaust session capacity.
         let session_id = {
             let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
-            match resolve_mcp_http_session(&mut map, &headers, true) {
-                Ok(Some(id)) => id,
-                Ok(None) => unreachable!("mint_if_missing always yields an id or error"),
+            let mint_if_missing = rpc_method == Some("initialize");
+            match resolve_mcp_http_session(&mut map, &headers, mint_if_missing) {
+                Ok(id) => id,
                 Err(err) => {
                     let (status, body) = session_error_body(&err);
                     return write_http_json(&mut stream, status, &body, None);
@@ -532,9 +818,44 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
             }
         };
 
-        let msg: Value = serde_json::from_slice(&body).context("json-rpc body")?;
-        let rpc_method = msg.get("method").and_then(|m| m.as_str());
-        match dispatch_rpc(&msg) {
+        // Optional strictness: refuse sessionless provider tools/call outright
+        // (default off — stateless CI POSTs keep working, protected by the
+        // shared process-level anchor below; conforming streamable-HTTP
+        // clients always carry the header).
+        if session_id.is_none()
+            && rpc_method == Some("tools/call")
+            && env_truthy("LOCUS_MCP_HTTP_REQUIRE_SESSION")
+        {
+            let tool = msg
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            if !tool.starts_with("locus_") {
+                let body = json!({
+                    "error": "session_required",
+                    "hint": "LOCUS_MCP_HTTP_REQUIRE_SESSION=1: provider tools/call requires an Mcp-Session-Id (POST initialize first)",
+                });
+                return write_http_json(&mut stream, 400, &body, None);
+            }
+        }
+
+        // Stateless POSTs (no Mcp-Session-Id, non-initialize) share the
+        // process-level anchor: provider tools/call stays pin-swap protected
+        // (fail closed) without breaking legacy stateless clients — the same
+        // decide() machinery, one anchor per server process (stdio parity).
+        let anchor_scope = match session_id.as_deref() {
+            Some(id) => AnchorScope::Http(id.to_string()),
+            None => AnchorScope::Process,
+        };
+        // A fresh initialize without the header (stateless client) is the
+        // adoption path for the shared process anchor too — mirrors stdio,
+        // where initialize re-anchors the process. Session-bound initializes
+        // only reset their own session anchor.
+        if rpc_method == Some("initialize") && header_value(&headers, "mcp-session-id").is_none() {
+            AnchorScope::Process.reset(current_healthy_anchor());
+        }
+        match dispatch_rpc(&msg, &anchor_scope) {
             Some(response) => {
                 // When Accept lists both JSON and SSE, still upgrade large tools/call
                 // to multi-message SSE so hubs get progressive chunks without SSE-only Accept.
@@ -544,7 +865,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
                     200,
                     &response,
                     mode,
-                    Some(session_id.as_str()),
+                    session_id.as_deref(),
                     rpc_method,
                 )
             }
@@ -555,7 +876,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
                     202,
                     &json!({}),
                     response_mode,
-                    Some(session_id.as_str()),
+                    session_id.as_deref(),
                     rpc_method,
                 )
             }
@@ -590,7 +911,9 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
 }
 
 /// Values-free GET /mcp body: pin summary + tool names + advertised capabilities.
-fn http_mcp_capabilities() -> Value {
+/// `scope` is used for a read-only anchor report only — GET never establishes
+/// or resets an anchor.
+fn http_mcp_capabilities(scope: &AnchorScope) -> Value {
     let _ = maybe_mcp_auto_pin();
 
     let pin = match store() {
@@ -622,8 +945,10 @@ fn http_mcp_capabilities() -> Value {
     };
 
     // Tool *names* only via the same exclusive catalog as tools/list — no schemas,
-    // descriptions, or secret-bearing fields.
-    let tool_names: Vec<String> = match handle_tools_list() {
+    // descriptions, or secret-bearing fields. Scope::None keeps this probe
+    // read-only with respect to anchors (the global catalog is reported;
+    // anchor_ok below carries the per-session verdict).
+    let tool_names: Vec<String> = match handle_tools_list(&AnchorScope::None) {
         Ok(listed) => listed
             .get("tools")
             .and_then(|t| t.as_array())
@@ -636,7 +961,7 @@ fn http_mcp_capabilities() -> Value {
         Err(_) => control_tools(false).into_iter().map(|t| t.name).collect(),
     };
 
-    json!({
+    let mut caps = json!({
         "ok": true,
         "service": "locus-mcp",
         "version": VERSION,
@@ -669,14 +994,37 @@ fn http_mcp_capabilities() -> Value {
                 "header": "Mcp-Session-Id",
                 "ttl_seconds": HTTP_SESSION_TTL.as_secs(),
                 "max_sessions": HTTP_SESSION_MAX,
-                "mint": "initialize or first POST /mcp without header",
+                "mint": "POST initialize without Mcp-Session-Id header",
                 "storage": "memory-cache-plus-disk",
                 "disk": "$LOCUS_HOME/http-sessions or LOCUS_MCP_SESSION_DIR",
                 "disk_fields": "id + timestamps + optional pin summary (never secrets)"
             },
             "note": "Mcp-Session-Id file-backed resume + multi-message SSE for large tools/call landed. Multi-tenant remote multiplexor still open."
         }
-    })
+    });
+
+    // Values-free per-session anchor verdict — only when an Mcp-Session-Id
+    // header was presented (sessionless probes keep the exact legacy shape).
+    if matches!(scope, AnchorScope::Http(_)) {
+        match scope.get() {
+            Some(a) => {
+                // Same identity comparison as the provider gate — a
+                // mode/namespace change must read anchor_ok=false too.
+                let anchor_ok = match store().ok() {
+                    Some(s) => {
+                        anchor_matches_current(&a, current_identity_observation(&s).as_ref())
+                    }
+                    None => false,
+                };
+                caps["anchor_ok"] = json!(anchor_ok);
+                caps["anchor"] = json!({ "alias": a.binding_alias });
+            }
+            None => {
+                caps["anchor_ok"] = json!(true);
+            }
+        }
+    }
+    caps
 }
 
 fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
@@ -1003,14 +1351,11 @@ fn encode_sse_messages(messages: &[Value]) -> Result<Vec<u8>> {
 /// safe_next action — never secrets or credential refs.
 fn http_session_tick() -> Value {
     let pack = match store() {
-        Ok(s) => {
-            let external = DoctorExternal {
-                phantom_on_path: false,
-                unresolved_phm: Vec::new(),
-                cwd: Some(cwd()),
-            };
-            verify_session(&s, &cwd(), external).ok()
-        }
+        // Real external facts (Phantom PATH probe + unresolved phm refs) so the
+        // tick matches `locus verify session --json`; gather failure ⇒ fail closed.
+        Ok(s) => gather_doctor_external(&s, cwd())
+            .ok()
+            .and_then(|external| verify_session(&s, &cwd(), external).ok()),
         Err(_) => None,
     };
 
@@ -1096,20 +1441,39 @@ fn handle_mcp_sse_session_stream(stream: &mut TcpStream, query: &str) -> Result<
     Ok(())
 }
 
+/// Pre-auth HTTP read failures that map to explicit status codes (fail closed).
+#[derive(Debug)]
+enum HttpReadError {
+    /// Declared Content-Length exceeds [`HTTP_MAX_BODY_BYTES`] → 413.
+    PayloadTooLarge { content_length: usize },
+    /// Request line + headers exceed byte/count caps → 431.
+    HeadersTooLarge,
+    /// IO / framing error — nothing sane to answer; connection is dropped.
+    Fatal(anyhow::Error),
+}
+
 #[allow(clippy::type_complexity)]
 fn read_http_request<R: BufRead>(
     reader: &mut R,
-) -> Result<(String, String, Vec<(String, String)>, Vec<u8>)> {
+) -> std::result::Result<(String, String, Vec<(String, String)>, Vec<u8>), HttpReadError> {
+    // Budget the whole header section (request line included) so a huge line
+    // without a newline cannot allocate unboundedly before the token check.
+    let mut limited = io::Read::take(&mut *reader, HTTP_MAX_HEADER_BYTES as u64);
     let mut request_line = String::new();
-    reader
+    limited
         .read_line(&mut request_line)
-        .context("read request line")?;
+        .map_err(|e| HttpReadError::Fatal(anyhow::Error::new(e).context("read request line")))?;
     if request_line.is_empty() {
-        bail!("empty HTTP request");
+        return Err(HttpReadError::Fatal(anyhow::anyhow!("empty HTTP request")));
+    }
+    if !request_line.ends_with('\n') && limited.limit() == 0 {
+        return Err(HttpReadError::HeadersTooLarge);
     }
     let parts: Vec<&str> = request_line.split_whitespace().collect();
     if parts.len() < 2 {
-        bail!("malformed request line: {request_line:?}");
+        return Err(HttpReadError::Fatal(anyhow::anyhow!(
+            "malformed request line: {request_line:?}"
+        )));
     }
     let method = parts[0].to_string();
     let path = parts[1].to_string();
@@ -1118,10 +1482,26 @@ fn read_http_request<R: BufRead>(
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
-        reader.read_line(&mut line).context("read header")?;
+        let n = limited
+            .read_line(&mut line)
+            .map_err(|e| HttpReadError::Fatal(anyhow::Error::new(e).context("read header")))?;
+        if n == 0 {
+            // EOF (truncated request) or header byte budget exhausted.
+            return Err(if limited.limit() == 0 {
+                HttpReadError::HeadersTooLarge
+            } else {
+                HttpReadError::Fatal(anyhow::anyhow!("truncated HTTP headers"))
+            });
+        }
+        if !line.ends_with('\n') && limited.limit() == 0 {
+            return Err(HttpReadError::HeadersTooLarge);
+        }
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             break;
+        }
+        if headers.len() >= HTTP_MAX_HEADER_COUNT {
+            return Err(HttpReadError::HeadersTooLarge);
         }
         if let Some((k, v)) = trimmed.split_once(':') {
             let key = k.trim().to_string();
@@ -1133,9 +1513,15 @@ fn read_http_request<R: BufRead>(
         }
     }
 
+    // Cap before allocating the body buffer (pre-auth OOM guard).
+    if content_length > HTTP_MAX_BODY_BYTES {
+        return Err(HttpReadError::PayloadTooLarge { content_length });
+    }
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
-        reader.read_exact(&mut body).context("read HTTP body")?;
+        reader
+            .read_exact(&mut body)
+            .map_err(|e| HttpReadError::Fatal(anyhow::Error::new(e).context("read HTTP body")))?;
     }
     Ok((method, path, headers, body))
 }
@@ -1204,7 +1590,9 @@ fn http_status_reason(status: u16) -> &'static str {
         401 => "Unauthorized",
         404 => "Not Found",
         406 => "Not Acceptable",
+        413 => "Payload Too Large",
         415 => "Unsupported Media Type",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
         _ => "OK",
@@ -1348,7 +1736,7 @@ fn handle_notification(method: &str, _params: &Value) {
     match method {
         "notifications/initialized" | "initialized" => {
             // Client finished initialize handshake — ready for tools/list etc.
-            // No server-side state required beyond optional auto-pin on initialize.
+            // No server-side state required (initialize already ran the advisory auto-pin probe).
         }
         "notifications/cancelled" => {}
         _ => {
@@ -1363,8 +1751,9 @@ fn rpc_error(code: i64, message: String) -> Value {
 
 // ─── Initialize / agent instructions ────────────────────────────────────────
 
-/// Crisp agent rules for `initialize.instructions` — pin state is live after auto-pin.
-fn agent_instructions() -> String {
+/// Crisp agent rules for `initialize.instructions` — pin state reflects the
+/// operator-sealed store (the server never pins on its own).
+fn agent_instructions(session_anchor: Option<&SessionAnchor>) -> String {
     let pin_line = match store() {
         Ok(s) => {
             let _ = s.check_drift_and_freeze();
@@ -1381,25 +1770,66 @@ fn agent_instructions() -> String {
         Err(_) => "• Store unavailable — treat session as unpinned.".into(),
     };
 
-    [
+    let mut lines: Vec<String> = vec![
         "Locus identity plane — tools are hard-scoped to the active sealed pin.".into(),
         pin_line,
         "• ALWAYS call locus_whoami or locus_safe_next (or read locus://session) before infrastructure mutations when context is unclear.".into(),
         "• You CANNOT pin or switch tenants. Use locus_request_pin / locus_enter_hint; surface the command so a human runs `locus pin <alias>` / `locus enter <alias>`.".into(),
         "• When stuck, unpinned, approval-blocked, or doctor-unhealthy: call locus_safe_next — it returns the single best next action.".into(),
-        "• Frozen scopes (project_ref, team_id, orgs/repos) cannot be overridden; scope freeze on mismatch is expected and correct.".into(),
+        "• Hub session pack: locus_verify_session returns doctor + whoami + safe_next + session_ok (same as `locus verify session --json`). Gate on session_ok; available unpinned.".into(),
+        "• Frozen scopes (project_ref, team_id, account_id, orgs/repos) cannot be overridden — provider-native and camelCase alias spellings (projectId, teamId, owner/org, …) are frozen too; scope freeze on mismatch is expected and correct.".into(),
         "• Resources always reflect current pin: locus://session, locus://doctor, locus://bindings. Prompt: locus_context. Re-read after pin changes.".into(),
         "• Never invent alternate project_ref/team/org. Never claim you re-pinned. Never log or request raw secrets.".into(),
-    ]
-    .join("\n")
+    ];
+    if let Some(a) = session_anchor {
+        lines.push(format!(
+            "• This MCP session is anchored to `{}`; if the global pin changes, provider tools refuse until the client re-initializes.",
+            a.binding_alias
+        ));
+    }
+    lines.join("\n")
 }
 
-fn handle_initialize(_params: &Value) -> Value {
-    // Prefer auto-pin once at MCP start when workspace has default_binding / require_pin
-    // or when explicitly enabled (see maybe_mcp_auto_pin). Instructions then include pin state.
+fn handle_initialize(_params: &Value, scope: &AnchorScope) -> Value {
+    // Advisory auto-pin probe once at MCP start (see maybe_mcp_auto_pin): it
+    // audits the workspace default but never pins — instructions reflect the
+    // operator-controlled pin state only.
     let _ = maybe_mcp_auto_pin();
 
-    // listChanged=true: catalog may change after auto-pin / human pin/leave; clients should re-list.
+    // Anchor adoption: an explicit initialize re-anchors this MCP session to
+    // the current healthy pinned identity (the identity a human already made
+    // globally active — agents still cannot pin), or clears the anchor when
+    // unpinned/unhealthy. Audited when it replaces a different identity.
+    let old_anchor = scope.get();
+    let new_anchor = current_healthy_anchor();
+    let replaced_identity = match (&old_anchor, &new_anchor) {
+        (Some(o), Some(n)) => !o.same_identity(n),
+        (Some(_), None) => true,
+        _ => false,
+    };
+    if replaced_identity {
+        if let Some(old) = old_anchor.as_ref() {
+            audit_anchor_event(
+                "mcp.anchor_reset",
+                &old.binding_alias,
+                json!({
+                    "old": anchor::identity_json(old),
+                    "new": new_anchor.as_ref().map(anchor::identity_json),
+                }),
+            );
+        }
+    } else if old_anchor.is_none() {
+        if let Some(new) = new_anchor.as_ref() {
+            audit_anchor_event(
+                "mcp.anchor_established",
+                &new.binding_alias,
+                json!({ "anchor": anchor::identity_json(new) }),
+            );
+        }
+    }
+    scope.reset(new_anchor.clone());
+
+    // listChanged=true: catalog may change after a human pin/leave; clients should re-list.
     json!({
         "protocolVersion": "2024-11-05",
         "capabilities": {
@@ -1411,7 +1841,7 @@ fn handle_initialize(_params: &Value) -> Value {
             "name": "locus-mcp",
             "version": VERSION
         },
-        "instructions": agent_instructions()
+        "instructions": agent_instructions(new_anchor.as_ref())
     })
 }
 
@@ -1451,17 +1881,16 @@ fn cwd() -> PathBuf {
 
 // ─── MCP auto-pin ───────────────────────────────────────────────────────────
 
-/// Whether MCP may silently pin from workspace/cwd.
+/// Whether the advisory auto-pin probe may run from workspace/cwd signals.
 ///
-/// Enabled when:
+/// The knobs are parsed but currently **inert for authority**: the probe never
+/// pins (see [`maybe_mcp_auto_pin`]); it only audits the refusal. Enabled when:
 /// - `LOCUS_MCP_AUTO_PIN=1` (explicit), or
 /// - `LOCUS_AUTO_PIN=cwd` / `clients.auto_pin=cwd`, or
 /// - workspace `.locus.toml` has `require_pin = true`, or
-/// - workspace has `default_binding` (preferred default: pin once at MCP start)
+/// - workspace has `default_binding`
 ///
 /// Disabled when `LOCUS_MCP_AUTO_PIN=0|false|off`.
-///
-/// Actual pin still requires `require_pin` or `default_binding` and never uses force.
 fn mcp_auto_pin_policy_enabled(home: &Path) -> locus_core::Result<bool> {
     if let Ok(v) = std::env::var("LOCUS_MCP_AUTO_PIN") {
         let v = v.trim().to_ascii_lowercase();
@@ -1512,12 +1941,21 @@ fn env_truthy_cwd(key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Attempt silent workspace auto-pin when unpinned and policy allows.
+/// Advisory workspace auto-pin probe when unpinned and policy allows.
 ///
-/// - Only when unpinned
+/// MCP auto-pin is **advisory only — the server never pins**. The
+/// `LOCUS_AUTO_PIN` / `LOCUS_MCP_AUTO_PIN` / workspace knobs are parsed, but
+/// `Store::pin_auto_delegated` refuses: pinning requires operator authority,
+/// and an agent-facing process cannot self-issue session authority (the
+/// workspace `.locus.toml` is repo-local and agent-writable, and executor
+/// grants are bound to an operator-supervised launch). Pending an explicit
+/// operator-delegation design, the probe:
+///
+/// - Only runs when unpinned
 /// - Only when workspace has `require_pin` or non-empty `default_binding`
-/// - Never force past allowlist (`pin_auto` never uses force for autopin sources)
-/// - Audits `session.auto_pin` (in addition to normal `session.pin`)
+/// - Resolves the workspace target read-only (never force past allowlist)
+/// - Audits `session.auto_pin_denied` with the honest refusal reason
+/// - Leaves the session unpinned (control tools + `locus_request_pin` only)
 /// - At most once per process (initialize and/or first tools/list)
 fn maybe_mcp_auto_pin() -> Option<String> {
     if AUTO_PIN_ATTEMPTED.swap(true, Ordering::SeqCst) {
@@ -1570,8 +2008,14 @@ fn maybe_mcp_auto_pin() -> Option<String> {
         return None;
     }
 
+    // Advisory-only resolve so the audit records which binding the workspace
+    // suggested. Read-only: never forces past the allowlist, never pins.
+    let advisory = s.resolve_auto_pin(&cwd).ok();
     match s.pin_auto_delegated(&cwd, Some("mcp-auto".into()), false) {
         Ok(session) => {
+            // Unreachable today: pin_auto_delegated always refuses. Kept so a
+            // future operator-delegation design slots in with the audit trail
+            // already wired.
             let _ = s.audit(
                 "session.auto_pin",
                 &session.binding_alias,
@@ -1591,8 +2035,19 @@ fn maybe_mcp_auto_pin() -> Option<String> {
             Some(session.binding_alias)
         }
         Err(e) => {
-            // Soft: leave unpinned; agents still see control tools + request_pin.
-            eprintln!("locus-mcp: auto-pin failed (staying unpinned): {e}");
+            // Honest fail-closed: leave unpinned, audit the refusal, and point
+            // agents at control tools + locus_request_pin.
+            let advisory_alias = advisory.as_ref().map(|t| t.alias.as_str());
+            let _ = s.audit(
+                "session.auto_pin_denied",
+                advisory_alias.unwrap_or("-"),
+                Some(json!({
+                    "cwd": cwd.display().to_string(),
+                    "advisory_binding": advisory_alias,
+                    "reason": e.to_string(),
+                })),
+            );
+            eprintln!("locus-mcp: auto-pin unavailable (staying unpinned): {e}");
             None
         }
     }
@@ -1604,7 +2059,7 @@ const RESOURCE_SESSION: &str = "locus://session";
 const RESOURCE_DOCTOR: &str = "locus://doctor";
 const RESOURCE_BINDINGS: &str = "locus://bindings";
 
-/// Live pin tag for resource/prompt descriptions (after optional auto-pin).
+/// Live pin tag for resource/prompt descriptions (operator-controlled pin state).
 fn pin_label_for_catalog() -> String {
     match store() {
         Ok(s) => {
@@ -1619,7 +2074,7 @@ fn pin_label_for_catalog() -> String {
 }
 
 fn handle_resources_list() -> std::result::Result<Value, Value> {
-    // Stay in sync with auto-pin: attempt once before describing resources.
+    // Run the once-per-process advisory auto-pin probe before describing resources.
     let _ = maybe_mcp_auto_pin();
     let pin = pin_label_for_catalog();
     Ok(json!({
@@ -1629,7 +2084,7 @@ fn handle_resources_list() -> std::result::Result<Value, Value> {
                 "name": "session",
                 "title": "Active Locus pin (whoami)",
                 "description": format!(
-                    "[{pin}] Current pin whoami JSON: tenant, binding, providers, frozen scopes. Live after auto-pin. Never includes secrets."
+                    "[{pin}] Current pin whoami JSON: tenant, binding, providers, frozen scopes. Live after human pin/leave. Never includes secrets."
                 ),
                 "mimeType": "application/json"
             },
@@ -1655,8 +2110,8 @@ fn handle_resources_list() -> std::result::Result<Value, Value> {
     }))
 }
 
-fn handle_resources_read(params: &Value) -> std::result::Result<Value, Value> {
-    // Re-sync with pin after auto-pin (or if initialize was skipped).
+fn handle_resources_read(params: &Value, scope: &AnchorScope) -> std::result::Result<Value, Value> {
+    // Run the once-per-process advisory auto-pin probe (if initialize was skipped).
     let _ = maybe_mcp_auto_pin();
     let uri = params
         .get("uri")
@@ -1664,7 +2119,7 @@ fn handle_resources_read(params: &Value) -> std::result::Result<Value, Value> {
         .ok_or_else(|| rpc_error(-32602, "missing resource uri".into()))?;
 
     let body = match uri {
-        RESOURCE_SESSION => resource_session_json()?,
+        RESOURCE_SESSION => resource_session_json(scope)?,
         RESOURCE_DOCTOR => resource_doctor_json()?,
         RESOURCE_BINDINGS => resource_bindings_json()?,
         other => {
@@ -1682,31 +2137,33 @@ fn handle_resources_read(params: &Value) -> std::result::Result<Value, Value> {
     }))
 }
 
-fn resource_session_json() -> std::result::Result<Value, Value> {
+fn resource_session_json(scope: &AnchorScope) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     let _ = s.check_drift_and_freeze();
-    match s.whoami() {
-        Ok(w) => Ok(serde_json::to_value(w).unwrap_or(json!({}))),
-        Err(_) => Ok(json!({
+    let who = s.whoami().ok();
+    let mut body = match &who {
+        Some(w) => serde_json::to_value(w).unwrap_or(json!({})),
+        None => json!({
             "pinned": false,
             "hint": "No active pin. Human: `locus pin <alias>` or `locus enter <alias>`. Agents: locus_request_pin / locus_enter_hint."
-        })),
+        }),
+    };
+    // Additive anchor block (omitted when this session has no anchor).
+    if let Some(a) = scope.get() {
+        let current = current_identity_observation(&s);
+        let (report, _) = mcp_anchor_report(&a, who.as_ref(), current.as_ref());
+        body["mcp_anchor"] = report;
     }
+    Ok(body)
 }
 
 fn resource_doctor_json() -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
-    // Doctor lite: full structured report with empty external facts (no PATH probe).
-    // Never secrets.
-    let report = build_doctor_report(
-        &s,
-        DoctorExternal {
-            phantom_on_path: false,
-            unresolved_phm: Vec::new(),
-            cwd: Some(cwd()),
-        },
-    )
-    .map_err(|e| rpc_error(-32000, e.to_string()))?;
+    // Full structured report with real external facts (Phantom PATH probe +
+    // unresolved phm refs) so it matches `locus doctor --json`. Never secrets.
+    let external =
+        gather_doctor_external(&s, cwd()).map_err(|e| rpc_error(-32000, e.to_string()))?;
+    let report = build_doctor_report(&s, external).map_err(|e| rpc_error(-32000, e.to_string()))?;
     Ok(serde_json::to_value(report).unwrap_or(json!({})))
 }
 
@@ -1945,8 +2402,8 @@ fn tag_tool_descriptions(tools: &mut [AdapterTool], pin_alias: Option<&str>) {
 /// Unpinned / frozen / invalid seal ⇒ only locus_* control tools.
 /// Healthy pin ⇒ control + provider tools (synthetic + upstream MCP when declared).
 /// Namespaced multi-bind prefixes tools as `alias__tool`.
-fn handle_tools_list() -> std::result::Result<Value, Value> {
-    // Silent cwd auto-pin when still unpinned (once per process; no-ops after initialize).
+fn handle_tools_list(scope: &AnchorScope) -> std::result::Result<Value, Value> {
+    // Advisory auto-pin probe when still unpinned (once per process; never grants authority).
     let _ = maybe_mcp_auto_pin();
 
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
@@ -1958,6 +2415,21 @@ fn handle_tools_list() -> std::result::Result<Value, Value> {
     // Control tools always. `locus_providers` when a pin exists (even frozen).
     let mut tools: Vec<AdapterTool> = control_tools(drift.pinned);
     let pin_alias = drift.binding_alias.clone();
+
+    // Anchor check BEFORE the drift early-return so the catalog reflects the
+    // anchored identity even when a cross-process re-pin staled the executor
+    // grant (drift unhealthy but identity fields populated).
+    let session_anchor = scope.get();
+    if let (Some(anchored), true) = (&session_anchor, drift.pinned) {
+        if let Some(current) = anchor::drift_observation(&drift) {
+            if !anchored.same_primary_identity(&current) {
+                return Ok(tools_list_payload(
+                    control_tools(true),
+                    Some(anchored.binding_alias.as_str()),
+                ));
+            }
+        }
+    }
 
     // Privileged provider catalog only when runtime is healthy (pinned, seal ok,
     // unfrozen, unexpired, binding matches). Fail closed otherwise.
@@ -1975,6 +2447,44 @@ fn handle_tools_list() -> std::result::Result<Value, Value> {
                 Some(session.binding_alias.as_str()),
             ));
         }
+        // Anchor observe on the healthy catalog path: establish on the first
+        // healthy pinned observation; on mismatch collapse to control tools
+        // tagged with the ANCHORED alias (fail closed, session-local).
+        let obs = anchor::observation(session, bindings);
+        match scope.observe(&obs, true) {
+            Some(AnchorDecision::Mismatch { anchored }) => {
+                if scope.note_mismatch(&anchored, &obs) {
+                    audit_anchor_event(
+                        "mcp.anchor_mismatch",
+                        &anchored.binding_alias,
+                        json!({
+                            "anchored": anchor::identity_json(&anchored),
+                            "current": anchor::identity_json(&obs),
+                            "underlying_issues": [],
+                        }),
+                    );
+                }
+                return Ok(tools_list_payload(
+                    tools,
+                    Some(anchored.binding_alias.as_str()),
+                ));
+            }
+            Some(AnchorDecision::Established) => {
+                audit_anchor_event(
+                    "mcp.anchor_established",
+                    &obs.binding_alias,
+                    json!({ "anchor": anchor::identity_json(&obs) }),
+                );
+            }
+            Some(AnchorDecision::Repinned) => {
+                audit_anchor_event(
+                    "mcp.anchor_repin",
+                    &obs.binding_alias,
+                    json!({ "anchor": anchor::identity_json(&obs) }),
+                );
+            }
+            Some(AnchorDecision::Match) | None => {}
+        }
         let mgr = worker_manager()
             .lock()
             .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
@@ -1990,7 +2500,7 @@ fn handle_tools_list() -> std::result::Result<Value, Value> {
     Ok(tools_list_payload(tools, pin_alias.as_deref()))
 }
 
-fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
+fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result<Value, Value> {
     let name = params
         .get("name")
         .and_then(|n| n.as_str())
@@ -1999,7 +2509,7 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
 
     // Control tools (allowed even when frozen — whoami/status/heartbeat report freeze)
     if name.starts_with("locus_") {
-        return call_control(name, &args);
+        return call_control(name, &args, scope);
     }
 
     // Provider tools require a healthy pin
@@ -2010,17 +2520,36 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
         .check_drift_and_freeze()
         .map_err(|e| rpc_error(-32000, e.to_string()))?;
 
+    // Anchored-identity check BEFORE the drift early-returns: a cross-process
+    // re-pin stales the executor grant, so drift is already unhealthy — the
+    // wrong-account refusal (`pin_changed`) must outrank `runtime_unhealthy`.
+    // RuntimeDrift carries identity fields even when unhealthy; drift.issues
+    // ride along as underlying_issues so the authority-plane facts stay
+    // visible. Establishment never happens here (unhealthy observations).
+    let session_anchor = scope.get();
+    if let (Some(anchored), true) = (&session_anchor, drift.pinned) {
+        if let Some(current) = anchor::drift_observation(&drift) {
+            if !anchored.same_primary_identity(&current) {
+                return Ok(pin_changed_refusal(
+                    scope,
+                    anchored,
+                    &current,
+                    &drift.issues,
+                ));
+            }
+        }
+    }
+
     // Fail closed on any unhealthy runtime (invalid seal, freeze, expiry, drift).
     if !drift.ok {
         if !drift.pinned {
-            return Ok(tool_text(
-                json!({
-                    "error": "not_pinned",
-                    "issues": drift.issues,
-                    "hint": "Human must run: locus enter <alias> (or `locus pin <alias>`). Agents: locus_enter_hint / locus_request_pin."
-                }),
-                true,
-            ));
+            let mut body = json!({
+                "error": "not_pinned",
+                "issues": drift.issues,
+                "hint": "Human must run: locus enter <alias> (or `locus pin <alias>`). Agents: locus_enter_hint / locus_request_pin."
+            });
+            attach_anchor_context(&mut body, session_anchor.as_ref());
+            return Ok(tool_text(body, true));
         }
         if !drift.seal_ok {
             return Ok(tool_text(
@@ -2064,13 +2593,12 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
 
     let pinned = active_session_bindings().map_err(|e| rpc_error(-32000, e.to_string()))?;
     let Some((session, bindings)) = pinned else {
-        return Ok(tool_text(
-            json!({
-                "error": "not_pinned",
-                "hint": "Human must run: locus pin <alias>. Agents: call locus_request_pin or locus_enter_hint."
-            }),
-            true,
-        ));
+        let mut body = json!({
+            "error": "not_pinned",
+            "hint": "Human must run: locus pin <alias>. Agents: call locus_request_pin or locus_enter_hint."
+        });
+        attach_anchor_context(&mut body, session_anchor.as_ref());
+        return Ok(tool_text(body, true));
     };
 
     if session.is_frozen() {
@@ -2082,6 +2610,33 @@ fn handle_tools_call(params: &Value) -> std::result::Result<Value, Value> {
             }),
             true,
         ));
+    }
+
+    // Healthy-path anchor observe against the SAME loaded (session, bindings)
+    // handed to the provider gate below (window identical to today's drift
+    // window; no store mutation). Establish on first healthy observation;
+    // same-identity re-pin (`locus enter <same>`) re-anchors silently;
+    // different identity fails closed with `pin_changed`.
+    let obs = anchor::observation(&session, &bindings);
+    match scope.observe(&obs, true) {
+        Some(AnchorDecision::Established) => {
+            audit_anchor_event(
+                "mcp.anchor_established",
+                &obs.binding_alias,
+                json!({ "anchor": anchor::identity_json(&obs) }),
+            );
+        }
+        Some(AnchorDecision::Repinned) => {
+            audit_anchor_event(
+                "mcp.anchor_repin",
+                &obs.binding_alias,
+                json!({ "anchor": anchor::identity_json(&obs) }),
+            );
+        }
+        Some(AnchorDecision::Mismatch { anchored }) => {
+            return Ok(pin_changed_refusal(scope, &anchored, &obs, &[]));
+        }
+        Some(AnchorDecision::Match) | None => {}
     }
 
     // Resolve target binding + un-prefixed tool name for namespaced sessions.
@@ -2287,36 +2842,94 @@ fn scope_or_err(
     json!({ "error": msg })
 }
 
-fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
+fn call_control(
+    name: &str,
+    args: &Value,
+    scope: &AnchorScope,
+) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     // Heartbeat: detect drift and freeze when identity control tools are polled.
     if matches!(
         name,
-        "locus_whoami" | "locus_status" | "locus_providers" | "locus_heartbeat" | "locus_safe_next"
+        "locus_whoami"
+            | "locus_status"
+            | "locus_providers"
+            | "locus_heartbeat"
+            | "locus_safe_next"
+            | "locus_verify_session"
     ) {
         let _ = s.check_drift_and_freeze();
     }
+    // Additive `mcp_anchor` block for identity-reporting control tools —
+    // omitted entirely when this MCP session has no anchor (keeps unpinned
+    // response shapes untouched). (report, current_matches_anchor).
+    let anchor_report: Option<(Value, bool)> = if matches!(
+        name,
+        "locus_whoami"
+            | "locus_status"
+            | "locus_heartbeat"
+            | "locus_safe_next"
+            | "locus_verify_session"
+    ) {
+        scope.get().map(|a| {
+            let who = s.whoami().ok();
+            let current = current_identity_observation(&s);
+            mcp_anchor_report(&a, who.as_ref(), current.as_ref())
+        })
+    } else {
+        None
+    };
+    let attach_report = |mut body: Value| -> Value {
+        if let Some((report, _)) = &anchor_report {
+            body["mcp_anchor"] = report.clone();
+        }
+        body
+    };
+    // Anchored-identity mismatch while a *different* pin is globally active
+    // (not merely unpinned) — drives safe_next / verify_session overrides.
+    let anchor_mismatch_active = anchor_report
+        .as_ref()
+        .map(|(report, matches)| {
+            !matches
+                && report
+                    .get("current_alias")
+                    .map(|v| !v.is_null())
+                    .unwrap_or(false)
+        })
+        .unwrap_or(false);
     match name {
         "locus_safe_next" => {
             let next =
                 compute_safe_next(&s, &cwd()).map_err(|e| rpc_error(-32000, e.to_string()))?;
+            let mut body = attach_report(serde_json::to_value(&next).unwrap_or(json!({})));
+            let mut is_err = !next.ready;
+            if anchor_mismatch_active {
+                // Session-local override: the only safe next action is to
+                // re-initialize this client (or restore the anchored pin).
+                let anchored_alias = anchor_report
+                    .as_ref()
+                    .and_then(|(r, _)| r["anchored_alias"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                body["action"] = json!("reinitialize_client");
+                body["ready"] = json!(false);
+                body["command"] = json!(format!("locus enter {anchored_alias}"));
+                is_err = true;
+            }
             // Informational: isError only when not ready so agents notice the gate.
-            Ok(tool_text(
-                serde_json::to_value(&next).unwrap_or(json!({})),
-                !next.ready,
-            ))
+            Ok(tool_text(body, is_err))
         }
         "locus_whoami" => match s.whoami() {
             Ok(w) => Ok(tool_text(
-                serde_json::to_value(w).unwrap_or(json!({})),
+                attach_report(serde_json::to_value(w).unwrap_or(json!({}))),
                 false,
             )),
             Err(e) => Ok(tool_text(
-                json!({
+                attach_report(json!({
                     "pinned": false,
                     "error": e.to_string(),
                     "hint": "Run `locus pin <alias>` in this workspace. Agents: locus_enter_hint."
-                }),
+                })),
                 true,
             )),
         },
@@ -2326,14 +2939,14 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
                 .map_err(|e| rpc_error(-32000, e.to_string()))?;
             match active {
                 None => Ok(tool_text(
-                    json!({ "pinned": false, "status": "unpinned" }),
+                    attach_report(json!({ "pinned": false, "status": "unpinned" })),
                     false,
                 )),
                 Some(session) => {
                     let key = s.seal_key().map_err(|e| rpc_error(-32000, e.to_string()))?;
                     let seal_ok = session.verify_seal(&key).is_ok();
                     Ok(tool_text(
-                        json!({
+                        attach_report(json!({
                             "pinned": true,
                             "binding": session.binding_alias,
                             "tenant": session.tenant,
@@ -2344,7 +2957,7 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
                             "frozen_reason": session.frozen_reason,
                             "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
                             "namespaces": session.all_aliases(),
-                        }),
+                        })),
                         false,
                     ))
                 }
@@ -2368,7 +2981,7 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
             } else {
                 Some("runtime unhealthy — run `locus doctor`")
             };
-            let body = json!({
+            let body = attach_report(json!({
                 "ok": drift.ok,
                 "pinned": drift.pinned,
                 "seal_ok": drift.seal_ok,
@@ -2383,7 +2996,7 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
                 "providers": drift.providers,
                 "hint": hint,
                 "runtime": drift,
-            });
+            }));
             // Informational probe — isError only when unhealthy so agents notice.
             Ok(tool_text(body, !drift.ok))
         }
@@ -2494,6 +3107,49 @@ fn call_control(name: &str, args: &Value) -> std::result::Result<Value, Value> {
                 false,
             ))
         }
+        "locus_verify_session" => {
+            // Same pack as `locus verify session --json`. Available unpinned.
+            // isError only on hard store failures — agents/hub gate on session_ok.
+            let external =
+                gather_doctor_external(&s, cwd()).map_err(|e| rpc_error(-32000, e.to_string()))?;
+            let pack = verify_session(&s, &cwd(), external)
+                .map_err(|e| rpc_error(-32000, e.to_string()))?;
+            let binding = pack
+                .whoami
+                .as_ref()
+                .map(|w| w.binding_alias.as_str())
+                .unwrap_or("-");
+            let _ = s.audit(
+                "mcp.verify_session",
+                binding,
+                Some(json!({
+                    // Keys aligned with the CLI's `verify.session` audit event.
+                    "session_ok": pack.session_ok,
+                    "safe_next": pack.safe_next.action,
+                    "doctor_verdict": pack.doctor.verdict,
+                    "doctor_ok": pack.doctor.ok,
+                    "has_whoami": pack.whoami.is_some(),
+                })),
+            );
+            let mut body = attach_report(serde_json::to_value(&pack).unwrap_or(json!({})));
+            if anchor_mismatch_active {
+                // Hub gating: an anchored-identity mismatch is a per-session
+                // failure even when the global pin itself is healthy. The hub
+                // gates on session_ok — force it false; isError stays false
+                // (the pack itself returned fine).
+                let anchored_alias = anchor_report
+                    .as_ref()
+                    .and_then(|(r, _)| r["anchored_alias"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                body["session_ok"] = json!(false);
+                body["mcp_anchor_mismatch"] = json!(true);
+                body["safe_next"]["action"] = json!("reinitialize_client");
+                body["safe_next"]["ready"] = json!(false);
+                body["safe_next"]["command"] = json!(format!("locus enter {anchored_alias}"));
+            }
+            Ok(tool_text(body, false))
+        }
         other => Ok(tool_text(
             json!({ "error": format!("unknown control tool: {other}") }),
             true,
@@ -2511,6 +3167,170 @@ fn tool_text(value: Value, is_error: bool) -> Value {
         "content": [{ "type": "text", "text": text }],
         "isError": is_error
     })
+}
+
+#[cfg(test)]
+mod http_read_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[allow(clippy::type_complexity)]
+    fn parse(
+        raw: &[u8],
+    ) -> std::result::Result<(String, String, Vec<(String, String)>, Vec<u8>), HttpReadError> {
+        let mut reader = Cursor::new(raw.to_vec());
+        read_http_request(&mut reader)
+    }
+
+    #[test]
+    fn parses_simple_post_with_body() {
+        let raw = b"POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nabcd";
+        let (method, path, headers, body) = parse(raw).expect("parse");
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/mcp");
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("host") && v == "x"));
+        assert_eq!(body, b"abcd");
+    }
+
+    #[test]
+    fn oversized_content_length_rejected_before_allocation() {
+        let raw = format!(
+            "POST /mcp HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            HTTP_MAX_BODY_BYTES + 1
+        );
+        match parse(raw.as_bytes()) {
+            Err(HttpReadError::PayloadTooLarge { content_length }) => {
+                assert_eq!(content_length, HTTP_MAX_BODY_BYTES + 1);
+            }
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
+        }
+        // At the cap exactly: no 413 (body read may still hit EOF -> Fatal).
+        let raw = format!("POST /mcp HTTP/1.1\r\nContent-Length: {HTTP_MAX_BODY_BYTES}\r\n\r\n");
+        assert!(matches!(
+            parse(raw.as_bytes()),
+            Err(HttpReadError::Fatal(_))
+        ));
+    }
+
+    #[test]
+    fn too_many_header_fields_rejected() {
+        let mut raw = String::from("GET /mcp HTTP/1.1\r\n");
+        for i in 0..(HTTP_MAX_HEADER_COUNT + 1) {
+            raw.push_str(&format!("X-H-{i}: v\r\n"));
+        }
+        raw.push_str("\r\n");
+        assert!(matches!(
+            parse(raw.as_bytes()),
+            Err(HttpReadError::HeadersTooLarge)
+        ));
+    }
+
+    #[test]
+    fn oversized_header_bytes_rejected() {
+        // One giant header line without ever reaching the blank line.
+        let mut raw = String::from("GET /mcp HTTP/1.1\r\n");
+        raw.push_str("X-Big: ");
+        raw.push_str(&"a".repeat(HTTP_MAX_HEADER_BYTES + 1024));
+        raw.push_str("\r\n\r\n");
+        assert!(matches!(
+            parse(raw.as_bytes()),
+            Err(HttpReadError::HeadersTooLarge)
+        ));
+    }
+
+    #[test]
+    fn giant_request_line_rejected() {
+        let mut raw = String::from("GET /");
+        raw.push_str(&"a".repeat(HTTP_MAX_HEADER_BYTES + 1024));
+        raw.push_str(" HTTP/1.1\r\n\r\n");
+        assert!(matches!(
+            parse(raw.as_bytes()),
+            Err(HttpReadError::HeadersTooLarge)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod anchor_health_tests {
+    use super::*;
+    use crate::anchor::NamespaceAnchor;
+
+    fn sample(alias: &str, id: &str, tenant: &str, mode: &str) -> SessionAnchor {
+        SessionAnchor {
+            binding_id: id.into(),
+            binding_alias: alias.into(),
+            tenant: tenant.into(),
+            mode: mode.into(),
+            namespaces: Vec::new(),
+            session_id: "sess".into(),
+            backing: None,
+            anchored_at_unix: 1,
+        }
+    }
+
+    /// Regression: health surfaces must use the SAME identity comparison as
+    /// the provider gate — a mode/namespace change with identical primary
+    /// identity refuses provider tools, so it must read as a mismatch here
+    /// too (session_ok=false), not as healthy via primary-only matching.
+    #[test]
+    fn full_observation_trips_on_mode_and_namespace_changes() {
+        let anchored = sample("acme", "bnd_acme", "acme-corp", "exclusive");
+
+        // Same primary identity, different mode → provider gate refuses →
+        // health must mismatch.
+        let mode_changed = sample("acme", "bnd_acme", "acme-corp", "namespaced");
+        assert!(anchored.same_primary_identity(&mode_changed));
+        assert!(!anchor_matches_current(&anchored, Some(&mode_changed)));
+
+        // Identical full identity matches.
+        let same = sample("acme", "bnd_acme", "acme-corp", "exclusive");
+        assert!(anchor_matches_current(&anchored, Some(&same)));
+
+        // Namespace set change with identical primary identity mismatches.
+        let mut ns_anchor = sample("acme", "bnd_acme", "acme-corp", "namespaced");
+        ns_anchor.namespaces = vec![NamespaceAnchor {
+            alias: "alpha".into(),
+            binding_id: "bnd_alpha".into(),
+            tenant: "alpha-corp".into(),
+        }];
+        let mut ns_changed = ns_anchor.clone();
+        ns_changed.namespaces[0].tenant = "other-corp".into();
+        assert!(ns_anchor.same_primary_identity(&ns_changed));
+        assert!(!anchor_matches_current(&ns_anchor, Some(&ns_changed)));
+        assert!(anchor_matches_current(&ns_anchor, Some(&ns_anchor.clone())));
+    }
+
+    /// Primary-only comparison applies only when just the drift identity
+    /// exists (empty mode); no observation never matches (fail closed).
+    #[test]
+    fn drift_only_observation_compares_primary_and_none_never_matches() {
+        let anchored = sample("acme", "bnd_acme", "acme-corp", "exclusive");
+
+        let drift_same = sample("acme", "bnd_acme", "acme-corp", "");
+        assert!(anchor_matches_current(&anchored, Some(&drift_same)));
+
+        let drift_other = sample("beta", "bnd_beta", "beta-corp", "");
+        assert!(!anchor_matches_current(&anchored, Some(&drift_other)));
+
+        assert!(!anchor_matches_current(&anchored, None));
+    }
+
+    /// mcp_anchor_report carries the gate-equivalent verdict in `match`.
+    #[test]
+    fn anchor_report_match_follows_gate_comparison() {
+        let anchored = sample("acme", "bnd_acme", "acme-corp", "exclusive");
+        let mode_changed = sample("acme", "bnd_acme", "acme-corp", "namespaced");
+        let (report, matches) = mcp_anchor_report(&anchored, None, Some(&mode_changed));
+        assert!(!matches);
+        assert_eq!(report["match"], serde_json::json!(false));
+
+        let same = sample("acme", "bnd_acme", "acme-corp", "exclusive");
+        let (report, matches) = mcp_anchor_report(&anchored, None, Some(&same));
+        assert!(matches);
+        assert_eq!(report["match"], serde_json::json!(true));
+    }
 }
 
 #[cfg(test)]

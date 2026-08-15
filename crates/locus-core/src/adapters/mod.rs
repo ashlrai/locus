@@ -107,6 +107,22 @@ pub fn adapter_for(provider: &str) -> Option<Box<dyn ProviderAdapter>> {
     }
 }
 
+/// Providers with a built-in synthetic adapter (dispatchable via [`adapter_for`]).
+///
+/// Keep in sync with the `adapter_for` match above — enforced by the
+/// `known_providers_all_dispatch` test.
+pub fn known_providers() -> &'static [&'static str] {
+    &[
+        "supabase",
+        "github",
+        "vercel",
+        "cloudflare",
+        "aws",
+        "resend",
+        "stripe",
+    ]
+}
+
 /// All tools for a binding (exclusive pin — unprefixed `provider.tool`).
 pub fn tools_for_binding(binding: &Binding) -> Vec<AdapterTool> {
     let mut out = Vec::new();
@@ -271,14 +287,46 @@ pub fn call_tool_gated(
 /// Adapters may re-check the same keys inside `call()`; this preflight ensures
 /// destructive tools under `require_approval` still deny wrong selectors as
 /// hard errors (not soft `requires_approval` results).
+///
+/// Real MCP servers spell the same selector many ways (camelCase, provider
+/// jargon), so every frozen selector is enforced for its canonical key AND its
+/// provider-native alias spellings at any depth inside object and array args
+/// (bounded scan — args nesting past the limit deny fail closed, and
+/// non-string values under a frozen selector key deny as type mismatches). A tool
+/// whose provider prefix is not declared in the pinned binding is denied
+/// outright (fail closed): this binding can never authorize it.
 fn preflight_scope_freeze(binding: &Binding, tool_name: &str, args: &Value) -> Result<()> {
     let provider_name = tool_name.split('.').next().unwrap_or("");
     let Some(p) = binding.provider(provider_name) else {
-        return Ok(());
+        return Err(LocusError::msg(format!(
+            "scope freeze: provider `{provider_name}` is not part of the pinned binding (tool `{tool_name}`); denied fail closed"
+        )));
     };
     freeze_string_arg(args, "project_ref", p.scope.project_ref.as_deref())?;
     freeze_string_arg(args, "team_id", p.scope.team_id.as_deref())?;
     freeze_string_arg(args, "account_id", p.scope.account_id.as_deref())?;
+
+    // Provider-native / camelCase spellings of the same frozen selectors.
+    let spellings = selector_alias_spellings(&p.provider);
+    freeze_selector_aliases(
+        args,
+        spellings.project_ref,
+        "project_ref",
+        p.scope.project_ref.as_deref(),
+    )?;
+    freeze_selector_aliases(
+        args,
+        spellings.team_id,
+        "team_id",
+        p.scope.team_id.as_deref(),
+    )?;
+    freeze_selector_aliases(
+        args,
+        spellings.account_id,
+        "account_id",
+        p.scope.account_id.as_deref(),
+    )?;
+    freeze_org_selector_aliases(args, &p.scope.orgs)?;
     // Stripe (and similar) may freeze livemode via scope.extra
     let frozen_live = p
         .scope
@@ -295,7 +343,168 @@ fn preflight_scope_freeze(binding: &Binding, tool_name: &str, args: &Value) -> R
             })
         });
     freeze_bool_arg(args, "livemode", frozen_live)?;
+    // Nested / typed coverage for livemode: a frozen mode cannot be flipped via
+    // a nested object, an array member, or a non-boolean spelling.
+    if let Some(fl) = frozen_live {
+        let check = |key: &str, v: &Value| -> Result<()> {
+            if key != "livemode" {
+                return Ok(());
+            }
+            match v {
+                Value::Bool(m) if *m == fl => Ok(()),
+                Value::Null => Ok(()),
+                other => Err(LocusError::msg(format!(
+                    "scope freeze: refusing livemode={other}; binding freezes livemode={fl}"
+                ))),
+            }
+        };
+        walk_frozen_keys(args, FREEZE_SCAN_MAX_DEPTH, &check)?;
+    }
     Ok(())
+}
+
+/// Alias spellings per canonical frozen selector. The freeze scan enforces the
+/// canonical snake_case key AND these alias spellings real MCP servers use
+/// (camelCase, provider jargon) at every scanned depth. Unknown-but-declared
+/// providers (custom upstream workers) get the generic set.
+struct SelectorAliasSpellings {
+    project_ref: &'static [&'static str],
+    team_id: &'static [&'static str],
+    account_id: &'static [&'static str],
+}
+
+fn selector_alias_spellings(provider: &str) -> SelectorAliasSpellings {
+    const PROJECT_GENERIC: &[&str] = &["projectRef", "project_id", "projectId"];
+    const TEAM_GENERIC: &[&str] = &["teamId"];
+    const ACCOUNT_GENERIC: &[&str] = &["accountId"];
+    match provider.to_ascii_lowercase().as_str() {
+        "aws" => SelectorAliasSpellings {
+            project_ref: PROJECT_GENERIC,
+            team_id: TEAM_GENERIC,
+            account_id: &["accountId", "aws_account_id", "awsAccountId"],
+        },
+        "stripe" => SelectorAliasSpellings {
+            project_ref: PROJECT_GENERIC,
+            team_id: TEAM_GENERIC,
+            account_id: &["accountId", "stripe_account", "stripeAccount"],
+        },
+        _ => SelectorAliasSpellings {
+            project_ref: PROJECT_GENERIC,
+            team_id: TEAM_GENERIC,
+            account_id: ACCOUNT_GENERIC,
+        },
+    }
+}
+
+/// Max arg-nesting depth scanned by the freeze net. Args that nest deeper than
+/// this while a selector is frozen are denied outright (fail closed) — a
+/// selector can never hide below the scan horizon. Real MCP tool args stay far
+/// shallower than this.
+const FREEZE_SCAN_MAX_DEPTH: usize = 32;
+
+/// Bounded-depth walk over object entries and array members, applying `check`
+/// to every object key/value pair. Depth exhaustion with structure still
+/// unscanned is a hard deny (fail closed), never a silent skip.
+fn walk_frozen_keys<F>(value: &Value, depth: usize, check: &F) -> Result<()>
+where
+    F: Fn(&str, &Value) -> Result<()>,
+{
+    match value {
+        Value::Object(map) => {
+            if depth == 0 {
+                return Err(LocusError::msg(
+                    "scope freeze: args nest deeper than the freeze scan limit; denied fail closed",
+                ));
+            }
+            for (k, v) in map {
+                check(k, v)?;
+                walk_frozen_keys(v, depth - 1, check)?;
+            }
+        }
+        Value::Array(items) => {
+            if depth == 0 {
+                return Err(LocusError::msg(
+                    "scope freeze: args nest deeper than the freeze scan limit; denied fail closed",
+                ));
+            }
+            for v in items {
+                walk_frozen_keys(v, depth - 1, check)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Deny selector spellings (canonical key + aliases) that conflict with the
+/// frozen canonical value — at any scanned depth, inside arrays, and for any
+/// JSON type. A frozen selector key holding a non-string value (other than
+/// `null`, which carries no selector) is a hard deny: type games cannot dodge
+/// the freeze.
+fn freeze_selector_aliases(
+    args: &Value,
+    aliases: &[&str],
+    canonical: &str,
+    frozen: Option<&str>,
+) -> Result<()> {
+    let Some(f) = frozen else {
+        return Ok(());
+    };
+    let check = |key: &str, v: &Value| -> Result<()> {
+        if key != canonical && !aliases.contains(&key) {
+            return Ok(());
+        }
+        match v {
+            Value::String(m) if m.as_str() == f => Ok(()),
+            Value::Null => Ok(()),
+            Value::String(m) => Err(LocusError::msg(format!(
+                "scope freeze: refusing {key}={m:?}; binding freezes {canonical}={f:?}"
+            ))),
+            other => Err(LocusError::msg(format!(
+                "scope freeze: refusing non-string {key} ({}); binding freezes {canonical}={f:?}",
+                json_type_name(other)
+            ))),
+        }
+    };
+    walk_frozen_keys(args, FREEZE_SCAN_MAX_DEPTH, &check)
+}
+
+/// When orgs are frozen, model-supplied org/owner selectors must be members —
+/// at any scanned depth, inside arrays, and only as plain strings (non-string
+/// org selectors are a hard deny).
+fn freeze_org_selector_aliases(args: &Value, orgs: &[String]) -> Result<()> {
+    if orgs.is_empty() {
+        return Ok(());
+    }
+    const ORG_KEYS: &[&str] = &["org", "owner", "organization"];
+    let check = |key: &str, v: &Value| -> Result<()> {
+        if !ORG_KEYS.contains(&key) {
+            return Ok(());
+        }
+        match v {
+            Value::String(m) if orgs.iter().any(|o| o == m) => Ok(()),
+            Value::Null => Ok(()),
+            Value::String(m) => Err(LocusError::msg(format!(
+                "scope freeze: refusing {key}={m:?}; binding freezes orgs={orgs:?}"
+            ))),
+            other => Err(LocusError::msg(format!(
+                "scope freeze: refusing non-string {key} ({}); binding freezes orgs={orgs:?}",
+                json_type_name(other)
+            ))),
+        }
+    };
+    walk_frozen_keys(args, FREEZE_SCAN_MAX_DEPTH, &check)
 }
 
 /// Returns `Some(())` when the call is allowed through the approval gate.
@@ -467,7 +676,7 @@ pub fn control_tools(pinned: bool) -> Vec<AdapterTool> {
         },
         AdapterTool {
             name: "locus_verify_claim".into(),
-            description: "Verification plane (M5): score a free-text claim before acting. Returns {claim, confidence: unknown|low|medium|high, needs_tool, suggestion, signals, grounding?}. Heuristic — numbers/URLs/versions/currency ($)/percentages/absolute language (always|never) ⇒ needs_tool + low confidence; identity claims ground against whoami when pinned. Suggestion names concrete next steps (provider reads, locus exec, whoami). Never secrets. For hub session pack use CLI: locus verify session --json.".into(),
+            description: "Verification plane (M5): score a free-text claim before acting. Returns {claim, confidence: unknown|low|medium|high, needs_tool, suggestion, signals, grounding?}. Heuristic — numbers/URLs/versions/currency ($)/percentages/absolute language (always|never) ⇒ needs_tool + low confidence; identity claims ground against whoami when pinned. Suggestion names concrete next steps (provider reads, locus exec, whoami). Never secrets. For hub session pack use locus_verify_session (or CLI: locus verify session --json).".into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -482,6 +691,13 @@ pub fn control_tools(pinned: bool) -> Vec<AdapterTool> {
                 },
                 "additionalProperties": false
             }),
+            provider: "locus".into(),
+            destructive: false,
+        },
+        AdapterTool {
+            name: "locus_verify_session".into(),
+            description: "Verification plane (M5): hub session pack — same JSON as `locus verify session --json`. Returns {kind:\"session\", version, whoami?, doctor, safe_next, session_ok}. Available unpinned. Gate on session_ok (isError only on hard store failures). Never secrets — aliases, verdicts, scopes only.".into(),
+            input_schema: json!({"type":"object","properties":{},"additionalProperties":false}),
             provider: "locus".into(),
             destructive: false,
         },
@@ -503,6 +719,20 @@ mod tests {
     use super::*;
     use crate::binding::{BindingBody, Policy, Scope};
     use std::collections::BTreeMap;
+
+    /// `known_providers()` and the `adapter_for` dispatch match must stay in
+    /// sync — every published provider dispatches, and the two well-known
+    /// non-adapter names never appear.
+    #[test]
+    fn known_providers_all_dispatch() {
+        for p in known_providers() {
+            assert!(
+                adapter_for(p).is_some(),
+                "known provider '{p}' must dispatch"
+            );
+        }
+        assert!(adapter_for("unknown-provider").is_none());
+    }
 
     fn acme() -> Binding {
         Binding::from_body(BindingBody {
@@ -680,6 +910,202 @@ mod tests {
             msg.contains("scope freeze") && msg.contains("account_id"),
             "unexpected: {msg}"
         );
+    }
+
+    #[test]
+    fn freeze_rejects_camelcase_and_provider_native_alias_spellings() {
+        // supabase: project_ref frozen → projectId / project_id / projectRef all deny
+        let b = acme();
+        for key in ["projectId", "project_id", "projectRef"] {
+            let err = call_tool(&b, "supabase.scope", &json!({ key: "proj_evil" }));
+            assert!(err.is_err(), "{key} must be frozen");
+            let msg = err.unwrap_err().to_string();
+            assert!(
+                msg.contains("scope freeze") && msg.contains("project_ref"),
+                "unexpected: {msg}"
+            );
+        }
+        // Matching alias value passes through the freeze
+        let ok = call_tool(&b, "supabase.scope", &json!({ "projectId": "proj_acme" })).unwrap();
+        assert!(ok.ok);
+
+        // vercel: teamId alias frozen
+        let vb = vercel_binding();
+        let err = call_tool(&vb, "vercel.scope", &json!({ "teamId": "team_evil" }));
+        assert!(err.is_err(), "teamId must be frozen");
+        assert!(err.unwrap_err().to_string().contains("team_id"));
+
+        // cloudflare / aws / stripe: accountId + provider-native spellings
+        let mb = multi_provider();
+        let err = call_tool(
+            &mb,
+            "cloudflare.scope",
+            &json!({ "accountId": "cf_acct_evil" }),
+        );
+        assert!(err.is_err(), "cloudflare accountId must be frozen");
+        let err = call_tool(&mb, "aws.scope", &json!({ "awsAccountId": "999999999999" }));
+        assert!(err.is_err(), "aws awsAccountId must be frozen");
+        let err = call_tool(
+            &mb,
+            "stripe.scope",
+            &json!({ "stripe_account": "acct_evil" }),
+        );
+        assert!(err.is_err(), "stripe_account must be frozen");
+    }
+
+    #[test]
+    fn freeze_scans_shallow_nested_selector_objects() {
+        let b = acme();
+        let err = call_tool(
+            &b,
+            "supabase.scope",
+            &json!({ "options": { "projectId": "proj_evil" } }),
+        );
+        assert!(err.is_err(), "nested alias must freeze: {err:?}");
+        assert!(err.unwrap_err().to_string().contains("scope freeze"));
+        let ok = call_tool(
+            &b,
+            "supabase.scope",
+            &json!({ "options": { "projectId": "proj_acme" } }),
+        )
+        .unwrap();
+        assert!(ok.ok);
+    }
+
+    #[test]
+    fn freeze_scans_nested_canonical_arrays_and_deep_objects() {
+        let b = acme();
+        // canonical snake_case key nested inside an option object
+        let err = call_tool(
+            &b,
+            "supabase.scope",
+            &json!({ "options": { "project_ref": "proj_evil" } }),
+        );
+        assert!(err.is_err(), "nested canonical key must freeze: {err:?}");
+        assert!(err.unwrap_err().to_string().contains("scope freeze"));
+        // object inside an array
+        let err = call_tool(
+            &b,
+            "supabase.scope",
+            &json!({ "filters": [{ "projectId": "proj_evil" }] }),
+        );
+        assert!(err.is_err(), "array-nested alias must freeze: {err:?}");
+        // deeper than one level
+        let err = call_tool(
+            &b,
+            "supabase.scope",
+            &json!({ "a": { "b": { "c": { "projectId": "proj_evil" } } } }),
+        );
+        assert!(err.is_err(), "deep-nested alias must freeze: {err:?}");
+        // matching values pass at any depth
+        let ok = call_tool(
+            &b,
+            "supabase.scope",
+            &json!({ "filters": [{ "project_ref": "proj_acme" }] }),
+        )
+        .unwrap();
+        assert!(ok.ok);
+    }
+
+    #[test]
+    fn freeze_denies_non_string_selector_values() {
+        let b = acme();
+        for args in [
+            json!({ "projectId": 123 }),
+            json!({ "project_ref": 123 }),
+            json!({ "options": { "projectId": true } }),
+            json!({ "projectId": ["proj_evil"] }),
+        ] {
+            let err = call_tool(&b, "supabase.scope", &args);
+            assert!(err.is_err(), "non-string selector must deny: {args}");
+            assert!(err.unwrap_err().to_string().contains("scope freeze"));
+        }
+        // explicit null carries no selector — the frozen value applies
+        let ok = call_tool(&b, "supabase.scope", &json!({ "projectId": null })).unwrap();
+        assert!(ok.ok);
+    }
+
+    #[test]
+    fn freeze_stripe_livemode_nested_and_org_arrays() {
+        let mb = multi_provider();
+        // nested livemode flip denies
+        let err = call_tool(
+            &mb,
+            "stripe.scope",
+            &json!({ "options": { "livemode": true } }),
+        );
+        assert!(err.is_err(), "nested livemode flip must deny: {err:?}");
+        assert!(err.unwrap_err().to_string().contains("livemode"));
+        // non-bool livemode spelling denies (type mismatch)
+        let err = call_tool(&mb, "stripe.scope", &json!({ "livemode": "true" }));
+        assert!(err.is_err(), "non-bool livemode must deny: {err:?}");
+        // matching nested livemode passes
+        let ok = call_tool(
+            &mb,
+            "stripe.scope",
+            &json!({ "options": { "livemode": false } }),
+        )
+        .unwrap();
+        assert!(ok.ok);
+
+        let gb = github_binding();
+        let err = call_tool(
+            &gb,
+            "github.scope",
+            &json!({ "items": [{ "owner": "evil-corp" }] }),
+        );
+        assert!(err.is_err(), "array-nested owner must deny: {err:?}");
+        let err = call_tool(&gb, "github.scope", &json!({ "owner": 42 }));
+        assert!(err.is_err(), "non-string owner must deny: {err:?}");
+    }
+
+    #[test]
+    fn freeze_denies_args_nested_beyond_scan_depth() {
+        let b = acme();
+        let mut v = json!({ "projectId": "proj_evil" });
+        for _ in 0..40 {
+            v = json!({ "wrap": v });
+        }
+        let err = call_tool(&b, "supabase.scope", &v);
+        assert!(
+            err.is_err(),
+            "over-deep args must deny fail closed: {err:?}"
+        );
+        assert!(err.unwrap_err().to_string().contains("scope freeze"));
+    }
+
+    #[test]
+    fn freeze_owner_org_aliases_against_frozen_orgs() {
+        let b = github_binding();
+        let err = call_tool(&b, "github.scope", &json!({ "owner": "evil-corp" }));
+        assert!(err.is_err(), "owner outside frozen orgs must deny");
+        assert!(err.unwrap_err().to_string().contains("scope freeze"));
+        let ok = call_tool(&b, "github.scope", &json!({ "owner": "acme-corp" })).unwrap();
+        assert!(ok.ok);
+        // Shallow nested object spelling
+        let err = call_tool(
+            &b,
+            "github.scope",
+            &json!({ "repository": { "owner": "evil-corp" } }),
+        );
+        assert!(err.is_err(), "nested owner outside frozen orgs must deny");
+    }
+
+    #[test]
+    fn unknown_provider_tool_denied_fail_closed() {
+        let b = acme(); // only supabase declared
+        for tool in ["vercel.scope", "doesnotexist.anything"] {
+            let err = call_tool(&b, tool, &json!({}));
+            assert!(err.is_err(), "{tool} must be denied");
+            let msg = err.unwrap_err().to_string();
+            assert!(
+                msg.contains("not part of the pinned binding"),
+                "unexpected: {msg}"
+            );
+        }
+        // enforce_policy alone (upstream worker path) also denies before workers.
+        let err = enforce_policy(&b, "github.create_issue", &json!({}), None);
+        assert!(err.is_err(), "upstream path must deny undeclared provider");
     }
 
     #[test]
@@ -963,6 +1389,7 @@ mod tests {
         assert!(names.contains(&"locus_whoami"));
         assert!(names.contains(&"locus_safe_next"));
         assert!(names.contains(&"locus_verify_claim"));
+        assert!(names.contains(&"locus_verify_session"));
         assert!(!names.contains(&"locus_providers"));
         let safe = unbound
             .iter()
@@ -970,6 +1397,12 @@ mod tests {
             .unwrap();
         assert!(safe.description.to_lowercase().contains("enter"));
         assert!(safe.description.to_lowercase().contains("approve"));
+        let vs = unbound
+            .iter()
+            .find(|t| t.name == "locus_verify_session")
+            .unwrap();
+        assert!(vs.description.contains("session_ok"));
+        assert!(vs.description.to_lowercase().contains("unpinned"));
 
         let pinned = control_tools(true);
         let names: Vec<_> = pinned.iter().map(|t| t.name.as_str()).collect();
@@ -977,6 +1410,7 @@ mod tests {
         assert!(names.contains(&"locus_enter_hint"));
         assert!(names.contains(&"locus_safe_next"));
         assert!(names.contains(&"locus_verify_claim"));
+        assert!(names.contains(&"locus_verify_session"));
         assert!(names.contains(&"locus_providers"));
     }
 

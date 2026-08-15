@@ -53,15 +53,16 @@ pub use adapter_trust::{
     ADAPTER_TRUST_KEYS_VERSION,
 };
 pub use adapters::{
-    call_tool, call_tool_gated, control_tools, enforce_policy, tools_for_binding, AdapterTool,
-    ApprovalGate, ToolCallResult,
+    call_tool, call_tool_gated, control_tools, enforce_policy, known_providers, tools_for_binding,
+    AdapterTool, ApprovalGate, ToolCallResult,
 };
 pub use agent_report::{
     agent_md_content, agent_md_path, agent_md_present, agent_report_from_doctor,
     agent_report_json_has_stable_keys, build_agent_report, compute_safe_next, mcp_agent_env,
-    probe_agent_options, probe_mcp_registered, verify_session, workspace_present,
-    workspace_stub_toml, AgentCommands, AgentReport, AgentReportOptions, AgentStatus,
-    McpRegistered, SafeNext, SessionVerificationPack, AGENT_REPORT_JSON_KEYS, REQUIRED_SERVERS,
+    probe_agent_options, probe_mcp_registered, probe_mcp_registered_with_grok, verify_session,
+    workspace_present, workspace_stub_toml, AgentCommands, AgentReport, AgentReportOptions,
+    AgentStatus, McpRegistered, SafeNext, SessionVerificationPack, AGENT_REPORT_JSON_KEYS,
+    REQUIRED_SERVERS,
 };
 pub use approval::notifications_enabled;
 pub use approval::{
@@ -72,8 +73,11 @@ pub use approval::{
     EXTERNAL_APPROVAL_AUTHORITY_BLOCKER,
 };
 pub use authority_anchor::{
-    restrict_validation_to_executor, run_authority_anchor_server_if_requested,
-    CONTROL_CAPABILITY_ENV, EXECUTOR_CAPABILITY_ENV,
+    control_capability_file, control_capability_status, mint_ephemeral_control_capability,
+    mint_persisted_control_capability, persist_control_capability,
+    read_persisted_control_capability, restrict_validation_to_executor,
+    run_authority_anchor_server_if_requested, unpersist_control_capability,
+    ControlCapabilityStatus, CONTROL_CAPABILITY_ENV, EXECUTOR_CAPABILITY_ENV,
 };
 pub use autopin::{match_remote_binding, resolve_auto_pin, AutoPinTarget};
 pub use binding::{
@@ -84,15 +88,15 @@ pub use config::{
     load_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig, NotifyConfig,
 };
 pub use credential::{
-    credential_metadata, inject_keys_for_provider, phantom_on_path, resolve,
-    resolve_binding_secrets, CredentialMetadata, CredentialRef, CredentialResolutionIssue,
-    ResolvedBindingSecrets,
+    collect_unresolved_phm_refs, credential_metadata, inject_keys_for_provider,
+    migrate_legacy_phantom_ref, phantom_on_path, resolve, resolve_binding_secrets,
+    CredentialMetadata, CredentialRef, CredentialResolutionIssue, ResolvedBindingSecrets,
 };
 pub use doctor::{
-    build_doctor_report, count_near_misses, doctor_json_has_stable_keys, filter_audit_events,
-    is_near_miss_op, AuditSummary, DoctorExternal, DoctorIssue, DoctorPin, DoctorReport,
-    DoctorVerdict, IssueSeverity, NearMissSummary, WorkspaceStatus as DoctorWorkspaceStatus,
-    DOCTOR_JSON_KEYS,
+    build_doctor_report, control_capability_findings, count_near_misses,
+    doctor_json_has_stable_keys, filter_audit_events, gather_doctor_external, is_near_miss_op,
+    AuditSummary, DoctorExternal, DoctorIssue, DoctorPin, DoctorReport, DoctorVerdict,
+    IssueSeverity, NearMissSummary, WorkspaceStatus as DoctorWorkspaceStatus, DOCTOR_JSON_KEYS,
 };
 pub use engagement::{
     client_binding_template, close_checklist, engagement_readme, EngagementCloseResult,

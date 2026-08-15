@@ -9,7 +9,8 @@ Identity is resolved at the gate; policy is the second gate: **before** any adap
 ```toml
 [binding.policy]
 default = "allow"                 # allow | deny
-max_ttl = "8h"
+max_ttl = "8h"                    # hard cap on any pin (default 8h)
+default_ttl = "2h"                # optional: pin length when no --ttl is passed
 parallel_sessions = 4
 
 # Preferred: ordered structured rules (first match wins)
@@ -48,6 +49,28 @@ dual_control = []
 | `require_approval` | Block until independently authenticated external authority exists |
 | `dual_control` | Block until **two** distinct externally authenticated identities approve |
 | anything else | Fail closed → deny |
+
+### Session TTL (auto-leave)
+
+Every pin expires; expiry is enforced passively and fail-closed by seal
+verification on every privileged op (MCP gate, `exec`, `whoami`, `doctor`) —
+there is no timer to kill. `locus enter <alias> --ttl 30m` requests a shorter
+pin (min `1m`, max `24h`).
+
+Precedence (winner always capped by `max_ttl`):
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | `--ttl` flag on `enter` / `pin` (or CI mint TTL) | `locus enter cmp --ttl 30m` |
+| 2 | `policy.default_ttl` in the binding TOML | `default_ttl = "2h"` |
+| 3 | `policy.max_ttl` (default `8h`) | `max_ttl = "8h"` |
+
+A request above `max_ttl` is silently clamped (the CLI prints a cap warning).
+An invalid `default_ttl` fails closed at binding save/load. Editing
+`default_ttl` never freezes a live session — it is deliberately outside the
+binding fingerprint. Remaining time surfaces in `whoami`
+(`expires_in_secs`), `binding list` (`* pinned (… left)`), and `doctor`
+emits a `pin_expiring` **Warn** finding in the final 5 minutes.
 
 ### Evaluation order
 

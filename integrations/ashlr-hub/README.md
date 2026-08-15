@@ -23,7 +23,8 @@ Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus wi
 5. Use **`withLocusSession(binding, fn)`** for ephemeral job pins (`ci mint`; scrubbed child env + `validateMintEnv`; no `active.json` mutation).
 6. For continuous session health, shell **`locusWatchOnce()`** / **`locusVerifySession()`** (or pure `parseWatchHeartbeat` / `parseSessionVerificationPack`) — soft annotation under `LOCUS_ENFORCE=warn` via `locusSoftWatchHeartbeat`; never a hard blocker alone.
 7. Add **`checkLocus`** to ashlr doctor — see [doctor-check.md](./doctor-check.md).
-8. **Never** parse or store secret values from locus/phantom output.
+8. **Observational:** hub doctor/readiness may soft-warn via hub-only `checkLocusFirm` when enrolled>0 + locus available + `locus.firm` false (hub [#277](https://github.com/ashlrai/ashlr-hub/pull/277)) — **never hard-blocks mutate**; not part of this drop-in.
+9. **Never** parse or store secret values from locus/phantom output.
 
 ## What hub must not do
 
@@ -76,6 +77,8 @@ Firm profile (production fleets only — never monorepo default):
 ```json
 { "locus": { "firm": true } }
 ```
+
+**Hub soft-warn** (doctor/readiness only — hub [#277](https://github.com/ashlrai/ashlr-hub/pull/277)): when enrolled repos &gt; 0, `locus` is on PATH, and `locus.firm` is not true, ashlr doctor/readiness emits non-blocking warning id `locus-firm` (*consider locus.firm for production*). Fresh installs (0 enrolled) stay quiet. Soft-warn **never** gates pre-mutate dispatch; monorepo default remains off. Production checklist: hub `docs/LOCUS-FIRM-FLEET.md`. Contract sketch: [doctor-check.md](./doctor-check.md)#checklocusfirm-hub-only-soft-warn--hub-277.
 
 ---
 

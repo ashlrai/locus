@@ -34,12 +34,28 @@ locus --help
 Agents **cannot** pin a session. A human (or CI step) must:
 
 ```bash
-locus init --with-samples   # first time
+locus init --with-samples   # first time — also mints LOCUS_CONTROL_CAPABILITY
+                            # if missing (persisted 0600 under ~/.locus/)
 locus pin acme              # seal session to binding "acme"
 locus whoami                # verify tenant + providers
 ```
 
-Until a valid pin exists, `tools/list` returns **control tools only** (`locus_whoami`, `locus_status`, `locus_list_bindings`, `locus_request_pin`). There is **no** ambient fallthrough to personal accounts.
+Control commands (init/quickstart/enter/pin/leave) require the operator
+control capability `LOCUS_CONTROL_CAPABILITY` (64 lowercase hex chars) in the
+shell env. `locus quickstart` / `locus init` mint and persist one when nothing
+exists; export it in new shells with `eval "$(locus hook zsh)"` (reads
+`$LOCUS_HOME/control_capability`, never echoes the value) or manage it
+yourself: `export LOCUS_CONTROL_CAPABILITY="$(openssl rand -hex 32)"`.
+`locus doctor` flags a missing, invalid, or mismatched capability with the
+exact fix. locus-mcp deliberately runs **without** it — agents never hold
+control authority. Persisting the capability is a deliberate onboarding
+default: any same-user process can then run control commands. For the strict
+posture use `locus init --no-persist-capability` or `locus capability
+unpersist` (keep the printed export line in your shell profile); `locus
+capability status` shows the current posture without printing the value. See
+[SECURITY.md § Control-plane authority boundary](../SECURITY.md#control-plane-authority-boundary).
+
+Until a valid pin exists, `tools/list` returns **control tools only** (`locus_whoami`, `locus_safe_next`, `locus_status`, `locus_heartbeat`, `locus_enter_hint`, `locus_list_bindings`, `locus_request_pin`, `locus_verify_claim`, `locus_verify_session`). There is **no** ambient fallthrough to personal accounts.
 
 ## Wire into Claude Code
 
@@ -51,6 +67,21 @@ locus setup --client claude
 ```
 
 This writes/merges `.mcp.json` so Claude Code launches `locus-mcp` over stdio. **Restart Claude Code** after setup so the tool catalog reloads.
+
+To register once for **all** projects (Claude Code *user scope*), let the
+claude CLI do the write — user-scope servers live in `~/.claude.json`, a
+mixed-state file owned by Claude Code that Locus never hand-edits:
+
+```bash
+locus agent setup --apply --client claude --claude-scope user
+```
+
+This shells out to `claude mcp add-json locus '<entry>' --scope user`
+(healing a stale entry via `claude mcp remove` first) and verifies with
+`claude mcp get locus`. It requires the `claude` CLI on PATH and fails closed
+with instructions when it is missing. Default `--claude-scope project` keeps
+the project-local `.mcp.json` behavior. Scope precedence in Claude Code is
+local > project > user, matched by server name.
 
 Manual equivalent (illustrative):
 
@@ -90,13 +121,56 @@ Any client that can spawn a stdio MCP server can use:
 | Args | (none) |
 | Env | optional `LOCUS_HOME` for isolated stores |
 
+## Wire into Grok Build
+
+Grok Build's documented MCP config is `~/.grok/config.toml` — Codex-style
+`[mcp_servers.<name>]` TOML tables. Locus writes it with the same fail-closed
+`toml_edit` merge used for Codex (unparseable file ⇒ abort untouched; only the
+`locus` entry is upserted):
+
+```bash
+locus setup --client grok
+locus agent setup --apply --client grok   # grok is also included in --client all
+```
+
+The entry carries `LOCUS_AUTO_PIN=cwd` + `LOCUS_CLIENT=grok` (never
+`LOCUS_NOTIFY`). Restart Grok Build (or `/mcps` in its TUI) after changes;
+`grok mcp list` / `grok inspect` show the loaded server. Note Grok Build also
+compat-loads MCP configs from `~/.claude.json`, project `.mcp.json`, and
+`.cursor/mcp.json`, so Locus's Claude/Cursor writes are typically already
+visible to it.
+
+`locus agent doctor` / `locus agent report --json` verify the registration
+(`mcp_registered.grok`) by probing `~/.grok/config.toml`. To probe a
+nonstandard location (e.g. a compat mcp.json), override it:
+
+```bash
+export LOCUS_GROK_MCP_CONFIG=/path/to/config   # JSON mcpServers or TOML [mcp_servers]
+```
+
+## Any other stdio MCP client (generic)
+
+For clients without a known on-disk config path, emit the canonical stdio
+server entry (JSON **and** TOML shapes) and paste it into the client's MCP
+settings — nothing is written:
+
+```bash
+locus setup --client generic
+locus agent setup --dry-run --client generic
+```
+
+Point the client at `locus-mcp` (absolute path for GUI launchers with a
+minimal PATH). `LOCUS_GROK_MCP_CONFIG` doubles as the probe override for such
+clients so `mcp_registered.grok` can verify them; without a real config path
+the probe never guesses.
+
 ## Protocol notes
 
 - **JSON-RPC 2.0** over stdio — **Content-Length** framing (Claude Code / Cursor) and **NDJSON**  
 - Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`  
 - **Never** log to stdout from the server — that breaks the protocol (errors go to stderr)  
 - Protocol version advertised: `2024-11-05`  
-- `initialize.instructions` carries crisp agent rules (whoami / `locus_safe_next` first, cannot pin, scope freeze, live pin state after auto-pin, resources)
+- `initialize.instructions` carries crisp agent rules (whoami / `locus_safe_next` first, cannot pin, scope freeze, live operator-controlled pin state, resources)
 
 ## HTTP transport (CI / remote agents)
 
@@ -116,7 +190,7 @@ LOCUS_MCP_HTTP=1 LOCUS_MCP_HTTP_ADDR=127.0.0.1:8742 locus-mcp
 | `GET /health` (`/healthz`, `/`) | none | Liveness JSON: `{ ok, service, version, transport, endpoints }` |
 | `GET /mcp` (also `/jsonrpc`) | **required** | Capabilities + pin summary + **tool names only** (values-free); advertises `Mcp-Session-Id` support |
 | `GET /mcp/sse` | **required** | Long-lived SSE hub heartbeat: `locus.session_tick` (`session_ok`, doctor verdict, safe_next). Query: `?once=1`, `?interval=5s` |
-| `POST /mcp` (also `/jsonrpc`) | **required** | One JSON-RPC 2.0 request → JSON, single SSE event, or **multi-message SSE** for large bodies; mints/binds `Mcp-Session-Id` |
+| `POST /mcp` (also `/jsonrpc`) | **required** | One JSON-RPC 2.0 request → JSON, single SSE event, or **multi-message SSE** for large bodies; binds `Mcp-Session-Id` (mint on `initialize` only) |
 | `DELETE /mcp` | **required** | Terminate the session named by `Mcp-Session-Id` (**204** / **404**) |
 | `OPTIONS /mcp` | none | Minimal CORS preflight for local tooling |
 
@@ -126,13 +200,16 @@ Auth headers (any one):
 - `X-Locus-Token: <token>`
 - `X-Locus-Mcp-Token: <token>`
 
+**Pre-auth request limits** (fail closed before any body allocation or the token check): declared `Content-Length` above **8 MB** → **413**; request line + headers above **32 KB** total or more than **128** header fields → **431**. An unparseable JSON-RPC body returns **400** with JSON-RPC error `-32700` (parse error) — never a dropped connection, and **no** `Mcp-Session-Id` is minted.
+
 ### `Mcp-Session-Id` (memory + disk resume)
 
 Streamable clients get an opaque session id (MCP streamable HTTP). Locus keeps an **in-memory cache** and a **file-backed map** so restarts and multiple `locus-mcp` workers on the same `LOCUS_HOME` can resume the same id.
 
 | Step | Behavior |
 |------|----------|
-| `POST /mcp` **without** `Mcp-Session-Id` | Mint a new opaque id (initialize / first POST path). Response includes `Mcp-Session-Id: <id>`. Persists under the session dir. |
+| `POST /mcp` `initialize` **without** `Mcp-Session-Id` | Mint a new opaque id (**`initialize` only**). Response includes `Mcp-Session-Id: <id>`. Persists under the session dir. |
+| Non-`initialize` POST **without** `Mcp-Session-Id` | Served **statelessly** — no mint, so garbage POSTs cannot exhaust session capacity. Provider `tools/call` is still pin-swap protected via a shared **process-level anchor** (a fresh sessionless `initialize` re-anchors it). |
 | `POST /mcp` **with** a known id | Bind to that session (memory hit, or **load-on-miss from disk**), refresh idle TTL, echo the same header. |
 | Unknown / expired / **corrupt** id | **404** `{ "error": "unknown_session", ... }` — fail closed (corrupt files are removed, never soft-allowed). |
 | Empty id | **400** `{ "error": "invalid_session", ... }`. |
@@ -200,7 +277,7 @@ Each tick is a JSON-RPC `notifications/message` with values-free `data`:
 }
 ```
 
-`X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets.
+`X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets. Ticks run the same external probes as `locus doctor` (Phantom on PATH, unresolved `phm:` refs), so `session_ok: true` is a real verdict on a healthy pin — not a conservative constant.
 
 Cross-process `Mcp-Session-Id` resume is **on** when workers share the same `LOCUS_HOME` (or `LOCUS_MCP_SESSION_DIR`). Multi-tenant remote multiplexor remains open.
 
@@ -219,7 +296,7 @@ Example (CI):
 curl -sS http://127.0.0.1:8742/health
 curl -sS -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
   http://127.0.0.1:8742/mcp
-# Initialize / first POST mints Mcp-Session-Id (inspect response headers):
+# initialize mints Mcp-Session-Id (inspect response headers; other POSTs never mint):
 curl -sS -D - -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
@@ -326,6 +403,8 @@ Every tool description is prefixed with **`[locus:<alias|unpinned>]`** so the mo
 | `locus_enter_hint` | Shell command for the human to pin (`locus enter …`) |
 | `locus_list_bindings` | Configured aliases/tenants |
 | `locus_request_pin` | Returns instructions for the human; **does not pin** |
+| `locus_verify_claim` | Verification plane: score a free-text claim (`confidence`, `needs_tool`, `suggestion`) before acting |
+| `locus_verify_session` | Hub session pack — same JSON as `locus verify session --json` (`whoami?`, `doctor`, `safe_next`, `session_ok`); runs real external probes (Phantom on PATH, unresolved `phm:` refs) |
 
 ### When pinned
 
@@ -354,40 +433,40 @@ Use `resources/list` + `resources/read` with `{ "uri": "locus://session" }`.
 
 `prompts/get` with `{ "name": "locus_context" }` returns a user-role message agents can inject as context.
 
-## MCP auto-pin (cwd / workspace)
+## MCP auto-pin (advisory only — the server never pins)
 
-Agents still **cannot** call pin. The **server** may silently pin once at MCP start (and at most once per process) from the workspace when policy allows.
+Agents **cannot** call pin, and the **server cannot pin on their behalf** either. MCP auto-pin is currently **advisory only**: `locus-mcp` parses the knobs below and runs a once-per-process probe, but pinning requires operator authority — the workspace `.locus.toml` is repo-local (agent-writable) and cannot prove operator intent, and an agent-facing process cannot self-issue session authority. The probe therefore always refuses with `auto-pin requires operator delegation, which is not available: …` and audits **`session.auto_pin_denied`** (with the advisory workspace binding and the refusal reason). A human pins with `locus enter <alias>` / `locus pin <alias>`.
 
-`locus agent setup --apply` writes `.locus/AGENT.md` with this table and sets `LOCUS_AUTO_PIN=cwd` on MCP client env.
+The knobs stay parsed — as the probe's enable/kill signals and so existing client configs keep working unchanged — pending an explicit operator-delegation design. `locus agent setup --apply` still writes `.locus/AGENT.md` with this table and sets `LOCUS_AUTO_PIN=cwd` on MCP client env.
 
-### Enable signals
+### Probe enable signals (no authority effect)
 
 | Signal | Effect |
 |--------|--------|
-| `.locus.toml` has `default_binding` | **Preferred default** — auto-pin that binding on MCP start (cwd must see the workspace file) |
-| `.locus.toml` has `require_pin = true` | Enables auto-pin policy (still needs a resolvable default or autopin target) |
-| `LOCUS_MCP_AUTO_PIN=1` / `true` / `on` | Explicit enable |
-| `LOCUS_AUTO_PIN=cwd` or `clients.auto_pin = "cwd"` in `$LOCUS_HOME/config.toml` | Enable cwd-based auto-pin |
+| `.locus.toml` has `default_binding` | Probe runs at MCP start; the default is recorded as the advisory binding in the denial audit |
+| `.locus.toml` has `require_pin = true` | Enables the probe (still needs a resolvable default or autopin target for an advisory binding) |
+| `LOCUS_MCP_AUTO_PIN=1` / `true` / `on` | Explicit probe enable |
+| `LOCUS_AUTO_PIN=cwd` or `clients.auto_pin = "cwd"` in `$LOCUS_HOME/config.toml` | cwd-based probe enable |
 
 ### Kill switches
 
 | Signal | Effect |
 |--------|--------|
-| `LOCUS_MCP_AUTO_PIN=0` | **Kill switch** — never auto-pin (also `false` / `off` / `no`) |
-| Omit workspace `default_binding` / `require_pin` and leave enable signals unset | Auto-pin policy stays off |
+| `LOCUS_MCP_AUTO_PIN=0` | **Kill switch** — skip the probe entirely (also `false` / `off` / `no`) |
+| Omit workspace `default_binding` / `require_pin` and leave enable signals unset | Probe stays off |
 
 Kill switch **wins** over workspace `default_binding` and `LOCUS_AUTO_PIN=cwd`.
 
 Rules:
 
-1. Only when **unpinned**; never rewrites a human pin mid-session.  
+1. Probe only when **unpinned**; never touches a human pin mid-session.  
 2. Only when workspace has `require_pin` or non-empty `default_binding`.  
-3. Uses `pin_auto` — **never `--force`**; workspace `allowed_bindings` always wins.  
-4. Audits **`session.auto_pin`** (plus normal `session.pin`).  
-5. Fail soft: if pin fails, stay unpinned and expose control tools only.  
-6. After auto-pin, **tools / resources / prompts** all re-read live pin state (`listChanged` advertised; re-read `locus://session` / `locus_context`).
+3. Advisory resolve is read-only — **never `--force`**; workspace `allowed_bindings` always wins.  
+4. The pin itself is refused: audits **`session.auto_pin_denied`** (never `session.auto_pin`).  
+5. Fail closed: stay unpinned and expose control tools + `locus_request_pin` only.  
+6. After a **human** pin/leave, tools / resources / prompts re-read live pin state (`listChanged` advertised; re-read `locus://session` / `locus_context`).
 
-Example workspace:
+Example workspace (advisory default for humans running `locus enter`, and for the denial audit):
 
 ```toml
 # .locus.toml
@@ -398,9 +477,7 @@ require_pin = true
 ```
 
 ```bash
-# optional explicit enable for CI / non-workspace shells
-export LOCUS_MCP_AUTO_PIN=1
-# kill switch when you want a bare control catalog
+# kill switch when you want no probe (and no denial audit noise)
 export LOCUS_MCP_AUTO_PIN=0
 ```
 
@@ -420,7 +497,7 @@ locus pin personal    # human action
 locus leave           # unbind; agent loses provider tools
 ```
 
-Workspace defaults (`.locus.toml`) affect CLI pin UX. MCP reads the **active sealed session** under `LOCUS_HOME`; with auto-pin enabled (see above) it may also pin the workspace `default_binding` once when the server’s cwd contains that `.locus.toml`.
+Workspace defaults (`.locus.toml`) affect CLI pin UX. MCP reads the **active sealed session** under `LOCUS_HOME` only — it never pins the workspace `default_binding` itself (MCP auto-pin is advisory only, see above).
 
 ## Isolation relative to other MCPs
 
@@ -440,7 +517,7 @@ Do **not** also register unrestricted personal Supabase/GitHub MCP servers along
 | `locus-mcp` not found | PATH for GUI vs terminal; reinstall; absolute path in MCP config |
 | Wrong tenant tools | `locus whoami`; re-pin; inspect binding providers |
 | Scope freeze errors | Model tried to override frozen `project_ref` / team / org — expected |
-| Setup didn’t stick | Re-run `locus setup --client …`; confirm config file path for your client version |
+| Setup didn’t stick | Re-run `locus agent setup --apply` (re-reads each config after write and fails naming the client+path) or `locus setup --client …` |
 
 ```bash
 locus doctor
@@ -458,6 +535,7 @@ LOCUS_HOME=/tmp/locus-debug locus pin personal
 
 ## Related
 
+- [docs/onboarding.md](./onboarding.md) — agency onboarding: 3 agent clients × 3 tenants end-to-end  
 - [docs/adapters.md](./adapters.md) — add provider tools  
 - [README.md](../README.md) — CLI quick start  
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — build and test  

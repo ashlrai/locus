@@ -342,6 +342,13 @@ pub struct Policy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ttl: Option<String>,
 
+    /// Default pin TTL when no `--ttl` is passed (e.g. "2h"); always capped by `max_ttl`.
+    ///
+    /// Deliberately excluded from `binding_fingerprint` so tuning it never
+    /// freezes a live session for drift.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_ttl: Option<String>,
+
     #[serde(default = "default_parallel")]
     pub parallel_sessions: u32,
 }
@@ -362,6 +369,7 @@ impl Default for Policy {
             dual_control: Vec::new(),
             dual_control_all_approvals: false,
             max_ttl: Some("8h".into()),
+            default_ttl: None,
             parallel_sessions: default_parallel(),
         }
     }
@@ -506,6 +514,22 @@ impl Binding {
         if let Some(ref p) = self.principal {
             validate_name_component("principal", p)?;
         }
+        if let Some(ref v) = self.policy.default_ttl {
+            // Fail closed at save/load, not at pin: a bad default_ttl must never
+            // silently fall back to max_ttl.
+            let bad = || {
+                crate::LocusError::msg(format!(
+                    "invalid policy.default_ttl '{v}': use 30m / 2h / 1d (min 1m)"
+                ))
+            };
+            if v.trim().is_empty() {
+                return Err(bad());
+            }
+            let parsed = crate::session::parse_ttl(v).map_err(|_| bad())?;
+            if parsed < chrono::Duration::minutes(1) {
+                return Err(bad());
+            }
+        }
         if self.providers.is_empty() {
             return Err(crate::LocusError::msg(
                 "binding must declare at least one provider",
@@ -604,6 +628,50 @@ account = "acme-corp"
 credential_ref = "phm:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"] }
 "#;
+
+    #[test]
+    fn validate_rejects_bad_default_ttl() {
+        for bad in ["nonsense", "0m", "-1h", " "] {
+            let mut b = Binding::parse_toml(SAMPLE).unwrap();
+            b.policy.default_ttl = Some(bad.into());
+            let err = b.validate().unwrap_err().to_string();
+            assert!(err.contains("policy.default_ttl"), "{bad}: {err}");
+        }
+        let mut b = Binding::parse_toml(SAMPLE).unwrap();
+        b.policy.default_ttl = Some("30m".into());
+        b.validate().unwrap();
+    }
+
+    #[test]
+    fn default_ttl_roundtrips_toml_and_absent_field_stays_absent() {
+        let b = Binding::parse_toml(SAMPLE).unwrap();
+        assert!(b.policy.default_ttl.is_none());
+        let out = b.to_toml().unwrap();
+        assert!(
+            !out.contains("default_ttl"),
+            "absent field must not serialize"
+        );
+
+        let mut b2 = b.clone();
+        b2.policy.default_ttl = Some("2h".into());
+        let out2 = b2.to_toml().unwrap();
+        assert!(out2.contains("default_ttl = \"2h\""), "{out2}");
+        let back = Binding::parse_toml(&out2).unwrap();
+        assert_eq!(back.policy.default_ttl.as_deref(), Some("2h"));
+    }
+
+    #[test]
+    fn default_ttl_edit_never_changes_binding_fingerprint() {
+        let b = Binding::parse_toml(SAMPLE).unwrap();
+        let before = crate::session::binding_fingerprint(&b);
+        let mut edited = b.clone();
+        edited.policy.default_ttl = Some("30m".into());
+        assert_eq!(
+            before,
+            crate::session::binding_fingerprint(&edited),
+            "default_ttl must never trip drift-freeze"
+        );
+    }
 
     #[test]
     fn parse_sample_binding() {
