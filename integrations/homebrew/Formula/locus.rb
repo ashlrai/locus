@@ -48,12 +48,13 @@ class Locus < Formula
   homepage "https://github.com/ashlrai/locus"
   url "https://github.com/ashlrai/locus/archive/refs/tags/v0.3.0.tar.gz"
   version "0.3.0"
-  sha256 "REPLACE" # fill after tagging v0.3.0 (see step 3 above)
+  sha256 "e53e99479fa1fd88e92d0603aff0fe6da407b96cc51e8b761dafd6e254d61b33"
   license "MIT"
   head "https://github.com/ashlrai/locus.git", branch: "main"
 
   # Stable source tarball (verify after publishing v0.3.0):
   #   curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v#{version}.tar.gz" | shasum -a 256
+  # v0.3.0 source sha256: e53e99479fa1fd88e92d0603aff0fe6da407b96cc51e8b761dafd6e254d61b33
   # v0.2.0 source sha256 (reference): 257c9a5427e5cbd106c6fae5a324f6a921fdb15e7e49441bae2106ec6ed8826f
   # v0.1.0 source sha256 (reference): a0a8e9e14bd9b3322faca27d2efe42a2dcc473d84a40aab3497a4296b8d68cce
 
@@ -101,6 +102,11 @@ end
 #   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.3.0/locus-aarch64-apple-darwin.tar.gz" | shasum -a 256
 #   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.3.0/locus-x86_64-apple-darwin.tar.gz" | shasum -a 256
 #   curl -sL "https://github.com/ashlrai/locus/releases/download/v0.3.0/locus-x86_64-unknown-linux-gnu.tar.gz" | shasum -a 256
+#
+# v0.3.0 asset digests:
+#   aarch64-apple-darwin: 356aa29b91fdc8e433fcbdb269aed5108c349ac12a4c3501cabd95f2f75b319d
+#   x86_64-apple-darwin:  cbc2e322d71154d0a9e18a1db8bf6d4319fd5c0737472c62f7911df62122ffee
+#   x86_64-unknown-linux-gnu: 41c93be717847e4cc5e930d1a5eb050ec51e2bf03ceee260445b45a433f26313
 #
 # v0.2.0 asset digests (reference only):
 #   aarch64-apple-darwin: 25f30770368ce460105c3accbe24bb0dafa9d709be4017e4e419b61b1db1eaea
