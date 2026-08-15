@@ -12,6 +12,7 @@ use crate::error::{LocusError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -223,13 +224,32 @@ fn resolve_phantom(name: &str) -> Result<Zeroizing<String>> {
     resolve_phantom_with_timeout(name, PHANTOM_REVEAL_TIMEOUT)
 }
 
-fn resolve_phantom_with_timeout(name: &str, timeout: Duration) -> Result<Zeroizing<String>> {
-    // Optional project directory for multi-vault machines
+/// Optional per-project vault directory for multi-vault machines.
+///
+/// `LOCUS_PHANTOM_PROJECT` (when set) names the vault-of-record for *every*
+/// `phantom` child — reveal and list alike; otherwise children inherit the
+/// process cwd and `phantom` walks for `.phantom.toml` itself. Shared by
+/// `resolve_phantom` and the doctor/verify `phantom list` probe so the two
+/// spawn paths cannot drift.
+fn phantom_project_dir() -> Option<PathBuf> {
+    std::env::var("LOCUS_PHANTOM_PROJECT")
+        .ok()
+        .map(PathBuf::from)
+}
+
+/// Build a `phantom` child command rooted in the project vault dir (when set).
+fn phantom_command(args: &[&str], project_dir: Option<&Path>) -> Command {
     let mut cmd = Command::new("phantom");
-    cmd.arg("reveal").arg("--yes").arg(name);
-    if let Ok(dir) = std::env::var("LOCUS_PHANTOM_PROJECT") {
+    cmd.args(args);
+    if let Some(dir) = project_dir {
         cmd.current_dir(dir);
     }
+    cmd
+}
+
+fn resolve_phantom_with_timeout(name: &str, timeout: Duration) -> Result<Zeroizing<String>> {
+    let project_dir = phantom_project_dir();
+    let cmd = phantom_command(&["reveal", "--yes", name], project_dir.as_deref());
     // The deadline error carries only the static label + timeout — never the
     // locator name or any child output.
     let (status, stdout) = run_capture_stdout_with_deadline(cmd, timeout, "phantom reveal")
@@ -328,48 +348,55 @@ const PHANTOM_LIST_TIMEOUT: Duration = Duration::from_secs(2);
 /// spawning a fresh subprocess.
 const PHANTOM_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
 
-/// One cached fetch: when it happened and what it produced.
-/// The inner `None` means the fetch failed (known set unknown → fail closed).
-type PhantomListSlot = Option<(Instant, Option<Vec<String>>)>;
+/// One cached fetch: when it happened, the effective vault dir it was
+/// gathered from, and what it produced. The trailing `None` means the fetch
+/// failed (known set unknown → fail closed).
+type PhantomListSlot = Option<(Instant, Option<PathBuf>, Option<Vec<String>>)>;
 
 /// `phantom list` names with a process-wide TTL cache. `None` = unknown.
+///
+/// The cache is keyed by the effective vault dir (`LOCUS_PHANTOM_PROJECT`):
+/// the env var is normally stable for the life of the process, but if it
+/// does change, a cached name set from the old vault is never served.
 fn cached_phantom_list_names() -> Option<Vec<String>> {
     static CACHE: OnceLock<Mutex<PhantomListSlot>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
-    fetch_with_ttl(cache, PHANTOM_LIST_CACHE_TTL, || {
-        phantom_list_names(PHANTOM_LIST_TIMEOUT).ok()
+    let project_dir = phantom_project_dir();
+    fetch_with_ttl(cache, PHANTOM_LIST_CACHE_TTL, project_dir.clone(), || {
+        phantom_list_names(project_dir.as_deref(), PHANTOM_LIST_TIMEOUT).ok()
     })
 }
 
-/// Serve the cached value while fresh; otherwise run `fetch` and cache what it
-/// returns. The lock is held across `fetch` so concurrent heartbeat ticks
-/// never stampede subprocesses. Failed fetches (`None`) are cached too — a
-/// hanging binary is retried at most once per TTL, not once per tick.
+/// Serve the cached value while fresh and gathered from the same vault dir;
+/// otherwise run `fetch` and cache what it returns. The lock is held across
+/// `fetch` so concurrent heartbeat ticks never stampede subprocesses. Failed
+/// fetches (`None`) are cached too — a hanging binary is retried at most once
+/// per TTL, not once per tick.
 fn fetch_with_ttl(
     cache: &Mutex<PhantomListSlot>,
     ttl: Duration,
+    project_dir: Option<PathBuf>,
     fetch: impl FnOnce() -> Option<Vec<String>>,
 ) -> Option<Vec<String>> {
     let mut slot = match cache.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if let Some((fetched_at, cached)) = slot.as_ref() {
-        if fetched_at.elapsed() < ttl {
+    if let Some((fetched_at, cached_dir, cached)) = slot.as_ref() {
+        if fetched_at.elapsed() < ttl && cached_dir == &project_dir {
             return cached.clone();
         }
     }
     let fresh = fetch();
-    *slot = Some((Instant::now(), fresh.clone()));
+    *slot = Some((Instant::now(), project_dir, fresh.clone()));
     fresh
 }
 
 /// Fetch secret names via `phantom list` (best-effort; stdout shape may vary).
 /// Errors on spawn failure or when the child outlives `timeout` (it is
 /// killed). Callers treat errors as "known set unknown" — fail closed.
-fn phantom_list_names(timeout: Duration) -> Result<Vec<String>> {
-    let mut cmd = Command::new("phantom");
-    cmd.arg("list");
+fn phantom_list_names(project_dir: Option<&Path>, timeout: Duration) -> Result<Vec<String>> {
+    let cmd = phantom_command(&["list"], project_dir);
     let (status, stdout) = run_capture_stdout_with_deadline(cmd, timeout, "phantom list")?;
     if !status.success() {
         // Treat as empty known set — doctor will flag all phm refs.
@@ -532,20 +559,25 @@ fn parse_phantom_list_stdout(stdout: &str) -> Vec<String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        // Common formats: bare NAME, "NAME ...", "  NAME", JSON-ish "name": "NAME"
-        let token = line
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == ':');
+        // Common formats: bare NAME, "NAME ...", "  NAME", JSON-ish "name": "NAME",
+        // and bulleted "- NAME" / "* NAME" (phantom's own list output).
+        let mut tokens = line.split_whitespace();
+        let mut token = tokens.next().unwrap_or("");
+        if matches!(token, "-" | "->" | "*" | "•") {
+            token = tokens.next().unwrap_or("");
+        }
+        let token = token.trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == ':');
         if token.is_empty() || token.contains('=') {
             continue;
         }
-        // Skip table headers / chrome
+        // Skip table headers / chrome (including bare counts like "-> 5 secret(s)").
+        if token.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
         let lower = token.to_ascii_lowercase();
         if matches!(
             lower.as_str(),
-            "name" | "secret" | "secrets" | "key" | "---" | "total"
+            "name" | "secret" | "secrets" | "key" | "---" | "total" | "note"
         ) {
             continue;
         }
@@ -728,13 +760,28 @@ mod tests {
     }
 
     #[test]
+    fn phantom_list_parser_handles_real_bulleted_vault_output() {
+        // Shape produced by the shipping phantom CLI (`phantom list`).
+        let names = parse_phantom_list_stdout(
+            "-> 2 secret(s) in vault (os-keychain):\n\n   - SUPABASE_PERSONAL_FCEI\n   - GH_TOKEN_ASHLR\n\nnote Values are never displayed. Use phantom add/remove to manage.\n",
+        );
+        assert_eq!(
+            names,
+            vec![
+                "SUPABASE_PERSONAL_FCEI".to_string(),
+                "GH_TOKEN_ASHLR".to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn ttl_cache_serves_fresh_hits_and_caches_failures() {
         use std::cell::Cell;
         let cache: Mutex<PhantomListSlot> = Mutex::new(None);
         let calls = Cell::new(0u32);
 
         // First call fetches.
-        let got = fetch_with_ttl(&cache, Duration::from_secs(60), || {
+        let got = fetch_with_ttl(&cache, Duration::from_secs(60), None, || {
             calls.set(calls.get() + 1);
             Some(vec!["A".to_string()])
         });
@@ -742,7 +789,7 @@ mod tests {
         assert_eq!(calls.get(), 1);
 
         // Within TTL: fetch must not run again; cached value served.
-        let got = fetch_with_ttl(&cache, Duration::from_secs(60), || {
+        let got = fetch_with_ttl(&cache, Duration::from_secs(60), None, || {
             calls.set(calls.get() + 100);
             None
         });
@@ -750,7 +797,7 @@ mod tests {
         assert_eq!(calls.get(), 1);
 
         // Zero TTL forces a refetch; a failed fetch (None) is cached too.
-        let got = fetch_with_ttl(&cache, Duration::ZERO, || {
+        let got = fetch_with_ttl(&cache, Duration::ZERO, None, || {
             calls.set(calls.get() + 1);
             None
         });
@@ -758,12 +805,64 @@ mod tests {
         assert_eq!(calls.get(), 2);
 
         // The failure is served from cache within TTL (no retry storm).
-        let got = fetch_with_ttl(&cache, Duration::from_secs(60), || {
+        let got = fetch_with_ttl(&cache, Duration::from_secs(60), None, || {
             calls.set(calls.get() + 1);
             Some(vec!["B".to_string()])
         });
         assert_eq!(got, None);
         assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn ttl_cache_is_keyed_by_effective_vault_dir() {
+        let cache: Mutex<PhantomListSlot> = Mutex::new(None);
+
+        let got = fetch_with_ttl(&cache, Duration::from_secs(60), None, || {
+            Some(vec!["AMBIENT".to_string()])
+        });
+        assert_eq!(got, Some(vec!["AMBIENT".to_string()]));
+
+        // Fresh entry but a different effective vault dir → must refetch,
+        // never serve names gathered from the old vault.
+        let vault = Some(PathBuf::from("/tmp/locus-vault"));
+        let got = fetch_with_ttl(&cache, Duration::from_secs(60), vault.clone(), || {
+            Some(vec!["VAULT".to_string()])
+        });
+        assert_eq!(got, Some(vec!["VAULT".to_string()]));
+
+        // Same dir within TTL → served from cache (fetch must not run).
+        let got = fetch_with_ttl(&cache, Duration::from_secs(60), vault, || {
+            panic!("cached hit must not refetch")
+        });
+        assert_eq!(got, Some(vec!["VAULT".to_string()]));
+    }
+
+    #[test]
+    fn phantom_project_dir_env_roots_reveal_and_list_identically() {
+        // Env-var test: restore any prior value on exit. No other test in
+        // this crate reads LOCUS_PHANTOM_PROJECT, so a plain set/remove is
+        // race-free under the parallel test runner.
+        let prev = std::env::var_os("LOCUS_PHANTOM_PROJECT");
+        let vault = Path::new("/tmp/locus-vault-of-record");
+        std::env::set_var("LOCUS_PHANTOM_PROJECT", vault);
+
+        let dir = phantom_project_dir();
+        assert_eq!(dir.as_deref(), Some(vault));
+        // Both spawn paths must be rooted in the same dir (no drift between
+        // `phantom reveal` and the doctor/verify `phantom list` probe).
+        let reveal = phantom_command(&["reveal", "--yes", "NAME"], dir.as_deref());
+        let list = phantom_command(&["list"], dir.as_deref());
+        assert_eq!(reveal.get_current_dir(), Some(vault));
+        assert_eq!(list.get_current_dir(), Some(vault));
+
+        std::env::remove_var("LOCUS_PHANTOM_PROJECT");
+        assert_eq!(phantom_project_dir(), None);
+        // Unset → inherit the process cwd (no current_dir override).
+        assert_eq!(phantom_command(&["list"], None).get_current_dir(), None);
+
+        if let Some(v) = prev {
+            std::env::set_var("LOCUS_PHANTOM_PROJECT", v);
+        }
     }
 
     #[cfg(unix)]
