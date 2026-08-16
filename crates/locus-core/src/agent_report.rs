@@ -64,7 +64,12 @@ pub enum ClaudeMcpScope {
     Project,
     /// User-scope `~/.claude.json` (top-level `mcpServers`) only.
     User,
-    /// Registered in both project and user scope.
+    /// Local scope inside `~/.claude.json` — the per-project
+    /// `projects.<cwd>.mcpServers` map that `claude mcp add` (default
+    /// local scope) writes. Additive: older readers that don't know this
+    /// variant only consume the `claude` bool.
+    Local,
+    /// Registered in more than one scope.
     Both,
 }
 
@@ -72,7 +77,8 @@ pub enum ClaudeMcpScope {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpRegistered {
     pub claude: bool,
-    /// Where the Claude registration was found (`project` / `user` / `both`).
+    /// Where the Claude registration was found (`project` / `user` /
+    /// `local` / `both` — `both` meaning more than one scope matched).
     /// Additive: absent when `claude` is false and in reports from older
     /// binaries — the `claude` bool remains the compatibility surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -382,8 +388,11 @@ fn build_commands(project_dir: Option<&Path>, pin: Option<&DoctorPin>) -> AgentC
 ///
 /// - Claude: project `.mcp.json` → `mcpServers.locus`, **or** user-scope
 ///   `~/.claude.json` → top-level `mcpServers.locus` (the file `claude mcp
-///   add --scope user` manages). The probe only reads `~/.claude.json`;
-///   Locus never writes it. `claude_scope` reports which scope(s) matched.
+///   add --scope user` manages), **or** local-scope `~/.claude.json` →
+///   `projects.<cwd>.mcpServers.locus` (what `claude mcp add` writes by
+///   default) for the current project dir. The probe only reads
+///   `~/.claude.json`; Locus never writes it. `claude_scope` reports which
+///   scope matched (`both` when more than one).
 /// - Cursor: project `.cursor/mcp.json` or `~/.cursor/mcp.json`
 /// - Codex: `~/.codex/config.toml` → `[mcp_servers.locus]`
 /// - Grok Build: `~/.grok/config.toml` → `[mcp_servers.locus]` (documented
@@ -402,19 +411,26 @@ pub fn probe_mcp_registered_with_grok(
     user_home: Option<&Path>,
     grok_config: Option<&Path>,
 ) -> McpRegistered {
-    // Claude: project scope (.mcp.json) and user scope (~/.claude.json,
-    // top-level mcpServers — same JSON shape). Read-only probe: ~/.claude.json
-    // is owned by Claude Code and Locus never writes it.
+    // Claude: project scope (.mcp.json), user scope (~/.claude.json,
+    // top-level mcpServers — same JSON shape), and local scope (the default
+    // `claude mcp add` target: ~/.claude.json `projects.<cwd>.mcpServers`
+    // for the CURRENT project dir). Read-only probe: ~/.claude.json is
+    // owned by Claude Code and Locus never writes it.
     let claude_project = mcp_json_has_locus(&project_dir.join(".mcp.json"));
     let claude_user = user_home
         .map(|h| mcp_json_has_locus(&h.join(".claude.json")))
         .unwrap_or(false);
-    let claude = claude_project || claude_user;
-    let claude_scope = match (claude_project, claude_user) {
-        (true, true) => Some(ClaudeMcpScope::Both),
-        (true, false) => Some(ClaudeMcpScope::Project),
-        (false, true) => Some(ClaudeMcpScope::User),
-        (false, false) => None,
+    let claude_local = user_home
+        .map(|h| claude_local_project_has_locus(&h.join(".claude.json"), project_dir))
+        .unwrap_or(false);
+    let claude = claude_project || claude_user || claude_local;
+    let claude_scope = match (claude_project, claude_user, claude_local) {
+        (false, false, false) => None,
+        (true, false, false) => Some(ClaudeMcpScope::Project),
+        (false, true, false) => Some(ClaudeMcpScope::User),
+        (false, false, true) => Some(ClaudeMcpScope::Local),
+        // More than one scope matched.
+        _ => Some(ClaudeMcpScope::Both),
     };
 
     let cursor_project = project_dir.join(".cursor").join("mcp.json");
@@ -447,6 +463,38 @@ pub fn probe_mcp_registered_with_grok(
         codex,
         grok,
     }
+}
+
+/// `claude mcp add` (default **local** scope) registers servers inside
+/// `~/.claude.json` under `projects.<absolute cwd>.mcpServers`. Probe the
+/// current project's entry only — both the literal `project_dir` key and its
+/// canonicalized form (symlinked checkouts / macOS tempdirs differ).
+/// Read-only; unreadable or unparseable stays `false` (fail closed).
+fn claude_local_project_has_locus(path: &Path, project_dir: &Path) -> bool {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return false;
+    };
+    let Some(projects) = v.get("projects").and_then(|p| p.as_object()) else {
+        return false;
+    };
+    let mut keys: Vec<String> = vec![project_dir.to_string_lossy().into_owned()];
+    if let Ok(canon) = project_dir.canonicalize() {
+        let canon = canon.to_string_lossy().into_owned();
+        if !keys.contains(&canon) {
+            keys.push(canon);
+        }
+    }
+    keys.iter().any(|key| {
+        projects
+            .get(key)
+            .and_then(|proj| proj.get("mcpServers"))
+            .and_then(|s| s.get("locus"))
+            .map(|entry| entry.get("command").is_some() || entry.is_object())
+            .unwrap_or(false)
+    })
 }
 
 fn mcp_json_has_locus(path: &Path) -> bool {
@@ -1178,6 +1226,101 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&m).unwrap()["claude_scope"],
             serde_json::json!("user")
+        );
+    }
+
+    /// `claude mcp add` with no `--scope` writes local-scope registrations
+    /// into `~/.claude.json` under `projects.<cwd>.mcpServers` — the probe
+    /// must see the CURRENT project's entry (and only that entry).
+    #[test]
+    fn probe_claude_local_scope_in_claude_json_projects() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("proj");
+        let other = dir.path().join("other-proj");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::create_dir_all(&home).unwrap();
+
+        // Another project's local registration must NOT count for this cwd.
+        let doc = serde_json::json!({
+            "projects": {
+                other.to_string_lossy().as_ref(): {
+                    "mcpServers": { "locus": { "command": "locus-mcp" } }
+                }
+            }
+        });
+        fs::write(home.join(".claude.json"), doc.to_string()).unwrap();
+        let m = probe_mcp_registered_with_grok(&project, Some(&home), None);
+        assert!(!m.claude);
+        assert_eq!(m.claude_scope, None);
+
+        // Current project's local registration: claude=true, scope=local.
+        let doc = serde_json::json!({
+            "projects": {
+                project.to_string_lossy().as_ref(): {
+                    "mcpServers": { "locus": { "command": "locus-mcp" } }
+                }
+            }
+        });
+        fs::write(home.join(".claude.json"), doc.to_string()).unwrap();
+        let m = probe_mcp_registered_with_grok(&project, Some(&home), None);
+        assert!(m.claude);
+        assert_eq!(m.claude_scope, Some(ClaudeMcpScope::Local));
+
+        // The key Claude Code records is the canonical cwd; a probe called
+        // with a non-canonical (symlinked) project dir must still match.
+        let canon_key = project.canonicalize().unwrap();
+        let doc = serde_json::json!({
+            "projects": {
+                canon_key.to_string_lossy().as_ref(): {
+                    "mcpServers": { "locus": { "command": "locus-mcp" } }
+                }
+            }
+        });
+        fs::write(home.join(".claude.json"), doc.to_string()).unwrap();
+        let m = probe_mcp_registered_with_grok(&project, Some(&home), None);
+        assert!(m.claude);
+        assert_eq!(m.claude_scope, Some(ClaudeMcpScope::Local));
+
+        // A local entry without `locus` never registers (fail closed).
+        let doc = serde_json::json!({
+            "projects": {
+                project.to_string_lossy().as_ref(): { "mcpServers": {} }
+            }
+        });
+        fs::write(home.join(".claude.json"), doc.to_string()).unwrap();
+        let m = probe_mcp_registered_with_grok(&project, Some(&home), None);
+        assert!(!m.claude);
+        assert_eq!(m.claude_scope, None);
+
+        // Local + project scope together report `both` (more than one scope).
+        let doc = serde_json::json!({
+            "projects": {
+                project.to_string_lossy().as_ref(): {
+                    "mcpServers": { "locus": { "command": "locus-mcp" } }
+                }
+            }
+        });
+        fs::write(home.join(".claude.json"), doc.to_string()).unwrap();
+        fs::write(
+            project.join(".mcp.json"),
+            r#"{"mcpServers":{"locus":{"command":"locus-mcp"}}}"#,
+        )
+        .unwrap();
+        let m = probe_mcp_registered_with_grok(&project, Some(&home), None);
+        assert!(m.claude);
+        assert_eq!(m.claude_scope, Some(ClaudeMcpScope::Both));
+
+        // The new variant serializes additively as plain snake_case "local".
+        let m = McpRegistered {
+            claude: true,
+            claude_scope: Some(ClaudeMcpScope::Local),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&m).unwrap()["claude_scope"],
+            serde_json::json!("local")
         );
     }
 

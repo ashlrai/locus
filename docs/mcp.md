@@ -388,6 +388,88 @@ TTL       = 30s (default)
 
 See also [docs/workers.md](./workers.md) for worker pool reuse and idle teardown.
 
+## Multi-tenant HTTP (`--multi-tenant`)
+
+One `locus-mcp --http --multi-tenant` process (or `LOCUS_MCP_MULTI_TENANT=1`;
+stdio + `--multi-tenant` is a startup error, fail closed) serves several
+tenants concurrently — each request is routed to a sealed, delegated,
+TTL-capped grant session instead of the global pin. `active.json` is never
+consulted in this mode, and there is **no ambient fallthrough**: tenantless
+requests and stateless provider POSTs are refused outright.
+
+### Operator flow
+
+```bash
+# 1. Mint one grant per tenant job (local control only; agents cannot mint).
+locus mcp mint --binding cmp --ttl 1h --label "hub-job-42"
+# → {"grant_id":"3f2a…","token":"lmt_<grant_id>.<secret>", …}
+#   The token is printed exactly once — only its HMAC is stored at rest
+#   ($LOCUS_HOME/mcp-grants/<grant_id>.json, 0600).
+
+# 2. Launch the server with the operator control capability in its env
+#    (REQUIRED: tenant session validation fails closed for every grant
+#    without it — the server warns at startup when it is absent).
+#    Mint and serve from the SAME operator-supervised shell/session: grant
+#    authority lives in the authority broker, whose lifetime is tied to the
+#    supervising process that minted — identical to `locus ci mint`.
+LOCUS_MCP_HTTP_TOKEN=… LOCUS_CONTROL_CAPABILITY=… \
+  locus-mcp --http 127.0.0.1:8742 --multi-tenant
+
+# 3. Client: BOTH headers on every request — the server token is unchanged
+#    admission; the tenant token selects the grant. Never in tool arguments.
+curl -s http://127.0.0.1:8742/mcp \
+  -H "Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN" \
+  -H "X-Locus-Tenant-Token: lmt_<grant_id>.<secret>" \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' -i
+# → Mcp-Session-Id minted, bound to the grant, identity pre-anchored.
+
+# 4. Operate / inspect / revoke (CLI-only; tenants can never enumerate
+#    each other — there is deliberately NO HTTP enumeration endpoint).
+locus mcp list
+locus mcp revoke <grant_id>        # or --binding <alias> | --all
+```
+
+### Semantics
+
+- **Tenant token on every request** — `X-Locus-Tenant-Token` is required on
+  `POST /mcp`, `GET /mcp`, `GET /mcp/sse`, and `DELETE /mcp`. Possession of an
+  `Mcp-Session-Id` alone is never authority; revocation propagates on the next
+  request because the gate re-reads the grant file every time.
+- **Per-session isolation** — catalogs, whoami, drift, resources, prompts,
+  `GET /mcp`, and SSE ticks are computed from that grant's session only.
+  Agents cannot pin or pick a tenant: `locus_request_pin` returns
+  `tenant_fixed_by_grant`.
+- **Hard session partition** — MT `Mcp-Session-Id` records live under
+  `$LOCUS_HOME/http-sessions-mt/` (or `LOCUS_MCP_SESSION_DIR` + `-mt`), so
+  single-tenant servers can never resume tenant records and vice versa.
+- **Capacity** — global cap unchanged; per-grant cap
+  `LOCUS_MCP_SESSIONS_PER_GRANT` (default 8).
+- **Lifetimes** — grant TTL from mint (capped by binding `policy.max_ttl`),
+  30m idle HTTP-session TTL (resume with the same token + id while the grant
+  lives), explicit `DELETE /mcp` per session, `locus mcp revoke` per grant.
+  Worker teardown fires when a grant's last live HTTP session dies.
+- **In-flight revoke** — a call that already passed the gate completes its
+  single tool call; the next request refuses.
+
+### Failure table
+
+| Response | Meaning |
+|----------|---------|
+| `401 invalid_grant` | Missing/malformed/unknown/revoked tenant token — deliberately indistinguishable |
+| `401 invalid_grant` + `reason: grant_expired` | Token HMAC verified but the grant TTL elapsed; `safe_next` carries the re-mint command |
+| `403 tenant_mismatch` | `Mcp-Session-Id` belongs to a different grant (audited `mcp.tenant_mismatch`) |
+| `400 session_required` | Stateless non-initialize POST in MT mode |
+| tool error `grant_expired` / `grant_revoked` | Grant died mid-session; re-mint (never silent identity fallback) |
+
+Reverse proxies must forward **both** auth headers plus `Mcp-Session-Id`.
+Bearer tokens over HTTP make the loopback-refusal/TLS discipline load-bearing:
+`LOCUS_MCP_HTTP_ALLOW_REMOTE` semantics are unchanged in MT mode. Audit ops:
+`mcp.grant_mint`, `mcp.grant_revoke`, `mcp.grant_auth_fail`,
+`mcp.tenant_session_bound`, `mcp.tenant_mismatch`, `mcp.grant_expired_swept`
+— all values-free; per-call `mcp.tools_call` rows additionally carry
+`grant_id` + `http_session_id`.
+
 ## Tools the agent sees
 
 Every tool description is prefixed with **`[locus:<alias|unpinned>]`** so the model always sees which tenant the catalog belongs to. **`locus_whoami` is always first** in `tools/list`.
@@ -492,10 +574,16 @@ Agent best practice: call `locus_whoami` or `locus_safe_next` before any infrast
 ## Switching clients
 
 ```bash
+locus switch acme     # one-shot: leave-if-pinned + enter, target validated FIRST
 locus pin personal    # human action
 # restart or rely on next tools/list — catalog follows the new pin
 locus leave           # unbind; agent loses provider tools
 ```
+
+`locus switch <alias>` validates the target (alias exists, workspace allowlist)
+**before** dropping the current pin, so a typo never leaves you unpinned; it
+honors `--ttl`/`--force`/`--client` and audits as normal `session.leave` +
+`session.pin`.
 
 Workspace defaults (`.locus.toml`) affect CLI pin UX. MCP reads the **active sealed session** under `LOCUS_HOME` only — it never pins the workspace `default_binding` itself (MCP auto-pin is advisory only, see above).
 

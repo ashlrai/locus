@@ -26,6 +26,7 @@ use crate::session::{
 use crate::ticket::{self, CapabilityTicket};
 use crate::workspace::{find_workspace, WorkspaceConfig};
 use chrono::{Duration, Utc};
+use rand::RngCore;
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -812,12 +813,34 @@ impl Store {
         self.cleanup_named_session(path, session, "ci-")
     }
 
+    /// Best-effort worker-home removal, hardened against traversal and
+    /// symlink escape: the recorded path must *canonicalize* to a location
+    /// strictly under this store's `workers/` root or it is left untouched
+    /// (fail closed — a forged `worker_home` with `..` components or a
+    /// symlink pointing outside the store must never be followed into a
+    /// recursive delete). Removal failures are swallowed: cleanup is
+    /// best-effort and must never block a teardown.
+    fn remove_worker_home_if_safe(&self, worker_home: &str) {
+        let wh = PathBuf::from(worker_home);
+        if !wh.exists() {
+            return;
+        }
+        let Ok(workers_root) = self.home.join("workers").canonicalize() else {
+            return;
+        };
+        let Ok(canonical) = wh.canonicalize() else {
+            return;
+        };
+        // Strictly under the root: never the root itself, never a sibling
+        // that merely shares a textual prefix (component-wise comparison).
+        if canonical != workers_root && canonical.starts_with(&workers_root) {
+            let _ = fs::remove_dir_all(&canonical);
+        }
+    }
+
     fn cleanup_named_session(&self, path: &Path, session: &Session, prefix: &str) -> Result<()> {
         self.revoke_session_authority(session)?;
-        let wh = PathBuf::from(&session.worker_home);
-        if wh.exists() && wh.starts_with(self.home.join("workers")) {
-            let _ = fs::remove_dir_all(&wh);
-        }
+        self.remove_worker_home_if_safe(&session.worker_home);
         if path.exists()
             && path.starts_with(self.home.join("sessions"))
             && path
@@ -828,6 +851,216 @@ impl Store {
             let _ = fs::remove_file(path);
         }
         Ok(())
+    }
+
+    // ── MCP multi-tenant grants ──────────────────────────────────────────
+
+    /// Directory holding MCP multi-tenant grant records
+    /// (`mcp-grants/<grant_id>.json`, 0600 — token HMAC only, never secrets).
+    pub fn mcp_grants_dir(&self) -> PathBuf {
+        self.home.join("mcp-grants")
+    }
+
+    fn mcp_grant_path(&self, grant_id: &str) -> Option<PathBuf> {
+        if !is_safe_mcp_grant_id(grant_id) {
+            return None;
+        }
+        Some(self.mcp_grants_dir().join(format!("{grant_id}.json")))
+    }
+
+    fn mcp_grant_token_material(grant_id: &str, secret: &str) -> String {
+        format!("mcp-grant:{grant_id}:{secret}")
+    }
+
+    /// Mint a multi-tenant MCP grant: a sealed delegated CI-backed session
+    /// (never touches `active.json`) plus an opaque bearer token
+    /// `lmt_<grant_id>.<secret>`. Only the seal-key HMAC of the token is
+    /// stored at rest; the returned token is printed exactly once by the CLI.
+    ///
+    /// Audit op: `mcp.grant_mint` (grant_id / session_id / alias / expiry only).
+    pub fn create_mcp_grant(
+        &self,
+        alias_or_id: &str,
+        cwd: &Path,
+        ttl: Option<Duration>,
+        label: Option<String>,
+        force: bool,
+    ) -> Result<(Session, McpGrant, String)> {
+        let (session, _ci_path) = self.create_ci_session(alias_or_id, cwd, force, ttl)?;
+        let mut id_bytes = [0u8; 8];
+        rand::thread_rng().fill_bytes(&mut id_bytes);
+        let grant_id = hex::encode(id_bytes);
+        let mut secret_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut secret_bytes);
+        let secret = hex::encode(secret_bytes);
+        let token = format!("lmt_{grant_id}.{secret}");
+        let token_seal = self
+            .seal_key()?
+            .seal(&Self::mcp_grant_token_material(&grant_id, &secret));
+        let grant = McpGrant {
+            v: 1,
+            grant_id: grant_id.clone(),
+            token_seal,
+            session_id: session.session_id.clone(),
+            binding_alias: session.binding_alias.clone(),
+            tenant: session.tenant.clone(),
+            created_at: Utc::now().to_rfc3339(),
+            expires_at: session.expires_at,
+            label,
+            revoked: false,
+        };
+        fs::create_dir_all(self.mcp_grants_dir())?;
+        let path = self
+            .mcp_grant_path(&grant_id)
+            .ok_or_else(|| LocusError::msg("invalid grant id"))?;
+        // Fail closed on grant_id collision: never overwrite an existing
+        // grant record (create_new / O_EXCL semantics).
+        write_secret_file_new(&path, serde_json::to_string_pretty(&grant)?.as_bytes()).map_err(
+            |e| {
+                LocusError::msg(format!(
+                    "refusing to mint MCP grant `{grant_id}`: {e} (existing grant file is never overwritten)"
+                ))
+            },
+        )?;
+        self.audit(
+            "mcp.grant_mint",
+            &grant.binding_alias,
+            Some(serde_json::json!({
+                "grant_id": grant.grant_id,
+                "session_id": grant.session_id,
+                "tenant": grant.tenant,
+                "expires_at": grant.expires_at.to_rfc3339(),
+                "label": grant.label,
+            })),
+        )?;
+        Ok((session, grant, token))
+    }
+
+    /// Load a grant record by public grant id. Corrupt / mismatched files
+    /// read as unknown (fail closed).
+    pub fn load_mcp_grant(&self, grant_id: &str) -> Result<Option<McpGrant>> {
+        let Some(path) = self.mcp_grant_path(grant_id) else {
+            return Ok(None);
+        };
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = fs::read_to_string(&path)?;
+        let grant: McpGrant = match serde_json::from_str(&raw) {
+            Ok(g) => g,
+            Err(_) => return Ok(None),
+        };
+        if grant.v != 1 || grant.grant_id != grant_id {
+            return Ok(None);
+        }
+        Ok(Some(grant))
+    }
+
+    /// All grant records (operator surface: `locus mcp list`, doctor).
+    pub fn list_mcp_grants(&self) -> Result<Vec<McpGrant>> {
+        let dir = self.mcp_grants_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !is_safe_mcp_grant_id(stem) {
+                continue;
+            }
+            if let Some(grant) = self.load_mcp_grant(stem)? {
+                out.push(grant);
+            }
+        }
+        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(out)
+    }
+
+    /// Verify an opaque tenant bearer token `lmt_<grant_id>.<secret>`.
+    ///
+    /// Uniform `Invalid` on parse failure, unknown grant, MAC mismatch, or
+    /// revocation — never reveals which check failed. `Expired` is only
+    /// returned AFTER the HMAC proved possession of the secret (safe to hint
+    /// a re-mint to the legitimate holder).
+    pub fn verify_mcp_grant_token(
+        &self,
+        token: &str,
+    ) -> std::result::Result<McpGrant, McpGrantAuthError> {
+        let Some((grant_id, secret)) = parse_mcp_grant_token(token) else {
+            return Err(McpGrantAuthError::Invalid {
+                grant_id: None,
+                grant_dead: false,
+            });
+        };
+        let invalid = |grant_dead: bool| McpGrantAuthError::Invalid {
+            grant_id: Some(grant_id.to_string()),
+            grant_dead,
+        };
+        let grant = match self.load_mcp_grant(grant_id) {
+            Ok(Some(g)) => g,
+            // Missing / corrupt record: definitively dead (revoke deletes the
+            // file) — safe for the server to sweep this grant's sessions.
+            Ok(None) => return Err(invalid(true)),
+            // Transient IO error: fail closed but do NOT declare death.
+            Err(_) => return Err(invalid(false)),
+        };
+        let Ok(key) = self.seal_key() else {
+            return Err(invalid(false));
+        };
+        // Constant-time MAC compare (SealKey::verify).
+        if !key.verify(
+            &Self::mcp_grant_token_material(grant_id, secret),
+            &grant.token_seal,
+        ) {
+            return Err(invalid(false));
+        }
+        if grant.revoked {
+            // MAC proved possession; the grant is definitively revoked.
+            return Err(invalid(true));
+        }
+        if grant.is_expired() {
+            return Err(McpGrantAuthError::Expired {
+                grant: Box::new(grant),
+            });
+        }
+        Ok(grant)
+    }
+
+    /// Revoke a grant: mark + delete the grant file, then tear down the
+    /// backing sealed session (authority revoke + session file + hardened
+    /// worker-home removal via [`Store::cleanup_ci_session`]).
+    ///
+    /// Audit op: `mcp.grant_revoke`.
+    pub fn revoke_mcp_grant(&self, grant_id: &str) -> Result<Option<McpGrant>> {
+        let Some(grant) = self.load_mcp_grant(grant_id)? else {
+            return Ok(None);
+        };
+        let mut revoked = grant.clone();
+        revoked.revoked = true;
+        if let Some(path) = self.mcp_grant_path(grant_id) {
+            // Mark revoked first so a crash between steps still fails closed,
+            // then delete the record.
+            let _ = write_secret_file(&path, serde_json::to_string_pretty(&revoked)?.as_bytes());
+            let _ = fs::remove_file(&path);
+        }
+        if let Ok(Some(resolved)) = self.load_session_by_id_resolved(&grant.session_id) {
+            let _ = self.cleanup_ci_session(&resolved.path, &resolved.session);
+        }
+        self.audit(
+            "mcp.grant_revoke",
+            &grant.binding_alias,
+            Some(serde_json::json!({
+                "grant_id": grant.grant_id,
+                "session_id": grant.session_id,
+            })),
+        )?;
+        Ok(Some(revoked))
     }
 
     /// Load a session by `session_id` from `sessions/*.json` (active, run-*, ci-*).
@@ -1143,24 +1376,6 @@ impl Store {
         self.write_session_file(path, &sealed)
     }
 
-    fn save_current_session(&self, session: &Session) -> Result<()> {
-        if let Ok(selected) = std::env::var("LOCUS_SESSION_ID") {
-            let selected = selected.trim();
-            if !selected.is_empty() {
-                if selected != session.session_id {
-                    return Err(LocusError::msg(
-                        "refusing to persist a session other than exact LOCUS_SESSION_ID",
-                    ));
-                }
-                let path = self.session_path_by_id(selected)?.ok_or_else(|| {
-                    LocusError::msg("selected LOCUS_SESSION_ID has no session file")
-                })?;
-                return self.save_session_at(&path, session);
-            }
-        }
-        self.save_session_at(&self.active_session_path(), session)
-    }
-
     /// Resolve bare pin target: workspace `default_binding`, then opt-in git remote autopin.
     pub fn resolve_auto_pin(&self, cwd: &Path) -> Result<AutoPinTarget> {
         autopin::resolve_auto_pin(cwd, &self.home)
@@ -1284,6 +1499,22 @@ impl Store {
         }
     }
 
+    /// Like [`Store::require_active`] but for an explicit sealed session id
+    /// (CI mints / MCP tenant grants). Fails closed on unknown id, invalid
+    /// seal, expiry, or missing session authority. Frozen sessions still
+    /// return so callers can gate on drift.
+    pub fn require_session_by_id(&self, session_id: &str) -> Result<Session> {
+        let key = self.seal_key()?;
+        match self.load_session_by_id_resolved(session_id)? {
+            None => Err(LocusError::NotPinned),
+            Some(resolved) => {
+                resolved.session.verify(&key)?;
+                self.validate_session_authority(&resolved.session)?;
+                Ok(resolved.session)
+            }
+        }
+    }
+
     /// Like [`require_active`] but ignores freeze (seal + expiry only).
     /// Used by doctor / whoami reporting so frozen pins remain inspectable.
     pub fn require_active_allow_frozen(&self) -> Result<Session> {
@@ -1320,11 +1551,8 @@ impl Store {
                 }
             }
             self.revoke_session_authority(s)?;
-            // Best-effort cleanup of worker home
-            let wh = PathBuf::from(&s.worker_home);
-            if wh.exists() && wh.starts_with(self.home.join("workers")) {
-                let _ = fs::remove_dir_all(&wh);
-            }
+            // Best-effort cleanup of worker home (canonicalized containment check)
+            self.remove_worker_home_if_safe(&s.worker_home);
             self.audit(
                 "session.leave",
                 &s.binding_alias,
@@ -1390,13 +1618,31 @@ impl Store {
                     Err(_) => diagnosis.push("anchor_unavailable".into()),
                 }
                 // Best-effort revocation + worker-home cleanup: failures must
-                // not block teardown (the broker may be gone entirely).
+                // not block teardown (the broker may be gone entirely). The
+                // worker home is only removed when it canonicalizes to a
+                // path under this store's workers/ root (fail closed).
                 let _ = self.revoke_session_authority(session);
-                let wh = PathBuf::from(&session.worker_home);
-                if wh.exists() && wh.starts_with(self.home.join("workers")) {
-                    let _ = fs::remove_dir_all(&wh);
-                }
+                self.remove_worker_home_if_safe(&session.worker_home);
             }
+        }
+        // The removal of active.json is what defines a successful force-leave
+        // — perform it first, then audit what actually happened. A failed
+        // removal is audited as a failure (best-effort) and surfaced.
+        if let Err(remove_err) = fs::remove_file(&path) {
+            let _ = self.audit(
+                "session.force_leave_failed",
+                parsed
+                    .as_ref()
+                    .map(|s| s.binding_alias.as_str())
+                    .unwrap_or("-"),
+                Some(serde_json::json!({
+                    "session_id": parsed.as_ref().map(|s| s.session_id.clone()),
+                    "reason": reason,
+                    "diagnosis": diagnosis,
+                    "error": remove_err.to_string(),
+                })),
+            );
+            return Err(remove_err.into());
         }
         self.audit(
             "session.force_leave",
@@ -1410,7 +1656,6 @@ impl Store {
                 "diagnosis": diagnosis,
             })),
         )?;
-        fs::remove_file(&path)?;
         Ok(ForceLeaveOutcome {
             cleared: true,
             session_id: parsed.as_ref().map(|s| s.session_id.clone()),
@@ -1609,6 +1854,20 @@ impl Store {
     /// diagnose drift without a hard error.
     pub fn whoami(&self) -> Result<Whoami> {
         let session = self.require_active_allow_frozen()?;
+        self.whoami_from_session(session)
+    }
+
+    /// [`Store::whoami`] for an explicit resolved session (MCP tenant grants).
+    /// Same checks as the active path: seal verify + session authority
+    /// validation; frozen sessions still report (`frozen=true`).
+    pub fn whoami_for(&self, resolved: &ResolvedSession) -> Result<Whoami> {
+        let key = self.seal_key()?;
+        resolved.session.verify_seal(&key)?;
+        self.validate_session_authority(&resolved.session)?;
+        self.whoami_from_session(resolved.session.clone())
+    }
+
+    fn whoami_from_session(&self, session: Session) -> Result<Whoami> {
         let binding = self.load_binding(&session.binding_alias)?;
         let backing = session.backing.as_ref().ok_or(LocusError::InvalidSeal)?;
         Ok(Whoami {
@@ -1662,37 +1921,22 @@ impl Store {
     /// when unpinned (drift flags set). Does **not** mutate the session (see
     /// [`check_drift_and_freeze`]).
     pub fn verify_runtime(&self) -> Result<RuntimeDrift> {
-        let key = self.seal_key()?;
-        let mut drift = RuntimeDrift {
-            pinned: false,
-            seal_ok: false,
-            authority_anchor_ok: false,
-            backing_ok: false,
-            backing_type: None,
-            backing_path: None,
-            authority: None,
-            binding_present: false,
-            binding_id_match: false,
-            tenant_match: false,
-            providers_match: true,
-            frozen: false,
-            expired: false,
-            session_id: None,
-            binding_alias: None,
-            binding_id_session: None,
-            binding_id_file: None,
-            tenant_session: None,
-            tenant_file: None,
-            providers: Vec::new(),
-            issues: Vec::new(),
-            ok: false,
-        };
+        match self.resolve_active_session()? {
+            Some(resolved) => self.verify_runtime_for(&resolved),
+            None => {
+                let mut drift = empty_runtime_drift();
+                drift.issues.push("not_pinned".into());
+                Ok(drift)
+            }
+        }
+    }
 
-        let Some(resolved) = self.resolve_active_session()? else {
-            drift.issues.push("not_pinned".into());
-            return Ok(drift);
-        };
-        let session = resolved.session;
+    /// [`Store::verify_runtime`] against an explicit resolved session (MCP
+    /// tenant grants) — identical checks, no `active.json` involvement.
+    pub fn verify_runtime_for(&self, resolved: &ResolvedSession) -> Result<RuntimeDrift> {
+        let key = self.seal_key()?;
+        let mut drift = empty_runtime_drift();
+        let session = resolved.session.clone();
 
         drift.pinned = true;
         drift.backing_ok = true;
@@ -1849,7 +2093,17 @@ impl Store {
     /// Frozen sessions cause privileged ops (exec, tools/call) to fail with
     /// `session_frozen: re-pin` until a human re-pins.
     pub fn check_drift_and_freeze(&self) -> Result<RuntimeDrift> {
-        let mut drift = self.verify_runtime()?;
+        match self.resolve_active_session()? {
+            Some(resolved) => self.check_drift_and_freeze_for(&resolved),
+            None => self.verify_runtime(),
+        }
+    }
+
+    /// [`Store::check_drift_and_freeze`] against an explicit resolved session
+    /// (MCP tenant grants). A freeze writes ONLY the resolved session's file
+    /// (`save_session_at`) — `active.json` and other grants stay untouched.
+    pub fn check_drift_and_freeze_for(&self, resolved: &ResolvedSession) -> Result<RuntimeDrift> {
+        let mut drift = self.verify_runtime_for(resolved)?;
         if !drift.pinned {
             return Ok(drift);
         }
@@ -1866,7 +2120,8 @@ impl Store {
         });
 
         if should_freeze && drift.seal_ok && drift.backing_ok && drift.authority_anchor_ok {
-            if let Some(mut session) = self.active_session()? {
+            {
+                let mut session = resolved.session.clone();
                 if !session.frozen {
                     let reason = drift
                         .issues
@@ -1884,7 +2139,7 @@ impl Store {
                         .cloned()
                         .unwrap_or_else(|| "binding_drift".into());
                     session.freeze(reason.clone());
-                    self.save_current_session(&session)?;
+                    self.save_session_at(&resolved.path, &session)?;
                     self.audit(
                         "session.freeze",
                         &session.binding_alias,
@@ -2642,6 +2897,82 @@ impl RuntimeDrift {
     }
 }
 
+/// MCP multi-tenant grant record at rest (`mcp-grants/<grant_id>.json`).
+///
+/// Carries the seal-key HMAC of the bearer token (`token_seal`) — never the
+/// secret itself, never credentials, never an executor capability.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct McpGrant {
+    /// Record schema version (currently 1).
+    pub v: u32,
+    /// Public grant id (16 lowercase hex chars) — safe for audits and lists.
+    pub grant_id: String,
+    /// Seal-key HMAC over `mcp-grant:<grant_id>:<secret>`.
+    pub token_seal: String,
+    /// Backing sealed session id (ci-backed, delegated, TTL-capped).
+    pub session_id: String,
+    pub binding_alias: String,
+    pub tenant: String,
+    pub created_at: String,
+    pub expires_at: chrono::DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub revoked: bool,
+}
+
+impl McpGrant {
+    pub fn is_expired(&self) -> bool {
+        self.expires_at <= Utc::now()
+    }
+}
+
+/// Failure of [`Store::verify_mcp_grant_token`]. `Invalid` is deliberately
+/// uniform; `Expired` is only produced after the token HMAC verified.
+#[derive(Debug, Clone)]
+pub enum McpGrantAuthError {
+    Invalid {
+        /// Present only when the token parsed (safe to audit — public id).
+        grant_id: Option<String>,
+        /// True only when the token parsed AND the grant is definitively dead:
+        /// the record is missing/unreadable-as-a-grant (post-revoke deletion)
+        /// or the MAC verified against a record marked `revoked`. NEVER set on
+        /// a MAC mismatch — a forged token naming a live grant must not be
+        /// able to trigger session/worker sweeps for that grant. The external
+        /// error body stays uniform regardless.
+        grant_dead: bool,
+    },
+    Expired {
+        grant: Box<McpGrant>,
+    },
+}
+
+/// Grant ids are 16 lowercase hex chars — path-safe by construction.
+pub fn is_safe_mcp_grant_id(id: &str) -> bool {
+    id.len() == 16
+        && id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+}
+
+/// Parse `lmt_<grant_id>.<secret>` without any store access. Charset-strict
+/// so a hostile token can never influence a filesystem path.
+pub fn parse_mcp_grant_token(token: &str) -> Option<(&str, &str)> {
+    let rest = token.trim().strip_prefix("lmt_")?;
+    let (grant_id, secret) = rest.split_once('.')?;
+    if !is_safe_mcp_grant_id(grant_id) {
+        return None;
+    }
+    if secret.len() != 64
+        || !secret
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    {
+        return None;
+    }
+    Some((grant_id, secret))
+}
+
 /// Outcome of a forced session teardown ([`Store::force_leave`]).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ForceLeaveOutcome {
@@ -2657,6 +2988,34 @@ pub struct ForceLeaveOutcome {
 
 fn default_true() -> bool {
     true
+}
+
+/// All-false baseline drift record (shared by active + per-session paths).
+fn empty_runtime_drift() -> RuntimeDrift {
+    RuntimeDrift {
+        pinned: false,
+        seal_ok: false,
+        authority_anchor_ok: false,
+        backing_ok: false,
+        backing_type: None,
+        backing_path: None,
+        authority: None,
+        binding_present: false,
+        binding_id_match: false,
+        tenant_match: false,
+        providers_match: true,
+        frozen: false,
+        expired: false,
+        session_id: None,
+        binding_alias: None,
+        binding_id_session: None,
+        binding_id_file: None,
+        tenant_session: None,
+        tenant_file: None,
+        providers: Vec::new(),
+        issues: Vec::new(),
+        ok: false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -2690,6 +3049,23 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<()> {
         perms.set_mode(0o600);
         fs::set_permissions(path, perms)?;
     }
+    Ok(())
+}
+
+/// Like [`write_secret_file`] but with `create_new` (O_EXCL) semantics: errors
+/// if `path` already exists instead of overwriting — fail closed on id
+/// collision. Mode 0600 on Unix at creation (no chmod window).
+fn write_secret_file_new(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
     Ok(())
 }
 
@@ -3216,6 +3592,132 @@ credential_ref = "ghp_UNSAFE/CANARY"
         let audit = fs::read_to_string(store.audit_path()).unwrap();
         assert!(audit.contains("session.leave"));
         assert!(!audit.contains("session.force_leave"));
+    }
+
+    /// The force-leave audit must record what actually happened: when the
+    /// active.json removal fails, no success record may exist — only a
+    /// `session.force_leave_failed` record, and the error is surfaced.
+    #[cfg(unix)]
+    #[test]
+    fn force_leave_failed_removal_audits_failure_not_success() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        // Make the sessions dir read-only so remove_file(active.json) fails.
+        let sessions_dir = store.active_session_path().parent().unwrap().to_path_buf();
+        let orig = fs::metadata(&sessions_dir).unwrap().permissions();
+        fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        let result = store.force_leave("wedge under readonly dir", false);
+        fs::set_permissions(&sessions_dir, orig).unwrap();
+
+        assert!(result.is_err(), "removal failure must surface as an error");
+        assert!(store.active_session_path().exists());
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(audit.contains("session.force_leave_failed"));
+        // No success record: a successful audit serializes the op with an
+        // immediately closing quote; only the `_failed` variant may appear.
+        assert!(!audit.contains("session.force_leave\""));
+
+        // The wedge is still recoverable once the dir is writable again.
+        let outcome = store.force_leave("retry", false).unwrap();
+        assert!(outcome.cleared);
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(audit.contains("session.force_leave\""));
+    }
+
+    /// A forged `worker_home` using `..` traversal passes a naive
+    /// component-prefix check (`<home>/workers/../victim` starts with
+    /// `<home>/workers` component-wise) — the canonicalized containment
+    /// check must refuse to delete it.
+    #[test]
+    fn force_leave_never_removes_worker_home_outside_workers_root() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        let victim = dir.path().join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("keep.txt"), "keep").unwrap();
+
+        let path = store.active_session_path();
+        let mut s: Session = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        s.worker_home = dir
+            .path()
+            .join("workers")
+            .join("..")
+            .join("victim")
+            .display()
+            .to_string();
+        fs::write(&path, serde_json::to_string(&s).unwrap()).unwrap();
+
+        let outcome = store
+            .force_leave("forged worker_home traversal", false)
+            .unwrap();
+        assert!(outcome.cleared);
+        assert!(
+            victim.join("keep.txt").exists(),
+            "directory outside workers/ must survive force_leave"
+        );
+    }
+
+    /// A symlink planted under `workers/` whose target lies outside the
+    /// store must not be followed into a recursive delete.
+    #[cfg(unix)]
+    #[test]
+    fn force_leave_never_follows_worker_home_symlink_escape() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        let victim = dir.path().join("victim-symlink");
+        fs::create_dir_all(&victim).unwrap();
+        fs::write(victim.join("keep.txt"), "keep").unwrap();
+
+        let workers = dir.path().join("workers");
+        fs::create_dir_all(&workers).unwrap();
+        let link = workers.join("escape");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        let path = store.active_session_path();
+        let mut s: Session = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        s.worker_home = link.display().to_string();
+        fs::write(&path, serde_json::to_string(&s).unwrap()).unwrap();
+
+        let outcome = store.force_leave("symlinked worker_home", false).unwrap();
+        assert!(outcome.cleared);
+        assert!(
+            victim.join("keep.txt").exists(),
+            "symlink target outside workers/ must survive force_leave"
+        );
+    }
+
+    /// Guard: the hardening must not break legitimate cleanup — a real
+    /// worker home under workers/ is still removed on force_leave.
+    #[test]
+    fn force_leave_still_removes_legit_worker_home() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let session = store.pin("acme", dir.path(), None, false).unwrap();
+        let wh = PathBuf::from(&session.worker_home);
+        assert!(wh.exists(), "pin must create the worker home");
+
+        let outcome = store.force_leave("normal teardown", false).unwrap();
+        assert!(outcome.cleared);
+        assert!(!wh.exists(), "worker home under workers/ must be removed");
     }
 
     #[test]
@@ -4211,6 +4713,339 @@ allowed_bindings = ["acme"]
 
         store.cleanup_ci_session(&path, &ci).unwrap();
         assert!(!path.exists());
+    }
+
+    /// Every file under LOCUS_HOME (recursively) must be free of `needle`.
+    fn assert_no_file_contains(root: &Path, needle: &str) {
+        fn walk(dir: &Path, needle: &str) {
+            let Ok(entries) = fs::read_dir(dir) else {
+                return;
+            };
+            for ent in entries.flatten() {
+                let path = ent.path();
+                if path.is_dir() {
+                    walk(&path, needle);
+                } else if let Ok(raw) = fs::read_to_string(&path) {
+                    assert!(
+                        !raw.contains(needle),
+                        "secret material leaked into {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        walk(root, needle);
+    }
+
+    #[test]
+    fn mcp_grant_mint_verify_roundtrip_and_no_secret_at_rest() {
+        let _env_guard = lock_session_env();
+        std::env::remove_var("LOCUS_SESSION_ID");
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+
+        let (session, grant, token) = store
+            .create_mcp_grant(
+                "acme",
+                dir.path(),
+                Some(Duration::minutes(30)),
+                Some("job-1".into()),
+                false,
+            )
+            .unwrap();
+        // Token shape: lmt_<16 hex>.<64 hex>, parseable, id matches grant.
+        let (gid, secret) = parse_mcp_grant_token(&token).expect("token parses");
+        assert_eq!(gid, grant.grant_id);
+        assert!(is_safe_mcp_grant_id(gid));
+        assert_eq!(secret.len(), 64);
+        assert_eq!(grant.session_id, session.session_id);
+        assert_eq!(grant.binding_alias, "acme");
+        assert!(!grant.revoked);
+
+        // active.json untouched; grant session resolvable + delegated.
+        assert!(store.active_session().unwrap().is_none());
+        let resolved = store
+            .load_session_by_id_resolved(&grant.session_id)
+            .unwrap()
+            .expect("grant session resolvable");
+        assert_eq!(resolved.session.authority, SessionAuthority::Delegated);
+
+        // Verify roundtrip.
+        let verified = store
+            .verify_mcp_grant_token(&token)
+            .expect("token verifies");
+        assert_eq!(verified.grant_id, grant.grant_id);
+
+        // Secret never at rest: not in the grant file, audit log, or ANY file.
+        let grant_path = store
+            .mcp_grants_dir()
+            .join(format!("{}.json", grant.grant_id));
+        assert!(grant_path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&grant_path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "grant file must be 0600");
+        }
+        assert_no_file_contains(dir.path(), secret);
+        assert_no_file_contains(dir.path(), &token);
+        let audit_raw = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(audit_raw.contains("mcp.grant_mint"));
+        assert!(!audit_raw.contains("lmt_"), "token leaked into audit");
+
+        // list surfaces it.
+        let listed = store.list_mcp_grants().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].grant_id, grant.grant_id);
+    }
+
+    #[test]
+    fn secret_file_create_new_refuses_overwrite() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("grant.json");
+        write_secret_file_new(&path, b"first").unwrap();
+        // Second write to the same path must fail closed, leaving the
+        // original bytes untouched.
+        assert!(write_secret_file_new(&path, b"second").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn mcp_grant_verify_fail_closed_matrix() {
+        let _env_guard = lock_session_env();
+        std::env::remove_var("LOCUS_SESSION_ID");
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let (_s, grant, token) = store
+            .create_mcp_grant("acme", dir.path(), Some(Duration::minutes(30)), None, false)
+            .unwrap();
+
+        let is_invalid = |t: &str| {
+            matches!(
+                store.verify_mcp_grant_token(t),
+                Err(McpGrantAuthError::Invalid { .. })
+            )
+        };
+        // Malformed / unknown / wrong secret → uniform Invalid.
+        assert!(is_invalid(""));
+        assert!(is_invalid("not-a-token"));
+        assert!(is_invalid(&format!(
+            "lmt_{}.{}",
+            "0".repeat(16),
+            "0".repeat(64)
+        )));
+        let (gid, _) = parse_mcp_grant_token(&token).unwrap();
+        assert!(is_invalid(&format!("lmt_{gid}.{}", "0".repeat(64))));
+
+        // Tampered token_seal → Invalid (MAC mismatch).
+        let path = store.mcp_grants_dir().join(format!("{gid}.json"));
+        let mut g: McpGrant = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let original = fs::read_to_string(&path).unwrap();
+        g.token_seal = "hmac-sha256:deadbeef".into();
+        fs::write(&path, serde_json::to_string_pretty(&g).unwrap()).unwrap();
+        assert!(is_invalid(&token));
+        fs::write(&path, &original).unwrap();
+
+        // Corrupt file → Invalid.
+        fs::write(&path, "{not json").unwrap();
+        assert!(is_invalid(&token));
+        fs::write(&path, &original).unwrap();
+
+        // Expired (MAC still valid) → Expired, not Invalid.
+        let mut g: McpGrant = serde_json::from_str(&original).unwrap();
+        g.expires_at = Utc::now() - Duration::minutes(1);
+        fs::write(&path, serde_json::to_string_pretty(&g).unwrap()).unwrap();
+        assert!(matches!(
+            store.verify_mcp_grant_token(&token),
+            Err(McpGrantAuthError::Expired { .. })
+        ));
+        fs::write(&path, &original).unwrap();
+
+        // Revoked flag → Invalid (uniform; revocation is not advertised).
+        let mut g: McpGrant = serde_json::from_str(&original).unwrap();
+        g.revoked = true;
+        fs::write(&path, serde_json::to_string_pretty(&g).unwrap()).unwrap();
+        assert!(is_invalid(&token));
+        fs::write(&path, &original).unwrap();
+
+        // Deleted grant file → Invalid.
+        fs::remove_file(&path).unwrap();
+        assert!(is_invalid(&token));
+        let _ = grant;
+    }
+
+    #[test]
+    fn mcp_grant_dead_flag_only_for_revoked_or_deleted() {
+        let _env_guard = lock_session_env();
+        std::env::remove_var("LOCUS_SESSION_ID");
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let (_s, grant, token) = store
+            .create_mcp_grant("acme", dir.path(), Some(Duration::minutes(30)), None, false)
+            .unwrap();
+        let (gid, _) = parse_mcp_grant_token(&token).unwrap();
+        let dead_of = |t: &str| match store.verify_mcp_grant_token(t) {
+            Err(McpGrantAuthError::Invalid { grant_dead, .. }) => grant_dead,
+            other => panic!("expected Invalid, got {other:?}"),
+        };
+
+        // Parse failure: no grant id, never dead.
+        assert!(!dead_of("not-a-token"));
+        // MAC mismatch on a LIVE grant: NOT dead — a forged token naming a
+        // real grant must never be able to trigger a session/worker sweep.
+        assert!(!dead_of(&format!("lmt_{gid}.{}", "0".repeat(64))));
+
+        // Revoked-marked record (crash between mark + delete): dead.
+        let path = store.mcp_grants_dir().join(format!("{gid}.json"));
+        let original = fs::read_to_string(&path).unwrap();
+        let mut g: McpGrant = serde_json::from_str(&original).unwrap();
+        g.revoked = true;
+        fs::write(&path, serde_json::to_string_pretty(&g).unwrap()).unwrap();
+        assert!(dead_of(&token), "MAC-verified revoked grant is dead");
+        fs::write(&path, &original).unwrap();
+
+        // Full revoke (deletes the record): dead — the running MT server uses
+        // this to sweep the grant's sessions and tear down its workers.
+        store.revoke_mcp_grant(&grant.grant_id).unwrap().unwrap();
+        assert!(dead_of(&token), "deleted grant record is dead");
+    }
+
+    #[test]
+    fn mcp_grant_revoke_removes_grant_session_and_worker_home() {
+        let _env_guard = lock_session_env();
+        std::env::remove_var("LOCUS_SESSION_ID");
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let (session, grant, token) = store
+            .create_mcp_grant("acme", dir.path(), Some(Duration::minutes(30)), None, false)
+            .unwrap();
+        let worker_home = PathBuf::from(&session.worker_home);
+        fs::create_dir_all(&worker_home).unwrap();
+        let session_path = store
+            .load_session_by_id_resolved(&grant.session_id)
+            .unwrap()
+            .unwrap()
+            .path;
+
+        let revoked = store.revoke_mcp_grant(&grant.grant_id).unwrap().unwrap();
+        assert!(revoked.revoked);
+        assert!(!store
+            .mcp_grants_dir()
+            .join(format!("{}.json", grant.grant_id))
+            .exists());
+        assert!(!session_path.exists(), "grant session file must be removed");
+        assert!(!worker_home.exists(), "worker home must be removed");
+        assert!(matches!(
+            store.verify_mcp_grant_token(&token),
+            Err(McpGrantAuthError::Invalid { .. })
+        ));
+        // Idempotent: second revoke is a no-op.
+        assert!(store.revoke_mcp_grant(&grant.grant_id).unwrap().is_none());
+        let audit_raw = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(audit_raw.contains("mcp.grant_revoke"));
+    }
+
+    #[test]
+    fn check_drift_and_freeze_for_freezes_only_that_grant() {
+        let _env_guard = lock_session_env();
+        std::env::remove_var("LOCUS_SESSION_ID");
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("beta", "beta-corp", "p2"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("gamma", "gamma-corp", "p3"))
+            .unwrap();
+
+        // Global pin + two grants.
+        let active = store.pin("gamma", dir.path(), None, false).unwrap();
+        let (_sa, grant_a, _ta) = store
+            .create_mcp_grant("acme", dir.path(), Some(Duration::minutes(30)), None, false)
+            .unwrap();
+        let (_sb, grant_b, _tb) = store
+            .create_mcp_grant("beta", dir.path(), Some(Duration::minutes(30)), None, false)
+            .unwrap();
+
+        // Mutate acme's binding material → drift for grant A only.
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1-changed"))
+            .unwrap();
+
+        let resolved_a = store
+            .load_session_by_id_resolved(&grant_a.session_id)
+            .unwrap()
+            .unwrap();
+        let drift_a = store.check_drift_and_freeze_for(&resolved_a).unwrap();
+        assert!(!drift_a.ok);
+        assert!(drift_a.frozen, "grant A must freeze on providers drift");
+
+        // Grant A's session FILE is frozen; B and active are untouched.
+        let re_a = store
+            .load_session_by_id_resolved(&grant_a.session_id)
+            .unwrap()
+            .unwrap();
+        assert!(re_a.session.frozen);
+        let re_b = store
+            .load_session_by_id_resolved(&grant_b.session_id)
+            .unwrap()
+            .unwrap();
+        assert!(!re_b.session.frozen, "grant B must not be frozen");
+        let drift_b = store.check_drift_and_freeze_for(&re_b).unwrap();
+        assert!(drift_b.ok, "grant B stays healthy: {:?}", drift_b.issues);
+        let active_now = store.active_session().unwrap().unwrap();
+        assert_eq!(active_now.session_id, active.session_id);
+        assert!(!active_now.frozen, "active.json must be untouched");
+    }
+
+    #[test]
+    fn whoami_for_reports_grant_binding() {
+        let _env_guard = lock_session_env();
+        std::env::remove_var("LOCUS_SESSION_ID");
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("beta", "beta-corp", "p2"))
+            .unwrap();
+        store.pin("beta", dir.path(), None, false).unwrap();
+
+        let (_s, grant, _t) = store
+            .create_mcp_grant("acme", dir.path(), Some(Duration::minutes(30)), None, false)
+            .unwrap();
+        let resolved = store
+            .load_session_by_id_resolved(&grant.session_id)
+            .unwrap()
+            .unwrap();
+        let who = store.whoami_for(&resolved).unwrap();
+        assert_eq!(who.binding_alias, "acme");
+        assert_eq!(who.tenant, "acme-corp");
+        assert_eq!(who.session_id, grant.session_id);
+        // Global whoami still answers as the operator pin.
+        assert_eq!(store.whoami().unwrap().binding_alias, "beta");
     }
 
     #[test]

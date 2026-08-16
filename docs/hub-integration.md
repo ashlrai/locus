@@ -316,6 +316,50 @@ export const REQUIRED_SERVERS = ["locus", "phantom"] as const;
 
 ---
 
+## MCP-native multi-tenant dispatch (one URL, one token per job)
+
+For concurrent personal/ashlr/cmp jobs the hub can point every worker at ONE
+`locus-mcp --http --multi-tenant` URL and hand each job its own operator-minted
+tenant token instead of a `LOCUS_SESSION_ID` env (that env pattern is untouched
+and keeps working for exec-style jobs):
+
+```bash
+locus mcp mint --binding cmp --ttl 1h --label "job-42"   # → token lmt_… (once)
+# worker sends BOTH headers on every /mcp request:
+#   Authorization: Bearer $LOCUS_MCP_HTTP_TOKEN
+#   X-Locus-Tenant-Token: lmt_<grant_id>.<secret>
+```
+
+Each job sees only its own binding's catalog/identity; cross-tenant session
+reuse is a 403; `locus mcp revoke` cuts a job off within one request. Tenant
+enumeration is CLI-only (`locus mcp list`) — tenants can never list each
+other over HTTP.
+
+### Grant lifecycle a hub should drive
+
+1. **Mint at job admission** — `locus mcp mint --binding <alias> --ttl <= job
+   budget> --label <job-id>`. The token is printed exactly once (only its HMAC
+   is stored at rest under `$LOCUS_HOME/mcp-grants/`); hand it to the worker
+   as a header value, never log it and never place it in tool arguments.
+2. **Mint and serve from the same operator-supervised session** — grant
+   validation rides the authority broker of the shell that minted; launch
+   `locus-mcp --http --multi-tenant` with `LOCUS_CONTROL_CAPABILITY` in its
+   env or every tenant fails closed (the server warns at startup).
+3. **Revoke at job completion** — `locus mcp revoke <grant_id>` (or
+   `--binding <alias>` per client, `--all` for drain). Revocation propagates
+   within one request and sweeps that grant's `Mcp-Session-Id` records plus
+   worker homes.
+4. **Expiry is self-cleaning** — an expired grant answers `401` with
+   `reason: grant_expired` + a re-mint `safe_next`; its sessions are swept and
+   audited (`mcp.grant_expired_swept`). Re-mint rather than extend.
+5. **Reconcile** — `locus mcp list` joins live per-grant HTTP-session counts;
+   diff it against the hub's job table to catch leaked grants. Per-grant
+   session cap: `LOCUS_MCP_SESSIONS_PER_GRANT` (default 8). A `withLocusMcpTenant` wrapper in the hub drop-in
+(`integrations/ashlr-hub/locus.ts`) is a named follow-up; until then use the
+header contract above. Details: [docs/mcp.md](./mcp.md#multi-tenant-http---multi-tenant).
+
+---
+
 ## Suggested hub wiring sequence
 
 ```bash

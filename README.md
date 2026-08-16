@@ -21,15 +21,19 @@ Pin a client — every CLI command, MCP tool, and the **local dashboard** is har
 ## Install
 
 ```bash
-brew install ashlrai/tap/locus  # when published
+# Homebrew (tap live) — installs locus + locus-mcp
+brew install ashlrai/tap/locus
 
+# npm — locus-cli and @ashlrai/locus-mcp published at 0.3.0
+# (downloads a release binary, or falls back to cargo install)
+npm install -g locus-cli @ashlrai/locus-mcp
+npx locus-cli --help
+npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
+
+# cargo
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo install --git https://github.com/ashlrai/locus --package locus-cli --locked
 cargo install --git https://github.com/ashlrai/locus --package locus-mcp --locked
-
-# npm / npx — downloads a release binary, or falls back to cargo install
-npx locus-cli --help
-npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
 ```
 
 Local checkout:

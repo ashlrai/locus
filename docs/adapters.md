@@ -88,6 +88,8 @@ let project_ref = freeze_string_arg(args, "project_ref", frozen)?;
 | Supabase | `project_ref`, `read_only` |
 | GitHub | `orgs[]`, `repos[]` |
 | Vercel | `team_id`, projects, env (preview/prod) |
+| Anthropic | `account_id` (org id), `project_ref` (workspace id), `read_only` — per-tenant model-API spend isolation; aliases `org`/`org_id`/`organization`/`workspace`/`workspace_id` (+ camelCase) are freeze-netted |
+| OpenAI | `account_id` (org id), `project_ref` (project id), `read_only` — per-tenant model-API spend isolation; aliases `org`/`org_id`/`organization`/`project`/`project_id` (+ camelCase) are freeze-netted |
 | Cloudflare (future) | `account_id`, zones |
 | AWS (future) | account / region / role |
 

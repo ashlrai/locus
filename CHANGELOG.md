@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-tenant MCP multiplexor (`locus-mcp --http --multi-tenant`)** — one
+  HTTP process serves several tenants concurrently via operator-minted grants
+  (`locus mcp mint|list|revoke`, local control boundary only; agents cannot
+  mint). Each grant wraps a sealed, delegated, TTL-capped session
+  (`active.json` is never consulted — no ambient fallthrough) and a
+  `lmt_<grant_id>.<secret>` bearer token whose HMAC-only record lives at
+  `$LOCUS_HOME/mcp-grants/<grant_id>.json` (0600); the token itself is printed
+  exactly once at mint. `X-Locus-Tenant-Token` is required on every `/mcp`,
+  `/mcp/sse`, and `DELETE` request on top of the unchanged
+  `LOCUS_MCP_HTTP_TOKEN`; the grant file is re-read per request so revocation
+  propagates within one call. Fail-closed responses: uniform `401
+  invalid_grant` (malformed/unknown/revoked indistinguishable; `grant_expired`
+  + re-mint `safe_next` only after HMAC proof), `403 tenant_mismatch`
+  (audited), `400 session_required` for stateless POSTs. Catalogs, whoami,
+  drift, resources, prompts, `GET /mcp`, and SSE ticks are computed per grant;
+  `locus_request_pin` / `locus_enter_hint` return `tenant_fixed_by_grant`;
+  tenants cannot enumerate each other (grant listing is CLI-only). Tenant
+  `Mcp-Session-Id` records live in a hard `http-sessions-mt/` partition with a
+  per-grant cap (`LOCUS_MCP_SESSIONS_PER_GRANT`, default 8) and worker
+  teardown when a grant's last session dies. Identity is pre-anchored from
+  the grant at session mint (zero wrong-account window). New values-free
+  audits: `mcp.grant_mint`/`grant_revoke`/`grant_auth_fail`/
+  `tenant_session_bound`/`tenant_mismatch`/`grant_expired_swept`;
+  `mcp.tools_call` rows additionally carry `grant_id` + `http_session_id`.
+  Doctor gains a values-free `mcp_multi_tenant` section (active grants per
+  alias, expired-unswept warning). Stdio + `--multi-tenant` is a startup
+  error. Docs: [docs/mcp.md](./docs/mcp.md#multi-tenant-http---multi-tenant),
+  [docs/hub-integration.md](./docs/hub-integration.md).
+- **Anthropic + OpenAI provider adapters** — synthetic freeze-check tools
+  (`anthropic.scope|whoami|usage|keys.list|keys.create`, same set for
+  `openai.*`) for per-tenant model-API spend isolation. Org id freezes via
+  `scope.account_id`, workspace/project id via `scope.project_ref`;
+  provider-native selector spellings (`org`, `organization_id`, `workspace_id`,
+  `project_id`, + camelCase) are freeze-netted; `keys.create` is destructive
+  (hidden + denied under `read_only`). Matrix:
+  [docs/adapters.md](./docs/adapters.md).
+- **`locus switch <alias>`** — one-shot leave-if-pinned + enter with
+  pre-flight target validation (alias suggestions + workspace allowlist
+  checked **before** dropping the current pin), honoring
+  `--ttl`/`--force`/`--client`, compact identity block + `--json`; audits as
+  normal `session.leave` + `session.pin`.
+
+### Fixed
+
+- `locus leave --force` audits success only after `active.json` removal
+  actually succeeds; a failed removal now writes a
+  `session.force_leave_failed` audit record with the error instead of a
+  false success trail.
+- Claude registration probe also detects **local-scope** registrations in
+  `~/.claude.json` under `projects.<cwd>.mcpServers.locus` (literal and
+  canonicalized project keys); `ClaudeMcpScope` gains an additive `local`
+  variant and `both` now means more-than-one-scope.
+
+### Security
+
+- Worker-home deletion hardened (`leave`, `leave --force`, CI/grant session
+  cleanup): the recorded path and `$LOCUS_HOME/workers/` are both
+  canonicalized and strict containment is required — `..`-traversal and
+  symlink escapes are refused, and the workers root itself is never removed.
+
 ## [0.3.0] — 2026-08-15
 
 Dogfood polish and release hygiene on top of 0.2.0. No identity-plane

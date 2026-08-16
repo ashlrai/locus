@@ -237,6 +237,10 @@ pub struct DoctorReport {
     pub near_miss_count: usize,
     /// Structured near-miss breakdown (same window as `near_miss_count`).
     pub near_miss: NearMissSummary,
+    /// Multi-tenant MCP grant health (present only when grants exist).
+    /// Values-free: counts + public grant metadata only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_multi_tenant: Option<McpMultiTenantHealth>,
     /// Structured issues with severity.
     pub findings: Vec<DoctorIssue>,
     /// Flat message list (same order as findings) for older consumers.
@@ -244,6 +248,19 @@ pub struct DoctorReport {
     pub verdict: DoctorVerdict,
     /// True only when verdict is SAFE.
     pub ok: bool,
+}
+
+/// Values-free multi-tenant MCP grant health for `locus doctor`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpMultiTenantHealth {
+    /// Live (unexpired, unrevoked) grants.
+    pub active_grants: usize,
+    /// Expired grant files still on disk (revoke or ignore — gates refuse them).
+    pub expired_unswept: usize,
+    /// Grant files still marked revoked (delete step failed mid-revoke).
+    pub revoked_leftovers: usize,
+    /// Active grant count per binding alias (surfaces same-alias double-mints).
+    pub grants_by_binding: std::collections::BTreeMap<String, usize>,
 }
 
 /// Gather real external facts: Phantom PATH probe + unresolved `phm:` refs.
@@ -808,6 +825,42 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
         findings.push(issue(IssueSeverity::Warn, "ungrounded_claims", msg));
     }
 
+    // Multi-tenant MCP grants: one values-free section, only when any exist.
+    let mcp_multi_tenant = match store.list_mcp_grants() {
+        Ok(grants) if !grants.is_empty() => {
+            let mut by_binding = std::collections::BTreeMap::new();
+            let mut active_grants = 0usize;
+            let mut expired_unswept = 0usize;
+            let mut revoked_leftovers = 0usize;
+            for g in &grants {
+                if g.revoked {
+                    revoked_leftovers += 1;
+                } else if g.is_expired() {
+                    expired_unswept += 1;
+                } else {
+                    active_grants += 1;
+                    *by_binding.entry(g.binding_alias.clone()).or_insert(0) += 1;
+                }
+            }
+            if expired_unswept > 0 {
+                findings.push(issue(
+                    IssueSeverity::Warn,
+                    "mcp_grants_expired_unswept",
+                    format!(
+                        "{expired_unswept} expired MCP grant file(s) on disk — `locus mcp revoke` to sweep (gates already refuse them)"
+                    ),
+                ));
+            }
+            Some(McpMultiTenantHealth {
+                active_grants,
+                expired_unswept,
+                revoked_leftovers,
+                grants_by_binding: by_binding,
+            })
+        }
+        _ => None,
+    };
+
     let mut verdict = DoctorVerdict::Safe;
     for f in &findings {
         let v = match f.severity {
@@ -839,6 +892,7 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
         audit,
         near_miss_count,
         near_miss,
+        mcp_multi_tenant,
         findings,
         issues,
         verdict,
