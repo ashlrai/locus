@@ -566,8 +566,29 @@ echo "$freeze_line" | grep -qiE 'scope freeze|proj_evil' \
   || die "unexpected freeze message: $freeze_line"
 ok "scope freeze denies wrong project_ref"
 
-# ── 8. require_approval → advisory → still blocked ───────────────────────────
-log "8. require_approval → local advisory → authority remains blocked"
+# ── 8. read_only hard deny, then require_approval → advisory → still blocked ─
+log "8a. read_only scope denies destructive tool outright (no approval minted)"
+ro_out="$(
+  mcp_rpc \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supabase.table.delete","arguments":{"table":"users"}}}'
+)"
+ro_line="$(echo "$ro_out" | tool_call_text)"
+echo "$ro_line" | grep -q '^ERR|' || die "expected read_only deny error: $ro_line"
+echo "$ro_line" | grep -q 'denied_read_only_scope' || die "missing denied_read_only_scope: $ro_line"
+if echo "$ro_line" | grep -qE 'appr_[a-f0-9]+'; then
+  die "read_only deny must not mint an approval record: $ro_line"
+fi
+ok "read_only scope hard-denies supabase.table.delete before approval gating"
+
+# Flip the fixture to read_only=false so the approval flow itself is testable.
+locus leave >/dev/null
+sed -i.bak 's/project_ref = "proj_env_e2e", read_only = true/project_ref = "proj_env_e2e", read_only = false/' "$LOCUS_HOME/bindings/envtest.toml"
+rm -f "$LOCUS_HOME/bindings/envtest.toml.bak"
+locus pin envtest >/dev/null
+
+log "8b. require_approval → local advisory → authority remains blocked"
 appr_out="$(
   mcp_rpc \
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
