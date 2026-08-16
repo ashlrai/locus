@@ -6720,12 +6720,12 @@ _locus_auto_enter() {{
   [[ "${{LOCUS_AUTO_ENTER:-0}}" == "1" ]] || return 0
   locus enter >/dev/null 2>&1 || true
 }}
-if [[ -n "$ZSH_VERSION" ]]; then
+if [[ -n "${{ZSH_VERSION:-}}" ]]; then
   autoload -Uz add-zsh-hook 2>/dev/null
   add-zsh-hook chpwd _locus_auto_enter 2>/dev/null || true
-elif [[ -n "$BASH_VERSION" ]]; then
+elif [[ -n "${{BASH_VERSION:-}}" ]]; then
   # bash: run on PROMPT_COMMAND (best-effort). Colors via ANSI for bash PS1 use.
-  if [[ -z "$_LOCUS_PROMPT_CMD" ]]; then
+  if [[ -z "${{_LOCUS_PROMPT_CMD:-}}" ]]; then
     _LOCUS_PROMPT_CMD=1
     PROMPT_COMMAND="_locus_auto_enter${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
   fi
