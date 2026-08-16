@@ -34,7 +34,11 @@ fi
 
 SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
 SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
-cleanup() { rm -rf "$SMOKE_HOME" "$SMOKE_PROJ"; }
+MT_SRV_PID=""
+cleanup() {
+  [[ -n "$MT_SRV_PID" ]] && kill "$MT_SRV_PID" 2>/dev/null || true
+  rm -rf "$SMOKE_HOME" "$SMOKE_PROJ"
+}
 trap cleanup EXIT
 
 export LOCUS_HOME="$SMOKE_HOME"
@@ -128,7 +132,7 @@ REPORT="$(locus agent report --json 2>/dev/null || true)"
 # ---------------------------------------------------------------------------
 # 3. Schemas present
 # ---------------------------------------------------------------------------
-for f in agent-report.schema.json doctor.schema.json hub-gate.schema.json; do
+for f in agent-report.schema.json doctor.schema.json hub-gate.schema.json mcp-grant.schema.json; do
   if [[ -f "$ROOT/schema/$f" ]]; then
     ok "schema/$f present"
   else
@@ -858,7 +862,7 @@ do
 done
 
 # locus.ts exports (static grep)
-for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv validateMintBinding parseLocusEnforceToken extractLocusConfigEnforce readLocusConfigFromAshlr resolveLocusEnforceMode decidePreMutateGate assertLocusPreMutate formatPreMutateBlockers applyLocusPreMutateGate decideLocusSessionRun runWithLocusSessionIfConfigured parseWatchHeartbeat parseSessionVerificationPack locusVerifySession locusWatchOnce locusSoftWatchHeartbeat; do
+for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv validateMintBinding parseLocusEnforceToken extractLocusConfigEnforce readLocusConfigFromAshlr resolveLocusEnforceMode decidePreMutateGate assertLocusPreMutate formatPreMutateBlockers applyLocusPreMutateGate decideLocusSessionRun runWithLocusSessionIfConfigured parseWatchHeartbeat parseSessionVerificationPack locusVerifySession locusWatchOnce locusSoftWatchHeartbeat parseMcpMintOutput parseMcpListOutput classifyTenantAuthError locusMcpMint locusMcpList locusMcpRevoke withLocusMcpTenant locusMtPreflight; do
   if grep -qE "export (async )?function $sym" "$ROOT/integrations/ashlr-hub/locus.ts"; then
     ok "locus.ts exports $sym"
   else
@@ -886,6 +890,335 @@ if grep -qE "locusWatchOnce|locusVerifySession" "$ROOT/integrations/ashlr-hub/fl
   ok "fleet-preflight.md documents session heartbeat helpers"
 else
   bad "fleet-preflight.md missing session heartbeat notes"
+fi
+if grep -q "withLocusMcpTenant" "$ROOT/docs/hub-integration.md" \
+  && grep -q "classifyTenantAuthError" "$ROOT/docs/hub-integration.md" \
+  && grep -q "X-Locus-Tenant-Token" "$ROOT/docs/hub-integration.md"; then
+  ok "hub-integration.md documents withLocusMcpTenant + tenant header contract"
+else
+  bad "hub-integration.md missing withLocusMcpTenant / tenant header notes"
+fi
+
+# ---------------------------------------------------------------------------
+# 7. Multi-tenant MCP composition smoke
+#    mint → serve --multi-tenant → whoami as tenant → cross-tenant 403 →
+#    sessionless 400 → revoke → 401 → expired 401 (feature-detected; soft-skip)
+#    Tokens live in shell/process memory only — never files, never echoed.
+# ---------------------------------------------------------------------------
+MT_SKIP=""
+if ! command -v curl >/dev/null 2>&1; then
+  MT_SKIP="curl not available"
+fi
+if [[ -z "$MT_SKIP" ]] && ! locus mcp mint --help >/dev/null 2>&1; then
+  MT_SKIP="locus mcp subcommand unavailable (older CLI)"
+fi
+if [[ -z "$MT_SKIP" ]] && ! command -v locus-mcp >/dev/null 2>&1; then
+  (cd "$ROOT" && cargo build -q -p locus-mcp) || true
+fi
+if [[ -z "$MT_SKIP" ]] && ! command -v locus-mcp >/dev/null 2>&1; then
+  MT_SKIP="locus-mcp binary not available"
+fi
+
+if [[ -n "$MT_SKIP" ]]; then
+  echo "skip  multi-tenant MCP smoke ($MT_SKIP)"
+else
+  MT_PORT=$(( 20000 + RANDOM % 20000 ))
+  MT_ADDR="127.0.0.1:${MT_PORT}"
+  export LOCUS_MCP_HTTP_TOKEN="hub-int-mt-$$-${RANDOM}"
+  MT_BODY="$SMOKE_PROJ/mt-body.json"
+
+  # Grant tokens are held in shell variables only (memory-only hub contract).
+  MINT_A_JSON="$(locus mcp mint --binding personal --ttl 10m --label hub-int-a --json 2>/dev/null)"
+  MINT_B_JSON="$(locus mcp mint --binding personal --ttl 10m --label hub-int-b --json 2>/dev/null)"
+  TOKEN_A="$(printf '%s' "$MINT_A_JSON" | jq -r .token)"
+  TOKEN_B="$(printf '%s' "$MINT_B_JSON" | jq -r .token)"
+  GRANT_A="$(printf '%s' "$MINT_A_JSON" | jq -r .grant_id)"
+  GRANT_B="$(printf '%s' "$MINT_B_JSON" | jq -r .grant_id)"
+
+  if printf '%s' "$MINT_A_JSON" | jq -e --arg g "$GRANT_A" '
+    (.grant_id | test("^[a-f0-9]+$"))
+    and (.token | startswith("lmt_" + $g + "."))
+    and (.session_id | startswith("ses_"))
+    and .binding == "personal"
+    and (.expires_at | type) == "string"
+  ' >/dev/null 2>&1; then
+    ok "mt: mint JSON contract (token embeds grant_id; shown once)"
+  else
+    bad "mt: mint JSON contract"
+  fi
+
+  # Serve from the SAME shell/capability that minted (broker requirement).
+  locus-mcp --http "$MT_ADDR" --multi-tenant >"$SMOKE_PROJ/mt-server.log" 2>&1 &
+  MT_SRV_PID=$!
+  mt_up=0
+  for _ in $(seq 1 60); do
+    if curl -sf "http://${MT_ADDR}/health" >/dev/null 2>&1; then mt_up=1; break; fi
+    sleep 0.25
+  done
+
+  if [[ "$mt_up" -ne 1 ]]; then
+    bad "mt: locus-mcp --http --multi-tenant did not become healthy"
+    tail -c 400 "$SMOKE_PROJ/mt-server.log" 2>/dev/null || true
+  else
+    ok "mt: server healthy on $MT_ADDR"
+
+    # POST /mcp helper: $1 tenant token ('' = none), $2 session id ('' = none),
+    # $3 JSON-RPC body. Prints HTTP status; response body → $MT_BODY.
+    mt_post() {
+      local args=( -s -o "$MT_BODY" -w '%{http_code}'
+        -H "Authorization: Bearer ${LOCUS_MCP_HTTP_TOKEN}"
+        -H "Content-Type: application/json" -H "Accept: application/json" )
+      [[ -n "$1" ]] && args+=( -H "X-Locus-Tenant-Token: $1" )
+      [[ -n "$2" ]] && args+=( -H "Mcp-Session-Id: $2" )
+      curl "${args[@]}" -d "$3" "http://${MT_ADDR}/mcp"
+    }
+
+    # Capabilities without a tenant token: only the MT layer answers invalid_grant.
+    st="$(curl -s -o "$MT_BODY" -w '%{http_code}' -H "Authorization: Bearer ${LOCUS_MCP_HTTP_TOKEN}" "http://${MT_ADDR}/mcp")"
+    if [[ "$st" == "401" ]] && jq -e '.error == "invalid_grant"' "$MT_BODY" >/dev/null 2>&1; then
+      ok "mt: GET /mcp without tenant token → 401 invalid_grant"
+    else
+      bad "mt: expected 401 invalid_grant without tenant token (got $st)"
+    fi
+    MT_401_INVALID_BODY="$(cat "$MT_BODY")"
+
+    # Capabilities as tenant A: mode + THIS grant only.
+    st="$(curl -s -o "$MT_BODY" -w '%{http_code}' -H "Authorization: Bearer ${LOCUS_MCP_HTTP_TOKEN}" -H "X-Locus-Tenant-Token: ${TOKEN_A}" "http://${MT_ADDR}/mcp")"
+    if [[ "$st" == "200" ]] && jq -e --arg g "$GRANT_A" '
+      .mode == "multi_tenant" and .grant_id == $g and .pin.binding_alias == "personal"
+    ' "$MT_BODY" >/dev/null 2>&1; then
+      ok "mt: GET /mcp capabilities mode=multi_tenant grant-scoped"
+    else
+      bad "mt: capabilities as tenant A (got $st)"
+      jq -c 'del(.tools)' "$MT_BODY" 2>/dev/null | head -c 300 || true
+    fi
+
+    # Initialize as tenant A → grant-bound Mcp-Session-Id.
+    st="$(curl -s -D "$SMOKE_PROJ/mt-init.headers" -o "$MT_BODY" -w '%{http_code}' \
+      -H "Authorization: Bearer ${LOCUS_MCP_HTTP_TOKEN}" -H "X-Locus-Tenant-Token: ${TOKEN_A}" \
+      -H "Content-Type: application/json" -H "Accept: application/json" \
+      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' "http://${MT_ADDR}/mcp")"
+    SESSION_A="$(grep -i '^mcp-session-id:' "$SMOKE_PROJ/mt-init.headers" | tr -d '\r' | awk '{print $2}')"
+    if [[ "$st" == "200" && -n "$SESSION_A" ]]; then
+      ok "mt: initialize minted grant-bound Mcp-Session-Id"
+    else
+      bad "mt: initialize as tenant A (status $st, session '${SESSION_A}')"
+    fi
+
+    # whoami as tenant A — scoped to the grant's binding; never bearer material.
+    st="$(mt_post "$TOKEN_A" "$SESSION_A" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"locus_whoami","arguments":{}}}')"
+    if [[ "$st" == "200" ]] && jq -e '
+      (.result.isError | not)
+      and (.result.content[0].text | contains("\"tenant\": \"personal\"") or contains("\"tenant\":\"personal\""))
+    ' "$MT_BODY" >/dev/null 2>&1; then
+      ok "mt: tools/call locus_whoami scoped to tenant grant"
+    else
+      bad "mt: whoami as tenant A (status $st)"
+    fi
+    if grep -q 'lmt_' "$MT_BODY"; then
+      bad "mt: whoami response leaked bearer token material"
+    else
+      ok "mt: whoami response bearer hygiene"
+    fi
+
+    # Cross-tenant session reuse: token B + session A → 403 tenant_mismatch.
+    st="$(mt_post "$TOKEN_B" "$SESSION_A" '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"locus_whoami","arguments":{}}}')"
+    if [[ "$st" == "403" ]] && jq -e '.error == "tenant_mismatch"' "$MT_BODY" >/dev/null 2>&1; then
+      ok "mt: cross-tenant session reuse → 403 tenant_mismatch"
+    else
+      bad "mt: expected 403 tenant_mismatch (got $st)"
+    fi
+    MT_403_BODY="$(cat "$MT_BODY")"
+
+    # Sessionless MT tools/call → 400 session_required (no ambient fallthrough).
+    st="$(mt_post "$TOKEN_A" "" '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"locus_whoami","arguments":{}}}')"
+    if [[ "$st" == "400" ]] && jq -e '.error == "session_required"' "$MT_BODY" >/dev/null 2>&1; then
+      ok "mt: sessionless tools/call → 400 session_required"
+    else
+      bad "mt: expected 400 session_required (got $st)"
+    fi
+    MT_400_BODY="$(cat "$MT_BODY")"
+
+    # Revoke A → token A refused within one request (uniform invalid_grant).
+    locus mcp revoke "$GRANT_A" >/dev/null 2>&1
+    st="$(mt_post "$TOKEN_A" "$SESSION_A" '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"locus_whoami","arguments":{}}}')"
+    if [[ "$st" == "401" ]] && jq -e '.error == "invalid_grant" and (has("reason") | not)' "$MT_BODY" >/dev/null 2>&1; then
+      ok "mt: revoked grant → 401 invalid_grant (revocation not advertised)"
+    else
+      bad "mt: expected 401 invalid_grant after revoke (got $st)"
+    fi
+
+    # Expired grant → 401 with reason=grant_expired + re-mint safe_next.
+    TOKEN_E="$(locus mcp mint --binding personal --ttl 1s --label hub-int-exp --json 2>/dev/null | jq -r .token)"
+    sleep 2
+    st="$(curl -s -o "$MT_BODY" -w '%{http_code}' -H "Authorization: Bearer ${LOCUS_MCP_HTTP_TOKEN}" -H "X-Locus-Tenant-Token: ${TOKEN_E}" "http://${MT_ADDR}/mcp")"
+    if [[ "$st" == "401" ]] && jq -e '
+      .error == "invalid_grant" and .reason == "grant_expired" and (.safe_next | contains("locus mcp mint"))
+    ' "$MT_BODY" >/dev/null 2>&1; then
+      ok "mt: expired grant → 401 grant_expired + safe_next re-mint"
+    else
+      bad "mt: expected 401 grant_expired (got $st)"
+    fi
+    MT_401_EXPIRED_BODY="$(cat "$MT_BODY")"
+
+    # Roster: values-free, revoked grant removed, live grant present.
+    MT_LIST_JSON="$(locus mcp list --json 2>/dev/null)"
+    if printf '%s' "$MT_LIST_JSON" | jq -e --arg a "$GRANT_A" --arg b "$GRANT_B" '
+      type == "array"
+      and (map(has("token")) | any | not)
+      and (map(select(.grant_id == $a)) | length == 0)
+      and (map(select(.grant_id == $b)) | first | .revoked == false)
+      and (map(.live_http_sessions | type == "number") | all)
+    ' >/dev/null 2>&1; then
+      ok "mt: locus mcp list roster (values-free; revoked grant removed)"
+    else
+      bad "mt: locus mcp list roster contract"
+    fi
+    if printf '%s' "$MT_LIST_JSON" | grep -q 'lmt_'; then
+      bad "mt: list roster leaked bearer token material"
+    else
+      ok "mt: list roster bearer hygiene"
+    fi
+
+    # Live drop-in slice: parse helpers + classify + preflight + withLocusMcpTenant
+    # against the real server. Tokens stay in process env memory only.
+    if HUB_ROOT="$ROOT" MT_URL="http://${MT_ADDR}" \
+      HUB_MT_MINT_JSON="$MINT_B_JSON" HUB_MT_LIST_JSON="$MT_LIST_JSON" \
+      HUB_MT_401_INVALID="$MT_401_INVALID_BODY" HUB_MT_401_EXPIRED="$MT_401_EXPIRED_BODY" \
+      HUB_MT_403="$MT_403_BODY" HUB_MT_400="$MT_400_BODY" HUB_MT_TOKEN_B="$TOKEN_B" \
+      LOCUS_BIN="${ROOT}/target/debug/locus" \
+      node --experimental-strip-types --input-type=module <<'NODE'
+import { pathToFileURL } from "node:url";
+
+const root = process.env.HUB_ROOT;
+const url = process.env.MT_URL;
+const serverToken = process.env.LOCUS_MCP_HTTP_TOKEN;
+const m = await import(pathToFileURL(`${root}/integrations/ashlr-hub/locus.ts`).href);
+
+// parseMcpMintOutput: live mint roundtrip + fail-closed variants
+const mint = m.parseMcpMintOutput(process.env.HUB_MT_MINT_JSON);
+if (!mint.token.startsWith(`lmt_${mint.grant_id}.`) || mint.binding !== "personal") {
+  throw new Error("parseMcpMintOutput live roundtrip failed");
+}
+for (const bad of [
+  "", "not-json",
+  JSON.stringify({ ...mint, token: "lmt_ffffffffffffffff.deadbeef" }), // foreign grant id
+  JSON.stringify({ ...mint, token: "sk-notatoken" }),
+  JSON.stringify({ ...mint, session_id: "bogus" }),
+]) {
+  let rejected = false;
+  try { m.parseMcpMintOutput(bad); } catch { rejected = true; }
+  if (!rejected) throw new Error("parseMcpMintOutput accepted malformed mint");
+}
+console.log("ok    mt-ts: parseMcpMintOutput live + fail-closed");
+
+// parseMcpListOutput: live roster + token-material rejection
+const rows = m.parseMcpListOutput(process.env.HUB_MT_LIST_JSON);
+if (!rows.some((r) => r.grant_id === mint.grant_id && r.revoked === false)) {
+  throw new Error("parseMcpListOutput missing live grant");
+}
+let listRejected = false;
+try {
+  m.parseMcpListOutput(JSON.stringify([{ grant_id: "ab12", token: "lmt_ab12.ffff" }]));
+} catch { listRejected = true; }
+if (!listRejected) throw new Error("parseMcpListOutput accepted bearer material");
+console.log("ok    mt-ts: parseMcpListOutput live + bearer hygiene");
+
+// classifyTenantAuthError: captured live bodies → typed reasons
+const cases = [
+  [401, process.env.HUB_MT_401_INVALID, "invalid_grant", "re_mint"],
+  [401, process.env.HUB_MT_401_EXPIRED, "grant_expired", "re_mint"],
+  [403, process.env.HUB_MT_403, "tenant_mismatch", "initialize"],
+  [400, process.env.HUB_MT_400, "session_required", "initialize"],
+  [401, JSON.stringify({ error: "unauthorized" }), "server_unauthorized", "server_token"],
+  [500, "{}", "unknown", "none"],
+];
+for (const [status, body, kind, recovery] of cases) {
+  const c = m.classifyTenantAuthError(status, body);
+  if (c.kind !== kind || c.recovery !== recovery) {
+    throw new Error(`classifyTenantAuthError(${status}) => ${c.kind}/${c.recovery}, want ${kind}/${recovery}`);
+  }
+}
+if (!m.classifyTenantAuthError(401, process.env.HUB_MT_401_EXPIRED).safeNext?.includes("locus mcp mint")) {
+  throw new Error("grant_expired classification lost safe_next");
+}
+console.log("ok    mt-ts: classifyTenantAuthError live 401/403/400 taxonomy");
+
+// locusMtPreflight: server-token-only probe proves MT via invalid_grant …
+const anon = await m.locusMtPreflight({ baseUrl: url, serverToken });
+if (!anon.reachable || !anon.multiTenant || anon.mode !== "multi_tenant") {
+  throw new Error(`anon preflight: ${JSON.stringify(anon)}`);
+}
+// … and a tenant-authenticated probe returns THIS grant.
+const authed = await m.locusMtPreflight({
+  baseUrl: url,
+  serverToken,
+  headers: { [m.TENANT_TOKEN_HEADER]: process.env.HUB_MT_TOKEN_B },
+});
+if (!authed.multiTenant || authed.grantId !== mint.grant_id) {
+  throw new Error(`authed preflight: ${JSON.stringify(authed)}`);
+}
+const down = await m.locusMtPreflight({ baseUrl: "http://127.0.0.1:9", timeoutMs: 1500 });
+if (down.reachable !== false) throw new Error("down preflight claimed reachable");
+console.log("ok    mt-ts: locusMtPreflight MT detection (anon + tenant + down)");
+
+// withLocusMcpTenant: mint → dispatch → auto-revoke → scrubbed handle
+let saved = null;
+await m.withLocusMcpTenant("personal", async (handle) => {
+  saved = handle;
+  if (!handle.headers[m.TENANT_TOKEN_HEADER]?.startsWith(`lmt_${handle.grantId}.`)) {
+    throw new Error("handle headers missing tenant token");
+  }
+  if (handle.headers.Authorization !== `Bearer ${serverToken}`) {
+    throw new Error("handle headers missing server bearer");
+  }
+  const res = await fetch(`${url}/mcp`, {
+    method: "POST",
+    headers: { ...handle.headers, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+  });
+  if (!res.ok) throw new Error(`initialize under handle failed: ${res.status}`);
+}, { ttl: "5m", label: "hub-int-ts", serverToken });
+if (!saved?.revoked) throw new Error("withLocusMcpTenant did not revoke in finally");
+if (saved.headers[m.TENANT_TOKEN_HEADER] !== undefined || saved.headers.Authorization !== undefined) {
+  throw new Error("withLocusMcpTenant left bearer material on the handle");
+}
+// Revoke deletes the record — the grant must be gone from the roster.
+const after = m.locusMcpList();
+if (!after.available || after.grants.some((g) => g.grant_id === saved.grantId)) {
+  throw new Error("revoked grant still present in roster");
+}
+console.log("ok    mt-ts: withLocusMcpTenant mint→dispatch→revoke + token scrub");
+
+// Failing callback: grant still revoked, callback error wins.
+let failed = false;
+let saved2 = null;
+try {
+  await m.withLocusMcpTenant("personal", (handle) => {
+    saved2 = handle;
+    throw new Error("job failed");
+  }, { ttl: "5m", label: "hub-int-ts-fail" });
+} catch (e) {
+  failed = e instanceof Error && e.message === "job failed";
+}
+if (!failed || !saved2?.revoked) {
+  throw new Error("failing callback did not preserve error + revoke");
+}
+console.log("ok    mt-ts: withLocusMcpTenant revokes on callback failure");
+NODE
+    then
+      ok "mt: live drop-in slice (parse + classify + preflight + withLocusMcpTenant)"
+    else
+      bad "mt: live drop-in slice failed"
+    fi
+
+    kill "$MT_SRV_PID" 2>/dev/null || true
+    wait "$MT_SRV_PID" 2>/dev/null || true
+    MT_SRV_PID=""
+  fi
+
+  # Drain remaining grants so the scratch store ends clean.
+  locus mcp revoke --all >/dev/null 2>&1 || true
 fi
 
 if [[ "$fail" -ne 0 ]]; then

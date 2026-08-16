@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Signed adapter-registry release manifests** — `locus adapter registry
+  export` emits a canonical JSON snapshot of the built-in adapter set
+  (`locus-adapter-registry/v1`: id, name, crate version, sorted tools, and a
+  `sha256` digest over each entry's canonical material). `--sign` signs it
+  with an operator-provided ed25519 key (`--key <file>` or
+  `LOCUS_REGISTRY_SIGNING_KEY`; base64 or 64-hex seed, never generated or
+  printed; `--sign` without a key refuses to export). `locus adapter
+  verify-manifest <file>` is fail-closed: the signature must verify against
+  the existing trust store (`$LOCUS_HOME/trust/adapter-keys.toml` +
+  `LOCUS_ADAPTER_TRUST_KEYS`) **and** the running binary's adapter set must
+  match the manifest exactly (version, ids, names, tools, digests);
+  `--allow-unsigned` permits only a *missing* signature for drift-only checks.
+  Release CI attaches the unsigned canonical manifest as
+  `locus-adapters-<tag>.json` (operators sign locally; a commented
+  `TODO(registry-signing)` block documents future CI signing). Docs:
+  `docs/registry-trust.md`.
+- **Hub multi-tenant drop-in** — `integrations/ashlr-hub/locus.ts` gains
+  `withLocusMcpTenant(binding, fn)` (mint → dispatch with
+  `X-Locus-Tenant-Token` headers → always-revoke, token held in memory only),
+  pure `parseMcpMintOutput` / `parseMcpListOutput` /
+  `classifyTenantAuthError` helpers, and async `locusMtPreflight()`;
+  `schema/mcp-grant.schema.json` documents the mint/list contract.
+- **MT conformance coverage** — `scripts/e2e.sh` step 31 exercises the full
+  two-tenant lifecycle (mint, isolation, cross-tenant 403, revoke → 401);
+  `scripts/dogfood.sh` gains an opt-in `DOGFOOD_MT=1` probe;
+  `scripts/hub-smoke.sh` / `hub-integration-test.sh` cover the grant CLI and
+  live drop-in slice.
+
+### Changed
+
+- **HTTP auth is Bearer-only in `Authorization`** — `locus-mcp --http` now
+  accepts the shared token as `Authorization: Bearer <token>` (or the
+  `X-Locus-Token` / `X-Locus-MCP-Token` headers) only. The undocumented raw
+  schemeless `Authorization: <token>` fallback accepted through v0.4.0 is
+  rejected with `401`. Migration: prefix the header value with `Bearer `.
+- **stdio frame cap** — the stdio MCP transport enforces the same 8 MB
+  Content-Length cap as HTTP; an oversized frame is refused before allocation
+  and the server exits with a protocol error (fail closed) instead of
+  attempting an unbounded read.
+- **Catalog deny annotation** — `tools/list` descriptions of tools a
+  structured policy `deny` rule unconditionally blocks under the current pin
+  now carry `[denied by policy under current pin]`, computed by the same
+  policy engine as the call gate (companion to the existing
+  `[requires human approval under current pin]` marker). `policy.default =
+  "deny"` is deliberately not annotated.
+- **Watch heartbeat control-capability findings** — `locus watch` ticks now
+  attach the operator-shell `LOCUS_CONTROL_CAPABILITY` readiness findings that
+  `locus doctor` reports, so hub heartbeat consumers see the same degraded
+  posture (`session_ok` reflects the escalated verdict).
+
 ## [0.4.0] — 2026-08-16
 
 ### Added

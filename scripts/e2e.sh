@@ -3,7 +3,9 @@
 # dual-control, events, optional enter/run/notify/ns; graph/ci/heartbeat,
 # dashboard health, forensics export, goal status, verify claim/session,
 # watch session heartbeat, safe_next MCP, upstream list, HTTP MCP session +
-# SSE when locus-mcp --http is available (feature-detected). Full 0.2+ surface
+# SSE when locus-mcp --http is available (feature-detected); multi-tenant
+# grants (mint / per-tenant isolation / cross-tenant 403 / revoke) when
+# locus-mcp --multi-tenant is available. Full 0.2+ surface
 # plus adversarial release security probes (~44+ checks).
 set -euo pipefail
 
@@ -57,11 +59,17 @@ LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")"
 log "2. LOCUS_HOME=$LOCUS_HOME"
 # Optional background PIDs (HTTP MCP, etc.) cleaned on any exit path.
 HTTP_MCP_PID=""
+MT_MCP_PID=""
 e2e_cleanup() {
   if [[ -n "${HTTP_MCP_PID:-}" ]]; then
     kill "$HTTP_MCP_PID" 2>/dev/null || true
     wait "$HTTP_MCP_PID" 2>/dev/null || true
     HTTP_MCP_PID=""
+  fi
+  if [[ -n "${MT_MCP_PID:-}" ]]; then
+    kill "$MT_MCP_PID" 2>/dev/null || true
+    wait "$MT_MCP_PID" 2>/dev/null || true
+    MT_MCP_PID=""
   fi
   rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"
 }
@@ -1864,6 +1872,203 @@ print("sse once bytes=%d" % len(body))
       HTTP_MCP_PID=""
     fi
     ok "locus-mcp --http server torn down cleanly"
+  fi
+fi
+
+# ── 31. multi-tenant HTTP MCP grants (feature-detected) ──────────────────────
+# When locus-mcp --multi-tenant + `locus mcp mint` exist: mint two grants over
+# the sample bindings, serve ONE --http --multi-tenant process, then assert
+# per-tenant whoami isolation, tenantless 401, cross-tenant 403, and
+# revocation → 401 while the surviving tenant keeps working.
+log "31. locus-mcp --http --multi-tenant grants (optional)"
+if ! "$MCP_BIN" --help 2>&1 | grep -qE -- '--multi-tenant'; then
+  skip "locus-mcp --multi-tenant not available"
+elif ! has_cmd_path mcp mint; then
+  skip "locus mcp mint not available"
+elif ! command -v curl >/dev/null 2>&1; then
+  skip "curl not available for multi-tenant probes"
+else
+  MT_MCP_PORT="$(
+    python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
+  )"
+  MT_MCP_TOKEN="e2e-mt-$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  MT_MCP_ADDR="127.0.0.1:${MT_MCP_PORT}"
+  MT_MCP_BASE="http://${MT_MCP_ADDR}"
+  mt_mcp_log="$LOCUS_HOME/e2e-mt-mcp.log"
+
+  # Mint one grant per sample binding (bearer token printed exactly once).
+  mt_mint_a="$(locus mcp mint -b personal --ttl 15m --label e2e-mt-personal --force --json)"
+  mt_mint_b="$(locus mcp mint -b acme --ttl 15m --label e2e-mt-acme --force --json)"
+  mt_grant_a="$(printf '%s' "$mt_mint_a" | python3 -c 'import json,sys; print(json.load(sys.stdin)["grant_id"])')"
+  mt_token_a="$(printf '%s' "$mt_mint_a" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+  mt_token_b="$(printf '%s' "$mt_mint_b" | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+  [[ "$mt_token_a" == lmt_* && "$mt_token_b" == lmt_* ]] \
+    || die "mcp mint did not return lmt_ tenant tokens"
+  printf '%s%s' "$mt_mint_a" "$mt_mint_b" \
+    | grep -Eq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|"credential_ref"|phm:|env:|test:' \
+    && die "mcp mint leaked secret or locator material" || true
+  ok "minted tenant grants for personal + acme (lmt_ tokens, no locators)"
+
+  set +e
+  LOCUS_HOME="$LOCUS_HOME" \
+    LOCUS_MCP_HTTP_TOKEN="$MT_MCP_TOKEN" \
+    LOCUS_MCP_AUTO_PIN=0 \
+    "$MCP_BIN" --http "$MT_MCP_ADDR" --multi-tenant >"$mt_mcp_log" 2>&1 &
+  MT_MCP_PID=$!
+  set -e
+
+  mt_ready=0
+  for _ in $(seq 1 40); do
+    if ! kill -0 "$MT_MCP_PID" 2>/dev/null; then
+      break
+    fi
+    if curl -fsS --max-time 1 "${MT_MCP_BASE}/health" >/dev/null 2>&1; then
+      mt_ready=1
+      break
+    fi
+    sleep 0.1
+  done
+
+  if [[ "$mt_ready" -ne 1 ]]; then
+    if [[ -n "${MT_MCP_PID:-}" ]]; then
+      kill "$MT_MCP_PID" 2>/dev/null || true
+      wait "$MT_MCP_PID" 2>/dev/null || true
+      MT_MCP_PID=""
+    fi
+    tail -n 20 "$mt_mcp_log" 2>/dev/null || true
+    skip "locus-mcp --http --multi-tenant did not become ready (bind/timeout on ${MT_MCP_ADDR})"
+  else
+    mt_init_body='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e-mt","version":"0"}}}'
+    mt_tools_body='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+    mt_whoami_body='{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"locus_whoami","arguments":{}}}'
+
+    # POST /mcp; prints the HTTP code. $1=body_out $2=hdr_out $3=payload, then
+    # extra curl args (tenant token / session headers).
+    mt_post() {
+      local body_out="$1" hdr_out="$2" payload="$3"
+      shift 3
+      curl -sS -D "$hdr_out" -o "$body_out" -w '%{http_code}' --max-time 5 \
+        -X POST "${MT_MCP_BASE}/mcp" \
+        -H "Authorization: Bearer ${MT_MCP_TOKEN}" \
+        -H 'Content-Type: application/json' \
+        -H 'Accept: application/json' \
+        "$@" \
+        -d "$payload" 2>/dev/null || echo "000"
+    }
+
+    mt_session_from_hdr() {
+      python3 -c '
+import sys
+sid = None
+with open(sys.argv[1], "rb") as f:
+    raw = f.read().decode("utf-8", "replace")
+for line in raw.splitlines():
+    if ":" not in line:
+        continue
+    k, v = line.split(":", 1)
+    if k.strip().lower() == "mcp-session-id":
+        sid = v.strip()
+        break
+assert sid, "missing Mcp-Session-Id header in:\\n%s" % raw[:500]
+assert len(sid) >= 16, "session id too short: %r" % sid
+print(sid)
+' "$1"
+    }
+
+    # Server token alone (no tenant token) → uniform 401 invalid_grant.
+    mt_no_tenant_body="$LOCUS_HOME/e2e-mt-notenant.body"
+    mt_code="$(mt_post "$mt_no_tenant_body" /dev/null "$mt_init_body")"
+    [[ "$mt_code" == "401" ]] \
+      || die "MT initialize without tenant token expected 401, got ${mt_code}"
+    grep -q 'invalid_grant' "$mt_no_tenant_body" \
+      || die "tenantless 401 missing uniform invalid_grant body: $(head -c 200 "$mt_no_tenant_body")"
+    ok "tenantless request → uniform 401 invalid_grant"
+
+    # Each tenant initializes its own Mcp-Session-Id.
+    mt_a_hdr="$LOCUS_HOME/e2e-mt-a.hdr"
+    mt_code="$(mt_post "$LOCUS_HOME/e2e-mt-a.body" "$mt_a_hdr" "$mt_init_body" \
+      -H "X-Locus-Tenant-Token: ${mt_token_a}")"
+    [[ "$mt_code" == "200" ]] || die "tenant A initialize expected 200, got ${mt_code}"
+    mt_sid_a="$(mt_session_from_hdr "$mt_a_hdr")"
+    mt_b_hdr="$LOCUS_HOME/e2e-mt-b.hdr"
+    mt_code="$(mt_post "$LOCUS_HOME/e2e-mt-b.body" "$mt_b_hdr" "$mt_init_body" \
+      -H "X-Locus-Tenant-Token: ${mt_token_b}")"
+    [[ "$mt_code" == "200" ]] || die "tenant B initialize expected 200, got ${mt_code}"
+    mt_sid_b="$(mt_session_from_hdr "$mt_b_hdr")"
+    [[ "$mt_sid_a" != "$mt_sid_b" ]] || die "tenant sessions must not share an Mcp-Session-Id"
+    ok "per-tenant initialize mints distinct Mcp-Session-Ids"
+
+    # Per-tenant whoami isolation: each grant sees only its own identity.
+    mt_who_a="$LOCUS_HOME/e2e-mt-who-a.body"
+    mt_code="$(mt_post "$mt_who_a" /dev/null "$mt_whoami_body" \
+      -H "X-Locus-Tenant-Token: ${mt_token_a}" -H "Mcp-Session-Id: ${mt_sid_a}")"
+    [[ "$mt_code" == "200" ]] || die "tenant A whoami expected 200, got ${mt_code}"
+    grep -q 'personal' "$mt_who_a" \
+      || die "tenant A whoami missing personal identity: $(head -c 300 "$mt_who_a")"
+    ! grep -qi 'acme' "$mt_who_a" || die "tenant A whoami leaked tenant B identity"
+    mt_who_b="$LOCUS_HOME/e2e-mt-who-b.body"
+    mt_code="$(mt_post "$mt_who_b" /dev/null "$mt_whoami_body" \
+      -H "X-Locus-Tenant-Token: ${mt_token_b}" -H "Mcp-Session-Id: ${mt_sid_b}")"
+    [[ "$mt_code" == "200" ]] || die "tenant B whoami expected 200, got ${mt_code}"
+    grep -q 'acme' "$mt_who_b" \
+      || die "tenant B whoami missing acme identity: $(head -c 300 "$mt_who_b")"
+    ! grep -q 'personal' "$mt_who_b" || die "tenant B whoami leaked tenant A identity"
+    for mt_body in "$mt_who_a" "$mt_who_b"; do
+      ! grep -Eq 'ghp_|gho_|github_pat_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|AKIA|secret_value' "$mt_body" \
+        || die "MT whoami leaked secret material"
+    done
+    ok "per-tenant whoami isolated (personal vs acme, no secrets)"
+
+    # Cross-tenant session reuse → 403 tenant_mismatch (never re-keyed).
+    mt_cross_body="$LOCUS_HOME/e2e-mt-cross.body"
+    mt_code="$(mt_post "$mt_cross_body" /dev/null "$mt_tools_body" \
+      -H "X-Locus-Tenant-Token: ${mt_token_b}" -H "Mcp-Session-Id: ${mt_sid_a}")"
+    [[ "$mt_code" == "403" ]] \
+      || die "cross-tenant session reuse expected 403, got ${mt_code}: $(head -c 200 "$mt_cross_body")"
+    grep -q 'tenant_mismatch' "$mt_cross_body" \
+      || die "cross-tenant 403 missing tenant_mismatch body"
+    ok "cross-tenant Mcp-Session-Id reuse → 403 tenant_mismatch"
+
+    # Revoke grant A → uniform 401; grant B keeps working.
+    locus mcp revoke "$mt_grant_a" >/dev/null
+    mt_revoked_body="$LOCUS_HOME/e2e-mt-revoked.body"
+    mt_code="$(mt_post "$mt_revoked_body" /dev/null "$mt_tools_body" \
+      -H "X-Locus-Tenant-Token: ${mt_token_a}" -H "Mcp-Session-Id: ${mt_sid_a}")"
+    [[ "$mt_code" == "401" ]] \
+      || die "revoked grant expected uniform 401, got ${mt_code}"
+    grep -q 'invalid_grant' "$mt_revoked_body" \
+      || die "revoked grant 401 missing uniform invalid_grant body"
+    mt_code="$(mt_post "$LOCUS_HOME/e2e-mt-b2.body" /dev/null "$mt_tools_body" \
+      -H "X-Locus-Tenant-Token: ${mt_token_b}" -H "Mcp-Session-Id: ${mt_sid_b}")"
+    [[ "$mt_code" == "200" ]] \
+      || die "surviving tenant B expected 200 after A's revocation, got ${mt_code}"
+    ok "revoke grant A → 401 while tenant B keeps working"
+
+    # Operator roster reflects revocation (revoked records are marked then
+    # deleted — they must never survive as live); never prints bearer tokens.
+    mt_list_json="$(locus mcp list --json)"
+    printf '%s' "$mt_list_json" | MT_GRANT_A="$mt_grant_a" python3 -c '
+import json, os, sys
+rows = json.load(sys.stdin)
+assert isinstance(rows, list), rows
+a_rows = [r for r in rows if r.get("grant_id") == os.environ["MT_GRANT_A"]]
+# Revoked grants are marked revoked then removed from disk: absent from the
+# roster, or (crash window) present only with revoked=true — never live.
+assert all(r.get("revoked") is True for r in a_rows), a_rows
+live_acme = [r for r in rows if r.get("binding") == "acme" and r.get("revoked") is False]
+assert live_acme, rows
+blob = json.dumps(rows)
+assert "lmt_" not in blob, "grant roster must never contain bearer tokens"
+print("mcp list grants=%d revoked_a_rows=%d live_acme=%d" % (len(rows), len(a_rows), len(live_acme)))
+'
+    ok "mcp list roster values-free (A gone/revoked, B live, no tokens)"
+
+    if [[ -n "${MT_MCP_PID:-}" ]]; then
+      kill "$MT_MCP_PID" 2>/dev/null || true
+      wait "$MT_MCP_PID" 2>/dev/null || true
+      MT_MCP_PID=""
+    fi
+    ok "multi-tenant locus-mcp torn down cleanly"
   fi
 fi
 

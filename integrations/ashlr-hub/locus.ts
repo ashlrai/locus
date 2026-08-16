@@ -19,6 +19,9 @@
  *
  * SECURITY:
  *   - Never parse or persist secret VALUES from locus/phantom output.
+ *   - Multi-tenant `lmt_` grant tokens are memory-only: they live inside a
+ *     withLocusMcpTenant handle's headers for the callback's duration and are
+ *     scrubbed afterwards — never logged, persisted, or placed in tool args.
  *   - Credential locators are private configuration; consume only presence/source metadata.
  *   - Prefer REQUIRED_SERVERS = ["locus","phantom"] — never ambient supabase MCP.
  *   - withLocusSession uses `ci mint` (ephemeral); does not mutate active.json.
@@ -32,13 +35,17 @@
  *   parseLocusEnforceToken, resolveLocusEnforceMode, extractLocusConfigEnforce,
  *   extractLocusConfigFirm, decideLocusSessionRun,
  *   scrubbedChildEnv, validateMintEnv, applyLocusSessionEnv, parseMcpConfigJson,
- *   mergeLocusIntoMcpConfig, locusServerSpec
+ *   mergeLocusIntoMcpConfig, locusServerSpec,
+ *   parseMcpMintOutput, parseMcpListOutput, classifyTenantAuthError
  *
  * Shell-out / FS: locusAvailable, locusAgentReport, locusVerifySession,
  *   locusWatchOnce, locusSoftWatchHeartbeat, ensureLocusReady, locusFleetGate,
  *   assertLocusPreMutate, applyLocusPreMutateGate, withLocusSession,
  *   runWithLocusSessionIfConfigured, locusDoctorLine, registerLocusInMcpConfig,
- *   readLocusConfigFromAshlr
+ *   readLocusConfigFromAshlr,
+ *   locusMcpMint, locusMcpList, locusMcpRevoke, withLocusMcpTenant
+ *
+ * HTTP (global fetch — no deps): locusMtPreflight
  *
  * Fleet heartbeat (session pack / watch tick — never secrets):
  *   locus verify session --json  → full doctor + whoami + safe_next pack
@@ -805,7 +812,9 @@ export function validateExistingLocusSession(
     worker_home: whoami.worker_home,
     secrets_resolved: false,
     env: Object.fromEntries(
-      Object.entries(env).filter(([, value]): value is string => typeof value === "string"),
+      Object.entries(env).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
     ),
   };
   return {
@@ -2299,4 +2308,694 @@ export function locusDoctorLine(): {
 export function locusHomeInitialized(): boolean {
   const home = process.env.LOCUS_HOME ?? join(homedir(), ".locus");
   return existsSync(home);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-tenant MCP grants (`locus mcp mint` → X-Locus-Tenant-Token dispatch)
+// ---------------------------------------------------------------------------
+
+/**
+ * Header carrying the per-tenant grant token on EVERY multi-tenant `/mcp`
+ * request (layered on the unchanged server bearer). Never a tool argument.
+ */
+export const TENANT_TOKEN_HEADER = "X-Locus-Tenant-Token" as const;
+
+/** Default `locus-mcp --http` base URL (server DEFAULT_HTTP_ADDR). */
+export const DEFAULT_MCP_HTTP_URL = "http://127.0.0.1:8742" as const;
+
+/** `lmt_<grant_id>.<secret>` — charset-strict, mirrors locus-core's parser. */
+const TENANT_TOKEN_RE = /^lmt_[a-f0-9]+\.[a-f0-9]+$/;
+
+/** Lowercase-hex id charset shared by grant ids (`lmt_<grant_id>.…`). */
+const GRANT_ID_RE = /^[a-f0-9]+$/;
+
+/**
+ * Output of `locus mcp mint --binding <alias> --json`.
+ *
+ * SECURITY: `token` is printed by the CLI exactly once (only its HMAC is
+ * stored at rest under `$LOCUS_HOME/mcp-grants/`). Hubs must hold it in
+ * memory only — never log, persist, or place it in tool arguments; it may
+ * appear solely as the {@link TENANT_TOKEN_HEADER} header value.
+ */
+export interface LocusMcpGrantMint {
+  grant_id: string;
+  /** `lmt_<grant_id>.<secret>` bearer — memory only (see above). */
+  token: string;
+  session_id: string;
+  binding: string;
+  tenant: string;
+  expires_at: string;
+  label?: string | null;
+  /** CLI serving hint (informational). */
+  serve?: string;
+}
+
+/** One row of `locus mcp list --json` (values-free: never tokens). */
+export interface LocusMcpGrantListEntry {
+  grant_id: string;
+  binding: string;
+  tenant: string;
+  label?: string | null;
+  expires_at: string;
+  expired: boolean;
+  revoked: boolean;
+  session_id: string;
+  live_http_sessions: number;
+}
+
+/** Result of `locusMcpList` (never throws). */
+export interface LocusMcpListResult {
+  available: boolean;
+  grants: LocusMcpGrantListEntry[];
+  exitCode: number;
+  error?: string;
+}
+
+/** Thrown on MT grant mint/parse/revoke failures (never carries a token). */
+export class LocusMcpGrantError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LocusMcpGrantError";
+  }
+}
+
+/**
+ * Pure: parse + validate `locus mcp mint --json` output.
+ *
+ * Fail closed: throws {@link LocusMcpGrantError} on invalid JSON, non-object
+ * root, malformed token/session shapes, or a token that does not embed the
+ * reported `grant_id` (a mint must never hand back someone else's grant).
+ * Error messages never include the token.
+ */
+export function parseMcpMintOutput(raw: string): LocusMcpGrantMint {
+  const text = (raw ?? "").trim();
+  if (!text) {
+    throw new LocusMcpGrantError("empty mcp mint JSON");
+  }
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    throw new LocusMcpGrantError("mcp mint output is not valid JSON");
+  }
+  if (v === null || typeof v !== "object" || Array.isArray(v)) {
+    throw new LocusMcpGrantError("mcp mint root is not an object");
+  }
+  const obj = v as Record<string, unknown>;
+  const grantId = typeof obj.grant_id === "string" ? obj.grant_id : "";
+  const token = typeof obj.token === "string" ? obj.token : "";
+  const sessionId = typeof obj.session_id === "string" ? obj.session_id : "";
+  const binding = typeof obj.binding === "string" ? obj.binding : "";
+  const tenant = typeof obj.tenant === "string" ? obj.tenant : "";
+  const expiresAt = typeof obj.expires_at === "string" ? obj.expires_at : "";
+  if (!GRANT_ID_RE.test(grantId)) {
+    throw new LocusMcpGrantError("mcp mint grant_id is malformed");
+  }
+  if (!TENANT_TOKEN_RE.test(token) || !token.startsWith(`lmt_${grantId}.`)) {
+    throw new LocusMcpGrantError("mcp mint token shape/grant binding is invalid");
+  }
+  if (!/^ses_[a-f0-9]+$/i.test(sessionId)) {
+    throw new LocusMcpGrantError("mcp mint session_id is malformed");
+  }
+  if (!binding || !tenant || !expiresAt) {
+    throw new LocusMcpGrantError("mcp mint is missing binding/tenant/expires_at");
+  }
+  return {
+    grant_id: grantId,
+    token,
+    session_id: sessionId,
+    binding,
+    tenant,
+    expires_at: expiresAt,
+    label: typeof obj.label === "string" ? obj.label : null,
+    serve: typeof obj.serve === "string" ? obj.serve : undefined,
+  };
+}
+
+/**
+ * Pure: parse + validate `locus mcp list --json` (operator roster).
+ *
+ * Fail closed: throws {@link LocusMcpGrantError} on invalid JSON, non-array
+ * root, malformed rows, or ANY `lmt_` bearer material in the payload — the
+ * roster is values-free by contract and a leaked token must never propagate.
+ */
+export function parseMcpListOutput(raw: string): LocusMcpGrantListEntry[] {
+  const text = (raw ?? "").trim();
+  if (!text) {
+    throw new LocusMcpGrantError("empty mcp list JSON");
+  }
+  if (/lmt_[a-f0-9]+\.[a-f0-9]+/.test(text)) {
+    throw new LocusMcpGrantError("mcp list payload contains bearer token material");
+  }
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    throw new LocusMcpGrantError("mcp list output is not valid JSON");
+  }
+  if (!Array.isArray(v)) {
+    throw new LocusMcpGrantError("mcp list root is not an array");
+  }
+  return v.map((row, i) => {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) {
+      throw new LocusMcpGrantError(`mcp list row ${i} is not an object`);
+    }
+    const r = row as Record<string, unknown>;
+    const grantId = typeof r.grant_id === "string" ? r.grant_id : "";
+    if (!GRANT_ID_RE.test(grantId)) {
+      throw new LocusMcpGrantError(`mcp list row ${i} grant_id is malformed`);
+    }
+    if (typeof r.binding !== "string" || typeof r.tenant !== "string") {
+      throw new LocusMcpGrantError(`mcp list row ${i} missing binding/tenant`);
+    }
+    if (typeof r.expired !== "boolean" || typeof r.revoked !== "boolean") {
+      throw new LocusMcpGrantError(`mcp list row ${i} expired/revoked not boolean`);
+    }
+    const live = r.live_http_sessions;
+    return {
+      grant_id: grantId,
+      binding: r.binding,
+      tenant: r.tenant,
+      label: typeof r.label === "string" ? r.label : null,
+      expires_at: typeof r.expires_at === "string" ? r.expires_at : "",
+      expired: r.expired,
+      revoked: r.revoked,
+      session_id: typeof r.session_id === "string" ? r.session_id : "",
+      live_http_sessions:
+        typeof live === "number" && Number.isFinite(live) && live >= 0 ? live : 0,
+    };
+  });
+}
+
+/** Typed reason for an MT `/mcp` auth failure. */
+export type TenantAuthErrorKind =
+  | "invalid_grant"
+  | "grant_expired"
+  | "tenant_mismatch"
+  | "session_required"
+  | "server_unauthorized"
+  | "unknown";
+
+/**
+ * Classification of an MT `/mcp` HTTP failure into a typed reason + the ONE
+ * safe recovery a hub may drive automatically.
+ */
+export interface TenantAuthClassification {
+  kind: TenantAuthErrorKind;
+  /**
+   * - `re_mint`: operator mints a fresh grant (`locus mcp mint`) — covers
+   *   invalid/revoked/expired tokens (revocation is never advertised, so
+   *   invalid and revoked collapse together by design).
+   * - `initialize`: POST `initialize` with YOUR tenant token to mint your own
+   *   `Mcp-Session-Id` (cross-tenant reuse / missing session).
+   * - `server_token`: fix the server bearer (`LOCUS_MCP_HTTP_TOKEN`).
+   * - `none`: not a recognized MT auth failure — treat as hard error.
+   */
+  recovery: "re_mint" | "initialize" | "server_token" | "none";
+  status: number;
+  /** Verbatim `safe_next` command when the server offered one (expired). */
+  safeNext?: string;
+  /** Verbatim server hint (values-free by server contract). */
+  hint?: string;
+}
+
+/** Best-effort object view of a response body (string JSON or object). */
+function tenantErrorObject(body: unknown): Record<string, unknown> | null {
+  if (typeof body === "string") {
+    const text = body.trim();
+    if (!text) return null;
+    try {
+      const v = JSON.parse(text) as unknown;
+      if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+        return v as Record<string, unknown>;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  if (body !== null && typeof body === "object" && !Array.isArray(body)) {
+    return body as Record<string, unknown>;
+  }
+  return null;
+}
+
+/**
+ * Pure: map an MT `/mcp` HTTP status + body onto a typed reason.
+ *
+ * | wire | kind | recovery |
+ * |------|------|----------|
+ * | 401 `{error:"invalid_grant",reason:"grant_expired"}` | grant_expired | re_mint |
+ * | 401 `{error:"invalid_grant"}` (missing/forged/revoked) | invalid_grant | re_mint |
+ * | 401 `{error:"unauthorized"}` (server bearer) | server_unauthorized | server_token |
+ * | 403 `{error:"tenant_mismatch"}` | tenant_mismatch | initialize |
+ * | 400 `{error:"session_required"}` | session_required | initialize |
+ * | anything else | unknown | none |
+ *
+ * Never throws. Never echoes tokens (server bodies are values-free).
+ */
+export function classifyTenantAuthError(
+  status: number,
+  body: unknown,
+): TenantAuthClassification {
+  const obj = tenantErrorObject(body);
+  const error = typeof obj?.error === "string" ? obj.error : "";
+  const reason = typeof obj?.reason === "string" ? obj.reason : "";
+  const hint = typeof obj?.hint === "string" ? obj.hint : undefined;
+  const safeNext = typeof obj?.safe_next === "string" ? obj.safe_next : undefined;
+
+  if (status === 401 && error === "invalid_grant") {
+    if (reason === "grant_expired") {
+      return { kind: "grant_expired", recovery: "re_mint", status, safeNext, hint };
+    }
+    return { kind: "invalid_grant", recovery: "re_mint", status, hint };
+  }
+  if (status === 401 && error === "unauthorized") {
+    return { kind: "server_unauthorized", recovery: "server_token", status, hint };
+  }
+  if (status === 403 && error === "tenant_mismatch") {
+    return { kind: "tenant_mismatch", recovery: "initialize", status, hint };
+  }
+  if (status === 400 && error === "session_required") {
+    return { kind: "session_required", recovery: "initialize", status, hint };
+  }
+  return { kind: "unknown", recovery: "none", status, hint };
+}
+
+export interface WithLocusMcpTenantOptions {
+  /** Grant TTL passed to `locus mcp mint` (CLI default 1h; cap ≤ job budget). */
+  ttl?: string;
+  /** Operator label shown by `locus mcp list` (use the hub job id). */
+  label?: string;
+  /** Allow bindings outside workspace allowlist. */
+  force?: boolean;
+  /** Server bearer (`LOCUS_MCP_HTTP_TOKEN`) merged into handle headers. */
+  serverToken?: string;
+  /** Extra env for the mint/revoke CLI spawns (e.g. LOCUS_HOME override). */
+  env?: NodeJS.ProcessEnv;
+  /** Override LOCUS_HOME for mint + revoke. */
+  home?: string;
+  /** Spawn timeout (ms). */
+  timeoutMs?: number;
+}
+
+/**
+ * Live handle for one tenant grant. `headers` carries the ONLY copy of the
+ * bearer token; it is scrubbed when {@link withLocusMcpTenant} returns.
+ */
+export interface LocusMcpTenantHandle {
+  grantId: string;
+  binding: string;
+  tenant: string;
+  /** Sealed grant session id (values-free identity metadata). */
+  sessionId: string;
+  expiresAt: string;
+  /**
+   * Auth headers for every `/mcp` request: {@link TENANT_TOKEN_HEADER} plus
+   * `Authorization: Bearer …` when `serverToken` was supplied. Memory only —
+   * never log, persist, or copy out of the callback scope.
+   */
+  headers: Record<string, string>;
+  /** Idempotent revoke (`locus mcp revoke <grant_id>`); also runs in finally. */
+  revoke: () => void;
+  /** True once the grant has been revoked. */
+  revoked: boolean;
+}
+
+/**
+ * Shell out to `locus mcp mint --binding <alias> --json` and validate.
+ *
+ * Fail closed: missing CLI, nonzero exit, malformed JSON, or a mint whose
+ * `binding` differs from the request. The returned token is memory-only —
+ * prefer {@link withLocusMcpTenant}, which scopes and scrubs it for you.
+ */
+export function locusMcpMint(
+  binding: string,
+  opts?: WithLocusMcpTenantOptions,
+): LocusMcpGrantMint {
+  if (!binding?.trim()) {
+    throw new LocusMcpGrantError("binding alias is required");
+  }
+  if (!locusAvailable()) {
+    throw new LocusMcpGrantError("locus CLI not found on PATH");
+  }
+  const args = ["mcp", "mint", "--binding", binding.trim(), "--json"];
+  if (opts?.ttl) {
+    args.push("--ttl", opts.ttl);
+  }
+  if (opts?.label) {
+    args.push("--label", opts.label);
+  }
+  if (opts?.force) {
+    args.push("--force");
+  }
+  const env = locusEnv({
+    ...opts?.env,
+    ...(opts?.home ? { LOCUS_HOME: opts.home } : {}),
+  });
+  const r = spawnSync(LOCUS_BIN, args, {
+    encoding: "utf8",
+    timeout: opts?.timeoutMs ?? TIMEOUT_MS,
+    env,
+    maxBuffer: 1024 * 1024,
+  });
+  if (r.error) {
+    throw new LocusMcpGrantError(`mcp mint failed: ${r.error.message}`);
+  }
+  if (r.status !== 0) {
+    // stderr only — mint stdout is the one-time token payload, never echoed.
+    throw new LocusMcpGrantError(
+      `mcp mint exit ${r.status}: ${(r.stderr ?? "").trim() || "unknown"}`,
+    );
+  }
+  const mint = parseMcpMintOutput(r.stdout ?? "");
+  if (mint.binding !== binding.trim()) {
+    throw new LocusMcpGrantError("mcp mint returned a different binding than requested");
+  }
+  return mint;
+}
+
+/**
+ * Shell out to `locus mcp list --json` (operator-only roster; there is
+ * deliberately NO HTTP enumeration). Never throws; values-free by contract.
+ */
+export function locusMcpList(env?: NodeJS.ProcessEnv): LocusMcpListResult {
+  if (!locusAvailable()) {
+    return {
+      available: false,
+      grants: [],
+      exitCode: 2,
+      error: "locus CLI not found on PATH",
+    };
+  }
+  try {
+    const r = spawnSync(LOCUS_BIN, ["mcp", "list", "--json"], {
+      encoding: "utf8",
+      timeout: TIMEOUT_MS,
+      env: locusEnv(env),
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    const exitCode = typeof r.status === "number" ? r.status : 2;
+    if (exitCode !== 0) {
+      return {
+        available: true,
+        grants: [],
+        exitCode,
+        error: r.stderr?.trim() || "mcp list failed",
+      };
+    }
+    return {
+      available: true,
+      grants: parseMcpListOutput(r.stdout ?? ""),
+      exitCode,
+    };
+  } catch (e) {
+    return {
+      available: true,
+      grants: [],
+      exitCode: 2,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+/**
+ * Shell out to `locus mcp revoke <grant_id>`.
+ *
+ * Throws {@link LocusMcpGrantError} on failure — a grant that outlives its
+ * job is a live credential path, so callers must not swallow this silently.
+ */
+export function locusMcpRevoke(
+  grantId: string,
+  opts?: Pick<WithLocusMcpTenantOptions, "env" | "home" | "timeoutMs">,
+): void {
+  const id = (grantId ?? "").trim();
+  if (!GRANT_ID_RE.test(id)) {
+    throw new LocusMcpGrantError("grant id is malformed");
+  }
+  if (!locusAvailable()) {
+    throw new LocusMcpGrantError("locus CLI not found on PATH");
+  }
+  const env = locusEnv({
+    ...opts?.env,
+    ...(opts?.home ? { LOCUS_HOME: opts.home } : {}),
+  });
+  const r = spawnSync(LOCUS_BIN, ["mcp", "revoke", id], {
+    encoding: "utf8",
+    timeout: opts?.timeoutMs ?? TIMEOUT_MS,
+    env,
+    maxBuffer: 1024 * 1024,
+  });
+  if (r.error) {
+    throw new LocusMcpGrantError(`mcp revoke failed: ${r.error.message}`);
+  }
+  if (r.status !== 0) {
+    throw new LocusMcpGrantError(
+      `mcp revoke exit ${r.status}: ${(r.stderr ?? r.stdout ?? "").trim() || "unknown"}`,
+    );
+  }
+}
+
+/**
+ * Run `fn` under a freshly minted multi-tenant MCP grant.
+ *
+ * Mints via `locus mcp mint --json`, hands `fn` a handle whose `headers`
+ * carry the ONLY copy of the `lmt_` bearer for HTTP `/mcp` dispatch, and
+ * ALWAYS revokes the grant in a finally (revocation propagates within one
+ * request and sweeps the grant's `Mcp-Session-Id` records + worker homes).
+ *
+ * Token hygiene (hub contract):
+ * - the token exists only in `handle.headers` for the callback's duration;
+ * - it is scrubbed from the handle when this function returns, so a retained
+ *   handle reference can never leak it;
+ * - never log/persist it or place it in tool arguments.
+ *
+ * A revoke failure after a SUCCESSFUL callback is thrown (a leaked live
+ * grant must not pass silently); after a failed callback the callback's
+ * error wins and the revoke failure is noted on stderr (grant id only).
+ *
+ * @example
+ * ```ts
+ * await withLocusMcpTenant("cmp", async ({ headers, grantId }) => {
+ *   const res = await fetch(`${url}/mcp`, {
+ *     method: "POST",
+ *     headers: { ...headers, "Content-Type": "application/json" },
+ *     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+ *   });
+ *   if (!res.ok) throw new Error(classifyTenantAuthError(res.status, await res.json()).kind);
+ * }, { ttl: "15m", label: jobId, serverToken: process.env.LOCUS_MCP_HTTP_TOKEN });
+ * ```
+ */
+export async function withLocusMcpTenant<T>(
+  binding: string,
+  fn: (handle: LocusMcpTenantHandle) => Promise<T> | T,
+  opts?: WithLocusMcpTenantOptions,
+): Promise<T> {
+  const mint = locusMcpMint(binding, opts);
+  const headers: Record<string, string> = {
+    [TENANT_TOKEN_HEADER]: mint.token,
+  };
+  if (opts?.serverToken) {
+    headers.Authorization = `Bearer ${opts.serverToken}`;
+  }
+  // Memory hygiene: the only live copy of the bearer now rides the handle.
+  mint.token = "";
+  const handle: LocusMcpTenantHandle = {
+    grantId: mint.grant_id,
+    binding: mint.binding,
+    tenant: mint.tenant,
+    sessionId: mint.session_id,
+    expiresAt: mint.expires_at,
+    headers,
+    revoked: false,
+    revoke: () => {
+      if (handle.revoked) return;
+      locusMcpRevoke(handle.grantId, opts);
+      handle.revoked = true;
+    },
+  };
+  let callbackFailed = false;
+  try {
+    return await fn(handle);
+  } catch (e) {
+    callbackFailed = true;
+    throw e;
+  } finally {
+    try {
+      handle.revoke();
+    } catch (revokeError) {
+      if (!callbackFailed) {
+        throw revokeError;
+      }
+      // Callback error wins; still surface the leaked grant (id only).
+      try {
+        process.stderr.write(
+          `[locus] mcp grant revoke failed for ${handle.grantId} — revoke manually\n`,
+        );
+      } catch {
+        // stderr may be closed in tests
+      }
+    } finally {
+      delete headers[TENANT_TOKEN_HEADER];
+      delete headers.Authorization;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MT preflight (HTTP — global fetch, no deps)
+// ---------------------------------------------------------------------------
+
+/** Minimal fetch surface so the drop-in stays dependency- and lib-agnostic. */
+type FetchLike = (
+  url: string,
+  init?: { headers?: Record<string, string>; signal?: unknown },
+) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+export interface LocusMtPreflightOptions {
+  /** Server base URL (default {@link DEFAULT_MCP_HTTP_URL}). */
+  baseUrl?: string;
+  /** Server bearer (`LOCUS_MCP_HTTP_TOKEN`) for the capabilities probe. */
+  serverToken?: string;
+  /**
+   * Extra headers, e.g. an active {@link LocusMcpTenantHandle}'s `headers`
+   * for a grant-authenticated probe (200 + `grant_id` instead of 401).
+   */
+  headers?: Record<string, string>;
+  /** Per-request timeout (ms). */
+  timeoutMs?: number;
+  /** Injectable fetch for hermetic tests (default `globalThis.fetch`). */
+  fetchFn?: FetchLike;
+}
+
+export interface LocusMtPreflightResult {
+  /** True when GET /health answered 200. */
+  reachable: boolean;
+  /** True when the server demonstrably runs `--multi-tenant`. */
+  multiTenant: boolean;
+  /**
+   * - `multi_tenant`: capabilities said `mode=multi_tenant`, OR /mcp answered
+   *   401 `invalid_grant` (only the MT layer emits that body).
+   * - `single_tenant`: capabilities 200 without the MT mode marker.
+   * - `unknown`: unreachable / server bearer rejected / unrecognized.
+   */
+  mode: "multi_tenant" | "single_tenant" | "unknown";
+  /** HTTP status of the /mcp probe when one was made. */
+  status?: number;
+  /** THIS grant's id when a tenant-authenticated probe succeeded. */
+  grantId?: string | null;
+  /** Typed classification when the /mcp probe failed auth. */
+  auth?: TenantAuthClassification;
+  error?: string;
+}
+
+/**
+ * Probe a `locus-mcp --http` server: reachable (GET /health) + multi-tenant
+ * mode detection (GET /mcp capabilities). Never throws; values-free.
+ *
+ * MT detection is sound both ways: with a tenant token the capabilities body
+ * carries `mode: "multi_tenant"` + `grant_id`; without one, only an MT server
+ * answers /mcp with 401 `invalid_grant` (single-tenant servers return 200
+ * capabilities on a valid server bearer).
+ */
+export async function locusMtPreflight(
+  opts?: LocusMtPreflightOptions,
+): Promise<LocusMtPreflightResult> {
+  const f =
+    opts?.fetchFn ??
+    ((globalThis as { fetch?: FetchLike }).fetch as FetchLike | undefined);
+  if (!f) {
+    return {
+      reachable: false,
+      multiTenant: false,
+      mode: "unknown",
+      error: "global fetch unavailable (Node >= 18 required)",
+    };
+  }
+  const base = (opts?.baseUrl ?? DEFAULT_MCP_HTTP_URL).replace(/\/+$/, "");
+  const timeoutMs = opts?.timeoutMs ?? TIMEOUT_MS;
+  const signalOf = () =>
+    (
+      globalThis as {
+        AbortSignal?: { timeout?: (ms: number) => unknown };
+      }
+    ).AbortSignal?.timeout?.(timeoutMs);
+
+  try {
+    const health = await f(`${base}/health`, { signal: signalOf() });
+    if (!health.ok) {
+      return {
+        reachable: false,
+        multiTenant: false,
+        mode: "unknown",
+        status: health.status,
+        error: `GET /health status ${health.status}`,
+      };
+    }
+  } catch (e) {
+    return {
+      reachable: false,
+      multiTenant: false,
+      mode: "unknown",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+
+  const headers: Record<string, string> = { ...opts?.headers };
+  if (opts?.serverToken) {
+    headers.Authorization = `Bearer ${opts.serverToken}`;
+  }
+  let status: number;
+  let body: unknown = null;
+  try {
+    const caps = await f(`${base}/mcp`, { headers, signal: signalOf() });
+    status = caps.status;
+    try {
+      body = await caps.json();
+    } catch {
+      body = null;
+    }
+  } catch (e) {
+    return {
+      reachable: true,
+      multiTenant: false,
+      mode: "unknown",
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+
+  if (status === 200) {
+    const obj = tenantErrorObject(body);
+    if (obj?.mode === "multi_tenant") {
+      return {
+        reachable: true,
+        multiTenant: true,
+        mode: "multi_tenant",
+        status,
+        grantId: typeof obj.grant_id === "string" ? obj.grant_id : null,
+      };
+    }
+    return { reachable: true, multiTenant: false, mode: "single_tenant", status };
+  }
+
+  const auth = classifyTenantAuthError(status, body);
+  if (auth.kind === "invalid_grant" || auth.kind === "grant_expired") {
+    // Only the MT grant layer emits invalid_grant on /mcp — mode proven.
+    return {
+      reachable: true,
+      multiTenant: true,
+      mode: "multi_tenant",
+      status,
+      auth,
+      error: auth.kind,
+    };
+  }
+  return {
+    reachable: true,
+    multiTenant: false,
+    mode: "unknown",
+    status,
+    auth,
+    error: auth.kind,
+  };
 }

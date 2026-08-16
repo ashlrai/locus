@@ -98,6 +98,46 @@ jobs:
           find artifacts -type f -name 'locus-*.tar.gz' -exec cp {} release-assets/ \;
           ls -la release-assets/
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-manifest
+
+      # Canonical catalog of the built-in adapter set for this tag, attached
+      # UNSIGNED. CI does not sign on purpose: no registry signing secret is
+      # provisioned. Operators sign locally and distribute the signed manifest
+      # out of band:
+      #   locus adapter registry export --sign --key <keyfile> --out locus-adapters-<tag>.json
+      # Consumers verify with:
+      #   locus adapter verify-manifest locus-adapters-<tag>.json
+      # See docs/registry-trust.md.
+      - name: Export adapter registry manifest (unsigned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --release --locked -p locus-cli -- adapter registry export \
+            --out "release-assets/locus-adapters-${GITHUB_REF_NAME}.json"
+
+      # TODO(registry-signing): once a LOCUS_REGISTRY_SIGNING_KEY repo secret
+      # exists (base64 or 64-hex ed25519 seed; NOT yet provisioned — do not
+      # invent one), replace the step above with a signed export:
+      #
+      #   - name: Export adapter registry manifest (signed)
+      #     env:
+      #       LOCUS_REGISTRY_SIGNING_KEY: ${{ secrets.LOCUS_REGISTRY_SIGNING_KEY }}
+      #     shell: bash
+      #     run: |
+      #       set -euo pipefail
+      #       cargo run --release --locked -p locus-cli -- adapter registry export --sign \
+      #         --key-id root \
+      #         --out "release-assets/locus-adapters-${GITHUB_REF_NAME}.json"
+      #
+      # and publish the matching public key (locus adapter trust add --id root
+      # --ed25519-pub <b64>) in the release notes / docs/registry-trust.md.
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:

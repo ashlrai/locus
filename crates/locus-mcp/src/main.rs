@@ -326,6 +326,9 @@ const HTTP_SESSION_MAX: usize = 256;
 
 /// Max HTTP request body accepted pre-auth (413 above this) — prevents a
 /// trivial OOM DoS via a huge Content-Length before the token check runs.
+/// Shared by the stdio transport: [`read_message`] refuses Content-Length
+/// frames above this before allocating (the parent is a trusted channel
+/// today, but the cap costs nothing and fails closed on a corrupt frame).
 const HTTP_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// Max total bytes for the request line + headers (431 above this).
 const HTTP_MAX_HEADER_BYTES: usize = 32 * 1024;
@@ -1562,6 +1565,10 @@ fn http_content_type_ok(content_type: &str) -> bool {
         || main.ends_with("+json")
 }
 
+/// Accepts `X-Locus-Token` / `X-Locus-MCP-Token`, or `Authorization` with the
+/// `Bearer` scheme only. A raw (schemeless) token in `Authorization` was
+/// accepted through v0.4.0 as a CI convenience; it is rejected now so proxies
+/// and log scrubbers can rely on the header always carrying a scheme.
 fn http_token_ok(headers: &[(String, String)], expected: &str) -> bool {
     for (k, v) in headers {
         let k = k.to_ascii_lowercase();
@@ -1579,10 +1586,6 @@ fn http_token_ok(headers: &[(String, String)], expected: &str) -> bool {
                 if constant_time_eq(rest.trim(), expected) {
                     return true;
                 }
-            }
-            // Also accept raw token in Authorization (some CI helpers).
-            if constant_time_eq(v, expected) {
-                return true;
             }
         }
     }
@@ -2143,61 +2146,108 @@ fn write_sse_event(stream: &mut TcpStream, event: &str, data: &Value) -> Result<
     Ok(())
 }
 
-/// Read one MCP message. Supports Content-Length headers and NDJSON lines.
-fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<(Value, Framing)>> {
-    let mut first = String::new();
-    let n = reader.read_line(&mut first)?;
+/// Read one line with a hard byte cap. Fails closed when `limit` bytes arrive
+/// with no `\n` terminator — an unbounded `read_line` would otherwise grow the
+/// buffer until a corrupt or hostile parent stream OOMs the process (the same
+/// scenario the Content-Length cap exists to prevent). Returns `Ok(None)` on
+/// EOF at a line boundary; a final unterminated line within the cap is
+/// returned as-is (matching `read_line`).
+fn read_line_bounded<R: BufRead>(reader: &mut R, limit: usize) -> Result<Option<String>> {
+    let mut buf = Vec::new();
+    // limit + 1 so exactly-`limit` bytes ending in `\n` still pass while
+    // `limit` bytes with no terminator in sight is detectable and refused.
+    let mut limited = io::Read::take(&mut *reader, limit as u64 + 1);
+    let n = limited.read_until(b'\n', &mut buf)?;
     if n == 0 {
         return Ok(None);
     }
-    let trimmed = first.trim();
-    if trimmed.is_empty() {
-        // Skip blank lines (common between framed messages)
-        return read_message(reader);
+    if !buf.ends_with(b"\n") && buf.len() > limit {
+        bail!("stdio line exceeds max {limit} bytes with no newline; refusing (fail closed)");
     }
+    let line = String::from_utf8(buf).context("stdio line utf-8")?;
+    Ok(Some(line))
+}
 
-    // Content-Length framed: headers until blank line, then body bytes.
-    if trimmed.to_ascii_lowercase().starts_with("content-length:")
-        || trimmed.to_ascii_lowercase().starts_with("content-type:")
-    {
-        let mut content_length: Option<usize> = None;
-        let mut line = first;
-        loop {
-            let lower = line.trim().to_ascii_lowercase();
-            if lower.starts_with("content-length:") {
-                let v = lower
-                    .trim_start_matches("content-length:")
-                    .trim()
-                    .parse::<usize>()
-                    .context("Content-Length parse")?;
-                content_length = Some(v);
-            }
-            // blank line ends headers
-            if line.trim().is_empty() {
-                break;
-            }
-            line.clear();
-            let n = reader.read_line(&mut line)?;
-            if n == 0 {
-                return Ok(None);
-            }
+/// Read one MCP message. Supports Content-Length headers and NDJSON lines.
+///
+/// Every line read is byte-capped via [`read_line_bounded`] (NDJSON/first
+/// lines at [`HTTP_MAX_BODY_BYTES`], header lines at
+/// [`HTTP_MAX_HEADER_BYTES`], header count at [`HTTP_MAX_HEADER_COUNT`]) so a
+/// hostile stream can neither OOM the process with a newline-free flood nor
+/// exhaust the stack — blank/garbage lines loop instead of recursing.
+fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<(Value, Framing)>> {
+    loop {
+        // The first line may itself be a whole NDJSON message, so it gets the
+        // body-size cap rather than the (smaller) header-line cap.
+        let Some(first) = read_line_bounded(reader, HTTP_MAX_BODY_BYTES)? else {
+            return Ok(None);
+        };
+        let trimmed = first.trim();
+        if trimmed.is_empty() {
+            // Skip blank lines (common between framed messages)
+            continue;
         }
-        let len = content_length.context("Content-Length header missing")?;
-        let mut buf = vec![0u8; len];
-        reader
-            .read_exact(&mut buf)
-            .context("read Content-Length body")?;
-        let msg: Value = serde_json::from_slice(&buf).context("json body")?;
-        return Ok(Some((msg, Framing::ContentLength)));
-    }
 
-    // NDJSON: first non-empty line is the JSON object.
-    match serde_json::from_str::<Value>(trimmed) {
-        Ok(msg) => Ok(Some((msg, Framing::Ndjson))),
-        Err(e) => {
-            eprintln!("locus-mcp: bad json: {e}");
-            // Skip garbage line; keep serving
-            read_message(reader)
+        // Content-Length framed: headers until blank line, then body bytes.
+        if trimmed.to_ascii_lowercase().starts_with("content-length:")
+            || trimmed.to_ascii_lowercase().starts_with("content-type:")
+        {
+            let mut content_length: Option<usize> = None;
+            let mut header_count = 0usize;
+            let mut line = first;
+            loop {
+                let lower = line.trim().to_ascii_lowercase();
+                if lower.starts_with("content-length:") {
+                    let v = lower
+                        .trim_start_matches("content-length:")
+                        .trim()
+                        .parse::<usize>()
+                        .context("Content-Length parse")?;
+                    content_length = Some(v);
+                }
+                // blank line ends headers
+                if line.trim().is_empty() {
+                    break;
+                }
+                header_count += 1;
+                if header_count > HTTP_MAX_HEADER_COUNT {
+                    bail!(
+                        "stdio frame exceeds {HTTP_MAX_HEADER_COUNT} header lines; refusing (fail closed)"
+                    );
+                }
+                // Header lines get the same per-line cap as HTTP headers.
+                match read_line_bounded(reader, HTTP_MAX_HEADER_BYTES)? {
+                    Some(next) => line = next,
+                    None => return Ok(None),
+                }
+            }
+            let len = content_length.context("Content-Length header missing")?;
+            // Same cap as HTTP (`HTTP_MAX_BODY_BYTES`), enforced before the
+            // allocation: a corrupt or hostile frame must not OOM the process.
+            // Framing is unrecoverable after a refused length (the body bytes
+            // would be reinterpreted as headers), so fail closed and stop
+            // serving.
+            if len > HTTP_MAX_BODY_BYTES {
+                bail!(
+                    "stdio Content-Length {len} exceeds max {HTTP_MAX_BODY_BYTES} bytes; refusing frame (fail closed)"
+                );
+            }
+            let mut buf = vec![0u8; len];
+            reader
+                .read_exact(&mut buf)
+                .context("read Content-Length body")?;
+            let msg: Value = serde_json::from_slice(&buf).context("json body")?;
+            return Ok(Some((msg, Framing::ContentLength)));
+        }
+
+        // NDJSON: first non-empty line is the JSON object.
+        match serde_json::from_str::<Value>(trimmed) {
+            Ok(msg) => return Ok(Some((msg, Framing::Ndjson))),
+            Err(e) => {
+                eprintln!("locus-mcp: bad json: {e}");
+                // Skip garbage line; keep serving
+                continue;
+            }
         }
     }
 }
@@ -4202,6 +4252,158 @@ mod http_read_tests {
             parse(raw.as_bytes()),
             Err(HttpReadError::HeadersTooLarge)
         ));
+    }
+}
+
+#[cfg(test)]
+mod stdio_framing_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn oversized_stdio_content_length_rejected_before_allocation() {
+        let raw = format!("Content-Length: {}\r\n\r\n", HTTP_MAX_BODY_BYTES + 1);
+        let mut reader = Cursor::new(raw.into_bytes());
+        let err = read_message(&mut reader).expect_err("oversized frame must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("exceeds max"),
+            "error must name the cap violation: {msg}"
+        );
+    }
+
+    #[test]
+    fn stdio_content_length_at_cap_is_not_rejected_by_the_cap() {
+        // Exactly at the cap: the length check passes; the truncated body then
+        // fails on read_exact (EOF), not on the cap.
+        let raw = format!("Content-Length: {HTTP_MAX_BODY_BYTES}\r\n\r\n");
+        let mut reader = Cursor::new(raw.into_bytes());
+        let err = read_message(&mut reader).expect_err("truncated body errors on read");
+        assert!(
+            !err.to_string().contains("exceeds max"),
+            "cap must not fire at exactly the limit: {err}"
+        );
+    }
+
+    #[test]
+    fn normal_framed_message_still_parses() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let raw = format!("Content-Length: {}\r\n\r\n{body}", body.len());
+        let mut reader = Cursor::new(raw.into_bytes());
+        let (msg, framing) = read_message(&mut reader).unwrap().unwrap();
+        assert_eq!(framing, Framing::ContentLength);
+        assert_eq!(msg["method"], "ping");
+    }
+
+    #[test]
+    fn newline_free_flood_rejected_without_unbounded_buffering() {
+        // A giant line with no terminator must fail closed at the cap instead
+        // of growing a String until the process OOMs. Keep the test cheap:
+        // exercise the helper directly at a tiny limit, then confirm
+        // read_message wires it up by feeding a just-over-cap prefix.
+        let mut reader = Cursor::new(vec![b'a'; 64]);
+        let err = read_line_bounded(&mut reader, 16).expect_err("must fail closed");
+        assert!(
+            err.to_string().contains("no newline"),
+            "error must name the missing terminator: {err}"
+        );
+
+        // At the read_message level: limit + 1 bytes, no newline → error, and
+        // the reader consumed only limit + 1 bytes (bounded), not everything.
+        let mut big = vec![b'x'; HTTP_MAX_BODY_BYTES + 4096];
+        big.push(b'\n');
+        let mut reader = Cursor::new(big);
+        let err = read_message(&mut reader).expect_err("oversized NDJSON line must fail closed");
+        assert!(err.to_string().contains("no newline"), "{err}");
+        assert_eq!(reader.position() as usize, HTTP_MAX_BODY_BYTES + 1);
+    }
+
+    #[test]
+    fn oversized_header_line_rejected() {
+        let mut raw = b"Content-Type: application/json\r\n".to_vec();
+        raw.extend(vec![b'h'; HTTP_MAX_HEADER_BYTES + 1024]);
+        let mut reader = Cursor::new(raw);
+        let err = read_message(&mut reader).expect_err("oversized header line must fail closed");
+        assert!(err.to_string().contains("no newline"), "{err}");
+    }
+
+    #[test]
+    fn header_line_flood_rejected() {
+        let mut raw = String::from("Content-Type: application/json\r\n");
+        for _ in 0..(HTTP_MAX_HEADER_COUNT + 8) {
+            raw.push_str("X-Filler: y\r\n");
+        }
+        let mut reader = Cursor::new(raw.into_bytes());
+        let err = read_message(&mut reader).expect_err("header flood must fail closed");
+        assert!(err.to_string().contains("header lines"), "{err}");
+    }
+
+    #[test]
+    fn long_blank_line_run_loops_instead_of_recursing() {
+        // Regression: blank/garbage lines used to recurse once per line, so a
+        // long run could exhaust the stack. Must now parse the trailing
+        // message without deep recursion.
+        let mut raw = "\n".repeat(200_000);
+        raw.push_str("not-json\n"); // garbage line is skipped, not fatal
+        raw.push_str(r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#);
+        raw.push('\n');
+        let mut reader = Cursor::new(raw.into_bytes());
+        let (msg, framing) = read_message(&mut reader).unwrap().unwrap();
+        assert_eq!(framing, Framing::Ndjson);
+        assert_eq!(msg["id"], 7);
+    }
+
+    #[test]
+    fn bounded_line_at_exact_limit_with_newline_passes() {
+        // limit bytes of payload + '\n' is exactly limit + 1 raw bytes and
+        // must still be accepted (the cap is on unterminated growth).
+        let mut raw = vec![b'a'; 16];
+        raw.push(b'\n');
+        let mut reader = Cursor::new(raw);
+        let line = read_line_bounded(&mut reader, 17).unwrap().unwrap();
+        assert_eq!(line.len(), 17);
+    }
+}
+
+#[cfg(test)]
+mod token_auth_tests {
+    use super::*;
+
+    fn h(k: &str, v: &str) -> Vec<(String, String)> {
+        vec![(k.into(), v.into())]
+    }
+
+    #[test]
+    fn bearer_authorization_accepted() {
+        assert!(http_token_ok(
+            &h("Authorization", "Bearer sekrit"),
+            "sekrit"
+        ));
+        assert!(http_token_ok(
+            &h("authorization", "bearer sekrit"),
+            "sekrit"
+        ));
+        assert!(http_token_ok(&h("X-Locus-Token", "sekrit"), "sekrit"));
+        assert!(http_token_ok(&h("X-Locus-MCP-Token", "sekrit"), "sekrit"));
+    }
+
+    #[test]
+    fn raw_authorization_fallback_removed() {
+        // Through v0.4.0 a schemeless Authorization value was accepted; the
+        // fallback is gone — Bearer-only now.
+        assert!(!http_token_ok(&h("Authorization", "sekrit"), "sekrit"));
+        assert!(!http_token_ok(&h("authorization", "sekrit"), "sekrit"));
+        // Other schemes never matched and still must not.
+        assert!(!http_token_ok(
+            &h("Authorization", "Basic sekrit"),
+            "sekrit"
+        ));
+        // Wrong token still denied under Bearer.
+        assert!(!http_token_ok(
+            &h("Authorization", "Bearer wrong"),
+            "sekrit"
+        ));
+        assert!(!http_token_ok(&[], "sekrit"));
     }
 }
 

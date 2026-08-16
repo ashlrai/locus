@@ -196,7 +196,8 @@ LOCUS_MCP_HTTP=1 LOCUS_MCP_HTTP_ADDR=127.0.0.1:8742 locus-mcp
 
 Auth headers (any one):
 
-- `Authorization: Bearer <LOCUS_MCP_HTTP_TOKEN>`
+- `Authorization: Bearer <LOCUS_MCP_HTTP_TOKEN>` (the `Bearer` scheme is
+  required — a raw schemeless token in `Authorization` is rejected)
 - `X-Locus-Token: <token>`
 - `X-Locus-Mcp-Token: <token>`
 

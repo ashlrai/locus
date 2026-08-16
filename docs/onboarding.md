@@ -178,6 +178,40 @@ What the agent sees vs. cannot do:
 | Scope | Frozen selectors (`project_ref`, `team_id`, `org`) reject alternates |
 | Secrets | Never in MCP responses — credentials resolve into worker env only |
 
+## Serving multiple tenants (hub mode)
+
+One `locus-mcp` process can serve several tenants at once over HTTP — each
+client presents a per-tenant bearer token instead of relying on the shell pin:
+
+```bash
+# Mint one grant per binding (token printed exactly once; only its HMAC is stored)
+locus mcp mint --binding ashlr --ttl 1h --label "hub — ashlr agent"
+locus mcp mint --binding cmp --ttl 15m --label "hub — cmp agent"
+
+# Serve with per-request tenant routing (needs LOCUS_CONTROL_CAPABILITY in the
+# server env — e.g. eval "$(locus hook zsh)" — or tenant validation fails closed)
+export LOCUS_MCP_HTTP_TOKEN="<server token>"
+locus-mcp --http 127.0.0.1:8742 --multi-tenant
+
+# Clients send BOTH headers on every request:
+#   Authorization: Bearer <LOCUS_MCP_HTTP_TOKEN>
+#   X-Locus-Tenant-Token: lmt_<grant_id>.<secret>
+
+# Operate the grant roster (operator-only; deliberately no HTTP enumeration)
+locus mcp list
+locus mcp revoke <grant_id>     # or: --binding cmp, or --all
+```
+
+Every request routes to its grant's sealed session: tools are hard-scoped to
+that binding, a missing / expired / revoked token is a uniform `401
+invalid_grant`, and presenting another tenant's `Mcp-Session-Id` is a `403
+tenant_mismatch`. Multi-tenant session records live under
+`$LOCUS_HOME/http-sessions-mt/`, partitioned from single-tenant state.
+`scripts/e2e.sh` exercises this end-to-end, and `DOGFOOD_MT=1 scripts/dogfood.sh`
+runs a mint → verify → revoke probe against a throwaway home.
+
+---
+
 ## 5. Troubleshooting
 
 | Symptom | Fix |

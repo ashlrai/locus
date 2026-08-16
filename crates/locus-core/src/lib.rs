@@ -38,12 +38,17 @@ pub mod workers;
 pub mod workspace;
 
 pub use adapter_registry::{
-    builtin_manifest, canonical_entry_material, ed25519_public_key_b64, list_adapters,
-    parse_manifest, parse_trust_keys_env, sign_entry, sign_entry_ed25519, sign_entry_material,
-    sign_entry_material_ed25519, verify_builtin, verify_entry, verify_entry_with_keys,
-    verify_manifest, verify_manifest_with_keys, AdapterManifest, AdapterManifestEntry,
-    EntryVerifyReport, EntryVerifyStatus, ManifestVerifyReport, RegistryKeyMaterial,
-    RegistryTrustKey, LOCUS_ADAPTER_TRUST_KEYS_ENV, SIG_SCHEME_ED25519, SIG_SCHEME_HMAC_SHA256,
+    build_release_manifest, build_release_manifest_from, builtin_manifest,
+    canonical_entry_material, canonical_release_manifest_material, ed25519_public_key_b64,
+    entry_digest, list_adapters, parse_ed25519_signing_key, parse_manifest, parse_release_manifest,
+    parse_trust_keys_env, release_manifest_json, sign_entry, sign_entry_ed25519,
+    sign_entry_material, sign_entry_material_ed25519, sign_release_manifest, verify_builtin,
+    verify_entry, verify_entry_with_keys, verify_manifest, verify_manifest_with_keys,
+    verify_release_manifest_against, verify_release_manifest_with_keys, AdapterManifest,
+    AdapterManifestEntry, EntryVerifyReport, EntryVerifyStatus, ManifestVerifyReport,
+    RegistryKeyMaterial, RegistryTrustKey, ReleaseManifest, ReleaseManifestAdapter,
+    ReleaseManifestVerifyReport, LOCUS_ADAPTER_TRUST_KEYS_ENV, LOCUS_REGISTRY_SIGNING_KEY_ENV,
+    RELEASE_MANIFEST_SCHEMA, SIG_SCHEME_ED25519, SIG_SCHEME_HMAC_SHA256,
 };
 pub use adapter_trust::{
     adapter_trust_dir, adapter_trust_keys_path, add_ed25519_trust_key, add_trust_key,

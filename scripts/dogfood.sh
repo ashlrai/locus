@@ -13,6 +13,9 @@
 #   7. scripts/hub-smoke.sh (ashlr-hub CLI contract; own throwaway home)
 #   8. (optional) scripts/dogfood-clients.sh when DOGFOOD_CLIENTS=1 —
 #      soft multi-client install probe; never blocks DOGFOOD READY by default
+#   8b. (optional) multi-tenant grant probe when DOGFOOD_MT=1 —
+#      mint → verify → revoke against its own throwaway LOCUS_HOME; must be
+#      green when enabled, default off (DOGFOOD READY contract unchanged)
 #
 # Prints "DOGFOOD READY" only after every required readiness probe is green.
 #
@@ -20,6 +23,7 @@
 # Never prints secret values or credential locators.
 # `DOGFOOD_SKIP_HUB_SMOKE=1` is diagnostic-only and can never reach READY.
 # `DOGFOOD_CLIENTS=1` runs the multi-client probe (soft-skip missing installs).
+# `DOGFOOD_MT=1` runs the multi-tenant grant probe (own throwaway home).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -242,6 +246,140 @@ sandbox_attestation() {
   )
 }
 
+# Multi-tenant grant probe: mint → verify (roster + HTTP 401/200) → revoke
+# (→ 401) inside its own throwaway LOCUS_HOME. Never touches the dogfood pin,
+# the dogfood home, or the operator's real ~/.locus. Values-free output.
+mt_grant_probe() {
+  local probe_root
+  probe_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-mt-dogfood.XXXXXX")"
+
+  (
+    mt_pid=""
+    mt_cleanup() {
+      if [[ -n "$mt_pid" ]]; then
+        kill "$mt_pid" 2>/dev/null || true
+        wait "$mt_pid" 2>/dev/null || true
+      fi
+      cd / 2>/dev/null || true
+      rm -rf "$probe_root"
+    }
+    trap 'mt_cleanup' EXIT
+    export LOCUS_HOME="$probe_root/home"
+    unset LOCUS_SESSION_ID || true
+    # Full isolation includes cwd: the caller may sit inside a workspace whose
+    # .locus.toml allowlist would deny `mt-probe` at mint time (pin enforces
+    # the cwd-derived allowlist). cd into the throwaway root so the probe never
+    # depends on where the operator invoked the script.
+    cd "$probe_root"
+
+    locus init >/dev/null
+    locus binding add mt-probe \
+      --tenant mt-probe \
+      --provider github \
+      --account mt-probe \
+      --credential-ref env:LOCUS_DOGFOOD_MT_UNUSED \
+      --org mt-probe >/dev/null
+
+    local mint grant_id token
+    mint="$(locus mcp mint -b mt-probe --ttl 15m --label dogfood-mt --json)" || {
+      printf '  mt probe: mint failed\n' >&2
+      exit 1
+    }
+    grant_id="$(printf '%s' "$mint" | jq -r '.grant_id // empty')"
+    token="$(printf '%s' "$mint" | jq -r '.token // empty')"
+    [[ -n "$grant_id" && "$token" == lmt_* ]] || {
+      printf '  mt probe: mint returned no grant_id/lmt_ token\n' >&2
+      exit 1
+    }
+    if printf '%s' "$mint" | grep -Eq '"credential_ref"|phm:|env:|test:'; then
+      printf '  mt probe: mint leaked a credential locator\n' >&2
+      exit 1
+    fi
+    locus mcp list --json | jq -e --arg g "$grant_id" '
+      type == "array"
+      and (map(select(.grant_id == $g and .revoked == false and .expired == false)) | length == 1)
+    ' >/dev/null || {
+      printf '  mt probe: minted grant missing from operator roster\n' >&2
+      exit 1
+    }
+
+    local port addr base http_token init_body code ready
+    port=$((28750 + RANDOM % 1000))
+    addr="127.0.0.1:${port}"
+    base="http://${addr}"
+    http_token="dogfood-mt-${PPID}-${RANDOM}"
+    LOCUS_MCP_HTTP_TOKEN="$http_token" \
+      "$MCP_BIN" --http "$addr" --multi-tenant >"$probe_root/mt-mcp.log" 2>&1 &
+    mt_pid=$!
+
+    ready=0
+    for _ in $(seq 1 40); do
+      kill -0 "$mt_pid" 2>/dev/null || break
+      if curl -fsS --max-time 1 "${base}/health" >/dev/null 2>&1; then
+        ready=1
+        break
+      fi
+      sleep 0.1
+    done
+    [[ "$ready" -eq 1 ]] || {
+      printf '  mt probe: locus-mcp --http --multi-tenant never became ready on %s\n' "$addr" >&2
+      tail -n 20 "$probe_root/mt-mcp.log" >&2 2>/dev/null || true
+      exit 1
+    }
+
+    init_body='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"dogfood-mt","version":"1"}}}'
+
+    # Tenantless request (server token only) → uniform 401 invalid_grant.
+    code="$(curl -sS -o "$probe_root/notenant.body" -w '%{http_code}' --max-time 5 \
+      -X POST "${base}/mcp" \
+      -H "Authorization: Bearer ${http_token}" \
+      -H 'Content-Type: application/json' -H 'Accept: application/json' \
+      -d "$init_body" 2>/dev/null || echo 000)"
+    [[ "$code" == "401" ]] || {
+      printf '  mt probe: tenantless request expected 401, got %s\n' "$code" >&2
+      exit 1
+    }
+    grep -q 'invalid_grant' "$probe_root/notenant.body" || {
+      printf '  mt probe: tenantless 401 missing uniform invalid_grant body\n' >&2
+      exit 1
+    }
+
+    # Granted tenant → 200 (verify).
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+      -X POST "${base}/mcp" \
+      -H "Authorization: Bearer ${http_token}" \
+      -H "X-Locus-Tenant-Token: ${token}" \
+      -H 'Content-Type: application/json' -H 'Accept: application/json' \
+      -d "$init_body" 2>/dev/null || echo 000)"
+    [[ "$code" == "200" ]] || {
+      printf '  mt probe: granted tenant initialize expected 200, got %s\n' "$code" >&2
+      exit 1
+    }
+
+    # Revoke → uniform 401 for the same token.
+    locus mcp revoke "$grant_id" >/dev/null
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+      -X POST "${base}/mcp" \
+      -H "Authorization: Bearer ${http_token}" \
+      -H "X-Locus-Tenant-Token: ${token}" \
+      -H 'Content-Type: application/json' -H 'Accept: application/json' \
+      -d "$init_body" 2>/dev/null || echo 000)"
+    [[ "$code" == "401" ]] || {
+      printf '  mt probe: revoked grant expected 401, got %s\n' "$code" >&2
+      exit 1
+    }
+    # Revoked grants are marked then deleted — the roster must no longer
+    # list this grant as live under any circumstances.
+    locus mcp list --json | jq -e --arg g "$grant_id" '
+      type == "array"
+      and (map(select(.grant_id == $g and .revoked == false and .expired == false)) | length == 0)
+    ' >/dev/null || {
+      printf '  mt probe: roster still lists the revoked grant as live\n' >&2
+      exit 1
+    }
+  )
+}
+
 if ! command -v jq >/dev/null 2>&1; then
   die "jq is required"
 fi
@@ -267,6 +405,7 @@ PACK_OUT="${DOGFOOD_PACK:-}"
 CLIENT="${DOGFOOD_CLIENT:-claude}"
 SKIP_HUB="${DOGFOOD_SKIP_HUB_SMOKE:-0}"
 RUN_CLIENTS="${DOGFOOD_CLIENTS:-0}"
+RUN_MT="${DOGFOOD_MT:-0}"
 
 cleanup() {
   if [[ "${USE_REAL}" != "1" && -n "${DOGFOOD_HOME:-}" && -d "${DOGFOOD_HOME}" ]]; then
@@ -476,6 +615,19 @@ if [[ "${RUN_CLIENTS}" == "1" ]]; then
   ok "multi-client probe"
 else
   printf '\n==> 8. multi-client probe skipped (set DOGFOOD_CLIENTS=1 to run)\n'
+fi
+
+# ── 8b. optional multi-tenant grant probe (hard-green when DOGFOOD_MT=1) ────
+if [[ "${RUN_MT}" == "1" ]]; then
+  log "8b. multi-tenant grant probe (DOGFOOD_MT=1: mint → verify → revoke)"
+  command -v curl >/dev/null 2>&1 || die "curl is required for the multi-tenant probe"
+  "$MCP_BIN" --help 2>&1 | grep -qE -- '--multi-tenant' \
+    || die "locus-mcp --multi-tenant not available"
+  locus mcp mint --help >/dev/null 2>&1 || die "locus mcp mint not available"
+  mt_grant_probe || die "multi-tenant probe failed (mint → verify → revoke must be green)"
+  ok "multi-tenant probe (mint → verify → revoke, throwaway home)"
+else
+  printf '\n==> 8b. multi-tenant probe skipped (set DOGFOOD_MT=1 to run)\n'
 fi
 
 # ── Ready gate ───────────────────────────────────────────────────────────────

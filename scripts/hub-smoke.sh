@@ -170,8 +170,55 @@ check_json "agent report unpinned" \
   "locus agent report --json" \
   '.status_oneline == "unpinned" and .ready == false'
 
+# Multi-tenant MCP grant CLI contract (feature-detected; soft-skip on older CLI).
+# Token is validated in-memory via jq and never echoed.
+if locus mcp mint --help >/dev/null 2>&1; then
+  MINT_JSON="$(locus mcp mint --binding personal --ttl 5m --label hub-smoke --json 2>/dev/null || true)"
+  if printf '%s' "$MINT_JSON" | jq -e '
+    (.grant_id | test("^[a-f0-9]+$"))
+    and (.token | test("^lmt_[a-f0-9]+\\.[a-f0-9]+$"))
+    and (.grant_id as $g | .token | startswith("lmt_" + $g + "."))
+    and (.session_id | startswith("ses_"))
+    and .binding == "personal"
+    and (.expires_at | type) == "string"
+  ' >/dev/null 2>&1; then
+    echo "ok    mcp mint --json grant contract (token validated, not echoed)"
+  else
+    echo "FAIL  mcp mint --json grant contract"
+    fail=1
+  fi
+  MINT_GRANT_ID="$(printf '%s' "$MINT_JSON" | jq -r .grant_id 2>/dev/null || true)"
+
+  LIST_JSON="$(locus mcp list --json 2>/dev/null || true)"
+  if printf '%s' "$LIST_JSON" | jq -e --arg g "$MINT_GRANT_ID" '
+    type == "array"
+    and (map(has("token")) | any | not)
+    and (map(select(.grant_id == $g)) | first
+         | .revoked == false and (.live_http_sessions | type == "number"))
+  ' >/dev/null 2>&1 && ! printf '%s' "$LIST_JSON" | grep -q 'lmt_'; then
+    echo "ok    mcp list --json values-free roster"
+  else
+    echo "FAIL  mcp list --json roster contract"
+    fail=1
+  fi
+
+  # Revoke deletes the record (after a fail-closed revoked marking), so the
+  # grant must vanish from the roster.
+  if locus mcp revoke "$MINT_GRANT_ID" >/dev/null 2>&1 \
+    && locus mcp list --json 2>/dev/null | jq -e --arg g "$MINT_GRANT_ID" '
+      map(select(.grant_id == $g)) | length == 0
+    ' >/dev/null 2>&1; then
+    echo "ok    mcp revoke removes grant from roster"
+  else
+    echo "FAIL  mcp revoke contract"
+    fail=1
+  fi
+else
+  echo "skip  mcp mint/list/revoke (locus mcp subcommand unavailable)"
+fi
+
 # Schema files present
-for f in agent-report.schema.json doctor.schema.json hub-gate.schema.json; do
+for f in agent-report.schema.json doctor.schema.json hub-gate.schema.json mcp-grant.schema.json; do
   if [[ -f "$ROOT/schema/$f" ]]; then
     echo "ok    schema/$f present"
   else

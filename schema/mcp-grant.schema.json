@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ashlrai/locus/schema/mcp-grant.schema.json",
+  "title": "LocusMcpGrantMint",
+  "description": "Output of `locus mcp mint --binding <alias> --json` — a multi-tenant MCP grant (sealed session + bearer token). The token is printed exactly once; only its HMAC is stored at rest under $LOCUS_HOME/mcp-grants/. Hubs MUST hold the token in memory only (never log, persist, or place it in tool arguments) and present it as the X-Locus-Tenant-Token header on every /mcp request against `locus-mcp --http --multi-tenant`. $defs.listEntry describes one row of `locus mcp list --json`, which is values-free (never tokens).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["grant_id", "token", "session_id", "binding", "tenant", "expires_at"],
+  "properties": {
+    "grant_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]+$",
+      "description": "Stable grant identifier (also embedded in the token as lmt_<grant_id>.<secret>). Safe to log and audit."
+    },
+    "token": {
+      "type": "string",
+      "pattern": "^lmt_[a-f0-9]+\\.[a-f0-9]+$",
+      "description": "One-time-shown tenant bearer token. MEMORY ONLY: hand it to the worker as a header value for the job's duration, then revoke the grant. Never persisted, logged, or placed in tool arguments."
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^ses_[a-f0-9]+$",
+      "description": "Sealed delegated session backing the grant (values-free identity metadata)."
+    },
+    "binding": {
+      "type": "string",
+      "description": "Binding alias the grant is hard-scoped to."
+    },
+    "tenant": {
+      "type": "string",
+      "description": "Tenant of the bound binding."
+    },
+    "expires_at": {
+      "type": "string",
+      "description": "RFC 3339 grant expiry. Expired grants answer 401 with reason=grant_expired and are swept; re-mint rather than extend."
+    },
+    "label": {
+      "type": ["string", "null"],
+      "description": "Free-form operator label (e.g. hub job id); shown by `locus mcp list`."
+    },
+    "serve": {
+      "type": "string",
+      "description": "Informational serving hint from the CLI."
+    }
+  },
+  "$defs": {
+    "listEntry": {
+      "title": "LocusMcpGrantListEntry",
+      "description": "One row of `locus mcp list --json` (operator-only roster; there is deliberately no HTTP enumeration). Values-free: never contains tokens.",
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["grant_id", "binding", "tenant", "expires_at", "expired", "revoked"],
+      "properties": {
+        "grant_id": { "type": "string", "pattern": "^[a-f0-9]+$" },
+        "binding": { "type": "string" },
+        "tenant": { "type": "string" },
+        "label": { "type": ["string", "null"] },
+        "expires_at": { "type": "string" },
+        "expired": { "type": "boolean" },
+        "revoked": { "type": "boolean" },
+        "session_id": { "type": "string" },
+        "live_http_sessions": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Live (non-expired) tenant HTTP sessions bound to this grant — diff against the hub job table to catch leaked grants."
+        }
+      }
+    }
+  }
+}

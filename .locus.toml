@@ -1,0 +1,7 @@
+version = 1
+default_binding = "ashlr"
+allowed_bindings = [
+    "ashlr",
+    "personal",
+]
+require_pin = false
