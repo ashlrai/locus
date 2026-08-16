@@ -3,7 +3,7 @@
 //! Hub JSON contract:
 //! ```json
 //! {
-//!   "version": "0.3.0",
+//!   "version": "0.4.0",
 //!   "ready": true,
 //!   "status": "unsafe|protected|ready",
 //!   "pin": { ... },
