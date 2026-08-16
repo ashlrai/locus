@@ -60,7 +60,7 @@ class Locus < Formula
   homepage "https://github.com/ashlrai/locus"
   url "https://github.com/ashlrai/locus/archive/refs/tags/v0.4.0.tar.gz"
   version "0.4.0"
-  sha256 "REPLACE"
+  sha256 "046ccb3bf0d873793051ce2b170851bb44f3c6bf458178e2486cda960d04a358"
   license "MIT"
   head "https://github.com/ashlrai/locus.git", branch: "main"
 
