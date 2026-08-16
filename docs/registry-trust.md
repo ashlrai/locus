@@ -12,12 +12,12 @@
 ```json
 {
   "schema": "locus-adapter-registry/v1",
-  "locus_version": "0.4.0",
+  "locus_version": "0.5.0",
   "adapters": [
     {
       "id": "github",
       "name": "GitHub",
-      "version": "0.4.0",
+      "version": "0.5.0",
       "tools": ["github.check_repo", "github.scope", "github.whoami"],
       "digest": "sha256:…"
     }
@@ -63,11 +63,11 @@ would hold the forging secret — `verify-manifest` reports such signatures as
 # Signing key: base64 (or 64-hex) of the 32-byte ed25519 seed, in a local file.
 # Locus never generates, prints, or logs private key material.
 locus adapter registry export --sign --key ~/keys/locus-registry-root \
-  --key-id root --out locus-adapters-v0.4.0.json
+  --key-id root --out locus-adapters-v0.5.0.json
 
 # Or via env (e.g. from a secrets manager; still never echoed):
 export LOCUS_REGISTRY_SIGNING_KEY="<base64-seed>"
-locus adapter registry export --sign --out locus-adapters-v0.4.0.json
+locus adapter registry export --sign --out locus-adapters-v0.5.0.json
 ```
 
 `--sign` **refuses** to export when no key is available — there is no silent
@@ -87,7 +87,7 @@ locus adapter trust add --id root --ed25519-pub '<base64-pubkey>'
 
 ```bash
 locus adapter trust add --id root --ed25519-pub '<base64-pubkey>'   # once
-locus adapter verify-manifest locus-adapters-v0.4.0.json [--json]
+locus adapter verify-manifest locus-adapters-v0.5.0.json [--json]
 ```
 
 ## What `verify-manifest` proves

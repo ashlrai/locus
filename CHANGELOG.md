@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-08-16
+
 ### Added
 
 - **Signed adapter-registry release manifests** — `locus adapter registry
@@ -667,7 +669,8 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 - Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
 - Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
 
-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/ashlrai/locus/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/ashlrai/locus/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ashlrai/locus/releases/tag/v0.4.0
 [0.3.0]: https://github.com/ashlrai/locus/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ashlrai/locus/releases/tag/v0.2.0

@@ -24,7 +24,7 @@ Pin a client — every CLI command, MCP tool, and the **local dashboard** is har
 # Homebrew (tap live) — installs locus + locus-mcp
 brew install ashlrai/tap/locus
 
-# npm — locus-cli and @ashlrai/locus-mcp published at 0.4.0
+# npm — locus-cli and @ashlrai/locus-mcp published at 0.5.0
 # (downloads a release binary, or falls back to cargo install)
 npm install -g locus-cli @ashlrai/locus-mcp
 npx locus-cli --help
@@ -261,7 +261,7 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | **0** Daemon-less control plane, pin/whoami/exec, isolation tests | done |
 | **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | done |
 | **2** Firm UX, doctor pane, run/ns, notify, local `locus graph`, `locus ci` | done (0.1.1) |
-| **2.x / 0.2–0.4** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch` | **you are here (0.4.0)** |
+| **2.x / 0.2–0.5** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch`; 0.5 signed registry manifests, hub MT drop-in | **you are here (0.5.0)** |
 | **3** Remote binding graph sync, dual-control packs, offboard, SIEM export | next |
 | **4** Adapter SDK, broader prebuilt platforms | later |
 
