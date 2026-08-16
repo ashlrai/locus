@@ -519,7 +519,7 @@ fn mt_tenantless_stateless_and_bad_tokens_fail_closed() {
     for bad in [
         "not-a-token".to_string(),
         format!("lmt_{}.{}", "0".repeat(16), "0".repeat(64)),
-        format!("lmt_{}.{}", &w.grant_a.grant_id, "0".repeat(64)),
+        format!("lmt_{}.{}", w.grant_a.grant_id, "0".repeat(64)),
     ] {
         let (status, _, body) =
             w.srv
