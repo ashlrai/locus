@@ -1,13 +1,13 @@
-# locus-mcp
+# @ashlrai/locus-mcp
 
 MCP multiplexor for [Locus](https://github.com/ashlrai/locus) — tools hard-scoped to the active pin so agents cannot act in the wrong tenant.
 
 ## Install
 
 ```bash
-npm install -g locus-mcp
+npm install -g @ashlrai/locus-mcp
 # or run via npx after pinning with locus:
-npx locus-mcp
+npx @ashlrai/locus-mcp
 ```
 
 On first run the wrapper downloads the release binary into `~/.locus/bin`, or falls back to:
@@ -20,7 +20,7 @@ cargo install --git https://github.com/ashlrai/locus --package locus-mcp --locke
 
 ```bash
 # Install CLI + MCP
-npm install -g locus-cli locus-mcp
+npm install -g locus-cli @ashlrai/locus-mcp
 # or: cargo install --git https://github.com/ashlrai/locus --package locus-cli --package locus-mcp
 
 locus pin acme

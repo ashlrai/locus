@@ -2399,6 +2399,51 @@ fn tag_tool_descriptions(tools: &mut [AdapterTool], pin_alias: Option<&str>) {
     }
 }
 
+/// Policy-aware presentation shaping of the provider tool catalog.
+///
+/// Per tool: resolve the owning binding and the bare `provider.tool` name
+/// (stripping the `alias__` namespace prefix so policy globs see the exact
+/// string the call gate evaluates), then delegate to
+/// [`locus_core::adapters::shape_catalog_tool`]:
+/// - destructive tools of a `read_only = true` provider scope are omitted;
+/// - `require_approval`-gated tools get a description marker.
+///
+/// Presentation only — call-time enforcement is untouched, and a hidden tool
+/// invoked anyway still hits the same call-time denial. Control (`locus_*`)
+/// tools never pass through here.
+fn shape_provider_catalog(
+    tools: Vec<AdapterTool>,
+    session: &Session,
+    bindings: &[(String, Binding)],
+) -> Vec<AdapterTool> {
+    let mut out = Vec::with_capacity(tools.len());
+    for mut t in tools {
+        // Resolve (binding, bare name) without holding a borrow on `t`.
+        let resolved: Option<(&Binding, String)> = if session.is_namespaced() {
+            split_namespaced_tool(&t.name).and_then(|(alias, bare)| {
+                bindings
+                    .iter()
+                    .find(|(a, _)| a == alias)
+                    .map(|(_, b)| (b, bare.to_string()))
+            })
+        } else {
+            bindings.first().map(|(_, b)| (b, t.name.clone()))
+        };
+        let keep = match resolved {
+            Some((binding, bare)) => {
+                locus_core::adapters::shape_catalog_tool(binding, &bare, &mut t)
+            }
+            // Unresolvable owner (should not happen): leave listing untouched —
+            // shaping is presentation-only and never a gate.
+            None => true,
+        };
+        if keep {
+            out.push(t);
+        }
+    }
+    out
+}
+
 /// Unpinned / frozen / invalid seal ⇒ only locus_* control tools.
 /// Healthy pin ⇒ control + provider tools (synthetic + upstream MCP when declared).
 /// Namespaced multi-bind prefixes tools as `alias__tool`.
@@ -2491,7 +2536,11 @@ fn handle_tools_list(scope: &AnchorScope) -> std::result::Result<Value, Value> {
         // Discovery is side-effect free: merge synthetic tools and schemas from
         // workers that were already started by an authorized call. Never spawn
         // a credential-bearing child from tools/list.
-        tools.extend(mgr.tools_for_session(session, bindings));
+        tools.extend(shape_provider_catalog(
+            mgr.tools_for_session(session, bindings),
+            session,
+            bindings,
+        ));
         return Ok(tools_list_payload(
             tools,
             Some(session.binding_alias.as_str()),
@@ -3408,5 +3457,136 @@ mod http_session_tests {
             resolve_mcp_http_session(&mut map, &with_id, true),
             Err(HttpSessionError::Unknown)
         );
+    }
+}
+
+#[cfg(test)]
+mod catalog_shaping_tests {
+    use super::*;
+    use chrono::Duration as ChronoDuration;
+    use locus_core::adapters::REQUIRES_APPROVAL_MARKER;
+    use locus_core::binding::{BindingBody, Policy, ProviderBinding, Scope};
+    use locus_core::seal::SealKey;
+    use locus_core::session::{namespace_tool, PinSource, SessionMode};
+
+    /// Production-shaped fixture: supabase pinned read_only with approval
+    /// gates on deletes and prod deploys (mirrors the cmp pin).
+    fn cmp_binding() -> Binding {
+        Binding::from_body(BindingBody {
+            id: "bnd_cmp".into(),
+            alias: "cmp".into(),
+            tenant: "cmp-co".into(),
+            principal: None,
+            description: None,
+            policy: Policy {
+                require_approval: vec!["*.delete*".into(), "vercel.deploy.*".into()],
+                ..Policy::default()
+            },
+            providers: vec![
+                ProviderBinding {
+                    provider: "supabase".into(),
+                    account: "cmp".into(),
+                    credential_ref: "phm:SUPABASE_CMP".into(),
+                    scope: Scope {
+                        project_ref: Some("proj_cmp".into()),
+                        read_only: Some(true),
+                        ..Scope::default()
+                    },
+                    upstream: None,
+                },
+                ProviderBinding {
+                    provider: "vercel".into(),
+                    account: "cmp-vc".into(),
+                    credential_ref: "phm:VERCEL_CMP".into(),
+                    scope: Scope {
+                        team_id: Some("team_cmp".into()),
+                        ..Scope::default()
+                    },
+                    upstream: None,
+                },
+            ],
+        })
+    }
+
+    fn session(mode: SessionMode) -> Session {
+        let namespaced = mode == SessionMode::Namespaced;
+        let s = Session::new(
+            "bnd_cmp",
+            "cmp",
+            "cmp-co",
+            None,
+            PinSource::Explicit,
+            Some("test".into()),
+            ChronoDuration::hours(1),
+            "/tmp/unused-worker-home".into(),
+            &SealKey::generate(),
+        )
+        .with_mode(mode);
+        if namespaced {
+            s.with_namespaces(vec!["other".into()], vec!["fp".into()])
+        } else {
+            s
+        }
+    }
+
+    #[test]
+    fn exclusive_catalog_hides_read_only_destructive_and_annotates_gated() {
+        let b = cmp_binding();
+        let s = session(SessionMode::Exclusive);
+        let shaped =
+            shape_provider_catalog(tools_for_binding(&b), &s, &[("cmp".to_string(), b.clone())]);
+        // read_only supabase: destructive tool omitted, reads survive.
+        assert!(!shaped.iter().any(|t| t.name == "supabase.table.delete"));
+        assert!(shaped.iter().any(|t| t.name == "supabase.scope"));
+        // vercel not read_only: destructive tool listed, approval-annotated
+        // (matches the `vercel.deploy.*` glob exactly as call-time does).
+        let deploy = shaped
+            .iter()
+            .find(|t| t.name == "vercel.deploy.prod")
+            .expect("vercel deploy stays listed");
+        assert!(deploy.description.contains(REQUIRES_APPROVAL_MARKER));
+        // Ungated read tool never annotated.
+        let scope_tool = shaped.iter().find(|t| t.name == "vercel.scope").unwrap();
+        assert!(!scope_tool.description.contains(REQUIRES_APPROVAL_MARKER));
+    }
+
+    #[test]
+    fn namespaced_catalog_strips_prefix_before_policy_match() {
+        let b = cmp_binding();
+        let s = session(SessionMode::Namespaced);
+        assert!(s.is_namespaced());
+        let mut tools = tools_for_binding(&b);
+        for t in &mut tools {
+            t.name = namespace_tool("cmp", &t.name);
+        }
+        let shaped = shape_provider_catalog(tools, &s, &[("cmp".to_string(), b.clone())]);
+        // Hidden under the alias prefix too.
+        assert!(!shaped
+            .iter()
+            .any(|t| t.name == "cmp__supabase.table.delete"));
+        assert!(shaped.iter().any(|t| t.name == "cmp__supabase.scope"));
+        // `vercel.deploy.*` must match the BARE name (it would never match
+        // the `cmp__`-prefixed spelling) — proves prefix stripping.
+        let deploy = shaped
+            .iter()
+            .find(|t| t.name == "cmp__vercel.deploy.prod")
+            .expect("namespaced vercel deploy stays listed");
+        assert!(deploy.description.contains(REQUIRES_APPROVAL_MARKER));
+    }
+
+    #[test]
+    fn shaping_without_binding_leaves_tools_untouched() {
+        // Presentation shaping is never a gate: unresolvable owners pass
+        // through unchanged (control catalogs never enter this path at all).
+        let b = cmp_binding();
+        let s = session(SessionMode::Exclusive);
+        let tools = tools_for_binding(&b);
+        let n = tools.len();
+        let shaped = shape_provider_catalog(tools.clone(), &s, &[]);
+        assert_eq!(shaped.len(), n);
+        for (orig, out) in tools.iter().zip(shaped.iter()) {
+            assert_eq!(orig.name, out.name);
+            assert_eq!(orig.description, out.description);
+        }
     }
 }

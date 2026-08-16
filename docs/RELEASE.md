@@ -50,7 +50,7 @@ cargo fmt --all -- --check
    done
    ```
 
-8. [ ] npm: publish `npm/` (`locus-cli`) and `npm-mcp/` (`locus-mcp`) at 0.3.0
+8. [ ] npm: publish `npm/` (`locus-cli`) and `npm-mcp/` (`@ashlrai/locus-mcp`, scoped — `locus-mcp` is third-party-owned on npm) at 0.3.0
 9. [x] Verify:
 
    ```bash

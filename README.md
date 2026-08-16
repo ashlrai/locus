@@ -29,7 +29,7 @@ cargo install --git https://github.com/ashlrai/locus --package locus-mcp --locke
 
 # npm / npx — downloads a release binary, or falls back to cargo install
 npx locus-cli --help
-npx locus-mcp   # MCP server for Claude Code / Cursor
+npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
 ```
 
 Local checkout:

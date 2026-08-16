@@ -1091,6 +1091,7 @@ name = "locus-mcp"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "hex",
  "locus-core",
  "rand 0.8.7",

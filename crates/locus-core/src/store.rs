@@ -1335,6 +1335,90 @@ impl Store {
         Ok(session)
     }
 
+    /// Forcibly clear the active session even when its seal is invalid, the
+    /// authority anchor is unavailable, or the supervising broker is gone
+    /// (`locus leave --force`).
+    ///
+    /// Recovery hatch for the supervisor-anchor wedge: a pin minted under a
+    /// now-dead supervisor leaves `leave` / `status` / `doctor` failing closed
+    /// with no built-in teardown. This path requires the operator control
+    /// capability (like normal [`leave`](Self::leave)) but never requires the
+    /// wedged session to validate. The capability is authenticated against the
+    /// best available verifier — the live broker when anything answers its
+    /// endpoint, else the persisted operator capability; when neither exists
+    /// (the `--no-persist-capability` strict posture) teardown additionally
+    /// requires the explicit `allow_unverified` acknowledgement
+    /// (`locus leave --force --no-verifier`). It only deletes session state —
+    /// `sessions/active.json` plus the session's worker home — and audits
+    /// `session.force_leave`; it never mints or refreshes any authority.
+    pub fn force_leave(&self, reason: &str, allow_unverified: bool) -> Result<ForceLeaveOutcome> {
+        authority_anchor::authorize_control_teardown(&self.home, allow_unverified)?;
+        // Always operates on active.json — never LOCUS_SESSION_ID overrides.
+        let path = self.active_session_path();
+        if !path.exists() {
+            return Ok(ForceLeaveOutcome {
+                cleared: false,
+                session_id: None,
+                binding_alias: None,
+                diagnosis: Vec::new(),
+            });
+        }
+        // Best-effort parse: a corrupt file must still be removable.
+        let parsed: Option<Session> = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+        let mut diagnosis: Vec<String> = Vec::new();
+        match parsed {
+            None => diagnosis.push("unreadable_session".into()),
+            Some(ref session) => {
+                match self.seal_key() {
+                    Err(_) => diagnosis.push("seal_key_unavailable".into()),
+                    Ok(key) => match session.verify_seal(&key) {
+                        Ok(()) => {}
+                        Err(LocusError::SessionExpired(_)) => {
+                            diagnosis.push("session_expired".into())
+                        }
+                        Err(LocusError::LegacySessionSeal) => diagnosis.push("legacy_seal".into()),
+                        Err(_) => diagnosis.push("invalid_seal".into()),
+                    },
+                }
+                match self.validate_session_authority(session) {
+                    Ok(_) => {}
+                    Err(LocusError::AuthorityAnchorMismatch) => {
+                        diagnosis.push("anchor_mismatch".into())
+                    }
+                    Err(_) => diagnosis.push("anchor_unavailable".into()),
+                }
+                // Best-effort revocation + worker-home cleanup: failures must
+                // not block teardown (the broker may be gone entirely).
+                let _ = self.revoke_session_authority(session);
+                let wh = PathBuf::from(&session.worker_home);
+                if wh.exists() && wh.starts_with(self.home.join("workers")) {
+                    let _ = fs::remove_dir_all(&wh);
+                }
+            }
+        }
+        self.audit(
+            "session.force_leave",
+            parsed
+                .as_ref()
+                .map(|s| s.binding_alias.as_str())
+                .unwrap_or("-"),
+            Some(serde_json::json!({
+                "session_id": parsed.as_ref().map(|s| s.session_id.clone()),
+                "reason": reason,
+                "diagnosis": diagnosis,
+            })),
+        )?;
+        fs::remove_file(&path)?;
+        Ok(ForceLeaveOutcome {
+            cleared: true,
+            session_id: parsed.as_ref().map(|s| s.session_id.clone()),
+            binding_alias: parsed.map(|s| s.binding_alias),
+            diagnosis,
+        })
+    }
+
     // ── Engagements ───────────────────────────────────────────────────────
 
     /// Create a client engagement: binding template + sidecar meta + optional workspace/README.
@@ -2520,6 +2604,57 @@ pub struct RuntimeDrift {
     pub ok: bool,
 }
 
+impl RuntimeDrift {
+    /// Degraded drift facts for a **wedged** active session — one whose file
+    /// exists but cannot even be read/resolved (corrupt JSON, invalid backing,
+    /// unavailable seal key). Doctor uses this to keep reporting (with a
+    /// `stale_session` finding naming `locus leave --force`) instead of dying
+    /// on the read error. Everything stays fail-closed: `ok` is false and no
+    /// field claims a verified state.
+    pub fn wedged(detail: &str) -> Self {
+        RuntimeDrift {
+            pinned: true,
+            seal_ok: false,
+            authority_anchor_ok: false,
+            backing_ok: false,
+            backing_type: None,
+            backing_path: None,
+            authority: None,
+            binding_present: false,
+            binding_id_match: false,
+            tenant_match: false,
+            providers_match: false,
+            frozen: false,
+            expired: false,
+            session_id: None,
+            binding_alias: None,
+            binding_id_session: None,
+            binding_id_file: None,
+            tenant_session: None,
+            tenant_file: None,
+            providers: Vec::new(),
+            issues: vec![
+                "stale_session".into(),
+                format!("session_unreadable: {detail}"),
+            ],
+            ok: false,
+        }
+    }
+}
+
+/// Outcome of a forced session teardown ([`Store::force_leave`]).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ForceLeaveOutcome {
+    /// True when an `active.json` existed and was removed.
+    pub cleared: bool,
+    pub session_id: Option<String>,
+    pub binding_alias: Option<String>,
+    /// Best-effort classification of why the session was wedged
+    /// (e.g. `invalid_seal`, `anchor_unavailable`, `unreadable_session`);
+    /// empty when the session was healthy.
+    pub diagnosis: Vec<String>,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -2935,6 +3070,152 @@ credential_ref = "ghp_UNSAFE/CANARY"
             store.require_active().unwrap_err(),
             LocusError::InvalidSeal
         ));
+    }
+
+    #[test]
+    fn force_leave_clears_invalid_seal_session() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        // Corrupt the seal deliberately — the production wedge.
+        let path = store.active_session_path();
+        let mut s: Session = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        s.seal = "deadbeef".into();
+        fs::write(&path, serde_json::to_string(&s).unwrap()).unwrap();
+
+        // The control boundary used by normal `locus leave` fails closed.
+        assert!(matches!(
+            store.require_local_control("locus leave").unwrap_err(),
+            LocusError::InvalidSeal
+        ));
+
+        // Recovery: force-leave tears the session state down anyway.
+        let outcome = store.force_leave("test wedge", false).unwrap();
+        assert!(outcome.cleared);
+        assert_eq!(outcome.binding_alias.as_deref(), Some("acme"));
+        assert!(outcome.diagnosis.iter().any(|d| d == "invalid_seal"));
+        assert!(!store.active_session_path().exists());
+        assert!(matches!(
+            store.require_active().unwrap_err(),
+            LocusError::NotPinned
+        ));
+
+        // Audited as session.force_leave with the reason; nothing minted.
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(audit.contains("session.force_leave"));
+        assert!(audit.contains("test wedge"));
+    }
+
+    #[test]
+    fn force_leave_clears_anchor_unavailable_session() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        // Supervisor-anchor wedge: the broker runtime is gone; any broker that
+        // comes back re-anchors under a fresh epoch, so the pinned session's
+        // authority generation can never validate again.
+        fs::remove_dir_all(dir.path().join("runtime")).unwrap();
+
+        // The broker endpoint is gone and no operator capability was ever
+        // persisted for this home: no verifier remains, so teardown fails
+        // closed until the operator explicitly acknowledges the degraded gate.
+        let err = store.force_leave("supervisor gone", false).unwrap_err();
+        assert!(err.to_string().contains("no verifier"), "err={err}");
+        assert!(store.active_session_path().exists());
+
+        // Normal leave fails closed on the unavailable/stale anchor (its
+        // control path restarts a broker under a FRESH epoch, so the pinned
+        // session's authority generation can never validate again).
+        assert!(store.leave().is_err());
+        assert!(store.active_session_path().exists());
+
+        // That restarted live broker now authenticates the control capability
+        // directly, so teardown proceeds without the acknowledgement flag.
+        let outcome = store.force_leave("supervisor gone", false).unwrap();
+        assert!(outcome.cleared);
+        assert!(outcome
+            .diagnosis
+            .iter()
+            .any(|d| d == "anchor_unavailable" || d == "anchor_mismatch"));
+        assert!(!store.active_session_path().exists());
+    }
+
+    #[test]
+    fn force_leave_without_matching_capability_fails() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        // No broker was ever started for this home, so teardown authentication
+        // falls back to the persisted operator capability — which deliberately
+        // differs from this process's control capability.
+        crate::authority_anchor::mint_persisted_control_capability(dir.path()).unwrap();
+        fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        fs::write(store.active_session_path(), "{ wedged").unwrap();
+
+        let err = store.force_leave("attempt", false).unwrap_err().to_string();
+        assert!(err.contains("control capability"), "err={err}");
+        // The no-verifier acknowledgement never overrides a verifier that is
+        // present and disagrees.
+        let err = store.force_leave("attempt", true).unwrap_err().to_string();
+        assert!(err.contains("control capability"), "err={err}");
+        // Fail closed: nothing was deleted.
+        assert!(store.active_session_path().exists());
+    }
+
+    #[test]
+    fn force_leave_without_session_is_noop() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        // Fresh home: no broker and no persisted capability, so the noop is
+        // only reachable through the acknowledged-unverified posture.
+        assert!(store.force_leave("nothing", false).is_err());
+        let outcome = store.force_leave("nothing", true).unwrap();
+        assert!(!outcome.cleared);
+        assert!(outcome.session_id.is_none());
+        assert!(outcome.diagnosis.is_empty());
+    }
+
+    #[test]
+    fn force_leave_clears_unreadable_session_file() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        fs::write(store.active_session_path(), "{ not json").unwrap();
+
+        // Even resolve fails on the corrupt file — the second production wedge.
+        assert!(store.active_session().is_err());
+
+        let outcome = store.force_leave("corrupt file", false).unwrap();
+        assert!(outcome.cleared);
+        assert!(outcome.diagnosis.iter().any(|d| d == "unreadable_session"));
+        assert!(!store.active_session_path().exists());
+    }
+
+    #[test]
+    fn normal_leave_still_works_after_force_leave_exists() {
+        // Guard: the recovery hatch must not change the healthy-path contract.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let left = store.leave().unwrap();
+        assert_eq!(left.map(|s| s.binding_alias).as_deref(), Some("acme"));
+        assert!(!store.active_session_path().exists());
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(audit.contains("session.leave"));
+        assert!(!audit.contains("session.force_leave"));
     }
 
     #[test]
