@@ -206,7 +206,23 @@ enum Commands {
 
     /// Leave the active pin (clear identity) and suggest re-enter
     #[command(next_help_heading = "Daily use")]
-    Leave,
+    Leave {
+        /// Force-clear a wedged session: tears down sessions/active.json even
+        /// when the seal is invalid or the supervisor/authority anchor is
+        /// gone. Requires the control capability (like normal leave), verified
+        /// against the live broker or the persisted operator capability;
+        /// deletes session state only — never mints anything.
+        #[arg(long)]
+        force: bool,
+
+        /// With --force when no verifier is reachable (authority broker gone
+        /// AND no persisted operator capability, e.g. after `locus init
+        /// --no-persist-capability`): explicitly acknowledge tearing down
+        /// without capability verification. Never overrides a live broker's
+        /// refusal or a mismatching persisted capability.
+        #[arg(long, requires = "force")]
+        no_verifier: bool,
+    },
 
     /// Manage client engagements (init / close)
     #[command(next_help_heading = "Setup", subcommand)]
@@ -901,7 +917,7 @@ fn run() -> Result<()> {
             ns,
             ttl,
         } => cmd_pin(alias, force, client, ns, ttl, cli.json),
-        Commands::Leave => cmd_leave(cli.json),
+        Commands::Leave { force, no_verifier } => cmd_leave(force, no_verifier, cli.json),
         Commands::Engagement(sub) => cmd_engagement(sub, cli.json),
         Commands::Graph(sub) => cmd_graph(sub, cli.json),
         Commands::Whoami => cmd_whoami(cli.json),
@@ -2188,10 +2204,44 @@ fn cmd_pin(
     Ok(())
 }
 
-fn cmd_leave(json: bool) -> Result<()> {
-    require_local_control_boundary("locus leave")?;
+/// Route wedged-session control errors to the recovery hatch.
+///
+/// When `leave` / `status` / `doctor` / `exec` fail closed on the ACTIVE
+/// session — invalid or legacy seal, unavailable/stale authority anchor,
+/// unparseable session file — the operator has no built-in way out except
+/// hand-deleting `sessions/active.json`. Name the supported teardown instead.
+fn wedged_session_recovery(err: anyhow::Error) -> anyhow::Error {
+    use locus_core::LocusError as E;
+    let wedged = matches!(
+        err.downcast_ref::<E>(),
+        Some(
+            E::InvalidSeal
+                | E::LegacySessionSeal
+                | E::AuthorityAnchorUnavailable(_)
+                | E::AuthorityAnchorMismatch
+                | E::Json(_)
+        )
+    );
+    if wedged {
+        err.context(
+            "active session is wedged — recovery: `locus leave --force` clears it \
+             (control capability required), then re-pin: `locus enter <alias>`",
+        )
+    } else {
+        err
+    }
+}
+
+fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {
+    if force {
+        return cmd_leave_force(no_verifier, json);
+    }
+    require_local_control_boundary("locus leave").map_err(wedged_session_recovery)?;
     let s = store()?;
-    match s.leave()? {
+    match s
+        .leave()
+        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))?
+    {
         None => {
             if json {
                 println!("{}", serde_json::json!({ "left": false }));
@@ -2233,6 +2283,72 @@ fn cmd_leave(json: bool) -> Result<()> {
                 );
             }
         }
+    }
+    Ok(())
+}
+
+/// `locus leave --force` — tear down a wedged active session.
+///
+/// Deliberately skips [`require_local_control_boundary`] (which re-validates
+/// the possibly-wedged session and would fail closed); the control capability
+/// is still required and authenticated inside [`Store::force_leave`].
+fn cmd_leave_force(no_verifier: bool, json: bool) -> Result<()> {
+    let s = store()?;
+    let reason = if no_verifier {
+        "operator forced leave (locus leave --force --no-verifier)"
+    } else {
+        "operator forced leave (locus leave --force)"
+    };
+    let outcome = s.force_leave(reason, no_verifier)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "left": outcome.cleared,
+                "forced": true,
+                "binding": outcome.binding_alias,
+                "session_id": outcome.session_id,
+                "diagnosis": outcome.diagnosis,
+            })
+        );
+    } else if !outcome.cleared {
+        println!("{} no active pin — already clear", "->".dimmed());
+        println!(
+            "   re-pin: {}  or  {}",
+            "locus enter <alias>".cyan(),
+            "locus pin personal".cyan()
+        );
+    } else {
+        println!(
+            "{} force-cleared active session{}{}",
+            "ok".green().bold(),
+            outcome
+                .binding_alias
+                .as_deref()
+                .map(|a| format!(" for {}", a.cyan().bold()))
+                .unwrap_or_default(),
+            outcome
+                .session_id
+                .as_deref()
+                .map(|id| format!(" ({})", id.dimmed()))
+                .unwrap_or_default(),
+        );
+        if !outcome.diagnosis.is_empty() {
+            println!(
+                "   wedge diagnosis: {}  {}",
+                outcome.diagnosis.join(", ").yellow(),
+                "[locus:force_leave]".dimmed()
+            );
+        }
+        println!(
+            "   session state deleted — nothing minted; audit: {}",
+            "session.force_leave".dimmed()
+        );
+        println!(
+            "   re-pin: {}  or  {}",
+            "locus enter <alias>".cyan(),
+            "locus pin personal".cyan()
+        );
     }
     Ok(())
 }
@@ -2556,7 +2672,10 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
     let require_pin = find_workspace(&cwd())?
         .map(|(_, cfg)| cfg.require_pin)
         .unwrap_or(false);
-    match s.active_session()? {
+    match s
+        .active_session()
+        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))?
+    {
         None => {
             if json {
                 println!(
@@ -2678,12 +2797,17 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
             "session.exec.delegated",
         );
     }
-    let session = s.require_active().context("need active pin for exec")?;
+    let session = s
+        .require_active()
+        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))
+        .context("need active pin for exec")?;
     let binding = s.load_binding(&session.binding_alias)?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Exec)?;
 
     // Drift check before privileged exec
-    let drift = s.check_drift_and_freeze()?;
+    let drift = s
+        .check_drift_and_freeze()
+        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))?;
     if drift.frozen {
         bail!(
             "session_frozen: re-pin — binding drifted under active pin ({})",
@@ -4354,8 +4478,11 @@ fn cmd_workspace(
 fn cmd_doctor(json: bool) -> Result<()> {
     let s = store()?;
 
-    // Continuous whoami: freeze session if binding material drifted under pin
-    let _ = s.check_drift_and_freeze()?;
+    // Continuous whoami: freeze session if binding material drifted under pin.
+    // Best-effort — a wedged session must not abort doctor itself;
+    // build_doctor_report re-runs this and classifies the wedge as a
+    // stale_session finding with the `locus leave --force` recovery.
+    let _ = s.check_drift_and_freeze();
 
     let report = gather_doctor_report(&s)?;
 
@@ -7083,9 +7210,7 @@ mod setup_merge_tests {
     fn verify_failures_name_unregistered_clients_only() {
         let probe = McpRegistered {
             claude: true,
-            cursor: false,
-            codex: false,
-            grok: false,
+            ..Default::default()
         };
         assert_eq!(
             mcp_verify_failures(&["claude", "cursor", "codex"], &probe),

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Thin npm wrapper for the `locus-mcp` binary.
+ * Thin npm wrapper (published as `@ashlrai/locus-mcp`) for the `locus-mcp` binary.
  *
  * 1. Prefer a cached download under ~/.locus/bin
  * 2. Else download the matching GitHub release asset (locus-<target>.tar.gz)

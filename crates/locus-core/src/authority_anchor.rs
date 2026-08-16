@@ -306,6 +306,89 @@ pub(crate) fn authorize_control(home: &Path) -> Result<()> {
     ping(home, &endpoint, &auth)
 }
 
+/// Authenticate the operator control capability for **wedged-session
+/// teardown** (`locus leave --force`).
+///
+/// Unlike [`authorize_control`], this never requires — and never starts — a
+/// live supervised broker: the whole point of forced teardown is recovering
+/// when the supervisor/broker is gone and every anchor-validated path fails
+/// closed. The gate stays real (fail closed):
+///
+/// - the env capability must be present and well-formed ([`control_auth`]);
+/// - when anything answers the recorded broker endpoint, the capability must
+///   authenticate against it exactly like any other control operation — a
+///   live broker refusing the capability refuses teardown; only a truly
+///   unreachable endpoint is the recovery path;
+/// - when the broker is unreachable but a persisted operator capability
+///   exists (0600 file minted at init/quickstart), the env value must match
+///   it byte-for-byte (constant-time);
+/// - when the broker is unreachable and NO persisted capability exists (the
+///   deliberate `locus init --no-persist-capability` strict posture), no
+///   verifier remains, so teardown is refused unless the operator explicitly
+///   acknowledged the degraded gate (`locus leave --force --no-verifier`,
+///   `allow_unverified`). The acknowledgement never overrides a verifier
+///   that is present and disagrees.
+///
+/// Teardown authority can only delete session state — it never mints,
+/// validates, or issues session generations.
+pub(crate) fn authorize_control_teardown(home: &Path, allow_unverified: bool) -> Result<()> {
+    let auth = control_auth()?;
+    authorize_control_teardown_with(home, allow_unverified, &auth)
+}
+
+fn authorize_control_teardown_with(
+    home: &Path,
+    allow_unverified: bool,
+    auth: &RequestAuth,
+) -> Result<()> {
+    if let Ok(endpoint) = read_endpoint(home) {
+        match ping(home, &endpoint, auth) {
+            Ok(()) => return Ok(()),
+            Err(_) => {
+                // Distinguish an authenticated rejection from a gone broker:
+                // if anything still answers the endpoint socket, the refusal
+                // is authoritative and teardown fails closed — exactly like
+                // normal `locus leave` against the same broker.
+                if platform::connect(&endpoint, IO_TIMEOUT).is_ok() {
+                    return Err(LocusError::ExecutorAuthorityUnavailable(
+                        "a live authority broker answered but refused this control capability — \
+                         refusing forced session teardown"
+                            .into(),
+                    ));
+                }
+                // Endpoint recorded but nothing answers: the broker is gone;
+                // fall through to the persisted-capability verifier.
+            }
+        }
+    }
+    match read_persisted_control_capability(home)? {
+        Some(persisted) => {
+            let persisted_key = decode_capability(&persisted, "persisted control")?;
+            let mismatch = auth
+                .key
+                .iter()
+                .zip(persisted_key.iter())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b));
+            if mismatch != 0 {
+                return Err(LocusError::ExecutorAuthorityUnavailable(
+                    "control capability does not match the persisted operator capability — \
+                     refusing forced session teardown"
+                        .into(),
+                ));
+            }
+            Ok(())
+        }
+        None if allow_unverified => Ok(()),
+        None => Err(LocusError::ExecutorAuthorityUnavailable(
+            "no verifier is available for forced teardown (authority broker unreachable and no \
+             persisted operator capability under this home) — re-run as \
+             `locus leave --force --no-verifier` to explicitly acknowledge tearing down without \
+             capability verification"
+                .into(),
+        )),
+    }
+}
+
 pub(crate) fn validate(
     home: &Path,
     lease: &SessionAuthorityAnchor,
@@ -2027,6 +2110,61 @@ mod tests {
         assert!(unpersist_control_capability(dir.path()).unwrap());
         assert!(!path.exists());
         assert!(!unpersist_control_capability(dir.path()).unwrap());
+    }
+
+    #[test]
+    fn teardown_live_broker_rejection_fails_closed() {
+        let dir = tempdir().unwrap();
+        broker(dir.path());
+        // The correct capability authorizes teardown against the live broker.
+        authorize_control_teardown(dir.path(), false).unwrap();
+        // A wrong-but-well-formed capability is refused by the live broker —
+        // even with the unverified-teardown acknowledgement.
+        let wrong = RequestAuth {
+            credential: RequestCredential::Control,
+            key: decode_capability(&random_hex(32), "control").unwrap(),
+        };
+        for allow_unverified in [false, true] {
+            let err =
+                authorize_control_teardown_with(dir.path(), allow_unverified, &wrong).unwrap_err();
+            assert!(
+                err.to_string().contains("refused"),
+                "expected live-broker refusal, got: {err}"
+            );
+        }
+        retire(dir.path());
+    }
+
+    #[test]
+    fn teardown_without_any_verifier_requires_explicit_acknowledgement() {
+        let dir = tempdir().unwrap();
+        // No broker, no endpoint file, no persisted capability: fail closed…
+        let err = authorize_control_teardown(dir.path(), false).unwrap_err();
+        assert!(err.to_string().contains("no verifier"), "err={err}");
+        // …unless the operator explicitly acknowledges the degraded gate.
+        authorize_control_teardown(dir.path(), true).unwrap();
+    }
+
+    #[test]
+    fn teardown_persisted_capability_must_match_byte_for_byte() {
+        let dir = tempdir().unwrap();
+        let value = mint_persisted_control_capability(dir.path()).unwrap();
+        let good = RequestAuth {
+            credential: RequestCredential::Control,
+            key: decode_capability(&value, "control").unwrap(),
+        };
+        authorize_control_teardown_with(dir.path(), false, &good).unwrap();
+        let wrong = RequestAuth {
+            credential: RequestCredential::Control,
+            key: decode_capability(&random_hex(32), "control").unwrap(),
+        };
+        // A present-but-mismatching verifier is never overridden — not even
+        // with the no-verifier acknowledgement.
+        for allow_unverified in [false, true] {
+            let err =
+                authorize_control_teardown_with(dir.path(), allow_unverified, &wrong).unwrap_err();
+            assert!(err.to_string().contains("does not match"), "err={err}");
+        }
     }
 
     #[test]

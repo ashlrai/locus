@@ -1,6 +1,9 @@
 {
-  "name": "locus-mcp",
+  "name": "@ashlrai/locus-mcp",
   "version": "0.3.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "MCP multiplexor for Locus — tools hard-scoped to the active pin so agents cannot act in the wrong tenant.",
   "bin": {
     "locus-mcp": "bin/locus-mcp.js"

@@ -421,8 +421,20 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     let binding_summaries = store.list_bindings()?;
     let bindings = binding_summaries.len();
     // Freeze on drift first so findings reflect the frozen session state.
-    let runtime = store.check_drift_and_freeze()?;
-    let active = store.active_session()?;
+    //
+    // A wedged active session (corrupt/unreadable file, invalid backing, seal
+    // key trouble) must not abort the diagnostic: doctor is exactly the tool
+    // an operator reaches for in that state. Report the wedge as a finding
+    // that names the recovery (`locus leave --force`) and keep going —
+    // provider access stays blocked by the data-plane gates regardless of
+    // what doctor prints.
+    let (runtime, active, session_wedge) = match store.check_drift_and_freeze() {
+        Ok(runtime) => match store.active_session() {
+            Ok(active) => (runtime, active, None),
+            Err(err) => (RuntimeDrift::wedged(&err.to_string()), None, Some(err)),
+        },
+        Err(err) => (RuntimeDrift::wedged(&err.to_string()), None, Some(err)),
+    };
     let approvals = store.approvals_health()?;
     let pending = store.pending_approvals()?;
     let pending_approvals = pending.len();
@@ -489,6 +501,21 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
 
     let mut findings: Vec<DoctorIssue> = Vec::new();
 
+    // Wedged active session: report + name the recovery instead of dying.
+    // WARN (not UNSAFE) because provider access is already blocked fail-closed
+    // by every data-plane gate; the finding exists to route the operator to
+    // the teardown hatch.
+    if let Some(ref err) = session_wedge {
+        findings.push(issue(
+            IssueSeverity::Warn,
+            "stale_session",
+            format!(
+                "active session is wedged ({err}) — clear it with `locus leave --force`, \
+                 then re-pin: locus enter <alias>"
+            ),
+        ));
+    }
+
     // ── Unsafe ────────────────────────────────────────────────────────────
     let migration_readiness = crate::credential_migration::migration_readiness(store);
     if !migration_readiness.ready() {
@@ -514,7 +541,8 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
         findings.push(issue(
             IssueSeverity::Unsafe,
             "invalid_seal",
-            "active pin seal invalid (session file may be tampered)",
+            "active pin seal invalid (session file may be tampered) — \
+             clear it with `locus leave --force`, then re-pin",
         ));
     }
     for tag in &runtime.issues {
@@ -560,6 +588,21 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                      doctor to verify the anchor",
                 ));
             }
+            // Supervisor-anchor wedge: the session's authority anchor cannot
+            // be reached (supervisor/broker gone). Name the teardown hatch —
+            // normal leave also fails closed in this state.
+            "authority_anchor_unavailable" => {
+                findings.push(issue(
+                    IssueSeverity::Warn,
+                    "anchor_unavailable",
+                    "session authority anchor unavailable (supervisor/broker gone?) — human \
+                     re-pin required; if `locus leave` also fails, clear the wedged pin with \
+                     `locus leave --force`",
+                ));
+            }
+            // Already covered by the dedicated stale_session finding above.
+            "stale_session" => {}
+            unreadable if unreadable.starts_with("session_unreadable:") => {}
             other => {
                 findings.push(issue(
                     IssueSeverity::Warn,
@@ -905,11 +948,25 @@ fn is_scope_freeze_op(op: &str) -> bool {
 }
 
 fn is_deny_op(op: &str) -> bool {
+    if is_advisory_op(op) {
+        return false;
+    }
     op == "approval.deny"
         || op.ends_with(".deny")
         || op.contains("denied")
         || op.contains("policy.deny")
         || op == "mcp.deny"
+}
+
+/// Advisory-by-design audit kinds: expected, benign refusals that must never
+/// feed the `recent_deny` counter. The MCP auto-pin probe audits
+/// `session.auto_pin_denied` on every startup by design (auto-pin never
+/// grants authority), so counting it as a denial turns routine agent startup
+/// into a scary `[recent_deny]` warning. Real policy denials
+/// (`approval.deny`, `*.deny`, `policy.deny`, `mcp.deny`) and scope-freeze
+/// events remain counted.
+fn is_advisory_op(op: &str) -> bool {
+    op == "session.auto_pin_denied" || op == "approval.advisory"
 }
 
 /// Filter helpers for `locus events`.
@@ -1388,6 +1445,94 @@ mod tests {
     }
 
     #[test]
+    fn doctor_reports_wedged_session_instead_of_dying() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        // Wedge the store: active.json is not even parseable. Previously this
+        // made doctor exit with a bare error (the state that forced operators
+        // to hand-delete sessions/active.json).
+        std::fs::write(store.active_session_path(), "{ not json").unwrap();
+        assert!(store.active_session().is_err());
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .expect("doctor must report on a wedged store, not die");
+
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.code == "stale_session")
+            .expect("stale_session finding");
+        assert_eq!(finding.severity, IssueSeverity::Warn);
+        assert!(
+            finding.message.contains("locus leave --force"),
+            "recovery hint missing: {}",
+            finding.message
+        );
+        assert!(report.runtime.issues.iter().any(|i| i == "stale_session"));
+        assert!(!report.runtime.ok);
+        // Fail closed overall: never SAFE on a wedged session.
+        assert_ne!(report.verdict, DoctorVerdict::Safe);
+        // Stable JSON contract still holds for the degraded report.
+        let v = serde_json::to_value(&report).unwrap();
+        doctor_json_has_stable_keys(&v).expect("stable keys");
+    }
+
+    #[test]
+    fn doctor_names_force_leave_when_anchor_unavailable() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        // Supervisor/broker gone: the session's authority anchor can no longer
+        // be validated (or revalidates under a fresh epoch and mismatches).
+        std::fs::remove_dir_all(dir.path().join("runtime")).unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .expect("doctor must report on an anchor-unavailable pin, not die");
+
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.code == "anchor_unavailable")
+            .expect("anchor_unavailable finding");
+        assert_eq!(finding.severity, IssueSeverity::Warn);
+        assert!(
+            finding.message.contains("locus leave --force"),
+            "recovery hint missing: {}",
+            finding.message
+        );
+        assert!(report
+            .runtime
+            .issues
+            .iter()
+            .any(|i| i == "authority_anchor_unavailable"));
+        // Provider trust remains fail-closed: the pin is not verified.
+        assert_eq!(report.pin_seal_ok, Some(false));
+        assert_ne!(report.verdict, DoctorVerdict::Safe);
+    }
+
+    #[test]
     fn doctor_unsafe_on_seal_tamper() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -1577,6 +1722,58 @@ require_pin = true
         let f3 = filter_audit_events(&events, 10, None, Some("b"));
         assert_eq!(f3.len(), 1);
         assert_eq!(f3[0].binding, "b");
+    }
+
+    #[test]
+    fn advisory_ops_are_not_denials() {
+        // Advisory-by-design refusals never count.
+        assert!(!is_deny_op("session.auto_pin_denied"));
+        assert!(!is_deny_op("approval.advisory"));
+        // Real denials stay counted.
+        assert!(is_deny_op("approval.deny"));
+        assert!(is_deny_op("mcp.deny"));
+        assert!(is_deny_op("policy.deny"));
+        assert!(is_deny_op("provider.tool.deny"));
+        assert!(is_deny_op("exec.denied_by_policy"));
+        // Scope-freeze stays in its own counter, not deny.
+        assert!(is_scope_freeze_op("mcp.scope_freeze"));
+        assert!(!is_deny_op("mcp.scope_freeze"));
+    }
+
+    #[test]
+    fn recent_deny_ignores_auto_pin_probe_but_counts_real_denials() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        // Benign advisory auto-pin probes (audited on every MCP startup with
+        // auto-pin knobs set) must not produce a [recent_deny] warning.
+        store
+            .audit("session.auto_pin_denied", "acme", None)
+            .unwrap();
+        store
+            .audit("session.auto_pin_denied", "acme", None)
+            .unwrap();
+        let external = || DoctorExternal {
+            phantom_on_path: true,
+            unresolved_phm: Vec::new(),
+            cwd: Some(dir.path().to_path_buf()),
+        };
+        let report = build_doctor_report(&store, external()).unwrap();
+        assert_eq!(report.audit.deny, 0, "advisory probe counted as denial");
+        assert!(
+            !report.findings.iter().any(|f| f.code == "recent_deny"),
+            "advisory auto-pin probe must not trigger recent_deny"
+        );
+
+        // A real denial still trips the warning.
+        store.audit("approval.deny", "acme", None).unwrap();
+        let report = build_doctor_report(&store, external()).unwrap();
+        assert_eq!(report.audit.deny, 1);
+        assert!(report.findings.iter().any(|f| f.code == "recent_deny"));
     }
 
     #[test]

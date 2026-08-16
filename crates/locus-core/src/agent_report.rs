@@ -56,10 +56,27 @@ impl AgentStatus {
     }
 }
 
+/// Which config scope registered `locus` for Claude Code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeMcpScope {
+    /// Project `.mcp.json` only.
+    Project,
+    /// User-scope `~/.claude.json` (top-level `mcpServers`) only.
+    User,
+    /// Registered in both project and user scope.
+    Both,
+}
+
 /// Which AI clients have `locus-mcp` registered.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpRegistered {
     pub claude: bool,
+    /// Where the Claude registration was found (`project` / `user` / `both`).
+    /// Additive: absent when `claude` is false and in reports from older
+    /// binaries — the `claude` bool remains the compatibility surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_scope: Option<ClaudeMcpScope>,
     pub cursor: bool,
     pub codex: bool,
     /// Grok Build. Probed at its documented config path
@@ -363,7 +380,10 @@ fn build_commands(project_dir: Option<&Path>, pin: Option<&DoctorPin>) -> AgentC
 
 /// Detect whether locus-mcp is registered for common AI clients.
 ///
-/// - Claude: project `.mcp.json` → `mcpServers.locus`
+/// - Claude: project `.mcp.json` → `mcpServers.locus`, **or** user-scope
+///   `~/.claude.json` → top-level `mcpServers.locus` (the file `claude mcp
+///   add --scope user` manages). The probe only reads `~/.claude.json`;
+///   Locus never writes it. `claude_scope` reports which scope(s) matched.
 /// - Cursor: project `.cursor/mcp.json` or `~/.cursor/mcp.json`
 /// - Codex: `~/.codex/config.toml` → `[mcp_servers.locus]`
 /// - Grok Build: `~/.grok/config.toml` → `[mcp_servers.locus]` (documented
@@ -382,7 +402,20 @@ pub fn probe_mcp_registered_with_grok(
     user_home: Option<&Path>,
     grok_config: Option<&Path>,
 ) -> McpRegistered {
-    let claude = mcp_json_has_locus(&project_dir.join(".mcp.json"));
+    // Claude: project scope (.mcp.json) and user scope (~/.claude.json,
+    // top-level mcpServers — same JSON shape). Read-only probe: ~/.claude.json
+    // is owned by Claude Code and Locus never writes it.
+    let claude_project = mcp_json_has_locus(&project_dir.join(".mcp.json"));
+    let claude_user = user_home
+        .map(|h| mcp_json_has_locus(&h.join(".claude.json")))
+        .unwrap_or(false);
+    let claude = claude_project || claude_user;
+    let claude_scope = match (claude_project, claude_user) {
+        (true, true) => Some(ClaudeMcpScope::Both),
+        (true, false) => Some(ClaudeMcpScope::Project),
+        (false, true) => Some(ClaudeMcpScope::User),
+        (false, false) => None,
+    };
 
     let cursor_project = project_dir.join(".cursor").join("mcp.json");
     let cursor_global = user_home.map(|h| h.join(".cursor").join("mcp.json"));
@@ -409,6 +442,7 @@ pub fn probe_mcp_registered_with_grok(
 
     McpRegistered {
         claude,
+        claude_scope,
         cursor,
         codex,
         grok,
@@ -948,9 +982,7 @@ mod tests {
             AgentReportOptions {
                 mcp: McpRegistered {
                     claude: true,
-                    cursor: false,
-                    codex: false,
-                    grok: false,
+                    ..Default::default()
                 },
                 project_dir: Some(dir.path().to_path_buf()),
                 home_ready: true,
@@ -1069,6 +1101,84 @@ mod tests {
         let m =
             probe_mcp_registered_with_grok(&project, Some(&home), Some(&home.join("missing.json")));
         assert!(!m.grok);
+    }
+
+    #[test]
+    fn probe_claude_user_scope_and_scope_reporting() {
+        let dir = tempdir().unwrap();
+        let project = dir.path().join("proj");
+        let home = dir.path().join("home");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&home).unwrap();
+
+        // Neither scope: false, no scope.
+        let m = probe_mcp_registered(&project, Some(&home));
+        assert!(!m.claude);
+        assert_eq!(m.claude_scope, None);
+
+        // User scope only (~/.claude.json top-level mcpServers): the probe
+        // must not be cwd-relative — claude is true from any project dir.
+        fs::write(
+            home.join(".claude.json"),
+            r#"{"mcpServers":{"locus":{"command":"locus-mcp"}},"projects":{}}"#,
+        )
+        .unwrap();
+        let m = probe_mcp_registered(&project, Some(&home));
+        assert!(m.claude, "user-scope ~/.claude.json registration missed");
+        assert_eq!(m.claude_scope, Some(ClaudeMcpScope::User));
+
+        // Both scopes.
+        fs::write(
+            project.join(".mcp.json"),
+            r#"{"mcpServers":{"locus":{"command":"locus-mcp"}}}"#,
+        )
+        .unwrap();
+        let m = probe_mcp_registered(&project, Some(&home));
+        assert!(m.claude);
+        assert_eq!(m.claude_scope, Some(ClaudeMcpScope::Both));
+
+        // Project scope only.
+        fs::remove_file(home.join(".claude.json")).unwrap();
+        let m = probe_mcp_registered(&project, Some(&home));
+        assert!(m.claude);
+        assert_eq!(m.claude_scope, Some(ClaudeMcpScope::Project));
+
+        // No user home at all: project scope still resolves.
+        let m = probe_mcp_registered(&project, None);
+        assert!(m.claude);
+        assert_eq!(m.claude_scope, Some(ClaudeMcpScope::Project));
+
+        // A ~/.claude.json without a locus entry never registers.
+        fs::write(home.join(".claude.json"), r#"{"mcpServers":{}}"#).unwrap();
+        fs::remove_file(project.join(".mcp.json")).unwrap();
+        let m = probe_mcp_registered(&project, Some(&home));
+        assert!(!m.claude);
+        assert_eq!(m.claude_scope, None);
+    }
+
+    #[test]
+    fn mcp_registered_json_shape_is_additive() {
+        // Older shape (no claude_scope key) still deserializes.
+        let legacy: McpRegistered =
+            serde_json::from_str(r#"{"claude":true,"cursor":false,"codex":false,"grok":false}"#)
+                .unwrap();
+        assert!(legacy.claude);
+        assert_eq!(legacy.claude_scope, None);
+
+        // claude_scope is omitted when absent…
+        let v = serde_json::to_value(McpRegistered::default()).unwrap();
+        assert!(v.get("claude_scope").is_none());
+
+        // …and serializes as a plain snake_case string when present.
+        let m = McpRegistered {
+            claude: true,
+            claude_scope: Some(ClaudeMcpScope::User),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&m).unwrap()["claude_scope"],
+            serde_json::json!("user")
+        );
     }
 
     #[test]

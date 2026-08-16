@@ -477,12 +477,35 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
     assert!(is_err, "expected supabase freeze deny: {text}");
     assert!(text.contains("scope freeze") || text.contains("proj_evil"));
 
-    // require_approval path writes pending approval for locus approve
-    let del = client.request(
+    // read_only supabase scope: the destructive tool is denied at the call
+    // gate — no approval record is minted for a tool that can never execute.
+    let ro = client.request(
         "tools/call",
         json!({
             "name": "supabase.table.delete",
             "arguments": { "table": "users" }
+        }),
+    );
+    let (ro_text, ro_err) = McpClient::tool_text(&ro);
+    assert!(
+        ro_err,
+        "read_only destructive call must be denied: {ro_text}"
+    );
+    assert!(
+        ro_text.contains("denied_read_only_scope"),
+        "unexpected read_only denial: {ro_text}"
+    );
+    assert!(
+        store.pending_approvals().unwrap().is_empty(),
+        "read_only denial must not mint an approval record"
+    );
+
+    // require_approval path writes pending approval for locus approve
+    let del = client.request(
+        "tools/call",
+        json!({
+            "name": "github.delete_repo",
+            "arguments": { "owner": "acme-corp", "repo": "users" }
         }),
     );
     let (text, is_err) = McpClient::tool_text(&del);
@@ -507,13 +530,13 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
         "expected pending approval record under approvals/"
     );
     assert!(pending.iter().any(|r| {
-        r.tool == "supabase.table.delete" && r.binding == "acme" && r.id.starts_with("appr_")
+        r.tool == "github.delete_repo" && r.binding == "acme" && r.id.starts_with("appr_")
     }));
 
     // A local assertion remains advisory and cannot unlock provider execution.
     let id = pending
         .iter()
-        .find(|r| r.tool == "supabase.table.delete")
+        .find(|r| r.tool == "github.delete_repo")
         .unwrap()
         .id
         .clone();
@@ -521,8 +544,8 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
     let del2 = client.request(
         "tools/call",
         json!({
-            "name": "supabase.table.delete",
-            "arguments": { "table": "users" }
+            "name": "github.delete_repo",
+            "arguments": { "owner": "acme-corp", "repo": "users" }
         }),
     );
     let (text2, is_err2) = McpClient::tool_text(&del2);

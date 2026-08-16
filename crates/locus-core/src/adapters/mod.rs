@@ -150,6 +150,48 @@ pub fn tools_for_binding(binding: &Binding) -> Vec<AdapterTool> {
     out
 }
 
+/// Marker appended to approval-gated tool descriptions in tools/list.
+///
+/// Presentation-layer truth only — call-time enforcement is unchanged.
+pub const REQUIRES_APPROVAL_MARKER: &str = "[requires human approval under current pin]";
+
+/// Presentation-layer catalog shaping for a single tool of one binding.
+///
+/// `bare_name` is the unprefixed `provider.tool` name — the exact string the
+/// call-time policy engine evaluates (namespaced `alias__` prefixes must be
+/// stripped by the caller so glob semantics match call-time exactly).
+///
+/// Returns `false` when the tool must be omitted from tools/list because the
+/// pinned binding can never execute it: the owning provider scope is
+/// `read_only = true` and the adapter classified the tool destructive.
+/// Classification is conservative — only the adapter-declared `destructive`
+/// flag hides a tool; anything not certainly a write stays listed.
+///
+/// Otherwise, when policy evaluation (same engine as call-time:
+/// [`evaluate`]) yields `RequireApproval`, the description is annotated with
+/// [`REQUIRES_APPROVAL_MARKER`] so agents and operators can see the gate
+/// before spending a call.
+///
+/// This mirrors real enforcement rather than inventing it: a tool hidden
+/// here because of a read_only scope is denied at call time by the read_only
+/// scope gate in [`enforce_policy`] (`denied_read_only_scope`), and an
+/// annotated tool hits the same policy engine that produced the annotation.
+pub fn shape_catalog_tool(binding: &Binding, bare_name: &str, tool: &mut AdapterTool) -> bool {
+    if tool.destructive {
+        if let Some(p) = binding.provider(&tool.provider) {
+            if p.scope.read_only == Some(true) {
+                return false;
+            }
+        }
+    }
+    if evaluate(&binding.policy, bare_name).decision == Decision::RequireApproval
+        && !tool.description.contains(REQUIRES_APPROVAL_MARKER)
+    {
+        tool.description = format!("{} {REQUIRES_APPROVAL_MARKER}", tool.description.trim_end());
+    }
+    true
+}
+
 /// Dispatch a tool call against the pinned binding (no approval store).
 ///
 /// For `require_approval` tools this always blocks. Prefer gated calls from MCP
@@ -171,6 +213,11 @@ pub fn enforce_policy(
     // Scope is part of authorization and must fail before approval creation or
     // any caller has an opportunity to start an upstream worker.
     preflight_scope_freeze(binding, tool_name, args)?;
+    // read_only scope wins before policy: a read_only pin can never execute a
+    // destructive tool, so no approval record is ever minted for one.
+    if let Some(blocked) = enforce_read_only_scope(binding, tool_name) {
+        return Ok(Some(blocked));
+    }
     let verdict = evaluate(&binding.policy, tool_name);
     match verdict.decision {
         Decision::Deny => Ok(Some(ToolCallResult {
@@ -280,6 +327,48 @@ pub fn call_tool_gated(
     }
     let verdict = evaluate(&binding.policy, tool_name);
     dispatch_tool(binding, tool_name, args, verdict)
+}
+
+/// Call-time enforcement of `read_only = true` provider scopes (fail closed).
+///
+/// Mirrors the catalog rule in [`shape_catalog_tool`]: every tool the catalog
+/// omits because the pinned provider scope is `read_only = true` and the
+/// adapter classified it destructive is denied here when invoked directly, so
+/// the "hidden tools can never execute" presentation claim is enforced at the
+/// gate rather than assumed. Runs after the scope freeze (hard errors keep
+/// precedence) and before policy evaluation.
+fn enforce_read_only_scope(binding: &Binding, tool_name: &str) -> Option<ToolCallResult> {
+    let provider_name = tool_name.split('.').next().unwrap_or("");
+    // Undeclared providers were already denied by `preflight_scope_freeze`.
+    let p = binding.provider(provider_name)?;
+    if p.scope.read_only != Some(true) {
+        return None;
+    }
+    let destructive = adapter_for(&p.provider).is_some_and(|adapter| {
+        adapter
+            .tools(p, binding)
+            .iter()
+            .any(|t| t.name == tool_name && t.destructive)
+    });
+    if !destructive {
+        return None;
+    }
+    Some(ToolCallResult {
+        ok: false,
+        content: json!({
+            "error": "denied_read_only_scope",
+            "detail": format!(
+                "provider `{}` is pinned read_only; destructive tool `{tool_name}` is denied",
+                p.provider
+            ),
+        }),
+        policy: Some(PolicyVerdict {
+            decision: Decision::Deny,
+            matched_rule: Some("scope.read_only".into()),
+            reason: "provider scope freezes read_only=true — destructive tools are denied at the call gate"
+                .into(),
+        }),
+    })
 }
 
 /// Shared account-selector freezes applied before policy evaluation.
@@ -1108,9 +1197,16 @@ mod tests {
         assert!(err.is_err(), "upstream path must deny undeclared provider");
     }
 
+    /// `acme()` without the read_only freeze — exercises the approval glob alone.
+    fn acme_writable() -> Binding {
+        let mut b = acme();
+        b.providers[0].scope.read_only = None;
+        b
+    }
+
     #[test]
     fn require_approval_blocks_delete() {
-        let b = acme();
+        let b = acme_writable();
         let r = call_tool(&b, "supabase.table.delete", &json!({"table": "users"})).unwrap();
         assert!(!r.ok);
         assert_eq!(
@@ -1121,7 +1217,7 @@ mod tests {
 
     #[test]
     fn confirm_alone_does_not_bypass_without_grant() {
-        let b = acme();
+        let b = acme_writable();
         let r = call_tool(
             &b,
             "supabase.table.delete",
@@ -1149,9 +1245,10 @@ mod tests {
                 provider: "supabase".into(),
                 account: "acme".into(),
                 credential_ref: "phm:SUPABASE_ACME".into(),
+                // Not read_only: the destructive stub must reach the freeze
+                // path (read_only would deny it earlier at the call gate).
                 scope: Scope {
                     project_ref: Some("proj_acme".into()),
-                    read_only: Some(true),
                     ..Scope::default()
                 },
                 upstream: None,
@@ -1466,5 +1563,144 @@ mod tests {
             assert_eq!(result.content["credential"]["present"], true);
             assert_eq!(result.content["credential"]["source"], "phantom");
         }
+    }
+
+    // ── Policy-aware catalog shaping (presentation-layer truth) ───────────
+
+    fn shaped_catalog(binding: &Binding) -> Vec<AdapterTool> {
+        let mut out = Vec::new();
+        for mut t in tools_for_binding(binding) {
+            let bare = t.name.clone();
+            if shape_catalog_tool(binding, &bare, &mut t) {
+                out.push(t);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn read_only_scope_hides_destructive_tools_but_call_still_denied() {
+        let b = acme(); // supabase read_only=true, require_approval "*.delete*"
+        let shaped = shaped_catalog(&b);
+        assert!(
+            !shaped.iter().any(|t| t.name == "supabase.table.delete"),
+            "read_only scope must hide destructive tools from the catalog"
+        );
+        // Non-destructive tools survive the shaping.
+        assert!(shaped.iter().any(|t| t.name == "supabase.scope"));
+        assert!(shaped.iter().any(|t| t.name == "supabase.project_ref"));
+
+        // The hidden tool is denied at the call gate: read_only wins before
+        // the approval glob can mint a pending approval.
+        let r = call_tool(&b, "supabase.table.delete", &json!({"table": "users"})).unwrap();
+        assert!(!r.ok);
+        assert_eq!(
+            r.content.get("error").and_then(|v| v.as_str()),
+            Some("denied_read_only_scope")
+        );
+    }
+
+    #[test]
+    fn read_only_scope_denies_destructive_call_without_approval_glob() {
+        // No require_approval / deny rules at all — policy default is Allow, so
+        // only the read_only scope stands between the call and execution.
+        let b = Binding::from_body(BindingBody {
+            id: "bnd_ro".into(),
+            alias: "ro".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "supabase".into(),
+                account: "acme".into(),
+                credential_ref: "phm:SUPABASE_ACME".into(),
+                scope: Scope {
+                    project_ref: Some("proj_acme".into()),
+                    read_only: Some(true),
+                    ..Scope::default()
+                },
+                upstream: None,
+            }],
+        });
+        let r = call_tool(&b, "supabase.table.delete", &json!({ "table": "users" })).unwrap();
+        assert!(!r.ok, "read_only scope must deny destructive call: {r:?}");
+        assert_eq!(
+            r.content.get("error").and_then(|v| v.as_str()),
+            Some("denied_read_only_scope")
+        );
+        assert_eq!(r.policy.unwrap().decision, Decision::Deny);
+        // Non-destructive tools on the same read_only provider still execute.
+        let ok = call_tool(&b, "supabase.scope", &json!({})).unwrap();
+        assert!(ok.ok, "read tool must survive read_only scope");
+    }
+
+    #[test]
+    fn require_approval_glob_annotates_gated_tools_only() {
+        let b = vercel_binding(); // require_approval "vercel.deploy.prod", no read_only
+        let shaped = shaped_catalog(&b);
+        let deploy = shaped
+            .iter()
+            .find(|t| t.name == "vercel.deploy.prod")
+            .expect("destructive tool stays listed when scope is not read_only");
+        assert!(
+            deploy.description.contains(REQUIRES_APPROVAL_MARKER),
+            "gated tool must carry the approval marker: {}",
+            deploy.description
+        );
+        let scope_tool = shaped.iter().find(|t| t.name == "vercel.scope").unwrap();
+        assert!(
+            !scope_tool.description.contains(REQUIRES_APPROVAL_MARKER),
+            "ungated tool must not be annotated"
+        );
+
+        // Re-shaping never duplicates the marker (idempotent listing).
+        let mut again = deploy.clone();
+        assert!(shape_catalog_tool(&b, "vercel.deploy.prod", &mut again));
+        assert_eq!(
+            again.description.matches(REQUIRES_APPROVAL_MARKER).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn structured_allow_rule_suppresses_annotation() {
+        // First-match allow rule beats a later require_approval glob at
+        // call-time — the annotation follows the same engine and stays silent.
+        let b = Binding::from_body(BindingBody {
+            id: "bnd_vc2".into(),
+            alias: "vc2".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy {
+                rules: vec![crate::binding::PolicyRule::new(
+                    "vercel.deploy.prod",
+                    "allow",
+                )],
+                require_approval: vec!["vercel.*".into()],
+                ..Policy::default()
+            },
+            providers: vec![ProviderBinding {
+                provider: "vercel".into(),
+                account: "acme-vc".into(),
+                credential_ref: "phm:VERCEL_ACME".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        });
+        let shaped = shaped_catalog(&b);
+        let deploy = shaped
+            .iter()
+            .find(|t| t.name == "vercel.deploy.prod")
+            .unwrap();
+        assert!(
+            !deploy.description.contains(REQUIRES_APPROVAL_MARKER),
+            "allow-ruled tool must not be annotated: {}",
+            deploy.description
+        );
+        // vercel.scope matches the legacy `vercel.*` glob → annotated.
+        let scope_tool = shaped.iter().find(|t| t.name == "vercel.scope").unwrap();
+        assert!(scope_tool.description.contains(REQUIRES_APPROVAL_MARKER));
     }
 }

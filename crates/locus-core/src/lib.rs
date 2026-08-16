@@ -61,8 +61,8 @@ pub use agent_report::{
     agent_report_json_has_stable_keys, build_agent_report, compute_safe_next, mcp_agent_env,
     probe_agent_options, probe_mcp_registered, probe_mcp_registered_with_grok, verify_session,
     workspace_present, workspace_stub_toml, AgentCommands, AgentReport, AgentReportOptions,
-    AgentStatus, McpRegistered, SafeNext, SessionVerificationPack, AGENT_REPORT_JSON_KEYS,
-    REQUIRED_SERVERS,
+    AgentStatus, ClaudeMcpScope, McpRegistered, SafeNext, SessionVerificationPack,
+    AGENT_REPORT_JSON_KEYS, REQUIRED_SERVERS,
 };
 pub use approval::notifications_enabled;
 pub use approval::{
@@ -135,7 +135,7 @@ pub use session::{
 };
 pub use store::{
     locus_home, ApprovalsHealth, AuditEvent, CredentialRefMigration, EngagementInitResult,
-    ProviderView, ResolvedSession, RuntimeDrift, Store, Whoami,
+    ForceLeaveOutcome, ProviderView, ResolvedSession, RuntimeDrift, Store, Whoami,
 };
 pub use ticket::{
     mint_ticket, verify_ticket, verify_ticket_parts, CapabilityTicket, DEFAULT_TICKET_TTL_SECS,
