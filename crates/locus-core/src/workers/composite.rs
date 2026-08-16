@@ -115,6 +115,13 @@ pub struct CompositeWorkerManager {
     last_used: BTreeMap<WorkerKey, Instant>,
     /// When set, `ensure*` / `call_tool` paths may reap idle workers first.
     idle_timeout: Option<Duration>,
+    /// Multi-session mode (multi-tenant server): many sealed sessions are
+    /// live concurrently in ONE manager, so `ensure*` must NOT focus-teardown
+    /// slots belonging to other sessions (that is single-tenant pin-switch
+    /// semantics — it would kill sibling tenants' credential-bearing workers
+    /// on every call). Lifecycle is instead driven by explicit per-grant
+    /// teardown (DELETE /mcp, dead-grant sweeps, TTL reconcile) + idle reap.
+    multi_session: bool,
 }
 
 impl Default for CompositeWorkerManager {
@@ -131,6 +138,7 @@ impl CompositeWorkerManager {
             slots: BTreeMap::new(),
             last_used: BTreeMap::new(),
             idle_timeout: idle_timeout_from_env(),
+            multi_session: false,
         }
     }
 
@@ -148,6 +156,26 @@ impl CompositeWorkerManager {
 
     pub fn idle_timeout(&self) -> Option<Duration> {
         self.idle_timeout
+    }
+
+    /// Enable multi-session mode (multi-tenant server): `ensure*` keeps other
+    /// sessions' workers alive instead of focus-tearing them down. Set once at
+    /// startup, before the manager serves requests.
+    pub fn set_multi_session(&mut self, multi: bool) {
+        self.multi_session = multi;
+    }
+
+    pub fn multi_session(&self) -> bool {
+        self.multi_session
+    }
+
+    /// Single-tenant pin switch: drop workers from other sessions. No-op in
+    /// multi-session mode where concurrent sessions are the normal state.
+    fn focus_session_unless_multi(&mut self, session_id: &str) -> Result<()> {
+        if self.multi_session {
+            return Ok(());
+        }
+        self.focus_session(session_id)
     }
 
     fn touch(&mut self, key: &WorkerKey) {
@@ -211,7 +239,7 @@ impl CompositeWorkerManager {
         binding: &Binding,
     ) -> Result<Vec<WorkerSlot>> {
         let _ = self.reap_idle_configured()?;
-        self.focus_session(&session.session_id)?;
+        self.focus_session_unless_multi(&session.session_id)?;
         self.ensure_all(session, binding)
     }
 
@@ -225,7 +253,7 @@ impl CompositeWorkerManager {
         provider: &str,
     ) -> Result<WorkerSlot> {
         let _ = self.reap_idle_configured()?;
-        self.focus_session(&session.session_id)?;
+        self.focus_session_unless_multi(&session.session_id)?;
         self.ensure(session, binding, provider)
     }
 
@@ -344,7 +372,7 @@ impl CompositeWorkerManager {
         bindings: &[(String, Binding)],
     ) -> Result<Vec<WorkerSlot>> {
         let _ = self.reap_idle_configured()?;
-        self.focus_session(&session.session_id)?;
+        self.focus_session_unless_multi(&session.session_id)?;
         let before = self.slots.keys().cloned().collect::<BTreeSet<_>>();
         let mut out = Vec::new();
         for (_, binding) in bindings {
@@ -859,6 +887,47 @@ for line in sys.stdin:
             .iter()
             .all(|sl| sl.key.session_id == s2.session_id));
         assert_eq!(mgr.list().len(), 2);
+    }
+
+    #[test]
+    fn multi_session_ensure_keeps_other_sessions_workers() {
+        // Multi-tenant server: tenant A's tools/call must never tear down
+        // tenant B's live workers (each grant has its own session_id but
+        // shares the singleton manager). Synthetic-only — no child spawn.
+        let dir = tempdir().unwrap();
+        let wh1 = dir.path().join("w1");
+        let wh2 = dir.path().join("w2");
+        std::fs::create_dir_all(&wh1).unwrap();
+        std::fs::create_dir_all(&wh2).unwrap();
+        let s1 = session_at(&wh1.display().to_string());
+        let mut s2 = session_at(&wh2.display().to_string());
+        s2.session_id = format!("{}-other", s1.session_id);
+        let binding = binding_mixed(false);
+
+        let mut mgr = CompositeWorkerManager::new();
+        mgr.set_multi_session(true);
+        mgr.ensure_binding(&s1, &binding).unwrap();
+        assert_eq!(mgr.list().len(), 2);
+        // Alternating tenants: neither ensure_binding nor ensure_provider
+        // evicts the sibling session's slots.
+        mgr.ensure_binding(&s2, &binding).unwrap();
+        assert_eq!(mgr.list().len(), 4, "both sessions' slots stay live");
+        mgr.ensure_provider(&s1, &binding, "github").unwrap();
+        assert_eq!(mgr.list().len(), 4, "ensure_provider must not evict");
+        assert!(mgr
+            .list()
+            .iter()
+            .any(|sl| sl.key.session_id == s1.session_id));
+        assert!(mgr
+            .list()
+            .iter()
+            .any(|sl| sl.key.session_id == s2.session_id));
+        // Explicit per-session teardown still works (grant death path).
+        mgr.teardown_session(&s1.session_id).unwrap();
+        assert!(mgr
+            .list()
+            .iter()
+            .all(|sl| sl.key.session_id == s2.session_id));
     }
 
     #[test]

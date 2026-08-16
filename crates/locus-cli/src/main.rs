@@ -25,8 +25,8 @@ use locus_core::{
     verify_claim, verify_manifest_with_keys, verify_session, workspace_stub_toml, AgentStatus,
     Binding, BindingBody, CredentialRef, CredentialResolutionIssue, DoctorExternal, DoctorVerdict,
     EventsExportFormat, EventsExportOptions, EventsExportSink, ForensicsExportOptions, IsolatedEnv,
-    McpRegistered, Policy, ProviderBinding, Scope, Session, Store, TrustKeyOrigin, WorkspaceConfig,
-    AUDIT_WEBHOOK_URL_ENV, VERSION,
+    LocusError, McpRegistered, Policy, ProviderBinding, Scope, Session, Store, TrustKeyOrigin,
+    WorkspaceConfig, AUDIT_WEBHOOK_URL_ENV, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -45,7 +45,7 @@ Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
   Setup         init · quickstart · setup · agent · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter\n  \
-  Daily use     enter · pin · leave · whoami · status · exec · run · binding\n  \
+  Daily use     enter · switch · pin · leave · whoami · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
   Audit         events · forensics\n  \
@@ -155,9 +155,12 @@ enum Commands {
         shell: String,
     },
 
-    /// Run the locus-mcp stdio server (same as the locus-mcp binary)
+    /// Run the locus-mcp stdio server, or manage multi-tenant MCP grants
     #[command(next_help_heading = "Setup")]
-    Mcp,
+    Mcp {
+        #[command(subcommand)]
+        cmd: Option<McpCmd>,
+    },
 
     // ─────────────────────────── Daily use ───────────────────────────
     /// Enter a client context (pin + shell-friendly status)
@@ -181,6 +184,28 @@ enum Commands {
         /// Print `export LOCUS_*=…` lines for eval
         #[arg(long)]
         exports: bool,
+    },
+
+    /// One-shot switch: leave the active pin (if any) and enter ALIAS
+    ///
+    /// Same fail-closed paths and errors as `leave` + `enter`. A target that
+    /// `enter` would refuse (unknown alias, outside the workspace allowlist)
+    /// is refused *before* the current pin is dropped. Audits normally via
+    /// the underlying leave/pin operations.
+    #[command(next_help_heading = "Daily use")]
+    Switch {
+        /// Binding alias or id to switch to
+        alias: String,
+        /// Allow bindings outside workspace allowlist
+        #[arg(long)]
+        force: bool,
+        /// Client label recorded on the session (claude, cursor, cli)
+        #[arg(long)]
+        client: Option<String>,
+        /// Auto-expire the new pin after DUR (e.g. 30m, 2h; min 1m, max 24h;
+        /// capped by the binding's policy.max_ttl)
+        #[arg(long, value_name = "DUR")]
+        ttl: Option<String>,
     },
 
     /// Pin the current session to a binding
@@ -500,6 +525,49 @@ enum AgentCmd {
         /// Emit JSON (hub contract). Also available as global `--json`.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum McpCmd {
+    /// Mint a multi-tenant MCP grant (sealed session + bearer token)
+    ///
+    /// Prints `lmt_<grant_id>.<secret>` exactly once — only the token's HMAC
+    /// is stored at rest. Serve with `locus-mcp --http --multi-tenant`; the
+    /// client presents the token as `X-Locus-Tenant-Token` on every request.
+    Mint {
+        /// Binding alias to bind the grant to
+        #[arg(short = 'b', long = "binding")]
+        binding: String,
+        /// Grant TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        #[arg(long, default_value = "1h")]
+        ttl: String,
+        /// Free-form operator label (shown in `locus mcp list`)
+        #[arg(long)]
+        label: Option<String>,
+        /// Allow bindings outside workspace allowlist
+        #[arg(long)]
+        force: bool,
+        /// Emit JSON (mint always prints JSON; flag kept for consistency)
+        #[arg(long)]
+        json: bool,
+    },
+    /// List grants (operator-only; there is deliberately NO HTTP enumeration)
+    List {
+        /// Emit JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Revoke grants: by id, per binding, or all
+    Revoke {
+        /// Grant id to revoke
+        grant_id: Option<String>,
+        /// Revoke every grant for this binding alias
+        #[arg(short = 'b', long = "binding")]
+        binding: Option<String>,
+        /// Revoke every grant
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -910,6 +978,12 @@ fn run() -> Result<()> {
             ttl,
             exports,
         } => cmd_enter(alias, force, client, exports, ttl, cli.json),
+        Commands::Switch {
+            alias,
+            force,
+            client,
+            ttl,
+        } => cmd_switch(alias, force, client, ttl, cli.json),
         Commands::Pin {
             alias,
             force,
@@ -939,7 +1013,10 @@ fn run() -> Result<()> {
             cmd,
         } => cmd_run(binding, share_pin, cmd, !no_resolve, strict_creds, force),
         Commands::Ci(sub) => cmd_ci(sub, cli.json),
-        Commands::Mcp => cmd_mcp(),
+        Commands::Mcp { cmd } => match cmd {
+            None => cmd_mcp(),
+            Some(sub) => cmd_mcp_sub(sub, cli.json),
+        },
         Commands::Binding(sub) => cmd_binding(sub, cli.json),
         Commands::Client(sub) => cmd_client(sub, cli.json),
         Commands::Upstream(sub) => cmd_upstream(sub, cli.json),
@@ -1728,7 +1805,7 @@ scope = { team_id = "team_personal_replace_me", env = ["preview", "production"] 
 
     let acme = r#"# Sample client binding (Acme) — REPLACE placeholders before real work.
 # Client work: prefer read_only on prod Supabase; require_approval on delete/deploy.
-# Switch: locus enter acme   |   leave: locus leave
+# Switch: locus switch acme   |   leave: locus leave
 # Dual-control / firm mode: docs/firm-mode.md
 
 [binding]
@@ -2067,6 +2144,165 @@ fn cmd_enter(
         "locus exec -- <cmd>".dimmed(),
         "locus leave".dimmed()
     );
+    Ok(())
+}
+
+/// Outcome of the one-shot `locus switch` flow (leave-if-pinned + enter).
+#[derive(Debug)]
+struct SwitchOutcome {
+    /// The session that was left, when one was active.
+    left: Option<Session>,
+    /// The freshly pinned session.
+    session: Session,
+    providers_n: usize,
+    /// TTL actually granted on the new pin.
+    granted: chrono::Duration,
+    /// True when the `--ttl` request was silently capped by policy.max_ttl.
+    ttl_capped: bool,
+}
+
+/// Core of `locus switch <alias>`: leave-if-pinned + enter, fail closed.
+///
+/// Pre-flights the target with the same checks `enter` runs — binding
+/// existence (with alias suggestions) and the workspace allowlist — BEFORE
+/// leaving, so a target `enter` would refuse never drops the current pin.
+/// The pin path then re-runs every check authoritatively: the pre-flight is
+/// operator UX, not the gate. Audits normally via the underlying
+/// `session.leave` + `session.pin` operations.
+fn switch_flow(
+    s: &Store,
+    alias: &str,
+    cwd: &Path,
+    force: bool,
+    client: Option<String>,
+    requested_ttl: Option<chrono::Duration>,
+) -> Result<SwitchOutcome> {
+    // Pre-flight: unknown target refuses (with suggestions) before leaving.
+    let target = s
+        .load_binding(alias)
+        .map_err(|e| with_alias_suggestions(s, e))?;
+    // Pre-flight: same workspace-allowlist rule the pin path enforces.
+    if let Some((_, cfg)) = find_workspace(cwd)? {
+        if !cfg.allows(&target.alias) && !cfg.allows(&target.id) && !force {
+            return Err(with_alias_suggestions(
+                s,
+                LocusError::BindingNotAllowed(target.alias.clone()),
+            ));
+        }
+    }
+    // Leave-if-pinned: the normal leave path (audits session.leave, revokes
+    // session authority, cleans the worker home). A wedged session fails
+    // closed here exactly like `locus leave` would.
+    let left = s
+        .leave()
+        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))?;
+    // Enter: the authoritative fail-closed path (allowlist, policy.max_ttl
+    // cap, seal) — audits session.pin normally.
+    let session = match s.pin_with_ttl(alias, cwd, client, force, requested_ttl) {
+        Ok(session) => session,
+        Err(e) => {
+            let err = with_alias_suggestions(s, e);
+            return Err(if left.is_some() {
+                err.context(
+                    "switch left the previous pin before enter failed — identity is now \
+                     clear; re-pin with `locus enter <alias>`",
+                )
+            } else {
+                err
+            });
+        }
+    };
+    // Surface a silent policy.max_ttl clamp (5s slack for pin-time skew).
+    let granted = session.expires_at - session.pinned_at;
+    let ttl_capped = requested_ttl.is_some_and(|req| granted + chrono::Duration::seconds(5) < req);
+    Ok(SwitchOutcome {
+        left,
+        providers_n: target.providers.len(),
+        session,
+        granted,
+        ttl_capped,
+    })
+}
+
+/// `locus switch <alias>` — one-shot leave-if-pinned + enter + compact
+/// identity block (replaces the leave → enter → whoami ritual).
+fn cmd_switch(
+    alias: String,
+    force: bool,
+    client: Option<String>,
+    ttl: Option<String>,
+    json: bool,
+) -> Result<()> {
+    require_local_control_boundary("locus switch").map_err(wedged_session_recovery)?;
+    let s = store()?;
+    let client = client.or_else(|| Some("cli".into()));
+    let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
+    let out = switch_flow(&s, &alias, &cwd(), force, client, requested_ttl)?;
+    let session = &out.session;
+
+    if json {
+        println!(
+            "{}",
+            json!({
+                "switched": true,
+                "from": out.left.as_ref().map(|l| l.binding_alias.clone()),
+                "binding": session.binding_alias,
+                "tenant": session.tenant,
+                "session_id": session.session_id,
+                "expires_at": session.expires_at.to_rfc3339(),
+                "expires_in_secs": (session.expires_at - chrono::Utc::now()).num_seconds().max(0),
+                "ttl_capped": out.ttl_capped,
+                "providers": out.providers_n,
+                "prompt": format!("[locus:{}:{}]", session.binding_alias, session.tenant),
+            })
+        );
+        return Ok(());
+    }
+
+    match &out.left {
+        Some(prev) => println!(
+            "{} switched {} -> {} ({})",
+            "ok".green().bold(),
+            prev.binding_alias.dimmed(),
+            session.binding_alias.cyan().bold(),
+            session.tenant.yellow()
+        ),
+        None => println!(
+            "{} entered {} ({}) — no previous pin",
+            "ok".green().bold(),
+            session.binding_alias.cyan().bold(),
+            session.tenant.yellow()
+        ),
+    }
+    // Compact identity block: everything whoami would show for a fresh pin.
+    println!(
+        "   prompt   {}",
+        format!("[locus:{}:{}]", session.binding_alias, session.tenant).cyan()
+    );
+    println!("   session  {}", session.session_id.dimmed());
+    println!(
+        "   expires  {}  {}",
+        session.expires_at.to_rfc3339().dimmed(),
+        format!(
+            "(at {} — in {})",
+            session
+                .expires_at
+                .with_timezone(&chrono::Local)
+                .format("%H:%M"),
+            human_dur(session.expires_at - chrono::Utc::now())
+        )
+        .yellow()
+    );
+    if let (true, Some(req)) = (out.ttl_capped, requested_ttl) {
+        println!(
+            "   {} requested ttl {} capped to {} by policy.max_ttl on '{}'",
+            "warning:".yellow().bold(),
+            human_dur(req),
+            human_dur(out.granted),
+            session.binding_alias
+        );
+    }
+    println!("   providers {}", out.providers_n);
     Ok(())
 }
 
@@ -3434,6 +3670,282 @@ fn cmd_mcp() -> Result<()> {
                 "locus-mcp not found on PATH — install with: cargo install --path crates/locus-mcp"
             );
         }
+    }
+}
+
+fn cmd_mcp_sub(sub: McpCmd, json_flag: bool) -> Result<()> {
+    match sub {
+        McpCmd::Mint {
+            binding,
+            ttl,
+            label,
+            force,
+            json,
+        } => cmd_mcp_mint(binding, ttl, label, force, json || json_flag),
+        McpCmd::List { json } => cmd_mcp_list(json || json_flag),
+        McpCmd::Revoke {
+            grant_id,
+            binding,
+            all,
+        } => cmd_mcp_revoke(grant_id, binding, all),
+    }
+}
+
+/// Mint a multi-tenant MCP grant. The bearer token is printed exactly once
+/// (JSON, machine-first — mirrors `locus ci mint`); at rest only its HMAC.
+fn cmd_mcp_mint(
+    binding_alias: String,
+    ttl: String,
+    label: Option<String>,
+    force: bool,
+    _json: bool,
+) -> Result<()> {
+    require_local_control_boundary("locus mcp mint")?;
+    let s = store()?;
+    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
+    let (session, grant, token) = s
+        .create_mcp_grant(&binding_alias, &cwd(), Some(ttl_dur), label, force)
+        .with_context(|| format!("mint MCP grant for `{binding_alias}`"))?;
+    // Always JSON (machine-first). Token appears here exactly once.
+    println!(
+        "{}",
+        json!({
+            "grant_id": grant.grant_id,
+            "token": token,
+            "session_id": session.session_id,
+            "binding": session.binding_alias,
+            "tenant": session.tenant,
+            "expires_at": grant.expires_at.to_rfc3339(),
+            "label": grant.label,
+            "serve": "locus-mcp --http --multi-tenant  (client header: X-Locus-Tenant-Token)",
+        })
+    );
+    eprintln!(
+        "{} token shown once — only its HMAC is stored under mcp-grants/",
+        "note".yellow()
+    );
+    Ok(())
+}
+
+/// Count live (non-expired) tenant HTTP sessions per grant from the
+/// multi-tenant session dir — the same partition the server writes
+/// (`locus_core::http_sessions::http_session_dir_mt()`, which honors
+/// `LOCUS_MCP_SESSION_DIR` with its `-mt` suffix).
+fn mt_live_sessions_by_grant(
+    dir: Option<&std::path::Path>,
+) -> std::collections::HashMap<String, usize> {
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let Some(dir) = dir else {
+        return counts;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return counts;
+    };
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for ent in entries.flatten() {
+        let path = ent.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        // Expired records are dead sessions awaiting sweep — never "live".
+        let Some(last_seen) = v.get("last_seen_unix").and_then(|x| x.as_u64()) else {
+            continue;
+        };
+        if locus_core::http_sessions::http_session_record_expired(
+            last_seen,
+            now_unix,
+            locus_core::http_sessions::DEFAULT_HTTP_SESSION_TTL,
+        ) {
+            continue;
+        }
+        if let Some(gid) = v
+            .get("tenant")
+            .and_then(|t| t.get("grant_id"))
+            .and_then(|g| g.as_str())
+        {
+            *counts.entry(gid.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// Operator-only grant roster (grant_id / alias / tenant / expiry / sessions).
+/// Values-free: never tokens or credentials.
+fn cmd_mcp_list(json: bool) -> Result<()> {
+    require_local_control_boundary("locus mcp list")?;
+    let s = store()?;
+    let grants = s.list_mcp_grants()?;
+    let live =
+        mt_live_sessions_by_grant(locus_core::http_sessions::http_session_dir_mt().as_deref());
+    if json {
+        let rows: Vec<serde_json::Value> = grants
+            .iter()
+            .map(|g| {
+                json!({
+                    "grant_id": g.grant_id,
+                    "binding": g.binding_alias,
+                    "tenant": g.tenant,
+                    "label": g.label,
+                    "expires_at": g.expires_at.to_rfc3339(),
+                    "expired": g.is_expired(),
+                    "revoked": g.revoked,
+                    "session_id": g.session_id,
+                    "live_http_sessions": live.get(&g.grant_id).copied().unwrap_or(0),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if grants.is_empty() {
+        println!(
+            "{} no MCP grants (mint: `locus mcp mint --binding <alias>`)",
+            "->".dimmed()
+        );
+        return Ok(());
+    }
+    println!("{} multi-tenant MCP grants:\n", "locus mcp".cyan().bold());
+    for g in &grants {
+        let state = if g.revoked {
+            "revoked".red().to_string()
+        } else if g.is_expired() {
+            "expired".yellow().to_string()
+        } else {
+            "active".green().to_string()
+        };
+        println!(
+            "  {}  {}  ·  {}  ·  expires {}  ·  {} live session(s){}",
+            g.grant_id.green().bold(),
+            g.binding_alias,
+            state,
+            g.expires_at.to_rfc3339().dimmed(),
+            live.get(&g.grant_id).copied().unwrap_or(0),
+            g.label
+                .as_deref()
+                .map(|l| format!("  ·  {}", l.dimmed()))
+                .unwrap_or_default(),
+        );
+    }
+    Ok(())
+}
+
+/// Revoke grants and sweep their tenant HTTP session records.
+fn cmd_mcp_revoke(grant_id: Option<String>, binding: Option<String>, all: bool) -> Result<()> {
+    require_local_control_boundary("locus mcp revoke")?;
+    let s = store()?;
+    let targets: Vec<String> = if all {
+        s.list_mcp_grants()?
+            .iter()
+            .map(|g| g.grant_id.clone())
+            .collect()
+    } else if let Some(alias) = binding {
+        s.list_mcp_grants()?
+            .iter()
+            .filter(|g| g.binding_alias == alias)
+            .map(|g| g.grant_id.clone())
+            .collect()
+    } else if let Some(id) = grant_id {
+        vec![id]
+    } else {
+        bail!("specify a <grant_id>, --binding <alias>, or --all");
+    };
+    if targets.is_empty() {
+        println!("{} no matching grants", "->".dimmed());
+        return Ok(());
+    }
+    for id in &targets {
+        match s.revoke_mcp_grant(id)? {
+            Some(g) => {
+                // Best-effort sweep of this grant's tenant session records
+                // (same MT partition the server writes; expired records of
+                // the grant are removed too).
+                if let Some(entries) = locus_core::http_sessions::http_session_dir_mt()
+                    .and_then(|dir| std::fs::read_dir(dir).ok())
+                {
+                    for ent in entries.flatten() {
+                        let path = ent.path();
+                        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                            continue;
+                        }
+                        let Ok(raw) = std::fs::read_to_string(&path) else {
+                            continue;
+                        };
+                        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                            continue;
+                        };
+                        if v.get("tenant")
+                            .and_then(|t| t.get("grant_id"))
+                            .and_then(|gid| gid.as_str())
+                            == Some(id.as_str())
+                        {
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+                println!(
+                    "{} revoked grant {} (binding `{}`)",
+                    "ok".green(),
+                    g.grant_id,
+                    g.binding_alias
+                );
+            }
+            None => println!(
+                "{} unknown grant `{id}` (already revoked?)",
+                "warn".yellow()
+            ),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod mt_session_reconcile_tests {
+    use super::mt_live_sessions_by_grant;
+
+    fn write_record(dir: &std::path::Path, name: &str, last_seen_unix: u64, grant_id: &str) {
+        let rec = serde_json::json!({
+            "v": 1,
+            "id": "a".repeat(32),
+            "created_at_unix": last_seen_unix,
+            "last_seen_unix": last_seen_unix,
+            "tenant": {
+                "grant_id": grant_id,
+                "session_id": "sess",
+                "binding_alias": "acme",
+                "tenant": "acme-corp",
+            },
+        });
+        std::fs::write(dir.join(name), rec.to_string()).unwrap();
+    }
+
+    #[test]
+    fn live_counts_exclude_expired_records_and_missing_dir_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let ttl = locus_core::http_sessions::DEFAULT_HTTP_SESSION_TTL.as_secs();
+        write_record(dir.path(), "live-1.json", now, "g1");
+        write_record(dir.path(), "stale.json", now - ttl - 1, "g1");
+        write_record(dir.path(), "live-2.json", now, "g2");
+        // Non-record noise is ignored.
+        std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
+
+        let counts = mt_live_sessions_by_grant(Some(dir.path()));
+        assert_eq!(counts.get("g1"), Some(&1), "expired record must not count");
+        assert_eq!(counts.get("g2"), Some(&1));
+
+        assert!(mt_live_sessions_by_grant(None).is_empty());
     }
 }
 
@@ -7524,6 +8036,165 @@ mod capability_posture_tests {
             assert_eq!(capability_posture(&status), "persisted");
             assert!(status.persisted_valid && status.persisted_permissions_ok);
         }
+    }
+}
+
+#[cfg(test)]
+mod switch_flow_tests {
+    use super::switch_flow;
+    use locus_core::{Binding, BindingBody, Policy, ProviderBinding, Scope, Store};
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn binding(alias: &str, tenant: &str) -> Binding {
+        Binding::from_body(BindingBody {
+            id: format!("bnd_{alias}"),
+            alias: alias.into(),
+            tenant: tenant.into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "github".into(),
+                account: "a".into(),
+                credential_ref: "phm:X".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        })
+    }
+
+    fn store_with(dir: &std::path::Path, aliases: &[(&str, &str)]) -> Store {
+        let s = Store::open(dir).unwrap();
+        for (a, t) in aliases {
+            s.save_binding(&binding(a, t)).unwrap();
+        }
+        s
+    }
+
+    #[test]
+    fn switch_leaves_current_pin_and_enters_target() {
+        let dir = tempdir().unwrap();
+        let s = store_with(dir.path(), &[("personal", "me"), ("acme", "acme-corp")]);
+        s.pin("personal", dir.path(), None, false).unwrap();
+
+        let out = switch_flow(&s, "acme", dir.path(), false, Some("cli".into()), None).unwrap();
+        assert_eq!(
+            out.left.as_ref().map(|l| l.binding_alias.as_str()),
+            Some("personal")
+        );
+        assert_eq!(out.session.binding_alias, "acme");
+        assert_eq!(out.session.tenant, "acme-corp");
+        assert_eq!(out.providers_n, 1);
+        assert_eq!(
+            s.active_session().unwrap().unwrap().binding_alias,
+            "acme",
+            "active pin must be the switch target"
+        );
+
+        // Audits normally via the underlying ops: session.leave for the old
+        // pin, then session.pin for the new one.
+        let audit = fs::read_to_string(s.audit_path()).unwrap();
+        let leave_at = audit.find("session.leave").expect("leave audited");
+        let last_pin_at = audit.rfind("session.pin").expect("pin audited");
+        assert!(
+            leave_at < last_pin_at,
+            "old pin's leave must be audited before the new pin"
+        );
+    }
+
+    #[test]
+    fn switch_when_unpinned_just_enters() {
+        let dir = tempdir().unwrap();
+        let s = store_with(dir.path(), &[("acme", "acme-corp")]);
+
+        let out = switch_flow(&s, "acme", dir.path(), false, None, None).unwrap();
+        assert!(out.left.is_none());
+        assert_eq!(out.session.binding_alias, "acme");
+        assert_eq!(s.active_session().unwrap().unwrap().binding_alias, "acme");
+    }
+
+    /// A target `enter` would refuse (unknown alias) must refuse BEFORE the
+    /// current pin is dropped — same error surface as enter, incl. the
+    /// did-you-mean suggestion.
+    #[test]
+    fn switch_unknown_target_keeps_current_pin() {
+        let dir = tempdir().unwrap();
+        let s = store_with(dir.path(), &[("personal", "me"), ("acme", "acme-corp")]);
+        s.pin("personal", dir.path(), None, false).unwrap();
+
+        let err = switch_flow(&s, "acmee", dir.path(), false, None, None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("acmee"), "{msg}");
+        assert!(msg.contains("did you mean `acme`?"), "{msg}");
+        assert_eq!(
+            s.active_session().unwrap().unwrap().binding_alias,
+            "personal",
+            "a refused switch must not drop the current pin"
+        );
+    }
+
+    /// Workspace-allowlist refusal is the same fail-closed rule enter/pin
+    /// enforce — and it must also fire before the current pin is dropped.
+    /// `--force` overrides it exactly like enter.
+    #[test]
+    fn switch_disallowed_by_workspace_keeps_pin_and_force_overrides() {
+        let dir = tempdir().unwrap();
+        let s = store_with(dir.path(), &[("personal", "me"), ("acme", "acme-corp")]);
+        let project = dir.path().join("proj");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join(".locus.toml"),
+            "version = 1\nallowed_bindings = [\"personal\"]\n",
+        )
+        .unwrap();
+        s.pin("personal", &project, None, false).unwrap();
+
+        let err = switch_flow(&s, "acme", &project, false, None, None).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not allowed in this workspace"), "{msg}");
+        assert_eq!(
+            s.active_session().unwrap().unwrap().binding_alias,
+            "personal"
+        );
+
+        // --force takes the same escape hatch enter has.
+        let out = switch_flow(&s, "acme", &project, true, None, None).unwrap();
+        assert_eq!(out.session.binding_alias, "acme");
+    }
+
+    #[test]
+    fn switch_cli_parses_alias_ttl_and_force() {
+        use clap::Parser;
+        let cli =
+            super::Cli::try_parse_from(["locus", "switch", "acme", "--ttl", "45m", "--force"])
+                .unwrap();
+        match cli.command {
+            super::Commands::Switch {
+                alias, force, ttl, ..
+            } => {
+                assert_eq!(alias, "acme");
+                assert!(force);
+                assert_eq!(ttl.as_deref(), Some("45m"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn switch_honors_ttl_request() {
+        let dir = tempdir().unwrap();
+        let s = store_with(dir.path(), &[("personal", "me"), ("acme", "acme-corp")]);
+        s.pin("personal", dir.path(), None, false).unwrap();
+
+        let req = chrono::Duration::minutes(5);
+        let out = switch_flow(&s, "acme", dir.path(), false, None, Some(req)).unwrap();
+        let granted = out.session.expires_at - out.session.pinned_at;
+        assert!(
+            granted >= chrono::Duration::minutes(4) && granted <= chrono::Duration::minutes(6),
+            "granted ttl should honor the request (got {granted})"
+        );
+        assert!(!out.ttl_capped);
     }
 }
 

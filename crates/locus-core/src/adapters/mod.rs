@@ -4,9 +4,11 @@
 //! exposes **safe read-only identity tools** that report the pinned scope
 //! and never call remote APIs with ambient credentials.
 
+mod anthropic;
 mod aws;
 mod cloudflare;
 mod github;
+mod openai;
 mod resend;
 mod stripe;
 mod supabase;
@@ -19,9 +21,11 @@ use crate::store::Store;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+pub use anthropic::AnthropicAdapter;
 pub use aws::AwsAdapter;
 pub use cloudflare::CloudflareAdapter;
 pub use github::GithubAdapter;
+pub use openai::OpenaiAdapter;
 pub use resend::ResendAdapter;
 pub use stripe::StripeAdapter;
 pub use supabase::SupabaseAdapter;
@@ -103,6 +107,8 @@ pub fn adapter_for(provider: &str) -> Option<Box<dyn ProviderAdapter>> {
         "aws" => Some(Box::new(AwsAdapter)),
         "resend" => Some(Box::new(ResendAdapter)),
         "stripe" => Some(Box::new(StripeAdapter)),
+        "anthropic" => Some(Box::new(AnthropicAdapter)),
+        "openai" => Some(Box::new(OpenaiAdapter)),
         _ => None,
     }
 }
@@ -120,6 +126,8 @@ pub fn known_providers() -> &'static [&'static str] {
         "aws",
         "resend",
         "stripe",
+        "anthropic",
+        "openai",
     ]
 }
 
@@ -476,6 +484,43 @@ fn selector_alias_spellings(provider: &str) -> SelectorAliasSpellings {
             project_ref: PROJECT_GENERIC,
             team_id: TEAM_GENERIC,
             account_id: &["accountId", "stripe_account", "stripeAccount"],
+        },
+        "anthropic" => SelectorAliasSpellings {
+            // account_id freezes the Anthropic org id; project_ref freezes the
+            // workspace id (per-tenant model-API spend isolation).
+            project_ref: &[
+                "projectRef",
+                "project_id",
+                "projectId",
+                "workspace",
+                "workspace_id",
+                "workspaceId",
+            ],
+            team_id: TEAM_GENERIC,
+            account_id: &[
+                "accountId",
+                "org",
+                "org_id",
+                "orgId",
+                "organization",
+                "organization_id",
+                "organizationId",
+            ],
+        },
+        "openai" => SelectorAliasSpellings {
+            // account_id freezes the OpenAI org id; project_ref freezes the
+            // project id (per-tenant model-API spend isolation).
+            project_ref: &["projectRef", "project", "project_id", "projectId"],
+            team_id: TEAM_GENERIC,
+            account_id: &[
+                "accountId",
+                "org",
+                "org_id",
+                "orgId",
+                "organization",
+                "organization_id",
+                "organizationId",
+            ],
         },
         _ => SelectorAliasSpellings {
             project_ref: PROJECT_GENERIC,
@@ -1420,6 +1465,283 @@ mod tests {
         assert!(err3.unwrap_err().to_string().contains("team_id"));
     }
 
+    /// Anthropic + OpenAI pinned side by side (per-tenant model-API spend
+    /// isolation): org id frozen via `account_id`, workspace/project id via
+    /// `project_ref`.
+    fn model_api_binding(read_only: bool) -> Binding {
+        let ro = read_only.then_some(true);
+        Binding::from_body(BindingBody {
+            id: "bnd_model_api".into(),
+            alias: "model-api".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![
+                ProviderBinding {
+                    provider: "anthropic".into(),
+                    account: "acme-anthropic".into(),
+                    credential_ref: "phm:ANTHROPIC_ACME".into(),
+                    scope: Scope {
+                        account_id: Some("org_ant_acme".into()),
+                        project_ref: Some("wrkspc_acme".into()),
+                        read_only: ro,
+                        ..Scope::default()
+                    },
+                    upstream: None,
+                },
+                ProviderBinding {
+                    provider: "openai".into(),
+                    account: "acme-openai".into(),
+                    credential_ref: "phm:OPENAI_ACME".into(),
+                    scope: Scope {
+                        account_id: Some("org-oa-acme".into()),
+                        project_ref: Some("proj_oa_acme".into()),
+                        read_only: ro,
+                        ..Scope::default()
+                    },
+                    upstream: None,
+                },
+            ],
+        })
+    }
+
+    #[test]
+    fn freeze_anthropic_org_and_workspace() {
+        let b = model_api_binding(false);
+        // Matching frozen selectors pass through the freeze.
+        let ok = call_tool(
+            &b,
+            "anthropic.scope",
+            &json!({ "org_id": "org_ant_acme", "workspace_id": "wrkspc_acme" }),
+        )
+        .unwrap();
+        assert!(ok.ok);
+        assert_eq!(
+            ok.content.get("org_id").and_then(|v| v.as_str()),
+            Some("org_ant_acme")
+        );
+        assert_eq!(
+            ok.content.get("workspace_id").and_then(|v| v.as_str()),
+            Some("wrkspc_acme")
+        );
+
+        // Wrong org: canonical, provider-native, and camelCase spellings all deny.
+        for key in [
+            "account_id",
+            "accountId",
+            "org",
+            "org_id",
+            "orgId",
+            "organization",
+            "organization_id",
+            "organizationId",
+        ] {
+            let err = call_tool(&b, "anthropic.scope", &json!({ key: "org_evil" }));
+            assert!(err.is_err(), "anthropic {key} must be frozen");
+            assert!(err.unwrap_err().to_string().contains("scope freeze"));
+        }
+        // Wrong workspace: canonical + native + camelCase spellings all deny.
+        for key in [
+            "project_ref",
+            "projectRef",
+            "workspace",
+            "workspace_id",
+            "workspaceId",
+        ] {
+            let err = call_tool(&b, "anthropic.usage", &json!({ key: "wrkspc_evil" }));
+            assert!(err.is_err(), "anthropic {key} must be frozen");
+            assert!(err.unwrap_err().to_string().contains("scope freeze"));
+        }
+    }
+
+    #[test]
+    fn freeze_openai_org_and_project() {
+        let b = model_api_binding(false);
+        let ok = call_tool(
+            &b,
+            "openai.scope",
+            &json!({ "org_id": "org-oa-acme", "project_id": "proj_oa_acme" }),
+        )
+        .unwrap();
+        assert!(ok.ok);
+        assert_eq!(
+            ok.content.get("org_id").and_then(|v| v.as_str()),
+            Some("org-oa-acme")
+        );
+        assert_eq!(
+            ok.content.get("project_id").and_then(|v| v.as_str()),
+            Some("proj_oa_acme")
+        );
+
+        for key in [
+            "account_id",
+            "accountId",
+            "org",
+            "org_id",
+            "orgId",
+            "organization",
+            "organization_id",
+            "organizationId",
+        ] {
+            let err = call_tool(&b, "openai.scope", &json!({ key: "org-evil" }));
+            assert!(err.is_err(), "openai {key} must be frozen");
+            assert!(err.unwrap_err().to_string().contains("scope freeze"));
+        }
+        for key in [
+            "project_ref",
+            "projectRef",
+            "project",
+            "project_id",
+            "projectId",
+        ] {
+            let err = call_tool(&b, "openai.usage", &json!({ key: "proj_evil" }));
+            assert!(err.is_err(), "openai {key} must be frozen");
+            assert!(err.unwrap_err().to_string().contains("scope freeze"));
+        }
+    }
+
+    #[test]
+    fn freeze_model_api_nested_and_destructive_selectors() {
+        let b = model_api_binding(false);
+        // Nested + array-nested alias spellings deny on both providers.
+        let err = call_tool(
+            &b,
+            "anthropic.keys.list",
+            &json!({ "options": { "workspaceId": "wrkspc_evil" } }),
+        );
+        assert!(err.is_err(), "nested anthropic workspaceId must freeze");
+        let err = call_tool(
+            &b,
+            "openai.keys.list",
+            &json!({ "filters": [{ "organizationId": "org-evil" }] }),
+        );
+        assert!(
+            err.is_err(),
+            "array-nested openai organizationId must freeze"
+        );
+
+        // Freeze applies to destructive stubs too (policy allows here).
+        let err = call_tool(
+            &b,
+            "anthropic.keys.create",
+            &json!({ "confirm": true, "org_id": "org_evil" }),
+        );
+        assert!(err.is_err(), "anthropic keys.create must freeze org_id");
+        let err = call_tool(
+            &b,
+            "openai.keys.create",
+            &json!({ "confirm": true, "projectId": "proj_evil" }),
+        );
+        assert!(err.is_err(), "openai keys.create must freeze projectId");
+
+        // Matching nested spellings pass.
+        let ok = call_tool(
+            &b,
+            "openai.keys.list",
+            &json!({ "options": { "projectId": "proj_oa_acme" } }),
+        )
+        .unwrap();
+        assert!(ok.ok);
+    }
+
+    #[test]
+    fn model_api_read_only_hides_and_denies_keys_create() {
+        let b = model_api_binding(true);
+        let shaped = shaped_catalog(&b);
+        for hidden in ["anthropic.keys.create", "openai.keys.create"] {
+            assert!(
+                !shaped.iter().any(|t| t.name == hidden),
+                "read_only scope must hide {hidden} from the catalog"
+            );
+        }
+        // Read tools survive the shaping.
+        for listed in [
+            "anthropic.scope",
+            "anthropic.usage",
+            "anthropic.keys.list",
+            "openai.scope",
+            "openai.usage",
+            "openai.keys.list",
+        ] {
+            assert!(shaped.iter().any(|t| t.name == listed), "{listed} missing");
+        }
+        // Hidden tools are denied at the call gate (fail closed).
+        for tool in ["anthropic.keys.create", "openai.keys.create"] {
+            let r = call_tool(&b, tool, &json!({ "confirm": true })).unwrap();
+            assert!(!r.ok, "{tool} must be denied under read_only scope");
+            assert_eq!(
+                r.content.get("error").and_then(|v| v.as_str()),
+                Some("denied_read_only_scope")
+            );
+        }
+        // Read stubs still execute under read_only.
+        let ok = call_tool(&b, "anthropic.usage", &json!({})).unwrap();
+        assert!(ok.ok);
+        let ok = call_tool(&b, "openai.keys.list", &json!({})).unwrap();
+        assert!(ok.ok);
+        assert_eq!(ok.content["keys"], json!([]));
+    }
+
+    #[test]
+    fn model_api_catalog_and_whoami_fields() {
+        let b = model_api_binding(false);
+        let tools = tools_for_binding(&b);
+        for name in [
+            "anthropic.scope",
+            "anthropic.whoami",
+            "anthropic.usage",
+            "anthropic.keys.list",
+            "anthropic.keys.create",
+            "openai.scope",
+            "openai.whoami",
+            "openai.usage",
+            "openai.keys.list",
+            "openai.keys.create",
+        ] {
+            assert!(tools.iter().any(|t| t.name == name), "{name} missing");
+        }
+        // Destructive classification is exactly the keys.create stubs.
+        for t in &tools {
+            assert_eq!(
+                t.destructive,
+                t.name.ends_with("keys.create"),
+                "unexpected destructive flag on {}",
+                t.name
+            );
+        }
+
+        for tool in ["anthropic.whoami", "openai.whoami"] {
+            let r = call_tool(&b, tool, &json!({})).unwrap();
+            assert!(r.ok, "{tool} failed: {:?}", r.content);
+            assert!(
+                r.content.get("identity").is_some(),
+                "{tool} missing identity"
+            );
+            assert!(
+                r.content.get("frozen_selectors").is_some(),
+                "{tool} missing frozen_selectors"
+            );
+            assert_eq!(
+                r.content.get("tenant").and_then(|v| v.as_str()),
+                Some("acme-corp")
+            );
+            assert!(r.content.get("credential_ref").is_none());
+            assert_eq!(r.content["credential"]["present"], true);
+            assert_eq!(r.content["credential"]["source"], "phantom");
+        }
+        let a = call_tool(&b, "anthropic.whoami", &json!({})).unwrap();
+        assert_eq!(
+            a.content.get("identity").and_then(|v| v.as_str()),
+            Some("anthropic:org_ant_acme:wrkspc_acme")
+        );
+        let o = call_tool(&b, "openai.whoami", &json!({})).unwrap();
+        assert_eq!(
+            o.content.get("identity").and_then(|v| v.as_str()),
+            Some("openai:org-oa-acme:proj_oa_acme")
+        );
+    }
+
     #[test]
     fn whoami_fields_complete_for_p2_providers() {
         let b = multi_provider();
@@ -1522,6 +1844,8 @@ mod tests {
             "stripe",
             "aws",
             "resend",
+            "anthropic",
+            "openai",
             "custom",
         ]
         .into_iter()
@@ -1551,6 +1875,8 @@ mod tests {
             "stripe.scope",
             "aws.scope",
             "resend.scope",
+            "anthropic.scope",
+            "openai.scope",
             "custom.scope",
         ] {
             let result = call_tool(&binding, tool, &json!({})).unwrap();

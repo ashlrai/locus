@@ -25,6 +25,7 @@ pub mod error;
 pub mod events;
 pub mod forensics;
 pub mod graph;
+pub mod http_sessions;
 pub mod isolation;
 pub mod policy;
 pub mod recipes;
@@ -96,7 +97,8 @@ pub use doctor::{
     build_doctor_report, control_capability_findings, count_near_misses,
     doctor_json_has_stable_keys, filter_audit_events, gather_doctor_external, is_near_miss_op,
     AuditSummary, DoctorExternal, DoctorIssue, DoctorPin, DoctorReport, DoctorVerdict,
-    IssueSeverity, NearMissSummary, WorkspaceStatus as DoctorWorkspaceStatus, DOCTOR_JSON_KEYS,
+    IssueSeverity, McpMultiTenantHealth, NearMissSummary, WorkspaceStatus as DoctorWorkspaceStatus,
+    DOCTOR_JSON_KEYS,
 };
 pub use engagement::{
     client_binding_template, close_checklist, engagement_readme, EngagementCloseResult,
@@ -134,8 +136,9 @@ pub use session::{
     SessionMode, CURRENT_SEAL_VERSION,
 };
 pub use store::{
-    locus_home, ApprovalsHealth, AuditEvent, CredentialRefMigration, EngagementInitResult,
-    ForceLeaveOutcome, ProviderView, ResolvedSession, RuntimeDrift, Store, Whoami,
+    is_safe_mcp_grant_id, locus_home, parse_mcp_grant_token, ApprovalsHealth, AuditEvent,
+    CredentialRefMigration, EngagementInitResult, ForceLeaveOutcome, McpGrant, McpGrantAuthError,
+    ProviderView, ResolvedSession, RuntimeDrift, Store, Whoami,
 };
 pub use ticket::{
     mint_ticket, verify_ticket, verify_ticket_parts, CapabilityTicket, DEFAULT_TICKET_TTL_SECS,

@@ -21,17 +21,21 @@
 //!   `text/event-stream`.
 
 mod anchor;
+mod grant;
 mod http_session;
 
 use anchor::{AnchorDecision, SessionAnchor};
 use anyhow::{bail, Context, Result};
+use grant::{resolve_tenant_grant, GrantAuthError, TenantCtx};
 use http_session::{
-    resolve_http_session_dir, HttpSessionError, HttpSessionMap, HttpSessionPinSummary,
+    resolve_http_session_dir, resolve_http_session_dir_mt, HttpSessionError, HttpSessionMap,
+    HttpSessionPinSummary, HttpSessionTenant,
 };
 use locus_core::{
     build_doctor_report, call_tool_gated, compute_safe_next, control_tools, enforce_policy,
     find_workspace, gather_doctor_external, load_config, split_namespaced_tool, tools_for_binding,
-    verify_claim, verify_session, AdapterTool, ApprovalGate, Binding, Session, Store, VERSION,
+    verify_claim, verify_session, AdapterTool, ApprovalGate, Binding, Session, Store,
+    WorkerManager, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -40,7 +44,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Process-wide worker manager (synthetic + per-provider upstream MCP).
 fn worker_manager() -> &'static Mutex<CompositeWorkerManagerGuard> {
@@ -54,6 +58,32 @@ type CompositeWorkerManagerGuard = locus_core::CompositeWorkerManager;
 /// Advisory auto-pin probe attempted once per process (start / first tools/list).
 /// The probe never pins — see [`maybe_mcp_auto_pin`].
 static AUTO_PIN_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+
+/// Process-wide multi-tenant flag (`--multi-tenant` / `LOCUS_MCP_MULTI_TENANT=1`,
+/// HTTP only). Set once at startup before any request thread exists.
+static MULTI_TENANT: AtomicBool = AtomicBool::new(false);
+
+fn multi_tenant() -> bool {
+    MULTI_TENANT.load(Ordering::SeqCst)
+}
+
+/// Per-request identity scope: transport anchor + optional tenant grant.
+/// stdio and single-tenant HTTP construct `tenant: None` — that branch is
+/// byte-identical to the legacy global-pin path.
+#[derive(Debug, Clone)]
+struct RequestScope {
+    anchor: AnchorScope,
+    tenant: Option<TenantCtx>,
+}
+
+impl RequestScope {
+    fn process() -> Self {
+        RequestScope {
+            anchor: AnchorScope::Process,
+            tenant: None,
+        }
+    }
+}
 
 /// Process-wide stdio session anchor: the pinned identity this MCP session
 /// observed at initialize (or first healthy pinned observation), plus the
@@ -289,7 +319,8 @@ fn mcp_anchor_report(
 const DEFAULT_HTTP_ADDR: &str = "127.0.0.1:8742";
 
 /// MCP HTTP session idle TTL. Clients must re-initialize after expiry.
-const HTTP_SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+/// Shared with the operator reconcile surface (`locus mcp list`) via locus-core.
+const HTTP_SESSION_TTL: Duration = locus_core::http_sessions::DEFAULT_HTTP_SESSION_TTL;
 /// Cap concurrent opaque `Mcp-Session-Id` entries (memory + on-disk resume map).
 const HTTP_SESSION_MAX: usize = 256;
 
@@ -322,6 +353,8 @@ enum Framing {
 struct RunMode {
     /// When set, serve HTTP JSON-RPC instead of stdio.
     http_addr: Option<SocketAddr>,
+    /// Explicit multi-tenant opt-in (HTTP only; stdio + MT is a parse error).
+    multi_tenant: bool,
 }
 
 fn main() {
@@ -332,7 +365,6 @@ fn main() {
         }
         return;
     }
-    locus_core::restrict_validation_to_executor();
     // MCP servers must not pollute stdout with logs (stdio mode).
     if let Err(e) = run() {
         eprintln!("locus-mcp error: {e:#}");
@@ -342,6 +374,35 @@ fn main() {
 
 fn run() -> Result<()> {
     let mode = parse_run_mode(std::env::args().skip(1))?;
+    if mode.multi_tenant {
+        // Multi-tenant validation authenticates EVERY tenant's sealed session
+        // per request; executor capabilities are single-session, so the
+        // documented MT launch requirement is the operator control capability
+        // in the server env (validation_auth's control fallback). Fail closed
+        // when absent — every provider validation will refuse.
+        MULTI_TENANT.store(true, Ordering::SeqCst);
+        // The singleton worker manager serves EVERY grant concurrently in MT
+        // mode: disable single-tenant focus-teardown semantics so tenant A's
+        // tools/call can never kill tenant B's live workers.
+        worker_manager()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_multi_session(true);
+        if std::env::var(locus_core::CONTROL_CAPABILITY_ENV)
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+        {
+            eprintln!(
+                "locus-mcp: warning — multi-tenant mode without {} in the environment: \
+                 tenant session validation will fail closed for every grant",
+                locus_core::CONTROL_CAPABILITY_ENV
+            );
+        }
+    } else {
+        // Single-tenant agent-facing transports narrow to executor-only
+        // validation authority (unchanged legacy behavior).
+        locus_core::restrict_validation_to_executor();
+    }
     match mode.http_addr {
         Some(addr) => run_http(addr),
         None => run_stdio(),
@@ -361,10 +422,14 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
     let args: Vec<String> = args.into_iter().collect();
     let mut http_flag = false;
     let mut http_arg: Option<String> = None;
+    let mut multi_tenant_flag = false;
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
+            "--multi-tenant" => {
+                multi_tenant_flag = true;
+            }
             "--http" | "-H" => {
                 http_flag = true;
                 if let Some(next) = args.get(i + 1) {
@@ -390,8 +455,17 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
     }
 
     let env_http = env_truthy("LOCUS_MCP_HTTP");
+    let multi_tenant = multi_tenant_flag || env_truthy("LOCUS_MCP_MULTI_TENANT");
     if !http_flag && !env_http {
-        return Ok(RunMode { http_addr: None });
+        if multi_tenant {
+            // Fail closed: multi-tenant is meaningless without per-request
+            // tenant tokens, which only the HTTP transport carries.
+            bail!("--multi-tenant requires --http (stdio has no per-request tenant token)");
+        }
+        return Ok(RunMode {
+            http_addr: None,
+            multi_tenant: false,
+        });
     }
 
     let addr_str = http_arg
@@ -402,6 +476,7 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
         .with_context(|| format!("invalid HTTP bind address: {addr_str}"))?;
     Ok(RunMode {
         http_addr: Some(addr),
+        multi_tenant,
     })
 }
 
@@ -410,7 +485,9 @@ fn print_help() {
         "locus-mcp {VERSION} — MCP multiplexor (pin-scoped tools)\n\n\
          Usage:\n\
            locus-mcp                 stdio MCP (Claude Code / Cursor default)\n\
-           locus-mcp --http [ADDR]   Streamable-HTTP-lite on ADDR (default {DEFAULT_HTTP_ADDR})\n\n\
+           locus-mcp --http [ADDR]   Streamable-HTTP-lite on ADDR (default {DEFAULT_HTTP_ADDR})\n\
+           locus-mcp --http --multi-tenant   per-request tenant routing via\n\
+                                     X-Locus-Tenant-Token (mint: `locus mcp mint`)\n\n\
          HTTP endpoints:\n\
            GET  /health              unauthenticated liveness\n\
            GET  /mcp                 capabilities + tool names (token; values-free)\n\
@@ -455,7 +532,7 @@ fn run_stdio() -> Result<()> {
             break; // EOF
         };
 
-        if let Some(response) = dispatch_rpc(&msg, &AnchorScope::Process) {
+        if let Some(response) = dispatch_rpc(&msg, &RequestScope::process()) {
             write_message(&mut stdout, &response, framing)?;
         }
     }
@@ -464,7 +541,7 @@ fn run_stdio() -> Result<()> {
 
 /// Dispatch one JSON-RPC request/notification.
 /// Returns `None` for notifications (no response).
-fn dispatch_rpc(msg: &Value, scope: &AnchorScope) -> Option<Value> {
+fn dispatch_rpc(msg: &Value, scope: &RequestScope) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(json!({}));
@@ -479,10 +556,10 @@ fn dispatch_rpc(msg: &Value, scope: &AnchorScope) -> Option<Value> {
         "ping" => Ok(json!({})),
         "tools/list" => handle_tools_list(scope),
         "tools/call" => handle_tools_call(&params, scope),
-        "resources/list" => handle_resources_list(),
+        "resources/list" => handle_resources_list(scope),
         "resources/read" => handle_resources_read(&params, scope),
-        "prompts/list" => handle_prompts_list(),
-        "prompts/get" => handle_prompts_get(&params),
+        "prompts/list" => handle_prompts_list(scope),
+        "prompts/get" => handle_prompts_get(&params, scope),
         other => Err(rpc_error(-32601, format!("method not found: {other}"))),
     };
 
@@ -527,12 +604,34 @@ fn current_http_session_pin_summary() -> Option<HttpSessionPinSummary> {
 fn http_session_map() -> &'static Mutex<HttpSessionMap> {
     static MAP: OnceLock<Mutex<HttpSessionMap>> = OnceLock::new();
     MAP.get_or_init(|| {
+        // HARD partition: multi-tenant records live under http-sessions-mt/
+        // so a single-tenant binary can never resume tenant-bound records
+        // (unknown id → 404 fail closed) and vice versa.
+        type PinSummaryFn = fn() -> Option<HttpSessionPinSummary>;
+        let (dir, pin_fn): (_, Option<PinSummaryFn>) = if multi_tenant() {
+            (resolve_http_session_dir_mt(), None)
+        } else {
+            (
+                resolve_http_session_dir(),
+                Some(current_http_session_pin_summary as PinSummaryFn),
+            )
+        };
         Mutex::new(
             HttpSessionMap::new(HTTP_SESSION_TTL, HTTP_SESSION_MAX)
-                .with_persist_dir(resolve_http_session_dir())
-                .with_pin_summary_fn(Some(current_http_session_pin_summary)),
+                .with_persist_dir(dir)
+                .with_pin_summary_fn(pin_fn),
         )
     })
+}
+
+/// Per-grant HTTP session cap (`LOCUS_MCP_SESSIONS_PER_GRANT`, default 8) so
+/// one tenant cannot starve the global HTTP_SESSION_MAX.
+fn sessions_per_grant() -> usize {
+    std::env::var("LOCUS_MCP_SESSIONS_PER_GRANT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|n: &usize| *n > 0)
+        .unwrap_or(8)
 }
 
 /// Resolve `Mcp-Session-Id` for an authenticated MCP HTTP request.
@@ -683,6 +782,30 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
         return write_http_json(&mut stream, 200, &body, None);
     }
 
+    // CORS preflight is credential-less by spec (browsers strip Authorization
+    // and custom headers on OPTIONS), so answer it BEFORE the token gates.
+    // Static allow-lists only — no state is read or written here.
+    if method.eq_ignore_ascii_case("OPTIONS") {
+        return write_http_response(
+            &mut stream,
+            204,
+            "text/plain",
+            b"",
+            Some(vec![
+                ("Access-Control-Allow-Origin", "*"),
+                (
+                    "Access-Control-Allow-Headers",
+                    "Authorization, Content-Type, Accept, X-Locus-Token, X-Locus-Tenant-Token, Mcp-Session-Id",
+                ),
+                (
+                    "Access-Control-Expose-Headers",
+                    "Mcp-Session-Id, X-Locus-Streamable",
+                ),
+                ("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"),
+            ]),
+        );
+    }
+
     if !http_token_ok(&headers, expected_token) {
         let body = json!({
             "error": "unauthorized",
@@ -690,6 +813,43 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
         });
         return write_http_json(&mut stream, 401, &body, Some("unauthorized"));
     }
+
+    // Multi-tenant: EVERY /mcp surface additionally requires a verified
+    // per-tenant grant token (layered on the unchanged server token above).
+    // Possession of an Mcp-Session-Id alone is never authority.
+    let is_sse_path = path_only == "/mcp/sse" || path_only == "/mcp/sse/";
+    let tenant_ctx: Option<TenantCtx> = if multi_tenant() && (is_mcp_path || is_sse_path) {
+        let s = match store() {
+            Ok(s) => s,
+            Err(_) => {
+                let body = json!({ "error": "store_unavailable" });
+                return write_http_json(&mut stream, 500, &body, None);
+            }
+        };
+        // Lazy TTL reconcile: every authenticated MT request purges expired
+        // sessions AND tears down workers for grants whose last session died
+        // by idle timeout (a vanished client must not leave credential-
+        // bearing worker processes alive until restart).
+        reconcile_expired_tenant_sessions();
+        match resolve_tenant_grant(&s, &headers) {
+            Ok(t) => Some(t),
+            Err(err) => {
+                match &err {
+                    // Expired (MAC-verified) and definitively dead (revoked /
+                    // deleted) grants both sweep: drop the grant's HTTP
+                    // sessions and tear down its credential-bearing workers.
+                    GrantAuthError::Expired { grant_id, .. }
+                    | GrantAuthError::DeadGrant { grant_id } => {
+                        sweep_dead_grant_sessions(grant_id);
+                    }
+                    GrantAuthError::Invalid => {}
+                }
+                return write_http_json(&mut stream, err.status(), &err.body(), None);
+            }
+        }
+    } else {
+        None
+    };
 
     // Reject Accept that cannot receive either JSON or SSE (streamable clients list both).
     // GET /mcp/sse is SSE-only — require event-stream (or */* / missing).
@@ -717,13 +877,29 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
         }
     }
 
-    if method.eq_ignore_ascii_case("GET") && (path_only == "/mcp/sse" || path_only == "/mcp/sse/") {
-        return handle_mcp_sse_session_stream(&mut stream, query);
+    if method.eq_ignore_ascii_case("GET") && is_sse_path {
+        return handle_mcp_sse_session_stream(&mut stream, query, tenant_ctx.as_ref());
     }
 
     if method.eq_ignore_ascii_case("GET") && is_mcp_path {
         // Capabilities probe: session optional. Unknown id fails closed.
-        let session_id = {
+        // MT: ownership is verified BEFORE any TTL touch — a cross-tenant
+        // probe must never refresh the victim session's idle timer.
+        let session_id = if let Some(t) = tenant_ctx.as_ref() {
+            match header_value(&headers, "mcp-session-id").map(str::trim) {
+                Some("") => {
+                    let (status, body) = session_error_body(&HttpSessionError::Invalid);
+                    return write_http_json(&mut stream, status, &body, None);
+                }
+                Some(id) => {
+                    if let Some((status, body)) = verify_session_tenant(id, t) {
+                        return write_http_json(&mut stream, status, &body, None);
+                    }
+                    Some(id.to_string())
+                }
+                None => None,
+            }
+        } else {
             let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
             match resolve_mcp_http_session(&mut map, &headers, false) {
                 Ok(id) => id,
@@ -739,7 +915,10 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
             Some(id) => AnchorScope::Http(id.to_string()),
             None => AnchorScope::None,
         };
-        let caps = http_mcp_capabilities(&anchor_scope);
+        let caps = http_mcp_capabilities(&RequestScope {
+            anchor: anchor_scope,
+            tenant: tenant_ctx.clone(),
+        });
         return write_http_mcp_body(
             &mut stream,
             200,
@@ -762,11 +941,20 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
                 return write_http_json(&mut stream, 400, &body, None);
             }
             Some(id) => {
+                // MT: only the owning tenant may terminate its session.
+                if let Some(t) = tenant_ctx.as_ref() {
+                    if let Some((status, body)) = verify_session_tenant(id, t) {
+                        return write_http_json(&mut stream, status, &body, None);
+                    }
+                }
                 let removed = {
                     let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
                     map.remove(id)
                 };
                 if removed {
+                    if let Some(t) = tenant_ctx.as_ref() {
+                        maybe_teardown_grant_workers(t);
+                    }
                     return write_http_response(&mut stream, 204, "text/plain", b"", None);
                 }
                 let (status, body) = session_error_body(&HttpSessionError::Unknown);
@@ -806,7 +994,40 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
 
         // Bind an existing Mcp-Session-Id when the header is present; mint only
         // on initialize so arbitrary POSTs cannot exhaust session capacity.
-        let session_id = {
+        // MT: every session is grant-bound; stateless POSTs are refused.
+        let session_id = if let Some(t) = tenant_ctx.as_ref() {
+            match header_value(&headers, "mcp-session-id").map(str::trim) {
+                Some("") => {
+                    let (status, body) = session_error_body(&HttpSessionError::Invalid);
+                    return write_http_json(&mut stream, status, &body, None);
+                }
+                Some(id) => {
+                    // Ownership BEFORE any TTL mutation: verify_session_tenant
+                    // touches only after the grant match, so a cross-tenant
+                    // probe (403) can never keep the victim session alive.
+                    // Unknown ids still 404 exactly as before.
+                    if let Some((status, body)) = verify_session_tenant(id, t) {
+                        return write_http_json(&mut stream, status, &body, None);
+                    }
+                    Some(id.to_string())
+                }
+                None if rpc_method == Some("initialize") => match mint_tenant_http_session(t) {
+                    Ok(id) => Some(id),
+                    Err((status, body)) => {
+                        return write_http_json(&mut stream, status, &body, None);
+                    }
+                },
+                None => {
+                    // NO ambient fallthrough: tenantless / stateless provider
+                    // POSTs never reach dispatch in multi-tenant mode.
+                    let body = json!({
+                        "error": "session_required",
+                        "hint": "multi-tenant mode requires an Mcp-Session-Id (POST initialize with your tenant token first)",
+                    });
+                    return write_http_json(&mut stream, 400, &body, None);
+                }
+            }
+        } else {
             let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
             let mint_if_missing = rpc_method == Some("initialize");
             match resolve_mcp_http_session(&mut map, &headers, mint_if_missing) {
@@ -851,11 +1072,19 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
         // A fresh initialize without the header (stateless client) is the
         // adoption path for the shared process anchor too — mirrors stdio,
         // where initialize re-anchors the process. Session-bound initializes
-        // only reset their own session anchor.
-        if rpc_method == Some("initialize") && header_value(&headers, "mcp-session-id").is_none() {
+        // only reset their own session anchor. Never in MT (tenant anchors
+        // are pre-set at mint and write-once).
+        if tenant_ctx.is_none()
+            && rpc_method == Some("initialize")
+            && header_value(&headers, "mcp-session-id").is_none()
+        {
             AnchorScope::Process.reset(current_healthy_anchor());
         }
-        match dispatch_rpc(&msg, &anchor_scope) {
+        let request_scope = RequestScope {
+            anchor: anchor_scope,
+            tenant: tenant_ctx.clone(),
+        };
+        match dispatch_rpc(&msg, &request_scope) {
             Some(response) => {
                 // When Accept lists both JSON and SSE, still upgrade large tools/call
                 // to multi-message SSE so hubs get progressive chunks without SSE-only Accept.
@@ -881,26 +1110,6 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
                 )
             }
         }
-    } else if method.eq_ignore_ascii_case("OPTIONS") {
-        // Minimal CORS preflight for local browser tools (CI usually doesn't need it).
-        write_http_response(
-            &mut stream,
-            204,
-            "text/plain",
-            b"",
-            Some(vec![
-                ("Access-Control-Allow-Origin", "*"),
-                (
-                    "Access-Control-Allow-Headers",
-                    "Authorization, Content-Type, Accept, X-Locus-Token, Mcp-Session-Id",
-                ),
-                (
-                    "Access-Control-Expose-Headers",
-                    "Mcp-Session-Id, X-Locus-Streamable",
-                ),
-                ("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"),
-            ]),
-        )
     } else {
         let body = json!({
             "error": "not_found",
@@ -910,10 +1119,249 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
     }
 }
 
+/// MT cross-check: a presented `Mcp-Session-Id` must be bound to the SAME
+/// grant that authenticated this request. Tenantless records (single-tenant /
+/// pre-MT) are refused too — fail closed both directions. Audited.
+fn verify_session_tenant(id: &str, t: &TenantCtx) -> Option<(u16, Value)> {
+    // Read-only lookup FIRST: the idle TTL is refreshed (touch) only after
+    // the session's bound grant matched the authenticated grant — a
+    // cross-tenant probe must never extend the victim session's lifetime.
+    let (known, bound) = {
+        let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
+        let known = map.peek_known(id);
+        let bound = if known { map.tenant_of(id) } else { None };
+        if known && bound.as_ref().is_some_and(|rec| rec.grant_id == t.grant_id) {
+            // Ownership proven — now (and only now) refresh the idle TTL.
+            let _ = map.touch(id);
+        }
+        (known, bound)
+    };
+    if !known {
+        // Unknown / expired / deleted id: 404, same as single-tenant.
+        return Some(session_error_body(&HttpSessionError::Unknown));
+    }
+    match bound {
+        Some(rec) if rec.grant_id == t.grant_id => None,
+        _ => {
+            if let Ok(s) = store() {
+                let _ = s.audit(
+                    "mcp.tenant_mismatch",
+                    &t.binding_alias,
+                    Some(json!({
+                        "grant_id": t.grant_id,
+                        "http_session_id": id,
+                    })),
+                );
+            }
+            Some((
+                403,
+                json!({
+                    "error": "tenant_mismatch",
+                    "hint": "Mcp-Session-Id is not bound to this tenant grant; POST initialize with your tenant token to mint your own session",
+                }),
+            ))
+        }
+    }
+}
+
+/// Mint a tenant-bound `Mcp-Session-Id`: grant binding + values-free pin
+/// summary + PRE-SET anchor from the grant session's observation — identity
+/// is fixed before the first tools/call (zero wrong-account window).
+fn mint_tenant_http_session(t: &TenantCtx) -> std::result::Result<String, (u16, Value)> {
+    let scope = RequestScope {
+        anchor: AnchorScope::None,
+        tenant: Some(t.clone()),
+    };
+    let (session, bindings) = match resolve_scope_session(&scope) {
+        Ok(Some(sb)) => sb,
+        _ => return Err((401, GrantAuthError::Invalid.body())),
+    };
+    let obs = anchor::observation(&session, &bindings);
+    let pin = Some(HttpSessionPinSummary {
+        binding_alias: Some(session.binding_alias.clone()),
+        tenant: Some(session.tenant.clone()),
+        mode: Some(if session.is_namespaced() {
+            "namespaced".into()
+        } else {
+            "exclusive".into()
+        }),
+        seal_ok: Some(true),
+    });
+    let tenant = HttpSessionTenant {
+        grant_id: t.grant_id.clone(),
+        session_id: t.session_id.clone(),
+        binding_alias: t.binding_alias.clone(),
+        tenant: t.tenant.clone(),
+    };
+    let minted = {
+        let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.mint_for_grant(tenant, pin, Some(obs), sessions_per_grant())
+    };
+    match minted {
+        Ok(id) => {
+            if let Ok(s) = store() {
+                let _ = s.audit(
+                    "mcp.tenant_session_bound",
+                    &t.binding_alias,
+                    Some(json!({
+                        "grant_id": t.grant_id,
+                        "http_session_id": id,
+                        "session_id": t.session_id,
+                    })),
+                );
+            }
+            Ok(id)
+        }
+        Err(err) => Err(session_error_body(&err)),
+    }
+}
+
+/// Tear down the grant session's workers once its LAST live HTTP session died
+/// (DELETE / TTL purge / grant death). Worker keying is per session_id, so
+/// other tenants are untouched.
+fn maybe_teardown_grant_workers(t: &TenantCtx) {
+    let live = {
+        let map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.live_count_for_grant(&t.grant_id)
+    };
+    if live == 0 {
+        let mut mgr = worker_manager().lock().unwrap_or_else(|e| e.into_inner());
+        let _ = mgr.teardown_session(&t.session_id);
+    }
+}
+
+/// Purge TTL-expired sessions and tear down workers for any grant whose LAST
+/// live session died by idle timeout — the documented "TTL purge" teardown
+/// trigger. Driven lazily from every authenticated MT request; grants are
+/// deduped and only torn down when zero live sessions remain.
+fn reconcile_expired_tenant_sessions() {
+    let removed = {
+        let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.purge_expired(SystemTime::now())
+    };
+    if removed.is_empty() {
+        return;
+    }
+    let mut seen: Vec<String> = Vec::new();
+    for t in removed {
+        if seen.iter().any(|g| g == &t.grant_id) {
+            continue;
+        }
+        seen.push(t.grant_id.clone());
+        let ctx = TenantCtx {
+            grant_id: t.grant_id,
+            session_id: t.session_id,
+            binding_alias: t.binding_alias,
+            tenant: t.tenant,
+        };
+        maybe_teardown_grant_workers(&ctx);
+    }
+}
+
+/// Sweep every HTTP session of a dead (expired/revoked) grant and tear down
+/// its workers. Audited as `mcp.grant_expired_swept` when anything dropped.
+fn sweep_dead_grant_sessions(grant_id: &str) {
+    let removed = {
+        let mut map = http_session_map().lock().unwrap_or_else(|e| e.into_inner());
+        map.remove_where_tenant(|t| t.grant_id != grant_id)
+    };
+    if removed.is_empty() {
+        return;
+    }
+    let mut torn_down: Vec<String> = Vec::new();
+    for t in &removed {
+        if !torn_down.iter().any(|s| s == &t.session_id) {
+            let mut mgr = worker_manager().lock().unwrap_or_else(|e| e.into_inner());
+            let _ = mgr.teardown_session(&t.session_id);
+            torn_down.push(t.session_id.clone());
+        }
+    }
+    if let Ok(s) = store() {
+        let _ = s.audit(
+            "mcp.grant_expired_swept",
+            removed
+                .first()
+                .map(|t| t.binding_alias.as_str())
+                .unwrap_or("-"),
+            Some(json!({
+                "grant_id": grant_id,
+                "http_sessions_dropped": removed.len(),
+            })),
+        );
+    }
+}
+
+/// Values-free multi-tenant GET /mcp body: THIS grant's pin summary and
+/// catalog names only — capabilities never aggregate identity across tenants.
+fn http_mcp_capabilities_tenant(scope: &RequestScope, t: &TenantCtx) -> Value {
+    let (pin, anchor_ok) = match store() {
+        Ok(s) => {
+            let _ = scope_drift(&s, scope);
+            let pin = match scope_whoami(&s, scope) {
+                Ok(w) => json!({
+                    "pinned": true,
+                    "binding_alias": w.binding_alias,
+                    "tenant": w.tenant,
+                    "mode": w.mode,
+                    "frozen": w.frozen,
+                    "providers": w.providers.iter().map(|p| json!({
+                        "provider": p.provider,
+                        "account": p.account,
+                    })).collect::<Vec<_>>(),
+                }),
+                Err(_) => json!({
+                    "pinned": false,
+                    "hint": "grant unavailable — operator must re-mint (`locus mcp mint`)",
+                }),
+            };
+            let anchor_ok = match scope.anchor.get() {
+                Some(a) => {
+                    anchor_matches_current(&a, scope_identity_observation(&s, scope).as_ref())
+                }
+                None => true,
+            };
+            (pin, anchor_ok)
+        }
+        Err(_) => (json!({ "pinned": false }), false),
+    };
+    let tool_names: Vec<String> = match handle_tools_list(scope) {
+        Ok(listed) => listed
+            .get("tools")
+            .and_then(|t| t.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => control_tools(false).into_iter().map(|t| t.name).collect(),
+    };
+    json!({
+        "ok": true,
+        "service": "locus-mcp",
+        "version": VERSION,
+        "mode": "multi_tenant",
+        "transport": "streamable-http-lite",
+        "protocolVersion": "2024-11-05",
+        "capabilities": {
+            "tools": { "listChanged": true },
+            "resources": { "subscribe": false, "listChanged": true },
+            "prompts": { "listChanged": true }
+        },
+        "grant_id": t.grant_id,
+        "pin": pin,
+        "tools": tool_names,
+        "anchor_ok": anchor_ok,
+    })
+}
+
 /// Values-free GET /mcp body: pin summary + tool names + advertised capabilities.
 /// `scope` is used for a read-only anchor report only — GET never establishes
 /// or resets an anchor.
-fn http_mcp_capabilities(scope: &AnchorScope) -> Value {
+fn http_mcp_capabilities(scope: &RequestScope) -> Value {
+    if let Some(t) = &scope.tenant {
+        return http_mcp_capabilities_tenant(scope, t);
+    }
     let _ = maybe_mcp_auto_pin();
 
     let pin = match store() {
@@ -948,7 +1396,10 @@ fn http_mcp_capabilities(scope: &AnchorScope) -> Value {
     // descriptions, or secret-bearing fields. Scope::None keeps this probe
     // read-only with respect to anchors (the global catalog is reported;
     // anchor_ok below carries the per-session verdict).
-    let tool_names: Vec<String> = match handle_tools_list(&AnchorScope::None) {
+    let tool_names: Vec<String> = match handle_tools_list(&RequestScope {
+        anchor: AnchorScope::None,
+        tenant: None,
+    }) {
         Ok(listed) => listed
             .get("tools")
             .and_then(|t| t.as_array())
@@ -1005,8 +1456,8 @@ fn http_mcp_capabilities(scope: &AnchorScope) -> Value {
 
     // Values-free per-session anchor verdict — only when an Mcp-Session-Id
     // header was presented (sessionless probes keep the exact legacy shape).
-    if matches!(scope, AnchorScope::Http(_)) {
-        match scope.get() {
+    if matches!(scope.anchor, AnchorScope::Http(_)) {
+        match scope.anchor.get() {
             Some(a) => {
                 // Same identity comparison as the provider gate — a
                 // mode/namespace change must read anchor_ok=false too.
@@ -1349,7 +1800,40 @@ fn encode_sse_messages(messages: &[Value]) -> Result<Vec<u8>> {
 ///
 /// Shape mirrors `locus watch` NDJSON: `session_ok`, pin alias, doctor verdict,
 /// safe_next action — never secrets or credential refs.
-fn http_session_tick() -> Value {
+fn http_session_tick(tenant: Option<&TenantCtx>) -> Value {
+    if let Some(t) = tenant {
+        // Tenant ticks are computed from THAT grant's drift only — the tick
+        // never aggregates or leaks the operator pin or other tenants.
+        let scope = RequestScope {
+            anchor: AnchorScope::None,
+            tenant: Some(t.clone()),
+        };
+        let drift = store().ok().and_then(|s| scope_drift(&s, &scope).ok());
+        let (session_ok, alias, frozen, pinned, issues) = match drift {
+            Some(d) => (d.ok, d.binding_alias.clone(), d.frozen, d.pinned, d.issues),
+            None => (false, None, false, false, vec!["store_unavailable".into()]),
+        };
+        return json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/message",
+            "params": {
+                "level": "info",
+                "data": {
+                    "kind": "locus.session_tick",
+                    "scope": "tenant",
+                    "grant_id": t.grant_id,
+                    "session_ok": session_ok,
+                    "whoami": alias,
+                    "doctor_verdict": if session_ok { "SAFE" } else { "UNSAFE" },
+                    "safe_next": if session_ok { "proceed" } else { "remint_grant" },
+                    "pinned": pinned,
+                    "frozen": frozen,
+                    "issues": issues,
+                    "version": VERSION
+                }
+            }
+        });
+    }
     let pack = match store() {
         // Real external facts (Phantom PATH probe + unresolved phm refs) so the
         // tick matches `locus verify session --json`; gather failure ⇒ fail closed.
@@ -1406,7 +1890,11 @@ fn http_session_tick() -> Value {
 /// Long-lived (or `?once=1`) SSE stream of session_ok ticks for hub heartbeats.
 ///
 /// Auth is checked by the caller before this runs. Fail closed: no soft-allow path.
-fn handle_mcp_sse_session_stream(stream: &mut TcpStream, query: &str) -> Result<()> {
+fn handle_mcp_sse_session_stream(
+    stream: &mut TcpStream,
+    query: &str,
+    tenant: Option<&TenantCtx>,
+) -> Result<()> {
     let once = query_flag(query, "once");
     let interval = query_value(query, "interval")
         .and_then(parse_sse_interval)
@@ -1427,7 +1915,7 @@ fn handle_mcp_sse_session_stream(stream: &mut TcpStream, query: &str) -> Result<
     stream.flush()?;
 
     loop {
-        let tick = http_session_tick();
+        let tick = http_session_tick(tenant);
         write_sse_event(stream, "message", &tick)?;
         if once {
             break;
@@ -1790,7 +2278,26 @@ fn agent_instructions(session_anchor: Option<&SessionAnchor>) -> String {
     lines.join("\n")
 }
 
-fn handle_initialize(_params: &Value, scope: &AnchorScope) -> Value {
+fn handle_initialize(_params: &Value, scope: &RequestScope) -> Value {
+    if let Some(t) = &scope.tenant {
+        // Tenant sessions: the anchor was pre-set at session mint from the
+        // grant session's observation and is write-once — re-initialize never
+        // rotates it, and the global pin is never consulted.
+        return json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {
+                "tools": { "listChanged": true },
+                "resources": { "subscribe": false, "listChanged": true },
+                "prompts": { "listChanged": true }
+            },
+            "serverInfo": {
+                "name": "locus-mcp",
+                "version": VERSION
+            },
+            "instructions": tenant_agent_instructions(t)
+        });
+    }
+    let scope = &scope.anchor;
     // Advisory auto-pin probe once at MCP start (see maybe_mcp_auto_pin): it
     // audits the workspace default but never pins — instructions reflect the
     // operator-controlled pin state only.
@@ -1849,8 +2356,153 @@ fn store() -> Result<Store> {
     Store::open_default().context("open locus store")
 }
 
+/// Agent rules for a tenant session — identity comes from the grant only.
+fn tenant_agent_instructions(t: &TenantCtx) -> String {
+    let pin_line = match store() {
+        Ok(s) => match scope_whoami(
+            &s,
+            &RequestScope {
+                anchor: AnchorScope::None,
+                tenant: Some(t.clone()),
+            },
+        ) {
+            Ok(w) => format!(
+                "• Tenant session: binding `{}` (tenant `{}`), grant `{}`. Catalog is exclusive to this binding — no ambient accounts, no other tenants.",
+                w.binding_alias, w.tenant, t.grant_id
+            ),
+            Err(_) => format!(
+                "• Tenant grant `{}` is unavailable — treat this session as unusable until the operator re-mints.",
+                t.grant_id
+            ),
+        },
+        Err(_) => "• Store unavailable — treat session as unpinned.".into(),
+    };
+    [
+        "Locus identity plane (multi-tenant) — tools are hard-scoped to this session's grant.".to_string(),
+        pin_line,
+        "• You CANNOT pin, switch tenants, or select another grant. The tenant is fixed by the operator-minted grant token.".into(),
+        "• Frozen scopes (project_ref, team_id, account_id, orgs/repos) cannot be overridden; scope freeze on mismatch is expected and correct.".into(),
+        "• Never invent alternate project_ref/team/org. Never claim you re-pinned. Never log or request raw secrets or tenant tokens.".into(),
+    ]
+    .join("\n")
+}
+
 /// Active pin plus resolved bindings (alias, Binding) for exclusive or namespaced mode.
 type ActiveBindings = (Session, Vec<(String, Binding)>);
+
+/// Re-verify a tenant's grant + backing session on EVERY identity read so a
+/// `locus mcp revoke` propagates within one in-flight call. Fail closed with
+/// a machine-readable issue tag; the grant file is the source of truth.
+fn tenant_grant_recheck(
+    s: &Store,
+    t: &TenantCtx,
+) -> std::result::Result<locus_core::ResolvedSession, String> {
+    match s.load_mcp_grant(&t.grant_id) {
+        Ok(Some(g)) if !g.revoked && g.session_id == t.session_id => {
+            if g.is_expired() {
+                return Err("grant_expired".into());
+            }
+        }
+        // Deleted / revoked / mismatched / unreadable — uniform tag.
+        _ => return Err("grant_revoked".into()),
+    }
+    match s.load_session_by_id_resolved(&t.session_id) {
+        Ok(Some(resolved)) => Ok(resolved),
+        _ => Err("grant_session_missing".into()),
+    }
+}
+
+/// All-false drift for a dead grant (revoked / expired / session missing).
+fn tenant_dead_drift(issue: &str) -> locus_core::RuntimeDrift {
+    locus_core::RuntimeDrift {
+        pinned: true,
+        seal_ok: false,
+        authority_anchor_ok: false,
+        backing_ok: false,
+        backing_type: None,
+        backing_path: None,
+        authority: None,
+        binding_present: false,
+        binding_id_match: false,
+        tenant_match: false,
+        providers_match: false,
+        frozen: false,
+        expired: issue == "grant_expired",
+        session_id: None,
+        binding_alias: None,
+        binding_id_session: None,
+        binding_id_file: None,
+        tenant_session: None,
+        tenant_file: None,
+        providers: Vec::new(),
+        issues: vec![issue.to_string()],
+        ok: false,
+    }
+}
+
+/// THE single identity resolution point: tenant `None` compiles to today's
+/// [`active_session_bindings`] path verbatim; tenant `Some` resolves the
+/// grant's sealed session instead — `active.json` is never consulted.
+fn resolve_scope_session(scope: &RequestScope) -> Result<Option<ActiveBindings>> {
+    match &scope.tenant {
+        None => active_session_bindings(),
+        Some(t) => {
+            let s = store()?;
+            if let Err(issue) = tenant_grant_recheck(&s, t) {
+                bail!("{issue}");
+            }
+            // Seal + expiry + session-authority validation, fail closed
+            // (mirrors `require_active` for the active path).
+            let session = s.require_session_by_id(&t.session_id)?;
+            let mut bindings = Vec::new();
+            for alias in session.all_aliases() {
+                let b = s.load_binding(&alias)?;
+                bindings.push((alias, b));
+            }
+            Ok(Some((session, bindings)))
+        }
+    }
+}
+
+/// Scope-aware drift heartbeat: tenant `None` → [`Store::check_drift_and_freeze`]
+/// (identical); tenant `Some` → per-session `check_drift_and_freeze_for` — a
+/// freeze writes ONLY that grant's session file.
+fn scope_drift(s: &Store, scope: &RequestScope) -> locus_core::Result<locus_core::RuntimeDrift> {
+    match &scope.tenant {
+        None => s.check_drift_and_freeze(),
+        Some(t) => match tenant_grant_recheck(s, t) {
+            Ok(resolved) => s.check_drift_and_freeze_for(&resolved),
+            Err(issue) => Ok(tenant_dead_drift(&issue)),
+        },
+    }
+}
+
+/// Scope-aware whoami: tenant `None` → [`Store::whoami`]; tenant `Some` →
+/// the grant session's identity only.
+fn scope_whoami(s: &Store, scope: &RequestScope) -> locus_core::Result<locus_core::Whoami> {
+    match &scope.tenant {
+        None => s.whoami(),
+        Some(t) => {
+            let resolved = tenant_grant_recheck(s, t).map_err(locus_core::LocusError::msg)?;
+            s.whoami_for(&resolved)
+        }
+    }
+}
+
+/// Scope-aware current identity observation for health surfaces (the
+/// tenantless branch is [`current_identity_observation`] verbatim).
+fn scope_identity_observation(s: &Store, scope: &RequestScope) -> Option<SessionAnchor> {
+    match &scope.tenant {
+        None => current_identity_observation(s),
+        Some(_) => {
+            if let Ok(Some((session, bindings))) = resolve_scope_session(scope) {
+                return Some(anchor::observation(&session, &bindings));
+            }
+            let drift = scope_drift(s, scope).ok()?;
+            anchor::drift_observation(&drift)
+        }
+    }
+}
 
 /// Load active pin + all bindings (exclusive: one; namespaced: many).
 /// Fails closed on invalid seal / expiry. Frozen sessions still return `Some`
@@ -2059,12 +2711,13 @@ const RESOURCE_SESSION: &str = "locus://session";
 const RESOURCE_DOCTOR: &str = "locus://doctor";
 const RESOURCE_BINDINGS: &str = "locus://bindings";
 
-/// Live pin tag for resource/prompt descriptions (operator-controlled pin state).
-fn pin_label_for_catalog() -> String {
+/// Live pin tag for resource/prompt descriptions — the request scope's
+/// identity (tenant grant when present, operator pin otherwise).
+fn pin_label_for_catalog(scope: &RequestScope) -> String {
     match store() {
         Ok(s) => {
-            let _ = s.check_drift_and_freeze();
-            match s.whoami() {
+            let _ = scope_drift(&s, scope);
+            match scope_whoami(&s, scope) {
                 Ok(w) => format!("locus:{}", w.binding_alias),
                 Err(_) => "locus:unpinned".into(),
             }
@@ -2073,10 +2726,12 @@ fn pin_label_for_catalog() -> String {
     }
 }
 
-fn handle_resources_list() -> std::result::Result<Value, Value> {
+fn handle_resources_list(scope: &RequestScope) -> std::result::Result<Value, Value> {
     // Run the once-per-process advisory auto-pin probe before describing resources.
-    let _ = maybe_mcp_auto_pin();
-    let pin = pin_label_for_catalog();
+    if scope.tenant.is_none() {
+        let _ = maybe_mcp_auto_pin();
+    }
+    let pin = pin_label_for_catalog(scope);
     Ok(json!({
         "resources": [
             {
@@ -2110,9 +2765,14 @@ fn handle_resources_list() -> std::result::Result<Value, Value> {
     }))
 }
 
-fn handle_resources_read(params: &Value, scope: &AnchorScope) -> std::result::Result<Value, Value> {
+fn handle_resources_read(
+    params: &Value,
+    scope: &RequestScope,
+) -> std::result::Result<Value, Value> {
     // Run the once-per-process advisory auto-pin probe (if initialize was skipped).
-    let _ = maybe_mcp_auto_pin();
+    if scope.tenant.is_none() {
+        let _ = maybe_mcp_auto_pin();
+    }
     let uri = params
         .get("uri")
         .and_then(|u| u.as_str())
@@ -2120,8 +2780,8 @@ fn handle_resources_read(params: &Value, scope: &AnchorScope) -> std::result::Re
 
     let body = match uri {
         RESOURCE_SESSION => resource_session_json(scope)?,
-        RESOURCE_DOCTOR => resource_doctor_json()?,
-        RESOURCE_BINDINGS => resource_bindings_json()?,
+        RESOURCE_DOCTOR => resource_doctor_json(scope)?,
+        RESOURCE_BINDINGS => resource_bindings_json(scope)?,
         other => {
             return Err(rpc_error(-32002, format!("resource not found: {other}")));
         }
@@ -2137,10 +2797,10 @@ fn handle_resources_read(params: &Value, scope: &AnchorScope) -> std::result::Re
     }))
 }
 
-fn resource_session_json(scope: &AnchorScope) -> std::result::Result<Value, Value> {
+fn resource_session_json(scope: &RequestScope) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
-    let _ = s.check_drift_and_freeze();
-    let who = s.whoami().ok();
+    let _ = scope_drift(&s, scope);
+    let who = scope_whoami(&s, scope).ok();
     let mut body = match &who {
         Some(w) => serde_json::to_value(w).unwrap_or(json!({})),
         None => json!({
@@ -2148,17 +2808,32 @@ fn resource_session_json(scope: &AnchorScope) -> std::result::Result<Value, Valu
             "hint": "No active pin. Human: `locus pin <alias>` or `locus enter <alias>`. Agents: locus_request_pin / locus_enter_hint."
         }),
     };
+    if let Some(t) = &scope.tenant {
+        body["grant_id"] = json!(t.grant_id);
+    }
     // Additive anchor block (omitted when this session has no anchor).
-    if let Some(a) = scope.get() {
-        let current = current_identity_observation(&s);
+    if let Some(a) = scope.anchor.get() {
+        let current = scope_identity_observation(&s, scope);
         let (report, _) = mcp_anchor_report(&a, who.as_ref(), current.as_ref());
         body["mcp_anchor"] = report;
     }
     Ok(body)
 }
 
-fn resource_doctor_json() -> std::result::Result<Value, Value> {
+fn resource_doctor_json(scope: &RequestScope) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
+    if let Some(t) = &scope.tenant {
+        // Tenant sessions get their own drift verdict only — the full doctor
+        // report describes the OPERATOR store (global pin, all bindings) and
+        // must never aggregate identity across tenants.
+        let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
+        return Ok(json!({
+            "scope": "tenant",
+            "grant_id": t.grant_id,
+            "ok": drift.ok,
+            "runtime": drift,
+        }));
+    }
     // Full structured report with real external facts (Phantom PATH probe +
     // unresolved phm refs) so it matches `locus doctor --json`. Never secrets.
     let external =
@@ -2167,19 +2842,33 @@ fn resource_doctor_json() -> std::result::Result<Value, Value> {
     Ok(serde_json::to_value(report).unwrap_or(json!({})))
 }
 
-fn resource_bindings_json() -> std::result::Result<Value, Value> {
+fn resource_bindings_json(scope: &RequestScope) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     let list = s
         .list_bindings()
         .map_err(|e| rpc_error(-32000, e.to_string()))?;
+    if scope.tenant.is_some() {
+        // Tenants must never enumerate each other: only this grant's aliases.
+        let aliases: Vec<String> = match resolve_scope_session(scope) {
+            Ok(Some((session, _))) => session.all_aliases(),
+            _ => Vec::new(),
+        };
+        let filtered: Vec<_> = list
+            .into_iter()
+            .filter(|b| aliases.iter().any(|a| a == &b.alias))
+            .collect();
+        return Ok(serde_json::to_value(filtered).unwrap_or(json!([])));
+    }
     Ok(serde_json::to_value(list).unwrap_or(json!([])))
 }
 
 // ─── Prompts ────────────────────────────────────────────────────────────────
 
-fn handle_prompts_list() -> std::result::Result<Value, Value> {
-    let _ = maybe_mcp_auto_pin();
-    let pin = pin_label_for_catalog();
+fn handle_prompts_list(scope: &RequestScope) -> std::result::Result<Value, Value> {
+    if scope.tenant.is_none() {
+        let _ = maybe_mcp_auto_pin();
+    }
+    let pin = pin_label_for_catalog(scope);
     Ok(json!({
         "prompts": [{
             "name": "locus_context",
@@ -2192,8 +2881,10 @@ fn handle_prompts_list() -> std::result::Result<Value, Value> {
     }))
 }
 
-fn handle_prompts_get(params: &Value) -> std::result::Result<Value, Value> {
-    let _ = maybe_mcp_auto_pin();
+fn handle_prompts_get(params: &Value, scope: &RequestScope) -> std::result::Result<Value, Value> {
+    if scope.tenant.is_none() {
+        let _ = maybe_mcp_auto_pin();
+    }
     let name = params
         .get("name")
         .and_then(|n| n.as_str())
@@ -2201,8 +2892,8 @@ fn handle_prompts_get(params: &Value) -> std::result::Result<Value, Value> {
 
     match name {
         "locus_context" => {
-            let text = build_locus_context_prompt();
-            let pin = pin_label_for_catalog();
+            let text = build_locus_context_prompt(scope);
+            let pin = pin_label_for_catalog(scope);
             Ok(json!({
                 "description": format!("[{pin}] Locus identity context for the agent system prompt"),
                 "messages": [{
@@ -2218,7 +2909,7 @@ fn handle_prompts_get(params: &Value) -> std::result::Result<Value, Value> {
     }
 }
 
-fn build_locus_context_prompt() -> String {
+fn build_locus_context_prompt(scope: &RequestScope) -> String {
     let s = match store() {
         Ok(s) => s,
         Err(e) => {
@@ -2227,7 +2918,7 @@ fn build_locus_context_prompt() -> String {
             );
         }
     };
-    let _ = s.check_drift_and_freeze();
+    let _ = scope_drift(&s, scope);
 
     let mut lines = vec![
         "## Locus identity context".into(),
@@ -2243,9 +2934,12 @@ fn build_locus_context_prompt() -> String {
         String::new(),
     ];
 
-    match s.whoami() {
+    match scope_whoami(&s, scope) {
         Ok(w) => {
             lines.push("### Active pin".into());
+            if let Some(t) = &scope.tenant {
+                lines.push(format!("- **grant_id**: `{}` (multi-tenant)", t.grant_id));
+            }
             lines.push(format!("- **binding**: `{}`", w.binding_alias));
             lines.push(format!("- **tenant**: `{}`", w.tenant));
             lines.push(format!("- **binding_id**: `{}`", w.binding_id));
@@ -2447,15 +3141,16 @@ fn shape_provider_catalog(
 /// Unpinned / frozen / invalid seal ⇒ only locus_* control tools.
 /// Healthy pin ⇒ control + provider tools (synthetic + upstream MCP when declared).
 /// Namespaced multi-bind prefixes tools as `alias__tool`.
-fn handle_tools_list(scope: &AnchorScope) -> std::result::Result<Value, Value> {
-    // Advisory auto-pin probe when still unpinned (once per process; never grants authority).
-    let _ = maybe_mcp_auto_pin();
+fn handle_tools_list(scope: &RequestScope) -> std::result::Result<Value, Value> {
+    // Advisory auto-pin probe when still unpinned (once per process; never
+    // grants authority). Tenant scopes never touch the global pin.
+    if scope.tenant.is_none() {
+        let _ = maybe_mcp_auto_pin();
+    }
 
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     // Heartbeat on every tools/list: freeze session if binding material drifted.
-    let drift = s
-        .check_drift_and_freeze()
-        .map_err(|e| rpc_error(-32000, e.to_string()))?;
+    let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
 
     // Control tools always. `locus_providers` when a pin exists (even frozen).
     let mut tools: Vec<AdapterTool> = control_tools(drift.pinned);
@@ -2464,7 +3159,7 @@ fn handle_tools_list(scope: &AnchorScope) -> std::result::Result<Value, Value> {
     // Anchor check BEFORE the drift early-return so the catalog reflects the
     // anchored identity even when a cross-process re-pin staled the executor
     // grant (drift unhealthy but identity fields populated).
-    let session_anchor = scope.get();
+    let session_anchor = scope.anchor.get();
     if let (Some(anchored), true) = (&session_anchor, drift.pinned) {
         if let Some(current) = anchor::drift_observation(&drift) {
             if !anchored.same_primary_identity(&current) {
@@ -2483,7 +3178,7 @@ fn handle_tools_list(scope: &AnchorScope) -> std::result::Result<Value, Value> {
         return Ok(tools_list_payload(tools, pin_alias.as_deref()));
     }
 
-    let pinned = active_session_bindings().map_err(|e| rpc_error(-32000, e.to_string()))?;
+    let pinned = resolve_scope_session(scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
     if let Some((ref session, ref bindings)) = pinned {
         // Belt + suspenders: frozen session never lists provider tools.
         if session.is_frozen() {
@@ -2496,9 +3191,9 @@ fn handle_tools_list(scope: &AnchorScope) -> std::result::Result<Value, Value> {
         // healthy pinned observation; on mismatch collapse to control tools
         // tagged with the ANCHORED alias (fail closed, session-local).
         let obs = anchor::observation(session, bindings);
-        match scope.observe(&obs, true) {
+        match scope.anchor.observe(&obs, true) {
             Some(AnchorDecision::Mismatch { anchored }) => {
-                if scope.note_mismatch(&anchored, &obs) {
+                if scope.anchor.note_mismatch(&anchored, &obs) {
                     audit_anchor_event(
                         "mcp.anchor_mismatch",
                         &anchored.binding_alias,
@@ -2549,7 +3244,7 @@ fn handle_tools_list(scope: &AnchorScope) -> std::result::Result<Value, Value> {
     Ok(tools_list_payload(tools, pin_alias.as_deref()))
 }
 
-fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result<Value, Value> {
+fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Result<Value, Value> {
     let name = params
         .get("name")
         .and_then(|n| n.as_str())
@@ -2565,9 +3260,28 @@ fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
 
     // Continuous drift check — freezes session if binding file mutated.
-    let drift = s
-        .check_drift_and_freeze()
-        .map_err(|e| rpc_error(-32000, e.to_string()))?;
+    let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
+
+    // Tenant grant death (revoked / expired / swept) outranks every other
+    // refusal — never a silent identity fallback.
+    if let Some(t) = &scope.tenant {
+        if let Some(issue) = drift
+            .issues
+            .iter()
+            .find(|i| i.starts_with("grant_"))
+            .cloned()
+        {
+            return Ok(tool_text(
+                json!({
+                    "error": issue,
+                    "grant_id": t.grant_id,
+                    "safe_next": format!("locus mcp mint --binding {}", t.binding_alias),
+                    "hint": "this tenant grant is no longer valid; the operator must mint a fresh token",
+                }),
+                true,
+            ));
+        }
+    }
 
     // Anchored-identity check BEFORE the drift early-returns: a cross-process
     // re-pin stales the executor grant, so drift is already unhealthy — the
@@ -2575,12 +3289,12 @@ fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result
     // RuntimeDrift carries identity fields even when unhealthy; drift.issues
     // ride along as underlying_issues so the authority-plane facts stay
     // visible. Establishment never happens here (unhealthy observations).
-    let session_anchor = scope.get();
+    let session_anchor = scope.anchor.get();
     if let (Some(anchored), true) = (&session_anchor, drift.pinned) {
         if let Some(current) = anchor::drift_observation(&drift) {
             if !anchored.same_primary_identity(&current) {
                 return Ok(pin_changed_refusal(
-                    scope,
+                    &scope.anchor,
                     anchored,
                     &current,
                     &drift.issues,
@@ -2621,6 +3335,18 @@ fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result
             ));
         }
         if drift.expired {
+            if let Some(t) = &scope.tenant {
+                return Ok(tool_text(
+                    json!({
+                        "error": "grant_expired",
+                        "grant_id": t.grant_id,
+                        "issues": drift.issues,
+                        "safe_next": format!("locus mcp mint --binding {}", t.binding_alias),
+                        "hint": "grant TTL elapsed; the operator must mint a fresh tenant token",
+                    }),
+                    true,
+                ));
+            }
             return Ok(tool_text(
                 json!({
                     "error": "session_expired",
@@ -2640,7 +3366,7 @@ fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result
         ));
     }
 
-    let pinned = active_session_bindings().map_err(|e| rpc_error(-32000, e.to_string()))?;
+    let pinned = resolve_scope_session(scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
     let Some((session, bindings)) = pinned else {
         let mut body = json!({
             "error": "not_pinned",
@@ -2667,7 +3393,7 @@ fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result
     // same-identity re-pin (`locus enter <same>`) re-anchors silently;
     // different identity fails closed with `pin_changed`.
     let obs = anchor::observation(&session, &bindings);
-    match scope.observe(&obs, true) {
+    match scope.anchor.observe(&obs, true) {
         Some(AnchorDecision::Established) => {
             audit_anchor_event(
                 "mcp.anchor_established",
@@ -2683,7 +3409,7 @@ fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result
             );
         }
         Some(AnchorDecision::Mismatch { anchored }) => {
-            return Ok(pin_changed_refusal(scope, &anchored, &obs, &[]));
+            return Ok(pin_changed_refusal(&scope.anchor, &anchored, &obs, &[]));
         }
         Some(AnchorDecision::Match) | None => {}
     }
@@ -2756,6 +3482,7 @@ fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result
                 audit_tool_block(&s, &binding.alias, tool_name, &r.content);
                 audit_tool_call(
                     &s,
+                    scope,
                     &binding.alias,
                     tool_name,
                     &session.session_id,
@@ -2804,6 +3531,7 @@ fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result
                     Ok(r) => {
                         audit_tool_call(
                             &s,
+                            scope,
                             &binding.alias,
                             tool_name,
                             &session.session_id,
@@ -2824,24 +3552,29 @@ fn handle_tools_call(params: &Value, scope: &AnchorScope) -> std::result::Result
 }
 
 /// Audit successful tools/call path with optional capability `ticket_id` (not a secret).
+/// Multi-tenant requests additionally stamp grant_id + http_session_id.
 fn audit_tool_call(
     s: &Store,
+    scope: &RequestScope,
     alias: &str,
     tool: &str,
     session_id: &str,
     ticket_id: Option<&str>,
     ok: bool,
 ) {
-    let _ = s.audit(
-        "mcp.tools_call",
-        alias,
-        Some(json!({
-            "tool": tool,
-            "session_id": session_id,
-            "ticket_id": ticket_id,
-            "ok": ok,
-        })),
-    );
+    let mut detail = json!({
+        "tool": tool,
+        "session_id": session_id,
+        "ticket_id": ticket_id,
+        "ok": ok,
+    });
+    if let Some(t) = &scope.tenant {
+        detail["grant_id"] = json!(t.grant_id);
+        if let AnchorScope::Http(id) = &scope.anchor {
+            detail["http_session_id"] = json!(id);
+        }
+    }
+    let _ = s.audit("mcp.tools_call", alias, Some(detail));
 }
 
 fn audit_tool_block(s: &Store, alias: &str, tool: &str, content: &Value) {
@@ -2894,7 +3627,7 @@ fn scope_or_err(
 fn call_control(
     name: &str,
     args: &Value,
-    scope: &AnchorScope,
+    scope: &RequestScope,
 ) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     // Heartbeat: detect drift and freeze when identity control tools are polled.
@@ -2907,7 +3640,7 @@ fn call_control(
             | "locus_safe_next"
             | "locus_verify_session"
     ) {
-        let _ = s.check_drift_and_freeze();
+        let _ = scope_drift(&s, scope);
     }
     // Additive `mcp_anchor` block for identity-reporting control tools —
     // omitted entirely when this MCP session has no anchor (keeps unpinned
@@ -2920,9 +3653,9 @@ fn call_control(
             | "locus_safe_next"
             | "locus_verify_session"
     ) {
-        scope.get().map(|a| {
-            let who = s.whoami().ok();
-            let current = current_identity_observation(&s);
+        scope.anchor.get().map(|a| {
+            let who = scope_whoami(&s, scope).ok();
+            let current = scope_identity_observation(&s, scope);
             mcp_anchor_report(&a, who.as_ref(), current.as_ref())
         })
     } else {
@@ -2948,6 +3681,38 @@ fn call_control(
         .unwrap_or(false);
     match name {
         "locus_safe_next" => {
+            if let Some(t) = &scope.tenant {
+                // Tenant-scoped: derived from this grant's drift only — never
+                // the operator store's global safe_next.
+                let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
+                let dead = drift
+                    .issues
+                    .iter()
+                    .find(|i| i.starts_with("grant_"))
+                    .cloned();
+                let (action, command, ready) = match (&dead, drift.ok) {
+                    (Some(issue), _) => (
+                        issue.clone(),
+                        Some(format!("locus mcp mint --binding {}", t.binding_alias)),
+                        false,
+                    ),
+                    (None, true) => ("proceed".to_string(), None, true),
+                    (None, false) => (
+                        "remint_grant".to_string(),
+                        Some(format!("locus mcp mint --binding {}", t.binding_alias)),
+                        false,
+                    ),
+                };
+                let body = attach_report(json!({
+                    "scope": "tenant",
+                    "grant_id": t.grant_id,
+                    "ready": ready,
+                    "action": action,
+                    "command": command,
+                    "issues": drift.issues,
+                }));
+                return Ok(tool_text(body, !ready));
+            }
             let next =
                 compute_safe_next(&s, &cwd()).map_err(|e| rpc_error(-32000, e.to_string()))?;
             let mut body = attach_report(serde_json::to_value(&next).unwrap_or(json!({})));
@@ -2968,11 +3733,14 @@ fn call_control(
             // Informational: isError only when not ready so agents notice the gate.
             Ok(tool_text(body, is_err))
         }
-        "locus_whoami" => match s.whoami() {
-            Ok(w) => Ok(tool_text(
-                attach_report(serde_json::to_value(w).unwrap_or(json!({}))),
-                false,
-            )),
+        "locus_whoami" => match scope_whoami(&s, scope) {
+            Ok(w) => {
+                let mut body = serde_json::to_value(w).unwrap_or(json!({}));
+                if let Some(t) = &scope.tenant {
+                    body["grant_id"] = json!(t.grant_id);
+                }
+                Ok(tool_text(attach_report(body), false))
+            }
             Err(e) => Ok(tool_text(
                 attach_report(json!({
                     "pinned": false,
@@ -2983,6 +3751,22 @@ fn call_control(
             )),
         },
         "locus_status" => {
+            if let Some(t) = &scope.tenant {
+                let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
+                let body = attach_report(json!({
+                    "pinned": drift.pinned,
+                    "scope": "tenant",
+                    "grant_id": t.grant_id,
+                    "binding": drift.binding_alias,
+                    "tenant": drift.tenant_session,
+                    "session_id": drift.session_id,
+                    "seal_ok": drift.seal_ok,
+                    "expired": drift.expired,
+                    "frozen": drift.frozen,
+                    "issues": drift.issues,
+                }));
+                return Ok(tool_text(body, false));
+            }
             let active = s
                 .active_session()
                 .map_err(|e| rpc_error(-32000, e.to_string()))?;
@@ -3014,9 +3798,7 @@ fn call_control(
         }
         "locus_heartbeat" => {
             // Doctor-lite: full RuntimeDrift + operator hint. Never secrets.
-            let drift = s
-                .check_drift_and_freeze()
-                .map_err(|e| rpc_error(-32000, e.to_string()))?;
+            let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
             let hint = if drift.ok {
                 None
             } else if !drift.pinned {
@@ -3049,6 +3831,13 @@ fn call_control(
             // Informational probe — isError only when unhealthy so agents notice.
             Ok(tool_text(body, !drift.ok))
         }
+        "locus_enter_hint" if scope.tenant.is_some() => Ok(tool_text(
+            json!({
+                "error": "tenant_fixed_by_grant",
+                "hint": "this session's tenant is fixed by its operator-minted grant; a different binding needs a new grant token (`locus mcp mint`)",
+            }),
+            true,
+        )),
         "locus_enter_hint" => {
             let alias = args
                 .get("alias")
@@ -3086,12 +3875,25 @@ fn call_control(
             ))
         }
         "locus_list_bindings" => {
-            let list = s
-                .list_bindings()
-                .map_err(|e| rpc_error(-32000, e.to_string()))?;
+            // Tenant scopes see only their own grant's aliases (never the
+            // operator's full binding roster).
+            let list = resource_bindings_json(scope)?;
+            Ok(tool_text(list, false))
+        }
+        "locus_request_pin" if scope.tenant.is_some() => {
+            let t = scope.tenant.as_ref().expect("guarded");
+            let _ = s.audit(
+                "mcp.request_pin",
+                &t.binding_alias,
+                Some(json!({ "refused": "tenant_fixed_by_grant", "grant_id": t.grant_id })),
+            );
             Ok(tool_text(
-                serde_json::to_value(list).unwrap_or(json!([])),
-                false,
+                json!({
+                    "error": "tenant_fixed_by_grant",
+                    "grant_id": t.grant_id,
+                    "hint": "this session's tenant is fixed by its operator-minted grant; the operator must mint a new grant token for a different binding (`locus mcp mint --binding <alias>`)",
+                }),
+                true,
             ))
         }
         "locus_request_pin" => {
@@ -3116,7 +3918,7 @@ fn call_control(
                 false,
             ))
         }
-        "locus_providers" => match s.whoami() {
+        "locus_providers" => match scope_whoami(&s, scope) {
             Ok(w) => Ok(tool_text(json!({ "providers": w.providers }), false)),
             Err(e) => Ok(tool_text(json!({ "error": e.to_string() }), true)),
         },
@@ -3133,7 +3935,7 @@ fn call_control(
                     true,
                 ));
             };
-            let who = s.whoami().ok();
+            let who = scope_whoami(&s, scope).ok();
             let result = verify_claim(text, who.as_ref());
             let binding = who
                 .as_ref()
@@ -3157,6 +3959,38 @@ fn call_control(
             ))
         }
         "locus_verify_session" => {
+            if let Some(t) = &scope.tenant {
+                // Tenant-scoped pack: this grant's drift + whoami only. The
+                // full operator pack (global doctor / global pin) must never
+                // reach a tenant session.
+                let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
+                let who = scope_whoami(&s, scope).ok();
+                let session_ok = drift.ok && who.is_some();
+                let body = attach_report(json!({
+                    "scope": "tenant",
+                    "grant_id": t.grant_id,
+                    "session_ok": session_ok,
+                    "whoami": who,
+                    "runtime": drift,
+                    "safe_next": {
+                        "action": if session_ok { "proceed" } else { "remint_grant" },
+                        "ready": session_ok,
+                        "command": if session_ok { Value::Null } else {
+                            json!(format!("locus mcp mint --binding {}", t.binding_alias))
+                        },
+                    },
+                }));
+                let _ = s.audit(
+                    "mcp.verify_session",
+                    &t.binding_alias,
+                    Some(json!({
+                        "session_ok": session_ok,
+                        "grant_id": t.grant_id,
+                        "scope": "tenant",
+                    })),
+                );
+                return Ok(tool_text(body, false));
+            }
             // Same pack as `locus verify session --json`. Available unpinned.
             // isError only on hard store failures — agents/hub gate on session_ok.
             let external =
@@ -3216,6 +4050,76 @@ fn tool_text(value: Value, is_error: bool) -> Value {
         "content": [{ "type": "text", "text": text }],
         "isError": is_error
     })
+}
+
+#[cfg(test)]
+mod multi_tenant_tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<RunMode> {
+        parse_run_mode(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn parse_run_mode_multi_tenant_requires_http() {
+        // stdio + --multi-tenant is a startup error (fail closed).
+        let err = parse(&["--multi-tenant"]).expect_err("stdio+MT must fail");
+        assert!(err.to_string().contains("--http"), "{err}");
+
+        let ok = parse(&["--http", "127.0.0.1:9123", "--multi-tenant"]).unwrap();
+        assert!(ok.multi_tenant);
+        assert!(ok.http_addr.is_some());
+
+        let plain = parse(&["--http", "127.0.0.1:9123"]).unwrap();
+        assert!(!plain.multi_tenant);
+
+        let stdio = parse(&[]).unwrap();
+        assert!(!stdio.multi_tenant);
+        assert!(stdio.http_addr.is_none());
+    }
+
+    /// Call-site completeness guard: every direct global-identity read in this
+    /// file must live in one of the tenantless-only helpers
+    /// (`current_healthy_anchor`, `current_identity_observation`,
+    /// `current_http_session_pin_summary`, `agent_instructions`,
+    /// `http_mcp_capabilities` single-tenant branch) or in the scope helpers'
+    /// own tenant-None arms. Any NEW direct call risks leaking the OPERATOR
+    /// pin into a tenant session — route it through `resolve_scope_session` /
+    /// `scope_whoami` / `scope_drift` instead, then update these counts.
+    #[test]
+    fn global_identity_reads_stay_in_scope_helpers() {
+        let src = include_str!("main.rs");
+        let bindings_needle = format!("{}{}", "active_session_", "bindings()");
+        let drift_needle = format!("{}{}", "check_drift_", "and_freeze()");
+        let whoami_needle = format!("{}{}", "s.", "whoami()");
+        assert_eq!(
+            src.matches(bindings_needle.as_str()).count(),
+            4,
+            "unexpected direct active-session read added outside scope helpers"
+        );
+        assert_eq!(
+            src.matches(drift_needle.as_str()).count(),
+            5,
+            "unexpected direct drift read added outside scope helpers"
+        );
+        assert_eq!(
+            src.matches(whoami_needle.as_str()).count(),
+            4,
+            "unexpected direct whoami read added outside scope helpers"
+        );
+    }
+
+    /// Tenant refusal bodies and dead-grant drift stay values-free.
+    #[test]
+    fn tenant_dead_drift_shapes() {
+        let d = tenant_dead_drift("grant_expired");
+        assert!(!d.ok);
+        assert!(d.expired);
+        assert_eq!(d.issues, vec!["grant_expired".to_string()]);
+        let d = tenant_dead_drift("grant_revoked");
+        assert!(!d.ok);
+        assert!(!d.expired);
+    }
 }
 
 #[cfg(test)]
