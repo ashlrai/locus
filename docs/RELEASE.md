@@ -1,7 +1,7 @@
 # Releasing Locus
 
 Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
-`[workspace.package] version` (currently **0.3.0**). Crates inherit via
+`[workspace.package] version` (currently **0.4.0**). Crates inherit via
 `version.workspace = true`. npm packages under `npm/`, `npm-mcp/`, and
 `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
 `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
@@ -22,7 +22,44 @@ cargo fmt --all -- --check
 - [ ] CI green on `main`
 - [ ] e2e green locally (`scripts/e2e.sh`)
 
-## Checklist — v0.3.0
+## Checklist — v0.4.0
+
+1. [x] Bump version → **0.4.0** (Cargo workspace + npm + bin wrappers)
+2. [x] `CHANGELOG.md` section for 0.4.0 (multi-tenant MCP multiplexor + grants, Anthropic/OpenAI adapters, `locus switch`, leave --force audit fix, worker-home deletion hardening, …)
+3. [ ] Homebrew formula comments: prior source + asset sha256 recorded (see formula)
+4. [ ] Tag from clean `main` (parent / release owner — **do not force-push tags**):
+
+   ```bash
+   git tag -a v0.4.0 -m "Locus v0.4.0"
+   git push origin main
+   git push origin v0.4.0
+   ```
+
+5. [ ] Wait for [`.github/workflows/release.yml`](../.github/workflows/release.yml) assets
+6. [ ] Source tarball sha256 for **v0.4.0** → update formula + live tap:
+
+   ```bash
+   curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v0.4.0.tar.gz" | shasum -a 256
+   ```
+
+7. [ ] Optional prebuilt digests (after assets land):
+
+   ```bash
+   for t in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+     curl -sL "https://github.com/ashlrai/locus/releases/download/v0.4.0/locus-$t.tar.gz" | shasum -a 256
+   done
+   ```
+
+8. [ ] npm: publish `npm/` (`locus-cli`) and `npm-mcp/` (`@ashlrai/locus-mcp`, scoped — `locus-mcp` is third-party-owned on npm) at 0.4.0
+9. [ ] Verify:
+
+   ```bash
+   gh release view v0.4.0
+   gh release download v0.4.0 -p 'locus-*.tar.gz' -D /tmp/locus-rel
+   locus --version   # or extracted binary
+   ```
+
+## Checklist — v0.3.0 (shipped)
 
 1. [x] Bump version → **0.3.0** (Cargo workspace + npm + bin wrappers)
 2. [x] `CHANGELOG.md` section for 0.3.0 (TTL auto-leave, client add, MCP session pin-anchoring, Grok/Claude wiring, verify_session, control capability, …)
