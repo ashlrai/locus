@@ -1212,6 +1212,35 @@ mod tests {
         assert!(ids.contains(&"vercel"));
     }
 
+    /// Drift guard: the built-in registry catalog (adapters/manifest.toml)
+    /// and the dispatchable provider set (`adapters::known_providers()`, kept
+    /// in sync with the `adapter_for` match by its own test) must be equal
+    /// both ways — a future adapter cannot miss either surface.
+    #[test]
+    fn builtin_catalog_matches_dispatchable_providers() {
+        use std::collections::BTreeSet;
+        let registry: BTreeSet<String> = builtin_manifest()
+            .expect("builtin manifest")
+            .providers
+            .iter()
+            .map(|p| p.id.to_ascii_lowercase())
+            .collect();
+        let dispatch: BTreeSet<String> = crate::adapters::known_providers()
+            .iter()
+            .map(|p| p.to_ascii_lowercase())
+            .collect();
+        let missing_from_registry: Vec<_> = dispatch.difference(&registry).collect();
+        let missing_from_dispatch: Vec<_> = registry.difference(&dispatch).collect();
+        assert!(
+            missing_from_registry.is_empty(),
+            "dispatchable providers missing from adapters/manifest.toml registry catalog: {missing_from_registry:?}"
+        );
+        assert!(
+            missing_from_dispatch.is_empty(),
+            "registry catalog providers with no dispatchable adapter in adapters/mod.rs: {missing_from_dispatch:?}"
+        );
+    }
+
     #[test]
     fn list_adapters_sorted() {
         let list = list_adapters().unwrap();

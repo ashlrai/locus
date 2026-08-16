@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Adapter registry catalog covers anthropic/openai** — the built-in catalog
+  (`adapters/manifest.toml`, surfaced by `locus adapter list` and
+  `locus adapter registry export`) now includes the `anthropic` and `openai`
+  adapters (9 providers total). A drift-guard test asserts the registry id set
+  equals the dispatchable provider set so future adapters cannot miss either
+  surface.
+
 ## [0.5.0] — 2026-08-16
 
 ### Added

@@ -93,3 +93,25 @@ frozen_selectors = ["domains"]
 tools = ["resend.scope", "resend.whoami"]
 destructive_tools = []
 description = "Domain allowlist freeze (scope.projects or scope.extra.domains)."
+
+[[providers]]
+id = "anthropic"
+name = "Anthropic"
+status = "built-in"
+synthetic = true
+capabilities = ["scope", "identity", "destructive_stubs"]
+frozen_selectors = ["org_id", "workspace_id"]
+tools = ["anthropic.scope", "anthropic.whoami", "anthropic.usage", "anthropic.keys.list", "anthropic.keys.create"]
+destructive_tools = ["anthropic.keys.create"]
+description = "Org + workspace freeze (scope.account_id / scope.project_ref); synthetic usage + key stubs, keys.create policy-gated."
+
+[[providers]]
+id = "openai"
+name = "OpenAI"
+status = "built-in"
+synthetic = true
+capabilities = ["scope", "identity", "destructive_stubs"]
+frozen_selectors = ["org_id", "project_id"]
+tools = ["openai.scope", "openai.whoami", "openai.usage", "openai.keys.list", "openai.keys.create"]
+destructive_tools = ["openai.keys.create"]
+description = "Org + project freeze (scope.account_id / scope.project_ref); synthetic usage + key stubs, keys.create policy-gated."
