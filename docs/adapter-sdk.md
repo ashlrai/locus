@@ -284,7 +284,8 @@ impl ProviderAdapter for MyProviderAdapter {
 |-----|--------|
 | In-tree `ProviderAdapter`, synthetic identity tools | Upstream MCP / REST workers (partially landed via recipes) |
 | Manual `adapter_for` match | Optional out-of-tree packages / dynamic load |
-| Catalog parse + **ed25519** (preferred) / HMAC-SHA256 (backcompat) verify (`locus adapter`) | Signed release manifests + registry root publication |
+| Catalog parse + **ed25519** (preferred) / HMAC-SHA256 (backcompat) verify (`locus adapter`) | Registry root publication |
+| Signed release manifests (`locus adapter registry export --sign` / `verify-manifest`, see [registry-trust.md](./registry-trust.md)) | CI-side signing (needs a provisioned `LOCUS_REGISTRY_SIGNING_KEY` secret) |
 | Policy + approval CLI | Elevation TTL, dual-control UX polish |
 
 Prefer **wrapping** official upstream MCP servers with frozen env over reimplementing APIs — see [workers.md](./workers.md).

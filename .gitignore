@@ -11,3 +11,6 @@ daemon.key
 .locus/
 sessions/
 approvals/
+
+# machine-local workspace advisory (operator-specific)
+/.locus.toml

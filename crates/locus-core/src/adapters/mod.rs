@@ -163,6 +163,12 @@ pub fn tools_for_binding(binding: &Binding) -> Vec<AdapterTool> {
 /// Presentation-layer truth only — call-time enforcement is unchanged.
 pub const REQUIRES_APPROVAL_MARKER: &str = "[requires human approval under current pin]";
 
+/// Marker appended in tools/list to tools a structured policy `deny` rule
+/// unconditionally blocks under the current pin.
+///
+/// Presentation-layer truth only — call-time enforcement is unchanged.
+pub const DENIED_BY_POLICY_MARKER: &str = "[denied by policy under current pin]";
+
 /// Presentation-layer catalog shaping for a single tool of one binding.
 ///
 /// `bare_name` is the unprefixed `provider.tool` name — the exact string the
@@ -177,8 +183,15 @@ pub const REQUIRES_APPROVAL_MARKER: &str = "[requires human approval under curre
 ///
 /// Otherwise, when policy evaluation (same engine as call-time:
 /// [`evaluate`]) yields `RequireApproval`, the description is annotated with
-/// [`REQUIRES_APPROVAL_MARKER`] so agents and operators can see the gate
+/// [`REQUIRES_APPROVAL_MARKER`]; when a structured rule yields `Deny`, with
+/// [`DENIED_BY_POLICY_MARKER`] — so agents and operators can see the gate
 /// before spending a call.
+///
+/// The deny marker never lies: [`evaluate`] is deterministic over the exact
+/// name call-time evaluates, so a rule-matched `Deny` here is unconditional.
+/// `policy.default = "deny"` (matched_rule `"default"`) is deliberately not
+/// annotated — under a deny-default the whole catalog would carry the marker,
+/// drowning the signal of explicit deny rules.
 ///
 /// This mirrors real enforcement rather than inventing it: a tool hidden
 /// here because of a read_only scope is denied at call time by the read_only
@@ -192,10 +205,21 @@ pub fn shape_catalog_tool(binding: &Binding, bare_name: &str, tool: &mut Adapter
             }
         }
     }
-    if evaluate(&binding.policy, bare_name).decision == Decision::RequireApproval
-        && !tool.description.contains(REQUIRES_APPROVAL_MARKER)
-    {
-        tool.description = format!("{} {REQUIRES_APPROVAL_MARKER}", tool.description.trim_end());
+    let verdict = evaluate(&binding.policy, bare_name);
+    match verdict.decision {
+        Decision::RequireApproval if !tool.description.contains(REQUIRES_APPROVAL_MARKER) => {
+            tool.description =
+                format!("{} {REQUIRES_APPROVAL_MARKER}", tool.description.trim_end());
+        }
+        // Structured rules only (rule-matched Deny, including unknown-action
+        // fail-closed) — default-deny is excluded via the "default" sentinel.
+        Decision::Deny
+            if verdict.matched_rule.as_deref() != Some("default")
+                && !tool.description.contains(DENIED_BY_POLICY_MARKER) =>
+        {
+            tool.description = format!("{} {DENIED_BY_POLICY_MARKER}", tool.description.trim_end());
+        }
+        _ => {}
     }
     true
 }
@@ -2028,5 +2052,98 @@ mod tests {
         // vercel.scope matches the legacy `vercel.*` glob → annotated.
         let scope_tool = shaped.iter().find(|t| t.name == "vercel.scope").unwrap();
         assert!(scope_tool.description.contains(REQUIRES_APPROVAL_MARKER));
+    }
+
+    #[test]
+    fn structured_deny_rule_annotates_denied_tools_only() {
+        let b = Binding::from_body(BindingBody {
+            id: "bnd_vc3".into(),
+            alias: "vc3".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy {
+                rules: vec![crate::binding::PolicyRule::new(
+                    "vercel.deploy.prod",
+                    "deny",
+                )],
+                ..Policy::default()
+            },
+            providers: vec![ProviderBinding {
+                provider: "vercel".into(),
+                account: "acme-vc".into(),
+                credential_ref: "phm:VERCEL_ACME".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        });
+        let shaped = shaped_catalog(&b);
+        let deploy = shaped
+            .iter()
+            .find(|t| t.name == "vercel.deploy.prod")
+            .expect("denied tool stays listed (annotated, not hidden)");
+        assert!(
+            deploy.description.contains(DENIED_BY_POLICY_MARKER),
+            "deny-ruled tool must carry the deny marker: {}",
+            deploy.description
+        );
+        assert!(
+            !deploy.description.contains(REQUIRES_APPROVAL_MARKER),
+            "deny and approval markers are mutually exclusive"
+        );
+        let scope_tool = shaped.iter().find(|t| t.name == "vercel.scope").unwrap();
+        assert!(
+            !scope_tool.description.contains(DENIED_BY_POLICY_MARKER),
+            "non-denied tool must not be annotated"
+        );
+
+        // Re-shaping never duplicates the marker (idempotent listing).
+        let mut again = deploy.clone();
+        assert!(shape_catalog_tool(&b, "vercel.deploy.prod", &mut again));
+        assert_eq!(
+            again.description.matches(DENIED_BY_POLICY_MARKER).count(),
+            1
+        );
+
+        // Never lie: the annotated tool really is denied at call time by the
+        // same engine.
+        let r = call_tool(&b, "vercel.deploy.prod", &json!({})).unwrap();
+        assert!(!r.ok);
+        assert_eq!(
+            r.content.get("error").and_then(|v| v.as_str()),
+            Some("denied_by_policy")
+        );
+    }
+
+    #[test]
+    fn default_deny_is_not_annotated() {
+        // policy.default = deny blocks unmatched tools too, but annotating the
+        // entire catalog would drown explicit deny rules — the marker is
+        // reserved for structured rule matches.
+        let b = Binding::from_body(BindingBody {
+            id: "bnd_vc4".into(),
+            alias: "vc4".into(),
+            tenant: "acme-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy {
+                default: "deny".into(),
+                ..Policy::default()
+            },
+            providers: vec![ProviderBinding {
+                provider: "vercel".into(),
+                account: "acme-vc".into(),
+                credential_ref: "phm:VERCEL_ACME".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        });
+        for t in shaped_catalog(&b) {
+            assert!(
+                !t.description.contains(DENIED_BY_POLICY_MARKER),
+                "default-deny must not annotate {}",
+                t.name
+            );
+        }
     }
 }

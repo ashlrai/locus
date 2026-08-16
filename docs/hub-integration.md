@@ -10,6 +10,7 @@ Machine contract for **ashlr-hub** (and similar orchestrators) to shell out to L
 | Agent report schema | [`schema/agent-report.schema.json`](../schema/agent-report.schema.json) |
 | Doctor schema | [`schema/doctor.schema.json`](../schema/doctor.schema.json) |
 | Fleet gate schema | [`schema/hub-gate.schema.json`](../schema/hub-gate.schema.json) |
+| MCP grant schema | [`schema/mcp-grant.schema.json`](../schema/mcp-grant.schema.json) |
 | Hub drop-in + TS types | [`integrations/ashlr-hub/locus.ts`](../integrations/ashlr-hub/locus.ts) |
 | Fleet preflight | [`integrations/ashlr-hub/fleet-preflight.md`](../integrations/ashlr-hub/fleet-preflight.md) |
 | MCP gateway patch | [`integrations/ashlr-hub/mcp-gateway-snippet.md`](../integrations/ashlr-hub/mcp-gateway-snippet.md) |
@@ -354,9 +355,87 @@ other over HTTP.
    audited (`mcp.grant_expired_swept`). Re-mint rather than extend.
 5. **Reconcile** — `locus mcp list` joins live per-grant HTTP-session counts;
    diff it against the hub's job table to catch leaked grants. Per-grant
-   session cap: `LOCUS_MCP_SESSIONS_PER_GRANT` (default 8). A `withLocusMcpTenant` wrapper in the hub drop-in
-(`integrations/ashlr-hub/locus.ts`) is a named follow-up; until then use the
-header contract above. Details: [docs/mcp.md](./mcp.md#multi-tenant-http---multi-tenant).
+   session cap: `LOCUS_MCP_SESSIONS_PER_GRANT` (default 8).
+
+Mint output contract: [`schema/mcp-grant.schema.json`](../schema/mcp-grant.schema.json).
+Details: [docs/mcp.md](./mcp.md#multi-tenant-http---multi-tenant).
+
+### Hub drop-in: `withLocusMcpTenant` (grant scope + auto-revoke)
+
+The drop-in ([`integrations/ashlr-hub/locus.ts`](../integrations/ashlr-hub/locus.ts))
+drives the full lifecycle for you — mint via CLI JSON, hand the callback an
+auth-header handle for HTTP `/mcp` dispatch, and **always revoke in a
+`finally`** (a revoke failure after a successful job throws — a leaked live
+grant must never pass silently):
+
+```ts
+import {
+  withLocusMcpTenant,
+  classifyTenantAuthError,
+  locusMtPreflight,
+  parseMcpMintOutput,
+  parseMcpListOutput,
+  locusMcpList,
+  TENANT_TOKEN_HEADER,
+} from "../integrations/ashlr-hub/locus";
+
+// Reachability + mode detection before dispatch (GET /health + GET /mcp)
+const pre = await locusMtPreflight({
+  baseUrl: "http://127.0.0.1:8742",
+  serverToken: process.env.LOCUS_MCP_HTTP_TOKEN,
+});
+if (!pre.reachable || !pre.multiTenant) {
+  // fall back to stdio / single-tenant wiring
+}
+
+await withLocusMcpTenant(
+  "cmp",
+  async ({ headers, grantId }) => {
+    // headers = { "X-Locus-Tenant-Token": lmt_…, Authorization: "Bearer …" }
+    const res = await fetch("http://127.0.0.1:8742/mcp", {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    });
+    if (!res.ok) {
+      const why = classifyTenantAuthError(res.status, await res.json());
+      throw new Error(`mcp auth failed: ${why.kind} (recovery: ${why.recovery})`);
+    }
+    // … dispatch tools/call with the minted Mcp-Session-Id …
+  },
+  { ttl: "15m", label: jobId, serverToken: process.env.LOCUS_MCP_HTTP_TOKEN },
+); // grant revoked here, token scrubbed from the handle
+```
+
+**Token hygiene (hub contract):** the `lmt_` bearer exists only inside
+`handle.headers` for the callback's duration and is scrubbed when the wrapper
+returns. Hold it **in memory only** — never log it, never persist it (job
+records, checkpoints, transcripts), never place it in tool arguments. The
+grant id (`grantId`) is the loggable identifier.
+
+**Typed auth failures** (`classifyTenantAuthError(status, body)`):
+
+| Wire | `kind` | `recovery` |
+|------|--------|------------|
+| 401 `{error:"invalid_grant",reason:"grant_expired"}` | `grant_expired` | `re_mint` (+ verbatim `safeNext`) |
+| 401 `{error:"invalid_grant"}` (missing / forged / revoked — indistinguishable by design) | `invalid_grant` | `re_mint` |
+| 401 `{error:"unauthorized"}` (server bearer) | `server_unauthorized` | `server_token` |
+| 403 `{error:"tenant_mismatch"}` (cross-tenant `Mcp-Session-Id` reuse) | `tenant_mismatch` | `initialize` |
+| 400 `{error:"session_required"}` (sessionless MT POST) | `session_required` | `initialize` |
+| anything else | `unknown` | `none` (hard error) |
+
+**Pure helpers** (unit-testable, no spawn/FS): `parseMcpMintOutput` validates
+mint JSON fail-closed (token shape `lmt_<grant_id>.<secret>` must embed the
+reported grant id); `parseMcpListOutput` validates the roster and **rejects any
+payload carrying `lmt_` bearer material** (the list is values-free by
+contract); `classifyTenantAuthError` is the table above.
+
+**Shell wrappers:** `locusMcpMint` / `locusMcpList` / `locusMcpRevoke` mirror
+the `locusCiMint` conventions (scrubbed spawn env, fail closed, never echo the
+token in errors). `locusMtPreflight` needs only global `fetch` (Node ≥ 18) —
+mode detection is sound both ways: with a tenant header the capabilities body
+carries `mode: "multi_tenant"` + `grant_id`; without one, only an MT server
+answers `GET /mcp` with 401 `invalid_grant`.
 
 ---
 
@@ -504,6 +583,11 @@ locus whoami --json        | jq -e '.binding_alias and .session_id'
 locus status --oneline
 locus verify session --json | jq -e '.kind == "session" and (.session_ok | type == "boolean")'
 locus watch --once --json   | jq -e '.kind == "watch" and (.session_ok | type == "boolean")'
+# MT grants (token shown once — validate, never echo/log it):
+locus mcp mint --binding personal --ttl 5m --json \
+  | jq -e '(.grant_id | test("^[a-f0-9]+$")) and (.token | startswith("lmt_"))' >/dev/null
+locus mcp list --json | jq -e 'type == "array" and (map(has("token")) | any | not)'
+locus mcp revoke --all
 ```
 
 ---

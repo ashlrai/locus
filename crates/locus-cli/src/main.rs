@@ -16,17 +16,20 @@ use colored::Colorize;
 use locus_core::{
     adapter_trust_keys_path, add_ed25519_trust_key, agent_md_content, agent_md_path,
     agent_report_from_doctor, all_recipes, build_ci_env_map, build_doctor_report,
-    build_isolated_env_opts, builtin_manifest, ci_secrets_allowed, default_export_filename,
-    export_content_type, export_events, export_forensics_pack, filter_audit_events, find_workspace,
-    known_providers, list_adapters, list_trust_keys_with_origin, load_merged_trust_keys,
-    mcp_agent_env, migrate_legacy_phantom_ref, parse_manifest, parse_ttl, phantom_on_path,
+    build_isolated_env_opts, build_release_manifest, builtin_manifest, ci_secrets_allowed,
+    default_export_filename, export_content_type, export_events, export_forensics_pack,
+    filter_audit_events, find_workspace, known_providers, list_adapters,
+    list_trust_keys_with_origin, load_merged_trust_keys, mcp_agent_env, migrate_legacy_phantom_ref,
+    parse_ed25519_signing_key, parse_manifest, parse_release_manifest, parse_ttl, phantom_on_path,
     post_audit_webhook, probe_agent_options, probe_mcp_registered, recipe_toml_snippet,
-    resolve_audit_webhook_url, resolve_passphrase, suggest_for_provider, validate_name_component,
-    verify_claim, verify_manifest_with_keys, verify_session, workspace_stub_toml, AgentStatus,
-    Binding, BindingBody, CredentialRef, CredentialResolutionIssue, DoctorExternal, DoctorVerdict,
-    EventsExportFormat, EventsExportOptions, EventsExportSink, ForensicsExportOptions, IsolatedEnv,
-    LocusError, McpRegistered, Policy, ProviderBinding, Scope, Session, Store, TrustKeyOrigin,
-    WorkspaceConfig, AUDIT_WEBHOOK_URL_ENV, VERSION,
+    release_manifest_json, resolve_audit_webhook_url, resolve_passphrase, sign_release_manifest,
+    suggest_for_provider, validate_name_component, verify_claim, verify_manifest_with_keys,
+    verify_release_manifest_with_keys, verify_session, workspace_stub_toml, AgentStatus, Binding,
+    BindingBody, CredentialRef, CredentialResolutionIssue, DoctorExternal, DoctorVerdict,
+    EntryVerifyStatus, EventsExportFormat, EventsExportOptions, EventsExportSink,
+    ForensicsExportOptions, IsolatedEnv, LocusError, McpRegistered, Policy, ProviderBinding, Scope,
+    Session, Store, TrustKeyOrigin, WorkspaceConfig, AUDIT_WEBHOOK_URL_ENV,
+    LOCUS_REGISTRY_SIGNING_KEY_ENV, VERSION,
 };
 use serde_json::json;
 use std::env;
@@ -836,6 +839,37 @@ enum AdapterCmd {
     /// Manage local adapter registry trust pins (`$LOCUS_HOME/trust/adapter-keys.toml`)
     #[command(subcommand)]
     Trust(AdapterTrustCmd),
+    /// Export a canonical release manifest of the built-in adapter set
+    #[command(subcommand)]
+    Registry(AdapterRegistryCmd),
+    /// Verify a release manifest signature (trust store) + adapter-set match (fail closed)
+    VerifyManifest {
+        /// Path to a locus-adapters-<tag>.json release manifest
+        file: PathBuf,
+        /// Permit a manifest with NO signature (drift check only).
+        /// A present-but-untrusted/invalid signature still fails.
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AdapterRegistryCmd {
+    /// Export the canonical registry manifest JSON (unsigned unless --sign)
+    Export {
+        /// Write to this file instead of stdout
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Sign with an operator ed25519 key (requires --key or LOCUS_REGISTRY_SIGNING_KEY)
+        #[arg(long)]
+        sign: bool,
+        /// Path to the ed25519 signing key file (base64 or 64-hex of the 32-byte seed)
+        #[arg(long, requires = "sign")]
+        key: Option<PathBuf>,
+        /// Key id recorded as `signed_by` (must match a pinned trust key id at verify time)
+        #[arg(long, default_value = "root", requires = "sign")]
+        key_id: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1230,7 +1264,9 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus adapter list [--json]\n\
                locus adapter verify [--path FILE] [--require-signed] [--json]\n\
                locus adapter trust list [--json]\n\
-               locus adapter trust add --id root --ed25519-pub <b64> [--json]\n\n\
+               locus adapter trust add --id root --ed25519-pub <b64> [--json]\n\
+               locus adapter registry export [--out FILE] [--sign --key <keyfile>] [--key-id ID]\n\
+               locus adapter verify-manifest <file> [--allow-unsigned] [--json]\n\n\
              Catalog source: adapters/manifest.toml (embedded).\n\
              Schema:         schema/adapter-manifest.schema.json\n\
              Trust store:    $LOCUS_HOME/trust/adapter-keys.toml (mode 0600)\n\n\
@@ -1243,9 +1279,14 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                2) LOCUS_ADAPTER_TRUST_KEYS=id:ed25519:<base64-pubkey>[,id:hmac-sha256:<64-hex>]\n\n\
              Soft verify (default): unsigned OK; invalid/malformed signatures fail.\n\
              --require-signed: fail closed unless every entry has a valid trusted signature\n\
-             (ed25519 or hmac-sha256 when the key id is trusted).\n\
+             (ed25519 or hmac-sha256 when the key id is trusted).\n\n\
+             Release manifests: `registry export` emits a canonical JSON of the built-in\n\
+             adapter set (id, name, version, tools, sha256 digest); `--sign` uses an operator\n\
+             ed25519 key from --key <file> or LOCUS_REGISTRY_SIGNING_KEY (never printed).\n\
+             `verify-manifest` is fail closed: trusted signature required (unless\n\
+             --allow-unsigned) AND this binary's adapter set must match exactly.\n\
              Not a plugin loader — in-tree ProviderAdapter registration is still manual.\n\
-             Docs: docs/adapter-sdk.md · sibling: locus upstream (recipes)",
+             Docs: docs/adapter-sdk.md · docs/registry-trust.md · sibling: locus upstream (recipes)",
         ),
         (
             "http",
@@ -4142,7 +4183,178 @@ fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
             Ok(())
         }
         AdapterCmd::Trust(trust_sub) => cmd_adapter_trust(trust_sub, json),
+        AdapterCmd::Registry(registry_sub) => cmd_adapter_registry(registry_sub, json),
+        AdapterCmd::VerifyManifest {
+            file,
+            allow_unsigned,
+        } => cmd_adapter_verify_manifest(&file, allow_unsigned, json),
     }
+}
+
+fn cmd_adapter_registry(sub: AdapterRegistryCmd, json: bool) -> Result<()> {
+    match sub {
+        AdapterRegistryCmd::Export {
+            out,
+            sign,
+            key,
+            key_id,
+        } => {
+            let mut manifest =
+                build_release_manifest().context("build adapter release manifest")?;
+
+            if sign {
+                // Key material comes from a file (--key) or the env var — it is
+                // parsed in memory and NEVER printed, logged, or generated here.
+                let raw = if let Some(key_path) = &key {
+                    std::fs::read_to_string(key_path)
+                        .with_context(|| format!("read signing key file {}", key_path.display()))?
+                } else {
+                    match env::var(LOCUS_REGISTRY_SIGNING_KEY_ENV) {
+                        Ok(v) if !v.trim().is_empty() => v,
+                        _ => bail!(
+                            "--sign requires a signing key: pass --key <file> or set \
+                             {LOCUS_REGISTRY_SIGNING_KEY_ENV} (refusing to export without one)"
+                        ),
+                    }
+                };
+                let signing_key =
+                    parse_ed25519_signing_key(&raw).context("parse ed25519 signing key")?;
+                sign_release_manifest(&mut manifest, &key_id, &signing_key);
+            }
+
+            let body = release_manifest_json(&manifest).context("serialize release manifest")?;
+            let signed_label = if sign { "signed" } else { "unsigned" };
+
+            if let Some(out_path) = out {
+                std::fs::write(&out_path, &body)
+                    .with_context(|| format!("write manifest {}", out_path.display()))?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&json!({
+                            "ok": true,
+                            "path": out_path.display().to_string(),
+                            "signed": sign,
+                            "signed_by": manifest.signed_by,
+                            "locus_version": manifest.locus_version,
+                            "adapter_count": manifest.adapters.len(),
+                        }))?
+                    );
+                    return Ok(());
+                }
+                println!(
+                    "{} exported {} registry manifest ({} adapters, locus {})",
+                    "✓".green().bold(),
+                    signed_label,
+                    manifest.adapters.len(),
+                    manifest.locus_version
+                );
+                println!("  path  {}", out_path.display().to_string().dimmed());
+                if let Some(by) = &manifest.signed_by {
+                    println!("  signed_by  {}", by.green());
+                }
+                println!(
+                    "{}",
+                    "Verify:  locus adapter verify-manifest <file> · Docs: docs/registry-trust.md"
+                        .dimmed()
+                );
+            } else {
+                // Manifest JSON goes to stdout as-is (pipe-friendly).
+                print!("{body}");
+            }
+            Ok(())
+        }
+    }
+}
+
+fn cmd_adapter_verify_manifest(file: &Path, allow_unsigned: bool, json: bool) -> Result<()> {
+    let body = std::fs::read_to_string(file)
+        .with_context(|| format!("read release manifest {}", file.display()))?;
+    let manifest = parse_release_manifest(&body).context("parse release manifest")?;
+
+    // Fresh merge of file + env trust keys each invocation.
+    let store = Store::open_default().context("open LOCUS_HOME")?;
+    let keys = load_merged_trust_keys(store.home());
+    let report = verify_release_manifest_with_keys(&manifest, &keys, allow_unsigned)
+        .context("verify release manifest")?;
+
+    if json {
+        let mut v = serde_json::to_value(&report)?;
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("source".into(), json!(file.display().to_string()));
+            obj.insert(
+                "trust_file".into(),
+                json!(adapter_trust_keys_path(store.home()).display().to_string()),
+            );
+        }
+        println!("{}", serde_json::to_string_pretty(&v)?);
+    } else {
+        let verdict = if report.ok {
+            "ok".green().bold()
+        } else {
+            "FAIL".red().bold()
+        };
+        println!(
+            "{} release manifest verify  {}",
+            "locus adapter".cyan().bold(),
+            verdict
+        );
+        println!("  source     {}", file.display().to_string().dimmed());
+        let sig = report.signature.as_str();
+        let sig_colored = match report.signature {
+            EntryVerifyStatus::Valid => sig.green().to_string(),
+            EntryVerifyStatus::Unsigned => sig.yellow().to_string(),
+            _ => sig.red().to_string(),
+        };
+        let by = report
+            .signed_by
+            .as_deref()
+            .map(|s| format!("  key={s}"))
+            .unwrap_or_default();
+        println!("  signature  {}{}", sig_colored, by.dimmed());
+        if let Some(d) = &report.signature_detail {
+            println!("      {}", d.dimmed());
+        }
+        println!(
+            "  versions   manifest {}  ·  binary {}",
+            report.manifest_version, report.binary_version
+        );
+        println!("  adapters   {}", report.adapter_count);
+        if allow_unsigned {
+            println!(
+                "  {}",
+                "--allow-unsigned: drift check only (bad signatures still fail)".yellow()
+            );
+        }
+        if report.drift.is_empty() {
+            println!("  drift      {}", "none — adapter set matches".green());
+        } else {
+            println!(
+                "  drift      {}",
+                format!("{} finding(s)", report.drift.len()).red()
+            );
+            for d in &report.drift {
+                println!("      {} {}", "×".red(), d);
+            }
+        }
+        if !report.ok && report.signature == EntryVerifyStatus::Unsigned && !allow_unsigned {
+            println!();
+            println!(
+                "{}",
+                "hint: release assets ship unsigned; ask your operator for the signed manifest,"
+                    .dimmed()
+            );
+            println!(
+                "{}",
+                "      pin their key (locus adapter trust add), or pass --allow-unsigned for a drift-only check"
+                    .dimmed()
+            );
+        }
+    }
+    if !report.ok {
+        bail!("release manifest verify failed");
+    }
+    Ok(())
 }
 
 fn cmd_adapter_trust(sub: AdapterTrustCmd, json: bool) -> Result<()> {
@@ -5123,7 +5335,13 @@ fn cmd_verify_session(json: bool) -> Result<()> {
     let s = store()?;
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let external = gather_doctor_external(&s, cwd.clone())?;
-    let pack = verify_session(&s, &cwd, external)?;
+    let mut pack = verify_session(&s, &cwd, external)?;
+    // Same finding pack as `locus doctor` / `locus watch`: hub consumers treat
+    // `verify session --json` and `watch --once --json` as interchangeable
+    // heartbeat probes (integrations/ashlr-hub/locus.ts), so both must agree
+    // on session_ok for identical operator-shell state.
+    let cap_status = locus_core::control_capability_status(s.home());
+    attach_control_capability_findings(s.home(), &cap_status, &mut pack);
     let binding = pack
         .whoami
         .as_ref()
@@ -5442,6 +5660,28 @@ fn gather_doctor_report(s: &Store) -> Result<locus_core::DoctorReport> {
         report.push_finding(f.severity, &f.code, f.message);
     }
     Ok(report)
+}
+
+/// Attach operator-shell control-capability findings to a `verify_session`
+/// pack and re-derive `session_ok` from the escalated doctor verdict.
+///
+/// Keeps `locus watch` and `locus verify session` on the same finding pack
+/// as `locus doctor` ([`gather_doctor_report`]), so the two hub heartbeat
+/// probes never disagree on `session_ok` for identical operator-shell state.
+/// CLI-only by design: locus-mcp runs
+/// executor-restricted and legitimately lacks the control capability, so
+/// these findings never attach to MCP verify_session surfaces. Env-free core
+/// (status passed in) so tests are deterministic under ambient
+/// `LOCUS_CONTROL_CAPABILITY`.
+fn attach_control_capability_findings(
+    home: &Path,
+    status: &locus_core::ControlCapabilityStatus,
+    pack: &mut locus_core::SessionVerificationPack,
+) {
+    for f in locus_core::control_capability_findings(status, home) {
+        pack.doctor.push_finding(f.severity, &f.code, f.message);
+    }
+    pack.session_ok = pack.doctor.ok && pack.safe_next.ready;
 }
 
 fn gather_doctor_external(s: &Store, cwd: PathBuf) -> Result<DoctorExternal> {
@@ -6141,7 +6381,11 @@ fn cmd_watch(interval: &str, once: bool, require_ok: bool, json: bool) -> Result
 
     loop {
         let external = gather_doctor_external(&s, cwd.clone())?;
-        let pack = verify_session(&s, &cwd, external)?;
+        let mut pack = verify_session(&s, &cwd, external)?;
+        // Same finding pack as `locus doctor`: operator-shell control
+        // capability readiness must reach hub heartbeat consumers too.
+        let cap_status = locus_core::control_capability_status(s.home());
+        attach_control_capability_findings(s.home(), &cap_status, &mut pack);
         let hb = WatchHeartbeat::from_pack(&pack);
         let pin_expected = hb.pinned || hb.frozen;
 
@@ -8746,8 +8990,8 @@ credential_ref = "phm:VERIFY_SESSION_MISSING"
 #[cfg(test)]
 mod watch_heartbeat_tests {
     use super::{
-        gather_doctor_external_with_phantom_status, parse_watch_interval, watch_should_fail,
-        WatchHeartbeat,
+        attach_control_capability_findings, gather_doctor_external_with_phantom_status,
+        parse_watch_interval, watch_should_fail, WatchHeartbeat,
     };
     use locus_core::{verify_session, Binding, Store};
     use std::time::Duration;
@@ -8852,6 +9096,63 @@ credential_ref = "env:GH_TOKEN"
             hb.pinned || hb.frozen,
             true
         ));
+    }
+
+    #[test]
+    fn watch_pack_attaches_control_capability_findings() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        let external =
+            gather_doctor_external_with_phantom_status(&store, dir.path().to_path_buf(), true)
+                .unwrap();
+        let mut pack = verify_session(&store, dir.path(), external).unwrap();
+
+        // Deterministic status (no ambient env reads): capability entirely
+        // missing from the operator shell.
+        let status = locus_core::ControlCapabilityStatus {
+            env_present: false,
+            env_valid: false,
+            persisted: false,
+            persisted_valid: false,
+            persisted_permissions_ok: true,
+            matches_persisted: None,
+            test_fallback: false,
+        };
+        attach_control_capability_findings(store.home(), &status, &mut pack);
+
+        // Same finding the doctor pack carries — watch must not hide it.
+        assert!(
+            pack.doctor
+                .findings
+                .iter()
+                .any(|f| f.code == "control_capability_missing"),
+            "missing capability must surface in the watch pack"
+        );
+        // Warn escalates the verdict, and session_ok is re-derived from it.
+        assert!(!pack.doctor.ok);
+        assert!(!pack.session_ok);
+        let hb = WatchHeartbeat::from_pack(&pack);
+        assert!(!hb.session_ok);
+
+        // Satisfied capability attaches nothing and keeps the pack unchanged.
+        let external =
+            gather_doctor_external_with_phantom_status(&store, dir.path().to_path_buf(), true)
+                .unwrap();
+        let mut ok_pack = verify_session(&store, dir.path(), external).unwrap();
+        let before = ok_pack.doctor.findings.len();
+        let satisfied = locus_core::ControlCapabilityStatus {
+            env_present: true,
+            env_valid: true,
+            persisted: false,
+            persisted_valid: false,
+            persisted_permissions_ok: true,
+            matches_persisted: None,
+            test_fallback: false,
+        };
+        let session_ok_before = ok_pack.session_ok;
+        attach_control_capability_findings(store.home(), &satisfied, &mut ok_pack);
+        assert_eq!(ok_pack.doctor.findings.len(), before);
+        assert_eq!(ok_pack.session_ok, session_ok_before);
     }
 
     #[test]

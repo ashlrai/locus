@@ -254,6 +254,27 @@ DUAL-IDE DOGFOOD: ok (matrix above; secrets never printed)
 
 ---
 
+## 6b. Multi-tenant grant probe (optional)
+
+`scripts/dogfood.sh` can additionally prove the hub-mode grant lifecycle —
+`locus mcp mint` → HTTP verify against `locus-mcp --http --multi-tenant`
+(tenantless request is a uniform `401 invalid_grant`, the granted tenant
+initializes with `200`) → `locus mcp revoke` (→ `401`, and the roster no
+longer lists the grant as live) — against its **own throwaway `LOCUS_HOME`**:
+
+```bash
+DOGFOOD_MT=1 scripts/dogfood.sh
+```
+
+Default **off** — the standard `DOGFOOD READY` contract is unchanged. When
+enabled the probe is hard: any red step blocks readiness. No secrets or
+credential locators ever appear in the output (the bearer token is consumed
+in-process and never printed). Full multi-tenant isolation coverage
+(per-tenant whoami, cross-tenant `403 tenant_mismatch`, revoke-while-others-
+live) runs in `scripts/e2e.sh` step 31.
+
+---
+
 ## 7. What this does **not** cover
 
 | Still manual / separate | Tool |

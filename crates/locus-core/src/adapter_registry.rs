@@ -524,137 +524,124 @@ pub fn verify_entry_with_keys(
     entry: &AdapterManifestEntry,
     keys: &[RegistryTrustKey],
 ) -> EntryVerifyReport {
-    let signed_by = entry.signed_by.clone();
-    let Some(sig) = entry
-        .signature
-        .as_deref()
+    let material = canonical_entry_material(entry);
+    let (status, signed_by, detail) = verify_material_signature(
+        &material,
+        entry.signature.as_deref(),
+        entry.signed_by.as_deref(),
+        keys,
+    );
+    EntryVerifyReport {
+        id: entry.id.clone(),
+        status,
+        signed_by,
+        detail,
+    }
+}
+
+/// Verify a detached signature over canonical `material` against a key set.
+///
+/// Shared by per-entry catalog verification and release-manifest verification.
+/// Returns `(status, signed_by, detail)`.
+fn verify_material_signature(
+    material: &str,
+    signature: Option<&str>,
+    signed_by: Option<&str>,
+    keys: &[RegistryTrustKey],
+) -> (EntryVerifyStatus, Option<String>, Option<String>) {
+    let declared_by = signed_by
         .map(str::trim)
         .filter(|s| !s.is_empty())
-    else {
-        return EntryVerifyReport {
-            id: entry.id.clone(),
-            status: EntryVerifyStatus::Unsigned,
-            signed_by,
-            detail: Some("no signature field".into()),
-        };
+        .map(String::from);
+    let Some(sig) = signature.map(str::trim).filter(|s| !s.is_empty()) else {
+        return (
+            EntryVerifyStatus::Unsigned,
+            declared_by,
+            Some("no signature field".into()),
+        );
     };
 
     let parsed = match parse_signature(sig) {
         Ok(p) => p,
         Err(e) => {
-            return EntryVerifyReport {
-                id: entry.id.clone(),
-                status: EntryVerifyStatus::Malformed,
-                signed_by,
-                detail: Some(e.to_string()),
-            };
+            return (
+                EntryVerifyStatus::Malformed,
+                declared_by,
+                Some(e.to_string()),
+            );
         }
     };
 
-    let key_id = entry
-        .signed_by
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    let Some(key_id) = key_id else {
-        return EntryVerifyReport {
-            id: entry.id.clone(),
-            status: EntryVerifyStatus::Malformed,
-            signed_by: None,
-            detail: Some("signature present but signed_by missing".into()),
-        };
+    let Some(key_id) = declared_by else {
+        return (
+            EntryVerifyStatus::Malformed,
+            None,
+            Some("signature present but signed_by missing".into()),
+        );
     };
 
-    let Some(key) = keys.iter().find(|k| k.id.eq_ignore_ascii_case(key_id)) else {
-        return EntryVerifyReport {
-            id: entry.id.clone(),
-            status: EntryVerifyStatus::UnknownKey,
-            signed_by: Some(key_id.to_string()),
-            detail: Some(format!("key id `{key_id}` not in trust store")),
-        };
+    let Some(key) = keys.iter().find(|k| k.id.eq_ignore_ascii_case(&key_id)) else {
+        let detail = format!("key id `{key_id}` not in trust store");
+        return (EntryVerifyStatus::UnknownKey, Some(key_id), Some(detail));
     };
-
-    let material = canonical_entry_material(entry);
 
     match (&parsed, &key.key) {
         (ParsedSignature::HmacSha256(expected), RegistryKeyMaterial::HmacSha256 { .. }) => {
-            let Ok(computed) = sign_entry_material(&material, key) else {
-                return EntryVerifyReport {
-                    id: entry.id.clone(),
-                    status: EntryVerifyStatus::Malformed,
-                    signed_by: Some(key_id.to_string()),
-                    detail: Some("failed to compute expected signature (bad trust key)".into()),
-                };
+            let Ok(computed) = sign_entry_material(material, key) else {
+                return (
+                    EntryVerifyStatus::Malformed,
+                    Some(key_id),
+                    Some("failed to compute expected signature (bad trust key)".into()),
+                );
             };
             let Ok(ParsedSignature::HmacSha256(computed_bytes)) = parse_signature(&computed) else {
-                return EntryVerifyReport {
-                    id: entry.id.clone(),
-                    status: EntryVerifyStatus::Malformed,
-                    signed_by: Some(key_id.to_string()),
-                    detail: Some("internal signature format error".into()),
-                };
+                return (
+                    EntryVerifyStatus::Malformed,
+                    Some(key_id),
+                    Some("internal signature format error".into()),
+                );
             };
             if ct_eq(expected, &computed_bytes) {
-                EntryVerifyReport {
-                    id: entry.id.clone(),
-                    status: EntryVerifyStatus::Valid,
-                    signed_by: Some(key_id.to_string()),
-                    detail: None,
-                }
+                (EntryVerifyStatus::Valid, Some(key_id), None)
             } else {
-                EntryVerifyReport {
-                    id: entry.id.clone(),
-                    status: EntryVerifyStatus::Invalid,
-                    signed_by: Some(key_id.to_string()),
-                    detail: Some("signature mismatch for canonical material".into()),
-                }
+                (
+                    EntryVerifyStatus::Invalid,
+                    Some(key_id),
+                    Some("signature mismatch for canonical material".into()),
+                )
             }
         }
         (ParsedSignature::Ed25519(signature), RegistryKeyMaterial::Ed25519Public { .. }) => {
             let Ok(vk) = key.ed25519_verifying_key() else {
-                return EntryVerifyReport {
-                    id: entry.id.clone(),
-                    status: EntryVerifyStatus::Malformed,
-                    signed_by: Some(key_id.to_string()),
-                    detail: Some("failed to parse ed25519 trust key".into()),
-                };
+                return (
+                    EntryVerifyStatus::Malformed,
+                    Some(key_id),
+                    Some("failed to parse ed25519 trust key".into()),
+                );
             };
             match vk.verify(material.as_bytes(), signature) {
-                Ok(()) => EntryVerifyReport {
-                    id: entry.id.clone(),
-                    status: EntryVerifyStatus::Valid,
-                    signed_by: Some(key_id.to_string()),
-                    detail: None,
-                },
-                Err(_) => EntryVerifyReport {
-                    id: entry.id.clone(),
-                    status: EntryVerifyStatus::Invalid,
-                    signed_by: Some(key_id.to_string()),
-                    detail: Some("ed25519 signature verification failed".into()),
-                },
+                Ok(()) => (EntryVerifyStatus::Valid, Some(key_id), None),
+                Err(_) => (
+                    EntryVerifyStatus::Invalid,
+                    Some(key_id),
+                    Some("ed25519 signature verification failed".into()),
+                ),
             }
         }
-        (ParsedSignature::HmacSha256(_), RegistryKeyMaterial::Ed25519Public { .. }) => {
-            EntryVerifyReport {
-                id: entry.id.clone(),
-                status: EntryVerifyStatus::Malformed,
-                signed_by: Some(key_id.to_string()),
-                detail: Some(format!(
-                    "signature scheme `{SIG_SCHEME_HMAC_SHA256}` does not match trust key scheme `{SIG_SCHEME_ED25519}`"
-                )),
-            }
-        }
-        (ParsedSignature::Ed25519(_), RegistryKeyMaterial::HmacSha256 { .. }) => {
-            EntryVerifyReport {
-                id: entry.id.clone(),
-                status: EntryVerifyStatus::Malformed,
-                signed_by: Some(key_id.to_string()),
-                detail: Some(format!(
-                    "signature scheme `{SIG_SCHEME_ED25519}` does not match trust key scheme `{SIG_SCHEME_HMAC_SHA256}`"
-                )),
-            }
-        }
+        (ParsedSignature::HmacSha256(_), RegistryKeyMaterial::Ed25519Public { .. }) => (
+            EntryVerifyStatus::Malformed,
+            Some(key_id),
+            Some(format!(
+                "signature scheme `{SIG_SCHEME_HMAC_SHA256}` does not match trust key scheme `{SIG_SCHEME_ED25519}`"
+            )),
+        ),
+        (ParsedSignature::Ed25519(_), RegistryKeyMaterial::HmacSha256 { .. }) => (
+            EntryVerifyStatus::Malformed,
+            Some(key_id),
+            Some(format!(
+                "signature scheme `{SIG_SCHEME_ED25519}` does not match trust key scheme `{SIG_SCHEME_HMAC_SHA256}`"
+            )),
+        ),
     }
 }
 
@@ -760,6 +747,416 @@ pub fn verify_manifest_with_keys(
 pub fn verify_builtin(require_signed: bool) -> Result<ManifestVerifyReport> {
     let m = builtin_manifest()?;
     Ok(verify_manifest(&m, require_signed))
+}
+
+// ---------------------------------------------------------------------------
+// Signed release manifests (`locus adapter registry export` / `verify-manifest`)
+// ---------------------------------------------------------------------------
+
+/// Schema id stamped into exported release manifests.
+pub const RELEASE_MANIFEST_SCHEMA: &str = "locus-adapter-registry/v1";
+
+/// Env var holding the operator ed25519 signing key (base64 or 64-hex of the
+/// 32-byte seed). Read by `locus adapter registry export --sign`; never
+/// echoed back in output or logs.
+pub const LOCUS_REGISTRY_SIGNING_KEY_ENV: &str = "LOCUS_REGISTRY_SIGNING_KEY";
+
+/// One adapter row in a release manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseManifestAdapter {
+    /// Stable provider id (`supabase`, `github`, …).
+    pub id: String,
+    /// Human title from the catalog.
+    pub name: String,
+    /// Locus workspace version this adapter shipped in.
+    pub version: String,
+    /// Tool names (sorted for determinism).
+    pub tools: Vec<String>,
+    /// `sha256:<hex>` over [`canonical_entry_material`] — covers name, status,
+    /// synthetic flag, capabilities, frozen selectors, tools, destructive tools.
+    pub digest: String,
+}
+
+/// Canonical registry release manifest (JSON, one per release tag).
+///
+/// Signature fields are excluded from [`canonical_release_manifest_material`],
+/// so signing after building does not invalidate the material.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseManifest {
+    /// Always [`RELEASE_MANIFEST_SCHEMA`].
+    pub schema: String,
+    /// Locus workspace version the manifest was exported from.
+    pub locus_version: String,
+    /// Built-in adapter set (sorted by id).
+    pub adapters: Vec<ReleaseManifestAdapter>,
+    /// Optional detached signature — `ed25519:<base64>` only. `hmac-sha256`
+    /// is rejected for release manifests: HMAC is symmetric, so every
+    /// verifier's trust store would hold the forging secret and the release
+    /// attestation would degrade to the weakest key in the store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    /// Trust-store key id that produced `signature`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed_by: Option<String>,
+}
+
+/// `sha256:<hex>` digest of one catalog entry's canonical material.
+pub fn entry_digest(entry: &AdapterManifestEntry) -> String {
+    use sha2::Digest;
+    let mut h = Sha256::new();
+    h.update(canonical_entry_material(entry).as_bytes());
+    format!("sha256:{}", hex::encode(h.finalize()))
+}
+
+/// Build the (unsigned) release manifest for the embedded built-in catalog.
+pub fn build_release_manifest() -> Result<ReleaseManifest> {
+    Ok(build_release_manifest_from(
+        &builtin_manifest()?,
+        env!("CARGO_PKG_VERSION"),
+    ))
+}
+
+/// Build an unsigned release manifest from an explicit catalog + version.
+pub fn build_release_manifest_from(
+    manifest: &AdapterManifest,
+    locus_version: &str,
+) -> ReleaseManifest {
+    let mut adapters: Vec<ReleaseManifestAdapter> = manifest
+        .providers
+        .iter()
+        .map(|p| {
+            let mut tools = p.tools.clone();
+            tools.sort_by_key(|t| t.to_ascii_lowercase());
+            ReleaseManifestAdapter {
+                id: p.id.trim().to_string(),
+                name: p.name.trim().to_string(),
+                version: locus_version.trim().to_string(),
+                tools,
+                digest: entry_digest(p),
+            }
+        })
+        .collect();
+    adapters.sort_by(|a, b| a.id.cmp(&b.id));
+    ReleaseManifest {
+        schema: RELEASE_MANIFEST_SCHEMA.into(),
+        locus_version: locus_version.trim().to_string(),
+        adapters,
+        signature: None,
+        signed_by: None,
+    }
+}
+
+/// Canonical signing material for a release manifest (excludes signature fields).
+///
+/// Stable line format:
+/// `locus-registry|v1|{schema}|{locus_version}|{adapter_count}` then one line
+/// per adapter (sorted by id): `{id}|{name}|{version}|{tools,…}|{digest}`.
+pub fn canonical_release_manifest_material(m: &ReleaseManifest) -> String {
+    let mut sorted: Vec<&ReleaseManifestAdapter> = m.adapters.iter().collect();
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut lines = vec![format!(
+        "locus-registry|{CANONICAL_VERSION}|{}|{}|{}",
+        m.schema.trim(),
+        m.locus_version.trim(),
+        sorted.len()
+    )];
+    for a in sorted {
+        let mut tools: Vec<&str> = a.tools.iter().map(|s| s.as_str()).collect();
+        tools.sort_by_key(|t| t.to_ascii_lowercase());
+        lines.push(format!(
+            "{}|{}|{}|{}|{}",
+            a.id.trim(),
+            a.name.trim(),
+            a.version.trim(),
+            tools.join(","),
+            a.digest.trim(),
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Sign a release manifest in place with an operator ed25519 key.
+pub fn sign_release_manifest(m: &mut ReleaseManifest, key_id: &str, signing_key: &SigningKey) {
+    let material = canonical_release_manifest_material(m);
+    m.signature = Some(sign_entry_material_ed25519(&material, signing_key));
+    m.signed_by = Some(key_id.trim().to_string());
+}
+
+/// Parse an operator-provided ed25519 signing key: standard base64 or 64-hex
+/// of the 32-byte seed. Error messages never echo the key material.
+pub fn parse_ed25519_signing_key(raw: &str) -> Result<SigningKey> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err(LocusError::msg("ed25519 signing key is empty"));
+    }
+    let bytes = if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+        hex::decode(s).map_err(|_| LocusError::msg("ed25519 signing key: bad hex"))?
+    } else {
+        B64.decode(s).map_err(|_| {
+            LocusError::msg(
+                "ed25519 signing key must be standard base64 or 64-hex of the 32-byte seed",
+            )
+        })?
+    };
+    if bytes.len() != 32 {
+        return Err(LocusError::msg(format!(
+            "ed25519 signing key must decode to 32 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(SigningKey::from_bytes(&arr))
+}
+
+/// Locate a canonical-material separator (`|`, `,`, CR, LF) inside a
+/// release-manifest field.
+///
+/// [`canonical_release_manifest_material`] joins fields with `|`, tools with
+/// `,`, and lines with `\n` **without escaping**, so any of those bytes
+/// inside a field would make two distinct manifests share one canonical
+/// material — and therefore one valid signature (e.g. tools `["a","b"]` vs a
+/// single tool literally named `"a,b"`). Fail closed: no real catalog field
+/// uses these characters.
+fn release_manifest_separator_ambiguity(m: &ReleaseManifest) -> Option<String> {
+    fn bad(value: &str) -> bool {
+        value.contains(['|', ',', '\r', '\n'])
+    }
+    let describe = |id: &str, what: &str| {
+        format!(
+            "release manifest adapter `{id}`: {what} contains a canonical-material \
+             separator (`|`, `,`, CR, or LF) — signature would be ambiguous; refusing (fail closed)"
+        )
+    };
+    if bad(&m.locus_version) {
+        return Some(
+            "release manifest locus_version contains a canonical-material separator \
+             (`|`, `,`, CR, or LF) — signature would be ambiguous; refusing (fail closed)"
+                .into(),
+        );
+    }
+    for a in &m.adapters {
+        if bad(&a.id) {
+            return Some(describe(a.id.trim(), "id"));
+        }
+        if bad(&a.name) {
+            return Some(describe(a.id.trim(), "name"));
+        }
+        if bad(&a.version) {
+            return Some(describe(a.id.trim(), "version"));
+        }
+        if bad(&a.digest) {
+            return Some(describe(a.id.trim(), "digest"));
+        }
+        for tool in &a.tools {
+            if bad(tool) {
+                return Some(describe(a.id.trim(), "tool name"));
+            }
+        }
+    }
+    None
+}
+
+/// Parse + validate a release manifest JSON document.
+pub fn parse_release_manifest(json_src: &str) -> Result<ReleaseManifest> {
+    let m: ReleaseManifest = serde_json::from_str(json_src)
+        .map_err(|e| LocusError::msg(format!("release manifest parse error: {e}")))?;
+    if m.schema != RELEASE_MANIFEST_SCHEMA {
+        return Err(LocusError::msg(format!(
+            "release manifest schema must be `{RELEASE_MANIFEST_SCHEMA}`, got `{}`",
+            m.schema
+        )));
+    }
+    if let Some(ambiguity) = release_manifest_separator_ambiguity(&m) {
+        return Err(LocusError::msg(ambiguity));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for a in &m.adapters {
+        let id = a.id.trim();
+        if id.is_empty() {
+            return Err(LocusError::msg("release manifest adapter has empty id"));
+        }
+        if !seen.insert(id.to_ascii_lowercase()) {
+            return Err(LocusError::msg(format!(
+                "release manifest duplicate adapter id `{id}`"
+            )));
+        }
+    }
+    Ok(m)
+}
+
+/// Serialize a release manifest as pretty JSON (trailing newline).
+pub fn release_manifest_json(m: &ReleaseManifest) -> Result<String> {
+    let body = serde_json::to_string_pretty(m)
+        .map_err(|e| LocusError::msg(format!("serialize release manifest: {e}")))?;
+    Ok(format!("{body}\n"))
+}
+
+/// Result of verifying a release manifest against a trust store + the running
+/// binary's adapter set.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReleaseManifestVerifyReport {
+    /// Signature verdict (same taxonomy as per-entry catalog verification).
+    pub signature: EntryVerifyStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signed_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_detail: Option<String>,
+    /// Version the manifest was exported from.
+    pub manifest_version: String,
+    /// Version of the verifying binary.
+    pub binary_version: String,
+    pub adapter_count: usize,
+    /// True when an unsigned manifest was explicitly permitted.
+    pub allow_unsigned: bool,
+    /// Human-readable drift findings (empty = adapter sets match).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drift: Vec<String>,
+    /// Overall verdict (fail closed).
+    pub ok: bool,
+}
+
+/// Verify a release manifest against the running binary's built-in adapter set.
+///
+/// Fail closed: unsigned (unless `allow_unsigned`), unknown key, invalid or
+/// malformed signature, and **any** adapter-set drift all make `ok = false`.
+/// `allow_unsigned` only excuses a *missing* signature — a present-but-bad
+/// signature still fails.
+pub fn verify_release_manifest_with_keys(
+    manifest: &ReleaseManifest,
+    keys: &[RegistryTrustKey],
+    allow_unsigned: bool,
+) -> Result<ReleaseManifestVerifyReport> {
+    let current = build_release_manifest()?;
+    Ok(verify_release_manifest_against(
+        manifest,
+        &current,
+        keys,
+        allow_unsigned,
+    ))
+}
+
+/// Verify against an explicit "current" manifest (tests / offline).
+pub fn verify_release_manifest_against(
+    manifest: &ReleaseManifest,
+    current: &ReleaseManifest,
+    keys: &[RegistryTrustKey],
+    allow_unsigned: bool,
+) -> ReleaseManifestVerifyReport {
+    let declared_by = manifest
+        .signed_by
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let declared_sig = manifest.signature.as_deref().map(str::trim);
+    let (signature, signed_by, signature_detail) = if let Some(ambiguity) =
+        release_manifest_separator_ambiguity(manifest)
+    {
+        // Unescaped separators would let two distinct manifests share one
+        // canonical material (and thus one valid signature) — never report
+        // Valid over ambiguous content, even for programmatically built
+        // manifests that skipped parse_release_manifest.
+        (EntryVerifyStatus::Malformed, declared_by, Some(ambiguity))
+    } else if declared_sig.is_some_and(|s| s.starts_with(&format!("{SIG_SCHEME_HMAC_SHA256}:"))) {
+        // Release attestation is ed25519-only: HMAC is symmetric, so anyone
+        // with read access to a verifier's trust store could forge a
+        // signature=valid manifest (weakest-key downgrade). Signing
+        // ([`sign_release_manifest`]) can only produce ed25519 anyway.
+        (
+            EntryVerifyStatus::Malformed,
+            declared_by,
+            Some("release manifests must be ed25519-signed (hmac-sha256 rejected: symmetric keys cannot attest a release)".into()),
+        )
+    } else {
+        let material = canonical_release_manifest_material(manifest);
+        verify_material_signature(
+            &material,
+            manifest.signature.as_deref(),
+            manifest.signed_by.as_deref(),
+            keys,
+        )
+    };
+
+    let mut drift = Vec::new();
+    if manifest.locus_version.trim() != current.locus_version.trim() {
+        drift.push(format!(
+            "manifest exported from locus {} but this binary is {}",
+            manifest.locus_version, current.locus_version
+        ));
+    }
+
+    let by_id =
+        |m: &ReleaseManifest| -> std::collections::BTreeMap<String, ReleaseManifestAdapter> {
+            m.adapters
+                .iter()
+                .map(|a| (a.id.trim().to_ascii_lowercase(), a.clone()))
+                .collect()
+        };
+    let want = by_id(manifest);
+    let have = by_id(current);
+
+    for (id, w) in &want {
+        let Some(h) = have.get(id) else {
+            drift.push(format!("adapter `{id}` in manifest but not in this binary"));
+            continue;
+        };
+        if w.name.trim() != h.name.trim() {
+            drift.push(format!(
+                "adapter `{id}` name drift: manifest `{}` vs binary `{}`",
+                w.name, h.name
+            ));
+        }
+        if w.version.trim() != h.version.trim() {
+            drift.push(format!(
+                "adapter `{id}` version drift: manifest `{}` vs binary `{}`",
+                w.version, h.version
+            ));
+        }
+        let mut wt: Vec<String> = w.tools.iter().map(|t| t.trim().to_string()).collect();
+        let mut ht: Vec<String> = h.tools.iter().map(|t| t.trim().to_string()).collect();
+        wt.sort_by_key(|t| t.to_ascii_lowercase());
+        ht.sort_by_key(|t| t.to_ascii_lowercase());
+        if wt != ht {
+            drift.push(format!(
+                "adapter `{id}` tool drift: manifest [{}] vs binary [{}]",
+                wt.join(", "),
+                ht.join(", ")
+            ));
+        }
+        if w.digest.trim() != h.digest.trim() {
+            drift.push(format!(
+                "adapter `{id}` digest drift: manifest {} vs binary {}",
+                w.digest, h.digest
+            ));
+        }
+    }
+    for id in have.keys() {
+        if !want.contains_key(id) {
+            drift.push(format!(
+                "adapter `{id}` present in binary but missing from manifest"
+            ));
+        }
+    }
+
+    let signature_ok = match signature {
+        EntryVerifyStatus::Valid => true,
+        EntryVerifyStatus::Unsigned => allow_unsigned,
+        _ => false,
+    };
+    let ok = signature_ok && drift.is_empty();
+
+    ReleaseManifestVerifyReport {
+        signature,
+        signed_by,
+        signature_detail,
+        manifest_version: manifest.locus_version.clone(),
+        binary_version: current.locus_version.clone(),
+        adapter_count: manifest.adapters.len(),
+        allow_unsigned,
+        drift,
+        ok,
+    }
 }
 
 #[cfg(test)]
@@ -1111,5 +1508,321 @@ name = "Empty"
             errors.is_empty(),
             "builtin manifest failed schema: {errors:?}"
         );
+    }
+
+    // ---- release manifest (signed registry export) ----
+
+    fn small_catalog() -> AdapterManifest {
+        AdapterManifest {
+            version: 1,
+            providers: vec![sample_entry("github"), sample_entry("vercel")],
+            signature: None,
+            signed_by: None,
+        }
+    }
+
+    #[test]
+    fn release_manifest_sign_verify_roundtrip() {
+        let (signing, trust) = gen_ed25519();
+        let current = build_release_manifest_from(&small_catalog(), "0.4.0");
+        let mut m = current.clone();
+        sign_release_manifest(&mut m, &trust.id, &signing);
+        assert!(m.signature.as_deref().unwrap().starts_with("ed25519:"));
+        assert_eq!(m.signed_by.as_deref(), Some(trust.id.as_str()));
+
+        let report =
+            verify_release_manifest_against(&m, &current, std::slice::from_ref(&trust), false);
+        assert_eq!(report.signature, EntryVerifyStatus::Valid, "{report:?}");
+        assert!(report.drift.is_empty(), "{:?}", report.drift);
+        assert!(report.ok, "{report:?}");
+    }
+
+    fn manifest_with_tools(tools: Vec<String>) -> ReleaseManifest {
+        ReleaseManifest {
+            schema: RELEASE_MANIFEST_SCHEMA.into(),
+            locus_version: "0.4.0".into(),
+            adapters: vec![ReleaseManifestAdapter {
+                id: "github".into(),
+                name: "GitHub".into(),
+                version: "0.4.0".into(),
+                tools,
+                digest: "sha256:abc".into(),
+            }],
+            signature: None,
+            signed_by: None,
+        }
+    }
+
+    #[test]
+    fn release_manifest_comma_tool_name_cannot_reuse_split_list_signature() {
+        let (signing, trust) = gen_ed25519();
+        let split = manifest_with_tools(vec!["a".into(), "b".into()]);
+        let mut joined = manifest_with_tools(vec!["a,b".into()]);
+        // Unescaped separators make the two distinct documents share one
+        // canonical material — exactly the ambiguity the verifier must refuse
+        // to attest over.
+        assert_eq!(
+            canonical_release_manifest_material(&split),
+            canonical_release_manifest_material(&joined)
+        );
+
+        let mut signed_split = split.clone();
+        sign_release_manifest(&mut signed_split, &trust.id, &signing);
+        joined.signature = signed_split.signature.clone();
+        joined.signed_by = signed_split.signed_by.clone();
+
+        // Current == joined so the drift comparison is silent and only the
+        // signature verdict is in play (the --json report exports it standalone).
+        let report =
+            verify_release_manifest_against(&joined, &joined, std::slice::from_ref(&trust), false);
+        assert_eq!(report.signature, EntryVerifyStatus::Malformed, "{report:?}");
+        assert!(!report.ok, "{report:?}");
+        assert!(
+            report
+                .signature_detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("separator"),
+            "{report:?}"
+        );
+
+        // The honest split-tool manifest still verifies.
+        let honest = verify_release_manifest_against(
+            &signed_split,
+            &split,
+            std::slice::from_ref(&trust),
+            false,
+        );
+        assert_eq!(honest.signature, EntryVerifyStatus::Valid, "{honest:?}");
+    }
+
+    #[test]
+    fn parse_release_manifest_rejects_separator_bytes() {
+        for bad in [
+            manifest_with_tools(vec!["a,b".into()]),
+            manifest_with_tools(vec!["a|b".into()]),
+            {
+                let mut m = manifest_with_tools(vec!["a".into()]);
+                m.adapters[0].name = "Git|Hub".into();
+                m
+            },
+            {
+                let mut m = manifest_with_tools(vec!["a".into()]);
+                m.adapters[0].version = "0.4.0\nx".into();
+                m
+            },
+        ] {
+            let json = release_manifest_json(&bad).unwrap();
+            let err = parse_release_manifest(&json)
+                .expect_err("separator bytes in fields must be rejected");
+            assert!(err.to_string().contains("separator"), "{err}");
+        }
+    }
+
+    #[test]
+    fn release_manifest_hmac_signature_rejected() {
+        // Signing is ed25519-only; a symmetric HMAC trust key (whose secret
+        // every verifier holds) must never yield signature=valid for a
+        // release manifest — that would be a weakest-key downgrade.
+        let key = mock_hmac_key();
+        let current = build_release_manifest_from(&small_catalog(), "0.4.0");
+        let mut m = current.clone();
+        let material = canonical_release_manifest_material(&m);
+        m.signature = Some(sign_entry_material(&material, &key).unwrap());
+        m.signed_by = Some(key.id.clone());
+
+        let report = verify_release_manifest_against(&m, &current, &[key], false);
+        assert_eq!(report.signature, EntryVerifyStatus::Malformed, "{report:?}");
+        assert!(!report.ok, "{report:?}");
+        assert!(
+            report
+                .signature_detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("ed25519"),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn release_manifest_tamper_fails() {
+        let (signing, trust) = gen_ed25519();
+        let current = build_release_manifest_from(&small_catalog(), "0.4.0");
+        let mut m = current.clone();
+        sign_release_manifest(&mut m, &trust.id, &signing);
+        // Tamper after signing.
+        m.adapters[0].tools.push("github.evil".into());
+
+        let report = verify_release_manifest_against(&m, &current, &[trust], false);
+        assert_eq!(report.signature, EntryVerifyStatus::Invalid, "{report:?}");
+        assert!(!report.ok);
+    }
+
+    #[test]
+    fn release_manifest_drifted_adapter_set_fails() {
+        let (signing, trust) = gen_ed25519();
+        // Manifest signed over a two-adapter set…
+        let signed_over = build_release_manifest_from(&small_catalog(), "0.4.0");
+        let mut m = signed_over.clone();
+        sign_release_manifest(&mut m, &trust.id, &signing);
+
+        // …but the "running binary" carries an extra adapter.
+        let mut bigger = small_catalog();
+        bigger.providers.push(sample_entry("stripe"));
+        let current = build_release_manifest_from(&bigger, "0.4.0");
+
+        let report = verify_release_manifest_against(&m, &current, &[trust], false);
+        assert_eq!(report.signature, EntryVerifyStatus::Valid, "{report:?}");
+        assert!(
+            report
+                .drift
+                .iter()
+                .any(|d| d.contains("stripe") && d.contains("missing from manifest")),
+            "{:?}",
+            report.drift
+        );
+        assert!(!report.ok, "drift must fail closed: {report:?}");
+    }
+
+    #[test]
+    fn release_manifest_tool_drift_fails() {
+        let (signing, trust) = gen_ed25519();
+        let current = build_release_manifest_from(&small_catalog(), "0.4.0");
+        // Manifest claims a different tool set for github (re-signed so the
+        // signature itself is valid — drift alone must fail).
+        let mut m = current.clone();
+        m.adapters[0].tools = vec!["github.scope".into()];
+        sign_release_manifest(&mut m, &trust.id, &signing);
+
+        let report = verify_release_manifest_against(&m, &current, &[trust], false);
+        assert_eq!(report.signature, EntryVerifyStatus::Valid, "{report:?}");
+        assert!(
+            report.drift.iter().any(|d| d.contains("tool drift")),
+            "{:?}",
+            report.drift
+        );
+        assert!(!report.ok);
+    }
+
+    #[test]
+    fn release_manifest_unsigned_fails_closed() {
+        let current = build_release_manifest_from(&small_catalog(), "0.4.0");
+        let report = verify_release_manifest_against(&current, &current, &[], false);
+        assert_eq!(report.signature, EntryVerifyStatus::Unsigned);
+        assert!(!report.ok, "unsigned must fail without --allow-unsigned");
+
+        let relaxed = verify_release_manifest_against(&current, &current, &[], true);
+        assert!(
+            relaxed.ok,
+            "drift-only check with allow_unsigned: {relaxed:?}"
+        );
+    }
+
+    #[test]
+    fn release_manifest_bad_signature_fails_even_with_allow_unsigned() {
+        let (signing, _trust) = gen_ed25519();
+        let current = build_release_manifest_from(&small_catalog(), "0.4.0");
+        let mut m = current.clone();
+        sign_release_manifest(&mut m, "unknown-root", &signing);
+
+        // Key not in trust store: present-but-unverifiable signature must fail
+        // even when unsigned manifests are permitted.
+        let report = verify_release_manifest_against(&m, &current, &[], true);
+        assert_eq!(report.signature, EntryVerifyStatus::UnknownKey);
+        assert!(!report.ok, "{report:?}");
+    }
+
+    #[test]
+    fn release_manifest_version_mismatch_is_drift() {
+        let (signing, trust) = gen_ed25519();
+        let mut m = build_release_manifest_from(&small_catalog(), "0.3.0");
+        sign_release_manifest(&mut m, &trust.id, &signing);
+        let current = build_release_manifest_from(&small_catalog(), "0.4.0");
+
+        let report = verify_release_manifest_against(&m, &current, &[trust], false);
+        assert!(
+            report
+                .drift
+                .iter()
+                .any(|d| d.contains("exported from locus")),
+            "{:?}",
+            report.drift
+        );
+        assert!(!report.ok);
+    }
+
+    #[test]
+    fn canonical_release_material_stable_under_reorder() {
+        let m1 = build_release_manifest_from(&small_catalog(), "0.4.0");
+        let mut m2 = m1.clone();
+        m2.adapters.reverse();
+        m2.adapters[0].tools.reverse();
+        assert_eq!(
+            canonical_release_manifest_material(&m1),
+            canonical_release_manifest_material(&m2)
+        );
+    }
+
+    #[test]
+    fn release_manifest_json_roundtrip() {
+        let (signing, trust) = gen_ed25519();
+        let mut m = build_release_manifest().expect("builtin release manifest");
+        assert_eq!(m.schema, RELEASE_MANIFEST_SCHEMA);
+        assert_eq!(m.locus_version, env!("CARGO_PKG_VERSION"));
+        assert!(m.adapters.len() >= 5);
+        sign_release_manifest(&mut m, &trust.id, &signing);
+
+        let body = release_manifest_json(&m).unwrap();
+        let parsed = parse_release_manifest(&body).unwrap();
+        assert_eq!(parsed, m);
+
+        let report = verify_release_manifest_with_keys(&parsed, &[trust], false).unwrap();
+        assert!(report.ok, "{report:?}");
+        assert_eq!(report.signature, EntryVerifyStatus::Valid);
+    }
+
+    #[test]
+    fn parse_release_manifest_rejects_wrong_schema() {
+        let err = parse_release_manifest(
+            r#"{"schema":"other/v9","locus_version":"0.4.0","adapters":[]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("schema"), "{err}");
+    }
+
+    #[test]
+    fn parse_release_manifest_rejects_duplicate_ids() {
+        let err = parse_release_manifest(
+            r#"{"schema":"locus-adapter-registry/v1","locus_version":"0.4.0","adapters":[
+                {"id":"github","name":"A","version":"0.4.0","tools":[],"digest":"sha256:aa"},
+                {"id":"GitHub","name":"B","version":"0.4.0","tools":[],"digest":"sha256:bb"}
+            ]}"#,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn parse_ed25519_signing_key_hex_and_base64() {
+        let signing = SigningKey::generate(&mut OsRng);
+        let seed = signing.to_bytes();
+
+        let from_hex = parse_ed25519_signing_key(&hex::encode(seed)).unwrap();
+        assert_eq!(from_hex.to_bytes(), seed);
+
+        let from_b64 = parse_ed25519_signing_key(&B64.encode(seed)).unwrap();
+        assert_eq!(from_b64.to_bytes(), seed);
+
+        // Errors must not echo material.
+        let bad = "!!!not-a-key!!!";
+        let err = parse_ed25519_signing_key(bad).unwrap_err().to_string();
+        assert!(
+            !err.contains(bad),
+            "error must not echo key material: {err}"
+        );
+        assert!(parse_ed25519_signing_key("").is_err());
+        assert!(parse_ed25519_signing_key(&B64.encode([1u8; 16])).is_err());
     }
 }
