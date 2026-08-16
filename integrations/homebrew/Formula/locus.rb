@@ -72,13 +72,18 @@ class Locus < Formula
   homepage "https://github.com/ashlrai/locus"
   url "https://github.com/ashlrai/locus/archive/refs/tags/v0.5.0.tar.gz"
   version "0.5.0"
-  sha256 "REPLACE"
+  sha256 "296edb7b6ee41cd86201c5d4df7f832c4467455887ddca9d57da2ead710188b4"
   license "MIT"
   head "https://github.com/ashlrai/locus.git", branch: "main"
 
   # Stable source tarball (verify after publishing v0.5.0):
   #   curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v#{version}.tar.gz" | shasum -a 256
-  # v0.4.0 source sha256 (reference): 046ccb3bf0d873793051ce2b170851bb44f3c6bf458178e2486cda960d04a358
+  # v0.5.0 asset digests:
+#   aarch64-apple-darwin: fd45ec7431a730f309a4532f91356f64d6387143a7ac482fde4440d6ea5b4a79
+#   x86_64-apple-darwin:  5fcb2cf1b229dbcd57bee331df960fade17af5da528fec89913316502f2a9b6a
+#   x86_64-unknown-linux-gnu: 1ce1994a49ad8edd8c30b0e56173c7e45edf2e123002dddc279390a720e361f0
+#
+# v0.4.0 source sha256 (reference): 046ccb3bf0d873793051ce2b170851bb44f3c6bf458178e2486cda960d04a358
   # v0.3.0 source sha256 (reference): e53e99479fa1fd88e92d0603aff0fe6da407b96cc51e8b761dafd6e254d61b33
   # v0.2.0 source sha256 (reference): 257c9a5427e5cbd106c6fae5a324f6a921fdb15e7e49441bae2106ec6ed8826f
   # v0.1.0 source sha256 (reference): a0a8e9e14bd9b3322faca27d2efe42a2dcc473d84a40aab3497a4296b8d68cce
