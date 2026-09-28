@@ -207,9 +207,9 @@ pub fn read_meta(dir: &Path, alias: &str) -> Result<Option<EngagementMeta>> {
 pub fn close_checklist(alias: &str) -> Vec<String> {
     let suf = cred_suffix(alias);
     vec![
-        format!("Binding pin cleared if it was active (`locus leave`)"),
-        format!("Engagement marked closed (metadata only — binding file kept)"),
-        format!("Archive audit slice if --archive was used"),
+        "Binding pin cleared if it was active (`locus leave`)".to_string(),
+        "Engagement marked closed (metadata only — binding file kept)".to_string(),
+        "Archive audit slice if --archive was used".to_string(),
         format!(
             "Rotate/revoke Phantom secrets: SUPABASE_{suf}, GH_TOKEN_{suf}, VERCEL_TOKEN_{suf}"
         ),
