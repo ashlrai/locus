@@ -20,8 +20,7 @@ Until the first tag + formula publish, install from source:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --git https://github.com/ashlrai/locus --package locus-cli --locked
-cargo install --git https://github.com/ashlrai/locus --package locus-mcp --locked
+cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
 ```
 
 Or test the local formula (requires a matching tag / valid `sha256`, or use `--HEAD`):

@@ -45,6 +45,7 @@ jobs:
           node --check npm/bin/locus.js
           node --check npm-mcp/install.js
           node --check npm-mcp/bin/locus-mcp.js
+          node --test npm/test
           ruby -c integrations/homebrew/Formula/locus.rb
 
       - name: Clippy
@@ -55,3 +56,6 @@ jobs:
 
       - name: Release build
         run: cargo build --workspace --release
+
+      - name: Recipes (examples/recipes against the release build)
+        run: node --test examples/recipes
