@@ -2281,7 +2281,7 @@ export function locusDoctorLine(): {
       id: "locus",
       ok: false,
       detail: "locus CLI not installed",
-      fix: "cargo install --git https://github.com/ashlrai/locus --package locus-cli --locked",
+      fix: "cargo install --git https://github.com/ashlrai/locus locus-cli --locked",
     };
   }
   if (!probe.report) {

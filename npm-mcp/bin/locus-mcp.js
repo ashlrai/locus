@@ -33,7 +33,8 @@ const VERSION = "0.5.0";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus-mcp";
 const CARGO_PACKAGE = "locus-mcp";
-const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} --package ${CARGO_PACKAGE} --locked`;
+// `cargo install` takes the crate as a positional argument; it has no --package flag.
+const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} ${CARGO_PACKAGE} --locked`;
 const CACHE_DIR = join(
   process.env.HOME || process.env.USERPROFILE || "/tmp",
   ".locus",
@@ -48,6 +49,31 @@ const SUPPORTED_TARGETS = Object.freeze({
   "win32-arm64": "aarch64-pc-windows-msvc",
   "win32-x64": "x86_64-pc-windows-msvc",
 });
+
+// Targets release.yml actually builds and uploads. The other SUPPORTED_TARGETS
+// have no prebuilt asset yet, so they go straight to the cargo fallback.
+// Keep in sync with the matrix in .github/workflows/release.yml.
+const PREBUILT_TARGETS = Object.freeze([
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+]);
+
+function hasPrebuiltBinary(target) {
+  return PREBUILT_TARGETS.includes(target);
+}
+
+function cargoFallbackMessage(runtime = process, reason = "no-prebuilt") {
+  const platform = `${runtime.platform}-${runtime.arch}`;
+  const why =
+    reason === "no-prebuilt"
+      ? `No prebuilt locus-mcp binary for ${platform} in v${VERSION}`
+      : `Could not download the prebuilt locus-mcp v${VERSION} binary for ${platform}`;
+  return (
+    `${why}; building from source with cargo instead. ` +
+    `This can take several minutes and needs Rust (https://rustup.rs).`
+  );
+}
 
 function unsupportedPlatformMessage(runtime = process) {
   return `Unsupported platform: ${runtime.platform}-${runtime.arch}. Install from source: ${INSTALL_FROM_SOURCE}`;
@@ -227,7 +253,6 @@ function installViaCargo() {
       "install",
       "--git",
       `https://github.com/${REPO}`,
-      "--package",
       CARGO_PACKAGE,
       "--locked",
       "--force",
@@ -316,10 +341,27 @@ async function ensureBinary() {
     return existing;
   }
 
+  let target = null;
+  try {
+    target = getPlatformTarget();
+  } catch {
+    // Unsupported platform: downloadReleaseBinary reports it, then cargo runs.
+  }
+  if (target && !hasPrebuiltBinary(target)) {
+    console.error(cargoFallbackMessage(process, "no-prebuilt"));
+    try {
+      return installViaCargo();
+    } catch (cargoErr) {
+      console.error(cargoErr.message);
+      process.exit(1);
+    }
+  }
+
   try {
     return await downloadReleaseBinary(binaryPath);
   } catch (err) {
     console.error(`Failed to download locus-mcp: ${err.message}`);
+    console.error(cargoFallbackMessage(process, "download-failed"));
     try {
       return installViaCargo();
     } catch (cargoErr) {
@@ -345,7 +387,11 @@ if (require.main === module) {
 }
 
 module.exports = {
+  INSTALL_FROM_SOURCE,
+  PREBUILT_TARGETS,
   SUPPORTED_TARGETS,
+  cargoFallbackMessage,
+  hasPrebuiltBinary,
   getPlatformTarget,
   parseSha256File,
   findBinaryInDir,
