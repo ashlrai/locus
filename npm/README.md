@@ -15,7 +15,9 @@ npx locus-cli --help
 On first run the wrapper:
 
 1. Downloads the matching GitHub release binary into `~/.locus/bin`, or
-2. Falls back to `cargo install --git https://github.com/ashlrai/locus --package locus-cli`
+2. Falls back to `cargo install --git https://github.com/ashlrai/locus locus-cli --locked`. On platforms
+   without a prebuilt release binary (today: Linux arm64 and Windows) it says so
+   and goes straight to this step, which can take several minutes.
 
 Requires Node ≥ 16. Cargo fallback needs [Rust](https://rustup.rs).
 
