@@ -56,3 +56,6 @@ jobs:
 
       - name: Release build
         run: cargo build --workspace --release
+
+      - name: Recipes (examples/recipes against the release build)
+        run: node --test examples/recipes

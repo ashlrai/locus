@@ -3,6 +3,7 @@
 [![CI](https://github.com/ashlrai/locus/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](./rust-toolchain.toml)
+[![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?label=npm%20locus-cli)](https://www.npmjs.com/package/locus-cli)
 
 **AI-native identity plane for coding agents.**  
 **Wrong account, impossible.**
@@ -15,6 +16,17 @@ Pin a client — every CLI command, MCP tool, and the **local dashboard** is har
 | **Locus** | As whom, against which tenant, right now? |
 
 > Agents inherit ambient identity: global `gh auth`, one Supabase MCP token, last Vercel team. Contract work makes that lethal. Locus makes wrong-account action **mechanically impossible** — not merely discouraged. AI-native (`locus agent`, MCP resources/prompts), hub-native (`agent report` · `REQUIRED_SERVERS`), and operator-visible (`locus dashboard` · `forensics` · `goal status`).
+
+### How it compares
+
+| Approach | Where the identity lives | Reach of a switch |
+|---|---|---|
+| `gh auth switch` | gh's shared config (`hosts.yml`) | Every process that reads that config, until the next switch |
+| direnv `.envrc` | Variables exported into your shell on `cd` | Only the variables in `.envrc`; the rest of the shell's environment stays |
+| 1Password `op run` | Secret references resolved for one command | That command |
+| **Locus** `run` / `exec` / `pin` | A sealed session bound to one binding | That command or session. Ambient `GH_TOKEN`, `AWS_*`, `SUPABASE_*`… are scrubbed, a directory's `.locus.toml` can refuse other bindings, and `locus-mcp` exposes only the pinned binding's tools |
+
+These tools compose: binding credentials can be Phantom (`phm:`) or environment (`env:`) references. Try it in a minute with the executable [recipes](./examples/recipes/) (two clients, a directory allowlist, a CI session).
 
 ---
 
