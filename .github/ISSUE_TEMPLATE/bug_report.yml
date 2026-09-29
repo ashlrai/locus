@@ -1,0 +1,60 @@
+name: Bug report
+description: Report a defect in Locus
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. For **security vulnerabilities** (for example, a way to act
+        under a binding that is not pinned), do not file a public issue. See
+        [SECURITY.md](https://github.com/ashlrai/locus/blob/main/SECURITY.md).
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      options:
+        - locus CLI (locus-cli)
+        - MCP server (locus-mcp)
+        - core (locus-core)
+        - dashboard
+        - npm wrapper / install
+        - Homebrew formula
+        - docs
+        - other / unsure
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug, including any error output. Redact tokens and account names.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. locus init --with-samples
+        2. locus enter ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `locus --version`, and how you installed it (brew, npm, cargo, source).
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15 arm64 / Ubuntu 24.04 x86_64

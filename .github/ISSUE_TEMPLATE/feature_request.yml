@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest an improvement or a new provider/adapter for Locus
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the workflow and where the wrong identity or tenant could leak in today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
