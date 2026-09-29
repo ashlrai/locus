@@ -44,8 +44,7 @@ npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
 
 # cargo
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --git https://github.com/ashlrai/locus --package locus-cli --locked
-cargo install --git https://github.com/ashlrai/locus --package locus-mcp --locked
+cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
 ```
 
 Local checkout:
