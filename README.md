@@ -93,30 +93,13 @@ locus workspace --default acme --allow acme,acme-ro --require-pin
 locus pin          # uses .locus.toml
 ```
 
-### Ten minutes to wrong-account-impossible
+### Planned guided setup and adapter discovery
 
-New here? The guided wizard takes you from zero to multi-tenant in about ten
-minutes — it detects the ambient identity on your machine, walks you through
-naming tenants, wiring credential refs, freezing scopes, and provisioning
-workspaces, then proves isolation with `locus doctor` and a live scrub demo:
-
-```bash
-locus onboard --detect-only   # preview what the wizard sees (nothing is auto-pinned)
-locus onboard                 # interactive wizard (re-runnable, resumable)
-locus onboard --yes --json    # scripted / CI: NDJSON events per step
-```
-
-Need a provider Locus doesn't ship built-in? The community adapter
-marketplace installs signed, declarative adapters from any registry index —
-verified against *your* trust store, never the server's honesty:
-
-```bash
-locus adapter registry index add https://adapters.example.com/index.json
-locus adapter trust add --id example-publisher --ed25519-pub <base64-pubkey>
-locus adapter search linear
-locus adapter install linear
-locus binding add --provider linear --from-adapter linear …   # upstream MCP spec included
-```
+[Guided onboarding](./DESIGN-onboarding-wizard.md) and the
+[adapter marketplace](./DESIGN-adapter-marketplace.md) are design proposals
+in this phase-one checkout. Use the existing [onboarding walkthrough](./docs/onboarding.md)
+and built-in adapters until their CLI implementations are integrated and tested.
+The current Cargo and npm version remains 0.5.0; these proposals do not announce a new release.
 
 ### Shell prompt
 
@@ -399,7 +382,7 @@ approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
 - Policy: globs + structured `[[rules]]`, `require_approval`, dual-control (2 principals).
 - Upstream MCP workers start only after an authorized provider call. `tools/list` is discovery-only, multi-provider startup rolls back on partial failure, and each worker receives only its named provider's resolved credential keys.
-- Drift freeze + hub heartbeat: `locus watch [--json] [--require-ok]` re-runs session verify each tick; doctor re-pin if binding changes under a session.
+- Drift freeze + hub heartbeat: `locus watch [--json] [--require-ok]` re-runs session verify each tick; a changed binding requires an explicit operator re-pin. Doctor only reports findings.
 
 Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md §9](./DESIGN.md).
 

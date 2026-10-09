@@ -1,10 +1,10 @@
 # DESIGN (proposal): community adapter marketplace
 
-**Status:** implemented — `locus adapter search/install/update/uninstall` +
-`locus adapter registry index` (v0.6.0). This doc is now the as-built
-record; product decisions below.
+**Status:** proposal for future adapter discovery and installation commands.
+This phase-one checkout does not contain the marketplace implementation.
+Cargo and npm versions remain 0.5.0; this document does not announce a release.
 
-**Product decisions (defaults chosen; alternatives noted):**
+**Proposed defaults (subject to implementation and review):**
 - **Index model:** registry-agnostic from day one. Any HTTPS URL can serve a
   static index JSON (`locus adapter registry index add <url>`); no
   AshlrAI-run canonical index is hardcoded. AshlrAI may publish a *curated*
@@ -19,12 +19,14 @@ record; product decisions below.
 - **Monetization:** none — the marketplace is an ecosystem accelerant for
   Phantom/Locus adoption.
 **Problem:** Locus ships 9 built-in provider adapters (github, supabase,
-vercel, aws, cloudflare, stripe, resend, anthropic, openai) with a signed
+vercel, aws, cloudflare, stripe, resend, anthropic, openai) with an exportable
 registry manifest and a trust store (`locus adapter registry export`,
 `locus adapter verify-manifest`, `locus adapter trust`). The long tail of
 providers (Linear, Notion, Salesforce, Snowflake, …) can't all be built-in —
 but the *trust model for third-party adapters doesn't exist yet*. Today an
 adapter is either compiled in (trusted by construction) or it doesn't exist.
+Release catalogs are unsigned; local signing and operator trust are separate
+explicit actions. Archive checksum sidecars do not sign an adapter catalog.
 
 ## Proposed: signed community adapter registry
 
@@ -50,9 +52,9 @@ Build on the existing registry trust machinery rather than inventing a new one:
 4. **Namespace the risk.** Community adapters run through the same isolation
    pipeline as built-ins: isolated env, scope freeze, `require_approval`
    policy, and MCP surfaces limited to the pinned binding. A malicious adapter
-   manifest can at worst expose *its own* provider's tools — it cannot reach
-   other bindings' credentials (isolation.rs positive-construction env) or
-   forge sessions (sealed pins).
+   signature authenticates its publisher; it does not sandbox upstream code.
+   An upstream MCP command still executes code and may use the binding's
+   credentials, so approving its command and scope remains necessary.
 
 ## Explicitly out of scope (v1)
 
