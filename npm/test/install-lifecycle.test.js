@@ -46,7 +46,11 @@ function fixture(t, name, file, options = {}) {
       calls.push([binary, args]);
       if (options.extract && binary === "tar") {
         if (options.extractFailure) throw new Error("synthetic extraction failure");
-        if (options.extract === "real") return execFileSync("/usr/bin/tar", args, { ...opts, env: processStub.env });
+        // GNU tar starts gzip via PATH; BSD tar's built-in gzip masked this
+        // dependency locally. Use only system tools, retaining synthetic env.
+        if (options.extract === "real") return execFileSync("/usr/bin/tar", args, {
+          ...opts, env: { ...processStub.env, PATH: "/usr/bin:/bin" },
+        });
         const dir = args[args.indexOf("-C") + 1];
         fs.writeFileSync(path.join(dir, name), options.binary);
         return Buffer.alloc(0);
@@ -208,7 +212,7 @@ for (const [name, file] of wrappers) {
     fs.writeFileSync(path.join(staging, nested, name), bytes);
     const archive = path.join(staging, "fixture.tar.gz");
     execFileSync("/usr/bin/tar", ["czf", archive, "-C", staging, nested], {
-      env: { HOME: staging, USERPROFILE: staging, LOCUS_HOME: path.join(staging, "state"), PATH: "" },
+      env: { HOME: staging, USERPROFILE: staging, LOCUS_HOME: path.join(staging, "state"), PATH: "/usr/bin:/bin" },
     });
     const f = fixture(t, name, file, { archive: fs.readFileSync(archive), extract: "real" });
     assert.equal(await f.mod.ensureBinary(), f.cache);
