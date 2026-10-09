@@ -93,6 +93,31 @@ locus workspace --default acme --allow acme,acme-ro --require-pin
 locus pin          # uses .locus.toml
 ```
 
+### Ten minutes to wrong-account-impossible
+
+New here? The guided wizard takes you from zero to multi-tenant in about ten
+minutes — it detects the ambient identity on your machine, walks you through
+naming tenants, wiring credential refs, freezing scopes, and provisioning
+workspaces, then proves isolation with `locus doctor` and a live scrub demo:
+
+```bash
+locus onboard --detect-only   # preview what the wizard sees (nothing is auto-pinned)
+locus onboard                 # interactive wizard (re-runnable, resumable)
+locus onboard --yes --json    # scripted / CI: NDJSON events per step
+```
+
+Need a provider Locus doesn't ship built-in? The community adapter
+marketplace installs signed, declarative adapters from any registry index —
+verified against *your* trust store, never the server's honesty:
+
+```bash
+locus adapter registry index add https://adapters.example.com/index.json
+locus adapter trust add --id example-publisher --ed25519-pub <base64-pubkey>
+locus adapter search linear
+locus adapter install linear
+locus binding add --provider linear --from-adapter linear …   # upstream MCP spec included
+```
+
 ### Shell prompt
 
 ```bash
@@ -230,7 +255,7 @@ locus topic <name>                    # dashboard · forensics · serve · goal 
 
 **Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
 
-**Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/ashlr-hub/](./integrations/ashlr-hub/)
+**Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/phantom/](./integrations/phantom/)
 
 Approvals:
 
