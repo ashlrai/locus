@@ -162,8 +162,9 @@ pub fn build_isolated_env_opts(
         let allowed_secret_keys = binding
             .providers
             .iter()
-            .flat_map(|provider| crate::credential::inject_keys_for_provider(&provider.provider))
-            .copied()
+            .flat_map(|provider| {
+                crate::credential::inject_keys_for_binding_provider(provider).unwrap_or_default()
+            })
             .collect::<std::collections::BTreeSet<_>>();
         for (k, v) in outcome.env {
             if allowed_secret_keys.contains(k.as_str()) {
@@ -174,8 +175,8 @@ pub fn build_isolated_env_opts(
         secrets_failed = outcome.issues;
         for p in &binding.providers {
             let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());
-            let keys = crate::credential::inject_keys_for_provider(&p.provider);
-            let ok = keys.iter().any(|k| vars.contains_key(*k));
+            let keys = crate::credential::inject_keys_for_binding_provider(p).unwrap_or_default();
+            let ok = keys.iter().any(|k| vars.contains_key(k));
             vars.insert(flag, if ok { "1".into() } else { "0".into() });
         }
     }
@@ -320,8 +321,8 @@ pub fn build_ci_env_map(
         }
         for p in &binding.providers {
             let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());
-            let keys = crate::credential::inject_keys_for_provider(&p.provider);
-            let ok = keys.iter().any(|k| vars.contains_key(*k));
+            let keys = crate::credential::inject_keys_for_binding_provider(p).unwrap_or_default();
+            let ok = keys.iter().any(|k| vars.contains_key(k));
             vars.insert(flag, if ok { "1".into() } else { "0".into() });
         }
     }

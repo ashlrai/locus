@@ -1,7 +1,7 @@
 //! CredentialRef resolution.
 //!
 //! Formats:
-//! - `phm:NAME`     — resolve via `phantom reveal --yes NAME` (value never logged)
+//! - `phm:NAME`     — retained reference; resolution requires an unavailable scoped bridge
 //! - `env:VAR`      — read from process environment
 //! - `test:VALUE`   — compiled unit tests only; release binaries always reject it
 //!
@@ -12,9 +12,10 @@ use crate::error::{LocusError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -30,7 +31,7 @@ pub fn phantom_on_path() -> bool {
 }
 
 /// Hard deadline for the `phantom --version` PATH probe. Same fail-closed
-/// treatment as `phantom list`: a wedged binary must never hang doctor,
+/// treatment as any metadata probe: a wedged binary must never hang doctor,
 /// verify, or the dashboard poll — probe failure just means "not on PATH".
 const PHANTOM_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -196,7 +197,7 @@ pub fn migrate_legacy_phantom_ref(raw: &str) -> Option<String> {
 /// Caller must not log or serialize the returned value into agent context.
 pub fn resolve(cred: &CredentialRef) -> Result<Zeroizing<String>> {
     match cred {
-        CredentialRef::Phantom { name } => resolve_phantom(name),
+        CredentialRef::Phantom { .. } => Err(LocusError::PhantomCredentialIntegrationUnsupported),
         CredentialRef::Env { var } => {
             let v = std::env::var(var)
                 .map_err(|_| LocusError::msg("credential unavailable (source=environment)"))?;
@@ -212,59 +213,20 @@ pub fn resolve(cred: &CredentialRef) -> Result<Zeroizing<String>> {
     }
 }
 
-/// Hard deadline for `phantom reveal` during credential injection.
-///
-/// More generous than the 2s probes: this runs at user-facing session start
-/// (worker spawn, `locus exec`) where a slower vault unlock is legitimate —
-/// but a hung binary must still fail closed with a clear error instead of
-/// wedging session start forever.
-const PHANTOM_REVEAL_TIMEOUT: Duration = Duration::from_secs(10);
-
-fn resolve_phantom(name: &str) -> Result<Zeroizing<String>> {
-    resolve_phantom_with_timeout(name, PHANTOM_REVEAL_TIMEOUT)
-}
-
-/// Optional per-project vault directory for multi-vault machines.
-///
-/// `LOCUS_PHANTOM_PROJECT` (when set) names the vault-of-record for *every*
-/// `phantom` child — reveal and list alike; otherwise children inherit the
-/// process cwd and `phantom` walks for `.phantom.toml` itself. Shared by
-/// `resolve_phantom` and the doctor/verify `phantom list` probe so the two
-/// spawn paths cannot drift.
-fn phantom_project_dir() -> Option<PathBuf> {
-    std::env::var("LOCUS_PHANTOM_PROJECT")
-        .ok()
-        .map(PathBuf::from)
-}
-
-/// Build a `phantom` child command rooted in the project vault dir (when set).
-fn phantom_command(args: &[&str], project_dir: Option<&Path>) -> Command {
-    let mut cmd = Command::new("phantom");
-    cmd.args(args);
-    if let Some(dir) = project_dir {
-        cmd.current_dir(dir);
+/// Preflight only operations that request credential resolution.
+/// Reference parsing/storage remains available for migration and metadata.
+pub fn ensure_binding_credential_resolution_supported(
+    binding: &crate::binding::Binding,
+) -> Result<()> {
+    if binding.providers.iter().any(|provider| {
+        matches!(
+            CredentialRef::parse(&provider.credential_ref),
+            CredentialRef::Phantom { .. }
+        )
+    }) {
+        return Err(LocusError::PhantomCredentialIntegrationUnsupported);
     }
-    cmd
-}
-
-fn resolve_phantom_with_timeout(name: &str, timeout: Duration) -> Result<Zeroizing<String>> {
-    let project_dir = phantom_project_dir();
-    let cmd = phantom_command(&["reveal", "--yes", name], project_dir.as_deref());
-    // The deadline error carries only the static label + timeout — never the
-    // locator name or any child output.
-    let (status, stdout) = run_capture_stdout_with_deadline(cmd, timeout, "phantom reveal")
-        .map_err(|error| {
-            LocusError::msg(format!("credential unavailable (source=phantom): {error}"))
-        })?;
-    if !status.success() {
-        // Both streams are untrusted and may contain locator names or secret material.
-        return Err(LocusError::msg("credential unavailable (source=phantom)"));
-    }
-    let value = String::from_utf8_lossy(&stdout).trim().to_string();
-    if value.is_empty() {
-        return Err(LocusError::msg("credential unavailable (source=phantom)"));
-    }
-    Ok(Zeroizing::new(value))
+    Ok(())
 }
 
 /// Map provider → standard env var names that receive the resolved secret.
@@ -284,125 +246,73 @@ pub fn inject_keys_for_provider(provider: &str) -> &'static [&'static str] {
     }
 }
 
-/// Check Phantom locators for every `phm:` ref across bindings and return
-/// provider/source metadata only (never locator names or values).
-///
-/// Shared by doctor / verify surfaces (CLI and MCP) so external facts are
-/// gathered the same way everywhere. When Phantom is not on PATH every `phm:`
-/// ref is reported as unavailable so doctor surfaces the gap (fail closed).
+/// Custom keys come only from a verified community contract and supported env refs.
+pub fn inject_keys_for_binding_provider(
+    provider: &crate::binding::ProviderBinding,
+) -> Result<Vec<String>> {
+    let Some(manifest) = provider.verified_community_adapter()? else {
+        return Ok(inject_keys_for_provider(&provider.provider)
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect());
+    };
+    let Some(key) = manifest.credential_env.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let prefix = format!(
+        "{}_",
+        provider.provider.to_ascii_uppercase().replace('-', "_")
+    );
+    let suffix = key.strip_prefix(&prefix).unwrap_or("");
+    let source = CredentialRef::validate(&provider.credential_ref)?;
+    let supported_source = matches!(&source, CredentialRef::Env { var }
+        if ![
+            crate::authority_anchor::CONTROL_CAPABILITY_ENV,
+            crate::authority_anchor::EXECUTOR_CAPABILITY_ENV,
+            "LOCUS_SEAL",
+            crate::adapter_registry::LOCUS_ADAPTER_TRUST_KEYS_ENV,
+            "LOCUS_REGISTRY_SIGNING_KEY",
+        ].iter().any(|reserved| var.eq_ignore_ascii_case(reserved)));
+    if !valid_env_name(key)
+        || key != key.to_ascii_uppercase()
+        || !matches!(suffix, "API_KEY" | "TOKEN" | "ACCESS_TOKEN" | "SECRET_KEY")
+        || key.starts_with("LOCUS_")
+        || !supported_source
+    {
+        return Err(LocusError::msg("community credential mapping requires a provider-local key and supported env reference"));
+    }
+    Ok(vec![key.to_string()])
+}
+
+/// Report unsupported Phantom credential references without invoking the
+/// binary or opening a vault. Installation/name presence cannot prove that
+/// a scoped credential bridge is available.
 pub fn collect_unresolved_phm_refs(
     store: &crate::store::Store,
-    phantom_on_path: bool,
+    _phantom_on_path: bool,
 ) -> Result<Vec<CredentialResolutionIssue>> {
-    let summaries = store.list_bindings()?;
-    let mut needed: Vec<(String, String)> = Vec::new();
-    for sum in summaries {
-        let b = match store.load_binding(&sum.alias) {
-            Ok(b) => b,
+    let mut unresolved = Vec::new();
+    for summary in store.list_bindings()? {
+        let binding = match store.load_binding(&summary.alias) {
+            Ok(binding) => binding,
             Err(_) => continue,
         };
-        for p in &b.providers {
-            if let CredentialRef::Phantom { name } = CredentialRef::parse(&p.credential_ref) {
-                let provider = safe_provider_label(&p.provider);
-                if !needed.iter().any(|(n, p)| n == &name && p == &provider) {
-                    needed.push((name, provider));
-                }
+        for provider in binding.providers {
+            if matches!(
+                CredentialRef::parse(&provider.credential_ref),
+                CredentialRef::Phantom { .. }
+            ) {
+                unresolved.push(CredentialResolutionIssue {
+                    provider: safe_provider_label(&provider.provider),
+                    source: "phantom".into(),
+                    code: "unsupported-integration".into(),
+                });
             }
         }
     }
-    if needed.is_empty() {
-        return Ok(Vec::new());
-    }
-    let unavailable_issue = |provider: String| CredentialResolutionIssue {
-        provider,
-        source: "phantom".into(),
-        code: "unavailable".into(),
-    };
-    // Fail closed: `known` is `None` when Phantom is off PATH or when
-    // `phantom list` failed / timed out — every phm: ref then stays flagged
-    // as unresolved (more warnings, never fewer; never a hang).
-    let known = if phantom_on_path {
-        cached_phantom_list_names()
-    } else {
-        None
-    };
-    let mut unresolved: Vec<CredentialResolutionIssue> = needed
-        .into_iter()
-        .filter(|(name, _)| match &known {
-            Some(known) => !known.iter().any(|known_name| known_name == name),
-            None => true, // cannot verify — report as unresolved
-        })
-        .map(|(_, provider)| unavailable_issue(provider))
-        .collect();
     unresolved.sort_by(|a, b| a.provider.cmp(&b.provider));
     unresolved.dedup_by(|a, b| a.provider == b.provider);
     Ok(unresolved)
-}
-
-/// Hard deadline for a `phantom list` child. A hung or slow binary must never
-/// wedge doctor/verify or the MCP SSE heartbeat.
-const PHANTOM_LIST_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// TTL for the cached `phantom list` known-name set. The MCP SSE heartbeat
-/// gathers doctor facts roughly every 5s; the cache keeps each tick from
-/// spawning a fresh subprocess.
-const PHANTOM_LIST_CACHE_TTL: Duration = Duration::from_secs(5);
-
-/// One cached fetch: when it happened, the effective vault dir it was
-/// gathered from, and what it produced. The trailing `None` means the fetch
-/// failed (known set unknown → fail closed).
-type PhantomListSlot = Option<(Instant, Option<PathBuf>, Option<Vec<String>>)>;
-
-/// `phantom list` names with a process-wide TTL cache. `None` = unknown.
-///
-/// The cache is keyed by the effective vault dir (`LOCUS_PHANTOM_PROJECT`):
-/// the env var is normally stable for the life of the process, but if it
-/// does change, a cached name set from the old vault is never served.
-fn cached_phantom_list_names() -> Option<Vec<String>> {
-    static CACHE: OnceLock<Mutex<PhantomListSlot>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(None));
-    let project_dir = phantom_project_dir();
-    fetch_with_ttl(cache, PHANTOM_LIST_CACHE_TTL, project_dir.clone(), || {
-        phantom_list_names(project_dir.as_deref(), PHANTOM_LIST_TIMEOUT).ok()
-    })
-}
-
-/// Serve the cached value while fresh and gathered from the same vault dir;
-/// otherwise run `fetch` and cache what it returns. The lock is held across
-/// `fetch` so concurrent heartbeat ticks never stampede subprocesses. Failed
-/// fetches (`None`) are cached too — a hanging binary is retried at most once
-/// per TTL, not once per tick.
-fn fetch_with_ttl(
-    cache: &Mutex<PhantomListSlot>,
-    ttl: Duration,
-    project_dir: Option<PathBuf>,
-    fetch: impl FnOnce() -> Option<Vec<String>>,
-) -> Option<Vec<String>> {
-    let mut slot = match cache.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if let Some((fetched_at, cached_dir, cached)) = slot.as_ref() {
-        if fetched_at.elapsed() < ttl && cached_dir == &project_dir {
-            return cached.clone();
-        }
-    }
-    let fresh = fetch();
-    *slot = Some((Instant::now(), project_dir, fresh.clone()));
-    fresh
-}
-
-/// Fetch secret names via `phantom list` (best-effort; stdout shape may vary).
-/// Errors on spawn failure or when the child outlives `timeout` (it is
-/// killed). Callers treat errors as "known set unknown" — fail closed.
-fn phantom_list_names(project_dir: Option<&Path>, timeout: Duration) -> Result<Vec<String>> {
-    let cmd = phantom_command(&["list"], project_dir);
-    let (status, stdout) = run_capture_stdout_with_deadline(cmd, timeout, "phantom list")?;
-    if !status.success() {
-        // Treat as empty known set — doctor will flag all phm refs.
-        return Ok(Vec::new());
-    }
-    Ok(parse_phantom_list_stdout(&String::from_utf8_lossy(&stdout)))
 }
 
 /// Cap on concurrent stdout-reader helper threads (short-lived readers plus
@@ -551,43 +461,6 @@ fn run_capture_stdout_with_deadline(
     }
 }
 
-/// Parse secret names from `phantom list` stdout (best-effort).
-fn parse_phantom_list_stdout(stdout: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    for line in stdout.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        // Common formats: bare NAME, "NAME ...", "  NAME", JSON-ish "name": "NAME",
-        // and bulleted "- NAME" / "* NAME" (phantom's own list output).
-        let mut tokens = line.split_whitespace();
-        let mut token = tokens.next().unwrap_or("");
-        if matches!(token, "-" | "->" | "*" | "•") {
-            token = tokens.next().unwrap_or("");
-        }
-        let token = token.trim_matches(|c: char| c == '"' || c == '\'' || c == ',' || c == ':');
-        if token.is_empty() || token.contains('=') {
-            continue;
-        }
-        // Skip table headers / chrome (including bare counts like "-> 5 secret(s)").
-        if token.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        let lower = token.to_ascii_lowercase();
-        if matches!(
-            lower.as_str(),
-            "name" | "secret" | "secrets" | "key" | "---" | "total" | "note"
-        ) {
-            continue;
-        }
-        if !names.iter().any(|n| n == token) {
-            names.push(token.to_string());
-        }
-    }
-    names
-}
-
 /// Resolve all provider credentials for a binding into env var injections.
 /// Returns map of env_key → secret. Values must not be logged.
 pub fn resolve_binding_secrets(binding: &crate::binding::Binding) -> ResolvedBindingSecrets {
@@ -595,22 +468,55 @@ pub fn resolve_binding_secrets(binding: &crate::binding::Binding) -> ResolvedBin
     let mut issues = Vec::new();
     for p in &binding.providers {
         let cred = CredentialRef::parse(&p.credential_ref);
-        let value = match resolve(&cred) {
-            Ok(v) => v,
+        let keys = match inject_keys_for_binding_provider(p) {
+            Ok(keys) if !keys.is_empty() => keys,
+            Ok(_) => {
+                issues.push(CredentialResolutionIssue {
+                    provider: safe_provider_label(&p.provider),
+                    source: cred.source().into(),
+                    code: "unsupported-mapping".into(),
+                });
+                continue;
+            }
             Err(_) => {
                 issues.push(CredentialResolutionIssue {
                     provider: safe_provider_label(&p.provider),
                     source: cred.source().into(),
-                    code: "unavailable".into(),
+                    code: "invalid-adapter-contract".into(),
                 });
                 continue;
             }
         };
-        for key in inject_keys_for_provider(&p.provider) {
-            out.insert(
-                (*key).to_string(),
-                Zeroizing::new(value.as_str().to_string()),
-            );
+        let value = match resolve(&cred) {
+            Ok(v) => v,
+            Err(error) => {
+                issues.push(CredentialResolutionIssue {
+                    provider: safe_provider_label(&p.provider),
+                    source: cred.source().into(),
+                    code: if matches!(error, LocusError::PhantomCredentialIntegrationUnsupported) {
+                        "unsupported-integration"
+                    } else {
+                        "unavailable"
+                    }
+                    .into(),
+                });
+                continue;
+            }
+        };
+        if value.is_empty()
+            && p.upstream
+                .as_ref()
+                .is_some_and(|upstream| upstream.community_adapter.is_some())
+        {
+            issues.push(CredentialResolutionIssue {
+                provider: safe_provider_label(&p.provider),
+                source: cred.source().into(),
+                code: "unavailable".into(),
+            });
+            continue;
+        }
+        for key in keys {
+            out.insert(key, Zeroizing::new(value.as_str().to_string()));
         }
         // Also set LOCUS_<PROVIDER>_RESOLVED=1 (not the secret) for debugging
         let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());
@@ -719,19 +625,27 @@ mod tests {
         })
     }
 
+    // These read-only credential fixtures do not authorize control mutations
+    // or start an authority broker. Store loading still validates the TOML.
+    fn write_binding_fixture(store: &crate::store::Store, binding: &crate::binding::Binding) {
+        std::fs::write(
+            store.bindings_dir().join(format!("{}.toml", binding.alias)),
+            binding.to_toml().unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn collect_unresolved_phm_refs_reports_when_phantom_missing() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path()).unwrap();
-        store
-            .save_binding(&phm_binding("phm:CRED_TEST_MISSING_CANARY"))
-            .unwrap();
+        write_binding_fixture(&store, &phm_binding("phm:CRED_TEST_MISSING_CANARY"));
 
         let issues = collect_unresolved_phm_refs(&store, false).unwrap();
         assert_eq!(issues.len(), 1, "{issues:?}");
         assert_eq!(issues[0].provider, "github");
         assert_eq!(issues[0].source, "phantom");
-        assert_eq!(issues[0].code, "unavailable");
+        assert_eq!(issues[0].code, "unsupported-integration");
         // Locator names never leak into the metadata.
         let json = serde_json::to_string(&issues).unwrap();
         assert!(!json.contains("CRED_TEST_MISSING_CANARY"), "{json}");
@@ -741,7 +655,7 @@ mod tests {
     fn collect_unresolved_phm_refs_empty_without_phm_refs() {
         let dir = tempfile::tempdir().unwrap();
         let store = crate::store::Store::open(dir.path()).unwrap();
-        store.save_binding(&phm_binding("env:SOME_VAR")).unwrap();
+        write_binding_fixture(&store, &phm_binding("env:SOME_VAR"));
         // No phm refs → empty result and no `phantom list` shell-out.
         assert!(collect_unresolved_phm_refs(&store, false)
             .unwrap()
@@ -749,120 +663,6 @@ mod tests {
         assert!(collect_unresolved_phm_refs(&store, true)
             .unwrap()
             .is_empty());
-    }
-
-    #[test]
-    fn phantom_list_parser_handles_common_stdout_shapes() {
-        let names = parse_phantom_list_stdout(
-            "# vault\nNAME\nGH_TOKEN prod\n  \"API_KEY\",\ntotal 2\nGH_TOKEN\n",
-        );
-        assert_eq!(names, vec!["GH_TOKEN".to_string(), "API_KEY".to_string()]);
-    }
-
-    #[test]
-    fn phantom_list_parser_handles_real_bulleted_vault_output() {
-        // Shape produced by the shipping phantom CLI (`phantom list`).
-        let names = parse_phantom_list_stdout(
-            "-> 2 secret(s) in vault (os-keychain):\n\n   - SUPABASE_PERSONAL_FCEI\n   - GH_TOKEN_ASHLR\n\nnote Values are never displayed. Use phantom add/remove to manage.\n",
-        );
-        assert_eq!(
-            names,
-            vec![
-                "SUPABASE_PERSONAL_FCEI".to_string(),
-                "GH_TOKEN_ASHLR".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn ttl_cache_serves_fresh_hits_and_caches_failures() {
-        use std::cell::Cell;
-        let cache: Mutex<PhantomListSlot> = Mutex::new(None);
-        let calls = Cell::new(0u32);
-
-        // First call fetches.
-        let got = fetch_with_ttl(&cache, Duration::from_secs(60), None, || {
-            calls.set(calls.get() + 1);
-            Some(vec!["A".to_string()])
-        });
-        assert_eq!(got, Some(vec!["A".to_string()]));
-        assert_eq!(calls.get(), 1);
-
-        // Within TTL: fetch must not run again; cached value served.
-        let got = fetch_with_ttl(&cache, Duration::from_secs(60), None, || {
-            calls.set(calls.get() + 100);
-            None
-        });
-        assert_eq!(got, Some(vec!["A".to_string()]));
-        assert_eq!(calls.get(), 1);
-
-        // Zero TTL forces a refetch; a failed fetch (None) is cached too.
-        let got = fetch_with_ttl(&cache, Duration::ZERO, None, || {
-            calls.set(calls.get() + 1);
-            None
-        });
-        assert_eq!(got, None);
-        assert_eq!(calls.get(), 2);
-
-        // The failure is served from cache within TTL (no retry storm).
-        let got = fetch_with_ttl(&cache, Duration::from_secs(60), None, || {
-            calls.set(calls.get() + 1);
-            Some(vec!["B".to_string()])
-        });
-        assert_eq!(got, None);
-        assert_eq!(calls.get(), 2);
-    }
-
-    #[test]
-    fn ttl_cache_is_keyed_by_effective_vault_dir() {
-        let cache: Mutex<PhantomListSlot> = Mutex::new(None);
-
-        let got = fetch_with_ttl(&cache, Duration::from_secs(60), None, || {
-            Some(vec!["AMBIENT".to_string()])
-        });
-        assert_eq!(got, Some(vec!["AMBIENT".to_string()]));
-
-        // Fresh entry but a different effective vault dir → must refetch,
-        // never serve names gathered from the old vault.
-        let vault = Some(PathBuf::from("/tmp/locus-vault"));
-        let got = fetch_with_ttl(&cache, Duration::from_secs(60), vault.clone(), || {
-            Some(vec!["VAULT".to_string()])
-        });
-        assert_eq!(got, Some(vec!["VAULT".to_string()]));
-
-        // Same dir within TTL → served from cache (fetch must not run).
-        let got = fetch_with_ttl(&cache, Duration::from_secs(60), vault, || {
-            panic!("cached hit must not refetch")
-        });
-        assert_eq!(got, Some(vec!["VAULT".to_string()]));
-    }
-
-    #[test]
-    fn phantom_project_dir_env_roots_reveal_and_list_identically() {
-        // Env-var test: restore any prior value on exit. No other test in
-        // this crate reads LOCUS_PHANTOM_PROJECT, so a plain set/remove is
-        // race-free under the parallel test runner.
-        let prev = std::env::var_os("LOCUS_PHANTOM_PROJECT");
-        let vault = Path::new("/tmp/locus-vault-of-record");
-        std::env::set_var("LOCUS_PHANTOM_PROJECT", vault);
-
-        let dir = phantom_project_dir();
-        assert_eq!(dir.as_deref(), Some(vault));
-        // Both spawn paths must be rooted in the same dir (no drift between
-        // `phantom reveal` and the doctor/verify `phantom list` probe).
-        let reveal = phantom_command(&["reveal", "--yes", "NAME"], dir.as_deref());
-        let list = phantom_command(&["list"], dir.as_deref());
-        assert_eq!(reveal.get_current_dir(), Some(vault));
-        assert_eq!(list.get_current_dir(), Some(vault));
-
-        std::env::remove_var("LOCUS_PHANTOM_PROJECT");
-        assert_eq!(phantom_project_dir(), None);
-        // Unset → inherit the process cwd (no current_dir override).
-        assert_eq!(phantom_command(&["list"], None).get_current_dir(), None);
-
-        if let Some(v) = prev {
-            std::env::set_var("LOCUS_PHANTOM_PROJECT", v);
-        }
     }
 
     #[cfg(unix)]
@@ -968,52 +768,66 @@ mod tests {
         out
     }
 
-    /// Regression (fail closed, never hang): a hung `phantom reveal` is killed
-    /// at the deadline and resolution errors with a clear, non-leaking message.
     #[cfg(unix)]
     #[test]
-    fn resolve_phantom_times_out_hung_reveal_and_fails_closed() {
-        with_fake_phantom("sleep 5", || {
-            let start = Instant::now();
-            let err =
-                resolve_phantom_with_timeout("CANARY_SECRET_NAME", Duration::from_millis(200))
-                    .expect_err("hung reveal must fail closed");
-            let msg = err.to_string();
+    fn phantom_resolution_fails_before_binary_invocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("phantom-invoked");
+        let script = format!("printf invoked > '{}'", marker.display());
+        with_fake_phantom(&script, || {
+            let error = resolve(&CredentialRef::Phantom {
+                name: "REFERENCE_NAME_CANARY".into(),
+            })
+            .expect_err("no supported scoped bridge exists");
+            assert!(matches!(
+                error,
+                LocusError::PhantomCredentialIntegrationUnsupported
+            ));
+            let message = error.to_string();
+            assert!(message.contains("env:VAR"));
+            assert!(!message.contains("REFERENCE_NAME_CANARY"));
             assert!(
-                start.elapsed() < Duration::from_secs(3),
-                "resolve must not wait for the child's natural exit"
-            );
-            assert!(
-                msg.contains("credential unavailable (source=phantom)"),
-                "error keeps the standard shape: {msg}"
-            );
-            assert!(
-                msg.contains("phantom reveal timed out"),
-                "timeout must be distinguishable from other failures: {msg}"
-            );
-            assert!(
-                !msg.contains("CANARY_SECRET_NAME"),
-                "locator name must never leak into errors: {msg}"
+                !marker.exists(),
+                "unsupported resolution must not invoke phantom"
             );
         });
     }
 
-    /// A healthy `phantom reveal` still resolves under the deadline runner.
+    #[test]
+    fn binding_preflight_and_safe_issue_metadata_reject_phantom_without_ambient_fallback() {
+        let binding = phm_binding("phm:REFERENCE_NAME_CANARY");
+        assert!(matches!(
+            ensure_binding_credential_resolution_supported(&binding),
+            Err(LocusError::PhantomCredentialIntegrationUnsupported)
+        ));
+        let resolved = resolve_binding_secrets(&binding);
+        assert!(resolved.env.is_empty());
+        assert_eq!(resolved.issues.len(), 1);
+        assert_eq!(resolved.issues[0].code, "unsupported-integration");
+        assert!(!serde_json::to_string(&resolved.issues)
+            .unwrap()
+            .contains("REFERENCE_NAME_CANARY"));
+        ensure_binding_credential_resolution_supported(&phm_binding("env:UNUSED")).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
-    fn resolve_phantom_success_under_deadline_runner() {
-        with_fake_phantom("printf 's3cret-value\\n'", || {
-            let v = resolve_phantom_with_timeout("ANY", Duration::from_secs(5)).unwrap();
-            assert_eq!(v.as_str(), "s3cret-value");
+    fn doctor_flags_unsupported_integration_even_with_phantom_installed_without_invocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("phantom-invoked");
+        let script = format!("printf invoked > '{}'", marker.display());
+        let store = crate::store::Store::open(dir.path().join("store")).unwrap();
+        write_binding_fixture(&store, &phm_binding("phm:REFERENCE_NAME_CANARY"));
+        with_fake_phantom(&script, || {
+            let issues = collect_unresolved_phm_refs(&store, true).unwrap();
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].code, "unsupported-integration");
+            assert!(!marker.exists());
         });
     }
 
     #[test]
-    fn phantom_deadlines_are_sane() {
-        // Probes stay snappy (heartbeat/doctor paths)...
+    fn phantom_probe_deadline_stays_bounded() {
         assert_eq!(PHANTOM_PROBE_TIMEOUT, Duration::from_secs(2));
-        assert_eq!(PHANTOM_LIST_TIMEOUT, Duration::from_secs(2));
-        // ...while user-facing session start gets a more generous reveal window.
-        assert_eq!(PHANTOM_REVEAL_TIMEOUT, Duration::from_secs(10));
     }
 }

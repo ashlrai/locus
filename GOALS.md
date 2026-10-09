@@ -18,7 +18,7 @@ Related: [PLAN.md](./PLAN.md) (phased roadmap) · [DESIGN.md](./DESIGN.md) (arch
 |--------|---------|
 | **Wrong-account impossible** | Seal + exclusive catalog + scrub + scope freeze. Soft prompts are not the control. |
 | **AI-native** | Agents get whoami/status/report/resources/prompts; they cannot pin; setup wires MCP in one command. |
-| **Hub-native** | ashlr-hub (and peers) shell out to `agent report` / `ci mint`; REQUIRED_SERVERS = locus + phantom only. |
+| **Hub-native** | Phantom (and peers) shell out to `agent report` / `ci mint`; REQUIRED_SERVERS = locus + phantom only. |
 
 Sibling: [Phantom](https://phm.dev) answers *can this secret enter the model?*  
 Locus answers *as whom, against which tenant, right now?*
@@ -40,7 +40,7 @@ Northstar: wrong-account impossible · AI-native · hub-native
 │     locus-mcp tools/resources/prompts · agent report/setup · auto-pin · AGENT.md
 │
 ├─ 4. Hub composition
-│     agent-report contract · integrations/ashlr-hub · REQUIRED_SERVERS · doctor check
+│     agent-report contract · integrations/phantom · REQUIRED_SERVERS · doctor check
 │
 └─ 5. Verification plane (partial)
       claim verify stubs · continuous whoami in CI · isolation pack · audit SIEM · bounty
@@ -110,18 +110,18 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 
 - [x] `docs/hub-integration.md` + agent-report / doctor JSON schemas
 - [x] `scripts/hub-smoke.sh` contract smoke
-- [x] `integrations/ashlr-hub/locus.ts` probe + `withLocusSession` / `ensureLocusReady`
-- [x] `integrations/ashlr-hub/mcp-gateway-snippet.md` (REQUIRED_SERVERS + discovery)
-- [x] `integrations/ashlr-hub/doctor-check.md` (`checkLocus`)
+- [x] `integrations/phantom/locus.ts` probe + `withLocusSession` / `ensureLocusReady`
+- [x] `integrations/phantom/mcp-gateway-snippet.md` (REQUIRED_SERVERS + discovery)
+- [x] `integrations/phantom/doctor-check.md` (`checkLocus`)
 - [x] `locusFleetGate()` + pure parse helpers (`evaluateFleetGate`, `parseStatusOneline`, `hasRequiredServers`)
 - [x] `registerLocusInMcpConfig` / `mergeLocusIntoMcpConfig` MCP merge helpers
-- [x] `integrations/ashlr-hub/fleet-preflight.md` — exact pre-dispatch preflight
+- [x] `integrations/phantom/fleet-preflight.md` — exact pre-dispatch preflight
 - [x] `schema/hub-gate.schema.json` fleet gate response contract
 - [x] `scripts/hub-integration-test.sh` composition smoke (required_servers + oneline + gate)
 - [x] Land drop-in inside ashlr-hub: `src/core/integrations/locus.ts` + REQUIRED_SERVERS includes `locus` (+ ecosystem discovery name `locus`)
 - [x] `ashlr doctor` calls `checkLocus` in production path (`src/core/doctor.ts`)
 - [x] Hub pre-mutate gate library + production wire-in (opt-in `LOCUS_ENFORCE=1|warn`) — hub [PR #239](https://github.com/ashlrai/ashlr-hub/pull/239) doctor/REQUIRED_SERVERS; [PR #241](https://github.com/ashlrai/ashlr-hub/pull/241) scrubbed mint + `applyLocusPreMutateGate` on `spawnEngine` / `runSwarm` / `runApiModelSandboxed`
-- [x] Drop-in `integrations/ashlr-hub/locus.ts` synced with hub: `scrubbedChildEnv`, `validateMintEnv`, `withLocusSession` scrub, `resolveLocusEnforceMode` / `decidePreMutateGate` / `assertLocusPreMutate` / `formatPreMutateBlockers` / `applyLocusPreMutateGate` / `runWithLocusSessionIfConfigured` + docs (`hub-integration.md`, `fleet-preflight.md`) — locus [PR #14](https://github.com/ashlrai/locus/pull/14) (firm drop-in + runTask call sites); related locus [#15](https://github.com/ashlrai/locus/pull/15) dogfood clients · [#16](https://github.com/ashlrai/locus/pull/16) adapter registry · [#17](https://github.com/ashlrai/locus/pull/17) streamable-HTTP-lite (M3/M5)
+- [x] Drop-in `integrations/phantom/locus.ts` synced with hub: `scrubbedChildEnv`, `validateMintEnv`, `withLocusSession` scrub, `resolveLocusEnforceMode` / `decidePreMutateGate` / `assertLocusPreMutate` / `formatPreMutateBlockers` / `applyLocusPreMutateGate` / `runWithLocusSessionIfConfigured` + docs (`hub-integration.md`, `fleet-preflight.md`) — locus [PR #14](https://github.com/ashlrai/locus/pull/14) (firm drop-in + runTask call sites); related locus [#15](https://github.com/ashlrai/locus/pull/15) dogfood clients · [#16](https://github.com/ashlrai/locus/pull/16) adapter registry · [#17](https://github.com/ashlrai/locus/pull/17) streamable-HTTP-lite (M3/M5)
 - [x] Ecosystem MCP write injects `locusServerSpec` env (`LOCUS_HOME` / `LOCUS_CLIENT` / `LOCUS_NOTIFY`) — hub #241
 - [x] Swarm path: `runWithLocusSessionIfConfigured` when `LOCUS_CI_BINDING` / `LOCUS_BINDING` set — hub #241
 - [x] Single-task path: `runTask` wraps `runWithLocusSessionIfConfigured` (same CI mint overlay as swarm) — hub [PR #252](https://github.com/ashlrai/ashlr-hub/pull/252)
@@ -177,7 +177,7 @@ locus init --with-samples && locus enter personal && locus doctor
 ## Non-goals (do not dilute the plane)
 
 - Replacing cloud IAM or becoming a SaaS OAuth mesh (Composio-class)
-- Absorbing Phantom vault core or ashlr-hub fleet OS
+- Absorbing Phantom vault core or Phantom fleet OS
 - Soft “please check project_ref” as a substitute for freeze
 - Ambient personal fallthrough when unpinned
 

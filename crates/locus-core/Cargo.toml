@@ -26,6 +26,7 @@ ed25519-dalek = { workspace = true }
 libc = { workspace = true }
 fs2 = "0.4"
 ureq = { workspace = true }
+url = "2.5"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

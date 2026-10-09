@@ -90,6 +90,19 @@ enum Commands {
         no_persist_capability: bool,
     },
 
+    /// Guided refs-only tenant setup; detection never grants or pins identity
+    #[command(next_help_heading = "Setup")]
+    Onboard {
+        #[arg(long)]
+        detect_only: bool,
+        /// Apply only the explicitly reviewed saved plan; never auto-accept candidates
+        #[arg(long)]
+        yes: bool,
+        /// Remove the saved refs-only plan before starting
+        #[arg(long)]
+        reset: bool,
+    },
+
     /// Operator control-capability posture: status / persist / unpersist
     #[command(next_help_heading = "Setup", subcommand)]
     Capability(CapabilityCmd),
@@ -825,6 +838,20 @@ enum UpstreamCmd {
 
 #[derive(Subcommand, Debug)]
 enum AdapterCmd {
+    /// Search configured community indexes (summaries are untrusted until install)
+    Search { query: Option<String> },
+    /// Install a trusted full-envelope community adapter; upstream executes code
+    Install {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Remove a community adapter installation
+    Uninstall {
+        id: String,
+        #[arg(long)]
+        yes: bool,
+    },
     /// List built-in provider adapters from the registry catalog
     List,
     /// Verify adapter manifest signatures (soft by default; fail-closed with --require-signed)
@@ -855,6 +882,8 @@ enum AdapterCmd {
 
 #[derive(Subcommand, Debug)]
 enum AdapterRegistryCmd {
+    #[command(subcommand)]
+    Index(AdapterIndexCmd),
     /// Export the canonical registry manifest JSON (unsigned unless --sign)
     Export {
         /// Write to this file instead of stdout
@@ -869,6 +898,19 @@ enum AdapterRegistryCmd {
         /// Key id recorded as `signed_by` (must match a pinned trust key id at verify time)
         #[arg(long, default_value = "root", requires = "sign")]
         key_id: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AdapterIndexCmd {
+    Add {
+        url: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    List,
+    Remove {
+        name: String,
     },
 }
 
@@ -925,6 +967,12 @@ enum ClientCmd {
 struct BindingAddArgs {
     /// Binding alias (e.g. cash-margin)
     alias: Option<String>,
+    /// Use a currently trusted installed community executable envelope
+    #[arg(long)]
+    from_adapter: Option<String>,
+    /// Frozen custom scalar selector, KEY=VALUE (repeatable, community adapters only)
+    #[arg(long)]
+    scope: Vec<String>,
     /// Tenant label (defaults to the alias when prompted)
     #[arg(long)]
     tenant: Option<String>,
@@ -1055,6 +1103,11 @@ fn run() -> Result<()> {
         Commands::Client(sub) => cmd_client(sub, cli.json),
         Commands::Upstream(sub) => cmd_upstream(sub, cli.json),
         Commands::Adapter(sub) => cmd_adapter(sub, cli.json),
+        Commands::Onboard {
+            detect_only,
+            yes,
+            reset,
+        } => cmd_onboard(detect_only, yes, reset, cli.json),
         Commands::Workspace {
             default,
             allow,
@@ -1809,8 +1862,9 @@ enabled = false
 fn write_sample_bindings(s: &Store) -> Result<()> {
     // Annotated TOML so first-run users know what to replace. Never raw secrets.
     let personal = r#"# Sample personal binding — REPLACE project_ref / team_id placeholders.
-# CredentialRefs are Phantom names (phm:NAME). Never put raw tokens here.
-# Store secrets with: phantom store SUPABASE_PERSONAL / GH_TOKEN_PERSONAL / …
+# CredentialRefs are explicit env:VAR pointers. Never put raw tokens here.
+# Supply those variables outside agent context before supervised execution.
+# phm: references currently require an unavailable scoped bridge.
 # Then: locus enter personal && locus whoami && locus doctor
 
 [binding]
@@ -1826,21 +1880,21 @@ max_ttl = "12h"
 [[binding.providers]]
 provider = "supabase"
 account = "personal"
-credential_ref = "phm:SUPABASE_PERSONAL"
+credential_ref = "env:LOCUS_SUPABASE_PERSONAL"
 # project_ref is frozen on every tool call — set the real ref.
 scope = { project_ref = "personal_ref_replace_me", read_only = false }
 
 [[binding.providers]]
 provider = "github"
 account = "personal"
-credential_ref = "phm:GH_TOKEN_PERSONAL"
+credential_ref = "env:LOCUS_GH_TOKEN_PERSONAL"
 # Empty orgs/repos = no allowlist restriction (tighten for client work).
 scope = { orgs = [], repos = [] }
 
 [[binding.providers]]
 provider = "vercel"
 account = "personal"
-credential_ref = "phm:VERCEL_TOKEN_PERSONAL"
+credential_ref = "env:LOCUS_VERCEL_TOKEN_PERSONAL"
 scope = { team_id = "team_personal_replace_me", env = ["preview", "production"] }
 "#;
 
@@ -1864,20 +1918,20 @@ require_approval = ["*.delete*", "vercel.deploy.prod"]
 [[binding.providers]]
 provider = "supabase"
 account = "acme-prod"
-credential_ref = "phm:SUPABASE_ACME"
+credential_ref = "env:LOCUS_SUPABASE_ACME"
 scope = { project_ref = "acme_ref_replace_me", read_only = true }
 
 [[binding.providers]]
 provider = "github"
 account = "acme-corp"
-credential_ref = "phm:GH_TOKEN_ACME"
+credential_ref = "env:LOCUS_GH_TOKEN_ACME"
 # Frozen org/repo allowlist — model cannot reach outside.
 scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 
 [[binding.providers]]
 provider = "vercel"
 account = "acme-team"
-credential_ref = "phm:VERCEL_TOKEN_ACME"
+credential_ref = "env:LOCUS_VERCEL_TOKEN_ACME"
 scope = { team_id = "team_acme_replace_me", projects = ["acme-web"], env = ["preview"] }
 "#;
 
@@ -2762,7 +2816,7 @@ fn cmd_graph(sub: GraphCmd, json: bool) -> Result<()> {
                 }
                 println!(
                     "   {}",
-                    "wire Phantom secrets for each credential_ref before pin".dimmed()
+                    "configure explicit env:VAR references before supervised execution; phm: resolution is unsupported".dimmed()
                 );
             }
             Ok(())
@@ -3642,6 +3696,13 @@ fn preflight_child_launch(
     surface: ChildLaunchSurface,
 ) -> Result<()> {
     if resolve_secrets {
+        locus_core::credential::ensure_binding_credential_resolution_supported(binding)
+            .with_context(|| {
+                format!(
+                    "{} credential preflight failed before child or session effects",
+                    surface.command_name()
+                )
+            })?;
         return Ok(());
     }
     let resolving_upstreams = credential_resolving_upstreams(binding).with_context(|| {
@@ -3990,10 +4051,292 @@ mod mt_session_reconcile_tests {
     }
 }
 
+fn community_search(
+    query: Option<&str>,
+) -> Result<Vec<locus_core::marketplace::CommunityIndexEntry>> {
+    let sources = locus_core::marketplace::load_index_sources(store()?.home())?;
+    if sources.is_empty() {
+        bail!("no community indexes configured; use locus adapter registry index add <HTTPS URL>");
+    }
+    let (hits, warnings) = locus_core::marketplace::search_indexes(&sources, query.unwrap_or(""));
+    if !warnings.is_empty() {
+        bail!("community index fetch failed; no partial search/install selection accepted");
+    }
+    Ok(hits.into_iter().map(|hit| hit.entry).collect())
+}
+
+fn cmd_adapter_index(sub: AdapterIndexCmd, json: bool) -> Result<()> {
+    let s = store()?;
+    let mut sources = locus_core::marketplace::load_index_sources(s.home())?;
+    match sub {
+        AdapterIndexCmd::List => {}
+        AdapterIndexCmd::Add { url, name } => {
+            require_local_control_boundary("locus adapter registry index add")?;
+            let index = locus_core::marketplace::fetch_index(&url)?;
+            let name = name.unwrap_or(index.name);
+            validate_name_component("index name", &name)?;
+            if sources
+                .iter()
+                .any(|source| source.name == name || source.url == url)
+            {
+                bail!("index name or URL is already registered");
+            }
+            sources.push(locus_core::marketplace::IndexSource { name, url });
+            locus_core::marketplace::save_index_sources(s.home(), &sources)?;
+        }
+        AdapterIndexCmd::Remove { name } => {
+            require_local_control_boundary("locus adapter registry index remove")?;
+            sources.retain(|source| source.name != name);
+            locus_core::marketplace::save_index_sources(s.home(), &sources)?;
+        }
+    }
+    if json {
+        println!("{}", json!({"sources":sources}));
+    } else {
+        for source in sources {
+            println!("{}  {}", source.name, source.url);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_onboard(detect_only: bool, yes: bool, reset: bool, json: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    let s = store()?;
+    if reset {
+        require_local_control_boundary("locus onboard reset")?;
+        locus_core::OnboardPlan::reset(s.home())?;
+    }
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| s.home().to_path_buf());
+    let candidates = locus_core::detect_ambient_candidates(&home, &cwd());
+    for candidate in &candidates {
+        if json {
+            println!(
+                "{}",
+                json!({"wizard":"onboard", "step":"detect", "event":"candidate", "provider":candidate.provider, "source":candidate.source, "account_hint":candidate.account_hint})
+            );
+        } else {
+            println!(
+                "{}  {}  {}",
+                candidate.provider, candidate.account_hint, candidate.detail
+            );
+        }
+    }
+    if detect_only {
+        return Ok(());
+    }
+    require_local_control_boundary("locus onboard")?;
+    let mut plan = locus_core::OnboardPlan::load(s.home())?;
+    if plan.version != 1 {
+        bail!("unsupported onboard plan schema");
+    }
+    if !yes {
+        if json || !io::stdin().is_terminal() {
+            bail!("onboarding requires an operator TTY; --yes applies only a reviewed refs-only saved plan, never detected candidates");
+        }
+        println!("Candidates are hints. Supply and review each binding; nothing is pinned and no credential values are requested.");
+        if plan.bindings.is_empty() {
+            loop {
+                let args = BindingAddArgs {
+                    guided: true,
+                    ..Default::default()
+                };
+                let answers = resolve_add_answers_interactive(&s, &args)?;
+                if !answers.credential_ref.starts_with("env:") {
+                    bail!("use supported env:VAR credentials; Phantom bridge is unavailable");
+                }
+                let draft = locus_core::PlannedBinding {
+                    alias: answers.alias,
+                    tenant: answers.tenant,
+                    provider: answers.provider,
+                    account: answers.account,
+                    credential_ref: answers.credential_ref,
+                    read_only: answers.read_only,
+                    project_ref: answers.project_ref,
+                    team_id: answers.team_id,
+                    account_id: answers.account_id,
+                    org: answers.org,
+                    repos: answers.repos,
+                    description: answers.description,
+                };
+                println!("{}", draft.clone().into_binding()?.to_toml()?);
+                if !prompt_confirm("add this reviewed binding to the saved plan?", false)? {
+                    bail!("onboarding declined");
+                }
+                if plan
+                    .bindings
+                    .iter()
+                    .any(|existing| existing.alias == draft.alias)
+                {
+                    bail!("binding alias is already in the saved plan");
+                }
+                plan.bindings.push(draft);
+                plan.save(s.home())?;
+                if !prompt_confirm("add another tenant binding?", false)? {
+                    break;
+                }
+            }
+        } else {
+            for draft in &plan.bindings {
+                println!("{}", draft.clone().into_binding()?.to_toml()?);
+            }
+        }
+        if !prompt_confirm("write all reviewed bindings?", false)? {
+            bail!("plan saved; no bindings written");
+        }
+    }
+    if plan.bindings.is_empty() {
+        bail!("saved onboard plan has no explicitly reviewed bindings");
+    }
+    for draft in &plan.bindings {
+        draft.validate()?;
+        validate_name_component("alias", &draft.alias)?;
+        if !draft.credential_ref.starts_with("env:") {
+            bail!("saved plan contains unsupported credentials; use env:VAR");
+        }
+    }
+    for draft in &plan.bindings {
+        let binding = draft.clone().into_binding()?;
+        if s.bindings_dir()
+            .join(format!("{}.toml", binding.alias))
+            .exists()
+        {
+            if s.load_binding(&binding.alias)? != binding {
+                bail!("existing binding differs from plan; refusing overwrite");
+            }
+        } else {
+            s.save_binding(&binding)?;
+        }
+        if json {
+            println!(
+                "{}",
+                json!({"wizard":"onboard","step":"scopes","event":"binding_written","alias":binding.alias})
+            );
+        } else {
+            println!("wrote binding {}", binding.alias);
+        }
+    }
+    for step in [
+        locus_core::steps::DETECT,
+        locus_core::steps::TENANTS,
+        locus_core::steps::CREDENTIALS,
+        locus_core::steps::SCOPES,
+    ] {
+        plan.mark_done(step);
+    }
+    plan.save(s.home())?;
+    if !yes
+        && !json
+        && prompt_confirm(
+            "provision this directory with an exclusive default binding?",
+            false,
+        )?
+    {
+        let default = prompt_value(
+            "default binding",
+            "alias",
+            Some(&plan.bindings[0].alias),
+            &|value| {
+                if plan.bindings.iter().any(|draft| draft.alias == value) {
+                    Ok(())
+                } else {
+                    Err("choose a reviewed binding alias".into())
+                }
+            },
+        )?;
+        cmd_workspace(default, None, true, false)?;
+        plan.workspaces.push(cwd().display().to_string());
+        plan.mark_done(locus_core::steps::WORKSPACES);
+        plan.save(s.home())?;
+    }
+    // Read-only readiness: never pin, resolve credentials, run env, or claim a live test.
+    let report = gather_doctor_report(&s)?;
+    if json {
+        println!(
+            "{}",
+            json!({"wizard":"onboard","step":"verify","event":"metadata_report","doctor":report,"live_credentials_verified":false})
+        );
+    } else {
+        print_doctor_human(&report);
+        println!("Next: explicitly enter a binding and verify its provider scope. Live credentials were not tested by onboarding.");
+    }
+    Ok(())
+}
+
 fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
     match sub {
+        AdapterCmd::Search { query } => {
+            let hits = community_search(query.as_deref())?;
+            if json {
+                println!("{}", json!({"hits": hits}));
+            } else {
+                for hit in hits {
+                    println!("{}  {}  {}", hit.id, hit.publisher, hit.version);
+                }
+            }
+            Ok(())
+        }
+        AdapterCmd::Install { id, yes } => {
+            require_local_control_boundary("locus adapter install")?;
+            let s = store()?;
+            let hit = community_search(Some(&id))?
+                .into_iter()
+                .find(|hit| hit.id == id)
+                .ok_or_else(|| anyhow!("community adapter not found in configured indexes"))?;
+            let keys = load_merged_trust_keys(s.home());
+            if keys.is_empty() {
+                bail!("install requires explicit trusted publisher trust keys (locus adapter trust add)");
+            }
+            let manifest = locus_core::marketplace::fetch_manifest(&hit)?;
+            locus_core::marketplace::verify_community_manifest_with_keys(&manifest, &keys)?;
+            eprintln!("Community adapter upstream executes publisher-supplied code. Its signature authenticates against a configured key, not publisher identity or code safety; review the command, args and sandbox policy.");
+            if !yes {
+                use std::io::IsTerminal;
+                if json || !io::stdin().is_terminal() {
+                    bail!("install requires explicit --yes after reviewing executable code");
+                }
+                eprintln!("{}", serde_json::to_string_pretty(&manifest)?);
+                if !prompt_confirm(
+                    "install this executable envelope and approve its tool surface?",
+                    false,
+                )? {
+                    bail!("installation declined");
+                }
+            }
+            let report =
+                locus_core::marketplace::install_adapter(s.home(), &manifest, &keys, true)?;
+            if json {
+                println!(
+                    "{}",
+                    json!({"ok":true, "id":report.id, "version":report.version, "updated":report.updated, "added_tools":report.added_tools, "removed_tools":report.removed_tools})
+                );
+            } else {
+                println!("installed {} {}", report.id, report.version);
+            }
+            Ok(())
+        }
+        AdapterCmd::Uninstall { id, yes } => {
+            require_local_control_boundary("locus adapter uninstall")?;
+            if !yes && !prompt_confirm("remove this installed community adapter?", false)? {
+                bail!("removal declined");
+            }
+            let removed = locus_core::marketplace::uninstall_adapter(store()?.home(), &id)?;
+            if json {
+                println!("{}", json!({"removed":removed}));
+            } else {
+                println!("removed: {removed}");
+            }
+            Ok(())
+        }
         AdapterCmd::List => {
-            let providers = list_adapters().context("load built-in adapter registry")?;
+            let mut providers = list_adapters().context("load built-in adapter registry")?;
+            providers.extend(
+                locus_core::marketplace::installed_manifests(store()?.home())
+                    .into_iter()
+                    .map(|(_, manifest)| manifest.entry),
+            );
             if json {
                 println!("{}", serde_json::to_string_pretty(&providers)?);
                 return Ok(());
@@ -4059,7 +4402,7 @@ fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
             );
             println!(
                 "{}",
-                "Schema:  schema/adapter-manifest.schema.json · docs/adapter-sdk.md".dimmed()
+                "Marketplace: adapter registry index add <HTTPS URL> · adapter search · adapter install <id>".dimmed()
             );
             Ok(())
         }
@@ -4193,6 +4536,7 @@ fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
 
 fn cmd_adapter_registry(sub: AdapterRegistryCmd, json: bool) -> Result<()> {
     match sub {
+        AdapterRegistryCmd::Index(sub) => cmd_adapter_index(sub, json),
         AdapterRegistryCmd::Export {
             out,
             sign,
@@ -4884,11 +5228,11 @@ fn resolve_add_answers_interactive(s: &Store, args: &BindingAddArgs) -> Result<A
         None => {
             println!("  credential_ref is a pointer, never the secret itself:");
             println!(
-                "    {}  Phantom vault (recommended — phantom add NAME, https://phm.dev)",
+                "    {}  reserved Phantom reference (resolution unsupported; use env:VAR)",
                 "phm:NAME".cyan()
             );
             println!(
-                "    {}   read from the environment at exec time",
+                "    {}   read an explicitly supplied variable at exec time",
                 "env:VAR".cyan()
             );
             prompt_value("credential_ref", "--credential-ref", None, &|v| {
@@ -4984,9 +5328,26 @@ fn scope_prompts(provider: &str) -> &'static [(&'static str, bool)] {
 /// `locus client add` (guided_default=true). The write path is exactly
 /// `Store::save_binding` — validation, bindings lock, reserved-alias check,
 /// audit `binding.save`.
-fn cmd_binding_add(args: BindingAddArgs, guided_default: bool, json: bool) -> Result<()> {
+fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -> Result<()> {
     use std::io::IsTerminal;
     let s = store()?;
+    let community = if let Some(id) = &args.from_adapter {
+        let manifest = locus_core::marketplace::load_installed_manifest(s.home(), id)?;
+        if args
+            .provider
+            .as_deref()
+            .is_some_and(|provider| provider != manifest.entry.id)
+        {
+            bail!("--provider differs from the installed community adapter");
+        }
+        args.provider = Some(manifest.entry.id.clone());
+        Some(manifest)
+    } else {
+        None
+    };
+    if community.is_none() && !args.scope.is_empty() {
+        bail!("--scope requires --from-adapter");
+    }
     let guided = guided_default || args.guided;
     let can_prompt = !args.non_interactive && !json && io::stdin().is_terminal();
     let answers = if can_prompt && (guided || !missing_add_flags(&args).is_empty()) {
@@ -4994,7 +5355,52 @@ fn cmd_binding_add(args: BindingAddArgs, guided_default: bool, json: bool) -> Re
     } else {
         resolve_add_answers(&args)?
     };
-    let b = binding_from_answers(&answers);
+    let mut b = binding_from_answers(&answers);
+    if let Some(manifest) = community {
+        if !answers.credential_ref.starts_with("env:") {
+            bail!("community onboarding requires supported env:VAR credentials; phm: bridge unavailable");
+        }
+        let provider = b
+            .providers
+            .first_mut()
+            .ok_or_else(|| anyhow!("binding lacks provider"))?;
+        for selector in &args.scope {
+            let (key, value) = selector
+                .split_once('=')
+                .ok_or_else(|| anyhow!("--scope requires KEY=VALUE"))?;
+            if !manifest
+                .entry
+                .frozen_selectors
+                .iter()
+                .any(|signed| signed == key)
+                || [
+                    "project_ref",
+                    "team_id",
+                    "account_id",
+                    "read_only",
+                    "orgs",
+                    "repos",
+                    "projects",
+                    "env",
+                    "tools",
+                ]
+                .contains(&key)
+            {
+                bail!("--scope must name a custom signed frozen selector; use dedicated flags for built-in selectors");
+            }
+            if value.is_empty()
+                || provider
+                    .scope
+                    .extra
+                    .insert(key.to_owned(), serde_json::from_value(json!(value))?)
+                    .is_some()
+            {
+                bail!("empty or duplicate custom frozen selector");
+            }
+        }
+        *provider = provider.clone().with_community_adapter(manifest)?;
+        provider.community_frozen_values()?;
+    }
     let toml = b.to_toml()?;
 
     if args.dry_run {
@@ -5037,14 +5443,10 @@ fn cmd_binding_add(args: BindingAddArgs, guided_default: bool, json: bool) -> Re
     println!(
         "   {}  {}",
         "locus doctor".dimmed(),
-        "(unresolved phm: refs are flagged)".dimmed()
+        "(unsupported phm: integration is flagged)".dimmed()
     );
-    if let Some(name) = answers.credential_ref.strip_prefix("phm:") {
-        println!(
-            "   {}  {}",
-            format!("phantom add {name}").dimmed(),
-            "(store the secret in Phantom — https://phm.dev)".dimmed()
-        );
+    if answers.credential_ref.starts_with("phm:") {
+        println!("   phm: resolution is unsupported; use an explicitly supplied env:VAR reference until a supported scoped bridge exists.");
     }
     Ok(())
 }
@@ -6667,10 +7069,8 @@ fn format_credential_issues(issues: &[CredentialResolutionIssue]) -> String {
         .join(", ")
 }
 
-/// Check Phantom locators internally and return provider/source metadata only.
-///
-/// Delegates to `locus_core` so the timeout-hardened, TTL-cached
-/// `phantom list` path is shared with the MCP doctor/heartbeat surfaces.
+/// Report unsupported Phantom integration using safe provider/source metadata.
+/// Delegates to core without invoking Phantom or inspecting vault contents.
 fn collect_unresolved_phm_refs(
     s: &Store,
     phantom_on_path: bool,
@@ -7007,9 +7407,10 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
     }
 
     println!();
-    println!("Phantom pairing:");
-    println!("  credential_ref = \"phm:MY_SECRET\"  # locus exec resolves via phantom reveal");
-    println!("  Or env:VAR for CI. Never put raw secrets in binding files.");
+    println!("Credential configuration:");
+    println!("  credential_ref = \"env:LOCUS_PROVIDER_TOKEN\"  # explicitly supplied outside agent context");
+    println!("  phm: references are retained, but credential resolution is unsupported until a scoped bridge exists.");
+    println!("  Never put raw secrets in binding files or agent prompts.");
     Ok(())
 }
 
@@ -8861,6 +9262,53 @@ mod touchid_tests {
         let r = confirm_grant_touchid("bob", "appr_aabbccddeeff001122334455", "t", "b");
         std::env::remove_var("LOCUS_TOUCHID_MOCK");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn generated_samples_use_explicit_environment_refs_without_legacy_secret_commands() {
+        let home = tempfile::tempdir().unwrap();
+        let store = locus_core::Store::open(home.path()).unwrap();
+        super::write_sample_bindings(&store).unwrap();
+        for alias in ["personal", "acme"] {
+            let content =
+                std::fs::read_to_string(store.bindings_dir().join(format!("{alias}.toml")))
+                    .unwrap();
+            let binding = Binding::parse_toml(&content).unwrap();
+            assert!(binding
+                .providers
+                .iter()
+                .all(|provider| provider.credential_ref.starts_with("env:LOCUS_")));
+            assert!(!content.contains("phantom store"));
+            assert!(!content.contains("credential_ref = \"phm:"));
+        }
+    }
+
+    #[test]
+    fn unsupported_phantom_guard_covers_resolving_surfaces_and_preserves_metadata_only_use() {
+        let binding = Binding::parse_toml(
+            r#"
+id = "bnd_phantom_contract"
+alias = "phantom-contract"
+tenant = "synthetic"
+[[providers]]
+provider = "github"
+account = "synthetic"
+credential_ref = "phm:REFERENCE_NAME_CANARY"
+"#,
+        )
+        .unwrap();
+        for surface in [
+            ChildLaunchSurface::Exec,
+            ChildLaunchSurface::Run,
+            ChildLaunchSurface::CiRun,
+        ] {
+            let error = preflight_child_launch(&binding, true, surface).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("Phantom credential integration unsupported"));
+            assert!(message.contains("env:VAR"));
+            assert!(!message.contains("REFERENCE_NAME_CANARY"));
+            preflight_child_launch(&binding, false, surface).unwrap();
+        }
     }
 
     #[test]

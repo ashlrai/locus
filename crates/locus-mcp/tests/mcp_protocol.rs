@@ -1736,9 +1736,36 @@ fn locus_safe_next_unpinned_and_ready() {
     let dir = tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     sample_bindings(&store);
+    // This explicitly healthy fixture needs supported sources. The shared
+    // phm samples remain unchanged for unsupported-bridge negative coverage.
+    let mut binding = store.load_binding("acme").unwrap();
+    for provider in &mut binding.providers {
+        provider.credential_ref = format!(
+            "env:LOCUS_SAFE_NEXT_{}_FIXTURE",
+            provider.provider.to_ascii_uppercase()
+        );
+    }
+    store.save_binding(&binding).unwrap();
+    assert!(locus_core::collect_unresolved_phm_refs(&store, false)
+        .unwrap()
+        .is_empty());
+    let fixture_env = [
+        (
+            "LOCUS_SAFE_NEXT_GITHUB_FIXTURE",
+            "synthetic-safe-next-github",
+        ),
+        (
+            "LOCUS_SAFE_NEXT_VERCEL_FIXTURE",
+            "synthetic-safe-next-vercel",
+        ),
+        (
+            "LOCUS_SAFE_NEXT_SUPABASE_FIXTURE",
+            "synthetic-safe-next-supabase",
+        ),
+    ];
 
     // Unpinned → action=enter, isError=true (not ready)
-    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    let mut client = McpClient::spawn_opts(dir.path(), Framing::Ndjson, None, &fixture_env);
     handshake(&mut client);
 
     let list = client.request("tools/list", json!({}));
@@ -1804,7 +1831,7 @@ fn locus_safe_next_unpinned_and_ready() {
     assert!(text2.contains("executor_authority_unavailable"));
 
     drop(client);
-    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    let mut client = McpClient::spawn_opts(dir.path(), Framing::Ndjson, None, &fixture_env);
     handshake(&mut client);
     let call2 = client.request(
         "tools/call",
@@ -1898,44 +1925,59 @@ require_pin = true
     assert!(store.active_session().unwrap().is_none());
 }
 
-/// Dispatch-level regression net for the always-false session_ok bug: a healthy
-/// pinned fixture with deterministic external facts (fake `phantom` shim on
-/// PATH listing every phm: ref) must verify with session_ok=true over
-/// tools/call — same pack as `locus verify session --json`.
+/// A metadata-only Phantom probe; any credential operation leaves a marker.
 #[cfg(unix)]
-#[test]
-fn locus_verify_session_session_ok_true_on_healthy_pin() {
+fn phantom_version_fixture(dir: &std::path::Path) -> (String, PathBuf) {
     use std::os::unix::fs::PermissionsExt;
-
-    let dir = tempdir().unwrap();
-    let store = Store::open(dir.path()).unwrap();
-    sample_bindings(&store);
-    store
-        .pin("acme", dir.path(), Some("mcp-verify".into()), false)
-        .unwrap();
-
-    // Fake phantom shim: --version ok + list prints every phm: name the
-    // sample bindings reference, so unresolved_phm is deterministically empty.
-    let shim_dir = dir.path().join("shim-bin");
+    let shim_dir = dir.join("shim-bin");
     std::fs::create_dir_all(&shim_dir).unwrap();
     let shim = shim_dir.join("phantom");
     std::fs::write(
         &shim,
-        "#!/bin/sh\nif [ \"$1\" = \"list\" ]; then\n  echo GH_TOKEN_ACME\n  echo VERCEL_TOKEN_ACME\n  echo SUPABASE_ACME\nfi\nexit 0\n",
+        "#!/bin/sh\ncase \"$1\" in --version) exit 0;; *) printf invoked > \"$LOCUS_VERIFY_PHANTOM_MARKER\"; exit 1;; esac\n",
     )
     .unwrap();
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let path_env = format!(
-        "{}:{}",
-        shim_dir.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
+    (
+        format!("{}:/usr/bin:/bin", shim_dir.display()),
+        dir.join("phantom-credential-operation"),
+    )
+}
 
+/// A healthy pin uses supported env references with synthetic values. Phantom
+/// presence supplies metadata only; it cannot establish credential usability.
+#[cfg(unix)]
+#[test]
+fn locus_verify_session_session_ok_true_on_healthy_pin() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    let mut binding = store.load_binding("acme").unwrap();
+    for provider in &mut binding.providers {
+        provider.credential_ref = match provider.provider.as_str() {
+            "github" => "env:LOCUS_VERIFY_GITHUB_TOKEN",
+            "vercel" => "env:LOCUS_VERIFY_VERCEL_TOKEN",
+            "supabase" => "env:LOCUS_VERIFY_SUPABASE_TOKEN",
+            other => panic!("unexpected fixture provider {other}"),
+        }
+        .into();
+    }
+    store.save_binding(&binding).unwrap();
+    store
+        .pin("acme", dir.path(), Some("mcp-verify".into()), false)
+        .unwrap();
+    let (path_env, marker) = phantom_version_fixture(dir.path());
     let mut client = McpClient::spawn_opts(
         dir.path(),
         Framing::Ndjson,
         Some(dir.path()),
-        &[("PATH", path_env.as_str())],
+        &[
+            ("PATH", path_env.as_str()),
+            ("LOCUS_VERIFY_PHANTOM_MARKER", marker.to_str().unwrap()),
+            ("LOCUS_VERIFY_GITHUB_TOKEN", "synthetic-fixture-github"),
+            ("LOCUS_VERIFY_VERCEL_TOKEN", "synthetic-fixture-vercel"),
+            ("LOCUS_VERIFY_SUPABASE_TOKEN", "synthetic-fixture-supabase"),
+        ],
     );
     handshake(&mut client);
 
@@ -1947,25 +1989,83 @@ fn locus_verify_session_session_ok_true_on_healthy_pin() {
     assert!(!is_err, "verify_session should not error: {text}");
     let body: Value = serde_json::from_str(&text).expect("session pack json");
     assert_eq!(body["kind"], "session");
-    assert_eq!(
-        body["session_ok"], true,
-        "healthy pinned fixture must verify session_ok=true: {body}"
-    );
+    assert_eq!(body["session_ok"], true, "healthy env fixture: {body}");
     assert_eq!(body["doctor"]["ok"], true, "doctor must be SAFE: {body}");
     assert_eq!(body["doctor"]["phantom_on_path"], true, "{body}");
-    assert!(
-        body["doctor"]["unresolved_phm"]
-            .as_array()
-            .map(|a| a.is_empty())
-            .unwrap_or(false),
-        "no unresolved phm refs expected: {body}"
-    );
+    assert_eq!(body["doctor"]["unresolved_phm"], json!([]), "{body}");
     assert_eq!(body["safe_next"]["action"], "ready", "{body}");
     assert_eq!(body["safe_next"]["ready"], true, "{body}");
     assert_eq!(body["whoami"]["binding_alias"], "acme", "{body}");
-    // Never secrets or credential refs in the pack.
-    for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME"] {
-        assert!(!text.contains(canary), "pack leaked locator {canary}");
+    assert!(
+        !marker.exists(),
+        "verification invoked a Phantom credential operation"
+    );
+    for canary in [
+        "LOCUS_VERIFY_GITHUB_TOKEN",
+        "LOCUS_VERIFY_VERCEL_TOKEN",
+        "LOCUS_VERIFY_SUPABASE_TOKEN",
+        "synthetic-fixture-github",
+        "synthetic-fixture-vercel",
+        "synthetic-fixture-supabase",
+    ] {
+        assert!(
+            !text.contains(canary),
+            "pack leaked fixture value or locator {canary}"
+        );
+    }
+}
+
+/// Installation alone cannot turn unsupported Phantom references into readiness.
+#[cfg(unix)]
+#[test]
+fn locus_verify_session_session_ok_false_for_unsupported_phantom_even_installed() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    store
+        .pin(
+            "acme",
+            dir.path(),
+            Some("mcp-verify-unsupported".into()),
+            false,
+        )
+        .unwrap();
+    let (path_env, marker) = phantom_version_fixture(dir.path());
+    let mut client = McpClient::spawn_opts(
+        dir.path(),
+        Framing::Ndjson,
+        Some(dir.path()),
+        &[
+            ("PATH", path_env.as_str()),
+            ("LOCUS_VERIFY_PHANTOM_MARKER", marker.to_str().unwrap()),
+        ],
+    );
+    handshake(&mut client);
+    let call = client.request(
+        "tools/call",
+        json!({ "name": "locus_verify_session", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&call);
+    assert!(
+        !is_err,
+        "unhealthy verification still returns a pack: {text}"
+    );
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["session_ok"], false, "{body}");
+    assert_eq!(body["doctor"]["phantom_on_path"], true, "{body}");
+    assert_eq!(body["safe_next"]["ready"], false, "{body}");
+    let issues = body["doctor"]["unresolved_phm"].as_array().unwrap();
+    assert_eq!(issues.len(), 3, "{body}");
+    for issue in issues {
+        assert_eq!(issue["source"], "phantom", "{body}");
+        assert_eq!(issue["code"], "unsupported-integration", "{body}");
+    }
+    assert!(
+        !marker.exists(),
+        "unsupported references invoked Phantom credentials"
+    );
+    for locator in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME"] {
+        assert!(!text.contains(locator), "pack leaked locator {locator}");
     }
 }
 
@@ -2423,4 +2523,92 @@ fn stdio_env_session_immune_to_active_json_rewrites() {
     assert_eq!(body["mcp_anchor"]["match"], true, "{body}");
     // Observability: the anchor records its non-active backing.
     assert_eq!(body["mcp_anchor"]["anchored_alias"], "acme", "{body}");
+}
+
+#[test]
+fn community_tool_admission_precedes_credential_resolution_and_worker_start() {
+    use locus_core::adapter_registry::{
+        sign_entry_material, AdapterManifestEntry, RegistryTrustKey,
+    };
+    use locus_core::marketplace::{CommunityAdapterManifest, COMMUNITY_MANIFEST_VERSION};
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("community-started");
+    // Synthetic fixture key only; no operator key or provider is accessed.
+    let secret = "07".repeat(32);
+    let key = RegistryTrustKey::hmac_sha256("community-fixture", &secret);
+    let trust = format!("community-fixture:hmac-sha256:{secret}");
+    let mut manifest = CommunityAdapterManifest {
+        manifest_version: COMMUNITY_MANIFEST_VERSION,
+        publisher: "inert test fixture".into(), version: "1.0.0".into(),
+        credential_env: Some("LINEAR_API_KEY".into()),
+        upstream: Some(UpstreamSpec::new("python3").with_args([
+            "-u".to_owned(), "-c".to_owned(),
+            "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('started'); time.sleep(30)".to_owned(),
+            marker.display().to_string(),
+        ]).resolve_secrets(true)),
+        entry: AdapterManifestEntry {
+            id: "linear".into(), name:"inert community".into(), status:"community".into(),
+            synthetic:false, capabilities:vec![], frozen_selectors:vec!["project_ref".into()],
+            tools:vec!["linear.read".into(), "linear.write".into()], destructive_tools:vec!["linear.write".into()],
+            description:String::new(), signed_by:Some(key.id.clone()), signature:None,
+        },
+    };
+    manifest.entry.signature =
+        Some(sign_entry_material(&manifest.signing_material(), &key).unwrap());
+    let mut upstream = manifest.upstream.clone().unwrap();
+    upstream.community_adapter = Some(Box::new(manifest));
+    let store = Store::open(dir.path()).unwrap();
+    let binding = Binding::from_body(BindingBody {
+        id: "bnd_community".into(),
+        alias: "community".into(),
+        tenant: "fixture".into(),
+        principal: None,
+        description: None,
+        policy: Policy::default(),
+        providers: vec![ProviderBinding {
+            provider: "linear".into(),
+            account: "fixture".into(),
+            credential_ref: "env:COMMUNITY_FIXTURE_KEY".into(),
+            scope: Scope {
+                project_ref: Some("frozen-project".into()),
+                read_only: Some(true),
+                ..Default::default()
+            },
+            upstream: Some(upstream),
+        }],
+    });
+    store.save_binding(&binding).unwrap();
+    store
+        .pin("community", dir.path(), Some("local-control".into()), false)
+        .unwrap();
+    let mut client = McpClient::spawn_opts(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[
+            ("LOCUS_ADAPTER_TRUST_KEYS", &trust),
+            ("COMMUNITY_FIXTURE_KEY", "synthetic-community-value"),
+        ],
+    );
+    handshake(&mut client);
+    for (tool, arguments) in [
+        ("linear.admin", json!({"project_ref":"frozen-project"})),
+        ("linear.write", json!({"project_ref":"frozen-project"})),
+        (
+            "linear.read",
+            json!({"nested":{"project_ref":"wrong-project"}}),
+        ),
+    ] {
+        let response = client.request("tools/call", json!({"name":tool,"arguments":arguments}));
+        let (text, is_error) = McpClient::tool_text(&response);
+        assert!(
+            is_error && text.contains("community_admission_denied"),
+            "{text}"
+        );
+        assert!(!text.contains("synthetic-community-value"));
+        assert!(
+            !marker.exists(),
+            "denied request launched a credential-bearing worker"
+        );
+    }
 }

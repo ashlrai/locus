@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Guided onboarding and adapter marketplace design proposals. Their runtime
+  and CLI implementations are not included in this phase-one checkout;
+  current Cargo and npm versions remain 0.5.0.
+
+### Fixed
+
+- **CI: `node --test` directory form** — the `Validate distribution wrappers`
+  and `Recipes` steps invoked `node --test npm/test` and
+  `node --test examples/recipes` (directory form), which the Node test runner
+  rejects (`Cannot find module …`). They now address the test files directly
+  (`npm/test/*.test.js`, `examples/recipes/*.test.mjs`), including installer
+  lifecycle tests when present.
+- **Release publishes `.sha256` sidecars** — `release.yml` now writes a
+  `sha256sum`-format sidecar next to each `locus-<target>.tar.gz` (via
+  `shasum -a 256` on macOS runners), carries it through artifact upload and
+  release collection, and verifies archive/sidecar pairs before publication. These
+  unsigned sidecars provide integrity metadata, not publisher authentication;
+  npm wrapper trust still requires independently verified package-owned digest
+  pins.
+
+### Changed
+
+- **ashlr-hub → Phantom rename** — the hub was renamed to Phantom (same repo).
+  `integrations/phantom/` is added alongside the existing compatibility directory
+  `integrations/ashlr-hub/`; docs and scripts use the new path. CLI help text
+  still needs its separately owned follow-up. Historical changelog
+  entries, quoted PR URLs, and the runtime `LOCUS_CLIENT="ashlr-hub"`
+  identifier are intentionally unchanged.
+
+### Added
+
+- **`INTEGRATION.md`** — sketch of how Phantom plugs into Locus (opt-in/out):
+  the account-separation guarantees, per-job `ci mint` flow, pre-mutate gate,
+  and failure modes.
+- **`DESIGN-onboarding-wizard.md`, `DESIGN-adapter-marketplace.md`** —
+  design proposals for future guided setup and adapter discovery. They do
+  not establish a shipped command or release version.
+
 ### Fixed
 
 - **Adapter registry catalog covers anthropic/openai** — the built-in catalog

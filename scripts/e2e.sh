@@ -143,6 +143,14 @@ for line in sys.stdin:
 
 # ── 3. init --with-samples, pin personal/acme, whoami ────────────────────────
 log "3. init --with-samples, pin personal, whoami, pin acme, whoami"
+# Sample bindings use explicit env references. Supply synthetic values for all
+# configured samples because doctor/readiness checks include unpinned bindings.
+export LOCUS_SUPABASE_PERSONAL="e2e-sample-personal-sb-canary"
+export LOCUS_GH_TOKEN_PERSONAL="e2e-sample-personal-gh-canary"
+export LOCUS_VERCEL_TOKEN_PERSONAL="e2e-sample-personal-vc-canary"
+export LOCUS_SUPABASE_ACME="e2e-sample-acme-sb-canary"
+export LOCUS_GH_TOKEN_ACME="e2e-sample-acme-gh-canary"
+export LOCUS_VERCEL_TOKEN_ACME="e2e-sample-acme-vc-canary"
 locus init --with-samples >/dev/null
 locus pin personal >/dev/null
 who_personal="$(locus whoami --json)"
@@ -166,9 +174,12 @@ assert w.get("seal_ok") is True, w
 # Agent-facing whoami exposes only credential presence/source metadata.
 for p in w["providers"]:
     assert "credential_ref" not in p, p
-    assert p["credential"] == {"present": True, "source": "phantom"}, p
+    assert p["credential"] == {"present": True, "source": "environment"}, p
+providers = {p["provider"]: p for p in w["providers"]}
+assert providers["supabase"]["project_ref"] == "acme_ref_replace_me", w
 serialized = json.dumps(w)
-for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME", "PERSONAL"]:
+for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME", "PERSONAL",
+               "e2e-sample-personal-", "e2e-sample-acme-"]:
     assert canary not in serialized, (canary, w)
 '
 ok "pin acme + whoami exclusive"
@@ -627,7 +638,7 @@ ok "re-call remains blocked after local advisory"
 
 # ── 9. doctor (structure + exit codes) ───────────────────────────────────────
 log "9. doctor structure + exit codes"
-# Sample bindings use unresolved phm: refs → verdict WARN / exit 1 typical.
+# Samples use synthetic env values; other configured bindings may cause warnings.
 # Assert structural health: seal + pin + bindings; SAFE|WARN|UNSAFE exit 0/1/2.
 set +e
 doctor_json="$(locus doctor --json 2>/dev/null)"
@@ -1299,10 +1310,12 @@ phantom_error="$(PATH=/usr/bin:/bin LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" run
 phantom_ec=$?
 set -e
 [[ $phantom_ec -ne 0 ]] || die "strict resolution unexpectedly succeeded without Phantom"
-[[ "$phantom_error" == *"provider=github source=phantom code=unavailable"* ]] \
-  || die "strict Phantom error omitted safe provider/source metadata"
+[[ "$phantom_error" == *"Phantom credential integration unsupported"* ]] \
+  || die "strict Phantom error omitted unsupported-integration guidance"
+[[ "$phantom_error" == *"env:VAR"* ]] \
+  || die "strict Phantom error omitted supported credential reference guidance"
 [[ "$phantom_error" != *"LEGACY_RELEASE_LOCATOR_CANARY"* ]] || die "strict Phantom error leaked locator"
-ok "Phantom failures expose only provider/source metadata"
+ok "Phantom resolution fails closed with non-disclosing env reference guidance"
 
 ci_security="$(LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" --json ci mint -b legacy)"
 [[ "$ci_security" != *"LEGACY_RELEASE_LOCATOR_CANARY"* ]] || die "CI mint leaked locator"

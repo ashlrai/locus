@@ -27,6 +27,8 @@ pub mod forensics;
 pub mod graph;
 pub mod http_sessions;
 pub mod isolation;
+pub mod marketplace;
+pub mod onboard;
 pub mod policy;
 pub mod recipes;
 pub mod seal;
@@ -128,6 +130,18 @@ pub use graph::{
 pub use isolation::{
     build_ci_env_map, build_isolated_env, build_isolated_env_for_provider_opts,
     build_isolated_env_opts, build_isolated_env_strict, ci_secrets_allowed, IsolatedEnv,
+};
+pub use marketplace::{
+    fetch_index, fetch_manifest, fetch_url, install_adapter, installed_manifests,
+    load_index_sources, load_installed, load_installed_manifest, save_index_sources,
+    search_indexes, uninstall_adapter, validate_index_entry, CommunityAdapterManifest,
+    CommunityIndex, CommunityIndexEntry, IndexSource, InstallReport, InstalledAdapter, SearchHit,
+    ADAPTERS_DIR,
+};
+pub use onboard::steps;
+pub use onboard::{
+    detect_ambient_candidates, scope_fields_for_provider, suggest_alias, suggest_credential_ref,
+    DetectedCandidate, OnboardPlan, PlannedBinding, ONBOARD_PLAN_FILE,
 };
 pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
 pub use recipes::{

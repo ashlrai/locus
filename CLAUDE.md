@@ -43,7 +43,7 @@ Planes (see [docs/architecture.md](./docs/architecture.md)):
 Clients → data plane (locus-mcp / exec)
             ├─ control: bindings + sealed sessions
             ├─ policy: allow / deny / require_approval
-            ├─ credential: phm: / env: → worker env only
+            ├─ credential: env: → worker env only; phm: scoped bridge unavailable
             └─ workers: synthetic adapters or MCP stdio children
 ```
 
@@ -88,4 +88,4 @@ Clients → data plane (locus-mcp / exec)
 
 ## Sibling product
 
-[Phantom](https://phm.dev) — secrets never enter the model. Compose via `credential_ref = "phm:NAME"`.
+[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) protects credentials. Locus retains `phm:NAME` references but cannot resolve them until a supported scoped bridge exists. Use explicit `env:VAR` references supplied outside agent context; never capture trusted-terminal reveal output. This source change is unreleased; see [credential compatibility](./docs/credential-compatibility.md).
