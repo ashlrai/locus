@@ -154,9 +154,9 @@ Firm / multi-client workflow: [docs/firm-mode.md](./docs/firm-mode.md).
 | [docs/mcp.md](./docs/mcp.md) | Wire `locus-mcp` into clients |
 | [docs/adapters.md](./docs/adapters.md) | Write a provider adapter |
 | [docs/workers.md](./docs/workers.md) | Synthetic vs MCP stdio workers |
-| [docs/hub-integration.md](./docs/hub-integration.md) | ashlr-hub contract + agent report |
+| [docs/hub-integration.md](./docs/hub-integration.md) | Phantom (hub) contract + agent report |
 | [docs/verification-plane.md](./docs/verification-plane.md) | Claim verify stubs (propose → verify → act) |
-| [integrations/ashlr-hub/](./integrations/ashlr-hub/) | Hub drop-in TS + gateway/doctor snippets |
+| [integrations/phantom/](./integrations/phantom/) | Phantom hub drop-in TS + gateway/doctor snippets |
 | [GOALS.md](./GOALS.md) | Northstar goal loop (`locus goal status`) |
 | [DESIGN.md](./DESIGN.md) | Full design + threat model |
 | [PLAN.md](./PLAN.md) | Roadmap |
