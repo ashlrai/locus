@@ -105,8 +105,15 @@ jobs:
             cp "artifacts/locus-${TARGET}/${ASSET}" "release-assets/${ASSET}"
             cp "artifacts/locus-${TARGET}/${ASSET}.sha256" "release-assets/${ASSET}.sha256"
           done
-          # Missing sidecars or changed archive bytes stop publication.
-          (cd release-assets && sha256sum --check locus-*.tar.gz.sha256)
+          # Require one canonical record for its exact archive. A sidecar
+          # naming a different file must not leave this archive unchecked.
+          (
+            cd release-assets
+            for ASSET in locus-*.tar.gz; do
+              sha256sum "$ASSET" | cmp - "${ASSET}.sha256"
+            done
+            sha256sum --check locus-*.tar.gz.sha256
+          )
           ls -la release-assets/
 
       - name: Install Rust toolchain
