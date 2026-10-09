@@ -1736,9 +1736,36 @@ fn locus_safe_next_unpinned_and_ready() {
     let dir = tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
     sample_bindings(&store);
+    // This explicitly healthy fixture needs supported sources. The shared
+    // phm samples remain unchanged for unsupported-bridge negative coverage.
+    let mut binding = store.load_binding("acme").unwrap();
+    for provider in &mut binding.providers {
+        provider.credential_ref = format!(
+            "env:LOCUS_SAFE_NEXT_{}_FIXTURE",
+            provider.provider.to_ascii_uppercase()
+        );
+    }
+    store.save_binding(&binding).unwrap();
+    assert!(locus_core::collect_unresolved_phm_refs(&store, false)
+        .unwrap()
+        .is_empty());
+    let fixture_env = [
+        (
+            "LOCUS_SAFE_NEXT_GITHUB_FIXTURE",
+            "synthetic-safe-next-github",
+        ),
+        (
+            "LOCUS_SAFE_NEXT_VERCEL_FIXTURE",
+            "synthetic-safe-next-vercel",
+        ),
+        (
+            "LOCUS_SAFE_NEXT_SUPABASE_FIXTURE",
+            "synthetic-safe-next-supabase",
+        ),
+    ];
 
     // Unpinned → action=enter, isError=true (not ready)
-    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    let mut client = McpClient::spawn_opts(dir.path(), Framing::Ndjson, None, &fixture_env);
     handshake(&mut client);
 
     let list = client.request("tools/list", json!({}));
@@ -1804,7 +1831,7 @@ fn locus_safe_next_unpinned_and_ready() {
     assert!(text2.contains("executor_authority_unavailable"));
 
     drop(client);
-    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    let mut client = McpClient::spawn_opts(dir.path(), Framing::Ndjson, None, &fixture_env);
     handshake(&mut client);
     let call2 = client.request(
         "tools/call",
