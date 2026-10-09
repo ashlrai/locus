@@ -1299,10 +1299,12 @@ phantom_error="$(PATH=/usr/bin:/bin LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" run
 phantom_ec=$?
 set -e
 [[ $phantom_ec -ne 0 ]] || die "strict resolution unexpectedly succeeded without Phantom"
-[[ "$phantom_error" == *"provider=github source=phantom code=unavailable"* ]] \
-  || die "strict Phantom error omitted safe provider/source metadata"
+[[ "$phantom_error" == *"Phantom credential integration unsupported"* ]] \
+  || die "strict Phantom error omitted unsupported-integration guidance"
+[[ "$phantom_error" == *"env:VAR"* ]] \
+  || die "strict Phantom error omitted supported credential reference guidance"
 [[ "$phantom_error" != *"LEGACY_RELEASE_LOCATOR_CANARY"* ]] || die "strict Phantom error leaked locator"
-ok "Phantom failures expose only provider/source metadata"
+ok "Phantom resolution fails closed with non-disclosing env reference guidance"
 
 ci_security="$(LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" --json ci mint -b legacy)"
 [[ "$ci_security" != *"LEGACY_RELEASE_LOCATOR_CANARY"* ]] || die "CI mint leaked locator"

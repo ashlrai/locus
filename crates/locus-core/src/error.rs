@@ -5,6 +5,9 @@ pub enum LocusError {
     #[error("{0}")]
     Message(String),
 
+    #[error("Phantom credential integration unsupported: trusted-terminal reveal cannot be used by Locus; use an explicitly supplied env:VAR reference until a supported scoped bridge is available; no Phantom credential was retrieved")]
+    PhantomCredentialIntegrationUnsupported,
+
     #[error("binding not found: {0}")]
     BindingNotFound(String),
 
