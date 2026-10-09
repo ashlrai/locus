@@ -26,7 +26,7 @@ Pin a client — every CLI command, MCP tool, and the **local dashboard** is har
 | 1Password `op run` | Secret references resolved for one command | That command |
 | **Locus** `run` / `exec` / `pin` | A sealed session bound to one binding | That command or session. Ambient `GH_TOKEN`, `AWS_*`, `SUPABASE_*`… are scrubbed, a directory's `.locus.toml` can refuse other bindings, and `locus-mcp` exposes only the pinned binding's tools |
 
-These tools compose: binding credentials can be Phantom (`phm:`) or environment (`env:`) references. Try it in a minute with the executable [recipes](./examples/recipes/) (two clients, a directory allowlist, a CI session).
+Use explicit environment (`env:`) references for supported credential resolution. Phantom (`phm:`) references remain readable for metadata and migration, but require a scoped bridge that is not available in this source checkout. Try it in a minute with the executable [recipes](./examples/recipes/) (two clients, a directory allowlist, a CI session).
 
 ---
 
@@ -142,7 +142,7 @@ locus pin acme
         │
         └─► locus exec -- <cmd>
               ├─ scrubs ambient AWS_PROFILE / GH_TOKEN / SUPABASE_* / …
-              ├─ resolves phm: / env: credential_refs into provider env vars
+              ├─ resolves explicit env: credential_refs into provider env vars
               ├─ private GH_CONFIG_DIR + AWS_* under ~/.locus/workers/<session>/
               └─ never injects other bindings' providers
 ```
@@ -151,8 +151,10 @@ locus pin acme
 
 | Ref | Resolution |
 |-----|------------|
-| `phm:NAME` | `phantom reveal --yes NAME` (values only in child env) |
-| `env:VAR` | parent process env (CI / tests) |
+| `phm:NAME` | Reserved pointer; resolution fails before any Phantom invocation until a supported scoped bridge exists |
+| `env:VAR` | Explicitly supplied parent process variable, injected only into the pinned provider’s child environment |
+
+See [credential compatibility and onboarding](./docs/credential-compatibility.md) for the supported setup and release distinction.
 
 `test:` credentials are compiled-test-only and are always rejected by production binaries, regardless of environment.
 
@@ -206,13 +208,13 @@ max_ttl = "8h"
 [[binding.providers]]
 provider = "supabase"
 account = "acme-prod"
-credential_ref = "phm:SUPABASE_ACME"
+credential_ref = "env:LOCUS_SUPABASE_ACME"
 scope = { project_ref = "abcdefghij", read_only = true }
 
 [[binding.providers]]
 provider = "github"
 account = "acme-corp"
-credential_ref = "phm:GH_TOKEN_ACME"
+credential_ref = "env:LOCUS_GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 ```
 

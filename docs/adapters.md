@@ -199,7 +199,7 @@ impl ProviderAdapter for CloudflareAdapter {
 [[binding.providers]]
 provider = "supabase"
 account = "acme-prod"
-credential_ref = "phm:SUPABASE_ACME"
+credential_ref = "env:LOCUS_SUPABASE_ACME"
 scope = { project_ref = "abcdefghij", read_only = true }
 ```
 
@@ -281,3 +281,4 @@ The signature covers the canonical entry material
 `sign_entry_ed25519`. Publish the manifest at a stable HTTPS URL and list it
 in your index JSON (`{ "version": 1, "name": …, "adapters": […] }` with
 `manifest_url` per entry). Operators pin your key; Locus does the rest.  
+Credential resolution currently supports explicitly supplied `env:VAR` references. Stored `phm:` references remain valid metadata but require an unavailable scoped bridge; never implement an adapter by capturing trusted-terminal reveal. See [credential compatibility](./credential-compatibility.md).
