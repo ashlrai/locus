@@ -26,7 +26,7 @@ Pin a client — every CLI command, MCP tool, and the **local dashboard** is har
 | 1Password `op run` | Secret references resolved for one command | That command |
 | **Locus** `run` / `exec` / `pin` | A sealed session bound to one binding | That command or session. Ambient `GH_TOKEN`, `AWS_*`, `SUPABASE_*`… are scrubbed, a directory's `.locus.toml` can refuse other bindings, and `locus-mcp` exposes only the pinned binding's tools |
 
-These tools compose: binding credentials can be Phantom (`phm:`) or environment (`env:`) references. Try it in a minute with the executable [recipes](./examples/recipes/) (two clients, a directory allowlist, a CI session).
+Use explicit environment (`env:`) references for supported credential resolution. Phantom (`phm:`) references remain readable for metadata and migration, but require a scoped bridge that is not available in this source checkout. Try it in a minute with the executable [recipes](./examples/recipes/) (two clients, a directory allowlist, a CI session).
 
 ---
 
@@ -37,7 +37,7 @@ These tools compose: binding credentials can be Phantom (`phm:`) or environment 
 brew install ashlrai/tap/locus
 
 # npm — locus-cli and @ashlrai/locus-mcp published at 0.5.0
-# (downloads a release binary, or falls back to cargo install)
+# (downloads a package-pinned native release archive; source installs are explicit)
 npm install -g locus-cli @ashlrai/locus-mcp
 npx locus-cli --help
 npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
@@ -93,6 +93,14 @@ locus workspace --default acme --allow acme,acme-ro --require-pin
 locus pin          # uses .locus.toml
 ```
 
+### Planned guided setup and adapter discovery
+
+[Guided onboarding](./DESIGN-onboarding-wizard.md) and the
+[adapter marketplace](./DESIGN-adapter-marketplace.md) are design proposals
+in this phase-one checkout. Use the existing [onboarding walkthrough](./docs/onboarding.md)
+and built-in adapters until their CLI implementations are integrated and tested.
+The current Cargo and npm version remains 0.5.0; these proposals do not announce a new release.
+
 ### Shell prompt
 
 ```bash
@@ -117,7 +125,7 @@ locus pin acme
         │
         └─► locus exec -- <cmd>
               ├─ scrubs ambient AWS_PROFILE / GH_TOKEN / SUPABASE_* / …
-              ├─ resolves phm: / env: credential_refs into provider env vars
+              ├─ resolves explicit env: credential_refs into provider env vars
               ├─ private GH_CONFIG_DIR + AWS_* under ~/.locus/workers/<session>/
               └─ never injects other bindings' providers
 ```
@@ -126,8 +134,10 @@ locus pin acme
 
 | Ref | Resolution |
 |-----|------------|
-| `phm:NAME` | `phantom reveal --yes NAME` (values only in child env) |
-| `env:VAR` | parent process env (CI / tests) |
+| `phm:NAME` | Reserved pointer; resolution fails before any Phantom invocation until a supported scoped bridge exists |
+| `env:VAR` | Explicitly supplied parent process variable, injected only into the pinned provider’s child environment |
+
+See [credential compatibility and onboarding](./docs/credential-compatibility.md) for the supported setup and release distinction.
 
 `test:` credentials are compiled-test-only and are always rejected by production binaries, regardless of environment.
 
@@ -181,13 +191,13 @@ max_ttl = "8h"
 [[binding.providers]]
 provider = "supabase"
 account = "acme-prod"
-credential_ref = "phm:SUPABASE_ACME"
+credential_ref = "env:LOCUS_SUPABASE_ACME"
 scope = { project_ref = "abcdefghij", read_only = true }
 
 [[binding.providers]]
 provider = "github"
 account = "acme-corp"
-credential_ref = "phm:GH_TOKEN_ACME"
+credential_ref = "env:LOCUS_GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 ```
 
@@ -230,7 +240,7 @@ locus topic <name>                    # dashboard · forensics · serve · goal 
 
 **Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
 
-**Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/ashlr-hub/](./integrations/ashlr-hub/)
+**Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/phantom/](./integrations/phantom/)
 
 Approvals:
 
@@ -372,7 +382,7 @@ approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
 - Policy: globs + structured `[[rules]]`, `require_approval`, dual-control (2 principals).
 - Upstream MCP workers start only after an authorized provider call. `tools/list` is discovery-only, multi-provider startup rolls back on partial failure, and each worker receives only its named provider's resolved credential keys.
-- Drift freeze + hub heartbeat: `locus watch [--json] [--require-ok]` re-runs session verify each tick; doctor re-pin if binding changes under a session.
+- Drift freeze + hub heartbeat: `locus watch [--json] [--require-ok]` re-runs session verify each tick; a changed binding requires an explicit operator re-pin. Doctor only reports findings.
 
 Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md §9](./DESIGN.md).
 

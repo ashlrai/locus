@@ -1,5 +1,5 @@
 // Tests for the npm wrappers' platform handling (issue #50).
-// Run: node --test npm/test
+// Run: node --test npm/test/*.test.js
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
 const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
@@ -32,32 +32,33 @@ for (const [name, file] of Object.entries(wrappers)) {
     assert.equal(mod.hasPrebuiltBinary("x86_64-unknown-linux-gnu"), true);
   });
 
-  test(`${name}: fallback message names the platform, version and cost`, () => {
+  test(`${name}: manual source guidance names the platform and pins the release`, () => {
     const msg = mod.cargoFallbackMessage({ platform: "linux", arch: "arm64" });
-    assert.match(msg, new RegExp(`^No prebuilt ${name} binary for linux-arm64 in v\\d+\\.\\d+\\.\\d+; building from source with cargo`));
-    assert.match(msg, /several minutes/);
+    assert.match(msg, new RegExp(`^No prebuilt ${name} binary for linux-arm64 in v\\d+\\.\\d+\\.\\d+\\. No automatic source install`));
+    assert.match(msg, /--tag v0\.5\.0/);
     assert.match(msg, /rustup\.rs/);
     assert.match(mod.cargoFallbackMessage({ platform: "darwin", arch: "arm64" }, "download-failed"), /^Could not download the prebuilt/);
   });
 
-  test(`${name}: on a platform without a prebuilt binary it explains the cargo fallback before trying it (no network)`, () => {
+  test(`${name}: without a prebuilt binary it reports a manual command without running Cargo (no network)`, () => {
     const home = mkdtempSync(join(tmpdir(), "locus-wrapper-"));
     try {
       // Pretend to be linux-arm64, which has no release asset. PATH has no
-      // locus and no cargo, so the fallback fails fast after the message.
+      // locus and no cargo. Source installation must remain an explicit choice.
       const preload = join(home, "arm64.js");
       writeFileSync(preload, 'Object.defineProperty(process, "platform", { value: "linux" }); Object.defineProperty(process, "arch", { value: "arm64" });\n');
       const result = spawnSync(process.execPath, ["--require", preload, file, "--help"], {
-        env: { HOME: home, USERPROFILE: home, PATH: join(home, "empty-bin") },
+        env: { HOME: home, USERPROFILE: home, LOCUS_HOME: join(home, "state"), PATH: join(home, "empty-bin") },
         encoding: "utf8",
         timeout: 20_000,
       });
       assert.equal(result.status, 1, result.stderr);
+      assert.equal(result.stdout, "", "installer diagnostics must stay off MCP stdout");
       assert.match(result.stderr, new RegExp(`No prebuilt ${name} binary for linux-arm64`));
       assert.doesNotMatch(result.stderr, /Downloading/, "must not attempt a download that would 404");
-      const messageAt = result.stderr.indexOf("No prebuilt");
-      const cargoAt = result.stderr.indexOf("Falling back to: cargo install");
-      assert.ok(messageAt >= 0 && cargoAt > messageAt, result.stderr);
+      assert.match(result.stderr, /No automatic source install/);
+      assert.match(result.stderr, /cargo install .* --tag v0\.5\.0/);
+      assert.doesNotMatch(result.stderr, /Falling back to|cargo install failed/);
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -68,8 +69,8 @@ test("source-install commands use a positional crate (cargo install has no --pac
   for (const file of Object.values(wrappers)) {
     const mod = require(file);
     assert.doesNotMatch(mod.INSTALL_FROM_SOURCE, /--package/);
-    assert.match(mod.INSTALL_FROM_SOURCE, /^cargo install --git https:\/\/github\.com\/ashlrai\/locus locus(-cli|-mcp) --locked$/);
-    assert.doesNotMatch(readFileSync(file, "utf8").split("function installViaCargo")[1].split("\n}\n")[0], /"--package"/);
+    assert.match(mod.INSTALL_FROM_SOURCE, /^cargo install --git https:\/\/github\.com\/ashlrai\/locus --tag v0\.5\.0 locus(-cli|-mcp) --locked$/);
+    assert.doesNotMatch(readFileSync(file, "utf8"), /function installViaCargo|spawnSync/);
   }
   for (const doc of ["README.md", "npm/README.md", "npm-mcp/README.md", "integrations/homebrew/README.md", "apps/web/public/index.html"]) {
     const text = readFileSync(join(root, doc), "utf8").replace(/\\\n\s*/g, " ");

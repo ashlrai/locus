@@ -75,7 +75,7 @@ Clients (Claude Code / Cursor / CLI / CI)
         │ verify HMAC session seal
         │ policy + scope freeze
         ▼
- Workers / isolated child env  ── CredentialRef resolve (phm: / env:)
+ Workers / isolated child env  ── CredentialRef resolve (env:; phm: bridge unavailable)
         │ only pinned binding's providers
         ▼
  Upstream provider APIs / CLIs
@@ -123,10 +123,11 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/adapters.md](./docs/adapters.
 | Binding TOML with `phm:NAME` / `env:VAR` refs | Raw API keys, PATs, service role keys |
 | `.locus.toml` (aliases only) | `~/.locus/daemon.key`, seal keys |
 | Examples under `examples/` with placeholders | Real `project_ref` + live tokens together as a working secret set in docs |
-| `phm_` placeholder tokens | Resolved credential values in tests, fixtures, or CI logs |
+| Synthetic fixture labels | Persistent `phm_` mappings, proxy bearers, or resolved credential values in CI logs |
 
 - Do **not** paste secrets into chat, commits, issues, or MCP tool args.
-- Prefer Phantom (`phm:NAME`) for real credentials; use `env:` only for CI bootstrap.
+- Use explicit `env:VAR` references for supported resolution; values must be supplied outside agent context. `phm:NAME` references remain readable but fail closed until a supported scoped bridge exists. Do not invoke or capture `phantom reveal` to emulate one.
+- This checkout’s compatibility change is unreleased; published Locus v0.5.0 still has the incompatible legacy reveal adapter. See [credential compatibility](./docs/credential-compatibility.md).
 - `test:VALUE` is available only inside compiled unit tests and is rejected by production binaries.
 - If a secret lands in git history, rotate it; do not only delete the file.
 
@@ -154,9 +155,9 @@ Firm / multi-client workflow: [docs/firm-mode.md](./docs/firm-mode.md).
 | [docs/mcp.md](./docs/mcp.md) | Wire `locus-mcp` into clients |
 | [docs/adapters.md](./docs/adapters.md) | Write a provider adapter |
 | [docs/workers.md](./docs/workers.md) | Synthetic vs MCP stdio workers |
-| [docs/hub-integration.md](./docs/hub-integration.md) | ashlr-hub contract + agent report |
+| [docs/hub-integration.md](./docs/hub-integration.md) | Phantom (hub) contract + agent report |
 | [docs/verification-plane.md](./docs/verification-plane.md) | Claim verify stubs (propose → verify → act) |
-| [integrations/ashlr-hub/](./integrations/ashlr-hub/) | Hub drop-in TS + gateway/doctor snippets |
+| [integrations/phantom/](./integrations/phantom/) | Phantom hub drop-in TS + gateway/doctor snippets |
 | [GOALS.md](./GOALS.md) | Northstar goal loop (`locus goal status`) |
 | [DESIGN.md](./DESIGN.md) | Full design + threat model |
 | [PLAN.md](./PLAN.md) | Roadmap |

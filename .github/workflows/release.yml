@@ -34,6 +34,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.95.0"
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
@@ -66,6 +67,9 @@ jobs:
           (
             cd "$OUT"
             tar -czf "locus-${TARGET}.tar.gz" "${STAGE}"
+            # Hash the final archive bytes. This sidecar supplies integrity
+            # metadata, not a signature or publisher attestation.
+            shasum -a 256 "locus-${TARGET}.tar.gz" > "locus-${TARGET}.tar.gz.sha256"
           )
           echo "Packed locus-${TARGET}.tar.gz"
 
@@ -73,7 +77,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: locus-${{ matrix.target }}
-          path: dist/locus-${{ matrix.target }}.tar.gz
+          path: |
+            dist/locus-${{ matrix.target }}.tar.gz
+            dist/locus-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
 
   release:
@@ -95,11 +101,26 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          find artifacts -type f -name 'locus-*.tar.gz' -exec cp {} release-assets/ \;
+          for TARGET in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+            ASSET="locus-${TARGET}.tar.gz"
+            cp "artifacts/locus-${TARGET}/${ASSET}" "release-assets/${ASSET}"
+            cp "artifacts/locus-${TARGET}/${ASSET}.sha256" "release-assets/${ASSET}.sha256"
+          done
+          # Require one canonical record for its exact archive. A sidecar
+          # naming a different file must not leave this archive unchecked.
+          (
+            cd release-assets
+            for ASSET in locus-*.tar.gz; do
+              sha256sum "$ASSET" | cmp - "${ASSET}.sha256"
+            done
+            sha256sum --check locus-*.tar.gz.sha256
+          )
           ls -la release-assets/
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
