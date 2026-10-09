@@ -292,7 +292,9 @@ async function downloadReleaseBinary(binaryPath) {
   const archivePath = join(CACHE_DIR, archiveName);
 
   try {
-    // Checksum is optional until release.yml publishes .sha256 sidecars
+    // Checksum sidecars are published by release.yml (.sha256 next to each
+    // tarball); if a sidecar is missing (old releases) install continues
+    // with a warning.
     let expected = null;
     try {
       const sumBuf = await download(sha256Url);

@@ -10,7 +10,7 @@
 #   5. locus forensics export --out /tmp/pack.json (or $DOGFOOD_PACK)
 #   5b. locus verify session --json (shape + secrets hard; session_ok hard at ready gate)
 #   6. locus goal status (northstar progress)
-#   7. scripts/hub-smoke.sh (ashlr-hub CLI contract; own throwaway home)
+#   7. scripts/hub-smoke.sh (Phantom CLI contract; own throwaway home)
 #   8. (optional) scripts/dogfood-clients.sh when DOGFOOD_CLIENTS=1 —
 #      soft multi-client install probe; never blocks DOGFOOD READY by default
 #   8b. (optional) multi-tenant grant probe when DOGFOOD_MT=1 —
