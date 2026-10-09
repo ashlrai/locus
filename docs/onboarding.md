@@ -1,5 +1,16 @@
 # Onboarding — 3 clients × 3 tenants
 
+> **Short on time?** `locus onboard` is the guided version of this
+> walkthrough: it detects ambient identity, walks through tenant naming,
+> credential refs, scope freezing, and workspace provisioning, then verifies
+> with `locus doctor` and a live isolation demo. Re-runnable and resumable;
+> `--yes --json` for scripts and CI. See `DESIGN-onboarding-wizard.md`.
+>
+> ```bash
+> locus onboard --detect-only   # preview candidates — nothing is auto-pinned
+> locus onboard                 # interactive wizard
+> ```
+
 The end-to-end walkthrough for an agency operator wiring **Codex CLI, Claude
 Code, and Grok Build** across three tenants: **personal**, **company
 (ashlr.ai)**, and a **client (cash-margin-partners)**. Every command below is

@@ -222,3 +222,62 @@ Prefer **wrapping** official upstream MCP servers with frozen env over reimpleme
 - [ ] Destructive tools covered by policy globs or explicit gates  
 - [ ] `cargo test -p locus-core` green  
 - [ ] `cargo clippy -p locus-core -- -D warnings` clean  
+
+## Community adapter marketplace
+
+The long tail of providers (Linear, Notion, Salesforce, …) ships as
+**signed community adapters** — declarative manifests, not code. A community
+adapter is the same canonical manifest JSON as built-in entries (id, tools,
+capabilities, frozen selectors, ed25519/HMAC signature), plus an optional
+upstream MCP server spec that the existing worker machinery spawns and
+scopes. See `DESIGN-adapter-marketplace.md` (as-built record).
+
+**For operators** — discovery and install:
+
+```bash
+locus adapter registry index add https://adapters.example.com/index.json
+locus adapter trust add --id example-publisher --ed25519-pub <base64-pubkey>
+locus adapter search linear
+locus adapter install linear            # signature verified; fail-closed
+locus binding add --provider linear --from-adapter linear …
+locus adapter update --yes               # explicit only; widening needs approval
+locus adapter uninstall linear
+```
+
+Trust model: indexes are registry-agnostic (any HTTPS URL); trust never
+depends on the index server being honest — every manifest is verified against
+**your** trust store at install. Updating to a manifest with a wider tool
+surface requires explicit approval (`--yes` or an interactive confirm);
+narrowing is always allowed. Installed adapters live in
+`$LOCUS_HOME/adapters/` (0600) and run through the same isolation pipeline
+as built-ins.
+
+**For publishers** — the manifest format:
+
+```json
+{
+  "manifest_version": 1,
+  "publisher": "Example",
+  "version": "1.2.0",
+  "credential_env": "LINEAR_API_KEY",
+  "upstream": { "command": "npx", "args": ["-y", "mcp-linear"], "resolve_secrets": true },
+  "entry": {
+    "id": "linear",
+    "name": "Linear",
+    "status": "community",
+    "capabilities": ["issues"],
+    "frozen_selectors": ["workspace"],
+    "tools": ["linear.issue"],
+    "destructive_tools": [],
+    "description": "Community adapter for Linear",
+    "signature": "ed25519:<base64>",
+    "signed_by": "example-publisher"
+  }
+}
+```
+
+The signature covers the canonical entry material
+(`locus_core::adapter_registry::canonical_entry_material`); sign with
+`sign_entry_ed25519`. Publish the manifest at a stable HTTPS URL and list it
+in your index JSON (`{ "version": 1, "name": …, "adapters": […] }` with
+`manifest_url` per entry). Operators pin your key; Locus does the rest.  
