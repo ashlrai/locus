@@ -37,7 +37,7 @@ Use explicit environment (`env:`) references for supported credential resolution
 brew install ashlrai/tap/locus
 
 # npm — locus-cli and @ashlrai/locus-mcp published at 0.5.0
-# (downloads a release binary, or falls back to cargo install)
+# (downloads a package-pinned native release archive; source installs are explicit)
 npm install -g locus-cli @ashlrai/locus-mcp
 npx locus-cli --help
 npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
