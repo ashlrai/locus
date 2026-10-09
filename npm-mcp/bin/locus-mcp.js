@@ -31,7 +31,7 @@ const {
   statSync,
   writeFileSync,
 } = require("fs");
-const { delimiter, extname, join, resolve } = require("path");
+const { delimiter, extname, isAbsolute, join, resolve } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
@@ -262,6 +262,7 @@ function cargoBinPath() {
 function isNativeCandidate(candidate) {
   let fd;
   try {
+    if (!isAbsolute(candidate)) return false;
     const actual = realpathSync(candidate);
     if (actual === realpathSync(__filename) || resolve(candidate) === resolve(getBinaryPath())) return false;
     if (!statSync(actual).isFile()) return false;
@@ -269,13 +270,27 @@ function isNativeCandidate(candidate) {
     if ([".js", ".cmd", ".ps1"].includes(extname(actual).toLowerCase())) return false;
     if (process.platform !== "win32") accessSync(actual, constants.X_OK);
     fd = openSync(actual, "r");
-    const header = Buffer.alloc(4096);
+    // Recognize native file formats, never scripts or shell trampolines.
+    // File headers establish the format only, not product authenticity.
+    const header = Buffer.alloc(64);
     const size = readSync(fd, header, 0, header.length, 0);
-    const text = header.subarray(0, size).toString("utf8");
-    // npm's Unix launcher normally resolves to this file, but another global
-    // package copy or a shell launcher can also invoke Node recursively.
-    if (text.startsWith("#!") && /\bnode(?:\.exe)?\b/.test(text)) return false;
-    return true;
+    if (process.platform === "linux") {
+      return size >= 16 && header.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])) &&
+        [1, 2].includes(header[4]) && [1, 2].includes(header[5]) && header[6] === 1;
+    }
+    if (process.platform === "darwin") {
+      return size >= 32 && [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe,
+        0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca].includes(header.readUInt32BE(0));
+    }
+    if (process.platform === "win32") {
+      if (size < 64 || header[0] !== 0x4d || header[1] !== 0x5a) return false;
+      const peOffset = header.readUInt32LE(0x3c);
+      if (peOffset < 64 || peOffset > 1024 * 1024 || peOffset + 4 > statSync(actual).size) return false;
+      const signature = Buffer.alloc(4);
+      return readSync(fd, signature, 0, 4, peOffset) === 4 &&
+        signature.equals(Buffer.from([0x50, 0x45, 0, 0]));
+    }
+    return false;
   } catch {
     return false;
   } finally {
@@ -288,7 +303,7 @@ function tryExistingOnPath() {
   // our own global npm shim). Paths are passed directly, including spaces.
   const filename = getBinaryFilename();
   const candidates = (process.env.PATH || "").split(delimiter)
-    .filter(Boolean).map((dir) => join(dir, filename));
+    .filter((dir) => isAbsolute(dir)).map((dir) => join(dir, filename));
   candidates.push(cargoBinPath());
   for (const candidate of candidates) {
     if (!isNativeCandidate(candidate)) continue;

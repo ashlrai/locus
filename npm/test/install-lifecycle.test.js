@@ -15,6 +15,18 @@ const wrappers = [
 ];
 const hash = (data) => crypto.createHash("sha256").update(data).digest("hex");
 
+function nativeBytes(platform = "linux") {
+  const bytes = Buffer.alloc(96);
+  if (platform === "win32") {
+    bytes.write("MZ"); bytes.writeUInt32LE(64, 0x3c); bytes.write("PE\0\0", 64);
+  } else if (platform === "darwin") {
+    bytes.writeUInt32BE(0xcffaedfe, 0);
+  } else {
+    bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  }
+  return bytes;
+}
+
 function fixture(t, name, file, options = {}) {
   const home = fs.mkdtempSync(path.join(tmpdir(), "locus install space "));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
@@ -39,9 +51,11 @@ function fixture(t, name, file, options = {}) {
         fs.writeFileSync(path.join(dir, name), options.binary);
         return Buffer.alloc(0);
       }
-      // Only harmless synthetic scripts may be executed for CLI --version.
+      // Native format fixtures are never executed. Stub only the exact CLI probe.
       assert.ok(binary.startsWith(home), `unexpected child process ${binary}`);
-      return execFileSync(binary, args, { ...opts, env: processStub.env });
+      assert.deepEqual(Array.from(args), ["--version"]);
+      if (options.versionProbeFailure) throw new Error("synthetic version failure");
+      return Buffer.from(options.version || "locus 0.5.0\n");
     },
     spawnSync() { throw new Error("No automatic Cargo/which child process allowed"); },
   };
@@ -84,7 +98,7 @@ for (const [name, file] of wrappers) {
     const f = fixture(t, name, file);
     fs.symlinkSync(file, path.join(f.first, name));
     const native = path.join(f.second, name);
-    fs.writeFileSync(native, "#!/bin/sh\nprintf 'locus 0.5.0\\n'\n", { mode: 0o755 });
+    fs.writeFileSync(native, nativeBytes(), { mode: 0o755 });
     assert.equal(f.mod.tryExistingOnPath(), native);
     fs.unlinkSync(path.join(f.first, name));
     fs.copyFileSync(file, path.join(f.first, name));
@@ -94,12 +108,50 @@ for (const [name, file] of wrappers) {
   });
 
   test(`${name}: Windows selects native exe rather than npm cmd launcher`, (t) => {
-    const f = fixture(t, name, file, { platform: "win32" });
+    const f = fixture(t, name, file, { platform: "win32", versionProbeFailure: true });
     fs.writeFileSync(path.join(f.first, `${name}.cmd`), '@node "%~dp0\\node_modules\\bin.js"');
     const native = path.join(f.second, `${name}.exe`);
-    fs.writeFileSync(native, "MZ synthetic native binary");
+    fs.writeFileSync(native, nativeBytes("win32"));
     if (name === "locus-mcp") assert.equal(f.mod.tryExistingOnPath(), native);
     else assert.equal(f.mod.tryExistingOnPath(), null, "a fake exe cannot report the exact CLI version");
+  });
+
+  test(`${name}: refuses shell trampolines, padded scripts and non-native bytes without executing`, (t) => {
+    const f = fixture(t, name, file);
+    const candidate = path.join(f.first, name);
+    for (const bytes of ["#!/bin/sh\nexec env locus-mcp \"$@\"\n",
+      "#!/bin/sh\n" + "# padding\n".repeat(1000) + "exec node shim.js\n", "MZ truncated", "arbitrary executable text"]) {
+      fs.writeFileSync(candidate, bytes, { mode: 0o755 });
+      assert.equal(f.mod.tryExistingOnPath(), null);
+      assert.deepEqual(f.calls, []);
+    }
+  });
+
+  test(`${name}: ignores relative PATH entries and recognizes Mach-O without executing MCP`, (t) => {
+    const f = fixture(t, name, file, { platform: "darwin" });
+    const candidate = path.join(f.second, name);
+    fs.writeFileSync(candidate, nativeBytes("darwin"), { mode: 0o755 });
+    f.processStub.env.PATH = "." + path.delimiter + path.relative(process.cwd(), f.second);
+    assert.equal(f.mod.tryExistingOnPath(), null);
+    assert.deepEqual(f.calls, []);
+    f.processStub.env.PATH = f.second;
+    assert.equal(f.mod.tryExistingOnPath(), candidate);
+    if (name === "locus-mcp") assert.deepEqual(f.calls, []);
+  });
+
+  test(`${name}: refuses truncated PE and invalid signature offsets without a probe`, (t) => {
+    const f = fixture(t, name, file, { platform: "win32" });
+    const candidate = path.join(f.second, `${name}.exe`);
+    for (const offset of [0, 32, 96, 1024 * 1024 + 1]) {
+      const bytes = nativeBytes("win32");
+      bytes.writeUInt32LE(offset, 0x3c);
+      fs.writeFileSync(candidate, bytes);
+      assert.equal(f.mod.tryExistingOnPath(), null);
+      assert.deepEqual(f.calls, []);
+    }
+    fs.writeFileSync(candidate, "MZ truncated");
+    assert.equal(f.mod.tryExistingOnPath(), null);
+    assert.deepEqual(f.calls, []);
   });
 
   test(`${name}: checksum failure preserves old cache and never extracts or installs Cargo`, async (t) => {
@@ -205,8 +257,8 @@ test("both package digest maps match the official formula's three v0.5.0 asset p
 
 test("CLI PATH version comparison rejects 0.5.01 rather than accepting a substring", (t) => {
   const [name, file] = wrappers[0];
-  const f = fixture(t, name, file);
+  const f = fixture(t, name, file, { version: "locus 0.5.01\n" });
   const native = path.join(f.first, name);
-  fs.writeFileSync(native, "#!/bin/sh\nprintf 'locus 0.5.01\\n'\n", { mode: 0o755 });
+  fs.writeFileSync(native, nativeBytes(), { mode: 0o755 });
   assert.equal(f.mod.tryExistingOnPath(), null);
 });
