@@ -4,7 +4,7 @@
 
 Milestone **M5** seeds a lightweight plane so agents and hub can ask: *should this claim be grounded with a tool before we act?*
 
-No ML models. Pure heuristics + a stable JSON shape for ashlr-hub (and peers) to re-score or enforce later.
+No ML models. Pure heuristics + a stable JSON shape for Phantom (and peers) to re-score or enforce later.
 
 Related: [architecture.md](./architecture.md) · [GOALS.md](../GOALS.md) · [hub-integration.md](./hub-integration.md)
 
