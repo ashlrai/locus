@@ -34,6 +34,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.95.0"
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
@@ -118,6 +119,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
