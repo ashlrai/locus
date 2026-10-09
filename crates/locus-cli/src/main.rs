@@ -1809,8 +1809,9 @@ enabled = false
 fn write_sample_bindings(s: &Store) -> Result<()> {
     // Annotated TOML so first-run users know what to replace. Never raw secrets.
     let personal = r#"# Sample personal binding — REPLACE project_ref / team_id placeholders.
-# CredentialRefs are Phantom names (phm:NAME). Never put raw tokens here.
-# Store secrets with: phantom store SUPABASE_PERSONAL / GH_TOKEN_PERSONAL / …
+# CredentialRefs are explicit env:VAR pointers. Never put raw tokens here.
+# Supply those variables outside agent context before supervised execution.
+# phm: references currently require an unavailable scoped bridge.
 # Then: locus enter personal && locus whoami && locus doctor
 
 [binding]
@@ -1826,21 +1827,21 @@ max_ttl = "12h"
 [[binding.providers]]
 provider = "supabase"
 account = "personal"
-credential_ref = "phm:SUPABASE_PERSONAL"
+credential_ref = "env:LOCUS_SUPABASE_PERSONAL"
 # project_ref is frozen on every tool call — set the real ref.
 scope = { project_ref = "personal_ref_replace_me", read_only = false }
 
 [[binding.providers]]
 provider = "github"
 account = "personal"
-credential_ref = "phm:GH_TOKEN_PERSONAL"
+credential_ref = "env:LOCUS_GH_TOKEN_PERSONAL"
 # Empty orgs/repos = no allowlist restriction (tighten for client work).
 scope = { orgs = [], repos = [] }
 
 [[binding.providers]]
 provider = "vercel"
 account = "personal"
-credential_ref = "phm:VERCEL_TOKEN_PERSONAL"
+credential_ref = "env:LOCUS_VERCEL_TOKEN_PERSONAL"
 scope = { team_id = "team_personal_replace_me", env = ["preview", "production"] }
 "#;
 
@@ -1864,20 +1865,20 @@ require_approval = ["*.delete*", "vercel.deploy.prod"]
 [[binding.providers]]
 provider = "supabase"
 account = "acme-prod"
-credential_ref = "phm:SUPABASE_ACME"
+credential_ref = "env:LOCUS_SUPABASE_ACME"
 scope = { project_ref = "acme_ref_replace_me", read_only = true }
 
 [[binding.providers]]
 provider = "github"
 account = "acme-corp"
-credential_ref = "phm:GH_TOKEN_ACME"
+credential_ref = "env:LOCUS_GH_TOKEN_ACME"
 # Frozen org/repo allowlist — model cannot reach outside.
 scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 
 [[binding.providers]]
 provider = "vercel"
 account = "acme-team"
-credential_ref = "phm:VERCEL_TOKEN_ACME"
+credential_ref = "env:LOCUS_VERCEL_TOKEN_ACME"
 scope = { team_id = "team_acme_replace_me", projects = ["acme-web"], env = ["preview"] }
 "#;
 
@@ -2762,7 +2763,7 @@ fn cmd_graph(sub: GraphCmd, json: bool) -> Result<()> {
                 }
                 println!(
                     "   {}",
-                    "wire Phantom secrets for each credential_ref before pin".dimmed()
+                    "configure explicit env:VAR references before supervised execution; phm: resolution is unsupported".dimmed()
                 );
             }
             Ok(())
@@ -3642,6 +3643,13 @@ fn preflight_child_launch(
     surface: ChildLaunchSurface,
 ) -> Result<()> {
     if resolve_secrets {
+        locus_core::credential::ensure_binding_credential_resolution_supported(binding)
+            .with_context(|| {
+                format!(
+                    "{} credential preflight failed before child or session effects",
+                    surface.command_name()
+                )
+            })?;
         return Ok(());
     }
     let resolving_upstreams = credential_resolving_upstreams(binding).with_context(|| {
@@ -4884,11 +4892,11 @@ fn resolve_add_answers_interactive(s: &Store, args: &BindingAddArgs) -> Result<A
         None => {
             println!("  credential_ref is a pointer, never the secret itself:");
             println!(
-                "    {}  Phantom vault (recommended — phantom add NAME, https://phm.dev)",
+                "    {}  reserved Phantom reference (resolution unsupported; use env:VAR)",
                 "phm:NAME".cyan()
             );
             println!(
-                "    {}   read from the environment at exec time",
+                "    {}   read an explicitly supplied variable at exec time",
                 "env:VAR".cyan()
             );
             prompt_value("credential_ref", "--credential-ref", None, &|v| {
@@ -5037,14 +5045,10 @@ fn cmd_binding_add(args: BindingAddArgs, guided_default: bool, json: bool) -> Re
     println!(
         "   {}  {}",
         "locus doctor".dimmed(),
-        "(unresolved phm: refs are flagged)".dimmed()
+        "(unsupported phm: integration is flagged)".dimmed()
     );
-    if let Some(name) = answers.credential_ref.strip_prefix("phm:") {
-        println!(
-            "   {}  {}",
-            format!("phantom add {name}").dimmed(),
-            "(store the secret in Phantom — https://phm.dev)".dimmed()
-        );
+    if answers.credential_ref.starts_with("phm:") {
+        println!("   phm: resolution is unsupported; use an explicitly supplied env:VAR reference until a supported scoped bridge exists.");
     }
     Ok(())
 }
@@ -6667,10 +6671,8 @@ fn format_credential_issues(issues: &[CredentialResolutionIssue]) -> String {
         .join(", ")
 }
 
-/// Check Phantom locators internally and return provider/source metadata only.
-///
-/// Delegates to `locus_core` so the timeout-hardened, TTL-cached
-/// `phantom list` path is shared with the MCP doctor/heartbeat surfaces.
+/// Report unsupported Phantom integration using safe provider/source metadata.
+/// Delegates to core without invoking Phantom or inspecting vault contents.
 fn collect_unresolved_phm_refs(
     s: &Store,
     phantom_on_path: bool,
@@ -7007,9 +7009,10 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
     }
 
     println!();
-    println!("Phantom pairing:");
-    println!("  credential_ref = \"phm:MY_SECRET\"  # locus exec resolves via phantom reveal");
-    println!("  Or env:VAR for CI. Never put raw secrets in binding files.");
+    println!("Credential configuration:");
+    println!("  credential_ref = \"env:LOCUS_PROVIDER_TOKEN\"  # explicitly supplied outside agent context");
+    println!("  phm: references are retained, but credential resolution is unsupported until a scoped bridge exists.");
+    println!("  Never put raw secrets in binding files or agent prompts.");
     Ok(())
 }
 
@@ -8861,6 +8864,53 @@ mod touchid_tests {
         let r = confirm_grant_touchid("bob", "appr_aabbccddeeff001122334455", "t", "b");
         std::env::remove_var("LOCUS_TOUCHID_MOCK");
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn generated_samples_use_explicit_environment_refs_without_legacy_secret_commands() {
+        let home = tempfile::tempdir().unwrap();
+        let store = locus_core::Store::open(home.path()).unwrap();
+        super::write_sample_bindings(&store).unwrap();
+        for alias in ["personal", "acme"] {
+            let content =
+                std::fs::read_to_string(store.bindings_dir().join(format!("{alias}.toml")))
+                    .unwrap();
+            let binding = Binding::parse_toml(&content).unwrap();
+            assert!(binding
+                .providers
+                .iter()
+                .all(|provider| provider.credential_ref.starts_with("env:LOCUS_")));
+            assert!(!content.contains("phantom store"));
+            assert!(!content.contains("credential_ref = \"phm:"));
+        }
+    }
+
+    #[test]
+    fn unsupported_phantom_guard_covers_resolving_surfaces_and_preserves_metadata_only_use() {
+        let binding = Binding::parse_toml(
+            r#"
+id = "bnd_phantom_contract"
+alias = "phantom-contract"
+tenant = "synthetic"
+[[providers]]
+provider = "github"
+account = "synthetic"
+credential_ref = "phm:REFERENCE_NAME_CANARY"
+"#,
+        )
+        .unwrap();
+        for surface in [
+            ChildLaunchSurface::Exec,
+            ChildLaunchSurface::Run,
+            ChildLaunchSurface::CiRun,
+        ] {
+            let error = preflight_child_launch(&binding, true, surface).unwrap_err();
+            let message = format!("{error:#}");
+            assert!(message.contains("Phantom credential integration unsupported"));
+            assert!(message.contains("env:VAR"));
+            assert!(!message.contains("REFERENCE_NAME_CANARY"));
+            preflight_child_launch(&binding, false, surface).unwrap();
+        }
     }
 
     #[test]
