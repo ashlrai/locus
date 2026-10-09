@@ -86,56 +86,162 @@ fn dedupe_candidates(cands: Vec<DetectedCandidate>) -> Vec<DetectedCandidate> {
     out
 }
 
-/// Run a command with a short timeout; `None` on any failure.
-fn run_probe(program: &str, args: &[&str]) -> Option<String> {
-    let child = Command::new(program).args(args).output().ok()?;
-    if !child.status.success() {
-        return None;
+const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
+const PROBE_OUTPUT_LIMIT: u64 = 16 * 1024;
+static PROBE_READERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct ProbeReaderPermit;
+impl Drop for ProbeReaderPermit {
+    fn drop(&mut self) {
+        PROBE_READERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
-    String::from_utf8(child.stdout).ok()
 }
 
-/// `gh auth status` → one candidate per logged-in account.
-fn detect_gh_cli(out: &mut Vec<DetectedCandidate>) {
-    let Some(text) = run_probe("gh", &["auth", "status"]) else {
+fn stop_probe_child(child: &mut std::process::Child) {
+    // The group was created exclusively for this probe. Its descendants may
+    // still own output pipes after the leader exits; terminate the group first.
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    if child.try_wait().ok().flatten().is_some() {
         return;
-    };
-    // stderr carries the status, but some versions print to stdout; check both
-    // would need stderr capture — keep to stdout parse, best-effort.
-    for line in text.lines() {
-        // e.g. "  ✓ Logged in to github.com account octocat (keyring)"
-        let line = line.trim();
-        if let Some(rest) = line.split("account ").nth(1) {
-            let user = rest.split_whitespace().next().unwrap_or("").trim();
-            if !user.is_empty() {
-                out.push(DetectedCandidate::new(
-                    "gh",
-                    "github",
-                    user,
-                    format!("gh CLI logged in as {user}"),
-                ));
+    }
+    let _ = child.kill();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    while std::time::Instant::now() < deadline {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// One bounded metadata probe, including both stdout and stderr. Reader slots
+/// remain reserved until an escaped grandchild closes its pipe; repeated probes
+/// cannot accumulate unbounded blocked threads. Captured text is never emitted.
+fn run_probe(program: &str, args: &[&str]) -> Option<zeroize::Zeroizing<String>> {
+    use std::io::Read;
+    use std::sync::atomic::Ordering;
+    use std::sync::mpsc;
+    use zeroize::Zeroize;
+    PROBE_READERS
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            if count <= 14 {
+                Some(count + 2)
+            } else {
+                None
+            }
+        })
+        .ok()?;
+    let permits = [ProbeReaderPermit, ProbeReaderPermit];
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let stderr = child.stderr.take()?;
+    let (sender, receiver) = mpsc::sync_channel(2);
+    fn read_pipe(pipe: impl Read, permit: ProbeReaderPermit) -> Option<zeroize::Zeroizing<String>> {
+        let _permit = permit;
+        let mut bytes = Vec::new();
+        let result = pipe.take(PROBE_OUTPUT_LIMIT + 1).read_to_end(&mut bytes);
+        if result.is_err() || bytes.len() as u64 > PROBE_OUTPUT_LIMIT {
+            bytes.zeroize();
+            return None;
+        }
+        match String::from_utf8(bytes) {
+            Ok(text) => Some(zeroize::Zeroizing::new(text)),
+            Err(error) => {
+                error.into_bytes().zeroize();
+                None
             }
         }
     }
-    // Fallback: some `gh` versions write status to stderr only; try again
-    // capturing stderr.
-    if out.iter().all(|c| c.source != "gh") {
-        if let Ok(child) = Command::new("gh").args(["auth", "status"]).output() {
-            let text = String::from_utf8_lossy(&child.stderr);
-            for line in text.lines() {
-                let line = line.trim();
-                if let Some(rest) = line.split("account ").nth(1) {
-                    let user = rest.split_whitespace().next().unwrap_or("").trim();
-                    if !user.is_empty() {
-                        out.push(DetectedCandidate::new(
-                            "gh",
-                            "github",
-                            user,
-                            format!("gh CLI logged in as {user}"),
-                        ));
-                    }
-                }
-            }
+    let [out_permit, err_permit] = permits;
+    let out_sender = sender.clone();
+    if std::thread::Builder::new()
+        .name("locus-probe-stdout".into())
+        .spawn(move || {
+            let _ = out_sender.send((0, read_pipe(stdout, out_permit)));
+        })
+        .is_err()
+    {
+        stop_probe_child(&mut child);
+        return None;
+    }
+    if std::thread::Builder::new()
+        .name("locus-probe-stderr".into())
+        .spawn(move || {
+            let _ = sender.send((1, read_pipe(stderr, err_permit)));
+        })
+        .is_err()
+    {
+        stop_probe_child(&mut child);
+        return None;
+    }
+    let deadline = std::time::Instant::now() + PROBE_DEADLINE;
+    let mut output = [None, None];
+    let mut received = 0;
+    let mut status = None;
+    while std::time::Instant::now() < deadline {
+        while let Ok((index, text)) = receiver.try_recv() {
+            output[index] = text;
+            received += 1;
+        }
+        status = status.or_else(|| child.try_wait().ok().flatten());
+        if received == 2 && status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    if status.is_none() || received != 2 {
+        stop_probe_child(&mut child);
+    }
+    if !status.is_some_and(|status| status.success()) || received != 2 {
+        return None;
+    }
+    Some(zeroize::Zeroizing::new(format!(
+        "{}\n{}",
+        output[0].as_deref()?,
+        output[1].as_deref()?
+    )))
+}
+
+/// `gh auth status` → one candidate per logged-in account; one bounded command.
+fn detect_gh_cli(out: &mut Vec<DetectedCandidate>) {
+    detect_gh_cli_using(out, "gh");
+}
+
+fn detect_gh_cli_using(out: &mut Vec<DetectedCandidate>, program: &str) {
+    let Some(text) = run_probe(program, &["auth", "status"]) else {
+        return;
+    };
+    for line in text.lines() {
+        let Some(rest) = line.split("Logged in to github.com account ").nth(1) else {
+            continue;
+        };
+        let user = rest.split_whitespace().next().unwrap_or("");
+        if !user.is_empty()
+            && user.len() <= 39
+            && user
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            out.push(DetectedCandidate::new(
+                "gh",
+                "github",
+                user,
+                format!("gh CLI logged in as {user}"),
+            ));
         }
     }
 }
@@ -265,7 +371,7 @@ fn detect_mcp_json(cwd: &Path, out: &mut Vec<DetectedCandidate>) {
     }
 }
 
-/// Suggest a Phantom credential-ref name for a provider × account pair.
+/// Suggest a supported environment credential-ref name for a provider × account pair.
 /// Uppercase, non-alphanumeric → `_`; never includes secret material.
 pub fn suggest_credential_ref(provider: &str, account: &str) -> String {
     let clean = |s: &str| {
@@ -279,7 +385,7 @@ pub fn suggest_credential_ref(provider: &str, account: &str) -> String {
             })
             .collect::<String>()
     };
-    format!("phm:{}_{}", clean(provider), clean(account))
+    format!("env:{}_{}", clean(provider), clean(account))
 }
 
 /// Suggest a binding alias from a candidate (lowercase, slugified).
@@ -574,7 +680,7 @@ mod tests {
     fn suggest_helpers() {
         assert_eq!(
             suggest_credential_ref("github", "acme-corp"),
-            "phm:GITHUB_ACME_CORP"
+            "env:GITHUB_ACME_CORP"
         );
         assert_eq!(suggest_alias("github", "octocat"), "github-octocat");
         assert_eq!(suggest_alias("aws", ""), "aws");
@@ -658,5 +764,67 @@ mod tests {
     fn candidate_key_stable() {
         let c = DetectedCandidate::new("gh", "github", "octocat", "d");
         assert_eq!(OnboardPlan::candidate_key(&c), "gh|github|octocat");
+    }
+    #[cfg(unix)]
+    #[test]
+    fn hung_gh_probe_returns_before_deadline_without_auth_access() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let gh = home.path().join("gh");
+        std::fs::write(&gh, "#!/bin/sh\nsleep 10\n").unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = std::time::Instant::now();
+        assert!(run_probe(gh.to_str().unwrap(), &["auth", "status"]).is_none());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gh_probe_reads_both_streams_once_and_only_emits_account_labels() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let gh = home.path().join("gh");
+        let marker = home.path().join("calls");
+        std::fs::write(&gh, format!("#!/bin/sh\nprintf x >> '{}'\nprintf 'Logged in to github.com account stdout-user (keyring)\\n'\nprintf 'Logged in to github.com account stderr-user (keyring)\\n' >&2\nprintf 'TOKEN: DO_NOT_DISCLOSE_CANARY\\n' >&2\n", marker.display())).unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut candidates = Vec::new();
+        detect_gh_cli_using(&mut candidates, gh.to_str().unwrap());
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "x");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].account_hint, "stdout-user");
+        assert_eq!(candidates[1].account_hint, "stderr-user");
+        assert!(!serde_json::to_string(&candidates)
+            .unwrap()
+            .contains("DO_NOT_DISCLOSE_CANARY"));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn exited_gh_leader_does_not_leave_a_pipe_holding_child_alive() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let gh = home.path().join("gh");
+        let pidfile = home.path().join("child-pid");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nsleep 30 &\nprintf '%s' \"$!\" > '{}'\nexit 0\n",
+                pidfile.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(run_probe(gh.to_str().unwrap(), &["auth", "status"]).is_none());
+        let pid = std::fs::read_to_string(pidfile)
+            .unwrap()
+            .parse::<i32>()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("owned probe descendant survived group cleanup");
     }
 }

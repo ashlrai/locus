@@ -223,62 +223,66 @@ Prefer **wrapping** official upstream MCP servers with frozen env over reimpleme
 - [ ] `cargo test -p locus-core` green  
 - [ ] `cargo clippy -p locus-core -- -D warnings` clean  
 
-## Community adapter marketplace
+## Community adapter marketplace (unreleased candidate)
 
-The long tail of providers (Linear, Notion, Salesforce, …) ships as
-**signed community adapters** — declarative manifests, not code. A community
-adapter is the same canonical manifest JSON as built-in entries (id, tools,
-capabilities, frozen selectors, ed25519/HMAC signature), plus an optional
-upstream MCP server spec that the existing worker machinery spawns and
-scopes. See `DESIGN-adapter-marketplace.md` (as-built record).
-
-**For operators** — discovery and install:
+Community adapters are publisher-supplied **executable code**. A trusted
+signature binds the complete installable envelope to a configured verification key;
+it does not establish publisher identity or that a command is safe. Review the command, ordered args,
+credential mapping and sandbox flags before approving installation. Discovery
+summaries are untrusted metadata and do not authorize execution.
 
 ```bash
-locus adapter registry index add https://adapters.example.com/index.json
-locus adapter trust add --id example-publisher --ed25519-pub <base64-pubkey>
+locus adapter registry index add https://adapters.example.com/index.json --name curated
+locus adapter trust add --id example-publisher --ed25519-pub <base64-public-key>
 locus adapter search linear
-locus adapter install linear            # signature verified; fail-closed
-locus binding add --provider linear --from-adapter linear …
-locus adapter update --yes               # explicit only; widening needs approval
-locus adapter uninstall linear
+locus adapter install linear            # inspect envelope and confirm explicitly
+locus binding add client-linear --from-adapter linear \
+  --tenant client --account client-ops --credential-ref env:CLIENT_LINEAR_TOKEN \
+  --scope workspace=workspace_client --read-only --non-interactive
+locus adapter uninstall linear --yes
 ```
 
-Trust model: indexes are registry-agnostic (any HTTPS URL); trust never
-depends on the index server being honest — every manifest is verified against
-**your** trust store at install. Updating to a manifest with a wider tool
-surface requires explicit approval (`--yes` or an interactive confirm);
-narrowing is always allowed. Installed adapters live in
-`$LOCUS_HOME/adapters/` (0600) and run through the same isolation pipeline
-as built-ins.
+`install` also updates an existing adapter; there is no separate `update`
+command. Installation always needs explicit consent, including tool widening.
+The manifest and ledger are persisted with atomic replacement and mode 0600.
+Use-time loading verifies the current publisher trust and full envelope digest
+against the ledger. Bindings capture the verified envelope; runtime rechecks
+current trust and exact provider/upstream equality before launch and dispatch.
+Revoking a publisher key prevents subsequent cached-worker calls.
 
-**For publishers** — the manifest format:
+Community names cannot replace built-in provider IDs. Allowed tool names,
+destructive flags and concrete scalar frozen selectors are enforced against
+actual upstream calls. Extra tools are denied; `read_only` denies signed
+destructive tools. Approval-required community calls remain fail-closed.
+Missing or unsupported credentials prevent a resolving worker from starting.
+Each community worker receives private HOME/config/temp directories for its
+binding/provider slot. Exact known injected credential values are blinded in
+model-facing strings and keys; trusted executable code can still transform or
+send credentials, so this is not a guarantee against a malicious publisher.
 
-```json
-{
-  "manifest_version": 1,
-  "publisher": "Example",
-  "version": "1.2.0",
-  "credential_env": "LINEAR_API_KEY",
-  "upstream": { "command": "npx", "args": ["-y", "mcp-linear"], "resolve_secrets": true },
-  "entry": {
-    "id": "linear",
-    "name": "Linear",
-    "status": "community",
-    "capabilities": ["issues"],
-    "frozen_selectors": ["workspace"],
-    "tools": ["linear.issue"],
-    "destructive_tools": [],
-    "description": "Community adapter for Linear",
-    "signature": "ed25519:<base64>",
-    "signed_by": "example-publisher"
-  }
-}
-```
+The supported credential source is an explicitly supplied `env:VAR` reference.
+`credential_env` must be a provider-local uppercase key ending in `API_KEY`,
+`TOKEN`, `ACCESS_TOKEN` or `SECRET_KEY`, such as `LINEAR_API_KEY`. It cannot
+replace HOME, PATH or Locus authority variables. `--scope KEY=VALUE` freezes a
+custom signed selector as a string; dedicated flags supply built-in selectors.
+Collection-valued or missing frozen selectors are refused.
+Community sources also refuse Locus control/executor capabilities, session seals,
+trust overlays and registry signing keys, regardless of variable-name case.
+Cached workers require the same signed envelope, binding identity, principal,
+tenant, policy, provider scope and credential reference used at launch.
 
-The signature covers the canonical entry material
-(`locus_core::adapter_registry::canonical_entry_material`); sign with
-`sign_entry_ed25519`. Publish the manifest at a stable HTTPS URL and list it
-in your index JSON (`{ "version": 1, "name": …, "adapters": […] }` with
-`manifest_url` per entry). Operators pin your key; Locus does the rest.  
-Credential resolution currently supports explicitly supplied `env:VAR` references. Stored `phm:` references remain valid metadata but require an unavailable scoped bridge; never implement an adapter by capturing trusted-terminal reveal. See [credential compatibility](./credential-compatibility.md).
+Publishers must use **manifest_version 2**. Full-envelope signing material is
+`CommunityAdapterManifest::signing_material()`: the exact typed JSON encoding
+with only `entry.signature` removed, prefixed by the UTF-8 domain
+`locus-community-adapter-envelope-v2` followed by NUL. Set `entry.signed_by`
+before computing material and sign with
+`adapter_registry::sign_entry_material_ed25519`. Ordered arrays remain JSON
+arrays; no comma/pipe concatenation or legacy entry-only signatures are accepted.
+The envelope covers publisher, version, credential mapping, every entry field,
+and all supported upstream fields (`command`, ordered `args`, `recipe`,
+`resolve_secrets`, `sandbox`, `sandbox_no_network`). Nested envelopes and unknown
+runtime fields are refused. Indexes use schema 1 and a `manifest_url` for each
+adapter; HTTPS and exact loopback HTTP are accepted, redirects are refused.
+
+See [credential compatibility](./credential-compatibility.md). Public released
+Locus remains 0.5.0 until the candidate passes all release gates.

@@ -11,16 +11,18 @@ use std::net::TcpListener;
 use std::process::Command;
 
 fn locus(home: &std::path::Path, cwd: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_locus"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_locus"));
+    command
         .args(args)
         .env("LOCUS_HOME", home)
-        // The session authority broker is spawned as a child process; on
-        // slow/virtualized machines the 10s default handshake can time out
-        // spuriously. This is a supported tuning knob, not a test bypass.
         .env("LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS", "60000")
-        .current_dir(cwd)
-        .output()
-        .expect("locus binary runs")
+        .current_dir(cwd);
+    // Explicit operator adoption from this synthetic test home only; no
+    // production control guard or persisted-capability default is relaxed.
+    if let Ok(capability) = std::fs::read_to_string(home.join("control_capability")) {
+        command.env("LOCUS_CONTROL_CAPABILITY", capability.trim());
+    }
+    command.output().expect("locus binary runs")
 }
 
 fn init_store() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -72,7 +74,7 @@ fn index_json(base: &str) -> String {
 fn linear_manifest_json() -> String {
     // Unsigned on purpose: install must refuse it (fail-closed path).
     serde_json::json!({
-        "manifest_version": 1,
+        "manifest_version": 2,
         "publisher": "Test Publisher",
         "version": "1.2.0",
         "entry": {
@@ -265,5 +267,120 @@ fn adapter_list_shows_marketplace_hint_when_empty() {
     assert!(
         stdout.contains("Marketplace"),
         "list should hint at the marketplace"
+    );
+}
+
+#[test]
+fn onboard_yes_never_accepts_detected_candidates_without_reviewed_plan() {
+    let (home, cwd) = init_store();
+    let output = locus(home.path(), cwd.path(), &["onboard", "--yes", "--json"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no explicitly reviewed bindings"));
+    let bindings = home.path().join("bindings");
+    assert_eq!(std::fs::read_dir(bindings).unwrap().count(), 0);
+    assert!(!home.path().join("sessions/active.json").exists());
+}
+
+#[test]
+fn binding_from_adapter_captures_verified_envelope_and_requires_qualified_scope() {
+    use locus_core::adapter_registry::{
+        sign_entry_material, AdapterManifestEntry, RegistryTrustKey,
+    };
+    use locus_core::marketplace::{
+        install_adapter, CommunityAdapterManifest, COMMUNITY_MANIFEST_VERSION,
+    };
+    let (home, cwd) = init_store();
+    let secret = "09".repeat(32); // synthetic fixture material only
+    let key = RegistryTrustKey::hmac_sha256("fixture", &secret);
+    let mut manifest = CommunityAdapterManifest {
+        manifest_version: COMMUNITY_MANIFEST_VERSION,
+        publisher: "inert fixture".into(),
+        version: "1.0.0".into(),
+        credential_env: Some("LINEAR_API_KEY".into()),
+        upstream: Some(
+            locus_core::UpstreamSpec::new("intentionally-uninvoked-fixture").resolve_secrets(true),
+        ),
+        entry: AdapterManifestEntry {
+            id: "linear".into(),
+            name: "fixture".into(),
+            status: "community".into(),
+            synthetic: false,
+            capabilities: vec![],
+            frozen_selectors: vec!["workspace".into()],
+            tools: vec!["linear.read".into()],
+            destructive_tools: vec![],
+            description: String::new(),
+            signed_by: Some("fixture".into()),
+            signature: None,
+        },
+    };
+    manifest.entry.signature =
+        Some(sign_entry_material(&manifest.signing_material(), &key).unwrap());
+    std::fs::create_dir_all(home.path().join("trust")).unwrap();
+    std::fs::write(home.path().join("trust/adapter-keys.toml"), format!("version = 1\n[[keys]]\nid = 'fixture'\nscheme = 'hmac-sha256'\nsecret_hex = '{secret}'\n")).unwrap();
+    install_adapter(home.path(), &manifest, &[key], true).unwrap();
+    let out = locus(
+        home.path(),
+        cwd.path(),
+        &[
+            "binding",
+            "add",
+            "client-linear",
+            "--from-adapter",
+            "linear",
+            "--tenant",
+            "client",
+            "--account",
+            "client-ops",
+            "--credential-ref",
+            "env:CLIENT_LINEAR_KEY",
+            "--scope",
+            "workspace=client-workspace",
+            "--read-only",
+            "--non-interactive",
+        ],
+    );
+    assert!(out.status.success(), "binding creation failed: {out:?}");
+    let text = std::fs::read_to_string(home.path().join("bindings/client-linear.toml")).unwrap();
+    let binding = locus_core::Binding::parse_toml(&text).unwrap();
+    let provider = &binding.providers[0];
+    assert_eq!(
+        provider.scope.extra["workspace"].as_str(),
+        Some("client-workspace")
+    );
+    assert_eq!(provider.scope.read_only, Some(true));
+    assert_eq!(
+        provider
+            .upstream
+            .as_ref()
+            .unwrap()
+            .community_adapter
+            .as_deref(),
+        Some(&manifest)
+    );
+    let out = locus(
+        home.path(),
+        cwd.path(),
+        &[
+            "binding",
+            "add",
+            "unqualified",
+            "--from-adapter",
+            "linear",
+            "--tenant",
+            "client",
+            "--account",
+            "client-ops",
+            "--credential-ref",
+            "env:CLIENT_LINEAR_KEY",
+            "--non-interactive",
+        ],
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("concrete scalar"));
+    assert!(!home.path().join("bindings/unqualified.toml").exists());
+    assert!(
+        !home.path().join("sessions/active.json").exists(),
+        "onboarding must not pin"
     );
 }

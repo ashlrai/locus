@@ -1,14 +1,14 @@
 # Onboarding — 3 clients × 3 tenants
 
-> **Short on time?** `locus onboard` is the guided version of this
-> walkthrough: it detects ambient identity, walks through tenant naming,
-> credential refs, scope freezing, and workspace provisioning, then verifies
-> with `locus doctor` and a live isolation demo. Re-runnable and resumable;
-> `--yes --json` for scripts and CI. See `DESIGN-onboarding-wizard.md`.
+> The unreleased `locus onboard` candidate previews metadata hints, guides
+> explicit tenant/ref/scope input, saves a refs-only plan, and can provision the
+> current directory after operator consent. It never pins, resolves credentials,
+> or runs a live isolation demo. `--yes --json` applies only an already reviewed
+> saved plan; it never accepts detected candidates automatically.
 >
 > ```bash
-> locus onboard --detect-only   # preview candidates — nothing is auto-pinned
-> locus onboard                 # interactive wizard
+> locus onboard --detect-only --json
+> locus onboard
 > ```
 
 The end-to-end walkthrough for an agency operator wiring **Codex CLI, Claude
@@ -50,10 +50,11 @@ that capability; `locus-mcp` deliberately runs without it — agents never hold
 control authority. `locus doctor` names the exact fix if it is missing,
 invalid, or mismatched.
 
-Secrets live in [Phantom](https://phm.dev) — bindings carry **CredentialRefs
-only** (`phm:NAME`, or `env:VAR` as a fallback), never raw tokens. Before the
-bindings below are usable, store the referenced tokens in Phantom under the
-same names (`GH_PERSONAL`, `VERCEL_ASHLR`, `SUPABASE_CMP`).
+Use explicitly supplied environment credentials. Bindings carry **CredentialRefs
+only** (`env:VAR`), never raw tokens. Current Phantom Secrets does not provide
+an agent-readable scoped credential bridge; stored `phm:` pointers are metadata
+for compatibility and fail closed at resolution. See
+[credential compatibility](./credential-compatibility.md).
 
 ## 1. Create the three tenant bindings
 
@@ -65,7 +66,7 @@ locus binding add personal \
   --tenant personal \
   --provider github \
   --account masonwyatt \
-  --credential-ref phm:GH_PERSONAL
+  --credential-ref env:GH_PERSONAL
 
 # Company — ashlr.ai on Vercel
 locus binding add ashlr \
@@ -73,7 +74,7 @@ locus binding add ashlr \
   --provider vercel \
   --account mason@ashlr.ai \
   --team-id team_ashlr \
-  --credential-ref phm:VERCEL_ASHLR
+  --credential-ref env:VERCEL_ASHLR
 
 # Client — Cash Margin Partners on Supabase (frozen to their project, read-only)
 locus binding add cmp \
@@ -81,7 +82,7 @@ locus binding add cmp \
   --provider supabase \
   --account cmp-ops \
   --project-ref <CMP_PROJECT_REF> \
-  --credential-ref phm:SUPABASE_CMP \
+  --credential-ref env:SUPABASE_CMP \
   --read-only
 ```
 
@@ -158,7 +159,7 @@ prints a paste-ready stdio server entry (JSON and TOML) and writes nothing.
 ### Verify all three
 
 ```bash
-locus doctor                 # store, capability, pin, workspace, phm: probes
+locus doctor                 # store, capability, pin, workspace, credential compatibility
 locus agent doctor           # human-readable readiness (exit: ready=0, protected=1, unsafe=2)
 locus agent report --json    # hub contract: ready / pin / mcp_registered / doctor
 ```
@@ -234,7 +235,7 @@ runs a mint → verify → revoke probe against a throwaway home.
 | Agent only sees `locus_*` tools | No valid pin — enter/pin first; seal may be expired or tampered (fail closed) |
 | `binding not found` | Typo — the error lists known aliases with a nearest-match suggestion |
 | `mcp_registered.grok` is `false` | Re-run `locus agent setup --apply --client grok` (writes `~/.grok/config.toml`); for a nonstandard path set `LOCUS_GROK_MCP_CONFIG` |
-| `phm:` refs unresolved | Phantom missing from `PATH` or the named secret is absent — `locus doctor` probes both |
+| `phm:` refs unresolved | Unsupported scoped Secrets integration; supply an explicit `env:VAR` reference. Doctor never reveals or probes named secrets |
 
 ## Related
 

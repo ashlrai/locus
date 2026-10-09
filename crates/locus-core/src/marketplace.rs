@@ -6,49 +6,27 @@
 //! long tail of providers (Linear, Notion, Salesforce, …) that can't all be
 //! built-in.
 //!
-//! ## Trust model (v1)
+//! ## Trust model (v2)
 //!
-//! - Adapters are **declarative manifests, not code**: the same canonical
-//!   [`AdapterManifestEntry`](crate::adapter_registry::AdapterManifestEntry)
-//!   JSON the built-in registry exports, plus an optional upstream MCP server
-//!   spec ([`UpstreamSpec`](crate::binding::UpstreamSpec)) that the existing
-//!   worker machinery spawns and scopes. No new execution primitive.
-//! - Publishers sign manifests with ed25519 (preferred) or HMAC-SHA256
-//!   (backcompat) using the exact canonical material from
-//!   [`canonical_entry_material`](crate::adapter_registry::canonical_entry_material).
-//! - Operators add publisher keys via `locus adapter trust add`
-//!   (per-publisher, per-adapter, or per-version pinning). Install is
-//!   **fail-closed**: unsigned, unknown-key, or invalid manifests are refused.
-//! - Discovery is **registry-agnostic**: any HTTPS URL can serve a static
-//!   index JSON. The index itself may carry a signature, but trust never
-//!   depends on the server being honest — every manifest is verified against
-//!   the operator's trust store on install.
-//! - Tool-surface widening requires explicit re-approval: updating to a
-//!   manifest whose tool list grew is refused unless the operator confirms.
-//! - Installed adapters run through the same isolation pipeline as built-ins:
-//!   isolated env, scope freeze, `require_approval` policy. A malicious
-//!   manifest can at worst expose its own provider's tools.
-//!
-//! ## Layout under `$LOCUS_HOME`
-//!
-//! - `adapter-indexes.toml` — registered index sources (`{name, url}`).
-//! - `adapters/<id>.json` — installed community manifests (mode 0600).
-//! - `adapters/installed.toml` — install ledger (version, publisher,
-//!   signed_by, digest, tool surface at install time).
-//!
-//! Explicitly out of scope for v1: executing third-party code (WASM/native),
-//! a hosted registry service with accounts/billing, and auto-update.
+//! The full installable envelope is signed with an unambiguous typed JSON
+//! encoding and a community-specific domain prefix. Commands, ordered args,
+//! sandbox flags, credential mapping, tools and frozen selectors are covered.
+//! Legacy entry-only signatures are refused. An upstream spec executes code:
+//! a signature proves authorization by a configured key; it does not establish publisher identity or make code safe.
+//! Installed bytes and current trust are rechecked before use.
 
 use crate::adapter_registry::{
-    canonical_entry_material, entry_digest, verify_entry_with_keys, AdapterManifestEntry,
-    EntryVerifyStatus, RegistryTrustKey,
+    verify_material_signature, AdapterManifestEntry, EntryVerifyStatus, RegistryTrustKey,
 };
 use crate::binding::UpstreamSpec;
 use crate::error::{LocusError, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use url::{Host, Url};
 
 /// Index sources file under `$LOCUS_HOME`.
 pub const INDEXES_FILE: &str = "adapter-indexes.toml";
@@ -92,47 +70,118 @@ pub struct CommunityIndex {
     pub description: String,
     #[serde(default)]
     pub adapters: Vec<CommunityIndexEntry>,
-    /// Optional whole-index signature (`ed25519:<base64>` / `hmac-sha256:<hex>`);
-    /// verified when the `signed_by` key is trusted, ignored otherwise.
+    /// Reserved index signature metadata. Indexes remain untrusted discovery;
+    /// only full installable envelopes are verified and admitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_by: Option<String>,
 }
 
-/// Full installable community adapter manifest.
-///
-/// The `entry` is the signed distribution unit — identical canonical JSON to
-/// built-in registry entries. `upstream` lets the existing MCP stdio worker
-/// machinery spawn the provider's server with the binding's isolated env;
-/// `credential_env` names the env var the worker maps the resolved
-/// credential ref into.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Signed installable envelope. An upstream command is executable code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct CommunityAdapterManifest {
-    #[serde(default = "manifest_schema_version")]
     pub manifest_version: u32,
     pub entry: AdapterManifestEntry,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream: Option<UpstreamSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_env: Option<String>,
-    /// Publisher label (display only).
     #[serde(default)]
     pub publisher: String,
-    /// Publisher's adapter version.
     #[serde(default)]
     pub version: String,
 }
 
-fn manifest_schema_version() -> u32 {
-    1
-}
+pub const COMMUNITY_MANIFEST_VERSION: u32 = 2;
+const COMMUNITY_SIGNATURE_DOMAIN: &str = "locus-community-adapter-envelope-v2\0";
+const MAX_COMMUNITY_BYTES: usize = 1024 * 1024;
 
 impl CommunityAdapterManifest {
-    /// The canonical bytes the publisher's `entry.signature` covers.
+    /// Exact typed JSON wire encoding, including signed_by, excluding only the
+    /// detached signature. Ordered arrays remain arrays, never joined strings.
     pub fn signing_material(&self) -> String {
-        canonical_entry_material(&self.entry)
+        let mut unsigned = self.clone();
+        unsigned.entry.signature = None;
+        format!(
+            "{COMMUNITY_SIGNATURE_DOMAIN}{}",
+            serde_json::to_string(&unsigned)
+                .expect("typed community manifest contains serializable fields")
+        )
     }
+}
+
+fn valid_adapter_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Verify the complete v2 envelope against the operator's current explicit keys.
+pub fn verify_community_manifest_with_keys(
+    manifest: &CommunityAdapterManifest,
+    keys: &[RegistryTrustKey],
+) -> Result<()> {
+    if manifest.manifest_version != COMMUNITY_MANIFEST_VERSION {
+        return Err(LocusError::msg("community manifests require full-envelope schema 2; legacy entry-only signatures are unsupported"));
+    }
+    if !valid_adapter_id(&manifest.entry.id)
+        || crate::adapter_registry::builtin_manifest()?
+            .providers
+            .iter()
+            .any(|entry| entry.id.eq_ignore_ascii_case(&manifest.entry.id))
+    {
+        return Err(LocusError::msg(
+            "community adapter id is invalid or reserved by a built-in provider",
+        ));
+    }
+    if manifest
+        .upstream
+        .as_ref()
+        .is_some_and(|upstream| upstream.community_adapter.is_some())
+    {
+        return Err(LocusError::msg(
+            "nested community adapter envelopes are unsupported",
+        ));
+    }
+    if manifest.signing_material().len() > MAX_COMMUNITY_BYTES {
+        return Err(LocusError::msg(
+            "invalid or oversized community adapter envelope",
+        ));
+    }
+    if let Some(name) = manifest.credential_env.as_deref() {
+        if name.is_empty()
+            || name.len() > 128
+            || !name
+                .bytes()
+                .enumerate()
+                .all(|(i, b)| b == b'_' || b.is_ascii_alphabetic() || i > 0 && b.is_ascii_digit())
+        {
+            return Err(LocusError::msg(
+                "invalid community credential environment key",
+            ));
+        }
+    }
+    let (status, _, _) = verify_material_signature(
+        &manifest.signing_material(),
+        manifest.entry.signature.as_deref(),
+        manifest.entry.signed_by.as_deref(),
+        keys,
+    );
+    if status != EntryVerifyStatus::Valid {
+        return Err(LocusError::msg(format!(
+            "community manifest signature {}",
+            status.as_str()
+        )));
+    }
+    Ok(())
+}
+
+pub fn community_manifest_digest(manifest: &CommunityAdapterManifest) -> String {
+    hex::encode(Sha256::digest(manifest.signing_material().as_bytes()))
 }
 
 /// A registered index source.
@@ -140,6 +189,107 @@ impl CommunityAdapterManifest {
 pub struct IndexSource {
     pub name: String,
     pub url: String,
+}
+
+fn read_bounded_file(path: &Path) -> Result<Vec<u8>> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| LocusError::msg("community metadata read failed"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| LocusError::msg("community metadata stat failed"))?;
+    if !metadata.is_file() || metadata.len() > MAX_COMMUNITY_BYTES as u64 {
+        return Err(LocusError::msg(
+            "community metadata must be a bounded regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take((MAX_COMMUNITY_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| LocusError::msg("community metadata read failed"))?;
+    if bytes.len() > MAX_COMMUNITY_BYTES {
+        return Err(LocusError::msg("community metadata exceeds 1 MiB"));
+    }
+    Ok(bytes)
+}
+
+fn atomic_metadata_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| LocusError::msg("invalid community metadata path"))?;
+    let metadata = std::fs::symlink_metadata(parent)
+        .map_err(|_| LocusError::msg("community metadata directory unavailable"))?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(LocusError::msg(
+            "community metadata directory must be physical",
+        ));
+    }
+    let tmp = parent.join(format!(".community-{:016x}.tmp", rand::random::<u64>()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| {
+        let mut file = options.open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result.map_err(|_| LocusError::msg("community metadata persistence failed"))
+}
+
+fn parse_community_manifest(bytes: &[u8]) -> Result<CommunityAdapterManifest> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|_| LocusError::msg("invalid community manifest JSON"))?;
+    for (field, allowed) in [
+        (
+            "entry",
+            &[
+                "id",
+                "name",
+                "status",
+                "synthetic",
+                "capabilities",
+                "frozen_selectors",
+                "tools",
+                "destructive_tools",
+                "description",
+                "signature",
+                "signed_by",
+            ][..],
+        ),
+        (
+            "upstream",
+            &[
+                "command",
+                "args",
+                "recipe",
+                "resolve_secrets",
+                "sandbox",
+                "sandbox_no_network",
+            ][..],
+        ),
+    ] {
+        if let Some(object) = value.get(field).and_then(|v| v.as_object()) {
+            if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+                return Err(LocusError::msg("unknown community manifest contract field"));
+            }
+        }
+    }
+    serde_json::from_value(value).map_err(|_| LocusError::msg("invalid community manifest schema"))
 }
 
 /// Load `$LOCUS_HOME/adapter-indexes.toml` (empty when missing).
@@ -153,8 +303,8 @@ pub fn load_index_sources(home: &Path) -> Result<Vec<IndexSource>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| LocusError::msg(format!("read {}: {e}", path.display())))?;
+    let text = String::from_utf8(read_bounded_file(&path)?)
+        .map_err(|_| LocusError::msg("invalid community metadata text"))?;
     let file: File = toml::from_str(&text)
         .map_err(|e| LocusError::msg(format!("parse {}: {e}", path.display())))?;
     Ok(file.source)
@@ -169,60 +319,72 @@ pub fn save_index_sources(home: &Path, sources: &[IndexSource]) -> Result<()> {
     let text = toml::to_string_pretty(&File { source: sources })
         .map_err(|e| LocusError::msg(format!("serialize index sources: {e}")))?;
     let path = home.join(INDEXES_FILE);
-    std::fs::write(&path, text)
-        .map_err(|e| LocusError::msg(format!("write {}: {e}", path.display())))?;
-    restrict_0600(&path);
+    atomic_metadata_write(&path, text.as_bytes())?;
     Ok(())
 }
 
-fn restrict_0600(path: &Path) {
-    #[cfg(unix)]
+/// Parse the URL rather than accepting host prefixes or userinfo lookalikes.
+fn marketplace_url(raw: &str) -> Result<Url> {
+    let parsed = Url::parse(raw).map_err(|_| LocusError::msg("invalid marketplace URL"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.fragment().is_some() {
+        return Err(LocusError::msg(
+            "marketplace URLs cannot contain credentials or fragments",
+        ));
+    }
+    let loopback = match parsed.host() {
+        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if parsed.host().is_none()
+        || !(parsed.scheme() == "https" || parsed.scheme() == "http" && loopback)
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        return Err(LocusError::msg(
+            "marketplace URLs require HTTPS or exact loopback HTTP",
+        ));
     }
+    Ok(parsed)
 }
 
-/// True for `http://localhost*` / `http://127.0.0.1*` (tests + local indexes).
-fn is_loopback_http(url: &str) -> bool {
-    let lower = url.to_ascii_lowercase();
-    lower.starts_with("http://localhost")
-        || lower.starts_with("http://localhost:")
-        || lower.starts_with("http://127.0.0.1")
-        || lower.starts_with("http://[::1]")
-}
-
-/// Fetch a URL body. HTTPS only in production; plain HTTP is allowed for
-/// loopback so tests and local indexes stay hermetic.
-pub fn fetch_url(url: &str) -> Result<String> {
-    let lower = url.to_ascii_lowercase();
-    if !(lower.starts_with("https://") || is_loopback_http(url)) {
-        return Err(LocusError::msg(format!(
-            "refusing to fetch non-HTTPS marketplace URL: {url}"
-        )));
-    }
+/// No redirects: even an HTTPS/loopback index cannot redirect to another host.
+pub fn fetch_url(raw: &str) -> Result<String> {
+    let parsed = marketplace_url(raw)?;
     let agent = ureq::AgentBuilder::new()
+        .redirects(0)
         .timeout(Duration::from_secs(20))
         .user_agent(&format!("locus-marketplace/{}", crate::VERSION))
         .build();
-    let resp = agent
-        .get(url)
+    let response = agent
+        .get(parsed.as_str())
         .call()
-        .map_err(|e| LocusError::msg(format!("fetch {url}: {e}")))?;
-    if !(200..300).contains(&resp.status()) {
-        return Err(LocusError::msg(format!(
-            "fetch {url}: HTTP {}",
-            resp.status()
-        )));
+        .map_err(|_| LocusError::msg("marketplace fetch failed"))?;
+    if !(200..300).contains(&response.status()) {
+        return Err(LocusError::msg(
+            "marketplace redirects or non-success responses are refused",
+        ));
     }
-    resp.into_string()
-        .map_err(|e| LocusError::msg(format!("read {url}: {e}")))
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take((MAX_COMMUNITY_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| LocusError::msg("marketplace response read failed"))?;
+    if bytes.len() > MAX_COMMUNITY_BYTES {
+        return Err(LocusError::msg("marketplace response exceeds 1 MiB"));
+    }
+    String::from_utf8(bytes).map_err(|_| LocusError::msg("marketplace response is not UTF-8"))
 }
 
 /// Fetch and parse a community index.
 pub fn fetch_index(url: &str) -> Result<CommunityIndex> {
     let body = fetch_url(url)?;
-    serde_json::from_str(&body).map_err(|e| LocusError::msg(format!("parse index {url}: {e}")))
+    let index: CommunityIndex =
+        serde_json::from_str(&body).map_err(|_| LocusError::msg("invalid community index JSON"))?;
+    if index.version != 1 {
+        return Err(LocusError::msg("unsupported community index schema"));
+    }
+    Ok(index)
 }
 
 /// Validate an index entry's shape before install (fail fast on garbage).
@@ -236,13 +398,10 @@ pub fn validate_index_entry(entry: &CommunityIndexEntry) -> Result<()> {
             entry.id
         )));
     }
-    let lower = entry.manifest_url.to_ascii_lowercase();
-    if !(lower.starts_with("https://") || is_loopback_http(&entry.manifest_url)) {
-        return Err(LocusError::msg(format!(
-            "index entry `{}` manifest_url must be HTTPS",
-            entry.id
-        )));
+    if !valid_adapter_id(&entry.id) {
+        return Err(LocusError::msg("invalid community index adapter id"));
     }
+    marketplace_url(&entry.manifest_url)?;
     Ok(())
 }
 
@@ -297,7 +456,7 @@ pub struct InstalledAdapter {
     pub publisher: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signed_by: Option<String>,
-    /// sha256 of the canonical entry material at install time.
+    /// sha256 of the domain-separated full envelope at install time.
     pub digest: String,
     /// Tool surface at install/update time (widening needs re-approval).
     #[serde(default)]
@@ -326,8 +485,8 @@ pub fn load_installed(home: &Path) -> Result<Vec<InstalledAdapter>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| LocusError::msg(format!("read {}: {e}", path.display())))?;
+    let text = String::from_utf8(read_bounded_file(&path)?)
+        .map_err(|_| LocusError::msg("invalid community metadata text"))?;
     let file: InstalledFile = toml::from_str(&text)
         .map_err(|e| LocusError::msg(format!("parse {}: {e}", path.display())))?;
     Ok(file.adapter)
@@ -342,19 +501,49 @@ fn save_installed(home: &Path, adapters: &[InstalledAdapter]) -> Result<()> {
     })
     .map_err(|e| LocusError::msg(format!("serialize install ledger: {e}")))?;
     let path = installed_path(home);
-    std::fs::write(&path, text)
-        .map_err(|e| LocusError::msg(format!("write {}: {e}", path.display())))?;
-    restrict_0600(&path);
+    atomic_metadata_write(&path, text.as_bytes())?;
     Ok(())
 }
 
 /// Load one installed community manifest.
 pub fn load_installed_manifest(home: &Path, id: &str) -> Result<CommunityAdapterManifest> {
+    let keys = crate::adapter_trust::load_merged_trust_keys(home);
+    load_installed_manifest_with_keys(home, id, &keys)
+}
+
+pub fn load_installed_manifest_with_keys(
+    home: &Path,
+    id: &str,
+    keys: &[RegistryTrustKey],
+) -> Result<CommunityAdapterManifest> {
+    if !valid_adapter_id(id) {
+        return Err(LocusError::msg("invalid installed adapter id"));
+    }
     let path = manifest_path(home, id);
-    let text = std::fs::read_to_string(&path)
-        .map_err(|_| LocusError::msg(format!("adapter `{id}` is not installed")))?;
-    serde_json::from_str(&text)
-        .map_err(|e| LocusError::msg(format!("parse installed adapter `{id}`: {e}")))
+    let bytes = read_bounded_file(&path)?;
+    let manifest = parse_community_manifest(&bytes)?;
+    verify_community_manifest_with_keys(&manifest, keys)?;
+    let ledger = load_installed(home)?;
+    let mut entries = ledger.iter().filter(|record| record.id == id);
+    let record = entries
+        .next()
+        .ok_or_else(|| LocusError::msg("community adapter ledger is missing"))?;
+    let mut tools = manifest.entry.tools.clone();
+    tools.sort();
+    tools.dedup();
+    if entries.next().is_some()
+        || manifest.entry.id != id
+        || record.digest != community_manifest_digest(&manifest)
+        || record.version != manifest.version
+        || record.publisher != manifest.publisher
+        || record.signed_by != manifest.entry.signed_by
+        || record.tools != tools
+    {
+        return Err(LocusError::msg(
+            "installed community envelope does not match its ledger",
+        ));
+    }
+    Ok(manifest)
 }
 
 /// All installed community manifests (for `locus adapter list` merging).
@@ -417,17 +606,8 @@ fn install_adapter_inner(
         )));
     }
 
-    // 1. Signature verification against the operator's trust store (fail closed).
-    let report = verify_entry_with_keys(&manifest.entry, trust_keys);
-    match report.status {
-        EntryVerifyStatus::Valid => {}
-        other => {
-            return Err(LocusError::msg(format!(
-                "refusing to install `{id}`: manifest signature {}",
-                other.as_str(),
-            )));
-        }
-    }
+    // 1. Verify every installable field before any persistence.
+    verify_community_manifest_with_keys(manifest, trust_keys)?;
     let signed_by = manifest.entry.signed_by.clone();
 
     // 2. Tool-surface diff vs the installed record.
@@ -469,16 +649,14 @@ fn install_adapter_inner(
     let body = serde_json::to_string_pretty(manifest)
         .map_err(|e| LocusError::msg(format!("serialize manifest: {e}")))?;
     let mpath = manifest_path(home, id);
-    std::fs::write(&mpath, body)
-        .map_err(|e| LocusError::msg(format!("write {}: {e}", mpath.display())))?;
-    restrict_0600(&mpath);
+    atomic_metadata_write(&mpath, body.as_bytes())?;
 
     let record = InstalledAdapter {
         id: id.to_string(),
         version: manifest.version.clone(),
         publisher: manifest.publisher.clone(),
         signed_by,
-        digest: entry_digest(&manifest.entry),
+        digest: community_manifest_digest(manifest),
         tools: new_tools,
         installed_at: now.unwrap_or_else(current_timestamp),
     };
@@ -527,8 +705,7 @@ pub fn uninstall_adapter(home: &Path, id: &str) -> Result<bool> {
 pub fn fetch_manifest(entry: &CommunityIndexEntry) -> Result<CommunityAdapterManifest> {
     validate_index_entry(entry)?;
     let body = fetch_url(&entry.manifest_url)?;
-    let manifest: CommunityAdapterManifest = serde_json::from_str(&body)
-        .map_err(|e| LocusError::msg(format!("parse manifest for `{}`: {e}", entry.id)))?;
+    let manifest = parse_community_manifest(body.as_bytes())?;
     if manifest.entry.id.trim() != entry.id.trim() {
         return Err(LocusError::msg(format!(
             "manifest id mismatch: index says `{}` but manifest says `{}`",
@@ -556,7 +733,9 @@ pub fn fetch_manifest(entry: &CommunityIndexEntry) -> Result<CommunityAdapterMan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter_registry::{ed25519_public_key_b64, sign_entry_ed25519, RegistryTrustKey};
+    use crate::adapter_registry::{
+        ed25519_public_key_b64, sign_entry_ed25519, sign_entry_material_ed25519, RegistryTrustKey,
+    };
     use ed25519_dalek::SigningKey;
 
     fn tmp_home(name: &str) -> PathBuf {
@@ -576,7 +755,7 @@ mod tests {
     }
 
     fn signed_manifest(id: &str, tools: &[&str], signing: &SigningKey) -> CommunityAdapterManifest {
-        let mut entry = AdapterManifestEntry {
+        let entry = AdapterManifestEntry {
             id: id.to_string(),
             name: format!("{id} adapter"),
             status: "community".to_string(),
@@ -587,13 +766,10 @@ mod tests {
             destructive_tools: vec![],
             description: format!("Community adapter for {id}"),
             signature: None,
-            signed_by: None,
+            signed_by: Some("test-publisher".to_string()),
         };
-        let sig = sign_entry_ed25519(&entry, signing);
-        entry.signature = Some(sig);
-        entry.signed_by = Some("test-publisher".to_string());
-        CommunityAdapterManifest {
-            manifest_version: 1,
+        let mut manifest = CommunityAdapterManifest {
+            manifest_version: COMMUNITY_MANIFEST_VERSION,
             entry,
             upstream: Some(UpstreamSpec {
                 command: "npx".to_string(),
@@ -603,7 +779,12 @@ mod tests {
             credential_env: Some(format!("{}_API_KEY", id.to_ascii_uppercase())),
             publisher: "Test Publisher".to_string(),
             version: "1.2.0".to_string(),
-        }
+        };
+        manifest.entry.signature = Some(sign_entry_material_ed25519(
+            &manifest.signing_material(),
+            signing,
+        ));
+        manifest
     }
 
     #[test]
@@ -638,7 +819,9 @@ mod tests {
         assert_eq!(recs[0].signed_by.as_deref(), Some("test-publisher"));
         // Manifest persisted with mode-safe write; ledger has digest.
         assert!(!recs[0].digest.is_empty());
-        let loaded = load_installed_manifest(&home, "linear").unwrap();
+        let loaded =
+            load_installed_manifest_with_keys(&home, "linear", std::slice::from_ref(&trust))
+                .unwrap();
         assert_eq!(loaded.credential_env.as_deref(), Some("LINEAR_API_KEY"));
     }
 
@@ -648,7 +831,7 @@ mod tests {
         let (signing, trust) = test_keypair();
         let mut m = signed_manifest("../evil", &["x"], &signing);
         // sign_entry covers the id, so re-sign after mutating.
-        m.entry.signature = Some(sign_entry_ed25519(&m.entry, &signing));
+        m.entry.signature = Some(sign_entry_material_ed25519(&m.signing_material(), &signing));
         assert!(install_adapter(&home, &m, &[trust], true).is_err());
         assert!(!home.join(ADAPTERS_DIR).join("evil.json").exists());
     }
@@ -689,13 +872,13 @@ mod tests {
         let (signing, trust) = test_keypair();
         install_adapter(
             &home,
-            &signed_manifest("figma", &["figma.file"], &signing),
+            &signed_manifest("customfigma", &["customfigma.file"], &signing),
             &[trust],
             true,
         )
         .unwrap();
-        assert!(uninstall_adapter(&home, "figma").unwrap());
-        assert!(!uninstall_adapter(&home, "figma").unwrap());
+        assert!(uninstall_adapter(&home, "customfigma").unwrap());
+        assert!(!uninstall_adapter(&home, "customfigma").unwrap());
         assert!(load_installed(&home).unwrap().is_empty());
     }
 
@@ -738,5 +921,212 @@ mod tests {
         assert!(validate_index_entry(&e).is_err());
         e.manifest_url = String::new();
         assert!(validate_index_entry(&e).is_err());
+    }
+    #[test]
+    fn full_envelope_rejects_each_executable_and_authority_field_tamper() {
+        let (signing, trust) = test_keypair();
+        let good = signed_manifest("linear", &["linear.read", "linear.write"], &signing);
+        let mut mutations = Vec::new();
+        macro_rules! tamper {
+            ($statement:expr) => {{
+                let mut m = good.clone();
+                $statement(&mut m);
+                mutations.push(m);
+            }};
+        }
+        tamper!(
+            |m: &mut CommunityAdapterManifest| m.upstream.as_mut().unwrap().command =
+                "attacker".into()
+        );
+        tamper!(|m: &mut CommunityAdapterManifest| m.upstream.as_mut().unwrap().args.reverse());
+        tamper!(
+            |m: &mut CommunityAdapterManifest| m.upstream.as_mut().unwrap().recipe =
+                Some("attacker".into())
+        );
+        tamper!(
+            |m: &mut CommunityAdapterManifest| m.upstream.as_mut().unwrap().resolve_secrets =
+                !m.upstream.as_ref().unwrap().resolve_secrets
+        );
+        tamper!(
+            |m: &mut CommunityAdapterManifest| m.upstream.as_mut().unwrap().sandbox =
+                Some(!m.upstream.as_ref().unwrap().sandbox.unwrap_or(false))
+        );
+        tamper!(|m: &mut CommunityAdapterManifest| m
+            .upstream
+            .as_mut()
+            .unwrap()
+            .sandbox_no_network =
+            !m.upstream.as_ref().unwrap().sandbox_no_network);
+        tamper!(|m: &mut CommunityAdapterManifest| m.credential_env = Some("OTHER_KEY".into()));
+        tamper!(|m: &mut CommunityAdapterManifest| m.publisher.push('x'));
+        tamper!(|m: &mut CommunityAdapterManifest| m.version.push('x'));
+        tamper!(|m: &mut CommunityAdapterManifest| m.entry.signed_by = Some("another-key".into()));
+        tamper!(|m: &mut CommunityAdapterManifest| m.entry.tools.push("linear.admin".into()));
+        tamper!(|m: &mut CommunityAdapterManifest| m
+            .entry
+            .destructive_tools
+            .push("linear.write".into()));
+        tamper!(|m: &mut CommunityAdapterManifest| m.entry.frozen_selectors.clear());
+        for mutation in mutations {
+            assert!(
+                verify_community_manifest_with_keys(&mutation, std::slice::from_ref(&trust))
+                    .is_err()
+            );
+        }
+        verify_community_manifest_with_keys(&good, &[trust]).unwrap();
+    }
+
+    #[test]
+    fn legacy_partial_signatures_and_builtin_ids_are_refused() {
+        let (signing, trust) = test_keypair();
+        let mut legacy = signed_manifest("linear", &["linear.read"], &signing);
+        legacy.entry.signature = Some(sign_entry_ed25519(&legacy.entry, &signing));
+        assert!(
+            verify_community_manifest_with_keys(&legacy, std::slice::from_ref(&trust)).is_err()
+        );
+        legacy.manifest_version = 1;
+        assert!(
+            verify_community_manifest_with_keys(&legacy, std::slice::from_ref(&trust)).is_err()
+        );
+        let builtin = signed_manifest("github", &["github.scope"], &signing);
+        assert!(verify_community_manifest_with_keys(&builtin, &[trust]).is_err());
+    }
+
+    #[test]
+    fn envelope_encoding_has_no_joined_array_or_field_collision() {
+        let (signing, _) = test_keypair();
+        let one = signed_manifest("linear", &["a,b"], &signing);
+        let two = signed_manifest("linear", &["a", "b"], &signing);
+        assert_ne!(one.signing_material(), two.signing_material());
+        let mut left = one.clone();
+        left.publisher = "a|b".into();
+        left.version = "c".into();
+        let mut right = one;
+        right.publisher = "a".into();
+        right.version = "b|c".into();
+        assert_ne!(left.signing_material(), right.signing_material());
+    }
+
+    #[test]
+    fn installed_envelope_rechecks_current_trust_and_ledger() {
+        let home = tmp_home("installed-recheck");
+        let (signing, trust) = test_keypair();
+        let good = signed_manifest("linear", &["linear.read"], &signing);
+        install_adapter(&home, &good, std::slice::from_ref(&trust), true).unwrap();
+        assert!(load_installed_manifest_with_keys(&home, "linear", &[]).is_err());
+        let mut tampered = good.clone();
+        tampered.upstream.as_mut().unwrap().command = "attacker".into();
+        std::fs::write(
+            manifest_path(&home, "linear"),
+            serde_json::to_vec(&tampered).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            load_installed_manifest_with_keys(&home, "linear", std::slice::from_ref(&trust))
+                .is_err()
+        );
+        tampered.entry.signature = Some(sign_entry_material_ed25519(
+            &tampered.signing_material(),
+            &signing,
+        ));
+        std::fs::write(
+            manifest_path(&home, "linear"),
+            serde_json::to_vec(&tampered).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            load_installed_manifest_with_keys(&home, "linear", &[trust]).is_err(),
+            "valid signature cannot replace ledger-bound bytes silently"
+        );
+    }
+
+    #[test]
+    fn parsed_urls_reject_host_prefix_and_userinfo_lookalikes() {
+        for url in [
+            "http://localhost.attacker.example/index",
+            "http://127.0.0.1.attacker.example/index",
+            "http://localhost@attacker.example/index",
+            "https://user:pass@example.com/index",
+            "file:///tmp/index",
+            "https://example.com/index#fragment",
+        ] {
+            assert!(marketplace_url(url).is_err(), "{url}");
+        }
+        for url in [
+            "http://localhost:1234/index",
+            "http://127.0.0.1:1234/index",
+            "http://[::1]:1234/index",
+            "https://example.com/index",
+        ] {
+            assert!(marketplace_url(url).is_ok());
+        }
+    }
+
+    #[test]
+    fn actual_fetch_refuses_loopback_redirect_without_contacting_destination() {
+        use std::net::TcpListener;
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/index", origin.local_addr().unwrap());
+        let target = destination.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            let mut request = [0; 4096];
+            let count = stream.read(&mut request).unwrap();
+            assert!(count > 0);
+            write!(stream, "HTTP/1.1 302 Found\r\nLocation: http://{target}/redirected\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        assert!(fetch_url(&url).is_err());
+        server.join().unwrap();
+        assert!(
+            matches!(destination.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn unknown_runtime_fields_are_not_silently_accepted() {
+        let (signing, _) = test_keypair();
+        let good = signed_manifest("linear", &["linear.read"], &signing);
+        let mut value = serde_json::to_value(good).unwrap();
+        value["upstream"]["env"] = serde_json::json!({"INVENTED":"value"});
+        assert!(parse_community_manifest(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn installed_manifest_symlinks_are_refused() {
+        let home = tmp_home("no-follow");
+        let (signing, trust) = test_keypair();
+        let manifest = signed_manifest("linear", &["linear.read"], &signing);
+        install_adapter(&home, &manifest, std::slice::from_ref(&trust), true).unwrap();
+        let path = manifest_path(&home, "linear");
+        let outside = home.join("outside.json");
+        std::fs::rename(&path, &outside).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(load_installed_manifest_with_keys(&home, "linear", &[trust]).is_err());
+    }
+    #[test]
+    fn weak_ed25519_key_cannot_authorize_an_arbitrary_executable_envelope() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+        let (signing, _) = test_keypair();
+        let mut manifest = signed_manifest("linear", &["linear.read"], &signing);
+        let mut identity = [0u8; 32];
+        identity[0] = 1;
+        let weak = VerifyingKey::from_bytes(&identity).unwrap();
+        assert!(weak.is_weak());
+        let mut forged = [0u8; 64];
+        forged[0] = 1;
+        manifest.entry.signature = Some(format!("ed25519:{}", STANDARD.encode(forged)));
+        let key = RegistryTrustKey::ed25519_public("test-publisher", STANDARD.encode(identity));
+        // Ordinary Dalek verification accepts this forgery for any material.
+        assert!(weak
+            .verify(
+                manifest.signing_material().as_bytes(),
+                &Signature::from_bytes(&forged)
+            )
+            .is_ok());
+        assert!(key.ed25519_verifying_key().is_err());
+        assert!(verify_community_manifest_with_keys(&manifest, &[key]).is_err());
     }
 }

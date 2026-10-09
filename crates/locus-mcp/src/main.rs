@@ -3516,6 +3516,25 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
         principal: principal_owned.as_deref(),
     };
 
+    // Signed community admission precedes credentials, worker startup and routing.
+    let args = if let Some(provider) = binding
+        .providers
+        .iter()
+        .find(|provider| tool_name.starts_with(&format!("{}.", provider.provider)))
+    {
+        match provider.community_tool_args(&binding.policy, tool_name, &args) {
+            Ok(scoped) => scoped,
+            Err(error) => {
+                return Ok(tool_text(
+                    json!({"error":"community_admission_denied", "detail":error.to_string(), "tool":name}),
+                    true,
+                ))
+            }
+        }
+    } else {
+        args
+    };
+
     let synthetic = tools_for_binding(binding);
     let is_synthetic = synthetic.iter().any(|t| t.name == tool_name);
 

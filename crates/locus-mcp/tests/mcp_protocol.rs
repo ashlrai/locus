@@ -2524,3 +2524,91 @@ fn stdio_env_session_immune_to_active_json_rewrites() {
     // Observability: the anchor records its non-active backing.
     assert_eq!(body["mcp_anchor"]["anchored_alias"], "acme", "{body}");
 }
+
+#[test]
+fn community_tool_admission_precedes_credential_resolution_and_worker_start() {
+    use locus_core::adapter_registry::{
+        sign_entry_material, AdapterManifestEntry, RegistryTrustKey,
+    };
+    use locus_core::marketplace::{CommunityAdapterManifest, COMMUNITY_MANIFEST_VERSION};
+    let dir = tempdir().unwrap();
+    let marker = dir.path().join("community-started");
+    // Synthetic fixture key only; no operator key or provider is accessed.
+    let secret = "07".repeat(32);
+    let key = RegistryTrustKey::hmac_sha256("community-fixture", &secret);
+    let trust = format!("community-fixture:hmac-sha256:{secret}");
+    let mut manifest = CommunityAdapterManifest {
+        manifest_version: COMMUNITY_MANIFEST_VERSION,
+        publisher: "inert test fixture".into(), version: "1.0.0".into(),
+        credential_env: Some("LINEAR_API_KEY".into()),
+        upstream: Some(UpstreamSpec::new("python3").with_args([
+            "-u".to_owned(), "-c".to_owned(),
+            "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('started'); time.sleep(30)".to_owned(),
+            marker.display().to_string(),
+        ]).resolve_secrets(true)),
+        entry: AdapterManifestEntry {
+            id: "linear".into(), name:"inert community".into(), status:"community".into(),
+            synthetic:false, capabilities:vec![], frozen_selectors:vec!["project_ref".into()],
+            tools:vec!["linear.read".into(), "linear.write".into()], destructive_tools:vec!["linear.write".into()],
+            description:String::new(), signed_by:Some(key.id.clone()), signature:None,
+        },
+    };
+    manifest.entry.signature =
+        Some(sign_entry_material(&manifest.signing_material(), &key).unwrap());
+    let mut upstream = manifest.upstream.clone().unwrap();
+    upstream.community_adapter = Some(Box::new(manifest));
+    let store = Store::open(dir.path()).unwrap();
+    let binding = Binding::from_body(BindingBody {
+        id: "bnd_community".into(),
+        alias: "community".into(),
+        tenant: "fixture".into(),
+        principal: None,
+        description: None,
+        policy: Policy::default(),
+        providers: vec![ProviderBinding {
+            provider: "linear".into(),
+            account: "fixture".into(),
+            credential_ref: "env:COMMUNITY_FIXTURE_KEY".into(),
+            scope: Scope {
+                project_ref: Some("frozen-project".into()),
+                read_only: Some(true),
+                ..Default::default()
+            },
+            upstream: Some(upstream),
+        }],
+    });
+    store.save_binding(&binding).unwrap();
+    store
+        .pin("community", dir.path(), Some("local-control".into()), false)
+        .unwrap();
+    let mut client = McpClient::spawn_opts(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[
+            ("LOCUS_ADAPTER_TRUST_KEYS", &trust),
+            ("COMMUNITY_FIXTURE_KEY", "synthetic-community-value"),
+        ],
+    );
+    handshake(&mut client);
+    for (tool, arguments) in [
+        ("linear.admin", json!({"project_ref":"frozen-project"})),
+        ("linear.write", json!({"project_ref":"frozen-project"})),
+        (
+            "linear.read",
+            json!({"nested":{"project_ref":"wrong-project"}}),
+        ),
+    ] {
+        let response = client.request("tools/call", json!({"name":tool,"arguments":arguments}));
+        let (text, is_error) = McpClient::tool_text(&response);
+        assert!(
+            is_error && text.contains("community_admission_denied"),
+            "{text}"
+        );
+        assert!(!text.contains("synthetic-community-value"));
+        assert!(
+            !marker.exists(),
+            "denied request launched a credential-bearing worker"
+        );
+    }
+}
