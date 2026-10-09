@@ -1,9 +1,10 @@
 # DESIGN (proposal): guided multi-account binding setup wizard
 
-**Status:** implemented — `locus onboard` (v0.6.0). This doc is now the
-as-built record; product decisions below.
+**Status:** proposal for a future `locus onboard` command. This phase-one
+checkout does not contain its CLI implementation. Cargo and npm versions are
+still 0.5.0; implementation, verification and a versioned release are separate.
 
-**Product decisions (defaults chosen; alternatives noted):**
+**Proposed defaults (subject to implementation and review):**
 - **Ambient import:** detect-only, never auto-import. Every candidate is an
   explicit operator accept/reject; `.mcp.json`/ambient configs become
   *suggestions* that still go through credential-ref wiring (refs only).
@@ -39,9 +40,11 @@ An interactive, re-runnable, TTY-first wizard (non-interactive `--yes` /
 2. **Name the tenants.** For each candidate, ask: alias (`personal`, `acme`,
    `acme-ro`), tenant label, and role (full vs read-only). Suggest the
    `*-ro` read-only pair for client engagements (firm-mode pattern).
-3. **Wire credential refs.** For each provider, choose `phm:NAME` (prompt for
-   the Phantom secret name; verify it resolves with a dry-run reveal) or
-   `env:VAR`. Enforce the existing rule: bare names, raw tokens, and empty
+3. **Wire credential refs.** Use `env:VAR` with an explicitly supplied
+   provider credential. `phm:NAME` is a compatibility reference, not a working
+   Secrets bridge: current Phantom Secrets denies agent-readable reveal, and
+   no separately approved credential bridge is active. Never probe values
+   through reveal or invent a dry-run reveal command. Bare names, raw tokens, and empty
    refs are rejected at save — the wizard must make it *harder* to paste a
    token than to pick a ref. Unsafe values are never echoed.
 4. **Freeze scopes.** Where the provider supports it, capture frozen selectors

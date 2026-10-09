@@ -26,7 +26,7 @@ Pin a client — every CLI command, MCP tool, and the **local dashboard** is har
 | 1Password `op run` | Secret references resolved for one command | That command |
 | **Locus** `run` / `exec` / `pin` | A sealed session bound to one binding | That command or session. Ambient `GH_TOKEN`, `AWS_*`, `SUPABASE_*`… are scrubbed, a directory's `.locus.toml` can refuse other bindings, and `locus-mcp` exposes only the pinned binding's tools |
 
-These tools compose: binding credentials can be Phantom (`phm:`) or environment (`env:`) references. Try it in a minute with the executable [recipes](./examples/recipes/) (two clients, a directory allowlist, a CI session).
+Use explicitly supplied environment (`env:`) credential references. `phm:` remains a compatibility reference; current Phantom Secrets does not provide an agent-readable credential bridge. Try it in a minute with the executable [recipes](./examples/recipes/) (two clients, a directory allowlist, a CI session).
 
 ---
 
@@ -93,30 +93,13 @@ locus workspace --default acme --allow acme,acme-ro --require-pin
 locus pin          # uses .locus.toml
 ```
 
-### Ten minutes to wrong-account-impossible
+### Planned guided setup and adapter discovery
 
-New here? The guided wizard takes you from zero to multi-tenant in about ten
-minutes — it detects the ambient identity on your machine, walks you through
-naming tenants, wiring credential refs, freezing scopes, and provisioning
-workspaces, then proves isolation with `locus doctor` and a live scrub demo:
-
-```bash
-locus onboard --detect-only   # preview what the wizard sees (nothing is auto-pinned)
-locus onboard                 # interactive wizard (re-runnable, resumable)
-locus onboard --yes --json    # scripted / CI: NDJSON events per step
-```
-
-Need a provider Locus doesn't ship built-in? The community adapter
-marketplace installs signed, declarative adapters from any registry index —
-verified against *your* trust store, never the server's honesty:
-
-```bash
-locus adapter registry index add https://adapters.example.com/index.json
-locus adapter trust add --id example-publisher --ed25519-pub <base64-pubkey>
-locus adapter search linear
-locus adapter install linear
-locus binding add --provider linear --from-adapter linear …   # upstream MCP spec included
-```
+[Guided onboarding](./DESIGN-onboarding-wizard.md) and the
+[adapter marketplace](./DESIGN-adapter-marketplace.md) are design proposals
+in this phase-one checkout. Use the existing [onboarding walkthrough](./docs/onboarding.md)
+and built-in adapters until their CLI implementations are integrated and tested.
+The current Cargo and npm version remains 0.5.0; these proposals do not announce a new release.
 
 ### Shell prompt
 
@@ -142,7 +125,7 @@ locus pin acme
         │
         └─► locus exec -- <cmd>
               ├─ scrubs ambient AWS_PROFILE / GH_TOKEN / SUPABASE_* / …
-              ├─ resolves phm: / env: credential_refs into provider env vars
+              ├─ resolves supported env: credential_refs into provider env vars
               ├─ private GH_CONFIG_DIR + AWS_* under ~/.locus/workers/<session>/
               └─ never injects other bindings' providers
 ```
@@ -151,7 +134,7 @@ locus pin acme
 
 | Ref | Resolution |
 |-----|------------|
-| `phm:NAME` | `phantom reveal --yes NAME` (values only in child env) |
+| `phm:NAME` | Unsupported integration with current Phantom Secrets; no reveal bypass or ambient fallback |
 | `env:VAR` | parent process env (CI / tests) |
 
 `test:` credentials are compiled-test-only and are always rejected by production binaries, regardless of environment.
@@ -397,7 +380,7 @@ approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
 - Policy: globs + structured `[[rules]]`, `require_approval`, dual-control (2 principals).
 - Upstream MCP workers start only after an authorized provider call. `tools/list` is discovery-only, multi-provider startup rolls back on partial failure, and each worker receives only its named provider's resolved credential keys.
-- Drift freeze + hub heartbeat: `locus watch [--json] [--require-ok]` re-runs session verify each tick; doctor re-pin if binding changes under a session.
+- Drift freeze + hub heartbeat: `locus watch [--json] [--require-ok]` re-runs session verify each tick; a changed binding requires an explicit operator re-pin. Doctor only reports findings.
 
 Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md §9](./DESIGN.md).
 

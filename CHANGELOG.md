@@ -9,35 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`locus onboard`** — guided multi-account binding setup wizard
-  (`DESIGN-onboarding-wizard.md`, now as-built): detects ambient identity
-  (`gh auth status` accounts, `~/.aws/config` profiles, well-known env vars,
-  `~/.ashlr/config.json`, `.mcp.json`) as explicit opt-in candidates — never
-  auto-pins; walks through tenant naming (with optional `*-ro` read-only
-  pairs), credential-ref wiring (`phm:`/`env:` only, raw tokens rejected,
-  dry-run resolution check), scope freezing ("denied, not redirected"),
-  `.locus.toml` provisioning, then verifies with `locus doctor` and a live
-  ambient-identity scrub demo (temporary run session — pin untouched).
-  Re-runnable/resumable via `$LOCUS_HOME/onboard-plan.json` (refs only);
-  `--yes`/`--json` (NDJSON events per step) for scripts, CI, and agent
-  harnesses. Refuses to run without the local control boundary (step zero).
-- **Community adapter marketplace** (`DESIGN-adapter-marketplace.md`, now
-  as-built): signed, registry-agnostic adapter distribution built on the
-  existing registry trust machinery. `locus adapter registry index
-  add|list|remove <https-url>` registers static index sources;
-  `locus adapter search <query>` discovers; `locus adapter install <id>`
-  fetches the manifest and verifies the publisher's ed25519/HMAC signature
-  against the operator's trust store — fail-closed on unsigned, unknown-key,
-  invalid, or tampered manifests. Tool-surface widening on update requires
-  explicit approval; narrowing is always allowed. Installed adapters live in
-  `$LOCUS_HOME/adapters/` (0600) with an install ledger, appear in
-  `locus adapter list`, and their upstream MCP spec flows into bindings via
-  `locus binding add --provider <id> --from-adapter <id>`. Declarative
-  manifests only — no third-party code execution. No default index is
-  hardcoded; no monetization (ecosystem accelerant).
-- **`locus binding add --from-adapter <id>`** — fill a new binding's upstream
-  MCP server spec from an installed community adapter (fail-closed on
-  provider/id mismatch).
+- Guided onboarding and adapter marketplace design proposals. Their runtime
+  and CLI implementations are not included in this phase-one checkout;
+  current Cargo and npm versions remain 0.5.0.
 
 ### Fixed
 
@@ -45,18 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `Recipes` steps invoked `node --test npm/test` and
   `node --test examples/recipes` (directory form), which the Node test runner
   rejects (`Cannot find module …`). They now address the test files directly
-  (`npm/test/wrappers.test.js`, `examples/recipes/run.test.mjs`).
+  (`npm/test/*.test.js`, `examples/recipes/*.test.mjs`), including installer
+  lifecycle tests when present.
 - **Release publishes `.sha256` sidecars** — `release.yml` now writes a
   `sha256sum`-format sidecar next to each `locus-<target>.tar.gz` (via
-  `shasum -a 256` on macOS runners) and attaches it to the GitHub release, so
-  the npm wrappers verify downloads instead of printing
-  "installing without verification" (closes #49).
+  `shasum -a 256` on macOS runners), carries it through artifact upload and
+  release collection, and verifies archive/sidecar pairs before publication. These
+  unsigned sidecars provide integrity metadata, not publisher authentication;
+  npm wrapper trust still requires independently verified package-owned digest
+  pins.
 
 ### Changed
 
 - **ashlr-hub → Phantom rename** — the hub was renamed to Phantom (same repo).
-  `integrations/ashlr-hub/` is now `integrations/phantom/`; prose and path
-  references in docs, scripts, and help text updated. Historical changelog
+  `integrations/phantom/` is added alongside the existing compatibility directory
+  `integrations/ashlr-hub/`; docs and scripts use the new path. CLI help text
+  still needs its separately owned follow-up. Historical changelog
   entries, quoted PR URLs, and the runtime `LOCUS_CLIENT="ashlr-hub"`
   identifier are intentionally unchanged.
 
@@ -66,9 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the account-separation guarantees, per-job `ci mint` flow, pre-mutate gate,
   and failure modes.
 - **`DESIGN-onboarding-wizard.md`, `DESIGN-adapter-marketplace.md`** —
-  design docs, now as-built records: the wizard shipped as `locus onboard`
-  and the marketplace as `locus adapter search/install/update/uninstall`
-  (see Added above).
+  design proposals for future guided setup and adapter discovery. They do
+  not establish a shipped command or release version.
 
 ### Fixed
 
