@@ -45,7 +45,7 @@ jobs:
           node --check npm/bin/locus.js
           node --check npm-mcp/install.js
           node --check npm-mcp/bin/locus-mcp.js
-          node --test npm/test
+          node --test npm/test/*.test.js
           ruby -c integrations/homebrew/Formula/locus.rb
 
       - name: Clippy
