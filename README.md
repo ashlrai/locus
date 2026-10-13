@@ -1,21 +1,39 @@
 # Locus
 
 [![CI](https://github.com/ashlrai/locus/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
+[![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?label=npm%20locus-cli)](https://www.npmjs.com/package/locus-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](./rust-toolchain.toml)
-[![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?label=npm%20locus-cli)](https://www.npmjs.com/package/locus-cli)
 
-**AI-native identity plane for coding agents.**  
-**Wrong account, impossible.**
+**Your coding agent can't act as the wrong account.** Pin a client, and every CLI command, MCP tool and agent session is sealed to that identity until you re-pin. No more ambient `gh auth`, a shared Supabase token or "whichever Vercel team was last".
 
-Pin a client — every CLI command, MCP tool, and the **local dashboard** is hard-scoped to that binding until you re-pin. Agents inherit a sealed session, not ambient `gh auth` / last Vercel team.
+![locus quickstart pins a sample binding; locus whoami shows the sealed session and its scoped providers](docs/assets/locus-demo.gif)
 
-| Product | Question it answers |
-|---------|---------------------|
-| **[Phantom](https://phm.dev)** | Can this secret enter the model? |
-| **Locus** | As whom, against which tenant, right now? |
+## 30-second start
 
-> Agents inherit ambient identity: global `gh auth`, one Supabase MCP token, last Vercel team. Contract work makes that lethal. Locus makes wrong-account action **mechanically impossible** — not merely discouraged. AI-native (`locus agent`, MCP resources/prompts), hub-native (`agent report` · `REQUIRED_SERVERS`), and operator-visible (`locus dashboard` · `forensics` · `goal status`).
+```bash
+brew install ashlrai/tap/locus          # or: npm i -g locus-cli @ashlrai/locus-mcp
+locus quickstart                        # sample bindings, pin, whoami, doctor
+eval "$(locus hook zsh)"                # or bash; exports the control capability
+locus whoami                            # who your agents are acting as, right now
+```
+
+## Connect your agent (MCP)
+
+`locus agent setup --apply` writes the configs for every client it finds. By hand:
+
+```bash
+claude mcp add locus -- locus-mcp       # Claude Code
+codex mcp add locus -- locus-mcp        # Codex
+```
+
+Cursor (`~/.cursor/mcp.json`):
+
+```json
+{ "mcpServers": { "locus": { "command": "locus-mcp" } } }
+```
+
+`locus-mcp` exposes only the pinned binding's tools, and never returns credential values.
 
 ### How it compares
 
@@ -30,7 +48,7 @@ These tools compose: binding credentials can be Phantom (`phm:`) or environment 
 
 ---
 
-## Install
+## Install options
 
 ```bash
 # Homebrew (tap live) — installs locus + locus-mcp
@@ -59,7 +77,7 @@ Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
 
 ---
 
-## Quick start
+## More of the CLI
 
 ```bash
 # First 60 seconds
