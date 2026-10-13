@@ -403,9 +403,37 @@ async function ensureBinary() {
   }
 }
 
+// Session authority is anchored to the *parent* process of `locus` (the user's
+// shell). When this Node wrapper sits in between, the anchor binds to a
+// short-lived node process, so `locus quickstart` then `locus enter <alias>`
+// fails with "session authority generation is stale". On POSIX we therefore
+// replace this wrapper with a symlink to the native binary, so the shell runs
+// locus directly. Best-effort: on any failure the wrapper keeps working.
+const AUTHORITY_COMMANDS = new Set(["quickstart", "pin", "enter", "init", "leave"]);
+
+function linkNativeBin(binary, target = __filename) {
+  if (process.platform === "win32" || process.env.LOCUS_NPM_NO_LINK) return false;
+  const fs = require("fs");
+  try {
+    if (fs.lstatSync(target).isSymbolicLink()) return false;
+    const tmp = `${target}.${process.pid}.tmp`;
+    removeIfExists(tmp);
+    fs.symlinkSync(binary, tmp);
+    fs.renameSync(tmp, target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   const binary = await ensureBinary();
   const args = process.argv.slice(2);
+  if (linkNativeBin(binary) && AUTHORITY_COMMANDS.has(args[0])) {
+    console.error(
+      "locus: linked the native binary for future runs. This first run went through the npm wrapper; if a later command reports a stale session authority, re-run `locus " + args.join(" ") + "`."
+    );
+  }
 
   try {
     execFileSync(binary, args, { stdio: "inherit" });
@@ -419,6 +447,11 @@ if (require.main === module) {
 }
 
 module.exports = {
+  getBinaryPath,
+  isCachedBinaryStale,
+  downloadReleaseBinary,
+  ensureBinary,
+  linkNativeBin,
   INSTALL_FROM_SOURCE,
   PREBUILT_TARGETS,
   SUPPORTED_TARGETS,

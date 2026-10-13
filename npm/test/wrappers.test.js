@@ -76,3 +76,26 @@ test("source-install commands use a positional crate (cargo install has no --pac
     assert.doesNotMatch(text, /cargo install [^\n]*--package/, `${doc} still uses cargo install --package`);
   }
 });
+
+// Regression: quickstart then `enter` failed with a stale session authority
+// because the Node wrapper, not the shell, was locus's parent process.
+test("locus: linkNativeBin replaces the wrapper with a symlink to the binary", () => {
+  if (process.platform === "win32") return;
+  const { linkNativeBin } = require(wrappers.locus);
+  const { lstatSync, readlinkSync } = require("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "locus-link-"));
+  try {
+    const bin = join(dir, "locus-native");
+    const target = join(dir, "locus.js");
+    writeFileSync(bin, "#!/bin/sh\necho native\n", { mode: 0o755 });
+    writeFileSync(target, "// wrapper\n");
+    assert.equal(linkNativeBin(bin, target), true);
+    assert.ok(lstatSync(target).isSymbolicLink());
+    assert.equal(readlinkSync(target), bin);
+    const out = spawnSync(target, [], { encoding: "utf8" });
+    assert.equal(out.stdout.trim(), "native");
+    assert.equal(linkNativeBin(bin, target), false, "idempotent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
