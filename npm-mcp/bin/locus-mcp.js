@@ -228,13 +228,28 @@ function cargoBinPath() {
   return join(home, ".cargo", "bin", getBinaryFilename());
 }
 
+function isNodeShim(path) {
+  try {
+    const real = require("fs").realpathSync(path);
+    if (real === require("fs").realpathSync(__filename)) return true;
+    const head = readFileSync(real).subarray(0, 64).toString("utf8");
+    return head.startsWith("#!") && head.includes("node");
+  } catch {
+    return false;
+  }
+}
+
 function tryExistingOnPath() {
   const which = process.platform === "win32" ? "where" : "which";
   const result = spawnSync(which, [BINARY_NAME], { encoding: "utf8" });
   if (result.status === 0) {
-    const path = (result.stdout || "").split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-    if (path && existsSync(path)) {
-      return path;
+    // Skip this npm shim itself (and any other node wrapper): `which` finds
+    // the npm-installed bin first, and executing it recurses forever.
+    const candidates = (result.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    for (const path of candidates) {
+      if (path && existsSync(path) && !isNodeShim(path)) {
+        return path;
+      }
     }
   }
   const cargoPath = cargoBinPath();
