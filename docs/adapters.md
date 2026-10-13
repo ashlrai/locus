@@ -199,7 +199,7 @@ impl ProviderAdapter for CloudflareAdapter {
 [[binding.providers]]
 provider = "supabase"
 account = "acme-prod"
-credential_ref = "phm:SUPABASE_ACME"
+credential_ref = "env:LOCUS_SUPABASE_ACME"
 scope = { project_ref = "abcdefghij", read_only = true }
 ```
 
@@ -222,3 +222,5 @@ Prefer **wrapping** official upstream MCP servers with frozen env over reimpleme
 - [ ] Destructive tools covered by policy globs or explicit gates  
 - [ ] `cargo test -p locus-core` green  
 - [ ] `cargo clippy -p locus-core -- -D warnings` clean  
+
+Credential resolution currently supports explicitly supplied `env:VAR` references. Stored `phm:` references remain valid metadata but require an unavailable scoped bridge; never implement an adapter by capturing trusted-terminal reveal. See [credential compatibility](./credential-compatibility.md).

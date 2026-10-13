@@ -874,15 +874,28 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
         });
     }
 
-    // Doctor UNSAFE (beyond runtime already handled).
+    // Use doctor's metadata-only evidence across configured bindings. A valid seal
+    // cannot make an unavailable credential bridge ready for provider dispatch.
     let doctor = build_doctor_report(
         store,
         DoctorExternal {
             phantom_on_path: false,
-            unresolved_phm: Vec::new(),
+            unresolved_phm: crate::credential::collect_unresolved_phm_refs(store, false)?,
             cwd: Some(cwd.to_path_buf()),
         },
     )?;
+    if !doctor.unresolved_phm.is_empty() {
+        return Ok(SafeNext {
+            action: "doctor_fix".into(),
+            command: Some("locus doctor".into()),
+            agent_tool: Some("locus_heartbeat".into()),
+            message: "Credential resolution is unavailable. Do not dispatch provider tools; run `locus doctor` and configure a supported credential source outside agent context.".into(),
+            ready: false,
+            approval_id: None,
+            binding,
+            tenant,
+        });
+    }
     if doctor.verdict == DoctorVerdict::Unsafe {
         let codes: Vec<&str> = doctor
             .findings
@@ -1410,6 +1423,35 @@ require_pin = true
         assert_eq!(next.binding.as_deref(), Some("acme"));
         assert_eq!(next.tenant.as_deref(), Some("acme-corp"));
         assert!(next.command.is_none());
+    }
+
+    #[test]
+    fn safe_next_refuses_unsupported_credentials_without_disclosing_reference() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut binding = sample_binding("acme", "acme-corp");
+        binding.providers[0].credential_ref = "phm:PRIVATE_REFERENCE_CANARY".into();
+        store.save_binding(&binding).unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "doctor_fix");
+        assert!(!next.ready);
+        assert_eq!(next.command.as_deref(), Some("locus doctor"));
+        assert_eq!(next.binding.as_deref(), Some("acme"));
+        assert_eq!(next.tenant.as_deref(), Some("acme-corp"));
+        assert!(next.message.contains("Do not dispatch provider tools"));
+        let encoded = serde_json::to_string(&next).unwrap();
+        assert!(!encoded.contains("PRIVATE_REFERENCE_CANARY"));
+        assert!(!encoded.contains("phm:"));
+
+        // Observation leaves pin/seal authority unchanged.
+        assert!(store.check_drift_and_freeze().unwrap().ok);
+        store.leave().unwrap();
+        assert_eq!(
+            compute_safe_next(&store, dir.path()).unwrap().action,
+            "enter"
+        );
     }
 
     #[test]

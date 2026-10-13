@@ -12,14 +12,24 @@ npm install -g locus-cli
 npx locus-cli --help
 ```
 
-On first run the wrapper:
+On first run the wrapper reuses a verified cache or an existing native Locus
+v0.5.0 on PATH (skipping npm launchers). Otherwise it downloads the matching
+v0.5.0 GitHub release archive and checks a SHA-256 digest shipped in this npm
+package before extracting it into `~/.locus/bin`.
 
-1. Downloads the matching GitHub release binary into `~/.locus/bin`, or
-2. Falls back to `cargo install --git https://github.com/ashlrai/locus locus-cli --locked`. On platforms
-   without a prebuilt release binary (today: Linux arm64 and Windows) it says so
-   and goes straight to this step, which can take several minutes.
+Prebuilt releases support macOS arm64/x64 and Linux x64. Missing assets,
+unsupported platforms, network failures and checksum failures stop with an
+explicit source install command. The wrapper never runs Cargo automatically:
 
-Requires Node ≥ 16. Cargo fallback needs [Rust](https://rustup.rs).
+```bash
+cargo install --git https://github.com/ashlrai/locus --tag v0.5.0 locus-cli --locked
+```
+
+Requires Node ≥ 16. Manual source installation needs [Rust](https://rustup.rs).
+Cached installs include a version, target and integrity receipt; older caches
+with only a `.version` sidecar are refreshed once. A verified cache runs offline.
+The wrapper downloads executable tooling only; it does not initialize Locus,
+pin a binding, acquire credentials or change the calling shell's identity.
 
 ## Quick start
 
