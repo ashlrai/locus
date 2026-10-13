@@ -9,6 +9,11 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+# Cancel superseded PR runs; never cancel main/master.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -33,14 +38,19 @@ jobs:
         with:
           key: conformance
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Install jq
         run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
 
       - name: Invariant suite (locus-core)
-        run: cargo test -p locus-core --test invariants --locked
+        run: cargo nextest run -p locus-core --test invariants --locked --no-fail-fast
 
       - name: MCP protocol + transport (locus-mcp)
-        run: cargo test -p locus-mcp --locked
+        run: cargo nextest run -p locus-mcp --locked --no-fail-fast
 
       - name: Hub contract smoke
         run: ./scripts/hub-smoke.sh
