@@ -1,23 +1,39 @@
 #!/usr/bin/env node
 
-// Keep installation fast and side-effect-light. The native binary downloads
-// (or is cargo-installed) lazily on first run via bin/locus.js.
+// Postinstall. On POSIX with a prebuilt release asset, fetch the native binary
+// now and link it in place of the JS wrapper, so the user's shell is the
+// binary's direct parent (session authority is anchored to that parent; see
+// bin/locus.js). Anything else stays lazy: the wrapper downloads (or
+// cargo-installs) on first run. Never fails the npm install.
 
 const { existsSync } = require("fs");
 const { join } = require("path");
 
-const CACHE_DIR = join(
-  process.env.HOME || process.env.USERPROFILE || "/tmp",
-  ".locus",
-  "bin"
-);
-
-const binaryExt = process.platform === "win32" ? ".exe" : "";
-const binaryPath = join(CACHE_DIR, `locus${binaryExt}`);
-
-if (existsSync(binaryPath)) {
-  console.log("locus binary already installed.");
-  process.exit(0);
+async function run() {
+  const wrapper = require("./bin/locus.js");
+  const wrapperPath = join(__dirname, "bin", "locus.js");
+  if (process.platform === "win32" || process.env.LOCUS_NPM_NO_LINK) {
+    console.log("locus will download (or cargo-install) on first use.");
+    return;
+  }
+  let target = null;
+  try {
+    target = wrapper.getPlatformTarget();
+  } catch {}
+  const cached = wrapper.getBinaryPath();
+  let binary = null;
+  if (existsSync(cached) && !wrapper.isCachedBinaryStale(cached)) {
+    binary = cached;
+  } else if (target && wrapper.hasPrebuiltBinary(target)) {
+    binary = await wrapper.downloadReleaseBinary(cached);
+  }
+  if (binary && wrapper.linkNativeBin(binary, wrapperPath)) {
+    console.log(`locus: linked native binary ${binary}`);
+  } else {
+    console.log("locus will download (or cargo-install) on first use.");
+  }
 }
 
-console.log("locus will download (or cargo-install) on first use.");
+run().catch((err) => {
+  console.log(`locus will download on first use (${err.message}).`);
+});
