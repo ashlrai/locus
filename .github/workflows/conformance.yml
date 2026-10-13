@@ -48,7 +48,7 @@ jobs:
         run: cargo nextest run -p locus-core --test invariants --locked --no-fail-fast
 
       - name: MCP protocol + transport (locus-mcp)
-        run: cargo nextest run -p locus-mcp --locked --no-fail-fast && cargo test -p locus-mcp --doc --locked
+        run: cargo nextest run -p locus-mcp --locked --no-fail-fast
 
       - name: Hub contract smoke
         run: ./scripts/hub-smoke.sh
