@@ -46,3 +46,22 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 tower = "0.5"
 tower-http = { version = "0.6", features = ["set-header"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
+
+# Optimize crypto/property-test dependency crates even in dev/test builds.
+# Argon2id/blake2/sha2/ed25519 at opt-level 0 are 20-100x slower, and the test
+# suites exercise them with production parameters. Same code, same params,
+# same assertions -- only the dependency crates are compiled optimized.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
