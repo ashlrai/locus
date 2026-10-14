@@ -76,10 +76,12 @@ binding), and `locus_safe_next` reports `Runtime unhealthy
 
 Those supervised children also get an isolated `HOME` under
 `$LOCUS_HOME/workers/<session>/`, so wrapping a whole client
-(`locus exec -- claude`) hides its own login and config. Until a supervised
-launch path for MCP clients ships, treat directly launched `locus-mcp` as
-control-plane only (pin status, verification, `locus_request_pin`) and run
-provider work through `locus exec` / `locus run -b <alias> -- <command>`.
+(`locus exec -- claude`) hides its own login and config. To serve provider
+tools to a client without wrapping it, register `locus mcp --supervised`
+instead of `locus-mcp` (see [Supervised launch](#supervised-launch-provider-tools)).
+Otherwise treat directly launched `locus-mcp` as control-plane only (pin
+status, verification, `locus_request_pin`) and run provider work through
+`locus exec` / `locus run -b <alias> -- <command>`.
 
 ## Wire into Claude Code
 
