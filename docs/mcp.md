@@ -36,6 +36,7 @@ Agents **cannot** pin a session. A human (or CI step) must:
 ```bash
 locus init --with-samples   # first time — also mints LOCUS_CONTROL_CAPABILITY
                             # if missing (persisted 0600 under ~/.locus/)
+eval "$(locus hook bash)"   # export it into this shell (zsh: locus hook zsh)
 locus pin acme              # seal session to binding "acme"
 locus whoami                # verify tenant + providers
 ```
@@ -55,7 +56,30 @@ unpersist` (keep the printed export line in your shell profile); `locus
 capability status` shows the current posture without printing the value. See
 [SECURITY.md § Control-plane authority boundary](../SECURITY.md#control-plane-authority-boundary).
 
+The pin is backed by an authority broker that the pinning shell supervises.
+When that shell exits, `whoami` and `enter` report `no current broker
+endpoint ... human re-pin required` until you run `locus leave --force` and pin
+again, so pin from the long-lived shell you launch your agent from.
+
 Until a valid pin exists, `tools/list` returns **control tools only** (`locus_whoami`, `locus_safe_next`, `locus_status`, `locus_heartbeat`, `locus_enter_hint`, `locus_list_bindings`, `locus_request_pin`, `locus_verify_claim`, `locus_verify_session`). There is **no** ambient fallthrough to personal accounts.
+
+### Provider tools need a supervised launch
+
+A pin alone does not unlock provider tools. `locus-mcp` validates provider
+execution with an executor capability (`LOCUS_EXECUTOR_CAPABILITY`), and only
+the children of `locus exec`, `locus run` and `locus ci run` receive one.
+Launched directly by a client, as the configs below do, the server lists the
+control tools plus `locus_providers` (10 tools for the sample `personal`
+binding), and `locus_safe_next` reports `Runtime unhealthy
+(executor_authority_unavailable)`. The same server started as
+`locus exec -- locus-mcp` lists the binding's provider tools too (18).
+
+Those supervised children also get an isolated `HOME` under
+`$LOCUS_HOME/workers/<session>/`, so wrapping a whole client
+(`locus exec -- claude`) hides its own login and config. Until a supervised
+launch path for MCP clients ships, treat directly launched `locus-mcp` as
+control-plane only (pin status, verification, `locus_request_pin`) and run
+provider work through `locus exec` / `locus run -b <alias> -- <command>`.
 
 ## Wire into Claude Code
 
