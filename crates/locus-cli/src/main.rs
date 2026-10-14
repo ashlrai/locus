@@ -160,12 +160,13 @@ enum Commands {
 
     /// Run the locus-mcp stdio server, or manage multi-tenant MCP grants
     ///
-    /// Without `--supervised`, locus-mcp runs executor-restricted with no
-    /// executor capability, so it serves control tools only. `--supervised`
-    /// grants the active pin's executor capability (the same grant as
-    /// `locus exec --no-resolve -- locus-mcp`) so the pinned provider tools
-    /// are served. It needs `LOCUS_CONTROL_CAPABILITY` and a live pin in the
-    /// launching environment, and falls back to control tools only otherwise.
+    /// Without `--supervised`, locus-mcp inherits this environment; launched
+    /// by a client it has no executor capability and serves control tools
+    /// only. `--supervised` grants the active pin's executor capability (the
+    /// grant `locus exec` makes, with no credential values in the server env)
+    /// so the pinned provider tools are served. It needs
+    /// `LOCUS_CONTROL_CAPABILITY` and a live pin in the launching environment,
+    /// and falls back to control tools only otherwise.
     #[command(next_help_heading = "Setup", args_conflicts_with_subcommands = true)]
     Mcp {
         /// Grant the active pin's executor capability to the locus-mcp child
@@ -3762,7 +3763,16 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
         .stderr(Stdio::inherit());
 
     let mut audit_ctx = None;
-    if supervised {
+    // Already inside a supervised child (`locus exec -- locus mcp --supervised`):
+    // the parent's executor grant passes through, exactly as without the flag.
+    let parent_supervised = supervised
+        && env::var_os(locus_core::EXECUTOR_CAPABILITY_ENV).is_some()
+        && store()
+            .and_then(|s| delegated_child_session(&s))
+            .is_ok_and(|d| d.is_some());
+    if parent_supervised {
+        eprintln!("locus mcp: already supervised by the parent locus process; using its grant");
+    } else if supervised {
         let launch = store().and_then(|s| prepare_supervised_mcp(&s).map(|l| (s, l)));
         match launch {
             Ok((s, launch)) => {
@@ -3779,6 +3789,17 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
                     "locus mcp: supervised as {} ({}) — provider tools enabled for this pin; restart the MCP server after a re-pin",
                     launch.session.binding_alias, launch.session.tenant
                 );
+                // Audit the grant before the child runs, so a killed parent
+                // still leaves a record of it.
+                s.audit(
+                    "session.mcp.supervised",
+                    &launch.session.binding_alias,
+                    Some(json!({
+                        "phase": "grant",
+                        "session_id": launch.session.session_id,
+                        "secrets_resolved": 0,
+                    })),
+                )?;
                 audit_ctx = Some((s, launch.session));
             }
             Err(e) => {
@@ -3799,6 +3820,7 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
             "session.mcp.supervised",
             &session.binding_alias,
             Some(json!({
+                "phase": "exit",
                 "exit": status.code(),
                 "session_id": session.session_id,
                 "secrets_resolved": 0,

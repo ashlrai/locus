@@ -184,3 +184,66 @@ fn supervised_conflicts_with_grant_subcommands() {
     );
     assert!(!run.status.success());
 }
+
+#[test]
+fn fallback_strips_an_inherited_executor_capability() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    init_store(home.path(), cwd.path());
+
+    let out = cwd.path().join("env.bin");
+    let stub = env_recorder(cwd.path(), &out);
+    let run = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .args(["mcp", "--supervised", "--mcp-bin", &stub])
+        .env("LOCUS_HOME", home.path())
+        .env("LOCUS_CONTROL_CAPABILITY", CONTROL)
+        .env("LOCUS_EXECUTOR_CAPABILITY", "f".repeat(64))
+        .env_remove("LOCUS_SESSION_ID")
+        .current_dir(cwd.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(run.status.success(), "fallback still serves: {run:?}");
+    assert!(
+        !recorded_env(&out).contains_key("LOCUS_EXECUTOR_CAPABILITY"),
+        "an unsupervised fallback never forwards a stray executor capability"
+    );
+}
+
+#[test]
+fn supervised_under_locus_exec_passes_the_parent_grant_through() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    init_store(home.path(), cwd.path());
+    let enter = locus(home.path(), cwd.path(), true, &["enter", "personal"]);
+    assert!(enter.status.success(), "enter failed: {enter:?}");
+
+    let out = cwd.path().join("env.bin");
+    let stub = env_recorder(cwd.path(), &out);
+    let locus_bin = env!("CARGO_BIN_EXE_locus");
+    let run = locus(
+        home.path(),
+        cwd.path(),
+        true,
+        &[
+            "exec",
+            "--no-resolve",
+            "--",
+            locus_bin,
+            "mcp",
+            "--supervised",
+            "--mcp-bin",
+            &stub,
+        ],
+    );
+    assert!(run.status.success(), "nested launch failed: {run:?}");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("already supervised"), "stderr: {stderr}");
+    let env = recorded_env(&out);
+    assert_eq!(
+        env.get("LOCUS_EXECUTOR_CAPABILITY").map(String::len),
+        Some(64),
+        "the parent's grant reaches the server"
+    );
+    assert!(!env.contains_key("LOCUS_CONTROL_CAPABILITY"));
+}

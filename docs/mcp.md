@@ -143,14 +143,21 @@ provider tools, launch it through the supervisor:
 ```
 
 `locus mcp --supervised` grants the active pin's executor capability to the
-sibling `locus-mcp` (or `--mcp-bin PATH`), with the same isolated environment
-as `locus exec --no-resolve -- locus-mcp`: `LOCUS_CONTROL_CAPABILITY` and
-credential values never reach the server, and `HOME` is the session's worker
-home. It needs `LOCUS_CONTROL_CAPABILITY` and a live pin in the environment the
+sibling `locus-mcp` (or `--mcp-bin PATH`), the same grant `locus exec` makes,
+in the isolated environment `locus exec --no-resolve` builds:
+`LOCUS_CONTROL_CAPABILITY` and credential values never reach the server, and
+`HOME` is the session's worker home. Unlike `exec --no-resolve` it does not
+refuse bindings with credential-resolving upstreams, because those resolve
+inside locus-mcp's policy-gated workers rather than in the server env. Known
+limit, shared with `locus exec -- locus-mcp`: in that scrubbed environment
+`env:` references cannot resolve, and `phm:` references depend on Phantom
+finding its vault from the worker home. It needs `LOCUS_CONTROL_CAPABILITY` and a live pin in the environment the
 client launches it from (start the client from the shell where you ran
 `eval "$(locus hook zsh)"` and `locus pin`). When either is missing it says
 why on stderr and serves control tools only. The grant is bound to the pin at
-launch: after `locus switch` or a re-pin, restart the MCP server.
+launch: after `locus switch` or a re-pin, restart the MCP server. Each launch is
+audited as `session.mcp.supervised` (`phase: grant`, then `phase: exit`).
+Under `locus exec`, `--supervised` passes the parent's grant through.
 
 ## Wire into Cursor
 
