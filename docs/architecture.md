@@ -82,7 +82,7 @@ locus pin acme
  Session sealed to binding "acme"
       │
       ├─► locus-mcp
-      │     tools/list = binding providers + locus_whoami / status / request_pin
+      │     tools/list = binding providers (under locus exec/run) + locus_whoami / status / request_pin
       │     agents cannot pin
       │     scope freeze: wrong project_ref / team_id → deny
       │

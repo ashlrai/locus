@@ -1,6 +1,6 @@
 # locus-mcp — Claude Code, Cursor, and friends
 
-`locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding. It is the agent-facing half of the identity plane.
+`locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding (provider tools need a supervised launch; see [below](#provider-tools-need-a-supervised-launch)). It is the agent-facing half of the identity plane.
 
 CLI and MCP share the same store and seal under `~/.locus` (or `LOCUS_HOME`).
 `locus exec --no-resolve`, `locus run --no-resolve`, and
@@ -61,7 +61,7 @@ When that shell exits, `whoami` and `enter` report `no current broker
 endpoint ... human re-pin required` until you run `locus leave --force` and pin
 again, so pin from the long-lived shell you launch your agent from.
 
-Until a valid pin exists, `tools/list` returns **control tools only** (`locus_whoami`, `locus_safe_next`, `locus_status`, `locus_heartbeat`, `locus_enter_hint`, `locus_list_bindings`, `locus_request_pin`, `locus_verify_claim`, `locus_verify_session`). There is **no** ambient fallthrough to personal accounts.
+Until a valid pin exists, `tools/list` returns **control tools only** (`locus_whoami`, `locus_safe_next`, `locus_status`, `locus_heartbeat`, `locus_enter_hint`, `locus_list_bindings`, `locus_request_pin`, `locus_verify_claim`, `locus_verify_session`). There is **no** ambient fallthrough to personal accounts. With a pin but launched directly by a client, it adds only `locus_providers`.
 
 ### Provider tools need a supervised launch
 
