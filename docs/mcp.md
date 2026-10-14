@@ -76,10 +76,12 @@ binding), and `locus_safe_next` reports `Runtime unhealthy
 
 Those supervised children also get an isolated `HOME` under
 `$LOCUS_HOME/workers/<session>/`, so wrapping a whole client
-(`locus exec -- claude`) hides its own login and config. Until a supervised
-launch path for MCP clients ships, treat directly launched `locus-mcp` as
-control-plane only (pin status, verification, `locus_request_pin`) and run
-provider work through `locus exec` / `locus run -b <alias> -- <command>`.
+(`locus exec -- claude`) hides its own login and config. To serve provider
+tools to a client without wrapping it, register `locus mcp --supervised`
+instead of `locus-mcp` (see [Supervised launch](#supervised-launch-provider-tools)).
+Otherwise treat directly launched `locus-mcp` as control-plane only (pin
+status, verification, `locus_request_pin`) and run provider work through
+`locus exec` / `locus run -b <alias> -- <command>`.
 
 ## Wire into Claude Code
 
@@ -121,6 +123,41 @@ Manual equivalent (illustrative):
 ```
 
 Ensure `locus-mcp` is on `PATH` for the GUI app (launchers sometimes inherit a minimal env — use absolute path if needed).
+
+### Supervised launch (provider tools)
+
+A directly launched `locus-mcp` validates provider execution with an executor
+capability (`LOCUS_EXECUTOR_CAPABILITY`) and is never handed one, so it serves
+control tools only, even with a valid pin. To serve the pinned binding's
+provider tools, launch it through the supervisor:
+
+```json
+{
+  "mcpServers": {
+    "locus": {
+      "command": "/abs/path/to/locus",
+      "args": ["mcp", "--supervised"]
+    }
+  }
+}
+```
+
+`locus mcp --supervised` grants the active pin's executor capability to the
+sibling `locus-mcp` (or `--mcp-bin PATH`), the same grant `locus exec` makes,
+in the isolated environment `locus exec --no-resolve` builds:
+`LOCUS_CONTROL_CAPABILITY` and credential values never reach the server, and
+`HOME` is the session's worker home. Unlike `exec --no-resolve` it does not
+refuse bindings with credential-resolving upstreams, because those resolve
+inside locus-mcp's policy-gated workers rather than in the server env. Known
+limit, shared with `locus exec -- locus-mcp`: in that scrubbed environment
+`env:` references cannot resolve, and `phm:` references depend on Phantom
+finding its vault from the worker home. It needs `LOCUS_CONTROL_CAPABILITY` and a live pin in the environment the
+client launches it from (start the client from the shell where you ran
+`eval "$(locus hook zsh)"` and `locus pin`). When either is missing it says
+why on stderr and serves control tools only. The grant is bound to the pin at
+launch: after `locus switch` or a re-pin, restart the MCP server. Each launch is
+audited as `session.mcp.supervised` (`phase: grant`, then `phase: exit`).
+Under `locus exec`, `--supervised` passes the parent's grant through.
 
 ## Wire into Cursor
 
@@ -627,6 +664,7 @@ Do **not** also register unrestricted personal Supabase/GitHub MCP servers along
 | Symptom | Check |
 |---------|--------|
 | Only `locus_*` tools | No valid pin — run `locus pin` / `locus whoami`; seal may be expired or tampered |
+| Pinned, but no provider tools | Direct launch has no executor capability; use `locus mcp --supervised` (see [Supervised launch](#supervised-launch-provider-tools)) and read its stderr line |
 | `locus-mcp` not found | PATH for GUI vs terminal; reinstall; absolute path in MCP config |
 | Wrong tenant tools | `locus whoami`; re-pin; inspect binding providers |
 | Scope freeze errors | Model tried to override frozen `project_ref` / team / org — expected |
