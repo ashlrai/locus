@@ -159,8 +159,21 @@ enum Commands {
     },
 
     /// Run the locus-mcp stdio server, or manage multi-tenant MCP grants
-    #[command(next_help_heading = "Setup")]
+    ///
+    /// Without `--supervised`, locus-mcp runs executor-restricted with no
+    /// executor capability, so it serves control tools only. `--supervised`
+    /// grants the active pin's executor capability (the same grant as
+    /// `locus exec --no-resolve -- locus-mcp`) so the pinned provider tools
+    /// are served. It needs `LOCUS_CONTROL_CAPABILITY` and a live pin in the
+    /// launching environment, and falls back to control tools only otherwise.
+    #[command(next_help_heading = "Setup", args_conflicts_with_subcommands = true)]
     Mcp {
+        /// Grant the active pin's executor capability to the locus-mcp child
+        #[arg(long)]
+        supervised: bool,
+        /// Path to locus-mcp binary (default: same dir as locus, or PATH)
+        #[arg(long)]
+        mcp_bin: Option<String>,
         #[command(subcommand)]
         cmd: Option<McpCmd>,
     },
@@ -1047,8 +1060,12 @@ fn run() -> Result<()> {
             cmd,
         } => cmd_run(binding, share_pin, cmd, !no_resolve, strict_creds, force),
         Commands::Ci(sub) => cmd_ci(sub, cli.json),
-        Commands::Mcp { cmd } => match cmd {
-            None => cmd_mcp(),
+        Commands::Mcp {
+            supervised,
+            mcp_bin,
+            cmd,
+        } => match cmd {
+            None => cmd_mcp(supervised, mcp_bin),
             Some(sub) => cmd_mcp_sub(sub, cli.json),
         },
         Commands::Binding(sub) => cmd_binding(sub, cli.json),
@@ -1224,7 +1241,8 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
             "mcp",
             "locus-mcp multiplexor — tools hard-scoped to the active pin.\n\n\
              Stdio (default for Claude Code / Cursor):\n\
-               locus mcp\n\
+               locus mcp --supervised   # pinned provider tools (needs pin + control capability)\n\
+               locus mcp                # control tools only\n\
                locus-mcp\n\
                locus setup --client claude|cursor|codex|grok\n\
                locus agent setup --apply\n\n\
@@ -3675,43 +3693,122 @@ fn credential_resolving_upstreams(binding: &Binding) -> Result<Vec<String>> {
     Ok(providers)
 }
 
-fn cmd_mcp() -> Result<()> {
-    // Re-exec locus-mcp if on PATH; otherwise tell user to run the binary.
-    let status = Command::new("locus-mcp")
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status();
-    match status {
-        Ok(s) => {
-            if !s.success() {
-                std::process::exit(s.code().unwrap_or(1));
-            }
-            Ok(())
-        }
-        Err(_) => {
-            // Fallback: try same directory as current exe
-            if let Ok(exe) = env::current_exe() {
-                if let Some(dir) = exe.parent() {
-                    let candidate = dir.join("locus-mcp");
-                    if candidate.exists() {
-                        let s = Command::new(candidate)
-                            .stdin(Stdio::inherit())
-                            .stdout(Stdio::inherit())
-                            .stderr(Stdio::inherit())
-                            .status()?;
-                        if !s.success() {
-                            std::process::exit(s.code().unwrap_or(1));
-                        }
-                        return Ok(());
-                    }
-                }
-            }
-            bail!(
-                "locus-mcp not found on PATH — install with: cargo install --path crates/locus-mcp"
-            );
+/// Supervised stdio launch: the env and executor capability a locus-mcp
+/// child needs to serve the active pin's provider tools.
+struct SupervisedMcpLaunch {
+    session: Session,
+    vars: Vec<(String, String)>,
+    executor_capability: String,
+}
+
+/// Grant authority for a supervised locus-mcp child. Mirrors the checks of
+/// `locus exec --no-resolve` (control boundary via the executor grant, drift
+/// freeze, isolated env, no credential values in the child env) without the
+/// `--no-resolve` upstream refusal: locus-mcp is the gate that owns upstream
+/// workers, and their credentials resolve inside it per tools/call.
+fn prepare_supervised_mcp(s: &Store) -> Result<SupervisedMcpLaunch> {
+    if delegated_child_session(s)?.is_some() {
+        bail!("the selected session is delegated; supervised launch needs an operator pin");
+    }
+    let session = s
+        .require_active()
+        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))
+        .context("need an active pin for a supervised MCP launch")?;
+    let binding = s.load_binding(&session.binding_alias)?;
+    let drift = s
+        .check_drift_and_freeze()
+        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))?;
+    if drift.frozen {
+        bail!(
+            "session_frozen: re-pin — binding drifted under active pin ({})",
+            drift.issues.join(", ")
+        );
+    }
+    let iso = isolated_child_env(s, &session, &binding, false);
+    if iso.secrets_resolved != 0 {
+        bail!("internal: supervised MCP env resolved credentials");
+    }
+    let executor_capability = s.grant_executor_capability(&session)?;
+    let mut vars: Vec<(String, String)> = iso.vars.into_iter().collect();
+    // Client label and auto-pin hint written by `locus setup` ride through;
+    // neither carries authority.
+    for key in ["LOCUS_CLIENT", "LOCUS_AUTO_PIN"] {
+        if let Ok(v) = env::var(key) {
+            vars.push((key.into(), v));
         }
     }
+    Ok(SupervisedMcpLaunch {
+        session,
+        vars,
+        executor_capability,
+    })
+}
+
+fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
+    let explicit = mcp_bin.is_some();
+    let (bin, bare) = resolve_mcp_bin_with_fallback(mcp_bin);
+    if explicit {
+        validate_explicit_mcp_bin(&bin)?;
+    } else if bare && find_on_path(&bin).is_none() {
+        bail!(
+            "locus-mcp not found next to locus or on PATH — install with: cargo install --path crates/locus-mcp"
+        );
+    }
+
+    let mut child = Command::new(&bin);
+    child
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let mut audit_ctx = None;
+    if supervised {
+        let launch = store().and_then(|s| prepare_supervised_mcp(&s).map(|l| (s, l)));
+        match launch {
+            Ok((s, launch)) => {
+                child.env_clear();
+                for (k, v) in &launch.vars {
+                    child.env(k, v);
+                }
+                child.env(
+                    locus_core::EXECUTOR_CAPABILITY_ENV,
+                    &launch.executor_capability,
+                );
+                // stderr only: stdout is the MCP protocol channel.
+                eprintln!(
+                    "locus mcp: supervised as {} ({}) — provider tools enabled for this pin; restart the MCP server after a re-pin",
+                    launch.session.binding_alias, launch.session.tenant
+                );
+                audit_ctx = Some((s, launch.session));
+            }
+            Err(e) => {
+                // Fall back to the unsupervised server: control tools only,
+                // including locus_request_pin. Never more authority than a
+                // direct locus-mcp launch.
+                eprintln!(
+                    "locus mcp: supervised launch unavailable, serving control tools only: {e:#}"
+                );
+                child.env_remove(locus_core::EXECUTOR_CAPABILITY_ENV);
+            }
+        }
+    }
+
+    let status = child.status().with_context(|| format!("spawn {bin}"))?;
+    if let Some((s, session)) = audit_ctx {
+        s.audit(
+            "session.mcp.supervised",
+            &session.binding_alias,
+            Some(json!({
+                "exit": status.code(),
+                "session_id": session.session_id,
+                "secrets_resolved": 0,
+            })),
+        )?;
+    }
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 fn cmd_mcp_sub(sub: McpCmd, json_flag: bool) -> Result<()> {

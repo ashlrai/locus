@@ -98,6 +98,34 @@ Manual equivalent (illustrative):
 
 Ensure `locus-mcp` is on `PATH` for the GUI app (launchers sometimes inherit a minimal env — use absolute path if needed).
 
+### Supervised launch (provider tools)
+
+A directly launched `locus-mcp` validates provider execution with an executor
+capability (`LOCUS_EXECUTOR_CAPABILITY`) and is never handed one, so it serves
+control tools only, even with a valid pin. To serve the pinned binding's
+provider tools, launch it through the supervisor:
+
+```json
+{
+  "mcpServers": {
+    "locus": {
+      "command": "/abs/path/to/locus",
+      "args": ["mcp", "--supervised"]
+    }
+  }
+}
+```
+
+`locus mcp --supervised` grants the active pin's executor capability to the
+sibling `locus-mcp` (or `--mcp-bin PATH`), with the same isolated environment
+as `locus exec --no-resolve -- locus-mcp`: `LOCUS_CONTROL_CAPABILITY` and
+credential values never reach the server, and `HOME` is the session's worker
+home. It needs `LOCUS_CONTROL_CAPABILITY` and a live pin in the environment the
+client launches it from (start the client from the shell where you ran
+`eval "$(locus hook zsh)"` and `locus pin`). When either is missing it says
+why on stderr and serves control tools only. The grant is bound to the pin at
+launch: after `locus switch` or a re-pin, restart the MCP server.
+
 ## Wire into Cursor
 
 ```bash
@@ -603,6 +631,7 @@ Do **not** also register unrestricted personal Supabase/GitHub MCP servers along
 | Symptom | Check |
 |---------|--------|
 | Only `locus_*` tools | No valid pin — run `locus pin` / `locus whoami`; seal may be expired or tampered |
+| Pinned, but no provider tools | Direct launch has no executor capability; use `locus mcp --supervised` (see [Supervised launch](#supervised-launch-provider-tools)) and read its stderr line |
 | `locus-mcp` not found | PATH for GUI vs terminal; reinstall; absolute path in MCP config |
 | Wrong tenant tools | `locus whoami`; re-pin; inspect binding providers |
 | Scope freeze errors | Model tried to override frozen `project_ref` / team / org — expected |
