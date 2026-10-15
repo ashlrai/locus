@@ -173,6 +173,23 @@ Cursor MCP config is typically user-level JSON; setup merges a `locus` server en
 locus setup --client codex
 ```
 
+That upserts one entry in `~/.codex/config.toml` and leaves the rest of the
+file alone (an unparseable file is left untouched and setup aborts). To write
+it by hand instead, add:
+
+```toml
+[mcp_servers.locus]
+command = "locus-mcp"   # setup writes the absolute path it finds
+
+[mcp_servers.locus.env]
+LOCUS_AUTO_PIN = "cwd"
+LOCUS_CLIENT = "codex"
+```
+
+Restart Codex afterwards; `locus agent doctor` checks the registration. This
+entry serves the control tools. For the pinned binding's provider tools, see
+[Supervised launch](#supervised-launch-provider-tools).
+
 Any client that can spawn a stdio MCP server can use:
 
 | Field | Value |

@@ -74,6 +74,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and PR templates (#48, #52, #53, #57, #60, #65).
 - License holder standardized to AshlrAI, Inc. (#47).
 
+### Docs
+
+- **Shell completions** — [docs/shell-completions.md](docs/shell-completions.md)
+  covers zsh, bash, fish, PowerShell and elvish, `locus completion --help`
+  prints the install lines, and the Homebrew formula installs bash/zsh/fish
+  completions (#63).
+- **Codex** — docs/mcp.md shows the `~/.codex/config.toml` entry that
+  `locus setup --client codex` writes, for wiring it by hand (#62).
+
 ## [0.5.0] — 2026-08-16
 
 ### Added
