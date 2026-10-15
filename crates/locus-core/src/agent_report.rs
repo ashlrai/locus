@@ -209,6 +209,40 @@ pub struct AgentReportOptions {
     pub workspace_error: bool,
 }
 
+/// Runtime health for `status_oneline`, matching `locus status --oneline`.
+///
+/// A pin whose runtime check failed *only* because this process has no
+/// control capability to authenticate the authority-anchor check
+/// (`executor_authority_unavailable`) is not an invalid pin: doctor already
+/// folds that environment gap into `pin.seal_ok` (true only when the
+/// capability is absent rather than present-but-wrong). Any other runtime
+/// issue, or any structural mismatch, still reads as invalid. Readiness stays
+/// fail closed separately: `compute_status` never reports ready while the
+/// anchor is unverified (`authority_anchor_verified == Some(false)`).
+fn runtime_ok_or_capability_gap(doctor: &DoctorReport) -> bool {
+    let rt = &doctor.runtime;
+    if rt.ok {
+        return true;
+    }
+    let pin_verified = doctor.pin.as_ref().is_some_and(|p| p.seal_ok);
+    pin_verified
+        && !rt.issues.is_empty()
+        && rt
+            .issues
+            .iter()
+            .all(|issue| issue == "executor_authority_unavailable")
+        && rt.pinned
+        && rt.seal_ok
+        && !rt.authority_anchor_ok
+        && rt.backing_ok
+        && rt.binding_present
+        && rt.binding_id_match
+        && rt.tenant_match
+        && rt.providers_match
+        && !rt.expired
+        && !rt.frozen
+}
+
 /// Build the hub agent report from a doctor report + MCP probe.
 pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) -> AgentReport {
     let workspace_error = opts.workspace_error;
@@ -293,7 +327,9 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
     let status_oneline = match &pin {
         None => "unpinned".to_string(),
         Some(_) if doctor.runtime.frozen => "frozen".to_string(),
-        Some(p) if !p.seal_ok || p.expired || !doctor.runtime.ok => "invalid".to_string(),
+        Some(p) if !p.seal_ok || p.expired || !runtime_ok_or_capability_gap(&doctor) => {
+            "invalid".to_string()
+        }
         Some(p) => format!("{}:{}", p.alias, p.tenant),
     };
     let env_session_id = std::env::var("LOCUS_SESSION_ID")
@@ -344,7 +380,11 @@ fn compute_status(
         }
     }
 
-    let pin_ok = pin.as_ref().is_some_and(|p| p.seal_ok && !p.expired);
+    // Never ready on an authority anchor whose check was skipped for lack of
+    // a capability: the pin is intact (not unsafe) but unverified here.
+    let pin_ok = pin
+        .as_ref()
+        .is_some_and(|p| p.seal_ok && !p.expired && p.authority_anchor_verified != Some(false));
     if pin_ok && doctor.bindings > 0 && mcp.any() {
         AgentStatus::Ready
     } else {
@@ -1046,6 +1086,77 @@ mod tests {
         assert!(report.mcp_registered.claude);
         assert_eq!(report.status_oneline, "acme:acme-corp");
         assert_eq!(serde_json::to_value(&report).unwrap()["status"], "ready");
+    }
+
+    #[test]
+    fn status_oneline_keeps_pin_when_only_capability_is_absent() {
+        // Regression: without LOCUS_CONTROL_CAPABILITY exported the report said
+        // `invalid` while `locus status --oneline` said `alias:tenant`. Doctor
+        // treats an unauthenticated anchor check as an environment gap, not
+        // tamper, so the oneline token must keep the pin (readiness stays off).
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let healthy = doctor_for(&store, dir.path());
+        let opts = || AgentReportOptions {
+            mcp: McpRegistered {
+                claude: true,
+                ..Default::default()
+            },
+            project_dir: Some(dir.path().to_path_buf()),
+            home_ready: true,
+            agent_md_present: true,
+            workspace_present: true,
+            workspace_error: false,
+        };
+
+        let mut gap = healthy.clone();
+        gap.runtime.ok = false;
+        gap.runtime.authority_anchor_ok = false;
+        gap.runtime.issues = vec!["executor_authority_unavailable".into()];
+        gap.push_finding(
+            IssueSeverity::Warn,
+            "executor_authority_unavailable",
+            "capability not exported".into(),
+        );
+        if let Some(p) = gap.pin.as_mut() {
+            p.authority_anchor_verified = Some(false);
+        }
+        let report = agent_report_from_doctor(gap.clone(), opts());
+        assert_eq!(report.status_oneline, "acme:acme-corp");
+        assert!(!report.ready, "a capability gap must never read as ready");
+        assert_eq!(report.status, AgentStatus::Protected);
+
+        // Present-but-wrong capability: doctor clears pin.seal_ok → invalid.
+        let mut wrong = gap.clone();
+        if let Some(p) = wrong.pin.as_mut() {
+            p.seal_ok = false;
+        }
+        assert_eq!(
+            agent_report_from_doctor(wrong, opts()).status_oneline,
+            "invalid"
+        );
+
+        // Any other runtime issue alongside the gap stays invalid.
+        let mut drift = gap.clone();
+        drift.runtime.providers_match = false;
+        drift.runtime.issues.push("providers_drift".into());
+        assert_eq!(
+            agent_report_from_doctor(drift, opts()).status_oneline,
+            "invalid"
+        );
+        let mut anchor = gap;
+        anchor
+            .runtime
+            .issues
+            .push("authority_anchor_mismatch".into());
+        assert_eq!(
+            agent_report_from_doctor(anchor, opts()).status_oneline,
+            "invalid"
+        );
     }
 
     #[test]

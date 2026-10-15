@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Doctor JSON validates against its schema** — `schema/doctor.schema.json`
+  now allows finding severity `info` (emitted as `control_capability_persisted`
+  on the default quickstart posture); real `locus doctor --json` output failed
+  the published schema before.
+- **Agent report readiness without an exported capability** — the report said
+  `ready: true` with `status_oneline: invalid` while `locus status --oneline`
+  said `alias:tenant`. Readiness now requires a verified authority anchor, and
+  the oneline token keeps the pin for the capability-absent gap only.
+- **`locus_whoami` on a plain (unsupervised) locus-mcp** no longer reports
+  `pinned: false` with a re-pin hint; it returns
+  `status: executor_authority_unavailable` and points at `locus mcp --supervised`.
 - **Adapter registry catalog covers anthropic/openai** — the built-in catalog
   (`adapters/manifest.toml`, surfaced by `locus adapter list` and
   `locus adapter registry export`) now includes the `anthropic` and `openai`
