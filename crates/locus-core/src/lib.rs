@@ -29,6 +29,7 @@ pub mod http_sessions;
 pub mod isolation;
 pub mod policy;
 pub mod recipes;
+pub mod recovery;
 pub mod seal;
 pub mod session;
 pub mod store;
