@@ -103,6 +103,19 @@ eval "$(locus hook zsh)"
 
 ---
 
+## Measured: wrong-client credential reachability
+
+Scenario: your shell still holds another client's ambient credentials (the `gh auth switch` or direnv leftover) and you launch a child process. Which of those can it still reach? Reproduce with `python3 eval/env-reachability/redteam.py` (needs `locus` 0.5.0 on PATH; fake canary credentials, throwaway `HOME` and `LOCUS_HOME`).
+
+| launch | env credentials reachable (16 variables x 3 trials) |
+| --- | --- |
+| plain launch | 48 of 48 |
+| `locus run -b acme -- <cmd>` | **0 of 48** |
+
+Also measured: with locus, credential files read through `$HOME` (`~/.config/gh/hosts.yml`, `~/.aws/credentials`, `~/.netrc`, `~/.git-credentials`, `~/.npmrc`) were not reachable (0 of 15), and an agent attempt to pin a binding was refused (3 of 3).
+
+**This is not a sandbox.** The same files read by their absolute real path stayed reachable under locus (15 of 15, same as a plain launch). Locus scrubs the environment and redirects `HOME`; it does not stop a process from opening files it already has OS permission to open. Scripted adversary, one machine, locus 0.5.0, 3 trials, no external audit.
+
 ## How isolation works
 
 ```
