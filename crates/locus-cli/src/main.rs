@@ -7,6 +7,10 @@
 //! locus leave
 //! ```
 
+// Must stay first: shadows `println!` / `print!` for every module below.
+#[macro_use]
+mod stdout;
+
 mod serve;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -993,9 +997,14 @@ fn main() {
         }
         return;
     }
-    if let Err(e) = run() {
-        eprintln!("{} {e:#}", "error:".red().bold());
-        std::process::exit(1);
+    // A closed stdout (`locus doctor | head -1`) exits 141 instead of panicking.
+    match stdout::catch_stdout_closed(run) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            eprintln!("{} {e:#}", "error:".red().bold());
+            std::process::exit(1);
+        }
+        Err(()) => std::process::exit(stdout::STDOUT_CLOSED_EXIT),
     }
 }
 
@@ -1130,7 +1139,9 @@ fn run() -> Result<()> {
         } => cmd_serve(port, token, !no_open),
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
-            generate(shell, &mut cmd, "locus", &mut io::stdout());
+            let mut buf = Vec::new();
+            generate(shell, &mut cmd, "locus", &mut buf);
+            stdout::write_stdout_bytes(&buf);
             Ok(())
         }
         Commands::Topic { name } => cmd_topic(name.as_deref()),
