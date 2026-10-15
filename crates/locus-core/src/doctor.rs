@@ -1909,6 +1909,58 @@ require_pin = true
     }
 
     #[test]
+    fn doctor_report_with_every_control_capability_finding_validates_against_schema() {
+        // Regression: the CLI attaches `control_capability_persisted` with
+        // severity `info` (the default quickstart posture), which the
+        // published schema used to reject (it allowed only warn|unsafe).
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        // Persisted but not exported: one warn finding plus the info note.
+        let status = crate::authority_anchor::ControlCapabilityStatus {
+            env_present: false,
+            env_valid: false,
+            persisted: true,
+            persisted_valid: true,
+            persisted_permissions_ok: true,
+            matches_persisted: None,
+            test_fallback: false,
+        };
+        for f in control_capability_findings(&status, dir.path()) {
+            report.push_finding(f.severity, &f.code, f.message);
+        }
+        let instance = serde_json::to_value(&report).unwrap();
+        let severities: Vec<&str> = instance["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["severity"].as_str())
+            .collect();
+        assert!(severities.contains(&"info"), "{severities:?}");
+        assert!(severities.contains(&"warn"), "{severities:?}");
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schema/doctor.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&instance)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "doctor JSON with an info finding violated schema: {}",
+            errors.join("\n")
+        );
+    }
+
+    #[test]
     fn advisory_labels_do_not_count_as_waiting_for_second_principal() {
         use crate::adapters::{call_tool_gated, ApprovalGate};
         use serde_json::json;
