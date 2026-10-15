@@ -328,7 +328,9 @@ tools/list →
         mode=namespace → "acme__supabase__list_tables"
         mode=transparent → "list_tables"  (only one binding active)
   Plus control tools:
-    locus_status, locus_pin, locus_unpin, locus_bindings, locus_whoami
+    locus_whoami, locus_safe_next, locus_status, locus_heartbeat, locus_enter_hint,
+    locus_list_bindings, locus_request_pin, locus_verify_claim, locus_verify_session
+    (+ locus_providers when pinned; no pin/unpin tool exists)
 ```
 
 **MVP default: transparent mode** when exactly one binding is pinned (best agent UX).  
@@ -459,7 +461,7 @@ locus audit export --since 7d --out acme-week.jsonl
 ```bash
 # One-time
 locus init
-locus binding add acme --from wizard   # interactive: pick providers, CredentialRefs
+locus client add acme                  # interactive: pick providers, CredentialRefs
 
 # Daily
 cd ~/clients/acme                      # .locus.toml → default_binding = acme
@@ -477,7 +479,7 @@ locus exec -- gh pr create             # GH_TOKEN for acme binding only
 locus exec -- vercel deploy --prod     # may require approval
 
 locus pin personal                     # switch
-locus unpin                            # no binding → dangerous CLIs refuse
+locus leave                            # no binding → dangerous CLIs refuse
 ```
 
 `locus exec` implementation:
@@ -524,8 +526,8 @@ locus setup --client claude
 |------|------------|-------|
 | `locus_whoami` | yes | tenant, binding, scopes (no secrets) |
 | `locus_status` | yes | read-only |
-| `locus_bindings` | yes | list aliases + descriptions |
-| `locus_pin` | **optional** | default **off** for agents; human CLI only. Prevents prompt injection re-pin to personal. |
+| `locus_list_bindings` | yes | list aliases + tenants |
+| `locus_pin` | **no** | not exposed as a tool; pinning is human CLI only. Prevents prompt injection re-pin to personal. |
 | `locus_request_pin` | yes | proposes pin; requires human confirm in terminal / OS prompt |
 
 **Default: agents cannot change pin.** They can only *request*. This is a load-bearing security choice.
@@ -648,14 +650,13 @@ Config file contains **only** the binding’s profile. `aws sts get-caller-ident
 
 ```bash
 locus pin acme                 # pin current shell + default MCP sessions for this cwd
-locus pin acme --session all   # all live MCP clients (with confirm)
 locus whoami                   # human-readable identity card
 locus status                   # dashboard in terminal
 locus exec -- <cmd>            # run cmd inside pin
 locus run -b acme -- <cmd>     # one-shot without changing shell pin
-locus approve <id>             # policy approval
+locus approve grant <id>       # local advisory label (not authority)
 locus doctor                   # wiring, phantom, adapters, stale sessions
-locus setup --client claude|cursor|windsurf|codex
+locus setup --client claude|cursor|codex|grok
 ```
 
 ### 7.2 Status bar / whoami
@@ -706,7 +707,7 @@ Human phrases Locus should support as first-class:
 | “Switch to personal” | `locus pin personal` |
 | “Read-only Acme” | `locus pin acme-readonly` |
 | “Who am I acting as?” | `locus whoami` / `locus_whoami` |
-| “Drop privileges” | `locus pin acme-readonly` or `locus unpin` |
+| “Drop privileges” | `locus pin acme-readonly` or `locus leave` |
 
 Agent-facing copy when wrong context suspected:
 
@@ -843,7 +844,7 @@ INV-5  agent-initiated pin change ⇒ no state change without human approval rec
 INV-6  audit chain verifies after every N events in CI
 ```
 
-Conformance suite: `locus test isolation` runs these as integration tests.
+Conformance suite: `cargo test -p locus-core --test invariants` (run by `.github/workflows/conformance.yml`) covers these as integration tests.
 
 ---
 

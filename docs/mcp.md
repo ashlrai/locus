@@ -230,7 +230,7 @@ the probe never guesses.
 - **JSON-RPC 2.0** over stdio — **Content-Length** framing (Claude Code / Cursor) and **NDJSON**  
 - Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`  
 - **Never** log to stdout from the server — that breaks the protocol (errors go to stderr)  
-- Protocol version advertised: `2024-11-05`  
+- Protocol versions: negotiates `2025-06-18`, `2025-03-26`, or `2024-11-05` (echoes the client's requested version when supported, else answers `2025-06-18`)  
 - `initialize.instructions` carries crisp agent rules (whoami / `locus_safe_next` first, cannot pin, scope freeze, live operator-controlled pin state, resources)
 
 ## HTTP transport (CI / remote agents)
