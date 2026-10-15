@@ -93,6 +93,8 @@ class Locus < Formula
   def install
     system "cargo", "install", "--locked", *std_cargo_args(path: "crates/locus-cli")
     system "cargo", "install", "--locked", *std_cargo_args(path: "crates/locus-mcp")
+    # `locus completion <shell>` prints the script; it reads no config or HOME.
+    generate_completions_from_executable(bin/"locus", "completion", shells: [:bash, :zsh, :fish])
   end
 
   def caveats
