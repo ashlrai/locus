@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+  # Dry run: a PR that changes this workflow builds, packages and checksums
+  # the Linux archive and verifies the assets, but never publishes a release.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: write
@@ -13,39 +18,50 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    # The PR dry run builds Linux only: macOS targets get a no-op job on
+    # ubuntu so they never queue behind the shared macOS runners.
+    name: Build ${{ matrix.target }}${{ github.event_name == 'pull_request' && matrix.release_only && ' (release only)' || '' }}
+    runs-on: ${{ github.event_name == 'pull_request' && matrix.release_only && 'ubuntu-latest' || matrix.os }}
+    env:
+      SKIP_BUILD: ${{ github.event_name == 'pull_request' && matrix.release_only }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: aarch64-apple-darwin
             os: macos-latest
+            release_only: true
           # Cross-compile Intel mac from Apple Silicon runners (macos-13 is scarce)
           - target: x86_64-apple-darwin
             os: macos-latest
+            release_only: true
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
 
     steps:
       - name: Checkout
+        if: env.SKIP_BUILD != 'true'
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
+        if: env.SKIP_BUILD != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo
+        if: env.SKIP_BUILD != 'true'
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
       - name: Build release binaries
+        if: env.SKIP_BUILD != 'true'
         run: |
           cargo build --release --target ${{ matrix.target }} -p locus-cli -p locus-mcp
 
       - name: Package artifacts
+        if: env.SKIP_BUILD != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -66,14 +82,21 @@ jobs:
           (
             cd "$OUT"
             tar -czf "locus-${TARGET}.tar.gz" "${STAGE}"
+            # Checksum of the final archive bytes, in `sha256sum -c` format.
+            # Integrity metadata only: not a signature or publisher attestation.
+            shasum -a 256 "locus-${TARGET}.tar.gz" > "locus-${TARGET}.tar.gz.sha256"
+            shasum -a 256 -c "locus-${TARGET}.tar.gz.sha256"
           )
           echo "Packed locus-${TARGET}.tar.gz"
 
       - name: Upload artifact
+        if: env.SKIP_BUILD != 'true'
         uses: actions/upload-artifact@v4
         with:
           name: locus-${{ matrix.target }}
-          path: dist/locus-${{ matrix.target }}.tar.gz
+          path: |
+            dist/locus-${{ matrix.target }}.tar.gz
+            dist/locus-${{ matrix.target }}.tar.gz.sha256
           if-no-files-found: error
 
   release:
@@ -95,8 +118,27 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          find artifacts -type f -name 'locus-*.tar.gz' -exec cp {} release-assets/ \;
+          find artifacts -type f \( -name 'locus-*.tar.gz' -o -name 'locus-*.tar.gz.sha256' \) \
+            -exec cp {} release-assets/ \;
           ls -la release-assets/
+
+      # Every archive ships with a sidecar that names exactly that archive and
+      # matches its bytes; a missing, stray or foreign sidecar fails the release.
+      - name: Verify release checksums
+        shell: bash
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(locus-*.tar.gz)
+          sidecars=(locus-*.tar.gz.sha256)
+          [ "${#archives[@]}" -gt 0 ] || { echo "no release archives" >&2; exit 1; }
+          [ "${#archives[@]}" -eq "${#sidecars[@]}" ] || { echo "archive/sidecar count mismatch" >&2; exit 1; }
+          for asset in "${archives[@]}"; do
+            [ -f "${asset}.sha256" ] || { echo "missing ${asset}.sha256" >&2; exit 1; }
+            sha256sum "$asset" | cmp -s - "${asset}.sha256" || { echo "${asset}.sha256 does not describe ${asset}" >&2; exit 1; }
+          done
+          sha256sum -c "${sidecars[@]}"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -118,8 +160,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A tag push names it after the tag; the PR dry run's ref (`79/merge`)
+          # has a slash, so slashes become dashes.
           cargo run --release --locked -p locus-cli -- adapter registry export \
-            --out "release-assets/locus-adapters-${GITHUB_REF_NAME}.json"
+            --out "release-assets/locus-adapters-${GITHUB_REF_NAME//\//-}.json"
 
       # TODO(registry-signing): once a LOCUS_REGISTRY_SIGNING_KEY repo secret
       # exists (base64 or 64-hex ed25519 seed; NOT yet provisioned — do not
@@ -139,6 +183,7 @@ jobs:
       # --ed25519-pub <b64>) in the release notes / docs/registry-trust.md.
 
       - name: Create release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true

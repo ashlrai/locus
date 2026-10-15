@@ -29,6 +29,17 @@ cargo fmt --all -- --check
 3. [ ] Merge this PR after #66, then tag from clean `main`:
    `git tag -a v0.5.1 -m "Locus v0.5.1" && git push origin v0.5.1`
 4. [ ] Release workflow builds the assets; publish `npm/` (`locus-cli`) and `npm-mcp/` (`@ashlrai/locus-mcp`) at 0.5.1
+   Each `locus-<target>.tar.gz` ships with a `locus-<target>.tar.gz.sha256`
+   sidecar; the workflow fails if any archive's sidecar is missing or wrong.
+   Check a download:
+
+   ```bash
+   gh release download v0.5.1 -p 'locus-*.tar.gz*' -D /tmp/locus-rel
+   (cd /tmp/locus-rel && sha256sum -c locus-*.tar.gz.sha256)   # macOS: shasum -a 256 -c
+   ```
+
+   A pull request that changes `release.yml` runs it as a dry run: Linux
+   archive, sidecar and checksum verification, no release.
 5. [ ] Update `integrations/homebrew/Formula/locus.rb` + the live tap with the v0.5.1 source/asset sha256 (commands below)
 6. [ ] Smoke: `npm i -g locus-cli@0.5.1` in a clean HOME → `locus quickstart` → `eval "$(locus hook zsh)"` → `locus enter acme`
 

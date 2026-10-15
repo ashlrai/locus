@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `LOCUS_CONTROL_CAPABILITY` (#71).
 - **MCP protocol negotiation** — locus-mcp answers with the client's requested
   protocol version when it supports it (#73).
+- **Release checksums** — every release archive ships with a
+  `locus-<target>.tar.gz.sha256` sidecar (`sha256sum -c` format), and the
+  release workflow refuses to publish when an archive's sidecar is missing or
+  does not match (#49). Integrity metadata only, not a signature.
 
 ### Fixed
 
@@ -73,6 +77,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cursor, executable multi-client recipes, Phantom-enrolled repo guide, issue
   and PR templates (#48, #52, #53, #57, #60, #65).
 - License holder standardized to AshlrAI, Inc. (#47).
+
+### Docs
+
+- **Shell completions** — [docs/shell-completions.md](docs/shell-completions.md)
+  covers zsh, bash, fish, PowerShell and elvish, `locus completion --help`
+  prints the install lines, and the Homebrew formula installs bash/zsh/fish
+  completions (#63).
+- **Codex** — docs/mcp.md shows the `~/.codex/config.toml` entry that
+  `locus setup --client codex` writes, for wiring it by hand (#62).
 
 ## [0.5.0] — 2026-08-16
 
