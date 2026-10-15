@@ -39,7 +39,10 @@ fn quickstart_then_enter_switches_binding() {
         enter.status.success(),
         "enter acme failed after quickstart: {stderr}"
     );
-    assert!(!stderr.contains("stale"), "unexpected stale authority: {stderr}");
+    assert!(
+        !stderr.contains("stale"),
+        "unexpected stale authority: {stderr}"
+    );
 
     let who = locus(home.path(), cwd.path(), Some(cap), &["whoami"]);
     let out = String::from_utf8_lossy(&who.stdout);
