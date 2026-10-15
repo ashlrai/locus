@@ -66,6 +66,32 @@ fn stale_pin_surfaces_name_the_recovery() {
         "whoami must name the recovery: {err}"
     );
 
+    // status must agree with whoami: not ok, same remedy, all three formats.
+    let status = locus(home.path(), cwd.path(), &cap, &["status"]);
+    assert_eq!(status.status.code(), Some(2), "stale status must exit 2");
+    let out = String::from_utf8_lossy(&status.stdout);
+    assert!(out.starts_with("INVALID personal"), "status: {out}");
+    assert!(
+        out.contains("eval \"$(locus hook bash)\"; locus leave --force; locus enter personal"),
+        "status must name the recovery: {out}"
+    );
+    let oneline = locus(home.path(), cwd.path(), &cap, &["status", "--oneline"]);
+    assert_eq!(oneline.status.code(), Some(2));
+    assert_eq!(String::from_utf8_lossy(&oneline.stdout).trim(), "invalid");
+    let json = locus(home.path(), cwd.path(), &cap, &["--json", "status"]);
+    assert_eq!(json.status.code(), Some(2));
+    let v: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(v["ok"], false);
+    assert_eq!(v["authority_verified"], false);
+    assert!(v["error"]
+        .as_str()
+        .unwrap()
+        .contains("human re-pin required"));
+    assert!(v["recovery"]
+        .as_str()
+        .unwrap()
+        .ends_with("locus leave --force; locus enter personal"));
+
     let enter = locus(home.path(), cwd.path(), &cap, &["enter", "acme"]);
     assert!(!enter.status.success(), "enter must still fail closed");
     let err = stderr(&enter);
@@ -82,4 +108,38 @@ fn stale_pin_surfaces_name_the_recovery() {
     let whoami = locus(home.path(), cwd.path(), &cap, &["whoami"]);
     assert!(whoami.status.success(), "whoami: {}", stderr(&whoami));
     assert!(!stderr(&whoami).contains(RECOVERY_TAIL));
+    let status = locus(home.path(), cwd.path(), &cap, &["--json", "status"]);
+    assert!(status.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["authority_verified"], true);
+    assert!(v["recovery"].is_null());
+}
+
+#[test]
+fn status_without_capability_is_unverified_not_ok() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    // Pin from this (live) test process so the broker stays up.
+    let qs = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .arg("quickstart")
+        .env("LOCUS_HOME", home.path())
+        .env_remove("LOCUS_CONTROL_CAPABILITY")
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    assert!(qs.status.success(), "quickstart: {}", stderr(&qs));
+    let status = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .arg("status")
+        .env("LOCUS_HOME", home.path())
+        .env_remove("LOCUS_CONTROL_CAPABILITY")
+        .env("SHELL", "/bin/zsh")
+        .env("NO_COLOR", "1")
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&status.stdout);
+    assert!(status.status.success(), "{out}");
+    assert!(out.starts_with("UNVERIFIED personal"), "status: {out}");
+    assert!(out.contains("eval \"$(locus hook zsh)\""), "status: {out}");
 }

@@ -3035,7 +3035,8 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
             let key = s.seal_key()?;
             let seal_ok = session.verify_seal(&key).is_ok();
             let frozen = session.frozen;
-            let ok = seal_ok && !frozen && !session.is_expired();
+            let check = status_pin_check(&s, &session, seal_ok);
+            let ok = seal_ok && check.usable && !frozen && !session.is_expired();
             if json {
                 println!(
                     "{}",
@@ -3051,6 +3052,10 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                         "require_pin": require_pin,
                         "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
                         "namespaces": session.all_aliases(),
+                        "authority_verified": check.verified,
+                        "ok": ok,
+                        "error": check.error,
+                        "recovery": check.recovery,
                     })
                 );
             } else if oneline {
@@ -3064,6 +3069,8 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
             } else {
                 let mark = if frozen {
                     "FROZEN".red()
+                } else if ok && !check.verified {
+                    "UNVERIFIED".yellow()
                 } else if ok {
                     "ok".green()
                 } else {
@@ -3082,6 +3089,13 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                         session.frozen_reason.as_deref().unwrap_or("binding_drift")
                     );
                 }
+                if let Some(error) = &check.error {
+                    let label = if ok { "note " } else { "error" };
+                    println!("  {label}    {error}");
+                }
+                if let Some(recovery) = &check.recovery {
+                    println!("  recover  {}", recovery.cyan());
+                }
             }
             if !ok {
                 std::process::exit(2);
@@ -3089,6 +3103,59 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Outcome of the verification `locus status` shares with `locus whoami`.
+#[derive(Debug, Default)]
+struct StatusPinCheck {
+    /// Pin may be reported as usable (verified, or unverifiable only for
+    /// lack of a control capability in this shell).
+    usable: bool,
+    /// The session authority anchor was actually checked and accepted.
+    verified: bool,
+    /// Why the pin is unusable or unverified (never secret-bearing).
+    error: Option<String>,
+    /// Operator remedy for `error`.
+    recovery: Option<String>,
+}
+
+/// Run the checks `locus whoami` runs (seal + session authority anchor +
+/// binding), so `status` never reports ok on a pin whoami refuses, e.g. one
+/// whose broker died with the shell that pinned. A missing control
+/// capability is the one gap that is reported as unverified rather than
+/// invalid, matching `agent report`'s `status_oneline`.
+fn status_pin_check(s: &Store, session: &Session, seal_ok: bool) -> StatusPinCheck {
+    use locus_core::recovery::{is_stale_pin_error, stale_pin_recovery};
+    let alias = Some(session.binding_alias.as_str());
+    if !seal_ok {
+        return StatusPinCheck {
+            error: Some(locus_core::LocusError::InvalidSeal.to_string()),
+            recovery: Some(stale_pin_recovery(alias)),
+            ..Default::default()
+        };
+    }
+    match s.whoami() {
+        Ok(_) => StatusPinCheck {
+            usable: true,
+            verified: true,
+            ..Default::default()
+        },
+        Err(locus_core::LocusError::ExecutorAuthorityUnavailable(_)) => StatusPinCheck {
+            usable: true,
+            verified: false,
+            error: Some(
+                "authority anchor not checked: no LOCUS_CONTROL_CAPABILITY in this shell".into(),
+            ),
+            recovery: Some(locus_core::recovery::hook_eval_command(
+                locus_core::recovery::hook_shell(env::var("SHELL").ok().as_deref()),
+            )),
+        },
+        Err(e) => StatusPinCheck {
+            recovery: is_stale_pin_error(&e).then(|| stale_pin_recovery(alias)),
+            error: Some(e.to_string()),
+            ..Default::default()
+        },
+    }
 }
 
 fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Result<()> {
