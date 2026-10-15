@@ -18,7 +18,7 @@ These are orthogonal. Mixing them into one “be careful” prompt loses mechani
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  Verification plane (next)                                 │
+│  Verification plane (M5, heuristic)                        │
 │  Epistemic certainty: evidence, tool-grounded checks,      │
 │  approval of *claims* before high-blast actions            │
 └────────────────────────────┬─────────────────────────────┘
@@ -39,7 +39,7 @@ These are orthogonal. Mixing them into one “be careful” prompt loses mechani
 |-------|---------|----------------|----------------|
 | Secret | **Phantom** | Confidentiality | Token/proxy; values stay out of context |
 | Identity | **Locus** | Agency / tenancy | HMAC pin, exclusive catalog, scrub ambient |
-| Verification | **Next** | Epistemic | Evidence requirements, dual-control on claims, audit of *why* |
+| Verification | **Locus verify** (M5, heuristic: `locus verify`, `locus_verify_claim`) | Epistemic | Evidence requirements, dual-control on claims, audit of *why* |
 
 Locus answers *who may act*. It does **not** assert the model’s plan is correct. Phantom answers *what may be known as a secret*. Neither replaces test runners, schema checks, or human review of intent.
 
