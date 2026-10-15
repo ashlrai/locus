@@ -446,7 +446,16 @@ enum Commands {
 
     // ───────────────────────── Maintenance ───────────────────────────
     /// Generate shell completions (bash | zsh | fish | elvish | powershell)
-    #[command(next_help_heading = "Maintenance")]
+    ///
+    /// Writes the script to stdout. Install it once (Homebrew installs bash/zsh/fish for you):
+    ///   zsh:   mkdir -p ~/.zfunc && locus completion zsh > ~/.zfunc/_locus
+    ///          then in ~/.zshrc, before compinit: fpath=(~/.zfunc $fpath)
+    ///   bash:  mkdir -p ~/.local/share/bash-completion/completions
+    ///          locus completion bash > ~/.local/share/bash-completion/completions/locus
+    ///   fish:  locus completion fish > ~/.config/fish/completions/locus.fish
+    ///   pwsh:  add `locus completion powershell | Out-String | Invoke-Expression` to $PROFILE
+    /// Open a new shell afterwards. See docs/shell-completions.md.
+    #[command(next_help_heading = "Maintenance", verbatim_doc_comment)]
     Completion {
         /// Target shell
         shell: Shell,
