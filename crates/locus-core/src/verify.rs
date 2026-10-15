@@ -203,7 +203,7 @@ pub fn verify_claim(text: &str, whoami: Option<&Whoami>) -> ClaimVerification {
             false,
             format!(
                 "Identity claim grounded against active pin `{}` (tenant `{}`). \
-                 Prefer `locus_safe_next` / `locus_whoami` / `locus heartbeat` if drift is possible; \
+                 Prefer `locus_safe_next` / `locus_whoami` / `locus_heartbeat` if drift is possible; \
                  use `locus verify session` for a doctor+whoami+safe_next pack.",
                 g.binding_alias, g.tenant
             ),

@@ -545,6 +545,28 @@ fn run_stdio() -> Result<()> {
 /// Dispatch one JSON-RPC request/notification.
 /// Returns `None` for notifications (no response).
 fn dispatch_rpc(msg: &Value, scope: &RequestScope) -> Option<Value> {
+    // A JSON-RPC batch (array) or any non-object used to fall through as a
+    // "notification" and get no reply at all, leaving the client waiting
+    // forever. Batching was removed from MCP in 2025-06-18; answer with an
+    // explicit Invalid Request instead of silence.
+    if !msg.is_object() {
+        let message = if msg.is_array() {
+            "invalid request: JSON-RPC batches are not supported; send one message per frame"
+        } else {
+            "invalid request: expected a JSON-RPC object"
+        };
+        return Some(json!({
+            "jsonrpc": "2.0",
+            "id": Value::Null,
+            "error": rpc_error(-32600, message.into()),
+        }));
+    }
+    // A response to a server-initiated request (no method, has result/error).
+    // locus-mcp sends no requests, so there is nothing to correlate; never
+    // answer a response with "method not found".
+    if msg.get("method").is_none() && (msg.get("result").is_some() || msg.get("error").is_some()) {
+        return None;
+    }
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(json!({}));
@@ -2283,6 +2305,40 @@ fn handle_notification(method: &str, _params: &Value) {
     }
 }
 
+/// One actionable message for every surface of a server launched without an
+/// executor capability (the plain `locus-mcp` client entry): it cannot observe
+/// the pin, and re-pinning or `locus doctor` (which runs with the operator's
+/// capability and reports healthy) never helps.
+const EXECUTOR_AUTHORITY_HINT: &str = "This locus-mcp has no executor capability for the current pin, so it cannot observe the pin and provider tools stay unavailable (re-pinning alone will not help). Human: launch it as `locus mcp --supervised`, or restart it that way after a re-pin (needs LOCUS_CONTROL_CAPABILITY and a live pin in the launching environment), or run the agent under `locus exec`. Agents: locus_verify_session / locus_safe_next.";
+
+const EXECUTOR_AUTHORITY_ISSUE: &str = "executor_authority_unavailable";
+
+fn has_executor_authority_issue(issues: &[String]) -> bool {
+    issues.iter().any(|i| i == EXECUTOR_AUTHORITY_ISSUE)
+}
+
+/// `initialize.instructions` pin line when `whoami` fails. A server with no
+/// executor capability (the plain client entry) cannot observe the pin at all:
+/// telling the agent it is "unpinned" sends the human to re-pin, which never
+/// helps.
+fn unpinned_instruction_line(e: &locus_core::LocusError) -> &'static str {
+    if matches!(e, locus_core::LocusError::ExecutorAuthorityUnavailable(_)) {
+        "• Pin not observable — this locus-mcp has no executor capability for the current pin, so only locus_* control tools are available even if a human has pinned (re-pinning alone will not help). Ask the human to launch it as `locus mcp --supervised` (restart it after a re-pin) or to run the agent under `locus exec`. There is no ambient personal fallthrough."
+    } else {
+        "• Currently unpinned — only locus_* control tools are available. There is no ambient personal fallthrough."
+    }
+}
+
+/// Hint for a provider `tools/call` refused because the runtime is unhealthy
+/// for a reason other than unpinned / seal / frozen / expired.
+fn runtime_unhealthy_hint(issues: &[String]) -> &'static str {
+    if has_executor_authority_issue(issues) {
+        EXECUTOR_AUTHORITY_HINT
+    } else {
+        "Identity drift detected. Human: `locus doctor` (or `locus verify session`), then re-pin if needed. Agents: call locus_heartbeat."
+    }
+}
+
 fn rpc_error(code: i64, message: String) -> Value {
     json!({ "code": code, "message": message })
 }
@@ -2302,7 +2358,7 @@ fn agent_instructions(session_anchor: Option<&SessionAnchor>) -> String {
                     w.tenant,
                     w.mode
                 ),
-                Err(_) => "• Currently unpinned — only locus_* control tools are available. There is no ambient personal fallthrough.".into(),
+                Err(e) => unpinned_instruction_line(&e).into(),
             }
         }
         Err(_) => "• Store unavailable — treat session as unpinned.".into(),
@@ -2328,13 +2384,31 @@ fn agent_instructions(session_anchor: Option<&SessionAnchor>) -> String {
     lines.join("\n")
 }
 
-fn handle_initialize(_params: &Value, scope: &RequestScope) -> Value {
+/// MCP protocol revisions this server speaks, newest first. Everything
+/// locus-mcp uses (tools, resources, prompts, listChanged, instructions) is
+/// unchanged across them.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// MCP version negotiation: echo the client's requested revision when we
+/// support it; otherwise answer our latest and let the client decide whether
+/// to continue (spec: lifecycle / version negotiation).
+fn negotiate_protocol_version(params: &Value) -> &'static str {
+    let requested = params.get("protocolVersion").and_then(Value::as_str);
+    SUPPORTED_PROTOCOL_VERSIONS
+        .iter()
+        .copied()
+        .find(|v| Some(*v) == requested)
+        .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[0])
+}
+
+fn handle_initialize(params: &Value, scope: &RequestScope) -> Value {
+    let protocol_version = negotiate_protocol_version(params);
     if let Some(t) = &scope.tenant {
         // Tenant sessions: the anchor was pre-set at session mint from the
         // grant session's observation and is write-once — re-initialize never
         // rotates it, and the global pin is never consulted.
         return json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": protocol_version,
             "capabilities": {
                 "tools": { "listChanged": true },
                 "resources": { "subscribe": false, "listChanged": true },
@@ -2388,7 +2462,7 @@ fn handle_initialize(_params: &Value, scope: &RequestScope) -> Value {
 
     // listChanged=true: catalog may change after a human pin/leave; clients should re-list.
     json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": protocol_version,
         "capabilities": {
             "tools": { "listChanged": true },
             "resources": { "subscribe": false, "listChanged": true },
@@ -2850,14 +2924,20 @@ fn handle_resources_read(
 fn resource_session_json(scope: &RequestScope) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     let _ = scope_drift(&s, scope);
-    let who = scope_whoami(&s, scope).ok();
-    let mut body = match &who {
-        Some(w) => serde_json::to_value(w).unwrap_or(json!({})),
-        None => json!({
+    let who_result = scope_whoami(&s, scope);
+    let mut body = match &who_result {
+        Ok(w) => serde_json::to_value(w).unwrap_or(json!({})),
+        Err(locus_core::LocusError::ExecutorAuthorityUnavailable(_)) => json!({
+            "pinned": Value::Null,
+            "status": EXECUTOR_AUTHORITY_ISSUE,
+            "hint": EXECUTOR_AUTHORITY_HINT,
+        }),
+        Err(_) => json!({
             "pinned": false,
             "hint": "No active pin. Human: `locus pin <alias>` or `locus enter <alias>`. Agents: locus_request_pin / locus_enter_hint."
         }),
     };
+    let who = who_result.ok();
     if let Some(t) = &scope.tenant {
         body["grant_id"] = json!(t.grant_id);
     }
@@ -3038,6 +3118,11 @@ fn build_locus_context_prompt(scope: &RequestScope) -> String {
                 }
             }
         }
+        Err(locus_core::LocusError::ExecutorAuthorityUnavailable(_)) => {
+            lines.push("### Active pin".into());
+            lines.push("- **pinned**: unknown (not observable from this server)".into());
+            lines.push(format!("- {EXECUTOR_AUTHORITY_HINT}"));
+        }
         Err(_) => {
             lines.push("### Active pin".into());
             lines.push("- **pinned**: false".into());
@@ -3090,13 +3175,9 @@ fn whoami_error_body(e: &locus_core::LocusError) -> Value {
     if matches!(e, locus_core::LocusError::ExecutorAuthorityUnavailable(_)) {
         return json!({
             "pinned": Value::Null,
-            "status": "executor_authority_unavailable",
+            "status": EXECUTOR_AUTHORITY_ISSUE,
             "error": e.to_string(),
-            "hint": "This locus-mcp has no executor capability, so it cannot observe the pin \
-                     (re-pinning will not help). Human: launch it as `locus mcp --supervised` \
-                     (needs LOCUS_CONTROL_CAPABILITY and a live pin in the launching \
-                     environment) or run the agent under `locus exec`. Agents: \
-                     locus_verify_session / locus_safe_next."
+            "hint": EXECUTOR_AUTHORITY_HINT,
         });
     }
     json!({
@@ -3432,8 +3513,8 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
         return Ok(tool_text(
             json!({
                 "error": "runtime_unhealthy",
+                "hint": runtime_unhealthy_hint(&drift.issues),
                 "issues": drift.issues,
-                "hint": "Identity drift detected. Human: `locus heartbeat` / `locus doctor`, then re-pin if needed. Agents: call locus_heartbeat.",
             }),
             true,
         ));
@@ -3802,6 +3883,19 @@ fn call_control(
                 body["ready"] = json!(false);
                 body["command"] = json!(format!("locus enter {anchored_alias}"));
                 is_err = true;
+            } else if let Some(issues) = scope_drift(&s, scope)
+                .ok()
+                .map(|d| d.issues)
+                .filter(|issues| !next.ready && has_executor_authority_issue(issues))
+            {
+                // Plain client entry: the pin is unobservable from this
+                // process. `locus doctor` (operator capability) reports
+                // healthy, so pointing there loops; name the real fix.
+                body["action"] = json!("launch_supervised");
+                body["command"] = json!("locus mcp --supervised");
+                body["message"] = json!(EXECUTOR_AUTHORITY_HINT);
+                body["issues"] = json!(issues);
+                is_err = true;
             }
             // Informational: isError only when not ready so agents notice the gate.
             Ok(tool_text(body, is_err))
@@ -3844,20 +3938,39 @@ fn call_control(
                 Some(session) => {
                     let key = s.seal_key().map_err(|e| rpc_error(-32000, e.to_string()))?;
                     let seal_ok = session.verify_seal(&key).is_ok();
+                    // The HMAC seal alone does not make a pin usable: its
+                    // authority anchor (broker) may be retired or unobservable
+                    // from this process. Report the same runtime verdict the
+                    // provider gate uses so `pinned: true, seal_ok: true`
+                    // never reads as "ready" when every provider call refuses.
+                    let drift = scope_drift(&s, scope).ok();
+                    let ok = drift.as_ref().is_some_and(|d| d.ok);
+                    let issues = drift.as_ref().map(|d| d.issues.clone()).unwrap_or_default();
+                    let hint = if ok {
+                        None
+                    } else if has_executor_authority_issue(&issues) {
+                        Some(EXECUTOR_AUTHORITY_HINT)
+                    } else {
+                        Some("pin present but not usable — call locus_heartbeat / locus_safe_next; a human may need to re-pin (`locus leave --force`, then `locus enter <alias>`)")
+                    };
                     Ok(tool_text(
                         attach_report(json!({
                             "pinned": true,
+                            "ok": ok,
                             "binding": session.binding_alias,
                             "tenant": session.tenant,
                             "session_id": session.session_id,
                             "seal_ok": seal_ok,
+                            "authority_anchor_ok": drift.as_ref().is_some_and(|d| d.authority_anchor_ok),
                             "expired": session.is_expired(),
                             "frozen": session.frozen,
                             "frozen_reason": session.frozen_reason,
                             "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
                             "namespaces": session.all_aliases(),
+                            "issues": issues,
+                            "hint": hint,
                         })),
-                        false,
+                        !ok,
                     ))
                 }
             }
@@ -3875,6 +3988,8 @@ fn call_control(
                 Some("invalid seal — human must re-pin")
             } else if drift.expired {
                 Some("pin TTL expired — human must re-pin")
+            } else if has_executor_authority_issue(&drift.issues) {
+                Some(EXECUTOR_AUTHORITY_HINT)
             } else {
                 Some("runtime unhealthy — run `locus doctor`")
             };
@@ -4731,5 +4846,48 @@ mod catalog_shaping_tests {
             assert_eq!(orig.name, out.name);
             assert_eq!(orig.description, out.description);
         }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_hint_tests {
+    use super::*;
+
+    #[test]
+    fn protocol_version_echoes_supported_and_falls_back_to_latest() {
+        for v in SUPPORTED_PROTOCOL_VERSIONS {
+            assert_eq!(
+                negotiate_protocol_version(&json!({ "protocolVersion": v })),
+                *v
+            );
+        }
+        assert_eq!(
+            negotiate_protocol_version(&json!({ "protocolVersion": "2030-01-01" })),
+            SUPPORTED_PROTOCOL_VERSIONS[0]
+        );
+        assert_eq!(
+            negotiate_protocol_version(&json!({})),
+            SUPPORTED_PROTOCOL_VERSIONS[0]
+        );
+    }
+
+    #[test]
+    fn runtime_unhealthy_hints_name_real_commands() {
+        let exec = runtime_unhealthy_hint(&["executor_authority_unavailable".into()]);
+        assert!(exec.contains("locus mcp --supervised"), "{exec}");
+        let other = runtime_unhealthy_hint(&["authority_anchor_unavailable".into()]);
+        assert!(other.contains("locus doctor"), "{other}");
+        // `locus heartbeat` is not a CLI command (the MCP tool is locus_heartbeat).
+        assert!(!exec.contains("locus heartbeat") && !other.contains("locus heartbeat"));
+    }
+
+    #[test]
+    fn instruction_line_distinguishes_unobservable_from_unpinned() {
+        let unobservable = unpinned_instruction_line(
+            &locus_core::LocusError::ExecutorAuthorityUnavailable("x".into()),
+        );
+        assert!(unobservable.contains("Pin not observable"));
+        let unpinned = unpinned_instruction_line(&locus_core::LocusError::NotPinned);
+        assert!(unpinned.contains("Currently unpinned"));
     }
 }
