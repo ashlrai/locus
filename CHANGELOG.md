@@ -37,6 +37,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrappers now drain those responses and exit explicitly.
 - **npm users get `locus-mcp`** — `locus-cli` installs `locus-mcp` from the same
   release archive next to the cached `locus`, where `locus setup` looks for it.
+- **Stale pins name their recovery** — `enter`, `status` and `agent report`
+  say how to recover a stale pin; `status` reports `invalid` (exit 2) whenever
+  `whoami` fails; the shell prompt shows invalid and frozen pins; commands
+  whose stdout closes early exit 141 instead of panicking (#76).
 - **Cargo fallback** — explains the slow from-source build and fixes the
   invalid `cargo install --package` command (#51).
 - **Shell hook under `set -u`** — guards `ZSH_VERSION` / `BASH_VERSION` /
