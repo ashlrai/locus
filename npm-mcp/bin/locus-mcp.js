@@ -104,9 +104,13 @@ function download(url) {
     https
       .get(url, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          // Drain every response we do not read, or its socket keeps the
+          // process alive after the download finishes.
+          res.resume();
           return download(res.headers.location).then(resolve).catch(reject);
         }
         if (res.statusCode !== 200) {
+          res.resume();
           return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
         }
         const chunks = [];
@@ -395,6 +399,8 @@ async function main() {
   } catch (err) {
     process.exit(err.status || 1);
   }
+  // Exit explicitly: a lingering download socket must never hold the client.
+  process.exit(0);
 }
 
 if (require.main === module) {

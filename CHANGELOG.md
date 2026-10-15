@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authority generation is stale". On macOS/Linux the npm package now links the
   native binary in place of the wrapper at install (and on first run), so the
   shell runs `locus` directly. New e2e test: quickstart → enter → whoami (#66).
+- **npm install and first run no longer hang** — unread redirect and 404
+  responses (the optional `.sha256` sidecar) kept a socket open, so
+  `npm i -g locus-cli` stalled in postinstall and wrappers never exited. Both
+  wrappers now drain those responses and exit explicitly.
+- **npm users get `locus-mcp`** — `locus-cli` installs `locus-mcp` from the same
+  release archive next to the cached `locus`, where `locus setup` looks for it.
 - **Cargo fallback** — explains the slow from-source build and fixes the
   invalid `cargo install --package` command (#51).
 - **Shell hook under `set -u`** — guards `ZSH_VERSION` / `BASH_VERSION` /

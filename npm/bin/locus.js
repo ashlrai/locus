@@ -22,7 +22,7 @@ const {
   unlinkSync,
   writeFileSync,
 } = require("fs");
-const { join } = require("path");
+const { dirname, join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
@@ -101,9 +101,13 @@ function download(url) {
     https
       .get(url, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          // Drain every response we do not read, or its socket keeps the
+          // process alive after the download finishes.
+          res.resume();
           return download(res.headers.location).then(resolve).catch(reject);
         }
         if (res.statusCode !== 200) {
+          res.resume();
           return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
         }
         const chunks = [];
@@ -215,9 +219,35 @@ function extractBinaryFromArchive(archivePath, binaryPath) {
       chmodSync(binaryPath, 0o755);
     }
     writeVersionSidecar(binaryPath);
+    installCompanionBinaries(stagingDir, binaryPath);
   } finally {
     rmSync(stagingDir, { recursive: true, force: true });
   }
+}
+
+// The release archive ships locus-mcp beside locus. Install it next to the
+// cached locus so `locus setup` finds the sibling MCP server; without it npm
+// users have no locus-mcp at all. Best-effort: never fails the locus install.
+const COMPANION_BINARIES = Object.freeze(["locus-mcp"]);
+
+function installCompanionBinaries(stagingDir, binaryPath, platform = process.platform) {
+  const installed = [];
+  const destDir = dirname(binaryPath);
+  for (const name of COMPANION_BINARIES) {
+    const filename = platform === "win32" ? `${name}.exe` : name;
+    try {
+      const src = findBinaryInDir(stagingDir, filename);
+      if (!src) continue;
+      const dest = join(destDir, filename);
+      copyFileSync(src, dest);
+      if (platform !== "win32") chmodSync(dest, 0o755);
+      writeVersionSidecar(dest);
+      installed.push(dest);
+    } catch {
+      // best-effort
+    }
+  }
+  return installed;
 }
 
 function removeIfExists(path) {
@@ -440,6 +470,8 @@ async function main() {
   } catch (err) {
     process.exit(err.status || 1);
   }
+  // Exit explicitly: a lingering download socket must never hold the shell.
+  process.exit(0);
 }
 
 if (require.main === module) {
@@ -460,4 +492,5 @@ module.exports = {
   getPlatformTarget,
   parseSha256File,
   findBinaryInDir,
+  installCompanionBinaries,
 };

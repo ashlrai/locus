@@ -34,6 +34,9 @@ async function run() {
   }
 }
 
-run().catch((err) => {
-  console.log(`locus will download on first use (${err.message}).`);
-});
+run()
+  .catch((err) => {
+    console.log(`locus will download on first use (${err.message}).`);
+  })
+  // Never let a lingering socket stall `npm install`.
+  .finally(() => process.exit(0));

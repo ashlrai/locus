@@ -99,3 +99,34 @@ test("locus: linkNativeBin replaces the wrapper with a symlink to the binary", (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The release archive ships locus-mcp beside locus; npm users must get both.
+test("locus: installCompanionBinaries installs locus-mcp next to the cached locus", () => {
+  const { installCompanionBinaries } = require(wrappers.locus);
+  const { existsSync, mkdirSync } = require("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "locus-companion-"));
+  try {
+    const staging = join(dir, "staging", "locus-x86_64-unknown-linux-gnu");
+    const cache = join(dir, "cache");
+    mkdirSync(staging, { recursive: true });
+    mkdirSync(cache);
+    writeFileSync(join(staging, "locus"), "native");
+    writeFileSync(join(staging, "locus-mcp"), "native-mcp");
+    const installed = installCompanionBinaries(join(dir, "staging"), join(cache, "locus"), "linux");
+    assert.deepEqual(installed, [join(cache, "locus-mcp")]);
+    assert.equal(readFileSync(join(cache, "locus-mcp"), "utf8"), "native-mcp");
+    assert.ok(existsSync(join(cache, "locus-mcp.version")));
+    // An archive without locus-mcp is not an error.
+    assert.deepEqual(installCompanionBinaries(join(dir, "empty"), join(cache, "locus"), "linux"), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("locus: wrapper drains unread HTTP responses and exits explicitly", () => {
+  const src = readFileSync(wrappers.locus, "utf8");
+  const download = src.split("function download(")[1].split("\nfunction ")[0];
+  assert.equal((download.match(/res\.resume\(\)/g) || []).length, 2, "redirect and non-200 responses must be drained");
+  assert.match(src.split("async function main()")[1], /process\.exit\(0\)/);
+  assert.match(readFileSync(join(root, "npm", "install.js"), "utf8"), /process\.exit\(0\)/);
+});
