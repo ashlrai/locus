@@ -389,6 +389,17 @@ fn authorize_control_teardown_with(
     }
 }
 
+/// Wrap a `read_endpoint` failure without nesting: an inner
+/// `AuthorityAnchorUnavailable` contributes only its detail, so the message
+/// reads "...: no current broker endpoint: <why>; human re-pin required" once.
+fn no_current_endpoint(error: LocusError) -> LocusError {
+    let detail = match error {
+        LocusError::AuthorityAnchorUnavailable(detail) => detail,
+        other => other.to_string(),
+    };
+    LocusError::AuthorityAnchorUnavailable(format!("no current broker endpoint: {detail}"))
+}
+
 pub(crate) fn validate(
     home: &Path,
     lease: &SessionAuthorityAnchor,
@@ -397,9 +408,7 @@ pub(crate) fn validate(
     subject_digest: &str,
 ) -> Result<ValidationMode> {
     let (auth, mode) = validation_auth()?;
-    let endpoint = read_endpoint(home).map_err(|error| {
-        LocusError::AuthorityAnchorUnavailable(format!("no current broker endpoint: {error}"))
-    })?;
+    let endpoint = read_endpoint(home).map_err(no_current_endpoint)?;
     validate_endpoint_shape(home, &endpoint)?;
     if lease.version != AUTHORITY_ANCHOR_VERSION || lease.epoch != endpoint.epoch {
         return Err(LocusError::AuthorityAnchorMismatch);
@@ -2107,6 +2116,22 @@ mod tests {
 
     fn auth() -> RequestAuth {
         control_auth().unwrap()
+    }
+
+    #[test]
+    fn no_current_endpoint_does_not_nest_the_unavailable_message() {
+        let inner = LocusError::AuthorityAnchorUnavailable(
+            "authority supervisor is no longer current".into(),
+        );
+        let msg = no_current_endpoint(inner).to_string();
+        assert_eq!(
+            msg,
+            "session authority anchor unavailable: no current broker endpoint: \
+             authority supervisor is no longer current; human re-pin required"
+        );
+        assert_eq!(msg.matches("human re-pin required").count(), 1);
+        let io = no_current_endpoint(LocusError::Io(std::io::ErrorKind::NotFound.into()));
+        assert!(io.to_string().contains("no current broker endpoint: io: "));
     }
 
     fn broker(home: &Path) -> AuthorityAnchorEndpoint {

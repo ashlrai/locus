@@ -7,6 +7,10 @@
 //! locus leave
 //! ```
 
+// Must stay first: shadows `println!` / `print!` for every module below.
+#[macro_use]
+mod stdout;
+
 mod serve;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -993,9 +997,14 @@ fn main() {
         }
         return;
     }
-    if let Err(e) = run() {
-        eprintln!("{} {e:#}", "error:".red().bold());
-        std::process::exit(1);
+    // A closed stdout (`locus doctor | head -1`) exits 141 instead of panicking.
+    match stdout::catch_stdout_closed(run) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            eprintln!("{} {e:#}", "error:".red().bold());
+            std::process::exit(1);
+        }
+        Err(()) => std::process::exit(stdout::STDOUT_CLOSED_EXIT),
     }
 }
 
@@ -1130,7 +1139,9 @@ fn run() -> Result<()> {
         } => cmd_serve(port, token, !no_open),
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
-            generate(shell, &mut cmd, "locus", &mut io::stdout());
+            let mut buf = Vec::new();
+            generate(shell, &mut cmd, "locus", &mut buf);
+            stdout::write_stdout_bytes(&buf);
             Ok(())
         }
         Commands::Topic { name } => cmd_topic(name.as_deref()),
@@ -2119,17 +2130,18 @@ fn cmd_enter(
     ttl: Option<String>,
     json: bool,
 ) -> Result<()> {
-    require_local_control_boundary("locus enter")?;
+    require_local_control_boundary("locus enter")
+        .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
     let session = match alias {
         Some(a) => s
             .pin_with_ttl(&a, &cwd(), client, force, requested_ttl)
-            .map_err(|e| with_alias_suggestions(&s, e))?,
+            .map_err(|e| wedged_session_recovery_for(with_alias_suggestions(&s, e), Some(&a)))?,
         None => s
             .pin_auto_with_ttl(&cwd(), client, force, requested_ttl)
-            .map_err(|e| with_alias_suggestions(&s, e))?,
+            .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
     };
     let binding = s.load_binding(&session.binding_alias)?;
     let providers_n = binding.providers.len();
@@ -2374,7 +2386,8 @@ fn cmd_pin(
     ttl: Option<String>,
     json: bool,
 ) -> Result<()> {
-    require_local_control_boundary("locus pin")?;
+    require_local_control_boundary("locus pin")
+        .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
@@ -2393,15 +2406,15 @@ fn cmd_pin(
             bail!("--ns requires at least two distinct bindings (e.g. --ns personal,acme)");
         }
         s.pin_namespaced_with_ttl(&aliases, &cwd(), client, force, requested_ttl)
-            .map_err(|e| with_alias_suggestions(&s, e))?
+            .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?
     } else {
         match alias {
             Some(a) => s
                 .pin_with_ttl(&a, &cwd(), client, force, requested_ttl)
-                .map_err(|e| with_alias_suggestions(&s, e))?,
+                .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
             None => s
                 .pin_auto_with_ttl(&cwd(), client, force, requested_ttl)
-                .map_err(|e| with_alias_suggestions(&s, e))?,
+                .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
         }
     };
     // Surface a silent policy.max_ttl clamp (5s slack for pin-time skew).
@@ -2503,29 +2516,34 @@ fn cmd_pin(
 /// Route wedged-session control errors to the recovery hatch.
 ///
 /// When `leave` / `status` / `doctor` / `exec` fail closed on the ACTIVE
-/// session — invalid or legacy seal, unavailable/stale authority anchor,
-/// unparseable session file — the operator has no built-in way out except
-/// hand-deleting `sessions/active.json`. Name the supported teardown instead.
+/// session — invalid or legacy seal, unavailable/stale authority anchor
+/// (e.g. the pinning shell exited and took the broker with it), unparseable
+/// session file — the operator has no built-in way out except hand-deleting
+/// `sessions/active.json`. Name the supported teardown + re-pin instead.
+/// Message only: the error itself still fails closed.
 fn wedged_session_recovery(err: anyhow::Error) -> anyhow::Error {
-    use locus_core::LocusError as E;
-    let wedged = matches!(
-        err.downcast_ref::<E>(),
-        Some(
-            E::InvalidSeal
-                | E::LegacySessionSeal
-                | E::AuthorityAnchorUnavailable(_)
-                | E::AuthorityAnchorMismatch
-                | E::Json(_)
-        )
-    );
+    wedged_session_recovery_for(err, None)
+}
+
+/// [`wedged_session_recovery`] naming the binding to re-enter, when known.
+fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyhow::Error {
+    let wedged = err
+        .downcast_ref::<locus_core::LocusError>()
+        .is_some_and(locus_core::recovery::is_stale_pin_error);
     if wedged {
-        err.context(
-            "active session is wedged — recovery: `locus leave --force` clears it \
-             (control capability required), then re-pin: `locus enter <alias>`",
+        anyhow!(
+            "{err:#}\n  recover (operator shell; control capability required): {}",
+            locus_core::recovery::stale_pin_recovery(alias)
         )
     } else {
         err
     }
+}
+
+/// Alias of the active session file, for recovery hints only (never trusted
+/// for authority; the recipe builder drops anything not alias-shaped).
+fn active_alias_hint(s: &Store) -> Option<String> {
+    Some(s.active_session().ok().flatten()?.binding_alias)
 }
 
 fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {
@@ -2876,7 +2894,10 @@ fn cmd_whoami(json: bool) -> Result<()> {
     let s = store()?;
     // Detect drift before reporting
     let _ = s.check_drift_and_freeze();
-    let w = s.whoami()?;
+    let w = s.whoami().map_err(|e| {
+        let alias = active_alias_hint(&s);
+        wedged_session_recovery_for(anyhow::Error::new(e), alias.as_deref())
+    })?;
     if json {
         println!("{}", serde_json::to_string_pretty(&w)?);
         return Ok(());
@@ -3007,7 +3028,8 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
             let key = s.seal_key()?;
             let seal_ok = session.verify_seal(&key).is_ok();
             let frozen = session.frozen;
-            let ok = seal_ok && !frozen && !session.is_expired();
+            let check = status_pin_check(&s, &session, seal_ok);
+            let ok = seal_ok && check.usable && !frozen && !session.is_expired();
             if json {
                 println!(
                     "{}",
@@ -3023,6 +3045,10 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                         "require_pin": require_pin,
                         "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
                         "namespaces": session.all_aliases(),
+                        "authority_verified": check.verified,
+                        "ok": ok,
+                        "error": check.error,
+                        "recovery": check.recovery,
                     })
                 );
             } else if oneline {
@@ -3036,6 +3062,8 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
             } else {
                 let mark = if frozen {
                     "FROZEN".red()
+                } else if ok && !check.verified {
+                    "UNVERIFIED".yellow()
                 } else if ok {
                     "ok".green()
                 } else {
@@ -3054,6 +3082,13 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                         session.frozen_reason.as_deref().unwrap_or("binding_drift")
                     );
                 }
+                if let Some(error) = &check.error {
+                    let label = if ok { "note " } else { "error" };
+                    println!("  {label}    {error}");
+                }
+                if let Some(recovery) = &check.recovery {
+                    println!("  recover  {}", recovery.cyan());
+                }
             }
             if !ok {
                 std::process::exit(2);
@@ -3061,6 +3096,59 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Outcome of the verification `locus status` shares with `locus whoami`.
+#[derive(Debug, Default)]
+struct StatusPinCheck {
+    /// Pin may be reported as usable (verified, or unverifiable only for
+    /// lack of a control capability in this shell).
+    usable: bool,
+    /// The session authority anchor was actually checked and accepted.
+    verified: bool,
+    /// Why the pin is unusable or unverified (never secret-bearing).
+    error: Option<String>,
+    /// Operator remedy for `error`.
+    recovery: Option<String>,
+}
+
+/// Run the checks `locus whoami` runs (seal + session authority anchor +
+/// binding), so `status` never reports ok on a pin whoami refuses, e.g. one
+/// whose broker died with the shell that pinned. A missing control
+/// capability is the one gap that is reported as unverified rather than
+/// invalid, matching `agent report`'s `status_oneline`.
+fn status_pin_check(s: &Store, session: &Session, seal_ok: bool) -> StatusPinCheck {
+    use locus_core::recovery::{is_stale_pin_error, stale_pin_recovery};
+    let alias = Some(session.binding_alias.as_str());
+    if !seal_ok {
+        return StatusPinCheck {
+            error: Some(locus_core::LocusError::InvalidSeal.to_string()),
+            recovery: Some(stale_pin_recovery(alias)),
+            ..Default::default()
+        };
+    }
+    match s.whoami() {
+        Ok(_) => StatusPinCheck {
+            usable: true,
+            verified: true,
+            ..Default::default()
+        },
+        Err(locus_core::LocusError::ExecutorAuthorityUnavailable(_)) => StatusPinCheck {
+            usable: true,
+            verified: false,
+            error: Some(
+                "authority anchor not checked: no LOCUS_CONTROL_CAPABILITY in this shell".into(),
+            ),
+            recovery: Some(locus_core::recovery::hook_eval_command(
+                locus_core::recovery::hook_shell(env::var("SHELL").ok().as_deref()),
+            )),
+        },
+        Err(e) => StatusPinCheck {
+            recovery: is_stale_pin_error(&e).then(|| stale_pin_recovery(alias)),
+            error: Some(e.to_string()),
+            ..Default::default()
+        },
+    }
 }
 
 fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Result<()> {
@@ -6822,7 +6910,9 @@ if [[ -z "${{LOCUS_CONTROL_CAPABILITY:-}}" ]]; then
 fi
 _locus_prompt() {{
   local s
-  s="$(locus status --oneline 2>/dev/null)" || s="unpinned"
+  # status exits non-zero for frozen/invalid but still prints the token.
+  s="$(locus status --oneline 2>/dev/null)"
+  [[ -n "$s" ]] || s="unpinned"
   if [[ "$s" == "require_pin" ]]; then
     echo "%F{{red}}%B[locus:enter!]%b%f"
   elif [[ "$s" == "unpinned" ]]; then
@@ -6864,7 +6954,9 @@ if test -z "$LOCUS_CONTROL_CAPABILITY"; and test -r "$_locus_cap"
   set -gx LOCUS_CONTROL_CAPABILITY (cat "$_locus_cap")
 end
 function locus_prompt
-  set -l s (locus status --oneline 2>/dev/null; or echo unpinned)
+  # status exits non-zero for frozen/invalid but still prints the token.
+  set -l s (locus status --oneline 2>/dev/null)
+  test -n "$s"; or set s unpinned
   if test "$s" = "require_pin"
     set_color --bold red
     echo -n "[locus:enter!]"

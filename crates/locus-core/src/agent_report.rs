@@ -133,6 +133,12 @@ pub struct AgentReport {
     /// Human next-step bullets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
+    /// Human-only recovery when a pin exists but can no longer be verified
+    /// (its broker died with the pinning shell, stale generation, bad seal,
+    /// expiry): `eval "$(locus hook bash)"; locus leave --force; locus enter
+    /// <alias>`. Agents cannot run it; they surface it to the human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<String>,
     /// Exit code for `locus agent doctor` / `report`.
     pub exit_code: i32,
     /// Same tokens as `locus status --oneline` (hub convenience).
@@ -251,6 +257,17 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
 
     let mut findings: Vec<String> = Vec::new();
 
+    // A pin that exists but no longer verifies (not frozen: that has its own
+    // re-pin flow) needs the human force-leave + re-enter recovery, since a
+    // plain re-pin fails closed on the wedged session.
+    let recovery = pin
+        .as_ref()
+        .filter(|p| {
+            !doctor.runtime.frozen
+                && (!p.seal_ok || p.expired || !runtime_ok_or_capability_gap(&doctor))
+        })
+        .map(|p| crate::recovery::stale_pin_recovery(Some(&p.alias)));
+
     if !opts.home_ready || !doctor.seal_ok {
         findings.push("locus home / seal key not ready — run `locus init`".into());
     }
@@ -261,10 +278,13 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
     if pin.is_none() {
         findings
             .push("not pinned — run `locus enter` or `locus pin <alias>` before agent work".into());
-    } else if pin.as_ref().is_some_and(|p| !p.seal_ok) {
-        findings.push("pin seal invalid — re-pin with `locus pin <alias>`".into());
-    } else if pin.as_ref().is_some_and(|p| p.expired) {
+    } else if pin.as_ref().is_some_and(|p| p.seal_ok && p.expired) {
         findings.push("pin expired — re-pin with `locus pin <alias>`".into());
+    } else if let Some(recovery) = &recovery {
+        findings.push(format!(
+            "pin cannot be verified (authority broker gone, stale session or bad seal) — \
+             human recovery: `{recovery}`"
+        ));
     }
     if !mcp.any() {
         findings.push(
@@ -309,6 +329,9 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
     let commands = build_commands(opts.project_dir.as_deref(), pin.as_ref());
 
     let mut next_steps: Vec<String> = Vec::new();
+    if let Some(recovery) = &recovery {
+        next_steps.push(recovery.clone());
+    }
     if !doctor.seal_ok || doctor.bindings == 0 {
         next_steps.push("locus init --with-samples".into());
     }
@@ -347,6 +370,7 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
         commands,
         findings,
         next_steps,
+        recovery,
         exit_code: status.exit_code(),
         status_oneline,
         home,
@@ -1157,6 +1181,70 @@ mod tests {
             agent_report_from_doctor(anchor, opts()).status_oneline,
             "invalid"
         );
+    }
+
+    #[test]
+    fn stale_pin_report_names_force_leave_recovery() {
+        // Regression: when the pinning shell exits, the broker dies and the
+        // pin can no longer be verified. The report said only "re-pin with
+        // `locus pin <alias>`", which fails closed on the wedged session.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let healthy = doctor_for(&store, dir.path());
+        let opts = || AgentReportOptions {
+            mcp: McpRegistered {
+                claude: true,
+                ..Default::default()
+            },
+            project_dir: Some(dir.path().to_path_buf()),
+            home_ready: true,
+            agent_md_present: true,
+            workspace_present: true,
+            workspace_error: false,
+        };
+
+        let report = agent_report_from_doctor(healthy.clone(), opts());
+        assert!(report.recovery.is_none());
+        let v = serde_json::to_value(&report).unwrap();
+        assert!(v.get("recovery").is_none(), "healthy pin: no recovery key");
+
+        // Broker gone: doctor reports the anchor unavailable and the pin unverified.
+        let mut stale = healthy;
+        stale.runtime.ok = false;
+        stale.runtime.authority_anchor_ok = false;
+        stale.runtime.issues = vec!["authority_anchor_unavailable".into()];
+        if let Some(p) = stale.pin.as_mut() {
+            p.seal_ok = false;
+            p.authority_anchor_verified = Some(false);
+        }
+        let report = agent_report_from_doctor(stale.clone(), opts());
+        assert_eq!(report.status_oneline, "invalid");
+        assert!(!report.ready);
+        let recovery = report.recovery.clone().expect("stale pin has a recovery");
+        assert!(
+            recovery.ends_with("; locus leave --force; locus enter acme"),
+            "{recovery}"
+        );
+        assert!(recovery.contains("locus hook"), "{recovery}");
+        assert_eq!(report.next_steps.first(), Some(&recovery));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.contains("pin cannot be verified") && f.contains(&recovery)));
+        assert!(!report
+            .findings
+            .iter()
+            .any(|f| f.contains("pin seal invalid")));
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["recovery"], recovery.as_str());
+
+        // Frozen pins keep their own re-pin flow.
+        stale.runtime.frozen = true;
+        assert!(agent_report_from_doctor(stale, opts()).recovery.is_none());
     }
 
     #[test]
