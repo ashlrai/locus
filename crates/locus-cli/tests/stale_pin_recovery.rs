@@ -48,6 +48,26 @@ fn pin_in_exited_shell(home: &Path, cwd: &Path) -> String {
     panic!("pin stayed verifiable after its supervising shell exited");
 }
 
+/// Render `_locus_prompt` from `locus hook bash` (raw, with color codes).
+fn hook_prompt(home: &Path, cwd: &Path, cap: &str) -> String {
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_locus")).parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg("eval \"$(locus hook bash)\"; _locus_prompt")
+        .env("PATH", path)
+        .env("LOCUS_HOME", home)
+        .env("LOCUS_CONTROL_CAPABILITY", cap)
+        .current_dir(cwd)
+        .output()
+        .expect("bash runs");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
@@ -91,6 +111,10 @@ fn stale_pin_surfaces_name_the_recovery() {
         .as_str()
         .unwrap()
         .ends_with("locus leave --force; locus enter personal"));
+
+    // The bash prompt hook shows the invalid pin instead of "unpinned".
+    let prompt = hook_prompt(home.path(), cwd.path(), &cap);
+    assert!(prompt.contains("[locus:invalid]"), "prompt: {prompt}");
 
     let enter = locus(home.path(), cwd.path(), &cap, &["enter", "acme"]);
     assert!(!enter.status.success(), "enter must still fail closed");

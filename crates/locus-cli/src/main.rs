@@ -6917,7 +6917,9 @@ if [[ -z "${{LOCUS_CONTROL_CAPABILITY:-}}" ]]; then
 fi
 _locus_prompt() {{
   local s
-  s="$(locus status --oneline 2>/dev/null)" || s="unpinned"
+  # status exits non-zero for frozen/invalid but still prints the token.
+  s="$(locus status --oneline 2>/dev/null)"
+  [[ -n "$s" ]] || s="unpinned"
   if [[ "$s" == "require_pin" ]]; then
     echo "%F{{red}}%B[locus:enter!]%b%f"
   elif [[ "$s" == "unpinned" ]]; then
@@ -6959,7 +6961,9 @@ if test -z "$LOCUS_CONTROL_CAPABILITY"; and test -r "$_locus_cap"
   set -gx LOCUS_CONTROL_CAPABILITY (cat "$_locus_cap")
 end
 function locus_prompt
-  set -l s (locus status --oneline 2>/dev/null; or echo unpinned)
+  # status exits non-zero for frozen/invalid but still prints the token.
+  set -l s (locus status --oneline 2>/dev/null)
+  test -n "$s"; or set s unpinned
   if test "$s" = "require_pin"
     set_color --bold red
     echo -n "[locus:enter!]"
