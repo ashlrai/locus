@@ -3083,6 +3083,29 @@ fn build_locus_context_prompt(scope: &RequestScope) -> String {
 
 // ─── Tools list / call ──────────────────────────────────────────────────────
 
+/// Error body for `locus_whoami`. A server launched without an executor
+/// capability (the plain client entry) cannot observe the pin at all; it must
+/// not claim `pinned: false` or tell the human to re-pin, which never helps.
+fn whoami_error_body(e: &locus_core::LocusError) -> Value {
+    if matches!(e, locus_core::LocusError::ExecutorAuthorityUnavailable(_)) {
+        return json!({
+            "pinned": Value::Null,
+            "status": "executor_authority_unavailable",
+            "error": e.to_string(),
+            "hint": "This locus-mcp has no executor capability, so it cannot observe the pin \
+                     (re-pinning will not help). Human: launch it as `locus mcp --supervised` \
+                     (needs LOCUS_CONTROL_CAPABILITY and a live pin in the launching \
+                     environment) or run the agent under `locus exec`. Agents: \
+                     locus_verify_session / locus_safe_next."
+        });
+    }
+    json!({
+        "pinned": false,
+        "error": e.to_string(),
+        "hint": "Run `locus pin <alias>` in this workspace. Agents: locus_enter_hint."
+    })
+}
+
 /// Map tools to MCP list payload; ensure `locus_whoami` first + locus tags.
 fn tools_list_payload(mut tools: Vec<AdapterTool>, pin_alias: Option<&str>) -> Value {
     tag_tool_descriptions(&mut tools, pin_alias);
@@ -3791,14 +3814,7 @@ fn call_control(
                 }
                 Ok(tool_text(attach_report(body), false))
             }
-            Err(e) => Ok(tool_text(
-                attach_report(json!({
-                    "pinned": false,
-                    "error": e.to_string(),
-                    "hint": "Run `locus pin <alias>` in this workspace. Agents: locus_enter_hint."
-                })),
-                true,
-            )),
+            Err(e) => Ok(tool_text(attach_report(whoami_error_body(&e)), true)),
         },
         "locus_status" => {
             if let Some(t) = &scope.tenant {
@@ -4100,6 +4116,27 @@ fn tool_text(value: Value, is_error: bool) -> Value {
         "content": [{ "type": "text", "text": text }],
         "isError": is_error
     })
+}
+
+#[cfg(test)]
+mod whoami_error_tests {
+    use super::*;
+
+    #[test]
+    fn whoami_error_without_executor_authority_does_not_claim_unpinned() {
+        let body = whoami_error_body(&locus_core::LocusError::ExecutorAuthorityUnavailable(
+            "this process requires a supervised executor capability".into(),
+        ));
+        assert!(body["pinned"].is_null());
+        assert_eq!(body["status"], "executor_authority_unavailable");
+        let hint = body["hint"].as_str().unwrap();
+        assert!(hint.contains("locus mcp --supervised"));
+        assert!(!hint.contains("Run `locus pin"));
+
+        let other = whoami_error_body(&locus_core::LocusError::NotPinned);
+        assert_eq!(other["pinned"], false);
+        assert!(other["hint"].as_str().unwrap().contains("locus pin"));
+    }
 }
 
 #[cfg(test)]
