@@ -160,8 +160,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A tag push names it after the tag; the PR dry run's ref (`79/merge`)
+          # has a slash, so slashes become dashes.
           cargo run --release --locked -p locus-cli -- adapter registry export \
-            --out "release-assets/locus-adapters-${GITHUB_REF_NAME}.json"
+            --out "release-assets/locus-adapters-${GITHUB_REF_NAME//\//-}.json"
 
       # TODO(registry-signing): once a LOCUS_REGISTRY_SIGNING_KEY repo secret
       # exists (base64 or 64-hex ed25519 seed; NOT yet provisioned — do not
