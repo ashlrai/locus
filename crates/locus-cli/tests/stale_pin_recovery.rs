@@ -112,6 +112,26 @@ fn stale_pin_surfaces_name_the_recovery() {
         .unwrap()
         .ends_with("locus leave --force; locus enter personal"));
 
+    // agent report: human and JSON both carry the re-pin recovery.
+    let report = locus(home.path(), cwd.path(), &cap, &["agent", "report"]);
+    let out = String::from_utf8_lossy(&report.stdout);
+    assert!(!report.status.success());
+    assert!(
+        out.contains("eval \"$(locus hook bash)\"; locus leave --force; locus enter personal"),
+        "agent report must name the recovery: {out}"
+    );
+    let report = locus(
+        home.path(),
+        cwd.path(),
+        &cap,
+        &["agent", "report", "--json"],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(v["ready"], false);
+    let recovery = v["recovery"].as_str().expect("recovery in JSON");
+    assert!(recovery.ends_with("locus leave --force; locus enter personal"));
+    assert_eq!(v["next_steps"][0], recovery);
+
     // The bash prompt hook shows the invalid pin instead of "unpinned".
     let prompt = hook_prompt(home.path(), cwd.path(), &cap);
     assert!(prompt.contains("[locus:invalid]"), "prompt: {prompt}");
@@ -138,6 +158,14 @@ fn stale_pin_surfaces_name_the_recovery() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["authority_verified"], true);
     assert!(v["recovery"].is_null());
+    let report = locus(
+        home.path(),
+        cwd.path(),
+        &cap,
+        &["agent", "report", "--json"],
+    );
+    let v: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert!(v.get("recovery").is_none(), "live pin: no recovery");
 }
 
 #[test]

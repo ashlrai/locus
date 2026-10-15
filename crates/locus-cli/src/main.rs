@@ -2541,16 +2541,9 @@ fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyho
 }
 
 /// Alias of the active session file, for recovery hints only (never trusted
-/// for authority). `None` unless it is a plain alias-shaped name.
+/// for authority; the recipe builder drops anything not alias-shaped).
 fn active_alias_hint(s: &Store) -> Option<String> {
-    let session = s.active_session().ok().flatten()?;
-    let alias = session.binding_alias;
-    let plain = !alias.is_empty()
-        && alias.len() <= 64
-        && alias
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-    plain.then_some(alias)
+    Some(s.active_session().ok().flatten()?.binding_alias)
 }
 
 fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {

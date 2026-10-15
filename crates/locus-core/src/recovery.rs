@@ -38,12 +38,24 @@ pub fn hook_eval_command(shell: &str) -> String {
 }
 
 /// One-line recovery for a stale or unverifiable pin, for an explicit shell.
+///
+/// `alias` usually comes from a session file that failed verification, so it
+/// is used only when it is a plain alias-shaped name; anything else (empty,
+/// overlong, shell metacharacters) falls back to `<alias>`.
 pub fn stale_pin_recovery_for_shell(alias: Option<&str>, shell: &str) -> String {
     format!(
         "{}; locus leave --force; locus enter {}",
         hook_eval_command(shell),
-        alias.unwrap_or("<alias>")
+        alias.filter(|a| is_plain_alias(a)).unwrap_or("<alias>")
     )
+}
+
+fn is_plain_alias(alias: &str) -> bool {
+    !alias.is_empty()
+        && alias.len() <= 64
+        && alias
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// One-line recovery for a stale or unverifiable pin, for the user's `$SHELL`.
@@ -89,6 +101,16 @@ mod tests {
             stale_pin_recovery_for_shell(None, "fish"),
             "locus hook fish | source; locus leave --force; locus enter <alias>"
         );
+    }
+
+    #[test]
+    fn untrusted_alias_never_reaches_the_recipe() {
+        for bad in ["", "a; rm -rf ~", "$(id)", "a b", &"x".repeat(65)] {
+            assert!(
+                stale_pin_recovery_for_shell(Some(bad), "bash").ends_with("locus enter <alias>"),
+                "{bad:?}"
+            );
+        }
     }
 
     #[test]
