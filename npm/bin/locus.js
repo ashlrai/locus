@@ -441,11 +441,43 @@ async function ensureBinary() {
 // locus directly. Best-effort: on any failure the wrapper keeps working.
 const AUTHORITY_COMMANDS = new Set(["quickstart", "pin", "enter", "init", "leave"]);
 
-function linkNativeBin(binary, target = __filename) {
+// True when a user other than the owner (no shared group assumed) can reach
+// `path`: it and every ancestor directory are world-traversable (for a file:
+// world-executable).
+function reachableByOthers(path) {
+  const fs = require("fs");
+  try {
+    let current = fs.realpathSync(path);
+    if ((fs.statSync(current).mode & 0o001) === 0) return false;
+    for (;;) {
+      const parent = dirname(current);
+      if (parent === current) return true;
+      if ((fs.statSync(parent).mode & 0o001) === 0) return false;
+      current = parent;
+    }
+  } catch {
+    return false;
+  }
+}
+
+function linkNativeBin(
+  binary,
+  target = __filename,
+  uid = typeof process.getuid === "function" ? process.getuid() : -1
+) {
   if (process.platform === "win32" || process.env.LOCUS_NPM_NO_LINK) return false;
   const fs = require("fs");
   try {
     if (fs.lstatSync(target).isSymbolicLink()) return false;
+    // A root install into a shared prefix (e.g. `sudo npm install -g` into
+    // /usr/lib/node_modules) must not point its bin into root's private HOME
+    // (/root is 0700): other users would get "Permission denied". Keep the
+    // wrapper there; each user's run then resolves a binary under their own
+    // HOME. Non-root installs still link (e.g. Homebrew node on macOS, whose
+    // prefix is world-readable while HOME is 0750), as they are the user's own.
+    if (uid === 0 && reachableByOthers(dirname(target)) && !reachableByOthers(binary)) {
+      return false;
+    }
     const tmp = `${target}.${process.pid}.tmp`;
     removeIfExists(tmp);
     fs.symlinkSync(binary, tmp);
@@ -484,6 +516,7 @@ module.exports = {
   downloadReleaseBinary,
   ensureBinary,
   linkNativeBin,
+  reachableByOthers,
   INSTALL_FROM_SOURCE,
   PREBUILT_TARGETS,
   SUPPORTED_TARGETS,

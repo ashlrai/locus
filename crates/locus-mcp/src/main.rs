@@ -446,6 +446,11 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
                 print_help();
                 std::process::exit(0);
             }
+            "--version" | "-V" => {
+                // Not a protocol session: the process exits before serving.
+                println!("locus-mcp {VERSION}");
+                std::process::exit(0);
+            }
             other if other.starts_with("--http=") => {
                 http_flag = true;
                 http_arg = Some(other.trim_start_matches("--http=").to_string());
@@ -490,7 +495,8 @@ fn print_help() {
            locus-mcp                 stdio MCP (Claude Code / Cursor default)\n\
            locus-mcp --http [ADDR]   Streamable-HTTP-lite on ADDR (default {DEFAULT_HTTP_ADDR})\n\
            locus-mcp --http --multi-tenant   per-request tenant routing via\n\
-                                     X-Locus-Tenant-Token (mint: `locus mcp mint`)\n\n\
+                                     X-Locus-Tenant-Token (mint: `locus mcp mint`)\n\
+           locus-mcp --version       print the version and exit\n\n\
          HTTP endpoints:\n\
            GET  /health              unauthenticated liveness\n\
            GET  /mcp                 capabilities + tool names (token; values-free)\n\
