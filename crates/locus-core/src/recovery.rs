@@ -65,8 +65,10 @@ pub fn stale_pin_recovery(alias: Option<&str>) -> String {
 }
 
 /// True for errors that mean the active pin exists but can no longer be
-/// verified (dead broker, stale generation, bad or legacy seal, unreadable
-/// session file) — the cases [`stale_pin_recovery`] fixes.
+/// verified or used (dead broker, stale generation, bad or legacy seal,
+/// unreadable session file, expired TTL) — the cases [`stale_pin_recovery`]
+/// fixes. An expired pin refuses a plain `leave` and a new `enter` alike, so
+/// it needs the same forced teardown.
 pub fn is_stale_pin_error(err: &LocusError) -> bool {
     matches!(
         err,
@@ -74,6 +76,7 @@ pub fn is_stale_pin_error(err: &LocusError) -> bool {
             | LocusError::LegacySessionSeal
             | LocusError::AuthorityAnchorUnavailable(_)
             | LocusError::AuthorityAnchorMismatch
+            | LocusError::SessionExpired(_)
             | LocusError::Json(_)
     )
 }
@@ -120,6 +123,9 @@ mod tests {
         )));
         assert!(is_stale_pin_error(&LocusError::AuthorityAnchorMismatch));
         assert!(is_stale_pin_error(&LocusError::InvalidSeal));
+        assert!(is_stale_pin_error(&LocusError::SessionExpired(
+            "2026-10-16T00:00:00Z".into()
+        )));
         assert!(!is_stale_pin_error(&LocusError::NotPinned));
         assert!(!is_stale_pin_error(
             &LocusError::ExecutorAuthorityUnavailable("no capability".into())
