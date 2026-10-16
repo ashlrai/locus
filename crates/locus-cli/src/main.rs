@@ -1301,7 +1301,7 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
             "agent",
             "AI-native setup + hub readiness.\n\n\
              Commands:\n\
-               locus agent setup --apply|--dry-run [--client all|claude|cursor|codex|grok]\n\
+               locus agent setup --apply|--dry-run [--client all|claude|cursor|codex|grok|gemini]\n\
                locus agent setup --apply --client claude --claude-scope user  # via claude CLI\n\
                locus agent report --json       # hub gate (exit ready=0 protected=1 unsafe=2)\n\
                locus agent doctor              # human-readable ladder\n\n\
@@ -1318,7 +1318,7 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                locus mcp --supervised   # pinned provider tools (needs pin + control capability)\n\
                locus mcp                # control tools only\n\
                locus-mcp\n\
-               locus setup --client claude|cursor|codex|grok\n\
+               locus setup --client claude|cursor|codex|grok|gemini\n\
                locus agent setup --apply\n\n\
              HTTP (CI / remote agents, loopback by default):\n\
                LOCUS_MCP_HTTP_TOKEN=… locus-mcp --http 127.0.0.1:8742\n\
@@ -6388,11 +6388,12 @@ fn print_agent_report_human(report: &locus_core::AgentReport) {
         }
     };
     println!(
-        "  mcp       claude={}  cursor={}  codex={}  grok={}",
+        "  mcp       claude={}  cursor={}  codex={}  grok={}  gemini={}",
         yn(report.mcp_registered.claude),
         yn(report.mcp_registered.cursor),
         yn(report.mcp_registered.codex),
-        yn(report.mcp_registered.grok)
+        yn(report.mcp_registered.grok),
+        yn(report.mcp_registered.gemini)
     );
     if report.findings.is_empty() {
         println!(
@@ -6475,9 +6476,11 @@ fn cmd_agent_setup(
         // `all` covers clients with a known on-disk config path — including
         // Grok Build (`~/.grok/config.toml`, Codex-style TOML). `generic`
         // stays print-only and must be asked for explicitly.
-        "all" => vec!["claude", "cursor", "codex", "grok"],
-        "claude" | "cursor" | "codex" | "grok" | "generic" => vec![client],
-        other => bail!("unknown client '{other}' (use claude|cursor|codex|grok|generic|all)"),
+        "all" => vec!["claude", "cursor", "codex", "grok", "gemini"],
+        "claude" | "cursor" | "codex" | "grok" | "gemini" | "generic" => vec![client],
+        other => {
+            bail!("unknown client '{other}' (use claude|cursor|codex|grok|gemini|generic|all)")
+        }
     };
     // User-scope Claude registration goes through the claude CLI — Locus
     // never hand-edits `~/.claude.json` (mixed runtime state owned by Claude
@@ -6609,6 +6612,31 @@ fn cmd_agent_setup(
                     merge_codex_mcp(&path, &bin, c)?;
                 }
             }
+            "gemini" => {
+                // Gemini CLI: project `.gemini/settings.json` (overrides user
+                // settings) plus the user file when it already exists. Both
+                // keep servers under `mcpServers`. No `type` field: Gemini's
+                // documented stdio entry is command/args/env.
+                let gemini_entry = gemini_server_entry(&server_entry);
+                let path = project.join(".gemini").join("settings.json");
+                actions.push(format!(
+                    "mcp gemini → {} (LOCUS_AUTO_PIN=cwd, LOCUS_CLIENT=gemini)",
+                    path.display()
+                ));
+                if apply {
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    merge_mcp_json(&path, "locus", &gemini_entry)?;
+                    if let Some(home) = dirs::home_dir() {
+                        let global = home.join(".gemini").join("settings.json");
+                        if global.exists() {
+                            merge_mcp_json(&global, "locus", &gemini_entry)?;
+                            actions.push(format!("mcp gemini global → {}", global.display()));
+                        }
+                    }
+                }
+            }
             "generic" => {
                 actions.push(
                     "mcp generic → print-only (no known on-disk config path — paste the \
@@ -6679,6 +6707,11 @@ fn cmd_agent_setup(
                     .as_ref()
                     .map(|h| h.join(".grok").join("config.toml").display().to_string())
                     .unwrap_or_else(|| "~/.grok/config.toml".into()),
+                "gemini" => project
+                    .join(".gemini")
+                    .join("settings.json")
+                    .display()
+                    .to_string(),
                 _ => continue,
             };
             verify_failures.push(format!("{c}: {path}"));
@@ -7544,9 +7577,20 @@ fn mcp_verify_failures<'a>(clients: &[&'a str], probe: &McpRegistered) -> Vec<&'
             "cursor" => !probe.cursor,
             "codex" => !probe.codex,
             "grok" => !probe.grok,
+            "gemini" => !probe.gemini,
             _ => false,
         })
         .collect()
+}
+
+/// Gemini CLI's documented stdio entry is command/args/env; drop the
+/// `type: "stdio"` field the other clients accept.
+fn gemini_server_entry(entry: &serde_json::Value) -> serde_json::Value {
+    let mut e = entry.clone();
+    if let Some(o) = e.as_object_mut() {
+        o.remove("type");
+    }
+    e
 }
 
 /// This `locus` executable, for config entries that launch `locus mcp`.
@@ -7571,7 +7615,7 @@ fn supervised_mcp_hint(locus_bin: &str) -> [String; 3] {
 }
 
 fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<()> {
-    if !print_only && matches!(client, "claude" | "cursor" | "codex" | "grok") {
+    if !print_only && matches!(client, "claude" | "cursor" | "codex" | "grok" | "gemini") {
         require_local_control_boundary("locus setup")?;
     }
     let bin = resolve_mcp_bin(mcp_bin);
@@ -7647,6 +7691,27 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
             println!("{} wrote/merged {}", "ok".green().bold(), path.display());
             println!("   verify: locus agent doctor   # mcp_registered.grok");
         }
+        "gemini" => {
+            let gemini_entry = gemini_server_entry(&server_entry);
+            let entry = serde_json::json!({ "mcpServers": { "locus": gemini_entry } });
+            if print_only {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+                return Ok(());
+            }
+            let project = cwd().join(".gemini").join("settings.json");
+            if let Some(parent) = project.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            merge_mcp_json(&project, "locus", &gemini_entry)?;
+            println!("{} wrote/merged {}", "ok".green().bold(), project.display());
+            if let Some(home) = dirs::home_dir() {
+                let global = home.join(".gemini").join("settings.json");
+                if global.exists() {
+                    merge_mcp_json(&global, "locus", &gemini_entry)?;
+                    println!("{} also merged {}", "ok".green().bold(), global.display());
+                }
+            }
+        }
         "generic" => {
             // Any generic stdio MCP client: no known on-disk config path, so
             // never write — emit both shapes for paste (`--print` implied).
@@ -7682,7 +7747,7 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
             merge_codex_mcp(&path, &bin, "codex")?;
             println!("{} wrote/merged {}", "ok".green().bold(), path.display());
         }
-        other => bail!("unknown client: {other} (claude|cursor|codex|grok|generic)"),
+        other => bail!("unknown client: {other} (claude|cursor|codex|grok|gemini|generic)"),
     }
 
     println!();
@@ -8667,6 +8732,28 @@ mod setup_merge_tests {
             ..probe.clone()
         };
         assert!(mcp_verify_failures(&["grok"], &probe_grok).is_empty());
+        let probe_gemini = McpRegistered {
+            gemini: true,
+            ..probe.clone()
+        };
+        assert_eq!(mcp_verify_failures(&["gemini"], &probe), vec!["gemini"]);
+        assert!(mcp_verify_failures(&["gemini"], &probe_gemini).is_empty());
+    }
+
+    #[test]
+    fn gemini_entry_has_no_type_field_and_keeps_command_args_env() {
+        let base = json!({
+            "type": "stdio",
+            "command": "/usr/local/bin/locus-mcp",
+            "args": [],
+            "env": { "LOCUS_AUTO_PIN": "cwd", "LOCUS_CLIENT": "gemini" },
+        });
+        let g = super::gemini_server_entry(&base);
+        assert!(g.get("type").is_none());
+        assert_eq!(g["command"], base["command"]);
+        assert_eq!(g["args"], base["args"]);
+        assert_eq!(g["env"]["LOCUS_CLIENT"], "gemini");
+        assert_eq!(base["type"], "stdio", "input must not be mutated");
     }
 
     // ── claude user scope: CLI-managed registration (mock PATH shim) ────

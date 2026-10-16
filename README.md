@@ -253,7 +253,7 @@ locus engagement init|close           # client engagement lifecycle (binding + w
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
 locus hook zsh|bash|fish
-locus setup --client claude|cursor|codex|grok
+locus setup --client claude|cursor|codex|grok|gemini
 locus mcp                             # run the stdio MCP server (same as locus-mcp)
 locus agent report|setup|doctor       # AI-native readiness (hub JSON)
 locus goal status                     # northstar progress from GOALS.md

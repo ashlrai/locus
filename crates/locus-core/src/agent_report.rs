@@ -92,11 +92,16 @@ pub struct McpRegistered {
     /// `probe_mcp_registered`.
     #[serde(default)]
     pub grok: bool,
+    /// Gemini CLI. Probed at project `.gemini/settings.json` and user
+    /// `~/.gemini/settings.json` (JSON `mcpServers`). Additive: absent in
+    /// reports from older binaries.
+    #[serde(default)]
+    pub gemini: bool,
 }
 
 impl McpRegistered {
     pub fn any(&self) -> bool {
-        self.claude || self.cursor || self.codex || self.grok
+        self.claude || self.cursor || self.codex || self.grok || self.gemini
     }
 }
 
@@ -520,12 +525,18 @@ pub fn probe_mcp_registered_with_grok(
             .unwrap_or(false),
     };
 
+    let gemini = mcp_json_has_locus(&project_dir.join(".gemini").join("settings.json"))
+        || user_home
+            .map(|h| mcp_json_has_locus(&h.join(".gemini").join("settings.json")))
+            .unwrap_or(false);
+
     McpRegistered {
         claude,
         claude_scope,
         cursor,
         codex,
         grok,
+        gemini,
     }
 }
 
@@ -1521,6 +1532,39 @@ mod tests {
             serde_json::to_value(&m).unwrap()["claude_scope"],
             serde_json::json!("local")
         );
+    }
+
+    #[test]
+    fn probe_detects_gemini_project_and_user_settings() {
+        let proj = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let none = probe_mcp_registered_with_grok(proj.path(), Some(home.path()), None);
+        assert!(!none.gemini);
+        // Unrelated server only: still false.
+        fs::create_dir_all(proj.path().join(".gemini")).unwrap();
+        fs::write(
+            proj.path().join(".gemini/settings.json"),
+            r#"{"mcpServers":{"other":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        assert!(!probe_mcp_registered_with_grok(proj.path(), Some(home.path()), None).gemini);
+        // Project scope.
+        fs::write(
+            proj.path().join(".gemini/settings.json"),
+            r#"{"mcpServers":{"locus":{"command":"locus-mcp"}}}"#,
+        )
+        .unwrap();
+        let p = probe_mcp_registered_with_grok(proj.path(), Some(home.path()), None);
+        assert!(p.gemini && p.any());
+        // User scope only.
+        let proj2 = tempdir().unwrap();
+        fs::create_dir_all(home.path().join(".gemini")).unwrap();
+        fs::write(
+            home.path().join(".gemini/settings.json"),
+            r#"{"theme":"x","mcpServers":{"locus":{"command":"locus-mcp"}}}"#,
+        )
+        .unwrap();
+        assert!(probe_mcp_registered_with_grok(proj2.path(), Some(home.path()), None).gemini);
     }
 
     #[test]
