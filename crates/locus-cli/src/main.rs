@@ -7,6 +7,10 @@
 //! locus leave
 //! ```
 
+// Must stay first: shadows `println!` / `print!` for every module below.
+#[macro_use]
+mod stdout;
+
 mod serve;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -47,7 +51,7 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · quickstart · setup · agent · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter\n  \
+  Setup         init · quickstart · setup · agent · capability · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter\n  \
   Daily use     enter · switch · pin · leave · whoami · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
@@ -159,8 +163,22 @@ enum Commands {
     },
 
     /// Run the locus-mcp stdio server, or manage multi-tenant MCP grants
-    #[command(next_help_heading = "Setup")]
+    ///
+    /// Without `--supervised`, locus-mcp inherits this environment; launched
+    /// by a client it has no executor capability and serves control tools
+    /// only. `--supervised` grants the active pin's executor capability (the
+    /// grant `locus exec` makes, with no credential values in the server env)
+    /// so the pinned provider tools are served. It needs
+    /// `LOCUS_CONTROL_CAPABILITY` and a live pin in the launching environment,
+    /// and falls back to control tools only otherwise.
+    #[command(next_help_heading = "Setup", args_conflicts_with_subcommands = true)]
     Mcp {
+        /// Grant the active pin's executor capability to the locus-mcp child
+        #[arg(long)]
+        supervised: bool,
+        /// Path to locus-mcp binary (default: same dir as locus, or PATH)
+        #[arg(long)]
+        mcp_bin: Option<String>,
         #[command(subcommand)]
         cmd: Option<McpCmd>,
     },
@@ -428,7 +446,16 @@ enum Commands {
 
     // ───────────────────────── Maintenance ───────────────────────────
     /// Generate shell completions (bash | zsh | fish | elvish | powershell)
-    #[command(next_help_heading = "Maintenance")]
+    ///
+    /// Writes the script to stdout. Install it once (Homebrew installs bash/zsh/fish for you):
+    ///   zsh:   mkdir -p ~/.zfunc && locus completion zsh > ~/.zfunc/_locus
+    ///          then in ~/.zshrc, before compinit: fpath=(~/.zfunc $fpath)
+    ///   bash:  mkdir -p ~/.local/share/bash-completion/completions
+    ///          locus completion bash > ~/.local/share/bash-completion/completions/locus
+    ///   fish:  locus completion fish > ~/.config/fish/completions/locus.fish
+    ///   pwsh:  add `locus completion powershell | Out-String | Invoke-Expression` to $PROFILE
+    /// Open a new shell afterwards. See docs/shell-completions.md.
+    #[command(next_help_heading = "Maintenance", verbatim_doc_comment)]
     Completion {
         /// Target shell
         shell: Shell,
@@ -979,9 +1006,14 @@ fn main() {
         }
         return;
     }
-    if let Err(e) = run() {
-        eprintln!("{} {e:#}", "error:".red().bold());
-        std::process::exit(1);
+    // A closed stdout (`locus doctor | head -1`) exits 141 instead of panicking.
+    match stdout::catch_stdout_closed(run) {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            eprintln!("{} {e:#}", "error:".red().bold());
+            std::process::exit(1);
+        }
+        Err(()) => std::process::exit(stdout::STDOUT_CLOSED_EXIT),
     }
 }
 
@@ -1047,8 +1079,12 @@ fn run() -> Result<()> {
             cmd,
         } => cmd_run(binding, share_pin, cmd, !no_resolve, strict_creds, force),
         Commands::Ci(sub) => cmd_ci(sub, cli.json),
-        Commands::Mcp { cmd } => match cmd {
-            None => cmd_mcp(),
+        Commands::Mcp {
+            supervised,
+            mcp_bin,
+            cmd,
+        } => match cmd {
+            None => cmd_mcp(supervised, mcp_bin),
             Some(sub) => cmd_mcp_sub(sub, cli.json),
         },
         Commands::Binding(sub) => cmd_binding(sub, cli.json),
@@ -1112,7 +1148,9 @@ fn run() -> Result<()> {
         } => cmd_serve(port, token, !no_open),
         Commands::Completion { shell } => {
             let mut cmd = Cli::command();
-            generate(shell, &mut cmd, "locus", &mut io::stdout());
+            let mut buf = Vec::new();
+            generate(shell, &mut cmd, "locus", &mut buf);
+            stdout::write_stdout_bytes(&buf);
             Ok(())
         }
         Commands::Topic { name } => cmd_topic(name.as_deref()),
@@ -1224,7 +1262,8 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
             "mcp",
             "locus-mcp multiplexor — tools hard-scoped to the active pin.\n\n\
              Stdio (default for Claude Code / Cursor):\n\
-               locus mcp\n\
+               locus mcp --supervised   # pinned provider tools (needs pin + control capability)\n\
+               locus mcp                # control tools only\n\
                locus-mcp\n\
                locus setup --client claude|cursor|codex|grok\n\
                locus agent setup --apply\n\n\
@@ -2100,17 +2139,18 @@ fn cmd_enter(
     ttl: Option<String>,
     json: bool,
 ) -> Result<()> {
-    require_local_control_boundary("locus enter")?;
+    require_local_control_boundary("locus enter")
+        .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
     let session = match alias {
         Some(a) => s
             .pin_with_ttl(&a, &cwd(), client, force, requested_ttl)
-            .map_err(|e| with_alias_suggestions(&s, e))?,
+            .map_err(|e| wedged_session_recovery_for(with_alias_suggestions(&s, e), Some(&a)))?,
         None => s
             .pin_auto_with_ttl(&cwd(), client, force, requested_ttl)
-            .map_err(|e| with_alias_suggestions(&s, e))?,
+            .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
     };
     let binding = s.load_binding(&session.binding_alias)?;
     let providers_n = binding.providers.len();
@@ -2223,11 +2263,11 @@ fn switch_flow(
         .load_binding(alias)
         .map_err(|e| with_alias_suggestions(s, e))?;
     // Pre-flight: same workspace-allowlist rule the pin path enforces.
-    if let Some((_, cfg)) = find_workspace(cwd)? {
+    if let Some((policy, cfg)) = find_workspace(cwd)? {
         if !cfg.allows(&target.alias) && !cfg.allows(&target.id) && !force {
             return Err(with_alias_suggestions(
                 s,
-                LocusError::BindingNotAllowed(target.alias.clone()),
+                LocusError::binding_not_allowed(&target.alias, &policy, &cfg.allowed_bindings),
             ));
         }
     }
@@ -2355,7 +2395,8 @@ fn cmd_pin(
     ttl: Option<String>,
     json: bool,
 ) -> Result<()> {
-    require_local_control_boundary("locus pin")?;
+    require_local_control_boundary("locus pin")
+        .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
@@ -2374,15 +2415,15 @@ fn cmd_pin(
             bail!("--ns requires at least two distinct bindings (e.g. --ns personal,acme)");
         }
         s.pin_namespaced_with_ttl(&aliases, &cwd(), client, force, requested_ttl)
-            .map_err(|e| with_alias_suggestions(&s, e))?
+            .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?
     } else {
         match alias {
             Some(a) => s
                 .pin_with_ttl(&a, &cwd(), client, force, requested_ttl)
-                .map_err(|e| with_alias_suggestions(&s, e))?,
+                .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
             None => s
                 .pin_auto_with_ttl(&cwd(), client, force, requested_ttl)
-                .map_err(|e| with_alias_suggestions(&s, e))?,
+                .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
         }
     };
     // Surface a silent policy.max_ttl clamp (5s slack for pin-time skew).
@@ -2484,29 +2525,34 @@ fn cmd_pin(
 /// Route wedged-session control errors to the recovery hatch.
 ///
 /// When `leave` / `status` / `doctor` / `exec` fail closed on the ACTIVE
-/// session — invalid or legacy seal, unavailable/stale authority anchor,
-/// unparseable session file — the operator has no built-in way out except
-/// hand-deleting `sessions/active.json`. Name the supported teardown instead.
+/// session — invalid or legacy seal, unavailable/stale authority anchor
+/// (e.g. the pinning shell exited and took the broker with it), unparseable
+/// session file — the operator has no built-in way out except hand-deleting
+/// `sessions/active.json`. Name the supported teardown + re-pin instead.
+/// Message only: the error itself still fails closed.
 fn wedged_session_recovery(err: anyhow::Error) -> anyhow::Error {
-    use locus_core::LocusError as E;
-    let wedged = matches!(
-        err.downcast_ref::<E>(),
-        Some(
-            E::InvalidSeal
-                | E::LegacySessionSeal
-                | E::AuthorityAnchorUnavailable(_)
-                | E::AuthorityAnchorMismatch
-                | E::Json(_)
-        )
-    );
+    wedged_session_recovery_for(err, None)
+}
+
+/// [`wedged_session_recovery`] naming the binding to re-enter, when known.
+fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyhow::Error {
+    let wedged = err
+        .downcast_ref::<locus_core::LocusError>()
+        .is_some_and(locus_core::recovery::is_stale_pin_error);
     if wedged {
-        err.context(
-            "active session is wedged — recovery: `locus leave --force` clears it \
-             (control capability required), then re-pin: `locus enter <alias>`",
+        anyhow!(
+            "{err:#}\n  recover (operator shell; control capability required): {}",
+            locus_core::recovery::stale_pin_recovery(alias)
         )
     } else {
         err
     }
+}
+
+/// Alias of the active session file, for recovery hints only (never trusted
+/// for authority; the recipe builder drops anything not alias-shaped).
+fn active_alias_hint(s: &Store) -> Option<String> {
+    Some(s.active_session().ok().flatten()?.binding_alias)
 }
 
 fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {
@@ -2857,7 +2903,10 @@ fn cmd_whoami(json: bool) -> Result<()> {
     let s = store()?;
     // Detect drift before reporting
     let _ = s.check_drift_and_freeze();
-    let w = s.whoami()?;
+    let w = s.whoami().map_err(|e| {
+        let alias = active_alias_hint(&s);
+        wedged_session_recovery_for(anyhow::Error::new(e), alias.as_deref())
+    })?;
     if json {
         println!("{}", serde_json::to_string_pretty(&w)?);
         return Ok(());
@@ -2988,7 +3037,8 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
             let key = s.seal_key()?;
             let seal_ok = session.verify_seal(&key).is_ok();
             let frozen = session.frozen;
-            let ok = seal_ok && !frozen && !session.is_expired();
+            let check = status_pin_check(&s, &session, seal_ok);
+            let ok = seal_ok && check.usable && !frozen && !session.is_expired();
             if json {
                 println!(
                     "{}",
@@ -3004,6 +3054,10 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                         "require_pin": require_pin,
                         "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
                         "namespaces": session.all_aliases(),
+                        "authority_verified": check.verified,
+                        "ok": ok,
+                        "error": check.error,
+                        "recovery": check.recovery,
                     })
                 );
             } else if oneline {
@@ -3017,6 +3071,8 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
             } else {
                 let mark = if frozen {
                     "FROZEN".red()
+                } else if ok && !check.verified {
+                    "UNVERIFIED".yellow()
                 } else if ok {
                     "ok".green()
                 } else {
@@ -3035,6 +3091,13 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                         session.frozen_reason.as_deref().unwrap_or("binding_drift")
                     );
                 }
+                if let Some(error) = &check.error {
+                    let label = if ok { "note " } else { "error" };
+                    println!("  {label}    {error}");
+                }
+                if let Some(recovery) = &check.recovery {
+                    println!("  recover  {}", recovery.cyan());
+                }
             }
             if !ok {
                 std::process::exit(2);
@@ -3042,6 +3105,59 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Outcome of the verification `locus status` shares with `locus whoami`.
+#[derive(Debug, Default)]
+struct StatusPinCheck {
+    /// Pin may be reported as usable (verified, or unverifiable only for
+    /// lack of a control capability in this shell).
+    usable: bool,
+    /// The session authority anchor was actually checked and accepted.
+    verified: bool,
+    /// Why the pin is unusable or unverified (never secret-bearing).
+    error: Option<String>,
+    /// Operator remedy for `error`.
+    recovery: Option<String>,
+}
+
+/// Run the checks `locus whoami` runs (seal + session authority anchor +
+/// binding), so `status` never reports ok on a pin whoami refuses, e.g. one
+/// whose broker died with the shell that pinned. A missing control
+/// capability is the one gap that is reported as unverified rather than
+/// invalid, matching `agent report`'s `status_oneline`.
+fn status_pin_check(s: &Store, session: &Session, seal_ok: bool) -> StatusPinCheck {
+    use locus_core::recovery::{is_stale_pin_error, stale_pin_recovery};
+    let alias = Some(session.binding_alias.as_str());
+    if !seal_ok {
+        return StatusPinCheck {
+            error: Some(locus_core::LocusError::InvalidSeal.to_string()),
+            recovery: Some(stale_pin_recovery(alias)),
+            ..Default::default()
+        };
+    }
+    match s.whoami() {
+        Ok(_) => StatusPinCheck {
+            usable: true,
+            verified: true,
+            ..Default::default()
+        },
+        Err(locus_core::LocusError::ExecutorAuthorityUnavailable(_)) => StatusPinCheck {
+            usable: true,
+            verified: false,
+            error: Some(
+                "authority anchor not checked: no LOCUS_CONTROL_CAPABILITY in this shell".into(),
+            ),
+            recovery: Some(locus_core::recovery::hook_eval_command(
+                locus_core::recovery::hook_shell(env::var("SHELL").ok().as_deref()),
+            )),
+        },
+        Err(e) => StatusPinCheck {
+            recovery: is_stale_pin_error(&e).then(|| stale_pin_recovery(alias)),
+            error: Some(e.to_string()),
+            ..Default::default()
+        },
+    }
 }
 
 fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Result<()> {
@@ -3675,43 +3791,143 @@ fn credential_resolving_upstreams(binding: &Binding) -> Result<Vec<String>> {
     Ok(providers)
 }
 
-fn cmd_mcp() -> Result<()> {
-    // Re-exec locus-mcp if on PATH; otherwise tell user to run the binary.
-    let status = Command::new("locus-mcp")
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status();
-    match status {
-        Ok(s) => {
-            if !s.success() {
-                std::process::exit(s.code().unwrap_or(1));
-            }
-            Ok(())
-        }
-        Err(_) => {
-            // Fallback: try same directory as current exe
-            if let Ok(exe) = env::current_exe() {
-                if let Some(dir) = exe.parent() {
-                    let candidate = dir.join("locus-mcp");
-                    if candidate.exists() {
-                        let s = Command::new(candidate)
-                            .stdin(Stdio::inherit())
-                            .stdout(Stdio::inherit())
-                            .stderr(Stdio::inherit())
-                            .status()?;
-                        if !s.success() {
-                            std::process::exit(s.code().unwrap_or(1));
-                        }
-                        return Ok(());
-                    }
-                }
-            }
-            bail!(
-                "locus-mcp not found on PATH — install with: cargo install --path crates/locus-mcp"
-            );
+/// Supervised stdio launch: the env and executor capability a locus-mcp
+/// child needs to serve the active pin's provider tools.
+struct SupervisedMcpLaunch {
+    session: Session,
+    vars: Vec<(String, String)>,
+    executor_capability: String,
+}
+
+/// Grant authority for a supervised locus-mcp child. Mirrors the checks of
+/// `locus exec --no-resolve` (control boundary via the executor grant, drift
+/// freeze, isolated env, no credential values in the child env) without the
+/// `--no-resolve` upstream refusal: locus-mcp is the gate that owns upstream
+/// workers, and their credentials resolve inside it per tools/call.
+fn prepare_supervised_mcp(s: &Store) -> Result<SupervisedMcpLaunch> {
+    if delegated_child_session(s)?.is_some() {
+        bail!("the selected session is delegated; supervised launch needs an operator pin");
+    }
+    let session = s
+        .require_active()
+        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))
+        .context("need an active pin for a supervised MCP launch")?;
+    let binding = s.load_binding(&session.binding_alias)?;
+    let drift = s
+        .check_drift_and_freeze()
+        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))?;
+    if drift.frozen {
+        bail!(
+            "session_frozen: re-pin — binding drifted under active pin ({})",
+            drift.issues.join(", ")
+        );
+    }
+    let iso = isolated_child_env(s, &session, &binding, false);
+    if iso.secrets_resolved != 0 {
+        bail!("internal: supervised MCP env resolved credentials");
+    }
+    let executor_capability = s.grant_executor_capability(&session)?;
+    let mut vars: Vec<(String, String)> = iso.vars.into_iter().collect();
+    // Client label and auto-pin hint written by `locus setup` ride through;
+    // neither carries authority.
+    for key in ["LOCUS_CLIENT", "LOCUS_AUTO_PIN"] {
+        if let Ok(v) = env::var(key) {
+            vars.push((key.into(), v));
         }
     }
+    Ok(SupervisedMcpLaunch {
+        session,
+        vars,
+        executor_capability,
+    })
+}
+
+fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
+    let explicit = mcp_bin.is_some();
+    let (bin, bare) = resolve_mcp_bin_with_fallback(mcp_bin);
+    if explicit {
+        validate_explicit_mcp_bin(&bin)?;
+    } else if bare && find_on_path(&bin).is_none() {
+        bail!(
+            "locus-mcp not found next to locus or on PATH — install with: cargo install --path crates/locus-mcp"
+        );
+    }
+
+    let mut child = Command::new(&bin);
+    child
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+
+    let mut audit_ctx = None;
+    // Already inside a supervised child (`locus exec -- locus mcp --supervised`):
+    // the parent's executor grant passes through, exactly as without the flag.
+    let parent_supervised = supervised
+        && env::var_os(locus_core::EXECUTOR_CAPABILITY_ENV).is_some()
+        && store()
+            .and_then(|s| delegated_child_session(&s))
+            .is_ok_and(|d| d.is_some());
+    if parent_supervised {
+        eprintln!("locus mcp: already supervised by the parent locus process; using its grant");
+    } else if supervised {
+        let launch = store().and_then(|s| prepare_supervised_mcp(&s).map(|l| (s, l)));
+        match launch {
+            Ok((s, launch)) => {
+                child.env_clear();
+                for (k, v) in &launch.vars {
+                    child.env(k, v);
+                }
+                child.env(
+                    locus_core::EXECUTOR_CAPABILITY_ENV,
+                    &launch.executor_capability,
+                );
+                // stderr only: stdout is the MCP protocol channel.
+                eprintln!(
+                    "locus mcp: supervised as {} ({}) — provider tools enabled for this pin; restart the MCP server after a re-pin",
+                    launch.session.binding_alias, launch.session.tenant
+                );
+                // Audit the grant before the child runs, so a killed parent
+                // still leaves a record of it.
+                s.audit(
+                    "session.mcp.supervised",
+                    &launch.session.binding_alias,
+                    Some(json!({
+                        "phase": "grant",
+                        "session_id": launch.session.session_id,
+                        "secrets_resolved": 0,
+                    })),
+                )?;
+                audit_ctx = Some((s, launch.session));
+            }
+            Err(e) => {
+                // Fall back to the unsupervised server: control tools only,
+                // including locus_request_pin. Never more authority than a
+                // direct locus-mcp launch.
+                eprintln!(
+                    "locus mcp: supervised launch unavailable, serving control tools only: {e:#}"
+                );
+                child.env_remove(locus_core::EXECUTOR_CAPABILITY_ENV);
+            }
+        }
+    }
+
+    let status = child.status().with_context(|| format!("spawn {bin}"))?;
+    if let Some((s, session)) = audit_ctx {
+        s.audit(
+            "session.mcp.supervised",
+            &session.binding_alias,
+            Some(json!({
+                "phase": "exit",
+                "exit": status.code(),
+                "session_id": session.session_id,
+                "secrets_resolved": 0,
+            })),
+        )?;
+    }
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    Ok(())
 }
 
 fn cmd_mcp_sub(sub: McpCmd, json_flag: bool) -> Result<()> {
@@ -6147,6 +6363,10 @@ fn cmd_agent_setup(
             println!("  2. {}", "locus whoami".cyan());
             println!("  3. {}", "locus agent doctor".cyan());
             println!("  4. Restart your AI client so MCP picks up locus-mcp");
+            println!(
+                "  5. Provider tools: register {} instead of locus-mcp (see docs/mcp.md, Supervised launch)",
+                format!("{} mcp --supervised", locus_self_bin()).cyan()
+            );
             println!();
             println!(
                 "  {} MCP env: LOCUS_AUTO_PIN=cwd + LOCUS_CLIENT — never LOCUS_NOTIFY by default",
@@ -6461,19 +6681,24 @@ fn parse_watch_interval(s: &str) -> Result<std::time::Duration> {
     if s.is_empty() {
         return Ok(std::time::Duration::from_secs(5));
     }
+    let invalid = || anyhow!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)");
     // Bare seconds (including multi-digit) before unit split so "10" → 10s not 1s.
-    if s.chars().all(|c| c.is_ascii_digit()) {
-        let n: u64 = s.parse().context("invalid watch interval")?;
-        return Ok(std::time::Duration::from_secs(n));
+    let secs = if s.chars().all(|c| c.is_ascii_digit()) {
+        s.parse::<u64>().map_err(|_| invalid())?
+    } else {
+        let (num, unit) = s.split_at(s.len().saturating_sub(1));
+        let n: u64 = num.parse().map_err(|_| invalid())?;
+        match unit {
+            "s" | "S" => n,
+            "m" | "M" => n.saturating_mul(60),
+            "h" | "H" => n.saturating_mul(3600),
+            _ => return Err(invalid()),
+        }
+    };
+    if secs == 0 {
+        bail!("invalid watch interval '{s}': must be at least 1s (use e.g. 5s, 30s, 1m)");
     }
-    let (num, unit) = s.split_at(s.len().saturating_sub(1));
-    let n: u64 = num.parse().context("invalid watch interval")?;
-    match unit {
-        "s" | "S" => Ok(std::time::Duration::from_secs(n)),
-        "m" | "M" => Ok(std::time::Duration::from_secs(n.saturating_mul(60))),
-        "h" | "H" => Ok(std::time::Duration::from_secs(n.saturating_mul(3600))),
-        _ => bail!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)"),
-    }
+    Ok(std::time::Duration::from_secs(secs))
 }
 
 fn print_doctor_human(report: &locus_core::DoctorReport) {
@@ -6679,12 +6904,54 @@ fn collect_unresolved_phm_refs(
 }
 
 fn cmd_hook(shell: &str) -> Result<()> {
-    match shell {
+    println!("{}", hook_script(shell)?);
+    Ok(())
+}
+
+/// Eval-able prompt/auto-enter snippet for `locus hook <shell>`.
+fn hook_script(shell: &str) -> Result<String> {
+    let script = match shell {
         "zsh" | "bash" => {
             // status --oneline tokens: unpinned | require_pin | frozen | invalid | alias:tenant
-            // zsh colors: red=unpinned/require_pin warn, yellow=frozen, cyan=healthy pin
-            println!(
-                r#"# Locus prompt + optional auto-enter — eval "$(locus hook zsh)"
+            // colors: red=unpinned/require_pin warn, yellow=frozen, cyan=healthy pin
+            let (prompt_body, prompt_hint) = if shell == "zsh" {
+                (
+                    r#"  if [[ "$s" == "require_pin" ]]; then
+    echo "%F{red}%B[locus:enter!]%b%f"
+  elif [[ "$s" == "unpinned" ]]; then
+    echo "%F{red}[locus:enter]%f"
+  elif [[ "$s" == "frozen" ]]; then
+    echo "%F{yellow}%B[locus:FROZEN]%b%f"
+  elif [[ "$s" == "invalid" ]]; then
+    echo "%F{red}[locus:invalid]%f"
+  else
+    echo "%F{cyan}[locus:$s]%f"
+  fi"#,
+                    r#"# Optional: add to PROMPT via: PROMPT='$(_locus_prompt) '"$PROMPT"#,
+                )
+            } else {
+                // bash: ANSI colors inside \001/\002, the readline markers that
+                // `\[`/`\]` stand for in PS1 (literal `\[` is not decoded in
+                // command-substitution output, so emit the bytes themselves).
+                (
+                    r#"  local c t
+  if [[ "$s" == "require_pin" ]]; then
+    c='1;31' t='[locus:enter!]'
+  elif [[ "$s" == "unpinned" ]]; then
+    c='0;31' t='[locus:enter]'
+  elif [[ "$s" == "frozen" ]]; then
+    c='1;33' t='[locus:FROZEN]'
+  elif [[ "$s" == "invalid" ]]; then
+    c='0;31' t='[locus:invalid]'
+  else
+    c='0;36' t="[locus:$s]"
+  fi
+  printf '\001\033[%sm\002%s\001\033[0m\002' "$c" "$t""#,
+                    r#"# Optional: add to PS1 via: PS1='$(_locus_prompt) '"$PS1""#,
+                )
+            };
+            format!(
+                r#"# Locus prompt + optional auto-enter — eval "$(locus hook {shell})"
 # Prompt:
 #   [locus:enter]           unpinned
 #   [locus:enter!]          unpinned in require_pin workspace (warn)
@@ -6703,18 +6970,10 @@ if [[ -z "${{LOCUS_CONTROL_CAPABILITY:-}}" ]]; then
 fi
 _locus_prompt() {{
   local s
-  s="$(locus status --oneline 2>/dev/null)" || s="unpinned"
-  if [[ "$s" == "require_pin" ]]; then
-    echo "%F{{red}}%B[locus:enter!]%b%f"
-  elif [[ "$s" == "unpinned" ]]; then
-    echo "%F{{red}}[locus:enter]%f"
-  elif [[ "$s" == "frozen" ]]; then
-    echo "%F{{yellow}}%B[locus:FROZEN]%b%f"
-  elif [[ "$s" == "invalid" ]]; then
-    echo "%F{{red}}[locus:invalid]%f"
-  else
-    echo "%F{{cyan}}[locus:$s]%f"
-  fi
+  # status exits non-zero for frozen/invalid but still prints the token.
+  s="$(locus status --oneline 2>/dev/null)"
+  [[ -n "$s" ]] || s="unpinned"
+{prompt_body}
 }}
 _locus_auto_enter() {{
   [[ "${{LOCUS_AUTO_ENTER:-0}}" == "1" ]] || return 0
@@ -6730,13 +6989,12 @@ elif [[ -n "${{BASH_VERSION:-}}" ]]; then
     PROMPT_COMMAND="_locus_auto_enter${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
   fi
 fi
-# Optional: add to PROMPT via: PROMPT='$(_locus_prompt) '"$PROMPT
+{prompt_hint}
 "#
-            );
+            )
         }
         "fish" => {
-            println!(
-                r#"# Locus prompt helper for fish
+            r#"# Locus prompt helper for fish
 # [locus:enter] | [locus:enter!] (require_pin) | [locus:FROZEN] | [locus:alias:tenant]
 # LOCUS_AUTO_ENTER=1 → try enter when changing directories
 # Control capability: export the persisted operator capability if unset.
@@ -6745,7 +7003,9 @@ if test -z "$LOCUS_CONTROL_CAPABILITY"; and test -r "$_locus_cap"
   set -gx LOCUS_CONTROL_CAPABILITY (cat "$_locus_cap")
 end
 function locus_prompt
-  set -l s (locus status --oneline 2>/dev/null; or echo unpinned)
+  # status exits non-zero for frozen/invalid but still prints the token.
+  set -l s (locus status --oneline 2>/dev/null)
+  test -n "$s"; or set s unpinned
   if test "$s" = "require_pin"
     set_color --bold red
     echo -n "[locus:enter!]"
@@ -6775,11 +7035,11 @@ function _locus_auto_enter --on-variable PWD
   end
 end
 "#
-            );
+            .to_string()
         }
         other => bail!("unsupported shell: {other} (use zsh|bash|fish)"),
-    }
-    Ok(())
+    };
+    Ok(script)
 }
 
 fn resolve_mcp_bin(mcp_bin: Option<String>) -> String {
@@ -6889,6 +7149,27 @@ fn mcp_verify_failures<'a>(clients: &[&'a str], probe: &McpRegistered) -> Vec<&'
             _ => false,
         })
         .collect()
+}
+
+/// This `locus` executable, for config entries that launch `locus mcp`.
+fn locus_self_bin() -> String {
+    env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "locus".into())
+}
+
+/// Setup registers plain `locus-mcp`, which serves control tools only (it is
+/// never handed an executor capability). Say how to get provider tools, so a
+/// fresh setup is not a silent dead end (docs/mcp.md, Supervised launch).
+fn supervised_mcp_hint(locus_bin: &str) -> [String; 3] {
+    [
+        "Provider tools: the registered locus-mcp serves control tools only.".to_string(),
+        format!(
+            "  To serve the pinned binding's provider tools, register `{locus_bin} mcp --supervised` instead"
+        ),
+        "  (launch the client from the shell that ran `locus hook` + `locus pin`; see docs/mcp.md, Supervised launch)."
+            .to_string(),
+    ]
 }
 
 fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<()> {
@@ -7006,6 +7287,10 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
         other => bail!("unknown client: {other} (claude|cursor|codex|grok|generic)"),
     }
 
+    println!();
+    for line in supervised_mcp_hint(&locus_self_bin()) {
+        println!("{line}");
+    }
     println!();
     println!("Phantom pairing:");
     println!("  credential_ref = \"phm:MY_SECRET\"  # locus exec resolves via phantom reveal");
@@ -8164,6 +8449,13 @@ mod setup_merge_tests {
         assert_eq!(bin, "/x/locus-mcp");
         assert!(!fallback);
     }
+
+    #[test]
+    fn supervised_mcp_hint_names_the_supervised_launch() {
+        let hint = super::supervised_mcp_hint("/opt/bin/locus").join("\n");
+        assert!(hint.contains("`/opt/bin/locus mcp --supervised`"), "{hint}");
+        assert!(hint.contains("control tools only"), "{hint}");
+    }
 }
 
 #[cfg(test)]
@@ -8397,6 +8689,8 @@ mod switch_flow_tests {
         let err = switch_flow(&s, "acme", &project, false, None, None).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("not allowed in this workspace"), "{msg}");
+        assert!(msg.contains(".locus.toml allows: personal"), "{msg}");
+        assert!(msg.contains("--force"), "{msg}");
         assert_eq!(
             s.active_session().unwrap().unwrap().binding_alias,
             "personal"
@@ -9016,6 +9310,23 @@ mod watch_heartbeat_tests {
     }
 
     #[test]
+    fn parse_watch_interval_rejects_zero() {
+        for zero in ["0", "0s", "0m", "0h"] {
+            let err = parse_watch_interval(zero).unwrap_err().to_string();
+            assert!(err.contains("at least 1s"), "{zero}: {err}");
+        }
+        assert_eq!(parse_watch_interval("1").unwrap(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn parse_watch_interval_errors_carry_hint() {
+        for bad in ["30sec", "nope", "5x", "1.5m", "s"] {
+            let err = format!("{:#}", parse_watch_interval(bad).unwrap_err());
+            assert!(err.contains("use e.g. 5s, 30s, 1m"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
     fn watch_should_fail_policy() {
         // Healthy tick never fails.
         assert!(!watch_should_fail(true, false, false));
@@ -9213,5 +9524,53 @@ credential_ref = "env:GH_TOKEN"
                 false
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod hook_and_help_tests {
+    use super::{hook_script, Cli};
+    use clap::CommandFactory;
+
+    #[test]
+    fn hook_bash_uses_bash_prompt_escapes() {
+        let bash = hook_script("bash").unwrap();
+        assert!(!bash.contains("%F{"), "bash hook must not emit zsh escapes");
+        assert!(!bash.contains("PROMPT="), "bash hook must not hint PROMPT=");
+        assert!(bash.contains("PS1="), "bash hook should hint PS1=");
+        // Readline non-printing markers (\[ \] equivalents) around ANSI colors.
+        assert!(bash.contains(r"printf '\001\033[%sm\002%s\001\033[0m\002'"));
+        assert!(bash.contains("c='0;36'"));
+        assert!(bash.contains(r#"eval "$(locus hook bash)""#));
+    }
+
+    #[test]
+    fn hook_zsh_keeps_zsh_prompt_escapes() {
+        let zsh = hook_script("zsh").unwrap();
+        assert!(zsh.contains(r#"echo "%F{cyan}[locus:$s]%f""#));
+        assert!(zsh.contains(r#"echo "%F{red}%B[locus:enter!]%b%f""#));
+        assert!(
+            zsh.contains(r#"# Optional: add to PROMPT via: PROMPT='$(_locus_prompt) '"$PROMPT"#)
+        );
+        assert!(
+            zsh.starts_with(r#"# Locus prompt + optional auto-enter — eval "$(locus hook zsh)""#)
+        );
+        assert!(!zsh.contains(r"\001"));
+    }
+
+    #[test]
+    fn top_level_help_groups_list_every_subcommand() {
+        let cmd = Cli::command();
+        let groups = cmd.get_long_about().expect("long_about").to_string();
+        let words: Vec<&str> = groups
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .collect();
+        let missing: Vec<String> = cmd
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+            .map(|c| c.get_name().to_string())
+            .filter(|name| !words.contains(&name.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "missing from help groups: {missing:?}");
     }
 }

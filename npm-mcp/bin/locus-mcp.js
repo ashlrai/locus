@@ -29,7 +29,7 @@ const { join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
-const VERSION = "0.5.0";
+const VERSION = "0.5.1";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus-mcp";
 const CARGO_PACKAGE = "locus-mcp";
@@ -104,9 +104,13 @@ function download(url) {
     https
       .get(url, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          // Drain every response we do not read, or its socket keeps the
+          // process alive after the download finishes.
+          res.resume();
           return download(res.headers.location).then(resolve).catch(reject);
         }
         if (res.statusCode !== 200) {
+          res.resume();
           return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
         }
         const chunks = [];
@@ -228,13 +232,28 @@ function cargoBinPath() {
   return join(home, ".cargo", "bin", getBinaryFilename());
 }
 
+function isNodeShim(path) {
+  try {
+    const real = require("fs").realpathSync(path);
+    if (real === require("fs").realpathSync(__filename)) return true;
+    const head = readFileSync(real).subarray(0, 64).toString("utf8");
+    return head.startsWith("#!") && head.includes("node");
+  } catch {
+    return false;
+  }
+}
+
 function tryExistingOnPath() {
   const which = process.platform === "win32" ? "where" : "which";
   const result = spawnSync(which, [BINARY_NAME], { encoding: "utf8" });
   if (result.status === 0) {
-    const path = (result.stdout || "").split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-    if (path && existsSync(path)) {
-      return path;
+    // Skip this npm shim itself (and any other node wrapper): `which` finds
+    // the npm-installed bin first, and executing it recurses forever.
+    const candidates = (result.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    for (const path of candidates) {
+      if (path && existsSync(path) && !isNodeShim(path)) {
+        return path;
+      }
     }
   }
   const cargoPath = cargoBinPath();
@@ -380,6 +399,8 @@ async function main() {
   } catch (err) {
     process.exit(err.status || 1);
   }
+  // Exit explicitly: a lingering download socket must never hold the client.
+  process.exit(0);
 }
 
 if (require.main === module) {

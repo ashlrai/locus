@@ -9,12 +9,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`locus hook bash` emits a bash prompt** — the prompt helper now prints ANSI
+  colors wrapped in readline's non-printing markers (what `\[`/`\]` stand for)
+  and the hint shows `PS1=`; it previously printed zsh `%F{...}` escapes and a
+  `PROMPT=` hint. `locus hook zsh` output is unchanged.
+- **`locus watch --interval`** rejects `0` (minimum 1s), and every parse error
+  (e.g. `30sec`) carries the `use e.g. 5s, 30s, 1m` hint.
+- **`locus --help` groups** list `capability` and `client` under Setup; a test
+  now checks that every visible subcommand appears in the groups.
+- **`locus_request_pin` / `locus_enter_hint` with an unknown alias** return an
+  error that says the binding does not exist and points at `locus binding list`
+  / `locus binding add <alias>`, instead of "Pin request recorded ... run
+  `locus enter <alias>`". The attempt is still audited.
+- **Docs:** `docs/verification-plane.md` lists the `locus_verify_session` MCP
+  tool and drops the stale "session pack is CLI/hub today" note.
+
+## [0.5.1] — 2026-10-15
+
+### Added
+
+- **`locus mcp --supervised`** — grants the active pin's executor capability to
+  locus-mcp (the grant `locus exec` makes, with no credential values or control
+  capability in the server env), so MCP clients get the pinned provider tools
+  without wrapping the whole client in `locus exec`. Falls back to control
+  tools only, with a stderr reason, when there is no pin or
+  `LOCUS_CONTROL_CAPABILITY` (#71).
+- **MCP protocol negotiation** — locus-mcp answers with the client's requested
+  protocol version when it supports it (#73).
+- **Release checksums** — every release archive ships with a
+  `locus-<target>.tar.gz.sha256` sidecar (`sha256sum -c` format), and the
+  release workflow refuses to publish when an archive's sidecar is missing or
+  does not match (#49). Integrity metadata only, not a signature.
+
+### Fixed
+
+- **`locus setup` points at provider tools** — `locus setup` and
+  `locus agent setup` register plain `locus-mcp`, which serves control tools
+  only. Both now say so and print the `locus mcp --supervised` command to
+  register instead for the pinned binding's provider tools. The written config
+  is unchanged.
+- **npm install no longer hangs** — after `npm i -g locus-cli`, the
+  `locus` / `locus-mcp` wrappers found themselves on `PATH` and re-executed
+  forever. They now skip Node shims when looking for an installed binary (#64).
+- **`locus enter` right after `quickstart` (npm installs)** — session authority
+  is anchored to the parent process; with the Node wrapper in between, it bound
+  to a short-lived `node` process and the next `enter` failed with "session
+  authority generation is stale". On macOS/Linux the npm package now links the
+  native binary in place of the wrapper at install (and on first run), so the
+  shell runs `locus` directly. New e2e test: quickstart → enter → whoami (#66).
+- **npm install and first run no longer hang** — unread redirect and 404
+  responses (the optional `.sha256` sidecar) kept a socket open, so
+  `npm i -g locus-cli` stalled in postinstall and wrappers never exited. Both
+  wrappers now drain those responses and exit explicitly.
+- **npm users get `locus-mcp`** — `locus-cli` installs `locus-mcp` from the same
+  release archive next to the cached `locus`, where `locus setup` looks for it.
+- **Stale pins name their recovery** — `enter`, `status` and `agent report`
+  say how to recover a stale pin; `status` reports `invalid` (exit 2) whenever
+  `whoami` fails; the shell prompt shows invalid and frozen pins; commands
+  whose stdout closes early exit 141 instead of panicking (#76).
+- **Cargo fallback** — explains the slow from-source build and fixes the
+  invalid `cargo install --package` command (#51).
+- **Shell hook under `set -u`** — guards `ZSH_VERSION` / `BASH_VERSION` /
+  `_LOCUS_PROMPT_CMD` (#46).
+
+- **Doctor JSON validates against its schema** — `schema/doctor.schema.json`
+  now allows finding severity `info` (emitted as `control_capability_persisted`
+  on the default quickstart posture); real `locus doctor --json` output failed
+  the published schema before.
+- **Agent report readiness without an exported capability** — the report said
+  `ready: true` with `status_oneline: invalid` while `locus status --oneline`
+  said `alias:tenant`. Readiness now requires a verified authority anchor, and
+  the oneline token keeps the pin for the capability-absent gap only.
+- **`locus_whoami` on a plain (unsupervised) locus-mcp** no longer reports
+  `pinned: false` with a re-pin hint; it returns
+  `status: executor_authority_unavailable` and points at `locus mcp --supervised`.
 - **Adapter registry catalog covers anthropic/openai** — the built-in catalog
   (`adapters/manifest.toml`, surfaced by `locus adapter list` and
   `locus adapter registry export`) now includes the `anthropic` and `openai`
   adapters (9 providers total). A drift-guard test asserts the registry id set
   equals the dispatchable provider set so future adapters cannot miss either
   surface.
+
+
+### Changed
+
+- CI: optimized crypto deps in the test profile (~6× faster `locus-core`
+  tests), cancel superseded PR runs, cargo-nextest (#58, #59).
+- Docs: 10-second README with a demo GIF, MCP snippets for Claude Code / Codex /
+  Cursor, executable multi-client recipes, Phantom-enrolled repo guide, issue
+  and PR templates (#48, #52, #53, #57, #60, #65).
+- License holder standardized to AshlrAI, Inc. (#47).
+
+### Docs
+
+- **Shell completions** — [docs/shell-completions.md](docs/shell-completions.md)
+  covers zsh, bash, fish, PowerShell and elvish, `locus completion --help`
+  prints the install lines, and the Homebrew formula installs bash/zsh/fish
+  completions (#63).
+- **Codex** — docs/mcp.md shows the `~/.codex/config.toml` entry that
+  `locus setup --client codex` writes, for wiring it by hand (#62).
 
 ## [0.5.0] — 2026-08-16
 
@@ -678,7 +771,8 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 - Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
 - Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
 
-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ashlrai/locus/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/ashlrai/locus/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ashlrai/locus/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ashlrai/locus/releases/tag/v0.4.0
 [0.3.0]: https://github.com/ashlrai/locus/releases/tag/v0.3.0

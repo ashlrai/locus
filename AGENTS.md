@@ -44,9 +44,15 @@ CI enforces fmt + clippy `-D warnings` + test + release build (see `.github/work
 
 ### Safe local smoke (never touch real `~/.locus` in tests)
 
+Run it as one shell script (one Bash call). The pin's authority broker lives
+only as long as the shell that pinned, so a pin made in one tool call is gone
+in the next (`no current broker endpoint ... human re-pin required`; recover
+with `locus leave --force`, then pin again).
+
 ```bash
 export LOCUS_HOME=/tmp/locus-agent-test
 locus init --with-samples
+eval "$(locus hook bash)"        # control commands need LOCUS_CONTROL_CAPABILITY
 locus pin personal
 locus whoami
 locus exec -- env | grep LOCUS_

@@ -22,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -63,8 +65,27 @@ jobs:
 
       # nextest: every test in its own process, parallel across binaries.
       # Doctests are not run by nextest, so they stay on cargo test --doc.
+      # PRs: only crates the diff touches plus their reverse deps (nextest
+      # rdeps filterset); manifest/lockfile/toolchain/CI changes select all().
+      # Pushes to main always run the complete suite.
+      - name: Select affected tests
+        id: affected
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            fs="$(bash scripts/ci/affected-filterset.sh "$BASE" "$HEAD" || echo 'all()')"
+          else
+            fs='all()'
+          fi
+          echo "filterset=$fs" >> "$GITHUB_OUTPUT"
+          echo "nextest filterset: $fs"
+
       - name: Test
-        run: cargo nextest run --workspace --no-fail-fast
+        if: steps.affected.outputs.filterset != 'none()'
+        run: cargo nextest run --workspace --no-fail-fast -E "${{ steps.affected.outputs.filterset }}"
 
       - name: Doctests
         run: cargo test --workspace --doc

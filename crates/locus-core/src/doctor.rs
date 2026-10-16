@@ -554,13 +554,31 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
             "seal key missing or unreadable",
         ));
     }
+    // Why the pin's authority anchor is gone, when Locus can tell (e.g. the
+    // pinning shell exited or exec'd into another program). Diagnostic only.
+    let anchor_loss = if runtime.authority_anchor_ok {
+        None
+    } else {
+        active
+            .as_ref()
+            .and_then(|sess| sess.authority_anchor.as_ref())
+            .and_then(|lease| {
+                crate::authority_anchor::anchor_loss_reason(store.home(), &lease.epoch)
+            })
+    };
     if let Some(false) = pin_seal_ok {
-        findings.push(issue(
-            IssueSeverity::Unsafe,
-            "invalid_seal",
+        // Same stable code and UNSAFE severity either way; only the wording
+        // distinguishes a failed seal HMAC (possible tamper) from an intact
+        // seal whose authority anchor, backing, or expiry failed.
+        let message = if runtime.seal_ok {
+            "active pin unverified: session seal is intact but its authority anchor, backing, \
+             or expiry check failed (see the accompanying finding) — re-pin from the operator \
+             shell; clear a wedged pin with `locus leave --force`"
+        } else {
             "active pin seal invalid (session file may be tampered) — \
-             clear it with `locus leave --force`, then re-pin",
-        ));
+             clear it with `locus leave --force`, then re-pin"
+        };
+        findings.push(issue(IssueSeverity::Unsafe, "invalid_seal", message));
     }
     for tag in &runtime.issues {
         match tag.as_str() {
@@ -609,12 +627,18 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
             // be reached (supervisor/broker gone). Name the teardown hatch —
             // normal leave also fails closed in this state.
             "authority_anchor_unavailable" => {
+                let cause = anchor_loss
+                    .as_deref()
+                    .map(|reason| format!("authority broker retired: {reason}"))
+                    .unwrap_or_else(|| "supervisor/broker gone?".into());
                 findings.push(issue(
                     IssueSeverity::Warn,
                     "anchor_unavailable",
-                    "session authority anchor unavailable (supervisor/broker gone?) — human \
-                     re-pin required; if `locus leave` also fails, clear the wedged pin with \
-                     `locus leave --force`",
+                    format!(
+                        "session authority anchor unavailable ({cause}) — human re-pin \
+                         required; if `locus leave` also fails, clear the wedged pin with \
+                         `locus leave --force`"
+                    ),
                 ));
             }
             // Already covered by the dedicated stale_session finding above.
@@ -1586,6 +1610,65 @@ mod tests {
         assert_ne!(report.verdict, DoctorVerdict::Safe);
     }
 
+    /// Regression: a pin whose broker retired because the pinning shell
+    /// exec'd into the reader (`bash -c '...; node reader.mjs'`) must be named
+    /// as such — not reported as "session file may be tampered".
+    #[test]
+    fn doctor_names_broker_retirement_cause_without_claiming_tamper() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let epoch = store
+            .active_session()
+            .unwrap()
+            .unwrap()
+            .authority_anchor
+            .unwrap()
+            .epoch;
+        std::fs::remove_dir_all(dir.path().join("runtime")).unwrap();
+        std::fs::create_dir_all(dir.path().join("runtime")).unwrap();
+        crate::authority_anchor::record_broker_retirement(
+            dir.path(),
+            &epoch,
+            "supervising process (pid 42) replaced itself (exec) from /usr/bin/bash with /usr/bin/node",
+        );
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        let anchor = report
+            .findings
+            .iter()
+            .find(|f| f.code == "anchor_unavailable")
+            .expect("anchor_unavailable finding");
+        assert!(
+            anchor.message.contains("replaced itself (exec)"),
+            "cause missing: {}",
+            anchor.message
+        );
+        // Still fail closed with the stable code, but honest wording: the
+        // seal HMAC itself verified.
+        assert!(report.runtime.seal_ok);
+        let pin = report
+            .findings
+            .iter()
+            .find(|f| f.code == "invalid_seal")
+            .expect("unverified pin stays an UNSAFE invalid_seal finding");
+        assert_eq!(pin.severity, IssueSeverity::Unsafe);
+        assert!(!pin.message.contains("tampered"), "{}", pin.message);
+        assert_eq!(report.pin_seal_ok, Some(false));
+        assert_eq!(report.verdict, DoctorVerdict::Unsafe);
+    }
+
     #[test]
     fn doctor_unsafe_on_seal_tamper() {
         let dir = tempdir().unwrap();
@@ -1906,6 +1989,58 @@ require_pin = true
             "local_advisory"
         );
         assert_eq!(instance["approvals"]["authoritative_path_enabled"], false);
+    }
+
+    #[test]
+    fn doctor_report_with_every_control_capability_finding_validates_against_schema() {
+        // Regression: the CLI attaches `control_capability_persisted` with
+        // severity `info` (the default quickstart posture), which the
+        // published schema used to reject (it allowed only warn|unsafe).
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        // Persisted but not exported: one warn finding plus the info note.
+        let status = crate::authority_anchor::ControlCapabilityStatus {
+            env_present: false,
+            env_valid: false,
+            persisted: true,
+            persisted_valid: true,
+            persisted_permissions_ok: true,
+            matches_persisted: None,
+            test_fallback: false,
+        };
+        for f in control_capability_findings(&status, dir.path()) {
+            report.push_finding(f.severity, &f.code, f.message);
+        }
+        let instance = serde_json::to_value(&report).unwrap();
+        let severities: Vec<&str> = instance["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["severity"].as_str())
+            .collect();
+        assert!(severities.contains(&"info"), "{severities:?}");
+        assert!(severities.contains(&"warn"), "{severities:?}");
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schema/doctor.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&instance)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "doctor JSON with an info finding violated schema: {}",
+            errors.join("\n")
+        );
     }
 
     #[test]

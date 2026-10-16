@@ -22,11 +22,11 @@ const {
   unlinkSync,
   writeFileSync,
 } = require("fs");
-const { join } = require("path");
+const { dirname, join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
-const VERSION = "0.5.0";
+const VERSION = "0.5.1";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus";
 const CARGO_PACKAGE = "locus-cli";
@@ -101,9 +101,13 @@ function download(url) {
     https
       .get(url, (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          // Drain every response we do not read, or its socket keeps the
+          // process alive after the download finishes.
+          res.resume();
           return download(res.headers.location).then(resolve).catch(reject);
         }
         if (res.statusCode !== 200) {
+          res.resume();
           return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
         }
         const chunks = [];
@@ -215,9 +219,35 @@ function extractBinaryFromArchive(archivePath, binaryPath) {
       chmodSync(binaryPath, 0o755);
     }
     writeVersionSidecar(binaryPath);
+    installCompanionBinaries(stagingDir, binaryPath);
   } finally {
     rmSync(stagingDir, { recursive: true, force: true });
   }
+}
+
+// The release archive ships locus-mcp beside locus. Install it next to the
+// cached locus so `locus setup` finds the sibling MCP server; without it npm
+// users have no locus-mcp at all. Best-effort: never fails the locus install.
+const COMPANION_BINARIES = Object.freeze(["locus-mcp"]);
+
+function installCompanionBinaries(stagingDir, binaryPath, platform = process.platform) {
+  const installed = [];
+  const destDir = dirname(binaryPath);
+  for (const name of COMPANION_BINARIES) {
+    const filename = platform === "win32" ? `${name}.exe` : name;
+    try {
+      const src = findBinaryInDir(stagingDir, filename);
+      if (!src) continue;
+      const dest = join(destDir, filename);
+      copyFileSync(src, dest);
+      if (platform !== "win32") chmodSync(dest, 0o755);
+      writeVersionSidecar(dest);
+      installed.push(dest);
+    } catch {
+      // best-effort
+    }
+  }
+  return installed;
 }
 
 function removeIfExists(path) {
@@ -234,13 +264,28 @@ function cargoBinPath() {
   return join(home, ".cargo", "bin", name);
 }
 
+function isNodeShim(path) {
+  try {
+    const real = require("fs").realpathSync(path);
+    if (real === require("fs").realpathSync(__filename)) return true;
+    const head = readFileSync(real).subarray(0, 64).toString("utf8");
+    return head.startsWith("#!") && head.includes("node");
+  } catch {
+    return false;
+  }
+}
+
 function tryExistingOnPath() {
   const which = process.platform === "win32" ? "where" : "which";
   const result = spawnSync(which, [BINARY_NAME], { encoding: "utf8" });
   if (result.status === 0) {
-    const path = (result.stdout || "").split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-    if (path && existsSync(path)) {
-      return path;
+    // Skip this npm shim itself (and any other node wrapper): `which` finds
+    // the npm-installed bin first, and executing it recurses forever.
+    const candidates = (result.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    for (const path of candidates) {
+      if (path && existsSync(path) && !isNodeShim(path)) {
+        return path;
+      }
     }
   }
   const cargoPath = cargoBinPath();
@@ -388,15 +433,45 @@ async function ensureBinary() {
   }
 }
 
+// Session authority is anchored to the *parent* process of `locus` (the user's
+// shell). When this Node wrapper sits in between, the anchor binds to a
+// short-lived node process, so `locus quickstart` then `locus enter <alias>`
+// fails with "session authority generation is stale". On POSIX we therefore
+// replace this wrapper with a symlink to the native binary, so the shell runs
+// locus directly. Best-effort: on any failure the wrapper keeps working.
+const AUTHORITY_COMMANDS = new Set(["quickstart", "pin", "enter", "init", "leave"]);
+
+function linkNativeBin(binary, target = __filename) {
+  if (process.platform === "win32" || process.env.LOCUS_NPM_NO_LINK) return false;
+  const fs = require("fs");
+  try {
+    if (fs.lstatSync(target).isSymbolicLink()) return false;
+    const tmp = `${target}.${process.pid}.tmp`;
+    removeIfExists(tmp);
+    fs.symlinkSync(binary, tmp);
+    fs.renameSync(tmp, target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function main() {
   const binary = await ensureBinary();
   const args = process.argv.slice(2);
+  if (linkNativeBin(binary) && AUTHORITY_COMMANDS.has(args[0])) {
+    console.error(
+      "locus: linked the native binary for future runs. This first run went through the npm wrapper; if a later command reports a stale session authority, re-run `locus " + args.join(" ") + "`."
+    );
+  }
 
   try {
     execFileSync(binary, args, { stdio: "inherit" });
   } catch (err) {
     process.exit(err.status || 1);
   }
+  // Exit explicitly: a lingering download socket must never hold the shell.
+  process.exit(0);
 }
 
 if (require.main === module) {
@@ -404,6 +479,11 @@ if (require.main === module) {
 }
 
 module.exports = {
+  getBinaryPath,
+  isCachedBinaryStale,
+  downloadReleaseBinary,
+  ensureBinary,
+  linkNativeBin,
   INSTALL_FROM_SOURCE,
   PREBUILT_TARGETS,
   SUPPORTED_TARGETS,
@@ -412,4 +492,5 @@ module.exports = {
   getPlatformTarget,
   parseSha256File,
   findBinaryInDir,
+  installCompanionBinaries,
 };
