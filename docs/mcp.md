@@ -93,6 +93,7 @@ locus setup --client claude
 ```
 
 This writes/merges `.mcp.json` so Claude Code launches `locus-mcp` over stdio. **Restart Claude Code** after setup so the tool catalog reloads.
+That entry serves control tools only; setup also prints the `locus mcp --supervised` command to register instead when you want the pinned binding's provider tools (see [Supervised launch](#supervised-launch-provider-tools)).
 
 To register once for **all** projects (Claude Code *user scope*), let the
 claude CLI do the write — user-scope servers live in `~/.claude.json`, a

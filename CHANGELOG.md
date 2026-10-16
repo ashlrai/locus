@@ -26,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`locus setup` points at provider tools** — `locus setup` and
+  `locus agent setup` register plain `locus-mcp`, which serves control tools
+  only. Both now say so and print the `locus mcp --supervised` command to
+  register instead for the pinned binding's provider tools. The written config
+  is unchanged.
 - **npm install no longer hangs** — after `npm i -g locus-cli`, the
   `locus` / `locus-mcp` wrappers found themselves on `PATH` and re-executed
   forever. They now skip Node shims when looking for an installed binary (#64).
