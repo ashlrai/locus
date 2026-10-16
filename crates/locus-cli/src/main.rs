@@ -6363,6 +6363,10 @@ fn cmd_agent_setup(
             println!("  2. {}", "locus whoami".cyan());
             println!("  3. {}", "locus agent doctor".cyan());
             println!("  4. Restart your AI client so MCP picks up locus-mcp");
+            println!(
+                "  5. Provider tools: register {} instead of locus-mcp (see docs/mcp.md, Supervised launch)",
+                format!("{} mcp --supervised", locus_self_bin()).cyan()
+            );
             println!();
             println!(
                 "  {} MCP env: LOCUS_AUTO_PIN=cwd + LOCUS_CLIENT — never LOCUS_NOTIFY by default",
@@ -7111,6 +7115,27 @@ fn mcp_verify_failures<'a>(clients: &[&'a str], probe: &McpRegistered) -> Vec<&'
         .collect()
 }
 
+/// This `locus` executable, for config entries that launch `locus mcp`.
+fn locus_self_bin() -> String {
+    env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "locus".into())
+}
+
+/// Setup registers plain `locus-mcp`, which serves control tools only (it is
+/// never handed an executor capability). Say how to get provider tools, so a
+/// fresh setup is not a silent dead end (docs/mcp.md, Supervised launch).
+fn supervised_mcp_hint(locus_bin: &str) -> [String; 3] {
+    [
+        "Provider tools: the registered locus-mcp serves control tools only.".to_string(),
+        format!(
+            "  To serve the pinned binding's provider tools, register `{locus_bin} mcp --supervised` instead"
+        ),
+        "  (launch the client from the shell that ran `locus hook` + `locus pin`; see docs/mcp.md, Supervised launch)."
+            .to_string(),
+    ]
+}
+
 fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<()> {
     if !print_only && matches!(client, "claude" | "cursor" | "codex" | "grok") {
         require_local_control_boundary("locus setup")?;
@@ -7226,6 +7251,10 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
         other => bail!("unknown client: {other} (claude|cursor|codex|grok|generic)"),
     }
 
+    println!();
+    for line in supervised_mcp_hint(&locus_self_bin()) {
+        println!("{line}");
+    }
     println!();
     println!("Phantom pairing:");
     println!("  credential_ref = \"phm:MY_SECRET\"  # locus exec resolves via phantom reveal");
@@ -8383,6 +8412,13 @@ mod setup_merge_tests {
         let (bin, fallback) = resolve_mcp_bin_with_fallback(Some("/x/locus-mcp".into()));
         assert_eq!(bin, "/x/locus-mcp");
         assert!(!fallback);
+    }
+
+    #[test]
+    fn supervised_mcp_hint_names_the_supervised_launch() {
+        let hint = super::supervised_mcp_hint("/opt/bin/locus").join("\n");
+        assert!(hint.contains("`/opt/bin/locus mcp --supervised`"), "{hint}");
+        assert!(hint.contains("control tools only"), "{hint}");
     }
 }
 
