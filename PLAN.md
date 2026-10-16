@@ -8,7 +8,7 @@
 
 ## Executive summary
 
-You have a real, underserved problem: multi-account MCP/CLI chaos for a contract firm (personal vs client Supabase/Vercel/xAI/Resend/etc.), where agents can and do act in the wrong tenant. Research across Phantom, ashlr-hub, vendor identity models, competitor landscape, and agency ops all converge on one thesis:
+You have a real, underserved problem: multi-account MCP/CLI chaos for a contract firm (personal vs client Supabase/Vercel/xAI/Resend/etc.), where agents can and do act in the wrong tenant. Research across Phantom (secrets vault + fleet OS), vendor identity models, competitor landscape, and agency ops all converge on one thesis:
 
 > **Phantom solves credential *exposure*. Almost nothing solves authorized-but-*wrong-account* action.**  
 > The market has registries, transport proxies, SaaS tool meshes (Composio), enterprise MCP gateways, and secret brokers (Agent Vault, Peta). It does **not** have a local-first, multi-provider **identity plane** that makes wrong-account actions mechanically impossible for coding agents.
@@ -29,8 +29,8 @@ You have a real, underserved problem: multi-account MCP/CLI chaos for a contract
 **Phantom (phm.dev) already owns:** keys never enter the LLM (phm_ tokens + reverse proxy + vault + MCP approval).  
 **Phantom explicitly does *not* own:** multi-tenant identity, account switch, wrong-project MCP, CLI context (its `env_scope` is dev/staging/prod, not clients).
 
-**ashlr-hub already owns:** machine-wide MCP aggregation (`mcp-gateway`, `<server>__<tool>`).  
-**ashlr-hub does *not* own:** profiles/workspaces/account policy — it fans everything in (wrong-account risk *increases* if both personal + client servers are discovered).
+**Phantom already owns:** machine-wide MCP aggregation (`mcp-gateway`, `<server>__<tool>`).  
+**Phantom does *not* own:** profiles/workspaces/account policy — it fans everything in (wrong-account risk *increases* if both personal + client servers are discovered).
 
 **Portfolio fit:** new standalone product (Phantom-class), composes with Phantom + thin hooks into hub. Do **not** bury this inside hub fleet OS or Phantom vault core. Avoid colliding with reserved **ashlr-mux**.
 
@@ -106,7 +106,7 @@ North-star metrics: **0 wrong-context incidents/quarter**, **&lt;30s to safe con
 
 - Not another MCP registry (Smithery/Glama)  
 - Not another secrets vault (Phantom/Doppler)  
-- Not another fleet conductor (ashlr-hub)  
+- Not another fleet conductor (Phantom)  
 - Not a 9k-app SaaS mesh (Composio)  
 - Not enterprise IT MCP gateway first (MintMCP)
 
@@ -359,7 +359,7 @@ License: **MIT** (match Phantom) or Apache-2.0 OR MIT.
 4. Phase 0 spike: daemon + pin + Supabase worker + isolation test  
 5. Dogfood on one real client BindingSet + personal BindingSet  
 6. Parallel: landing page draft (Phantom-quality mechanism-first copy)  
-7. Optional: thin ashlr-hub issue for “profile-scoped MCP discovery” (non-blocking)
+7. Optional: thin Phantom issue for “profile-scoped MCP discovery” (non-blocking)
 
 ---
 
@@ -370,7 +370,7 @@ License: **MIT** (match Phantom) or Apache-2.0 OR MIT.
 | Full architecture design | `/Users/masonwyatt/Desktop/mmcp/DESIGN.md` |
 | This plan | session `plan.md` |
 | Phantom deep dive | explore agent (architecture, gaps, reuse) |
-| ashlr-hub MCP gap analysis | explore agent (new product recommendation) |
+| Phantom MCP gap analysis | explore agent (new product recommendation) |
 | Competitive landscape | research agent (white space confirmed) |
 | Vendor identity matrix | research agent (Binding primitive) |
 | Agency ops requirements | research agent (R1–R10 + metrics) |
@@ -385,6 +385,6 @@ License: **MIT** (match Phantom) or Apache-2.0 OR MIT.
 |---------|---------------------|
 | **Phantom** | Can this secret enter the model? |
 | **Locus** | As whom, against which tenant, right now? |
-| **ashlr-hub** | How do I run the fleet / aggregate tools? |
+| **Phantom** | How do I run the fleet / aggregate tools? |
 
 Start Phase 0 spike immediately after name/language decisions. The design is mechanism-complete enough to implement; the remaining work is product craft and dogfood on real multi-client pain.

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`INTEGRATION.md`** — sketch of how Phantom plugs into Locus (opt-in/out):
+  the account-separation guarantees, per-job `ci mint` flow, pre-mutate gate,
+  and failure modes.
+- **`DESIGN-onboarding-wizard.md`, `DESIGN-adapter-marketplace.md`** —
+  design proposals for future guided setup and adapter discovery. They do
+  not establish a shipped command or release version.
+
+### Changed
+
+- **ashlr-hub to Phantom rename** — the hub was renamed to Phantom (same repo).
+  `integrations/phantom/` is added alongside the existing compatibility directory
+  `integrations/ashlr-hub/`; docs and scripts use the new path. Historical changelog
+  entries, quoted PR URLs, and the runtime `LOCUS_CLIENT="ashlr-hub"`
+  identifier are intentionally unchanged.
+
 ### Fixed
 
 - **`locus hook bash` emits a bash prompt** — the prompt helper now prints ANSI

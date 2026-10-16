@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hub-integration-test.sh — ashlr-hub composition smoke.
+# hub-integration-test.sh — Phantom (hub) composition smoke.
 #
 # Validates:
 #   1. locus agent report --json contract (required_servers = locus+phantom)
@@ -187,7 +187,7 @@ import { pathToFileURL } from "node:url";
 
 const root = process.env.HUB_ROOT;
 const mint = JSON.parse(process.env.HUB_MINT_JSON);
-const module = await import(pathToFileURL(`${root}/integrations/ashlr-hub/locus.ts`).href);
+const module = await import(pathToFileURL(`${root}/integrations/phantom/locus.ts`).href);
 const exact = { ...mint.env, LOCUS_HOME: process.env.LOCUS_HOME, LOCUS_ENFORCE: "1" };
 
 const verified = module.validateExistingLocusSession(exact);
@@ -236,7 +236,7 @@ if HUB_MINT_JSON="$EXPIRED_MINT" HUB_ROOT="$ROOT" LOCUS_BIN="${ROOT}/target/debu
   node --experimental-strip-types --input-type=module >/dev/null 2>&1 <<'NODE'
 import { pathToFileURL } from "node:url";
 const mint = JSON.parse(process.env.HUB_MINT_JSON);
-const module = await import(pathToFileURL(`${process.env.HUB_ROOT}/integrations/ashlr-hub/locus.ts`).href);
+const module = await import(pathToFileURL(`${process.env.HUB_ROOT}/integrations/phantom/locus.ts`).href);
 const env = { ...mint.env, LOCUS_HOME: process.env.LOCUS_HOME, LOCUS_ENFORCE: "1" };
 module.validateExistingLocusSession(env);
 NODE
@@ -849,9 +849,9 @@ NODE
 # 6. Drop-in + docs present
 # ---------------------------------------------------------------------------
 for f in \
-  integrations/ashlr-hub/locus.ts \
-  integrations/ashlr-hub/fleet-preflight.md \
-  integrations/ashlr-hub/README.md \
+  integrations/phantom/locus.ts \
+  integrations/phantom/fleet-preflight.md \
+  integrations/phantom/README.md \
   docs/hub-integration.md
 do
   if [[ -f "$ROOT/$f" ]]; then
@@ -863,7 +863,7 @@ done
 
 # locus.ts exports (static grep)
 for sym in locusFleetGate registerLocusInMcpConfig parseStatusOneline evaluateFleetGate mergeLocusIntoMcpConfig hasRequiredServers scrubbedChildEnv validateMintEnv validateMintBinding parseLocusEnforceToken extractLocusConfigEnforce readLocusConfigFromAshlr resolveLocusEnforceMode decidePreMutateGate assertLocusPreMutate formatPreMutateBlockers applyLocusPreMutateGate decideLocusSessionRun runWithLocusSessionIfConfigured parseWatchHeartbeat parseSessionVerificationPack locusVerifySession locusWatchOnce locusSoftWatchHeartbeat parseMcpMintOutput parseMcpListOutput classifyTenantAuthError locusMcpMint locusMcpList locusMcpRevoke withLocusMcpTenant locusMtPreflight; do
-  if grep -qE "export (async )?function $sym" "$ROOT/integrations/ashlr-hub/locus.ts"; then
+  if grep -qE "export (async )?function $sym" "$ROOT/integrations/phantom/locus.ts"; then
     ok "locus.ts exports $sym"
   else
     bad "locus.ts missing export $sym"
@@ -881,12 +881,12 @@ if grep -qE "locusWatchOnce|locusVerifySession|parseWatchHeartbeat" "$ROOT/docs/
 else
   bad "hub-integration.md missing watch/verify session heartbeat notes"
 fi
-if grep -qE "assertLocusPreMutate|applyLocusPreMutateGate" "$ROOT/integrations/ashlr-hub/fleet-preflight.md" && grep -q "validateMintEnv" "$ROOT/integrations/ashlr-hub/fleet-preflight.md" && grep -q "locus.enforce" "$ROOT/integrations/ashlr-hub/fleet-preflight.md"; then
+if grep -qE "assertLocusPreMutate|applyLocusPreMutateGate" "$ROOT/integrations/phantom/fleet-preflight.md" && grep -q "validateMintEnv" "$ROOT/integrations/phantom/fleet-preflight.md" && grep -q "locus.enforce" "$ROOT/integrations/phantom/fleet-preflight.md"; then
   ok "fleet-preflight.md documents pre-mutate + validateMintEnv + locus.enforce"
 else
   bad "fleet-preflight.md missing pre-mutate / mint scrub / firm config notes"
 fi
-if grep -qE "locusWatchOnce|locusVerifySession" "$ROOT/integrations/ashlr-hub/fleet-preflight.md"; then
+if grep -qE "locusWatchOnce|locusVerifySession" "$ROOT/integrations/phantom/fleet-preflight.md"; then
   ok "fleet-preflight.md documents session heartbeat helpers"
 else
   bad "fleet-preflight.md missing session heartbeat notes"
@@ -1093,7 +1093,7 @@ import { pathToFileURL } from "node:url";
 const root = process.env.HUB_ROOT;
 const url = process.env.MT_URL;
 const serverToken = process.env.LOCUS_MCP_HTTP_TOKEN;
-const m = await import(pathToFileURL(`${root}/integrations/ashlr-hub/locus.ts`).href);
+const m = await import(pathToFileURL(`${root}/integrations/phantom/locus.ts`).href);
 
 // parseMcpMintOutput: live mint roundtrip + fail-closed variants
 const mint = m.parseMcpMintOutput(process.env.HUB_MT_MINT_JSON);
