@@ -255,3 +255,22 @@ fn unpinned_plain_entry_still_says_unpinned() {
     let (body, _) = c.tool(2, "locus_status");
     assert_eq!(body["pinned"], false);
 }
+
+/// `locus-mcp --version` / `-V` print the version on stdout and exit 0
+/// (previously "unknown argument: --version", exit 1).
+#[test]
+fn version_flag_prints_version_and_exits_zero() {
+    for flag in ["--version", "-V"] {
+        let out = Command::new(mcp_bin())
+            .arg(flag)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run locus-mcp");
+        assert!(out.status.success(), "{flag}: {out:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!("locus-mcp {}", env!("CARGO_PKG_VERSION")),
+            "{flag}"
+        );
+    }
+}

@@ -23,17 +23,17 @@ locus whoami                            # who your agents are acting as, right n
 `locus agent setup --apply` writes the configs for every client it finds. By hand:
 
 ```bash
-claude mcp add locus -- locus-mcp       # Claude Code
-codex mcp add locus -- locus-mcp        # Codex
+claude mcp add locus -- locus mcp --supervised    # Claude Code
+codex mcp add locus -- locus mcp --supervised     # Codex
 ```
 
 Cursor (`~/.cursor/mcp.json`):
 
 ```json
-{ "mcpServers": { "locus": { "command": "locus-mcp" } } }
+{ "mcpServers": { "locus": { "command": "locus", "args": ["mcp", "--supervised"] } } }
 ```
 
-`locus-mcp` exposes only the pinned binding's tools, and never returns credential values.
+`locus mcp --supervised` serves the pinned binding's provider tools; launch the client from the shell that ran `locus hook` and `locus pin`, and restart it after a re-pin. Registered as plain `locus-mcp` (what `locus setup` writes), the server serves control tools only (pin status, verification, `locus_request_pin`). Neither returns credential values. See [docs/mcp.md](./docs/mcp.md#supervised-launch-provider-tools).
 
 ### How it compares
 
@@ -42,7 +42,7 @@ Cursor (`~/.cursor/mcp.json`):
 | `gh auth switch` | gh's shared config (`hosts.yml`) | Every process that reads that config, until the next switch |
 | direnv `.envrc` | Variables exported into your shell on `cd` | Only the variables in `.envrc`; the rest of the shell's environment stays |
 | 1Password `op run` | Secret references resolved for one command | That command |
-| **Locus** `run` / `exec` / `pin` | A sealed session bound to one binding | That command or session. Ambient `GH_TOKEN`, `AWS_*`, `SUPABASE_*`… are scrubbed, a directory's `.locus.toml` can refuse other bindings, and `locus-mcp` exposes only the pinned binding's tools |
+| **Locus** `run` / `exec` / `pin` | A sealed session bound to one binding | That command or session. Ambient `GH_TOKEN`, `AWS_*`, `SUPABASE_*`… are scrubbed, a directory's `.locus.toml` can refuse other bindings, and MCP provider tools (`locus mcp --supervised`) are only the pinned binding's |
 
 These tools compose: binding credentials can be Phantom (`phm:`) or environment (`env:`) references. Try it in a minute with the executable [recipes](./examples/recipes/) (two clients, a directory allowlist, a CI session).
 

@@ -24,13 +24,17 @@ Requires Node ≥ 16. Cargo fallback needs [Rust](https://rustup.rs).
 ## Quick start
 
 ```bash
-locus init --with-samples
-locus pin personal
+locus quickstart                 # sample bindings, pin, whoami, doctor
+eval "$(locus hook bash)"        # or zsh; exports the control capability
 locus whoami
 locus exec -- env | grep LOCUS_
 ```
 
+Step by step instead of `quickstart`: `locus init --with-samples`, then
+`eval "$(locus hook bash)"`, then `locus pin personal`. Without the hook line,
+`pin` fails with `LOCUS_CONTROL_CAPABILITY is required`.
+
 ## Related
 
-- MCP server: [`locus-mcp`](https://www.npmjs.com/package/locus-mcp)
+- MCP server: [`@ashlrai/locus-mcp`](https://www.npmjs.com/package/@ashlrai/locus-mcp)
 - Source / Homebrew: https://github.com/ashlrai/locus

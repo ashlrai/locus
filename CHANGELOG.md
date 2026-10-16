@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **npm: a root global install no longer breaks `locus` for other users.** The
+  postinstall replaced the shared bin with a symlink into the installer's HOME
+  (e.g. `/root/.locus/bin`, behind a 0700 `/root`), so other users got
+  "Permission denied". A root install now keeps the wrapper when it is
+  reachable by other users and the native binary is not.
+- **`locus-mcp --version` / `-V`** print `locus-mcp <version>` and exit 0
+  (was "unknown argument", exit 1).
+- **Docs:** the npm README quick start adds the `eval "$(locus hook bash)"`
+  step `pin` needs and links `@ashlrai/locus-mcp` (not an unrelated package);
+  the main README registers `locus mcp --supervised` for provider tools and says
+  plain `locus-mcp` serves control tools only.
+
 ## [0.5.1] — 2026-10-16
 
 ### Added

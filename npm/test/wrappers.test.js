@@ -100,6 +100,47 @@ test("locus: linkNativeBin replaces the wrapper with a symlink to the binary", (
   }
 });
 
+// Regression: a root `npm install -g` linked the shared bin to
+// /root/.locus/bin/locus (under a 0700 HOME), so every other user got
+// "Permission denied". A world-reachable wrapper must not be linked to a
+// binary other users cannot reach.
+test("locus: linkNativeBin keeps a root-installed shared wrapper when the binary is in a private dir", () => {
+  if (process.platform === "win32") return;
+  const { linkNativeBin } = require(wrappers.locus);
+  const { chmodSync, lstatSync, mkdirSync, realpathSync, statSync, unlinkSync } = require("node:fs");
+  const { dirname } = require("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "locus-shared-"));
+  try {
+    chmodSync(dir, 0o755);
+    // Skip when tmpdir itself is private to this user: nothing would be shared.
+    for (let d = realpathSync(dir); d !== dirname(d); d = dirname(d)) {
+      if ((statSync(dirname(d)).mode & 0o001) === 0) return;
+    }
+    const shared = join(dir, "lib", "node_modules", "locus-cli", "bin");
+    const privateHome = join(dir, "root");
+    mkdirSync(shared, { recursive: true, mode: 0o755 });
+    mkdirSync(join(privateHome, ".locus", "bin"), { recursive: true, mode: 0o755 });
+    chmodSync(privateHome, 0o700);
+    const bin = join(privateHome, ".locus", "bin", "locus");
+    writeFileSync(bin, "#!/bin/sh\necho native\n", { mode: 0o755 });
+    const target = join(shared, "locus.js");
+    writeFileSync(target, "// wrapper\n");
+    assert.equal(linkNativeBin(bin, target, 0), false);
+    assert.equal(lstatSync(target).isSymbolicLink(), false, "shared wrapper must stay in place");
+    // A non-root install (the user's own prefix) still links.
+    assert.equal(linkNativeBin(bin, target, 1000), true);
+    assert.ok(lstatSync(target).isSymbolicLink());
+    // As does a root install whose binary other users can reach.
+    unlinkSync(target);
+    writeFileSync(target, "// wrapper\n");
+    chmodSync(privateHome, 0o755);
+    assert.equal(linkNativeBin(bin, target, 0), true);
+    assert.ok(lstatSync(target).isSymbolicLink());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // The release archive ships locus-mcp beside locus; npm users must get both.
 test("locus: installCompanionBinaries installs locus-mcp next to the cached locus", () => {
   const { installCompanionBinaries } = require(wrappers.locus);
