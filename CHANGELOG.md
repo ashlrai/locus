@@ -7,14 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-16
+
 ### Added
+
+- **`locus onboard` wizard and community adapter marketplace** (#85, ported from the
+  closed #56). Community adapters are publisher-supplied executable code: a trusted
+  signature binds the installable envelope to a configured verification key but does
+  not establish that a command is safe, and installation always needs explicit consent.
+  Community credential sources are limited to `env:` references. Read
+  `docs/adapters.md` before installing any community adapter.
 
 - **`INTEGRATION.md`** — sketch of how Phantom plugs into Locus (opt-in/out):
   the account-separation guarantees, per-job `ci mint` flow, pre-mutate gate,
   and failure modes.
 - **`DESIGN-onboarding-wizard.md`, `DESIGN-adapter-marketplace.md`** —
-  design proposals for future guided setup and adapter discovery. They do
-  not establish a shipped command or release version.
+  design proposals for guided setup and adapter discovery. The shipped
+  behavior is described under `locus onboard` above and in `docs/adapters.md`.
 
 ### Changed
 
@@ -40,8 +49,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `locus enter <alias>`". The attempt is still audited.
 - **Docs:** `docs/verification-plane.md` lists the `locus_verify_session` MCP
   tool and drops the stale "session pack is CLI/hub today" note.
-
-## [0.5.1] — 2026-10-15
 
 ### Added
 
