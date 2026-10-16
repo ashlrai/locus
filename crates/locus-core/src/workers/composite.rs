@@ -312,16 +312,27 @@ impl CompositeWorkerManager {
             if !p.has_upstream() {
                 continue;
             }
+            let Ok(contract) = p.verified_community_adapter() else {
+                continue;
+            };
+            if p.community_frozen_values().is_err() {
+                continue;
+            }
             let Ok(upstream) = self.list_upstream_tools(session, binding, &p.provider) else {
                 continue;
             };
             let prov = p.provider.to_ascii_lowercase();
             for t in upstream {
                 let name = namespace_upstream_tool(&prov, &t.name);
+                if contract.is_some_and(|manifest| !manifest.entry.tools.contains(&name)) {
+                    continue;
+                }
                 if synthetic_names.contains(&name) {
                     // Prefer synthetic identity/scope tools on name collision.
                     continue;
                 }
+                let destructive = contract
+                    .is_some_and(|manifest| manifest.entry.destructive_tools.contains(&name));
                 tools.push(AdapterTool {
                     name,
                     description: if t.description.is_empty() {
@@ -334,7 +345,7 @@ impl CompositeWorkerManager {
                     },
                     input_schema: t.input_schema,
                     provider: p.provider.clone(),
-                    destructive: false,
+                    destructive,
                 });
             }
         }
@@ -427,6 +438,10 @@ impl CompositeWorkerManager {
             )));
         };
 
+        let pb = binding
+            .provider(provider)
+            .ok_or_else(|| LocusError::msg("upstream provider absent from binding"))?;
+        let scoped_args = pb.community_tool_args(&binding.policy, tool, args)?;
         let key = Self::worker_key(session, binding, provider);
         let slot = self
             .slots
@@ -452,7 +467,7 @@ impl CompositeWorkerManager {
 
         if let Some(backend) = self.mcp.get(&key) {
             let upstream_name = strip_provider_prefix(provider, tool);
-            return backend.call_tool(&slot, binding, &upstream_name, args);
+            return backend.call_tool(&slot, binding, &upstream_name, &scoped_args);
         }
 
         // No upstream — fall through to synthetic (may still error unknown tool).
@@ -467,13 +482,38 @@ impl WorkerManager for CompositeWorkerManager {
         binding: &Binding,
         provider: &str,
     ) -> Result<WorkerSlot> {
+        if let Some(pb) = binding.provider(provider) {
+            let community = pb.verified_community_adapter()?.is_some();
+            pb.community_frozen_values()?;
+            if community
+                && pb
+                    .upstream
+                    .as_ref()
+                    .map(|upstream| upstream.expand())
+                    .transpose()?
+                    .is_some_and(|upstream| upstream.resolve_secrets)
+                && (crate::credential::inject_keys_for_binding_provider(pb)?.is_empty()
+                    || crate::credential::resolve(&crate::credential::CredentialRef::validate(
+                        &pb.credential_ref,
+                    )?)?
+                    .is_empty())
+            {
+                return Err(LocusError::msg(
+                    "community worker requires a supported available credential mapping",
+                ));
+            }
+        }
         let key = Self::worker_key(session, binding, provider);
         if let Some(existing) = self.slots.get(&key) {
             if matches!(
                 existing.state,
                 WorkerState::Ready | WorkerState::Running | WorkerState::Pending
             ) {
-                // Reuse live worker — do not respawn upstream children.
+                // A cached community worker must retain the currently authorized source key.
+                if let (Some(backend), Some(pb)) = (self.mcp.get(&key), binding.provider(provider))
+                {
+                    backend.validate_community_worker_contract(existing, binding, pb)?;
+                }
                 let out = existing.clone();
                 self.touch(&key);
                 return Ok(out);
@@ -1213,6 +1253,7 @@ for line in sys.stdin:
                     resolve_secrets: false,
                     sandbox: Some(false),
                     sandbox_no_network: false,
+                    community_adapter: None,
                 }),
             }],
         });
@@ -1310,6 +1351,9 @@ for line in sys.stdin:
             assert!(!cfg.sandbox, "{id} must remain explicitly unsandboxed");
             assert!(cfg.sandbox_incompatibility.is_some());
 
+            // This fixture tests sandbox compatibility independently of
+            // credential admission; no provider credential is needed here.
+            cfg.resolve_secrets = false;
             // Model a later global force without mutating process-global env.
             // The spawn layer must fail before resolving or launching the child.
             cfg.sandbox = true;
@@ -1400,5 +1444,481 @@ for line in sys.stdin:
         assert!(tools.iter().any(|t| t.name == "personal__github.scope"));
         // Unprefixed tools must not appear in namespaced mode
         assert!(!tools.iter().any(|t| t.name == "github.scope"));
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod community_runtime_tests {
+    use super::*;
+    use crate::adapter_registry::{
+        ed25519_public_key_b64, sign_entry_material_ed25519, AdapterManifestEntry,
+        LOCUS_ADAPTER_TRUST_KEYS_ENV,
+    };
+    use crate::binding::{BindingBody, Policy, ProviderBinding, Scope};
+    use crate::marketplace::CommunityAdapterManifest;
+    use crate::seal::SealKey;
+    use crate::session::PinSource;
+    use chrono::Duration as ChronoDuration;
+    use ed25519_dalek::SigningKey;
+    use serde_json::json;
+    use std::ffi::OsString;
+
+    struct Environment(Vec<(String, Option<OsString>)>);
+    impl Environment {
+        fn set(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+            self.0.push((key.into(), std::env::var_os(key)));
+            std::env::set_var(key, value);
+        }
+    }
+    impl Drop for Environment {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    fn sign(manifest: &mut CommunityAdapterManifest, signing: &SigningKey) {
+        manifest.entry.signature = Some(sign_entry_material_ed25519(
+            &manifest.signing_material(),
+            signing,
+        ));
+    }
+
+    pub(crate) fn fixture(
+        provider: &str,
+        marker: &std::path::Path,
+        signing: &SigningKey,
+    ) -> ProviderBinding {
+        let script = r#"import sys,json,os,pathlib,time
+marker=pathlib.Path(sys.argv[1])
+with marker.open('a') as f: f.write(json.dumps({'started':True,'home':os.environ.get('HOME'),'linear': 'LINEAR_API_KEY' in os.environ, 'notion':'NOTION_API_KEY' in os.environ,'ambient':'GH_TOKEN' in os.environ,'control':'LOCUS_CONTROL_CAPABILITY' in os.environ,'locator':'LOCUS_COMMUNITY_LINEAR_FIXTURE' in os.environ,'config':os.environ.get('GH_CONFIG_DIR'),'aws':os.environ.get('AWS_CONFIG_FILE'),'tmp':os.environ.get('TMPDIR'),'binding':os.environ.get('LOCUS_WORKER_BINDING'),'tenant':os.environ.get('LOCUS_WORKER_TENANT'),'parent_binding':os.environ.get('LOCUS_BINDING')})+'\n')
+def send(result,mid):
+ print(json.dumps({'jsonrpc':'2.0','id':mid,'result':result}),flush=True)
+for line in sys.stdin:
+ msg=json.loads(line);mid=msg.get('id');method=msg.get('method')
+ if mid is None:continue
+ if method=='initialize':send({'protocolVersion':'2024-11-05','capabilities':{'tools':{}},'serverInfo':{'name':'inert','version':'1'}},mid)
+ elif method=='tools/list':send({'tools':[{'name':n,'description':os.environ.get('LINEAR_API_KEY',os.environ.get('NOTION_API_KEY','none')),'inputSchema':{'type':'object'}} for n in ['read','delete','extra']]},mid)
+ elif method=='tools/call':
+  if msg['params'].get('arguments',{}).get('barrier'):
+   pathlib.Path(str(marker)+'.ready').write_text('ready')
+   while not pathlib.Path(str(marker)+'.release').exists():time.sleep(.005)
+  with marker.open('a') as f:f.write(json.dumps({'call':msg['params']['name'],'args':msg['params'].get('arguments',{})})+'\n')
+  send({'content':[{'type':'text','text':'inert-ok '+os.environ.get('LINEAR_API_KEY',os.environ.get('NOTION_API_KEY','none'))}],'isError':False},mid)
+"#;
+        let mut manifest = CommunityAdapterManifest {
+            manifest_version: 2,
+            entry: AdapterManifestEntry {
+                id: provider.into(),
+                name: "inert fixture".into(),
+                status: "community".into(),
+                synthetic: false,
+                capabilities: vec![],
+                frozen_selectors: vec!["workspace".into()],
+                tools: vec![format!("{provider}.read"), format!("{provider}.delete")],
+                destructive_tools: vec![format!("{provider}.delete")],
+                description: String::new(),
+                signature: None,
+                signed_by: Some("community-runtime-fixture".into()),
+            },
+            upstream: Some(
+                UpstreamSpec::new("python3")
+                    .with_args(["-u", "-c", script, marker.to_str().unwrap()])
+                    .resolve_secrets(true)
+                    .sandbox(false),
+            ),
+            credential_env: Some(format!("{}_API_KEY", provider.to_ascii_uppercase())),
+            publisher: "synthetic".into(),
+            version: "1".into(),
+        };
+        sign(&mut manifest, signing);
+        ProviderBinding::new(
+            provider,
+            "fixture-account",
+            format!(
+                "env:LOCUS_COMMUNITY_{}_FIXTURE",
+                provider.to_ascii_uppercase()
+            ),
+        )
+        .with_scope(Scope {
+            extra: [(
+                "workspace".into(),
+                toml::Value::String(format!("tenant-{provider}")),
+            )]
+            .into(),
+            ..Scope::default()
+        })
+        .with_community_adapter(manifest)
+        .unwrap()
+    }
+
+    fn records(path: &std::path::Path) -> Vec<Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// Actual inert MCP children prove the contract at launch and at both dispatch seams.
+    #[test]
+    fn community_signed_runtime_contract() {
+        assert!(std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let dir = tempfile::tempdir().unwrap();
+        let worker_home = dir.path().join("worker");
+        std::fs::create_dir_all(&worker_home).unwrap();
+        let mut environment = Environment(vec![]);
+        let signing = SigningKey::from_bytes(&[19; 32]);
+        let trust = format!(
+            "community-runtime-fixture:ed25519:{}",
+            ed25519_public_key_b64(&signing.verifying_key())
+        );
+        environment.set(LOCUS_ADAPTER_TRUST_KEYS_ENV, &trust);
+        environment.set("LOCUS_HOME", dir.path());
+        environment.set("LOCUS_WORKER_SANDBOX", "0");
+        environment.set("LOCUS_WORKER_SANDBOX_NO_NETWORK", "0");
+        environment.set("LOCUS_COMMUNITY_LINEAR_FIXTURE", "synthetic-linear-private");
+        environment.set("LOCUS_COMMUNITY_NOTION_FIXTURE", "synthetic-notion-private");
+        environment.set("GH_TOKEN", "synthetic-unrelated-ambient");
+        environment.set(
+            "LOCUS_CONTROL_CAPABILITY",
+            "synthetic-control-never-delegate",
+        );
+        let linear_marker = dir.path().join("linear.jsonl");
+        let notion_marker = dir.path().join("notion.jsonl");
+        let linear = fixture("linear", &linear_marker, &signing);
+        let notion = fixture("notion", &notion_marker, &signing);
+        let binding = Binding::from_body(BindingBody {
+            id: "bnd_acme".into(),
+            alias: "acme".into(),
+            tenant: "fixture".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![linear.clone(), notion],
+        });
+        let session = Session::new(
+            "bnd_acme",
+            "acme",
+            "fixture",
+            None,
+            PinSource::Explicit,
+            Some("fixture".into()),
+            ChronoDuration::hours(1),
+            worker_home.display().to_string(),
+            &SealKey::generate(),
+        );
+        let mut manager = CompositeWorkerManager::new();
+        // Invalid requests refuse before a slot exists, with no credential-bearing child.
+        assert!(manager
+            .call_tool(&session, &binding, "linear.extra", &json!({}))
+            .is_err());
+        let mut readonly = binding.clone();
+        readonly.providers[0].scope.read_only = Some(true);
+        assert!(manager
+            .call_tool(&session, &readonly, "linear.delete", &json!({}))
+            .is_err());
+        assert!(manager
+            .call_tool(
+                &session,
+                &binding,
+                "linear.read",
+                &json!({"nested":[{"workspace":"wrong"}]})
+            )
+            .is_err());
+        assert!(!linear_marker.exists());
+        manager.ensure_binding(&session, &binding).unwrap();
+        let l = &records(&linear_marker)[0];
+        let n = &records(&notion_marker)[0];
+        assert_eq!(
+            l["home"],
+            worker_home.join("slots/linear").display().to_string()
+        );
+        assert_eq!(
+            n["home"],
+            worker_home.join("slots/notion").display().to_string()
+        );
+        assert_ne!(l["home"], n["home"]);
+        assert_eq!(l["linear"], true);
+        assert_eq!(l["notion"], false);
+        assert_eq!(n["notion"], true);
+        assert_eq!(n["linear"], false);
+        for record in [l, n] {
+            for field in ["ambient", "control", "locator"] {
+                assert_eq!(record[field], false);
+            }
+        }
+        let catalog = manager.tools_for_pin(&session, &binding);
+        assert!(catalog
+            .iter()
+            .filter(|tool| tool.name == "linear.read" || tool.name == "notion.read")
+            .all(|tool| tool.description == "[redacted]"));
+        assert!(!catalog.iter().any(|tool| tool.name == "linear.extra"));
+        assert!(
+            catalog
+                .iter()
+                .find(|tool| tool.name == "linear.delete")
+                .unwrap()
+                .destructive
+        );
+        let result = manager
+            .call_tool(&session, &binding, "linear.read", &json!({}))
+            .unwrap();
+        assert!(result.ok);
+        let encoded = serde_json::to_string(&result.content).unwrap();
+        assert!(!encoded.contains("synthetic-linear-private"));
+        assert!(encoded.contains("[redacted]"));
+        assert_eq!(
+            records(&linear_marker)[1]["args"]["workspace"],
+            "tenant-linear"
+        );
+        let count = records(&linear_marker).len();
+        assert!(manager
+            .call_tool(&session, &readonly, "linear.delete", &json!({}))
+            .is_err());
+        let mut gated = binding.clone();
+        gated.policy.require_approval.push("linear.*".into());
+        assert!(manager
+            .call_tool(&session, &gated, "linear.read", &json!({}))
+            .is_err());
+        assert!(manager
+            .call_tool(&session, &binding, "linear.extra", &json!({}))
+            .is_err());
+        assert!(manager
+            .call_tool(&session, &binding, "linear.read", &json!({"workspace":9}))
+            .is_err());
+        assert_eq!(records(&linear_marker).len(), count);
+        // The backend itself applies policy before sending, even when bypassing Composite.
+        let key = CompositeWorkerManager::worker_key(&session, &binding, "linear");
+        let backend = manager.mcp.get(&key).unwrap();
+        let slot = manager.slots.get(&key).unwrap();
+        assert!(backend
+            .call_tool(slot, &binding, "extra", &json!({}))
+            .is_err());
+        assert!(backend
+            .call_tool(slot, &readonly, "delete", &json!({}))
+            .is_err());
+        assert!(backend
+            .call_tool(
+                slot,
+                &binding,
+                "read",
+                &json!({"nested":{"workspace":"other"}})
+            )
+            .is_err());
+        assert_eq!(records(&linear_marker).len(), count);
+        // Even a valid new signature cannot relabel an already launched child.
+        // Changed executable args and credential target both require a restart.
+        for change_mapping in [false, true] {
+            let mut envelope = linear
+                .upstream
+                .as_ref()
+                .unwrap()
+                .community_adapter
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .clone();
+            if change_mapping {
+                envelope.credential_env = Some("LINEAR_TOKEN".into());
+            } else {
+                envelope
+                    .upstream
+                    .as_mut()
+                    .unwrap()
+                    .args
+                    .push("new-contract".into());
+            }
+            sign(&mut envelope, &signing);
+            let mut changed = binding.clone();
+            changed.providers[0] = linear.clone().with_community_adapter(envelope).unwrap();
+            assert!(manager
+                .call_tool(&session, &changed, "linear.read", &json!({}))
+                .is_err());
+            assert!(manager.ensure(&session, &changed, "linear").is_err());
+        }
+        assert_eq!(records(&linear_marker).len(), count);
+        let mut unsigned = binding.clone();
+        unsigned.providers[0]
+            .upstream
+            .as_mut()
+            .unwrap()
+            .community_adapter = None;
+        assert!(manager
+            .call_tool(&session, &unsigned, "linear.extra", &json!({}))
+            .is_err());
+        assert!(manager.ensure(&session, &unsigned, "linear").is_err());
+        assert_eq!(records(&linear_marker).len(), count);
+        let config = mcp_config_from_upstream(linear.upstream.as_ref().unwrap()).unwrap();
+        let mut altered_config = config.clone();
+        altered_config.command = "inert-unsigned-command".into();
+        assert!(McpStdioBackend::new(altered_config)
+            .build_command(&session, &binding, &linear, &worker_home)
+            .is_err());
+        // Missing or unsupported credentials refuse Command construction before launch.
+        let mut missing = linear.clone();
+        missing.credential_ref = "env:LOCUS_COMMUNITY_MISSING_FIXTURE".into();
+        assert!(McpStdioBackend::new(config.clone())
+            .build_command(&session, &binding, &missing, &worker_home)
+            .is_err());
+        let mut unsupported = linear.clone();
+        unsupported.credential_ref = "phm:UNSUPPORTED_FIXTURE".into();
+        assert!(McpStdioBackend::new(config.clone())
+            .build_command(&session, &binding, &unsupported, &worker_home)
+            .is_err());
+        for source in [
+            "LOCUS_CONTROL_CAPABILITY",
+            "LOCUS_EXECUTOR_CAPABILITY",
+            "LOCUS_SEAL",
+            "locus_control_capability",
+            "Locus_Executor_Capability",
+            "locus_seal",
+            "LOCUS_ADAPTER_TRUST_KEYS",
+            "Locus_Adapter_Trust_Keys",
+            "LOCUS_REGISTRY_SIGNING_KEY",
+            "locus_registry_signing_key",
+        ] {
+            let canary = if source.eq_ignore_ascii_case(LOCUS_ADAPTER_TRUST_KEYS_ENV) {
+                // Keep the actual synthetic publisher trusted, so rejection
+                // proves source exclusion rather than an invalid trust overlay.
+                format!(
+                    "community-runtime-fixture:ed25519:{}",
+                    ed25519_public_key_b64(&signing.verifying_key())
+                )
+            } else {
+                format!("synthetic-authority-canary-{source}")
+            };
+            environment.set(source, &canary);
+            let mut authority_source = linear.clone();
+            authority_source.credential_ref = format!("env:{source}");
+            let error = McpStdioBackend::new(config.clone())
+                .build_command(&session, &binding, &authority_source, &worker_home)
+                .unwrap_err();
+            assert!(error.to_string().contains("credential resolution failed"));
+            assert!(!error.to_string().contains(&canary));
+        }
+        let mut bad_key = linear.clone();
+        let envelope = bad_key
+            .upstream
+            .as_mut()
+            .unwrap()
+            .community_adapter
+            .as_mut()
+            .unwrap();
+        envelope.credential_env = Some("GH_TOKEN".into());
+        sign(envelope, &signing);
+        assert!(McpStdioBackend::new(config.clone())
+            .build_command(&session, &binding, &bad_key, &worker_home)
+            .is_err());
+        let mut unknown_scope = linear.clone();
+        unknown_scope.scope.extra.clear();
+        assert!(McpStdioBackend::new(config.clone())
+            .build_command(&session, &binding, &unknown_scope, &worker_home)
+            .is_err());
+        assert_eq!(records(&linear_marker).len(), count);
+        environment.set("LOCUS_COMMUNITY_LINEAR_FIXTURE", "synthetic-rotated-key");
+        assert!(manager
+            .call_tool(&session, &binding, "linear.read", &json!({}))
+            .is_err());
+        assert!(manager.ensure(&session, &binding, "linear").is_err());
+        assert_eq!(records(&linear_marker).len(), count);
+        environment.set("LOCUS_COMMUNITY_LINEAR_FIXTURE", "synthetic-linear-private");
+
+        // A new concrete scope or operator identity cannot relabel a live child,
+        // even with unchanged binding IDs, signed envelope and credential source.
+        for context in ["scope", "tenant", "principal", "policy"] {
+            let mut changed = binding.clone();
+            match context {
+                "scope" => {
+                    changed.providers[0].scope.extra.insert(
+                        "workspace".into(),
+                        toml::Value::String("other-workspace".into()),
+                    );
+                }
+                "tenant" => changed.tenant = "other-tenant".into(),
+                "principal" => changed.principal = Some("other-principal".into()),
+                "policy" => changed.policy.require_approval.push("linear.delete".into()),
+                _ => unreachable!(),
+            }
+            assert!(
+                manager
+                    .call_tool(&session, &changed, "linear.read", &json!({}))
+                    .is_err(),
+                "changed {context} reached the cached worker"
+            );
+            let backend = manager.mcp.get(&key).unwrap();
+            let slot = manager.slots.get(&key).unwrap();
+            assert!(backend
+                .call_tool(slot, &changed, "read", &json!({}))
+                .is_err());
+            assert!(manager.ensure(&session, &changed, "linear").is_err());
+            assert_eq!(records(&linear_marker).len(), count);
+        }
+        let started = &records(&linear_marker)[0];
+        assert_eq!(started["binding"], binding.alias);
+        assert_eq!(started["tenant"], binding.tenant);
+        assert_eq!(started["parent_binding"], session.binding_alias);
+
+        // Namespaced bindings of the same provider have disjoint private config roots.
+        let second_marker = dir.path().join("other-linear.jsonl");
+        let second = fixture("linear", &second_marker, &signing);
+        let mut other = binding.clone();
+        other.id = "bnd_other".into();
+        other.alias = "other".into();
+        other.tenant = "other-tenant".into();
+        other.providers = vec![second];
+        let namespaced = session
+            .clone()
+            .with_mode(crate::session::SessionMode::Namespaced)
+            .with_namespaces(vec!["other".into()], vec!["synthetic".into()]);
+        let mut multi = CompositeWorkerManager::new();
+        multi.ensure_binding(&namespaced, &binding).unwrap();
+        multi.ensure_binding(&namespaced, &other).unwrap();
+        let primary = records(&linear_marker).last().unwrap().clone();
+        let secondary = records(&second_marker)[0].clone();
+        assert_ne!(primary["home"], secondary["home"]);
+        for record in [&primary, &secondary] {
+            let home = record["home"].as_str().unwrap();
+            assert!(record["config"].as_str().unwrap().starts_with(home));
+            assert!(record["aws"].as_str().unwrap().starts_with(home));
+            assert!(record["tmp"].as_str().unwrap().starts_with(home));
+            assert_eq!(record["parent_binding"], "acme");
+        }
+        assert_eq!(primary["binding"], "acme");
+        assert_eq!(secondary["binding"], "other");
+        assert_eq!(secondary["tenant"], "other-tenant");
+        drop(multi);
+        let count = records(&linear_marker).len();
+        let mut wrong_binding = binding.clone();
+        wrong_binding.id = "bnd_other".into();
+        wrong_binding.alias = "other".into();
+        let backend = manager.mcp.get(&key).unwrap();
+        let slot = manager.slots.get(&key).unwrap();
+        assert!(backend
+            .call_tool(slot, &wrong_binding, "read", &json!({}))
+            .is_err());
+        let mut wrong_account = binding.clone();
+        wrong_account.providers[0].account = "other-account".into();
+        assert!(backend
+            .call_tool(slot, &wrong_account, "read", &json!({}))
+            .is_err());
+        assert_eq!(records(&linear_marker).len(), count);
+        // Current trust revocation denies cached reuse and direct dispatch, without a replay.
+        environment.set(LOCUS_ADAPTER_TRUST_KEYS_ENV, "");
+        assert!(manager
+            .call_tool(&session, &binding, "linear.read", &json!({}))
+            .is_err());
+        assert!(manager.ensure(&session, &binding, "linear").is_err());
+        assert_eq!(records(&linear_marker).len(), count);
+        drop(manager);
     }
 }

@@ -35,7 +35,7 @@
 
 use crate::error::{LocusError, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
@@ -155,12 +155,18 @@ impl RegistryTrustKey {
                 }
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(&bytes);
-                VerifyingKey::from_bytes(&arr).map_err(|e| {
+                let key = VerifyingKey::from_bytes(&arr).map_err(|e| {
                     LocusError::msg(format!(
                         "registry trust key `{}` invalid ed25519 public key: {e}",
                         self.id
                     ))
-                })
+                })?;
+                if key.is_weak() {
+                    return Err(LocusError::msg(
+                        "weak low-order ed25519 verification keys are refused",
+                    ));
+                }
+                Ok(key)
             }
             RegistryKeyMaterial::HmacSha256 { .. } => Err(LocusError::msg(format!(
                 "registry trust key `{}` is hmac-sha256 (no ed25519 public key)",
@@ -543,7 +549,7 @@ pub fn verify_entry_with_keys(
 ///
 /// Shared by per-entry catalog verification and release-manifest verification.
 /// Returns `(status, signed_by, detail)`.
-fn verify_material_signature(
+pub(crate) fn verify_material_signature(
     material: &str,
     signature: Option<&str>,
     signed_by: Option<&str>,
@@ -619,7 +625,7 @@ fn verify_material_signature(
                     Some("failed to parse ed25519 trust key".into()),
                 );
             };
-            match vk.verify(material.as_bytes(), signature) {
+            match vk.verify_strict(material.as_bytes(), signature) {
                 Ok(()) => (EntryVerifyStatus::Valid, Some(key_id), None),
                 Err(_) => (
                     EntryVerifyStatus::Invalid,
