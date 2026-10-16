@@ -54,7 +54,7 @@ Use explicitly supplied environment credentials. Bindings carry **CredentialRefs
 only** (`env:VAR`), never raw tokens. Current Phantom Secrets does not provide
 an agent-readable scoped credential bridge; stored `phm:` pointers are metadata
 for compatibility and fail closed at resolution. See
-[credential compatibility](./credential-compatibility.md).
+[Phantom-enrolled repos](./phantom-enrolled-repos.md).
 
 ## 1. Create the three tenant bindings
 
