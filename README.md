@@ -12,7 +12,7 @@
 ## 30-second start
 
 ```bash
-brew install ashlrai/tap/locus          # or: npm i -g locus-cli @ashlrai/locus-mcp
+brew install ashlrai/tap/locus          # or cargo; see Install options (npm 0.5.0 is broken)
 locus quickstart                        # sample bindings, pin, whoami, doctor
 eval "$(locus hook zsh)"                # or bash; exports the control capability
 locus whoami                            # who your agents are acting as, right now
@@ -54,11 +54,13 @@ These tools compose: binding credentials can be Phantom (`phm:`) or environment 
 # Homebrew (tap live) — installs locus + locus-mcp
 brew install ashlrai/tap/locus
 
-# npm — locus-cli and @ashlrai/locus-mcp published at 0.5.1
+# npm: wait for 0.5.1. The 0.5.0 on npm is the latest published version, and
+# its `locus --version` loops until killed (fixed in source, ships in 0.5.1).
+# Once `npm view locus-cli version` prints 0.5.1:
 # (downloads a release binary, or falls back to cargo install)
-npm install -g locus-cli @ashlrai/locus-mcp
-npx locus-cli --help
-npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
+npm install -g locus-cli@0.5.1 @ashlrai/locus-mcp@0.5.1
+npx locus-cli@0.5.1 --help
+npx @ashlrai/locus-mcp@0.5.1   # MCP server for Claude Code / Cursor
 
 # cargo
 export PATH="$HOME/.cargo/bin:$PATH"
