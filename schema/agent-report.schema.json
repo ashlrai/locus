@@ -114,7 +114,9 @@
       "properties": {
         "claude": { "type": "boolean" },
         "cursor": { "type": "boolean" },
-        "codex": { "type": "boolean" }
+        "codex": { "type": "boolean" },
+        "grok": { "type": "boolean" },
+        "gemini": { "type": "boolean" }
       }
     },
     "commands": {
