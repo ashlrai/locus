@@ -1,7 +1,7 @@
 # Releasing Locus
 
 Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
-`[workspace.package] version` (currently **0.5.0**). Crates inherit via
+`[workspace.package] version` (currently **0.5.1**). Crates inherit via
 `version.workspace = true`. npm packages under `npm/`, `npm-mcp/`, and
 `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
 `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
@@ -21,6 +21,27 @@ cargo fmt --all -- --check
 - [ ] Working tree clean (or intentional release commit)
 - [ ] CI green on `main`
 - [ ] e2e green locally (`scripts/e2e.sh`)
+
+## Checklist — v0.5.1 (launch: Oct 20)
+
+1. [x] Bump version → **0.5.1** (Cargo workspace + lock, npm, npm-mcp, apps/web, bin wrapper `VERSION`)
+2. [x] `CHANGELOG.md` section for 0.5.1 (npm wrapper hang #64, quickstart → enter #66)
+3. [ ] Merge this PR after #66, then tag from clean `main`:
+   `git tag -a v0.5.1 -m "Locus v0.5.1" && git push origin v0.5.1`
+4. [ ] Release workflow builds the assets; publish `npm/` (`locus-cli`) and `npm-mcp/` (`@ashlrai/locus-mcp`) at 0.5.1
+   Each `locus-<target>.tar.gz` ships with a `locus-<target>.tar.gz.sha256`
+   sidecar; the workflow fails if any archive's sidecar is missing or wrong.
+   Check a download:
+
+   ```bash
+   gh release download v0.5.1 -p 'locus-*.tar.gz*' -D /tmp/locus-rel
+   (cd /tmp/locus-rel && sha256sum -c locus-*.tar.gz.sha256)   # macOS: shasum -a 256 -c
+   ```
+
+   A pull request that changes `release.yml` runs it as a dry run: Linux
+   archive, sidecar and checksum verification, no release.
+5. [ ] Update `integrations/homebrew/Formula/locus.rb` + the live tap with the v0.5.1 source/asset sha256 (commands below)
+6. [ ] Smoke: `npm i -g locus-cli@0.5.1` in a clean HOME → `locus quickstart` → `eval "$(locus hook zsh)"` → `locus enter acme`
 
 ## Checklist — v0.5.0
 

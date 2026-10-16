@@ -1181,9 +1181,13 @@ impl Store {
         let binding = self.load_binding(alias_or_id)?;
         let ws = find_workspace(cwd)?;
 
-        if let Some((_, ref cfg)) = ws {
+        if let Some((ref policy, ref cfg)) = ws {
             if !cfg.allows(&binding.alias) && !cfg.allows(&binding.id) && !force {
-                return Err(LocusError::BindingNotAllowed(binding.alias.clone()));
+                return Err(LocusError::binding_not_allowed(
+                    &binding.alias,
+                    policy,
+                    &cfg.allowed_bindings,
+                ));
             }
         }
 
@@ -1193,9 +1197,13 @@ impl Store {
         if let Some(extra) = extra_namespaces {
             for alias in extra {
                 let b = self.load_binding(&alias)?;
-                if let Some((_, ref cfg)) = ws {
+                if let Some((ref policy, ref cfg)) = ws {
                     if !cfg.allows(&b.alias) && !cfg.allows(&b.id) && !force {
-                        return Err(LocusError::BindingNotAllowed(b.alias.clone()));
+                        return Err(LocusError::binding_not_allowed(
+                            &b.alias,
+                            policy,
+                            &cfg.allowed_bindings,
+                        ));
                     }
                 }
                 if b.alias == binding.alias {
@@ -3232,7 +3240,7 @@ allowed_bindings = ["acme"]
 
         store.pin("acme", &project, None, false).unwrap();
         let err = store.pin("personal", &project, None, false).unwrap_err();
-        assert!(matches!(err, LocusError::BindingNotAllowed(_)));
+        assert!(matches!(err, LocusError::BindingNotAllowed { .. }));
         // force overrides
         store.pin("personal", &project, None, true).unwrap();
     }
@@ -5153,9 +5161,25 @@ allowed_bindings = ["acme"]
             .unwrap();
         std::thread::sleep(std::time::Duration::from_secs(2));
         let key = store.seal_key().unwrap();
-        assert!(matches!(s.verify(&key), Err(LocusError::SessionExpired(_))));
+        let err = s.verify(&key).unwrap_err();
+        assert!(matches!(err, LocusError::SessionExpired(_)));
         // Fail closed on the store surface too.
         assert!(store.require_active().is_err());
+        // The error names the recovery, and that recovery works: a plain pin
+        // still refuses over the expired session, `locus leave --force`
+        // clears it, then `locus enter` pins again.
+        let msg = err.to_string();
+        assert!(msg.contains("locus leave --force"), "{msg}");
+        assert!(msg.contains("locus enter"), "{msg}");
+        assert!(matches!(
+            store.pin("acme", dir.path(), None, false),
+            Err(LocusError::SessionExpired(_))
+        ));
+        store
+            .force_leave("operator forced leave (locus leave --force)", false)
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        assert!(store.require_active().is_ok());
     }
 
     #[test]
@@ -5183,7 +5207,16 @@ allowed_bindings = ["acme"]
         let err = store
             .create_ci_session("personal", &project, false, Some(Duration::minutes(5)))
             .unwrap_err();
-        assert!(matches!(err, LocusError::BindingNotAllowed(_)));
+        assert!(matches!(err, LocusError::BindingNotAllowed { .. }));
+        // The refusal names the policy file, what it allows, and the overrides.
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&project.join(".locus.toml").display().to_string()),
+            "{msg}"
+        );
+        assert!(msg.contains("allows: acme"), "{msg}");
+        assert!(msg.contains("add `personal` to allowed_bindings"), "{msg}");
+        assert!(msg.contains("--force"), "{msg}");
 
         // --force bypasses
         let (ci, path) = store

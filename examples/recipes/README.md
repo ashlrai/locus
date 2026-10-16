@@ -57,6 +57,8 @@ cd ~/clients/acme
 locus workspace --default acme --allow acme --require-pin   # writes .locus.toml
 locus run -b personal -- git push
 # error: create run session for `personal`: binding `personal` is not allowed in this workspace
+#   (~/clients/acme/.locus.toml allows: acme); enter an allowed binding,
+#   add `personal` to allowed_bindings in ~/clients/acme/.locus.toml, or pass --force
 ```
 
 Commit `.locus.toml` so everyone working in the repo gets the same allowlist.

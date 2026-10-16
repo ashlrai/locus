@@ -332,7 +332,8 @@
       "properties": {
         "severity": {
           "type": "string",
-          "enum": ["warn", "unsafe"]
+          "enum": ["info", "warn", "unsafe"],
+          "description": "info is a posture note and never escalates the verdict"
         },
         "code": { "type": "string" },
         "message": { "type": "string" }

@@ -18,14 +18,21 @@ cargo run -p locus-mcp --   # stdio MCP; do not print logs on stdout
 
 Release binaries: `./target/release/locus`, `./target/release/locus-mcp`.
 
-Smoke without touching `~/.locus`:
+Smoke without touching `~/.locus`. Run it as one shell script (one Bash call):
+the pin's authority broker is supervised by the process that pinned, so it
+dies with that shell, and with `cargo run` it dies as soon as cargo exits.
 
 ```bash
-export LOCUS_HOME=/tmp/locus-dev
-cargo run -p locus-cli -- quickstart   # or: init --with-samples && enter personal
-cargo run -p locus-cli -- whoami
-cargo run -p locus-cli -- doctor
+cargo build --workspace
+export LOCUS_HOME=/tmp/locus-dev PATH="$PWD/target/debug:$PATH"
+locus quickstart                 # or: init --with-samples, then the hook line, then enter personal
+eval "$(locus hook bash)"        # exports LOCUS_CONTROL_CAPABILITY for whoami/pin/leave
+locus whoami
+locus doctor                     # exits 1 on WARN, e.g. when phantom is not installed
 ```
+
+A later shell sees `no current broker endpoint ... human re-pin required`.
+Recover with `eval "$(locus hook bash)"; locus leave --force; locus enter personal`.
 
 ## Architecture
 

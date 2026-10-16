@@ -1,6 +1,6 @@
 # locus-mcp — Claude Code, Cursor, and friends
 
-`locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding. It is the agent-facing half of the identity plane.
+`locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding (provider tools need a supervised launch; see [below](#provider-tools-need-a-supervised-launch)). It is the agent-facing half of the identity plane.
 
 CLI and MCP share the same store and seal under `~/.locus` (or `LOCUS_HOME`).
 `locus exec --no-resolve`, `locus run --no-resolve`, and
@@ -36,6 +36,7 @@ Agents **cannot** pin a session. A human (or CI step) must:
 ```bash
 locus init --with-samples   # first time — also mints LOCUS_CONTROL_CAPABILITY
                             # if missing (persisted 0600 under ~/.locus/)
+eval "$(locus hook bash)"   # export it into this shell (zsh: locus hook zsh)
 locus pin acme              # seal session to binding "acme"
 locus whoami                # verify tenant + providers
 ```
@@ -55,7 +56,32 @@ unpersist` (keep the printed export line in your shell profile); `locus
 capability status` shows the current posture without printing the value. See
 [SECURITY.md § Control-plane authority boundary](../SECURITY.md#control-plane-authority-boundary).
 
-Until a valid pin exists, `tools/list` returns **control tools only** (`locus_whoami`, `locus_safe_next`, `locus_status`, `locus_heartbeat`, `locus_enter_hint`, `locus_list_bindings`, `locus_request_pin`, `locus_verify_claim`, `locus_verify_session`). There is **no** ambient fallthrough to personal accounts.
+The pin is backed by an authority broker that the pinning shell supervises.
+When that shell exits, `whoami` and `enter` report `no current broker
+endpoint ... human re-pin required` until you run `locus leave --force` and pin
+again, so pin from the long-lived shell you launch your agent from.
+
+Until a valid pin exists, `tools/list` returns **control tools only** (`locus_whoami`, `locus_safe_next`, `locus_status`, `locus_heartbeat`, `locus_enter_hint`, `locus_list_bindings`, `locus_request_pin`, `locus_verify_claim`, `locus_verify_session`). There is **no** ambient fallthrough to personal accounts. With a pin but launched directly by a client, it adds only `locus_providers`.
+
+### Provider tools need a supervised launch
+
+A pin alone does not unlock provider tools. `locus-mcp` validates provider
+execution with an executor capability (`LOCUS_EXECUTOR_CAPABILITY`), and only
+the children of `locus exec`, `locus run` and `locus ci run` receive one.
+Launched directly by a client, as the configs below do, the server lists the
+control tools plus `locus_providers` (10 tools for the sample `personal`
+binding), and `locus_safe_next` reports `Runtime unhealthy
+(executor_authority_unavailable)`. The same server started as
+`locus exec -- locus-mcp` lists the binding's provider tools too (18).
+
+Those supervised children also get an isolated `HOME` under
+`$LOCUS_HOME/workers/<session>/`, so wrapping a whole client
+(`locus exec -- claude`) hides its own login and config. To serve provider
+tools to a client without wrapping it, register `locus mcp --supervised`
+instead of `locus-mcp` (see [Supervised launch](#supervised-launch-provider-tools)).
+Otherwise treat directly launched `locus-mcp` as control-plane only (pin
+status, verification, `locus_request_pin`) and run provider work through
+`locus exec` / `locus run -b <alias> -- <command>`.
 
 ## Wire into Claude Code
 
@@ -67,6 +93,7 @@ locus setup --client claude
 ```
 
 This writes/merges `.mcp.json` so Claude Code launches `locus-mcp` over stdio. **Restart Claude Code** after setup so the tool catalog reloads.
+That entry serves control tools only; setup also prints the `locus mcp --supervised` command to register instead when you want the pinned binding's provider tools (see [Supervised launch](#supervised-launch-provider-tools)).
 
 To register once for **all** projects (Claude Code *user scope*), let the
 claude CLI do the write — user-scope servers live in `~/.claude.json`, a
@@ -98,6 +125,41 @@ Manual equivalent (illustrative):
 
 Ensure `locus-mcp` is on `PATH` for the GUI app (launchers sometimes inherit a minimal env — use absolute path if needed).
 
+### Supervised launch (provider tools)
+
+A directly launched `locus-mcp` validates provider execution with an executor
+capability (`LOCUS_EXECUTOR_CAPABILITY`) and is never handed one, so it serves
+control tools only, even with a valid pin. To serve the pinned binding's
+provider tools, launch it through the supervisor:
+
+```json
+{
+  "mcpServers": {
+    "locus": {
+      "command": "/abs/path/to/locus",
+      "args": ["mcp", "--supervised"]
+    }
+  }
+}
+```
+
+`locus mcp --supervised` grants the active pin's executor capability to the
+sibling `locus-mcp` (or `--mcp-bin PATH`), the same grant `locus exec` makes,
+in the isolated environment `locus exec --no-resolve` builds:
+`LOCUS_CONTROL_CAPABILITY` and credential values never reach the server, and
+`HOME` is the session's worker home. Unlike `exec --no-resolve` it does not
+refuse bindings with credential-resolving upstreams, because those resolve
+inside locus-mcp's policy-gated workers rather than in the server env. Known
+limit, shared with `locus exec -- locus-mcp`: in that scrubbed environment
+`env:` references cannot resolve, and `phm:` references depend on Phantom
+finding its vault from the worker home. It needs `LOCUS_CONTROL_CAPABILITY` and a live pin in the environment the
+client launches it from (start the client from the shell where you ran
+`eval "$(locus hook zsh)"` and `locus pin`). When either is missing it says
+why on stderr and serves control tools only. The grant is bound to the pin at
+launch: after `locus switch` or a re-pin, restart the MCP server. Each launch is
+audited as `session.mcp.supervised` (`phase: grant`, then `phase: exit`).
+Under `locus exec`, `--supervised` passes the parent's grant through.
+
 ## Wire into Cursor
 
 ```bash
@@ -111,6 +173,23 @@ Cursor MCP config is typically user-level JSON; setup merges a `locus` server en
 ```bash
 locus setup --client codex
 ```
+
+That upserts one entry in `~/.codex/config.toml` and leaves the rest of the
+file alone (an unparseable file is left untouched and setup aborts). To write
+it by hand instead, add:
+
+```toml
+[mcp_servers.locus]
+command = "locus-mcp"   # setup writes the absolute path it finds
+
+[mcp_servers.locus.env]
+LOCUS_AUTO_PIN = "cwd"
+LOCUS_CLIENT = "codex"
+```
+
+Restart Codex afterwards; `locus agent doctor` checks the registration. This
+entry serves the control tools. For the pinned binding's provider tools, see
+[Supervised launch](#supervised-launch-provider-tools).
 
 Any client that can spawn a stdio MCP server can use:
 
@@ -169,7 +248,7 @@ the probe never guesses.
 - **JSON-RPC 2.0** over stdio — **Content-Length** framing (Claude Code / Cursor) and **NDJSON**  
 - Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`  
 - **Never** log to stdout from the server — that breaks the protocol (errors go to stderr)  
-- Protocol version advertised: `2024-11-05`  
+- Protocol versions: negotiates `2025-06-18`, `2025-03-26`, or `2024-11-05` (echoes the client's requested version when supported, else answers `2025-06-18`)  
 - `initialize.instructions` carries crisp agent rules (whoami / `locus_safe_next` first, cannot pin, scope freeze, live operator-controlled pin state, resources)
 
 ## HTTP transport (CI / remote agents)
@@ -603,6 +682,7 @@ Do **not** also register unrestricted personal Supabase/GitHub MCP servers along
 | Symptom | Check |
 |---------|--------|
 | Only `locus_*` tools | No valid pin — run `locus pin` / `locus whoami`; seal may be expired or tampered |
+| Pinned, but no provider tools | Direct launch has no executor capability; use `locus mcp --supervised` (see [Supervised launch](#supervised-launch-provider-tools)) and read its stderr line |
 | `locus-mcp` not found | PATH for GUI vs terminal; reinstall; absolute path in MCP config |
 | Wrong tenant tools | `locus whoami`; re-pin; inspect binding providers |
 | Scope freeze errors | Model tried to override frozen `project_ref` / team / org — expected |

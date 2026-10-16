@@ -26,6 +26,8 @@ crates/locus-core/src/adapters/
   aws.rs
   stripe.rs
   resend.rs
+  anthropic.rs
+  openai.rs
 
 crates/locus-core/src/adapter_registry.rs  # catalog parse + signature verify
 
