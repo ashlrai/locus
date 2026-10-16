@@ -2263,11 +2263,11 @@ fn switch_flow(
         .load_binding(alias)
         .map_err(|e| with_alias_suggestions(s, e))?;
     // Pre-flight: same workspace-allowlist rule the pin path enforces.
-    if let Some((_, cfg)) = find_workspace(cwd)? {
+    if let Some((policy, cfg)) = find_workspace(cwd)? {
         if !cfg.allows(&target.alias) && !cfg.allows(&target.id) && !force {
             return Err(with_alias_suggestions(
                 s,
-                LocusError::BindingNotAllowed(target.alias.clone()),
+                LocusError::binding_not_allowed(&target.alias, &policy, &cfg.allowed_bindings),
             ));
         }
     }
@@ -8617,6 +8617,8 @@ mod switch_flow_tests {
         let err = switch_flow(&s, "acme", &project, false, None, None).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("not allowed in this workspace"), "{msg}");
+        assert!(msg.contains(".locus.toml allows: personal"), "{msg}");
+        assert!(msg.contains("--force"), "{msg}");
         assert_eq!(
             s.active_session().unwrap().unwrap().binding_alias,
             "personal"
