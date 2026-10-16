@@ -51,7 +51,7 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · quickstart · setup · agent · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter\n  \
+  Setup         init · quickstart · setup · agent · capability · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter\n  \
   Daily use     enter · switch · pin · leave · whoami · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
@@ -6681,19 +6681,24 @@ fn parse_watch_interval(s: &str) -> Result<std::time::Duration> {
     if s.is_empty() {
         return Ok(std::time::Duration::from_secs(5));
     }
+    let invalid = || anyhow!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)");
     // Bare seconds (including multi-digit) before unit split so "10" → 10s not 1s.
-    if s.chars().all(|c| c.is_ascii_digit()) {
-        let n: u64 = s.parse().context("invalid watch interval")?;
-        return Ok(std::time::Duration::from_secs(n));
+    let secs = if s.chars().all(|c| c.is_ascii_digit()) {
+        s.parse::<u64>().map_err(|_| invalid())?
+    } else {
+        let (num, unit) = s.split_at(s.len().saturating_sub(1));
+        let n: u64 = num.parse().map_err(|_| invalid())?;
+        match unit {
+            "s" | "S" => n,
+            "m" | "M" => n.saturating_mul(60),
+            "h" | "H" => n.saturating_mul(3600),
+            _ => return Err(invalid()),
+        }
+    };
+    if secs == 0 {
+        bail!("invalid watch interval '{s}': must be at least 1s (use e.g. 5s, 30s, 1m)");
     }
-    let (num, unit) = s.split_at(s.len().saturating_sub(1));
-    let n: u64 = num.parse().context("invalid watch interval")?;
-    match unit {
-        "s" | "S" => Ok(std::time::Duration::from_secs(n)),
-        "m" | "M" => Ok(std::time::Duration::from_secs(n.saturating_mul(60))),
-        "h" | "H" => Ok(std::time::Duration::from_secs(n.saturating_mul(3600))),
-        _ => bail!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)"),
-    }
+    Ok(std::time::Duration::from_secs(secs))
 }
 
 fn print_doctor_human(report: &locus_core::DoctorReport) {
@@ -6899,12 +6904,54 @@ fn collect_unresolved_phm_refs(
 }
 
 fn cmd_hook(shell: &str) -> Result<()> {
-    match shell {
+    println!("{}", hook_script(shell)?);
+    Ok(())
+}
+
+/// Eval-able prompt/auto-enter snippet for `locus hook <shell>`.
+fn hook_script(shell: &str) -> Result<String> {
+    let script = match shell {
         "zsh" | "bash" => {
             // status --oneline tokens: unpinned | require_pin | frozen | invalid | alias:tenant
-            // zsh colors: red=unpinned/require_pin warn, yellow=frozen, cyan=healthy pin
-            println!(
-                r#"# Locus prompt + optional auto-enter — eval "$(locus hook zsh)"
+            // colors: red=unpinned/require_pin warn, yellow=frozen, cyan=healthy pin
+            let (prompt_body, prompt_hint) = if shell == "zsh" {
+                (
+                    r#"  if [[ "$s" == "require_pin" ]]; then
+    echo "%F{red}%B[locus:enter!]%b%f"
+  elif [[ "$s" == "unpinned" ]]; then
+    echo "%F{red}[locus:enter]%f"
+  elif [[ "$s" == "frozen" ]]; then
+    echo "%F{yellow}%B[locus:FROZEN]%b%f"
+  elif [[ "$s" == "invalid" ]]; then
+    echo "%F{red}[locus:invalid]%f"
+  else
+    echo "%F{cyan}[locus:$s]%f"
+  fi"#,
+                    r#"# Optional: add to PROMPT via: PROMPT='$(_locus_prompt) '"$PROMPT"#,
+                )
+            } else {
+                // bash: ANSI colors inside \001/\002, the readline markers that
+                // `\[`/`\]` stand for in PS1 (literal `\[` is not decoded in
+                // command-substitution output, so emit the bytes themselves).
+                (
+                    r#"  local c t
+  if [[ "$s" == "require_pin" ]]; then
+    c='1;31' t='[locus:enter!]'
+  elif [[ "$s" == "unpinned" ]]; then
+    c='0;31' t='[locus:enter]'
+  elif [[ "$s" == "frozen" ]]; then
+    c='1;33' t='[locus:FROZEN]'
+  elif [[ "$s" == "invalid" ]]; then
+    c='0;31' t='[locus:invalid]'
+  else
+    c='0;36' t="[locus:$s]"
+  fi
+  printf '\001\033[%sm\002%s\001\033[0m\002' "$c" "$t""#,
+                    r#"# Optional: add to PS1 via: PS1='$(_locus_prompt) '"$PS1""#,
+                )
+            };
+            format!(
+                r#"# Locus prompt + optional auto-enter — eval "$(locus hook {shell})"
 # Prompt:
 #   [locus:enter]           unpinned
 #   [locus:enter!]          unpinned in require_pin workspace (warn)
@@ -6926,17 +6973,7 @@ _locus_prompt() {{
   # status exits non-zero for frozen/invalid but still prints the token.
   s="$(locus status --oneline 2>/dev/null)"
   [[ -n "$s" ]] || s="unpinned"
-  if [[ "$s" == "require_pin" ]]; then
-    echo "%F{{red}}%B[locus:enter!]%b%f"
-  elif [[ "$s" == "unpinned" ]]; then
-    echo "%F{{red}}[locus:enter]%f"
-  elif [[ "$s" == "frozen" ]]; then
-    echo "%F{{yellow}}%B[locus:FROZEN]%b%f"
-  elif [[ "$s" == "invalid" ]]; then
-    echo "%F{{red}}[locus:invalid]%f"
-  else
-    echo "%F{{cyan}}[locus:$s]%f"
-  fi
+{prompt_body}
 }}
 _locus_auto_enter() {{
   [[ "${{LOCUS_AUTO_ENTER:-0}}" == "1" ]] || return 0
@@ -6952,13 +6989,12 @@ elif [[ -n "${{BASH_VERSION:-}}" ]]; then
     PROMPT_COMMAND="_locus_auto_enter${{PROMPT_COMMAND:+;$PROMPT_COMMAND}}"
   fi
 fi
-# Optional: add to PROMPT via: PROMPT='$(_locus_prompt) '"$PROMPT
+{prompt_hint}
 "#
-            );
+            )
         }
         "fish" => {
-            println!(
-                r#"# Locus prompt helper for fish
+            r#"# Locus prompt helper for fish
 # [locus:enter] | [locus:enter!] (require_pin) | [locus:FROZEN] | [locus:alias:tenant]
 # LOCUS_AUTO_ENTER=1 → try enter when changing directories
 # Control capability: export the persisted operator capability if unset.
@@ -6999,11 +7035,11 @@ function _locus_auto_enter --on-variable PWD
   end
 end
 "#
-            );
+            .to_string()
         }
         other => bail!("unsupported shell: {other} (use zsh|bash|fish)"),
-    }
-    Ok(())
+    };
+    Ok(script)
 }
 
 fn resolve_mcp_bin(mcp_bin: Option<String>) -> String {
@@ -9274,6 +9310,23 @@ mod watch_heartbeat_tests {
     }
 
     #[test]
+    fn parse_watch_interval_rejects_zero() {
+        for zero in ["0", "0s", "0m", "0h"] {
+            let err = parse_watch_interval(zero).unwrap_err().to_string();
+            assert!(err.contains("at least 1s"), "{zero}: {err}");
+        }
+        assert_eq!(parse_watch_interval("1").unwrap(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn parse_watch_interval_errors_carry_hint() {
+        for bad in ["30sec", "nope", "5x", "1.5m", "s"] {
+            let err = format!("{:#}", parse_watch_interval(bad).unwrap_err());
+            assert!(err.contains("use e.g. 5s, 30s, 1m"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
     fn watch_should_fail_policy() {
         // Healthy tick never fails.
         assert!(!watch_should_fail(true, false, false));
@@ -9471,5 +9524,53 @@ credential_ref = "env:GH_TOKEN"
                 false
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod hook_and_help_tests {
+    use super::{hook_script, Cli};
+    use clap::CommandFactory;
+
+    #[test]
+    fn hook_bash_uses_bash_prompt_escapes() {
+        let bash = hook_script("bash").unwrap();
+        assert!(!bash.contains("%F{"), "bash hook must not emit zsh escapes");
+        assert!(!bash.contains("PROMPT="), "bash hook must not hint PROMPT=");
+        assert!(bash.contains("PS1="), "bash hook should hint PS1=");
+        // Readline non-printing markers (\[ \] equivalents) around ANSI colors.
+        assert!(bash.contains(r"printf '\001\033[%sm\002%s\001\033[0m\002'"));
+        assert!(bash.contains("c='0;36'"));
+        assert!(bash.contains(r#"eval "$(locus hook bash)""#));
+    }
+
+    #[test]
+    fn hook_zsh_keeps_zsh_prompt_escapes() {
+        let zsh = hook_script("zsh").unwrap();
+        assert!(zsh.contains(r#"echo "%F{cyan}[locus:$s]%f""#));
+        assert!(zsh.contains(r#"echo "%F{red}%B[locus:enter!]%b%f""#));
+        assert!(
+            zsh.contains(r#"# Optional: add to PROMPT via: PROMPT='$(_locus_prompt) '"$PROMPT"#)
+        );
+        assert!(
+            zsh.starts_with(r#"# Locus prompt + optional auto-enter — eval "$(locus hook zsh)""#)
+        );
+        assert!(!zsh.contains(r"\001"));
+    }
+
+    #[test]
+    fn top_level_help_groups_list_every_subcommand() {
+        let cmd = Cli::command();
+        let groups = cmd.get_long_about().expect("long_about").to_string();
+        let words: Vec<&str> = groups
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .collect();
+        let missing: Vec<String> = cmd
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set() && c.get_name() != "help")
+            .map(|c| c.get_name().to_string())
+            .filter(|name| !words.contains(&name.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "missing from help groups: {missing:?}");
     }
 }

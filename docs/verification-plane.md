@@ -158,13 +158,12 @@ Binding drift still freezes the pin (same as doctor / `verify_session`). Never i
 
 ### MCP
 
-Control tool (available unpinned and pinned):
+Control tools (available unpinned and pinned):
 
 | Tool | Args | Result |
 |------|------|--------|
 | `locus_verify_claim` | `text` or `claim` (string) | Same JSON shape as CLI claim |
-
-Session pack is CLI/hub today (`locus verify session --json`); agents can compose `locus_whoami` + doctor resource + `locus_safe_next` equivalently.
+| `locus_verify_session` | none | Same JSON as `locus verify session --json` (`whoami?`, `doctor`, `safe_next`, `session_ok`); runs real external probes |
 
 Audit op: `mcp.verify_claim` / `verify.claim` / `verify.session` — confidence, signals, truncated claim preview / verdict flags only (no secrets).
 

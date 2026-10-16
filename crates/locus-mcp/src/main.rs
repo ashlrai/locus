@@ -2972,6 +2972,17 @@ fn resource_doctor_json(scope: &RequestScope) -> std::result::Result<Value, Valu
     Ok(serde_json::to_value(report).unwrap_or(json!({})))
 }
 
+/// Agent-facing text for `locus_request_pin` / `locus_enter_hint` when the
+/// alias names no binding: say so, and point the human at binding setup
+/// instead of a `locus enter` that cannot succeed.
+fn unknown_binding_message(alias: &str) -> String {
+    format!(
+        "There is no binding `{alias}`, so there is nothing to pin. Agents cannot pin or create bindings. \
+         Human: run `locus binding list` to see configured aliases, or `locus binding add {alias}` to create it, \
+         then `locus enter <alias>`."
+    )
+}
+
 fn resource_bindings_json(scope: &RequestScope) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     let list = s
@@ -4037,6 +4048,17 @@ fn call_control(
                     Some(json!({ "binding_exists": exists })),
                 );
             }
+            if let (Some(a), Some(false)) = (alias, exists) {
+                return Ok(tool_text(
+                    json!({
+                        "agents_cannot_pin": true,
+                        "alias": a,
+                        "binding_exists": false,
+                        "message": unknown_binding_message(a),
+                    }),
+                    true,
+                ));
+            }
             let message = match alias {
                 Some(_) => format!(
                     "Agents cannot pin. Ask the human to run `{enter_cmd}` (or `{pin_cmd}`) in a terminal, then continue."
@@ -4085,6 +4107,18 @@ fn call_control(
             // Verify binding exists
             let exists = s.load_binding(alias).is_ok();
             let _ = s.audit("mcp.request_pin", alias, Some(json!({ "exists": exists })));
+            if !exists {
+                // Audited above for forensics, but there is nothing to pin:
+                // no request is pending and no `locus enter` would succeed.
+                return Ok(tool_text(
+                    json!({
+                        "requested": alias,
+                        "binding_exists": false,
+                        "message": unknown_binding_message(alias),
+                    }),
+                    true,
+                ));
+            }
             Ok(tool_text(
                 json!({
                     "requested": alias,

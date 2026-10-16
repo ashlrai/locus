@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`locus hook bash` emits a bash prompt** — the prompt helper now prints ANSI
+  colors wrapped in readline's non-printing markers (what `\[`/`\]` stand for)
+  and the hint shows `PS1=`; it previously printed zsh `%F{...}` escapes and a
+  `PROMPT=` hint. `locus hook zsh` output is unchanged.
+- **`locus watch --interval`** rejects `0` (minimum 1s), and every parse error
+  (e.g. `30sec`) carries the `use e.g. 5s, 30s, 1m` hint.
+- **`locus --help` groups** list `capability` and `client` under Setup; a test
+  now checks that every visible subcommand appears in the groups.
+- **`locus_request_pin` / `locus_enter_hint` with an unknown alias** return an
+  error that says the binding does not exist and points at `locus binding list`
+  / `locus binding add <alias>`, instead of "Pin request recorded ... run
+  `locus enter <alias>`". The attempt is still audited.
+- **Docs:** `docs/verification-plane.md` lists the `locus_verify_session` MCP
+  tool and drops the stale "session pack is CLI/hub today" note.
+
 ## [0.5.1] — 2026-10-15
 
 ### Added

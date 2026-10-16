@@ -2424,3 +2424,53 @@ fn stdio_env_session_immune_to_active_json_rewrites() {
     // Observability: the anchor records its non-active backing.
     assert_eq!(body["mcp_anchor"]["anchored_alias"], "acme", "{body}");
 }
+
+#[test]
+fn request_pin_and_enter_hint_unknown_alias_point_at_binding_setup() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    for tool in ["locus_request_pin", "locus_enter_hint"] {
+        let resp = client.request(
+            "tools/call",
+            json!({ "name": tool, "arguments": { "alias": "nope" } }),
+        );
+        let (text, is_err) = McpClient::tool_text(&resp);
+        assert!(
+            is_err,
+            "{tool} with unknown alias should flag an error: {text}"
+        );
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["binding_exists"], false, "{tool}: {text}");
+        let message = body["message"].as_str().unwrap();
+        assert!(!message.contains("recorded"), "{tool}: {message}");
+        assert!(!message.contains("locus enter nope"), "{tool}: {message}");
+        assert!(message.contains("no binding `nope`"), "{tool}: {message}");
+        assert!(message.contains("locus binding list"), "{tool}: {message}");
+        assert!(
+            message.contains("locus binding add nope"),
+            "{tool}: {message}"
+        );
+        assert!(body.get("command").is_none(), "{tool}: {text}");
+        assert!(body.get("pin_command").is_none(), "{tool}: {text}");
+    }
+
+    // A known alias still gets the human pin command.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_request_pin", "arguments": { "alias": "acme" } }),
+    );
+    let (text, is_err) = McpClient::tool_text(&resp);
+    assert!(!is_err, "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["binding_exists"], true);
+    assert_eq!(body["command"], "locus enter acme");
+    assert!(body["message"]
+        .as_str()
+        .unwrap()
+        .contains("locus enter acme"));
+}
