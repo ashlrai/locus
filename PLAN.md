@@ -1,7 +1,7 @@
 # Locus — Identity Plane for Coding Agents
 
-**Repo codename:** `mmcp` · **Recommended product name:** **Locus** · **Workspace:** `/Users/masonwyatt/Desktop/mmcp` (greenfield)  
-**Full design already drafted:** [`DESIGN.md`](/Users/masonwyatt/Desktop/mmcp/DESIGN.md) (~1k lines)  
+**Repo codename:** `mmcp` · **Recommended product name:** **Locus** · **Workspace:** greenfield  
+**Full design already drafted:** [`DESIGN.md`](./DESIGN.md) (~1k lines)  
 **Sibling:** [Phantom Secrets](https://phm.dev) — secrets *in context*. Locus — *which identity acts*.
 
 ---
