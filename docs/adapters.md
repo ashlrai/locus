@@ -223,7 +223,7 @@ Prefer **wrapping** official upstream MCP servers with frozen env over reimpleme
 - [ ] `cargo test -p locus-core` green  
 - [ ] `cargo clippy -p locus-core -- -D warnings` clean  
 
-## Community adapter marketplace (unreleased candidate)
+## Community adapter marketplace
 
 Community adapters are publisher-supplied **executable code**. A trusted
 signature binds the complete installable envelope to a configured verification key;
@@ -284,4 +284,4 @@ and all supported upstream fields (`command`, ordered `args`, `recipe`,
 runtime fields are refused. Indexes use schema 1 and a `manifest_url` for each
 adapter; HTTPS and exact loopback HTTP are accepted, redirects are refused.
 
-This marketplace is an unreleased candidate and is not part of any published Locus release.
+Community adapters are new in 0.5.1.
