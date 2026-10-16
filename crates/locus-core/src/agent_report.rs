@@ -92,11 +92,16 @@ pub struct McpRegistered {
     /// `probe_mcp_registered`.
     #[serde(default)]
     pub grok: bool,
+    /// Gemini CLI. Probed at project `.gemini/settings.json` or user
+    /// `~/.gemini/settings.json` (`mcpServers.locus`, JSON). Additive:
+    /// absent in reports from older binaries.
+    #[serde(default)]
+    pub gemini: bool,
 }
 
 impl McpRegistered {
     pub fn any(&self) -> bool {
-        self.claude || self.cursor || self.codex || self.grok
+        self.claude || self.cursor || self.codex || self.grok || self.gemini
     }
 }
 
@@ -459,6 +464,8 @@ fn build_commands(project_dir: Option<&Path>, pin: Option<&DoctorPin>) -> AgentC
 ///   scope matched (`both` when more than one).
 /// - Cursor: project `.cursor/mcp.json` or `~/.cursor/mcp.json`
 /// - Codex: `~/.codex/config.toml` → `[mcp_servers.locus]`
+/// - Gemini CLI: project `.gemini/settings.json` or `~/.gemini/settings.json`
+///   → `mcpServers.locus`
 /// - Grok Build: `~/.grok/config.toml` → `[mcp_servers.locus]` (documented
 ///   Codex-style TOML path); `LOCUS_GROK_MCP_CONFIG=<path>` overrides the
 ///   location and accepts either the JSON `mcpServers` shape (Grok's
@@ -520,12 +527,20 @@ pub fn probe_mcp_registered_with_grok(
             .unwrap_or(false),
     };
 
+    // Gemini CLI: project `.gemini/settings.json` or user
+    // `~/.gemini/settings.json`, same `mcpServers` JSON shape as Claude/Cursor.
+    let gemini = mcp_json_has_locus(&project_dir.join(".gemini").join("settings.json"))
+        || user_home
+            .map(|h| mcp_json_has_locus(&h.join(".gemini").join("settings.json")))
+            .unwrap_or(false);
+
     McpRegistered {
         claude,
         claude_scope,
         cursor,
         codex,
         grok,
+        gemini,
     }
 }
 
@@ -635,7 +650,7 @@ locus leave                 # clear pin
 | Var | Value | Notes |
 |-----|--------|--------|
 | `LOCUS_AUTO_PIN` | `cwd` | Advisory only — parsed, but the server never pins itself |
-| `LOCUS_CLIENT` | claude\|cursor\|codex\|grok | Session label |
+| `LOCUS_CLIENT` | claude\|cursor\|codex\|grok\|gemini | Session label |
 | `LOCUS_NOTIFY` | **unset** | Desktop banners stay opt-in (`locus notify on`) |
 
 ### MCP auto-pin knobs (advisory only)
@@ -1312,6 +1327,10 @@ mod tests {
         assert!(m.cursor);
         assert!(m.codex);
         assert!(
+            !m.gemini,
+            "gemini stays false without a settings.json entry"
+        );
+        assert!(
             !m.grok,
             "grok stays false without ~/.grok/config.toml or an override"
         );
@@ -1348,6 +1367,48 @@ mod tests {
         let m =
             probe_mcp_registered_with_grok(&project, Some(&home), Some(&home.join("missing.json")));
         assert!(!m.grok);
+    }
+
+    #[test]
+    fn probe_gemini_project_and_user_settings() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("proj");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        assert!(!probe_mcp_registered_with_grok(&project, Some(&home), None).gemini);
+
+        // A settings.json without our entry (other servers only) is not a hit.
+        fs::create_dir_all(home.join(".gemini")).unwrap();
+        fs::write(
+            home.join(".gemini").join("settings.json"),
+            r#"{"theme":"x","mcpServers":{"other":{"command":"o"}}}"#,
+        )
+        .unwrap();
+        assert!(!probe_mcp_registered_with_grok(&project, Some(&home), None).gemini);
+
+        // User scope.
+        fs::write(
+            home.join(".gemini").join("settings.json"),
+            r#"{"mcpServers":{"locus":{"command":"locus-mcp"}}}"#,
+        )
+        .unwrap();
+        assert!(probe_mcp_registered_with_grok(&project, Some(&home), None).gemini);
+        fs::remove_file(home.join(".gemini").join("settings.json")).unwrap();
+
+        // Project scope.
+        fs::create_dir_all(project.join(".gemini")).unwrap();
+        fs::write(
+            project.join(".gemini").join("settings.json"),
+            r#"{"mcpServers":{"locus":{"command":"locus-mcp"}}}"#,
+        )
+        .unwrap();
+        let m = probe_mcp_registered_with_grok(&project, Some(&home), None);
+        assert!(m.gemini && m.any());
+
+        // Malformed JSON fails closed.
+        fs::write(project.join(".gemini").join("settings.json"), "{not json").unwrap();
+        assert!(!probe_mcp_registered_with_grok(&project, Some(&home), None).gemini);
     }
 
     #[test]
