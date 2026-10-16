@@ -38,6 +38,33 @@ fn slot_client_key(slot: &WorkerSlot) -> String {
     }
 }
 
+/// Bind a child to the publisher envelope and the operator's concrete context.
+/// This contains refs and scope metadata only, never resolved credential values.
+fn community_launch_digest(
+    binding: &Binding,
+    provider: &ProviderBinding,
+    manifest: &crate::marketplace::CommunityAdapterManifest,
+) -> Result<String> {
+    use sha2::Digest;
+    let context = serde_json::to_vec(&(
+        crate::marketplace::community_manifest_digest(manifest),
+        &binding.id,
+        &binding.alias,
+        &binding.tenant,
+        &binding.principal,
+        &binding.policy,
+        &provider.provider,
+        &provider.account,
+        &provider.scope,
+        &provider.credential_ref,
+    ))
+    .map_err(|_| LocusError::msg("community worker context cannot be encoded"))?;
+    let mut digest = sha2::Sha256::new();
+    digest.update(b"locus-community-worker-context-v1\0");
+    digest.update(context);
+    Ok(hex::encode(digest.finalize()))
+}
+
 /// Configuration for an MCP stdio worker spawn.
 #[derive(Debug, Clone, Default)]
 pub struct McpStdioConfig {
@@ -72,6 +99,10 @@ pub struct McpStdioBackend {
     children: Mutex<BTreeMap<WorkerKey, Child>>,
     /// Live MCP clients (stdin/stdout taken from children)
     clients: Mutex<BTreeMap<String, McpStdioClient>>,
+    /// Only this community child's injected values; never credentials from other workers.
+    known_secrets: Mutex<BTreeMap<String, Vec<zeroize::Zeroizing<String>>>>,
+    /// Signed envelope plus concrete operator context admitted at child launch.
+    community_contracts: Mutex<BTreeMap<String, String>>,
 }
 
 impl McpStdioBackend {
@@ -80,6 +111,8 @@ impl McpStdioBackend {
             config,
             children: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
+            known_secrets: Mutex::new(BTreeMap::new()),
+            community_contracts: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -94,12 +127,65 @@ impl McpStdioBackend {
         provider: &ProviderBinding,
         work_dir: &Path,
     ) -> Result<Command> {
-        let iso = build_isolated_env_for_provider_opts(
+        if let Some(manifest) = provider.verified_community_adapter()? {
+            let signed = manifest
+                .upstream
+                .as_ref()
+                .ok_or_else(|| LocusError::msg("community adapter missing signed upstream"))?
+                .expand()?;
+            if self.config.command != signed.command
+                || self.config.args != signed.args
+                || self.config.resolve_secrets != signed.resolve_secrets
+                || (signed.sandbox == Some(true) && !self.config.sandbox)
+                || (signed.sandbox_no_network && !self.config.sandbox_no_network)
+            {
+                return Err(LocusError::msg(
+                    "worker configuration differs from signed community executable contract",
+                ));
+            }
+        }
+        provider.community_frozen_values()?;
+        let community = provider.verified_community_adapter()?.is_some();
+        let mut iso = build_isolated_env_for_provider_opts(
             session,
             binding,
             provider,
             self.config.resolve_secrets,
         );
+        if self.config.resolve_secrets && !iso.secrets_failed.is_empty() {
+            return Err(LocusError::msg(
+                "upstream credential resolution failed; refusing worker launch",
+            ));
+        }
+        // Community subprocesses receive a private config root for this exact slot.
+        let child_home = if community {
+            work_dir
+        } else {
+            Path::new(&session.worker_home)
+        };
+        if community {
+            iso.vars
+                .insert("HOME".into(), child_home.display().to_string());
+            iso.vars
+                .insert("USERPROFILE".into(), child_home.display().to_string());
+            iso.vars.insert(
+                "GH_CONFIG_DIR".into(),
+                child_home.join("gh").display().to_string(),
+            );
+            iso.vars.insert(
+                "AWS_CONFIG_FILE".into(),
+                child_home.join("aws/config").display().to_string(),
+            );
+            iso.vars.insert(
+                "AWS_SHARED_CREDENTIALS_FILE".into(),
+                child_home.join("aws/credentials").display().to_string(),
+            );
+            let temp = child_home.join("tmp");
+            std::fs::create_dir_all(&temp)?;
+            for key in ["TMPDIR", "TMP", "TEMP"] {
+                iso.vars.insert(key.into(), temp.display().to_string());
+            }
+        }
         let sandboxed = sandbox_enabled(self.config.sandbox);
         let no_network = sandbox_no_network_enabled(self.config.sandbox_no_network);
         if sandboxed {
@@ -113,7 +199,7 @@ impl McpStdioBackend {
                 &self.config.command,
                 &self.config.args,
                 work_dir,
-                Path::new(&session.worker_home),
+                child_home,
                 no_network,
             )?;
             (
@@ -139,9 +225,14 @@ impl McpStdioBackend {
         cmd.env("LOCUS_WORKER_PROVIDER", &provider.provider);
         cmd.env("LOCUS_WORKER_ACCOUNT", &provider.account);
         cmd.env("LOCUS_WORKER_DIR", work_dir);
+        if community {
+            cmd.env("LOCUS_WORKER_BINDING", &binding.alias);
+            cmd.env("LOCUS_WORKER_BINDING_ID", &binding.id);
+            cmd.env("LOCUS_WORKER_TENANT", &binding.tenant);
+        }
 
         if let Some((backend, restricted_path, applied_no_network)) = sandbox_backend {
-            let temp_root = Path::new(&session.worker_home).join("tmp");
+            let temp_root = child_home.join("tmp");
             std::fs::create_dir_all(&temp_root)?;
             // Markers set only after backend resolution. Tag `path` is best-effort
             // PATH restriction — not equivalent to sandbox-exec or bwrap.
@@ -157,6 +248,68 @@ impl McpStdioBackend {
         }
 
         Ok(cmd)
+    }
+
+    /// A cached community worker must retain its admitted context and source key.
+    pub(super) fn validate_community_worker_contract(
+        &self,
+        slot: &WorkerSlot,
+        binding: &Binding,
+        provider: &ProviderBinding,
+    ) -> Result<()> {
+        let manifest = provider.verified_community_adapter()?;
+        let launched = self
+            .community_contracts
+            .lock()
+            .map_err(|_| LocusError::msg("worker contract guard unavailable"))?
+            .get(&slot_client_key(slot))
+            .cloned();
+        let Some(manifest) = manifest else {
+            if launched.is_none() {
+                return Ok(());
+            }
+            return Err(LocusError::msg(
+                "community worker signed contract removed; restart required",
+            ));
+        };
+        let digest = community_launch_digest(binding, provider, manifest)?;
+        if launched.as_ref() != Some(&digest) {
+            return Err(LocusError::msg(
+                "community worker signed contract changed or unavailable; restart required",
+            ));
+        }
+        if slot.account != provider.account {
+            return Err(LocusError::msg(
+                "community worker account differs from pinned provider",
+            ));
+        }
+        if !self.config.resolve_secrets {
+            return Ok(());
+        }
+        if crate::credential::inject_keys_for_binding_provider(provider)?.is_empty() {
+            return Err(LocusError::msg(
+                "community worker credential mapping unavailable",
+            ));
+        }
+        let current = crate::credential::resolve(&crate::credential::CredentialRef::validate(
+            &provider.credential_ref,
+        )?)?;
+        let secrets = self
+            .known_secrets
+            .lock()
+            .map_err(|_| LocusError::msg("worker secret guard unavailable"))?;
+        if current.is_empty()
+            || !secrets.get(&slot_client_key(slot)).is_some_and(|known| {
+                known
+                    .iter()
+                    .any(|secret| secret.as_str() == current.as_str())
+            })
+        {
+            return Err(LocusError::msg(
+                "community worker credential source changed or unavailable; restart required",
+            ));
+        }
+        Ok(())
     }
 
     /// Whether this backend will apply sandbox on spawn (config or env).
@@ -193,16 +346,29 @@ impl McpStdioBackend {
             Some(a) if !a.is_empty() => format!("{session_id}:{a}:{provider}"),
             _ => client_key(session_id, provider),
         };
-        let client = clients.get(&ck).or_else(|| {
-            // Fallback: single-client backends (one slot per backend instance)
+        let selected = clients.get_key_value(&ck).or_else(|| {
             if clients.len() == 1 {
-                clients.values().next()
+                clients.iter().next()
             } else {
                 None
             }
         });
-        let client = client.ok_or_else(|| LocusError::msg("no live mcp client for provider"))?;
-        client.list_tools_cached()
+        let (actual_key, client) =
+            selected.ok_or_else(|| LocusError::msg("no live mcp client for provider"))?;
+        let known = self
+            .known_secrets
+            .lock()
+            .map_err(|_| LocusError::msg("worker secret guard unavailable"))?
+            .get(actual_key)
+            .cloned()
+            .ok_or_else(|| LocusError::msg("worker secret guard unavailable"))?;
+        let mut tools = client.list_tools_cached()?;
+        for tool in &mut tools {
+            tool.name = redact_known_text(&tool.name, &known);
+            tool.description = redact_known_text(&tool.description, &known);
+            redact_known_value(&mut tool.input_schema, &known, 0);
+        }
+        Ok(tools)
     }
 
     /// Convenience: tool names only.
@@ -248,6 +414,31 @@ impl WorkerBackend for McpStdioBackend {
                 ));
             }
             let mut cmd = self.build_command(session, binding, provider, work_dir)?;
+            let contract = provider
+                .verified_community_adapter()?
+                .map(|manifest| community_launch_digest(binding, provider, manifest))
+                .transpose()?;
+            let keys = if provider.verified_community_adapter()?.is_some() {
+                crate::credential::inject_keys_for_binding_provider(provider)?
+            } else {
+                Vec::new()
+            };
+            let known = cmd
+                .get_envs()
+                .filter_map(|(key, value)| {
+                    if keys
+                        .iter()
+                        .any(|allowed| key == std::ffi::OsStr::new(allowed))
+                    {
+                        value
+                            .and_then(|value| value.to_str())
+                            .filter(|value| !value.is_empty())
+                            .map(|value| zeroize::Zeroizing::new(value.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
             match cmd.spawn() {
                 Ok(mut child) => {
                     pid = Some(child.id());
@@ -265,6 +456,18 @@ impl WorkerBackend for McpStdioBackend {
                             } else {
                                 client_key(&session.session_id, &provider.provider)
                             };
+                            self.known_secrets
+                                .lock()
+                                .map_err(|_| LocusError::msg("worker secret guard unavailable"))?
+                                .insert(ck.clone(), known);
+                            if let Some(contract) = contract {
+                                self.community_contracts
+                                    .lock()
+                                    .map_err(|_| {
+                                        LocusError::msg("worker contract guard unavailable")
+                                    })?
+                                    .insert(ck.clone(), contract);
+                            }
                             self.clients
                                 .lock()
                                 .map_err(|_| LocusError::msg("clients lock poisoned"))?
@@ -278,8 +481,9 @@ impl WorkerBackend for McpStdioBackend {
                             let _ = child.kill();
                             let _ = child.wait();
                             return Err(LocusError::msg(format!(
-                                "mcp handshake failed for {}: {e}",
-                                provider.provider
+                                "mcp handshake failed for {}: {}",
+                                provider.provider,
+                                redact_known_text(&e.to_string(), &known)
                             )));
                         }
                     }
@@ -308,6 +512,14 @@ impl WorkerBackend for McpStdioBackend {
 
     fn teardown(&self, slot: &WorkerSlot) -> Result<()> {
         let ck = slot_client_key(slot);
+        self.community_contracts
+            .lock()
+            .map_err(|_| LocusError::msg("worker contract guard unavailable"))?
+            .remove(&ck);
+        self.known_secrets
+            .lock()
+            .map_err(|_| LocusError::msg("worker secret guard unavailable"))?
+            .remove(&ck);
         let _ = self
             .clients
             .lock()
@@ -333,10 +545,27 @@ impl WorkerBackend for McpStdioBackend {
     fn call_tool(
         &self,
         slot: &WorkerSlot,
-        _binding: &Binding,
+        binding: &Binding,
         tool: &str,
         args: &Value,
     ) -> Result<WorkerToolResult> {
+        let provider = binding
+            .provider(&slot.key.provider)
+            .ok_or_else(|| LocusError::msg("upstream provider absent from binding"))?;
+        let full_tool = if tool.starts_with(&format!("{}.", slot.key.provider)) {
+            tool.to_string()
+        } else {
+            format!("{}.{}", slot.key.provider, tool)
+        };
+        let scoped_args = provider.community_tool_args(&binding.policy, &full_tool, args)?;
+        if provider.verified_community_adapter()?.is_some()
+            && (slot.binding_id != binding.id || slot.binding_alias != binding.alias)
+        {
+            return Err(LocusError::msg(
+                "community worker slot belongs to another binding",
+            ));
+        }
+        self.validate_community_worker_contract(slot, binding, provider)?;
         let ck = slot_client_key(slot);
         let clients = self
             .clients
@@ -365,13 +594,20 @@ impl WorkerBackend for McpStdioBackend {
             .strip_prefix(&format!("{}.", slot.key.provider))
             .unwrap_or(tool);
 
-        match client.call_tool(upstream_name, args) {
+        let known = self
+            .known_secrets
+            .lock()
+            .map_err(|_| LocusError::msg("worker secret guard unavailable"))?
+            .get(&ck)
+            .cloned()
+            .ok_or_else(|| LocusError::msg("worker secret guard unavailable"))?;
+        let mut response = match client.call_tool(upstream_name, &scoped_args) {
             Ok(result) => {
                 let is_error = result
                     .get("isError")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                Ok(WorkerToolResult {
+                Ok::<WorkerToolResult, LocusError>(WorkerToolResult {
                     ok: !is_error,
                     content: result,
                     provider: slot.key.provider.clone(),
@@ -388,6 +624,178 @@ impl WorkerBackend for McpStdioBackend {
                 }),
                 provider: slot.key.provider.clone(),
             }),
+        }?;
+        redact_known_value(&mut response.content, &known, 0);
+        Ok(response)
+    }
+}
+
+fn redact_known_text(text: &str, known: &[zeroize::Zeroizing<String>]) -> String {
+    known
+        .iter()
+        .filter(|secret| !secret.is_empty())
+        .fold(text.to_string(), |text, secret| {
+            text.replace(secret.as_str(), "[redacted]")
+        })
+}
+
+fn redact_known_value(value: &mut Value, known: &[zeroize::Zeroizing<String>], depth: usize) {
+    if known.is_empty() {
+        return;
+    }
+    if depth > 32 {
+        *value = Value::String("[redacted: output exceeds bounded depth]".into());
+        return;
+    }
+    match value {
+        Value::String(text) => *text = redact_known_text(text, known),
+        Value::Array(array) => {
+            for value in array {
+                redact_known_value(value, known, depth + 1);
+            }
         }
+        Value::Object(object) => {
+            let original = std::mem::take(object);
+            for (key, mut value) in original {
+                redact_known_value(&mut value, known, depth + 1);
+                object.insert(redact_known_text(&key, known), value);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod community_concurrency_tests {
+    use super::*;
+    use crate::adapter_registry::{ed25519_public_key_b64, LOCUS_ADAPTER_TRUST_KEYS_ENV};
+    use crate::binding::{BindingBody, Policy};
+    use crate::seal::SealKey;
+    use crate::session::PinSource;
+    use ed25519_dalek::SigningKey;
+    use std::time::{Duration, Instant};
+
+    struct Environment(Vec<(String, Option<std::ffi::OsString>)>);
+    impl Environment {
+        fn set(&mut self, key: &str, value: impl AsRef<std::ffi::OsStr>) {
+            self.0.push((key.into(), std::env::var_os(key)));
+            std::env::set_var(key, value);
+        }
+    }
+    impl Drop for Environment {
+        fn drop(&mut self) {
+            for (key, value) in self.0.drain(..).rev() {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+    struct ReleaseOnDrop(std::path::PathBuf);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.0, "release");
+        }
+    }
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !ready() {
+            assert!(
+                Instant::now() < deadline,
+                "inert protocol barrier timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn empty_secret_guard_preserves_deep_upstream_values() {
+        let mut original = json!("synthetic-deep-secret");
+        for _ in 0..40 {
+            original = json!({"nested": original});
+        }
+        let mut unguarded = original.clone();
+        redact_known_value(&mut unguarded, &[], 0);
+        assert_eq!(unguarded, original);
+
+        let known = vec![zeroize::Zeroizing::new("synthetic-deep-secret".into())];
+        let mut guarded = original;
+        redact_known_value(&mut guarded, &known, 0);
+        let text = serde_json::to_string(&guarded).unwrap();
+        assert!(!text.contains("synthetic-deep-secret"));
+        assert!(text.contains("output exceeds bounded depth"));
+    }
+
+    /// The old guard lookup after request completion leaked a reflected key when
+    /// teardown deleted that guard while waiting for the client's in-flight lock.
+    #[test]
+    fn community_inflight_redaction_survives_teardown() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut environment = Environment(vec![]);
+        let signing = SigningKey::from_bytes(&[19; 32]);
+        environment.set(
+            LOCUS_ADAPTER_TRUST_KEYS_ENV,
+            format!(
+                "community-runtime-fixture:ed25519:{}",
+                ed25519_public_key_b64(&signing.verifying_key())
+            ),
+        );
+        environment.set("LOCUS_HOME", dir.path());
+        environment.set(
+            "LOCUS_COMMUNITY_LINEAR_FIXTURE",
+            "synthetic-inflight-private-key",
+        );
+        environment.set("LOCUS_WORKER_SANDBOX", "0");
+        environment.set("LOCUS_WORKER_SANDBOX_NO_NETWORK", "0");
+        let marker = dir.path().join("barrier.jsonl");
+        let provider =
+            super::super::composite::community_runtime_tests::fixture("linear", &marker, &signing);
+        let binding = Binding::from_body(BindingBody {
+            id: "bnd_acme".into(),
+            alias: "acme".into(),
+            tenant: "fixture".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![provider.clone()],
+        });
+        let session = Session::new(
+            "bnd_acme",
+            "acme",
+            "fixture",
+            None,
+            PinSource::Explicit,
+            None,
+            chrono::Duration::hours(1),
+            dir.path().join("worker").display().to_string(),
+            &SealKey::generate(),
+        );
+        let config =
+            super::super::composite::mcp_config_from_upstream(provider.upstream.as_ref().unwrap())
+                .unwrap();
+        let backend = McpStdioBackend::new(config);
+        let slot = backend
+            .ensure(&session, &binding, &provider, &dir.path().join("slot"))
+            .unwrap();
+        let ck = slot_client_key(&slot);
+        let ready = std::path::PathBuf::from(format!("{}.ready", marker.display()));
+        let release = std::path::PathBuf::from(format!("{}.release", marker.display()));
+        std::thread::scope(|scope| {
+            let _release_on_unwind = ReleaseOnDrop(release.clone());
+            let pending = scope
+                .spawn(|| backend.call_tool(&slot, &binding, "read", &json!({"barrier":true})));
+            wait_until(|| ready.exists());
+            let teardown = scope.spawn(|| backend.teardown(&slot));
+            // This is a deterministic lifecycle barrier, not a timing guess.
+            wait_until(|| !backend.known_secrets.lock().unwrap().contains_key(&ck));
+            std::fs::write(&release, "release").unwrap();
+            let result = pending.join().unwrap().unwrap();
+            assert!(result.ok);
+            let text = serde_json::to_string(&result.content).unwrap();
+            assert!(!text.contains("synthetic-inflight-private-key"));
+            assert!(text.contains("[redacted]"));
+            teardown.join().unwrap().unwrap();
+        });
     }
 }
