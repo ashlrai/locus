@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Gemini CLI support.** `locus setup --client gemini` and
+  `locus agent setup --apply --client gemini` (also part of `--client all`)
+  register `locus-mcp` in `.gemini/settings.json` under `mcpServers`, merging
+  into the user file only when it exists. Other keys and servers are preserved
+  and malformed JSON is refused untouched. `agent doctor` and the agent report
+  gain `mcp_registered.gemini` (additive, defaults to false).
+
 ### Fixed
 
 - **npm: a root global install no longer breaks `locus` for other users.** The

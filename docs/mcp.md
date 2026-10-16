@@ -200,6 +200,21 @@ Any client that can spawn a stdio MCP server can use:
 | Args | (none) |
 | Env | optional `LOCUS_HOME` for isolated stores |
 
+## Wire into Gemini CLI
+
+Gemini CLI reads MCP servers from `.gemini/settings.json` (project) or
+`~/.gemini/settings.json` (user) under `mcpServers`.
+
+```bash
+locus setup --client gemini
+locus agent setup --apply --client gemini   # gemini is also included in --client all
+```
+
+The project file is written (other keys and servers are preserved; malformed
+JSON is refused untouched). The user file is merged only when it already
+exists. The entry carries `LOCUS_AUTO_PIN=cwd` + `LOCUS_CLIENT=gemini`. The
+readiness probe reports `mcp_registered.gemini`. Check with `gemini mcp list`.
+
 ## Wire into Grok Build
 
 Grok Build's documented MCP config is `~/.grok/config.toml` — Codex-style
