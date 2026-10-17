@@ -1362,6 +1362,29 @@ fn resources_list_and_read_session_doctor_bindings_unpinned() {
     );
 }
 
+/// `locus://doctor` must report a malformed binding file as an UNSAFE
+/// `binding_invalid` finding, as `locus doctor` does, not fail the read.
+#[test]
+fn resource_doctor_reports_malformed_binding_instead_of_erroring() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    std::fs::write(store.bindings_dir().join("broken.toml"), "garbage [[").unwrap();
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    let doc = client.request("resources/read", json!({ "uri": "locus://doctor" }));
+    assert!(doc.get("result").is_some(), "doctor read failed: {doc}");
+    let body: Value = serde_json::from_str(&parse_resource_text(&doc)).expect("doctor json");
+    assert_eq!(body["verdict"], "UNSAFE", "{body}");
+    let findings = body["findings"].as_array().expect("findings");
+    assert!(
+        findings.iter().any(|f| f["code"] == "binding_invalid"),
+        "{body}"
+    );
+}
+
 #[test]
 fn resources_session_whoami_when_pinned() {
     let dir = tempdir().unwrap();

@@ -11,6 +11,7 @@
 #[macro_use]
 mod stdout;
 
+mod cred_diag;
 mod serve;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -828,8 +829,8 @@ enum ApproveCmd {
     Wait {
         /// Approval id (`appr_…`)
         id: String,
-        /// Seconds to wait (default: 120)
-        #[arg(long, default_value_t = 120)]
+        /// How long to wait: bare seconds or 90s / 2m / 1h (default: 120)
+        #[arg(long, default_value = "120", value_parser = parse_wait_timeout)]
         timeout: u64,
         /// Poll interval in milliseconds (default: 500)
         #[arg(long, default_value_t = 500)]
@@ -3342,10 +3343,12 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         );
     }
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
+    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
         bail!(
-            "credential resolve failed: {}",
-            format_credential_issues(&iso.secrets_failed)
+            "credential resolve failed (--strict-creds): {}",
+            cred_lines.join("; ")
         );
     }
     let executor_capability = s.grant_executor_capability(&session)?;
@@ -3373,11 +3376,11 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    if !iso.secrets_failed.is_empty() {
+    for line in &cred_lines {
         eprintln!(
-            "{} unresolved credentials: {}",
+            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
             "warn".yellow(),
-            format_credential_issues(&iso.secrets_failed)
+            line
         );
     }
 
@@ -3572,11 +3575,13 @@ fn cmd_ci_run(
 
     // Child gets full isolated env (may resolve secrets for the command to work).
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
+    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_ci_session(&ci_path, &session);
         bail!(
-            "credential resolve failed: {}",
-            format_credential_issues(&iso.secrets_failed)
+            "credential resolve failed (--strict-creds): {}",
+            cred_lines.join("; ")
         );
     }
     let executor_capability = s.grant_executor_capability(&session)?;
@@ -3605,11 +3610,11 @@ fn cmd_ci_run(
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    if !iso.secrets_failed.is_empty() {
+    for line in &cred_lines {
         eprintln!(
-            "{} unresolved credentials: {}",
+            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
             "warn".yellow(),
-            format_credential_issues(&iso.secrets_failed)
+            line
         );
     }
 
@@ -3718,11 +3723,13 @@ fn cmd_run(
     }
 
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
+    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_run_session(&run_path, &session);
         bail!(
-            "credential resolve failed: {}",
-            format_credential_issues(&iso.secrets_failed)
+            "credential resolve failed (--strict-creds): {}",
+            cred_lines.join("; ")
         );
     }
     let executor_capability = s.grant_executor_capability(&session)?;
@@ -3772,11 +3779,11 @@ fn cmd_run(
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    if !iso.secrets_failed.is_empty() {
+    for line in &cred_lines {
         eprintln!(
-            "{} unresolved credentials: {}",
+            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
             "warn".yellow(),
-            format_credential_issues(&iso.secrets_failed)
+            line
         );
     }
 
@@ -6451,7 +6458,13 @@ fn gather_doctor_external_with_phantom_status(
     // An invalid binding file is reported by build_doctor_report as an
     // UNSAFE `binding_invalid` finding; do not abort the diagnostic here.
     let unresolved_phm = if s.list_bindings().is_ok() {
-        collect_unresolved_phm_refs(s, phantom)?
+        let mut unresolved = collect_unresolved_phm_refs(s, phantom)?;
+        // `phantom list` only proves the locator exists; probe the real
+        // resolve path so a refused/failed reveal is not reported as ok.
+        let extra = cred_diag::probe_phm_reveal(s, phantom, &unresolved);
+        unresolved.extend(extra);
+        unresolved.sort_by(|a, b| a.provider.cmp(&b.provider));
+        unresolved
     } else {
         Vec::new()
     };
@@ -7256,24 +7269,39 @@ fn parse_watch_interval(s: &str) -> Result<std::time::Duration> {
     if s.is_empty() {
         return Ok(std::time::Duration::from_secs(5));
     }
-    let invalid = || anyhow!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)");
-    // Bare seconds (including multi-digit) before unit split so "10" → 10s not 1s.
-    let secs = if s.chars().all(|c| c.is_ascii_digit()) {
-        s.parse::<u64>().map_err(|_| invalid())?
-    } else {
-        let (num, unit) = s.split_at(s.len().saturating_sub(1));
-        let n: u64 = num.parse().map_err(|_| invalid())?;
-        match unit {
-            "s" | "S" => n,
-            "m" | "M" => n.saturating_mul(60),
-            "h" | "H" => n.saturating_mul(3600),
-            _ => return Err(invalid()),
-        }
-    };
+    let secs = parse_duration_secs(s)
+        .ok_or_else(|| anyhow!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)"))?;
     if secs == 0 {
         bail!("invalid watch interval '{s}': must be at least 1s (use e.g. 5s, 30s, 1m)");
     }
     Ok(std::time::Duration::from_secs(secs))
+}
+
+/// Whole seconds from `10` (bare seconds), `5s`, `2m` or `1h`. Shared by
+/// `watch --interval` and `approve wait --timeout`; callers apply their own floor.
+fn parse_duration_secs(s: &str) -> Option<u64> {
+    // Bare seconds (including multi-digit) before unit split so "10" → 10s not 1s.
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
+        return s.parse::<u64>().ok();
+    }
+    if !s.is_ascii() {
+        return None;
+    }
+    let (num, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: u64 = num.parse().ok()?;
+    match unit {
+        "s" | "S" => Some(n),
+        "m" | "M" => Some(n.saturating_mul(60)),
+        "h" | "H" => Some(n.saturating_mul(3600)),
+        _ => None,
+    }
+}
+
+/// clap parser for `approve wait --timeout`: same units as `watch --interval`;
+/// 0 keeps its meaning of a single status check.
+fn parse_wait_timeout(s: &str) -> std::result::Result<u64, String> {
+    parse_duration_secs(s.trim())
+        .ok_or_else(|| format!("use bare seconds or e.g. 90s, 2m, 1h (got '{s}')"))
 }
 
 fn print_doctor_human(report: &locus_core::DoctorReport) {
@@ -7374,6 +7402,20 @@ fn print_doctor_human(report: &locus_core::DoctorReport) {
             report.unresolved_phm.len(),
             format_credential_issues(&report.unresolved_phm).dimmed()
         );
+        let mut causes: Vec<String> = Vec::new();
+        for issue in &report.unresolved_phm {
+            let line = format!(
+                "{}: {}",
+                issue.code,
+                cred_diag::cause(issue, report.phantom_on_path)
+            );
+            if !causes.contains(&line) {
+                causes.push(line);
+            }
+        }
+        for line in causes {
+            println!("               cause {}", line.yellow());
+        }
     } else if report.phantom_on_path {
         println!("  credentials  {}", "ok".green());
     }
@@ -10002,6 +10044,42 @@ mod watch_heartbeat_tests {
             assert!(err.contains("at least 1s"), "{zero}: {err}");
         }
         assert_eq!(parse_watch_interval("1").unwrap(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn approve_wait_timeout_accepts_watch_units() {
+        use clap::Parser;
+        for (raw, secs) in [("1s", 1), ("2m", 120), ("1h", 3600), ("45", 45), ("0", 0)] {
+            let cli = super::Cli::try_parse_from([
+                "locus",
+                "approve",
+                "wait",
+                "appr_x",
+                "--timeout",
+                raw,
+            ])
+            .unwrap_or_else(|e| panic!("{raw}: {e}"));
+            match cli.command {
+                super::Commands::Approve(super::ApproveCmd::Wait { timeout, .. }) => {
+                    assert_eq!(timeout, secs, "{raw}")
+                }
+                _ => panic!("{raw}: not parsed as approve wait"),
+            }
+        }
+        for bad in ["1.5m", "5x", "", "-1s"] {
+            assert!(
+                super::Cli::try_parse_from([
+                    "locus",
+                    "approve",
+                    "wait",
+                    "appr_x",
+                    "--timeout",
+                    bad
+                ])
+                .is_err(),
+                "{bad} must be rejected"
+            );
+        }
     }
 
     #[test]

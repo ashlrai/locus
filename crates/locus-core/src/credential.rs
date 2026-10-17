@@ -256,6 +256,9 @@ fn resolve_phantom_with_timeout(name: &str, timeout: Duration) -> Result<Zeroizi
         .map_err(|error| {
             LocusError::msg(format!("credential unavailable (source=phantom): {error}"))
         })?;
+    // The raw pipe buffer holds the plaintext too: zeroize it on every path
+    // (refused reveal output, success), not only the trimmed copy returned.
+    let stdout = Zeroizing::new(stdout);
     if !status.success() {
         // Both streams are untrusted and may contain locator names or secret material.
         return Err(LocusError::msg("credential unavailable (source=phantom)"));
