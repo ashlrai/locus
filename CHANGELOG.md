@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Control commands name the stale-pin recovery.** After the pinning shell
+  exits, `locus workspace`, `binding add`, `notify`, `init` and other control
+  commands failed closed with only "human re-pin required". They now print the
+  same `eval "$(locus hook bash)"; locus leave --force; locus enter <alias>`
+  recovery that `enter`, `leave` and `status` already did. Still fails closed.
+- **`locus doctor` reports a malformed binding file instead of aborting.** One
+  unparseable `bindings/*.toml` made `doctor` (and `doctor --json`) exit 1 with
+  a bare error and no report. It now completes, flags an UNSAFE
+  `binding_invalid` finding naming the bindings directory, and exits 2.
 - **npm: a root global install no longer breaks `locus` for other users.** The
   postinstall replaced the shared bin with a symlink into the installer's HOME
   (e.g. `/root/.locus/bin`, behind a 0700 `/root`), so other users got
