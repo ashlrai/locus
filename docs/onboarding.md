@@ -1,6 +1,6 @@
 # Onboarding — 3 clients × 3 tenants
 
-> The unreleased `locus onboard` candidate previews metadata hints, guides
+> `locus onboard` previews metadata hints, guides
 > explicit tenant/ref/scope input, saves a refs-only plan, and can provision the
 > current directory after operator consent. It never pins, resolves credentials,
 > or runs a live isolation demo. `--yes --json` applies only an already reviewed
