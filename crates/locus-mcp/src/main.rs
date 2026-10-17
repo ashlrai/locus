@@ -537,11 +537,17 @@ fn run_stdio() -> Result<()> {
     let mut reader = stdin.lock();
 
     loop {
-        let Some((msg, framing)) = read_message(&mut reader)? else {
+        let Some((parsed, framing)) = read_frame(&mut reader)? else {
             break; // EOF
         };
 
-        if let Some(response) = dispatch_rpc(&msg, &RequestScope::process()) {
+        let response = match parsed {
+            Ok(msg) => dispatch_rpc(&msg, &RequestScope::process()),
+            // JSON-RPC 2.0: an unparseable message gets a Parse error with a
+            // null id (the id cannot be known), never silence.
+            Err(e) => Some(parse_error_response(&e)),
+        };
+        if let Some(response) = response {
             write_message(&mut stdout, &response, framing)?;
         }
     }
@@ -1013,12 +1019,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
         let msg: Value = match serde_json::from_slice(&body) {
             Ok(v) => v,
             Err(e) => {
-                let body = json!({
-                    "jsonrpc": "2.0",
-                    "id": Value::Null,
-                    "error": { "code": -32700, "message": format!("parse error: {e}") },
-                });
-                return write_http_json(&mut stream, 400, &body, None);
+                return write_http_json(&mut stream, 400, &parse_error_response(&e), None);
             }
         };
         let rpc_method = msg.get("method").and_then(|m| m.as_str());
@@ -2196,14 +2197,43 @@ fn read_line_bounded<R: BufRead>(reader: &mut R, limit: usize) -> Result<Option<
     Ok(Some(line))
 }
 
-/// Read one MCP message. Supports Content-Length headers and NDJSON lines.
+/// JSON-RPC 2.0 Parse error (-32700). The id is always null: it cannot be
+/// read from a message that does not parse. The serde error carries only a
+/// position, never the offending bytes.
+fn parse_error_response(e: &serde_json::Error) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": { "code": -32700, "message": format!("parse error: {e}") },
+    })
+}
+
+/// Read one MCP message, skipping frames that are not valid JSON.
+#[cfg(test)]
+fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<(Value, Framing)>> {
+    loop {
+        match read_frame(reader)? {
+            None => return Ok(None),
+            Some((Ok(msg), framing)) => return Ok(Some((msg, framing))),
+            Some((Err(_), _)) => continue,
+        }
+    }
+}
+
+/// Read one MCP frame. Supports Content-Length headers and NDJSON lines.
+///
+/// A frame whose bytes were read intact but are not JSON is returned as an
+/// inner `Err` so the caller can answer it with a Parse error and keep
+/// serving; framing/size violations stay outer errors (fail closed).
 ///
 /// Every line read is byte-capped via [`read_line_bounded`] (NDJSON/first
 /// lines at [`HTTP_MAX_BODY_BYTES`], header lines at
 /// [`HTTP_MAX_HEADER_BYTES`], header count at [`HTTP_MAX_HEADER_COUNT`]) so a
 /// hostile stream can neither OOM the process with a newline-free flood nor
 /// exhaust the stack — blank/garbage lines loop instead of recursing.
-fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<(Value, Framing)>> {
+type Frame = (std::result::Result<Value, serde_json::Error>, Framing);
+
+fn read_frame<R: BufRead>(reader: &mut R) -> Result<Option<Frame>> {
     loop {
         // The first line may itself be a whole NDJSON message, so it gets the
         // body-size cap rather than the (smaller) header-line cap.
@@ -2264,19 +2294,20 @@ fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<(Value, Framing)>> 
             reader
                 .read_exact(&mut buf)
                 .context("read Content-Length body")?;
-            let msg: Value = serde_json::from_slice(&buf).context("json body")?;
-            return Ok(Some((msg, Framing::ContentLength)));
+            let parsed = serde_json::from_slice::<Value>(&buf);
+            if let Err(e) = &parsed {
+                eprintln!("locus-mcp: bad json: {e}");
+            }
+            return Ok(Some((parsed, Framing::ContentLength)));
         }
 
         // NDJSON: first non-empty line is the JSON object.
-        match serde_json::from_str::<Value>(trimmed) {
-            Ok(msg) => return Ok(Some((msg, Framing::Ndjson))),
-            Err(e) => {
-                eprintln!("locus-mcp: bad json: {e}");
-                // Skip garbage line; keep serving
-                continue;
-            }
+        let parsed = serde_json::from_str::<Value>(trimmed);
+        if let Err(e) = &parsed {
+            // stderr only; the Parse error response goes out on stdout.
+            eprintln!("locus-mcp: bad json: {e}");
         }
+        return Ok(Some((parsed, Framing::Ndjson)));
     }
 }
 
@@ -4562,6 +4593,28 @@ mod stdio_framing_tests {
         let (msg, framing) = read_message(&mut reader).unwrap().unwrap();
         assert_eq!(framing, Framing::Ndjson);
         assert_eq!(msg["id"], 7);
+    }
+
+    #[test]
+    fn unparseable_frames_surface_as_parse_errors_and_framing_survives() {
+        let mut raw = String::from("not-json\n");
+        raw.push_str("Content-Length: 5\r\n\r\n{bad}");
+        raw.push_str(r#"{"jsonrpc":"2.0","id":8,"method":"ping"}"#);
+        raw.push('\n');
+        let mut reader = Cursor::new(raw.into_bytes());
+
+        let (parsed, framing) = read_frame(&mut reader).unwrap().unwrap();
+        assert_eq!(framing, Framing::Ndjson);
+        let resp = parse_error_response(&parsed.expect_err("garbage line"));
+        assert_eq!(resp["error"]["code"], -32700);
+        assert_eq!(resp["id"], Value::Null);
+
+        let (parsed, framing) = read_frame(&mut reader).unwrap().unwrap();
+        assert_eq!(framing, Framing::ContentLength);
+        assert!(parsed.is_err(), "garbage Content-Length body");
+
+        let (parsed, _) = read_frame(&mut reader).unwrap().unwrap();
+        assert_eq!(parsed.unwrap()["id"], 8);
     }
 
     #[test]
