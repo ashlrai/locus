@@ -9,15 +9,32 @@ use std::process::{Command, Output};
 const RECOVERY_TAIL: &str = "locus leave --force; locus enter";
 
 fn locus(home: &Path, cwd: &Path, cap: &str, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_locus"))
-        .args(args)
+    locus_cmd(home, cwd, cap, args)
+        .output()
+        .expect("locus binary runs")
+}
+
+/// For a control command that must fail closed on the stale pin. The first
+/// such command's broker start never hands off an endpoint, so the CLI polls
+/// for a current broker for the full default start timeout (10s) before
+/// refusing. The documented override shortens only that wait; the
+/// refusal and its recovery text are asserted unchanged.
+fn locus_fail_closed(home: &Path, cwd: &Path, cap: &str, args: &[&str]) -> Output {
+    locus_cmd(home, cwd, cap, args)
+        .env("LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS", "500")
+        .output()
+        .expect("locus binary runs")
+}
+
+fn locus_cmd(home: &Path, cwd: &Path, cap: &str, args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
+    cmd.args(args)
         .env("LOCUS_HOME", home)
         .env("LOCUS_CONTROL_CAPABILITY", cap)
         .env("SHELL", "/bin/bash")
         .env("NO_COLOR", "1")
-        .current_dir(cwd)
-        .output()
-        .expect("locus binary runs")
+        .current_dir(cwd);
+    cmd
 }
 
 /// Quickstart (which pins `personal`) under a short-lived `sh`, so the pin's
@@ -136,7 +153,7 @@ fn stale_pin_surfaces_name_the_recovery() {
     let prompt = hook_prompt(home.path(), cwd.path(), &cap);
     assert!(prompt.contains("[locus:invalid]"), "prompt: {prompt}");
 
-    let enter = locus(home.path(), cwd.path(), &cap, &["enter", "acme"]);
+    let enter = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "acme"]);
     assert!(!enter.status.success(), "enter must still fail closed");
     let err = stderr(&enter);
     assert!(
@@ -224,7 +241,7 @@ fn stale_pin_control_commands_name_the_recovery() {
         &["notify", "on"],
     ];
     for args in cases {
-        let out = locus(home.path(), cwd.path(), &cap, args);
+        let out = locus_fail_closed(home.path(), cwd.path(), &cap, args);
         assert!(!out.status.success(), "{args:?} must fail closed");
         let err = stderr(&out);
         assert!(err.contains("human re-pin required"), "{args:?}: {err}");
