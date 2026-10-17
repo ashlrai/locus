@@ -152,7 +152,7 @@ locus watch --json --require-ok --interval 30s
 | `--once` | Single tick then exit |
 | `--require-ok` | Fail closed: non-zero exit whenever `session_ok` is false (including unpinned) |
 | `--once` only | Non-zero when pin was present/expected **and** `session_ok` is false; unpinned soft-exits 0 |
-| `--interval` | Poll period (`5s`, `30s`, `1m`; default `5s`) |
+| `--interval` | Poll period (`5s`, `30s`, `1m`; default `5s`; minimum `1s`) |
 
 Binding drift still freezes the pin (same as doctor / `verify_session`). Never includes secrets. Prefer `locus verify session --json` when hub needs the full doctor + whoami objects; use `watch` for continuous compact ticks.
 
