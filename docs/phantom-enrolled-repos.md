@@ -12,6 +12,29 @@ questions must be answered before any provider command runs:
 MCP and CLI **account auth** lives in Locus, not in Phantom Secrets. Phantom
 Secrets stores the token; Locus decides which token a session may use.
 
+> **Current status: `phm:` refs do not resolve with Phantom Secrets 0.7.9.**
+> Locus resolves `phm:NAME` by running `phantom reveal --yes NAME`, and
+> Phantom Secrets 0.7.9 refuses `--yes` (plaintext reveal needs a trusted
+> interactive terminal). A `phm:` binding still pins and lists its provider
+> tools, but `locus exec` / `locus run` start the worker with the provider
+> variables (`GH_TOKEN`, ...) unset and print
+> `warn unresolved credentials: provider=github source=phantom code=unavailable`;
+> `--strict-creds` fails before the child runs, and `locus doctor` reports
+> `WARN` with `[unresolved_phm]`. Do not work around this by capturing
+> `phantom reveal` output. Until a reviewed Phantom/Locus handoff ships, use
+> `env:` refs for provider work and supply the value from your
+> operator-controlled environment:
+>
+> ```bash
+> locus binding add personal --tenant personal --provider github \
+>   --account masonwyatt23 --credential-ref env:LOCUS_PERSONAL_GH_TOKEN --non-interactive
+> export LOCUS_PERSONAL_GH_TOKEN=...   # from your own secret store, outside agent context
+> locus pin personal && locus exec -- gh auth status
+> ```
+>
+> The `phm:` steps below describe the intended composition and keep working
+> for pinning, scope freeze and doctor checks.
+
 ## 1. One binding per owner scope
 
 Phantom repos belong to one owner scope: `personal`, `company`, or
