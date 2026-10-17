@@ -181,6 +181,22 @@ fn batch_and_non_object_messages_get_an_error_instead_of_silence() {
 }
 
 #[test]
+fn unparseable_line_gets_parse_error_with_null_id_and_server_keeps_serving() {
+    let dir = tempdir().unwrap();
+    let mut c = Client::spawn(dir.path());
+    c.initialize(Some("2025-06-18"));
+
+    c.send_raw("this is not json {");
+    let resp = c.read();
+    assert_eq!(resp["jsonrpc"], "2.0", "{resp}");
+    assert_eq!(resp["id"], Value::Null, "{resp}");
+    assert_eq!(resp["error"]["code"], -32700, "{resp}");
+
+    let pong = c.request(7, "ping", json!({}));
+    assert_eq!(pong["result"], json!({}));
+}
+
+#[test]
 fn plain_entry_with_live_pin_says_pin_is_unobservable_not_unpinned() {
     let dir = pinned_home();
     let mut c = Client::spawn(dir.path());
