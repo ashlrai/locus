@@ -40,6 +40,9 @@ pub mod verify;
 pub mod workers;
 pub mod workspace;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use adapter_registry::{
     build_release_manifest, build_release_manifest_from, builtin_manifest,
     canonical_entry_material, canonical_release_manifest_material, ed25519_public_key_b64,
