@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--json` failures are JSON.** With the global `--json`, a failing command
+  (e.g. `locus --json whoami` while unpinned) printed a human `error:` line, so
+  agents got non-JSON. The error line on stderr is now `{"ok": false,
+  "error": "..."}` (same message, recovery hints included); stdout keeps its
+  one-document contract and the exit code stays 1.
+- **`locus-mcp` answers unparseable stdio frames.** A non-JSON NDJSON line or
+  Content-Length body was only logged to stderr and never answered. It now
+  gets a JSON-RPC Parse error (`-32700`, `"id": null`) and the server keeps
+  serving. Framing/size violations still fail closed.
+- **`locus workspace` warns about aliases with no binding.** `--default` /
+  `--allow` naming an alias that is not in the store still writes
+  `.locus.toml` (exit 0), but now warns on stderr with the missing alias and
+  the `locus binding add` command, instead of failing later at `locus enter`.
 - **Control commands name the stale-pin recovery.** After the pinning shell
   exits, `locus workspace`, `binding add`, `notify`, `init` and other control
   commands failed closed with only "human re-pin required". They now print the
