@@ -1224,6 +1224,12 @@ for line in sys.stdin:
     /// canaries must not appear in the MCP child environment (recipe or explicit).
     #[test]
     fn recipe_config_resolve_secrets_false_excludes_ambient_provider_secrets() {
+        if !crate::test_support::run_in_isolated_process(
+            module_path!(),
+            "recipe_config_resolve_secrets_false_excludes_ambient_provider_secrets",
+        ) {
+            return;
+        }
         let dir = tempdir().unwrap();
         let worker_home = dir.path().join("worker");
         let work_dir = worker_home.join("slots/github");
@@ -1567,6 +1573,12 @@ for line in sys.stdin:
     /// Actual inert MCP children prove the contract at launch and at both dispatch seams.
     #[test]
     fn community_signed_runtime_contract() {
+        if !crate::test_support::run_in_isolated_process(
+            module_path!(),
+            "community_signed_runtime_contract",
+        ) {
+            return;
+        }
         assert!(std::process::Command::new("python3")
             .arg("--version")
             .output()
