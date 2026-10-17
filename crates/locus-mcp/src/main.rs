@@ -3427,6 +3427,18 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
         return call_control(name, &args, scope);
     }
 
+    // Every provider tool is `provider.tool` (namespaced: `alias__provider.tool`),
+    // so a dotless name is unknown to every binding. Say so before the runtime
+    // health checks: the answer needs no pin and reveals nothing about one.
+    if !name.contains('.') {
+        return Err(rpc_error(
+            -32602,
+            format!(
+                "unknown tool `{name}`: provider tools are named `provider.tool` and control tools `locus_*`; see tools/list"
+            ),
+        ));
+    }
+
     // Provider tools require a healthy pin
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
 
@@ -4928,6 +4940,20 @@ mod lifecycle_hint_tests {
             negotiate_protocol_version(&json!({})),
             SUPPORTED_PROTOCOL_VERSIONS[0]
         );
+    }
+
+    #[test]
+    fn dotless_tool_name_is_unknown_before_runtime_health() {
+        for name in ["nonexistent_tool", "acme__bogus", "githubscope"] {
+            let err = handle_tools_call(
+                &json!({ "name": name, "arguments": {} }),
+                &RequestScope::process(),
+            )
+            .unwrap_err();
+            assert_eq!(err["code"], json!(-32602), "{name}: {err}");
+            let msg = err["message"].as_str().unwrap();
+            assert!(msg.starts_with(&format!("unknown tool `{name}`")), "{msg}");
+        }
     }
 
     #[test]

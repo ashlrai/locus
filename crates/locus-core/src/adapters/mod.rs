@@ -245,6 +245,9 @@ pub fn enforce_policy(
     // Scope is part of authorization and must fail before approval creation or
     // any caller has an opportunity to start an upstream worker.
     preflight_scope_freeze(binding, tool_name, args)?;
+    // Closed adapter schemas are enforced before policy, so an undeclared
+    // argument never reaches an approval record or an adapter.
+    reject_undeclared_args(binding, tool_name, args)?;
     // read_only scope wins before policy: a read_only pin can never execute a
     // destructive tool, so no approval record is ever minted for one.
     if let Some(blocked) = enforce_read_only_scope(binding, tool_name) {
@@ -359,6 +362,51 @@ pub fn call_tool_gated(
     }
     let verdict = evaluate(&binding.policy, tool_name);
     dispatch_tool(binding, tool_name, args, verdict)
+}
+
+/// Gate arguments the approval path reads (`check_require_approval`). They are
+/// accepted on every synthetic tool even when its schema does not list them.
+const GATE_ARGS: &[&str] = &["confirm", "approval_id"];
+
+/// Enforce `additionalProperties: false` on in-process adapter tool schemas.
+///
+/// Only synthetic tools (whose schemas Locus owns) are checked; upstream
+/// worker tools are validated by their own server. Arguments must be a JSON
+/// object, and every key must be a declared property or a [`GATE_ARGS`] key.
+fn reject_undeclared_args(binding: &Binding, tool_name: &str, args: &Value) -> Result<()> {
+    let tools = tools_for_binding(binding);
+    let Some(tool) = tools.iter().find(|t| t.name == tool_name) else {
+        return Ok(());
+    };
+    let schema = &tool.input_schema;
+    if schema.get("additionalProperties") != Some(&Value::Bool(false)) {
+        return Ok(());
+    }
+    let Some(obj) = args.as_object() else {
+        return Err(LocusError::msg(format!(
+            "invalid arguments for `{tool_name}`: expected a JSON object, got {}",
+            json_type_name(args)
+        )));
+    };
+    let declared = schema.get("properties").and_then(Value::as_object);
+    let mut undeclared: Vec<&str> = obj
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !GATE_ARGS.contains(k) && !declared.is_some_and(|d| d.contains_key(*k)))
+        .collect();
+    if undeclared.is_empty() {
+        return Ok(());
+    }
+    undeclared.sort_unstable();
+    let mut allowed: Vec<&str> = declared
+        .map(|d| d.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    allowed.sort_unstable();
+    Err(LocusError::msg(format!(
+        "invalid arguments for `{tool_name}`: undeclared argument(s) [{}]; the schema allows [{}] (additionalProperties: false); denied fail closed",
+        undeclared.join(", "),
+        allowed.join(", ")
+    )))
 }
 
 /// Call-time enforcement of `read_only = true` provider scopes (fail closed).
@@ -878,6 +926,15 @@ mod tests {
     use crate::binding::{BindingBody, Policy, Scope};
     use std::collections::BTreeMap;
 
+    /// The scope freeze and adapter dispatch without the closed-schema gate.
+    /// Freeze tests pass selector spellings no synthetic schema declares, so
+    /// they check that matching values clear the freeze through this path;
+    /// `call_tool` rejects those undeclared keys before dispatch.
+    fn freeze_then_dispatch(b: &Binding, tool: &str, args: &Value) -> Result<ToolCallResult> {
+        preflight_scope_freeze(b, tool, args)?;
+        dispatch_tool(b, tool, args, evaluate(&b.policy, tool))
+    }
+
     /// `known_providers()` and the `adapter_for` dispatch match must stay in
     /// sync — every published provider dispatches, and the two well-known
     /// non-adapter names never appear.
@@ -1084,7 +1141,8 @@ mod tests {
             );
         }
         // Matching alias value passes through the freeze
-        let ok = call_tool(&b, "supabase.scope", &json!({ "projectId": "proj_acme" })).unwrap();
+        let ok = freeze_then_dispatch(&b, "supabase.scope", &json!({ "projectId": "proj_acme" }))
+            .unwrap();
         assert!(ok.ok);
 
         // vercel: teamId alias frozen
@@ -1121,7 +1179,7 @@ mod tests {
         );
         assert!(err.is_err(), "nested alias must freeze: {err:?}");
         assert!(err.unwrap_err().to_string().contains("scope freeze"));
-        let ok = call_tool(
+        let ok = freeze_then_dispatch(
             &b,
             "supabase.scope",
             &json!({ "options": { "projectId": "proj_acme" } }),
@@ -1156,7 +1214,7 @@ mod tests {
         );
         assert!(err.is_err(), "deep-nested alias must freeze: {err:?}");
         // matching values pass at any depth
-        let ok = call_tool(
+        let ok = freeze_then_dispatch(
             &b,
             "supabase.scope",
             &json!({ "filters": [{ "project_ref": "proj_acme" }] }),
@@ -1179,7 +1237,7 @@ mod tests {
             assert!(err.unwrap_err().to_string().contains("scope freeze"));
         }
         // explicit null carries no selector — the frozen value applies
-        let ok = call_tool(&b, "supabase.scope", &json!({ "projectId": null })).unwrap();
+        let ok = freeze_then_dispatch(&b, "supabase.scope", &json!({ "projectId": null })).unwrap();
         assert!(ok.ok);
     }
 
@@ -1198,7 +1256,7 @@ mod tests {
         let err = call_tool(&mb, "stripe.scope", &json!({ "livemode": "true" }));
         assert!(err.is_err(), "non-bool livemode must deny: {err:?}");
         // matching nested livemode passes
-        let ok = call_tool(
+        let ok = freeze_then_dispatch(
             &mb,
             "stripe.scope",
             &json!({ "options": { "livemode": false } }),
@@ -1238,7 +1296,8 @@ mod tests {
         let err = call_tool(&b, "github.scope", &json!({ "owner": "evil-corp" }));
         assert!(err.is_err(), "owner outside frozen orgs must deny");
         assert!(err.unwrap_err().to_string().contains("scope freeze"));
-        let ok = call_tool(&b, "github.scope", &json!({ "owner": "acme-corp" })).unwrap();
+        let ok =
+            freeze_then_dispatch(&b, "github.scope", &json!({ "owner": "acme-corp" })).unwrap();
         assert!(ok.ok);
         // Shallow nested object spelling
         let err = call_tool(
@@ -1423,6 +1482,68 @@ mod tests {
             msg.contains("scope freeze") && msg.contains("repo"),
             "unexpected: {msg}"
         );
+    }
+
+    #[test]
+    fn closed_schema_rejects_undeclared_args_before_policy() {
+        let b = github_binding();
+        for args in [
+            json!({ "bogus": 1 }),
+            json!({ "full_name": "acme-corp/web", "bogus": 1 }),
+        ] {
+            let msg = call_tool(&b, "github.check_repo", &args)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                msg.contains("undeclared argument(s) [bogus]")
+                    && msg.contains("full_name, org, owner, repo"),
+                "unexpected: {msg}"
+            );
+        }
+        let msg = call_tool(&b, "github.whoami", &json!({ "x": 1 }))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("undeclared argument(s) [x]"), "{msg}");
+        let msg = call_tool(&b, "github.scope", &json!([1]))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("expected a JSON object, got array"), "{msg}");
+        // Matching selectors outside the schema are undeclared too.
+        assert!(call_tool(&b, "github.scope", &json!({ "owner": "acme-corp" })).is_err());
+        // Declared args and the approval gate args stay accepted.
+        assert!(call_tool(&b, "github.whoami", &json!({})).unwrap().ok);
+        assert!(
+            call_tool(
+                &b,
+                "github.check_repo",
+                &json!({ "full_name": "acme-corp/web", "confirm": true, "approval_id": "appr_x" }),
+            )
+            .unwrap()
+            .ok
+        );
+        // A wrong selector still reports the scope freeze, which runs first.
+        let msg = call_tool(&b, "github.scope", &json!({ "owner": "evil-corp" }))
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("scope freeze"), "{msg}");
+
+        // An undeclared arg never mints a pending approval.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let gate = ApprovalGate {
+            store: &store,
+            session_id: "ses_x",
+            principal: None,
+        };
+        let vb = vercel_binding();
+        let err = call_tool_gated(
+            &vb,
+            "vercel.deploy.prod",
+            &json!({ "confirm": true, "bogus": 1 }),
+            Some(gate),
+        );
+        assert!(err.is_err(), "{err:?}");
+        assert!(store.list_approvals().unwrap().is_empty());
     }
 
     fn vercel_binding() -> Binding {
@@ -1660,7 +1781,7 @@ mod tests {
         assert!(err.is_err(), "openai keys.create must freeze projectId");
 
         // Matching nested spellings pass.
-        let ok = call_tool(
+        let ok = freeze_then_dispatch(
             &b,
             "openai.keys.list",
             &json!({ "options": { "projectId": "proj_oa_acme" } }),

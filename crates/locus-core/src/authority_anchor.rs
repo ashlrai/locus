@@ -836,7 +836,7 @@ fn ensure_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpo
             return Ok(endpoint);
         }
     }
-    start_broker(home, auth)
+    start_broker(home, auth, true)
 }
 
 fn ping(home: &Path, endpoint: &AuthorityAnchorEndpoint, auth: &RequestAuth) -> Result<()> {
@@ -851,7 +851,14 @@ fn ping(home: &Path, endpoint: &AuthorityAnchorEndpoint, auth: &RequestAuth) -> 
     }
 }
 
-fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoint> {
+/// `may_restart`: when the broker that refused this start exits without a
+/// successor, start once more instead of waiting for an endpoint that cannot
+/// appear (see [`retry_current_endpoint`]).
+fn start_broker(
+    home: &Path,
+    auth: &RequestAuth,
+    may_restart: bool,
+) -> Result<AuthorityAnchorEndpoint> {
     if auth.credential != RequestCredential::Control {
         return Err(LocusError::ExecutorAuthorityUnavailable(
             "only a control capability can start the authority broker".into(),
@@ -871,7 +878,8 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
         control_capability: hex::encode(auth.key),
     };
     if should_host_in_process() {
-        return start_in_process(startup).or_else(|_| retry_current_endpoint(home, auth));
+        return start_in_process(startup)
+            .or_else(|_| retry_current_endpoint(home, auth, may_restart));
     }
 
     let mut child = Command::new(&executable)
@@ -927,7 +935,8 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
             let _ = child.kill();
             let _ = child.wait();
             let detail = drain_broker_stderr(&err_receiver);
-            return retry_current_endpoint(home, auth).map_err(|_| {
+            // No restart after a timeout: that would double the worst-case wait.
+            return retry_current_endpoint(home, auth, false).map_err(|_| {
                 LocusError::AuthorityAnchorUnavailable(format!("broker startup timed out{detail}"))
             });
         }
@@ -937,11 +946,22 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
             ping(home, &endpoint, auth)?;
             Ok(endpoint)
         }
-        Err(_) => retry_current_endpoint(home, auth),
+        Err(_) => retry_current_endpoint(home, auth, may_restart),
     }
 }
 
-fn retry_current_endpoint(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoint> {
+/// Wait for the broker that owns this home to publish a current endpoint.
+///
+/// A start that lost the singleton lock lands here. When the lock holder was a
+/// broker on its way out (its supervisor just exited), the lock frees up and
+/// no endpoint will ever appear, so with `may_restart` this starts a broker
+/// once more rather than waiting out the whole start timeout. Every check
+/// still runs on the new broker; only the dead wait is skipped.
+fn retry_current_endpoint(
+    home: &Path,
+    auth: &RequestAuth,
+    may_restart: bool,
+) -> Result<AuthorityAnchorEndpoint> {
     let deadline = Instant::now() + broker_start_timeout();
     while Instant::now() < deadline {
         if let Ok(endpoint) = read_endpoint(home) {
@@ -949,11 +969,20 @@ fn retry_current_endpoint(home: &Path, auth: &RequestAuth) -> Result<AuthorityAn
                 return Ok(endpoint);
             }
         }
+        if may_restart && broker_lock_is_free(home) {
+            return start_broker(home, auth, false);
+        }
         thread::sleep(Duration::from_millis(25));
     }
     Err(LocusError::AuthorityAnchorUnavailable(
         "no supervised broker owns this Locus home".into(),
     ))
+}
+
+/// True only when the singleton lock opens cleanly and nobody holds it: no
+/// broker owns this home. Any doubt (unsafe lock file, I/O error) is `false`.
+fn broker_lock_is_free(home: &Path) -> bool {
+    open_singleton_lock(&broker_lock_path(home)).is_ok_and(|lock| lock.try_lock_exclusive().is_ok())
 }
 
 fn start_in_process(startup: ServerStartup) -> Result<AuthorityAnchorEndpoint> {
@@ -2560,6 +2589,34 @@ mod tests {
             .to_string()
             .contains("recorded broker owner"));
         write_endpoint_atomic(dir.path(), &endpoint).unwrap();
+        retire(dir.path());
+    }
+
+    /// Regression: a start that loses the lock to a broker on its way out
+    /// (its supervising shell just exited) used to wait the whole start
+    /// timeout for an endpoint nobody would publish. Once the lock frees up it
+    /// now starts a broker, which runs every usual check.
+    #[test]
+    fn start_after_exiting_lock_holder_does_not_wait_out_the_timeout() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(runtime_dir(dir.path())).unwrap();
+        let held = open_singleton_lock(&broker_lock_path(dir.path())).unwrap();
+        held.try_lock_exclusive().unwrap();
+        assert!(!broker_lock_is_free(dir.path()));
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let started = Instant::now();
+        let endpoint = ensure_broker(dir.path(), &auth());
+        let elapsed = started.elapsed();
+        release.join().unwrap();
+        let endpoint = endpoint.expect("broker must start once the lock frees up");
+        ping(dir.path(), &endpoint, &auth()).unwrap();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "start waited {elapsed:?} for an endpoint that could not appear"
+        );
         retire(dir.path());
     }
 
