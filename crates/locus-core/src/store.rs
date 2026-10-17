@@ -3615,25 +3615,51 @@ credential_ref = "ghp_UNSAFE/CANARY"
             .save_binding(&sample_binding("acme", "acme-corp", "p1"))
             .unwrap();
         store.pin("acme", dir.path(), None, false).unwrap();
+        let path = store.active_session_path();
+        let sealed = fs::read(&path).unwrap();
 
-        // Make the sessions dir read-only so remove_file(active.json) fails.
-        let sessions_dir = store.active_session_path().parent().unwrap().to_path_buf();
+        // Injection 1 (unprivileged only): a read-only sessions dir makes
+        // remove_file(active.json) fail with a valid, parsed session.
+        // CAP_DAC_OVERRIDE (root) ignores directory modes, so probe whether
+        // the mode is actually enforced instead of assuming it.
+        let sessions_dir = path.parent().unwrap().to_path_buf();
         let orig = fs::metadata(&sessions_dir).unwrap().permissions();
         fs::set_permissions(&sessions_dir, fs::Permissions::from_mode(0o555)).unwrap();
-        let result = store.force_leave("wedge under readonly dir", false);
+        let probe = sessions_dir.join(".perm-probe");
+        let mode_enforced = fs::write(&probe, b"").is_err();
+        let _ = fs::remove_file(&probe);
+        let readonly_result =
+            mode_enforced.then(|| store.force_leave("wedge under readonly dir", false));
         fs::set_permissions(&sessions_dir, orig).unwrap();
+        if let Some(result) = readonly_result {
+            assert!(result.is_err(), "removal failure must surface as an error");
+            assert!(path.exists());
+            let audit = fs::read_to_string(store.audit_path()).unwrap();
+            assert!(audit.contains("session.force_leave_failed"));
+            assert!(!audit.contains("session.force_leave\""));
+        }
 
+        // Injection 2 (always, privilege-independent): active.json replaced by
+        // a non-empty directory. unlink(2) on a directory fails for root too.
+        let _ = fs::remove_file(&path);
+        fs::create_dir(&path).unwrap();
+        fs::write(path.join("wedge"), b"x").unwrap();
+        let result = store.force_leave("wedge as directory", false);
         assert!(result.is_err(), "removal failure must surface as an error");
-        assert!(store.active_session_path().exists());
+        assert!(path.exists());
         let audit = fs::read_to_string(store.audit_path()).unwrap();
         assert!(audit.contains("session.force_leave_failed"));
+        assert!(audit.contains("wedge as directory"));
         // No success record: a successful audit serializes the op with an
         // immediately closing quote; only the `_failed` variant may appear.
         assert!(!audit.contains("session.force_leave\""));
 
-        // The wedge is still recoverable once the dir is writable again.
+        // The wedge is still recoverable once the obstruction is gone.
+        fs::remove_dir_all(&path).unwrap();
+        fs::write(&path, &sealed).unwrap();
         let outcome = store.force_leave("retry", false).unwrap();
         assert!(outcome.cleared);
+        assert!(!path.exists());
         let audit = fs::read_to_string(store.audit_path()).unwrap();
         assert!(audit.contains("session.force_leave\""));
     }

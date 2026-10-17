@@ -11,6 +11,7 @@
 #[macro_use]
 mod stdout;
 
+mod cred_diag;
 mod serve;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -1059,11 +1060,32 @@ fn main() {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             let e = stale_pin_recovery_fallback(e);
-            eprintln!("{} {e:#}", "error:".red().bold());
+            if JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed) {
+                emit_json_error(&e);
+            } else {
+                eprintln!("{} {e:#}", "error:".red().bold());
+            }
             std::process::exit(1);
         }
         Err(()) => std::process::exit(stdout::STDOUT_CLOSED_EXIT),
     }
+}
+
+/// Set once `--json` is parsed so a failing command reports its error as JSON.
+static JSON_ERRORS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Machine-readable form of a top-level CLI error, matching the `ok` field the
+/// success payloads carry. Same text as the human `error:` line (never secrets).
+fn json_error_payload(e: &anyhow::Error) -> serde_json::Value {
+    json!({ "ok": false, "error": format!("{e:#}") })
+}
+
+/// Print the JSON error as one line on stderr. Stdout keeps the existing
+/// `--json` stream contract (at most one JSON document, e.g. the
+/// `verify session` pack printed before its non-zero exit); errors stay on
+/// stderr, now parseable instead of a human `error:` line.
+fn emit_json_error(e: &anyhow::Error) {
+    eprintln!("{}", json_error_payload(e));
 }
 
 fn run() -> Result<()> {
@@ -1077,6 +1099,7 @@ fn run() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    JSON_ERRORS.store(cli.json, std::sync::atomic::Ordering::Relaxed);
     match cli.command {
         Commands::Init {
             with_samples,
@@ -3292,10 +3315,12 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         );
     }
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
+    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
         bail!(
-            "credential resolve failed: {}",
-            format_credential_issues(&iso.secrets_failed)
+            "credential resolve failed (--strict-creds): {}",
+            cred_lines.join("; ")
         );
     }
     let executor_capability = s.grant_executor_capability(&session)?;
@@ -3323,11 +3348,11 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    if !iso.secrets_failed.is_empty() {
+    for line in &cred_lines {
         eprintln!(
-            "{} unresolved credentials: {}",
+            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
             "warn".yellow(),
-            format_credential_issues(&iso.secrets_failed)
+            line
         );
     }
 
@@ -3522,11 +3547,13 @@ fn cmd_ci_run(
 
     // Child gets full isolated env (may resolve secrets for the command to work).
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
+    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_ci_session(&ci_path, &session);
         bail!(
-            "credential resolve failed: {}",
-            format_credential_issues(&iso.secrets_failed)
+            "credential resolve failed (--strict-creds): {}",
+            cred_lines.join("; ")
         );
     }
     let executor_capability = s.grant_executor_capability(&session)?;
@@ -3555,11 +3582,11 @@ fn cmd_ci_run(
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    if !iso.secrets_failed.is_empty() {
+    for line in &cred_lines {
         eprintln!(
-            "{} unresolved credentials: {}",
+            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
             "warn".yellow(),
-            format_credential_issues(&iso.secrets_failed)
+            line
         );
     }
 
@@ -3668,11 +3695,13 @@ fn cmd_run(
     }
 
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
+    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_run_session(&run_path, &session);
         bail!(
-            "credential resolve failed: {}",
-            format_credential_issues(&iso.secrets_failed)
+            "credential resolve failed (--strict-creds): {}",
+            cred_lines.join("; ")
         );
     }
     let executor_capability = s.grant_executor_capability(&session)?;
@@ -3722,11 +3751,11 @@ fn cmd_run(
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    if !iso.secrets_failed.is_empty() {
+    for line in &cred_lines {
         eprintln!(
-            "{} unresolved credentials: {}",
+            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
             "warn".yellow(),
-            format_credential_issues(&iso.secrets_failed)
+            line
         );
     }
 
@@ -5841,7 +5870,27 @@ fn cmd_workspace(
     };
     std::fs::write(&path, cfg.to_toml()?)?;
     println!("{} wrote {}", "ok".green().bold(), path.display());
+    // Advisory only: README/e2e flows name aliases before they exist locally,
+    // so a missing binding is a warning (stderr, exit 0), not a rejection.
+    if let Ok(known) = store().and_then(|s| Ok(s.list_bindings()?)) {
+        let known: Vec<&str> = known.iter().map(|b| b.alias.as_str()).collect();
+        for alias in missing_workspace_aliases(&cfg.allowed_bindings, &known) {
+            eprintln!(
+                "{} binding '{alias}' does not exist yet; `locus enter {alias}` will fail until you add it: locus binding add {alias} --provider <provider> --account <label> --credential-ref phm:NAME",
+                "warning:".yellow().bold(),
+            );
+        }
+    }
     Ok(())
+}
+
+/// Workspace aliases (default first, then allowlist) with no local binding.
+fn missing_workspace_aliases<'a>(aliases: &'a [String], known: &[&str]) -> Vec<&'a str> {
+    aliases
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !known.contains(a))
+        .collect()
 }
 
 fn cmd_doctor(json: bool) -> Result<()> {
@@ -6342,7 +6391,13 @@ fn gather_doctor_external_with_phantom_status(
     // An invalid binding file is reported by build_doctor_report as an
     // UNSAFE `binding_invalid` finding; do not abort the diagnostic here.
     let unresolved_phm = if s.list_bindings().is_ok() {
-        collect_unresolved_phm_refs(s, phantom)?
+        let mut unresolved = collect_unresolved_phm_refs(s, phantom)?;
+        // `phantom list` only proves the locator exists; probe the real
+        // resolve path so a refused/failed reveal is not reported as ok.
+        let extra = cred_diag::probe_phm_reveal(s, phantom, &unresolved);
+        unresolved.extend(extra);
+        unresolved.sort_by(|a, b| a.provider.cmp(&b.provider));
+        unresolved
     } else {
         Vec::new()
     };
@@ -7265,6 +7320,20 @@ fn print_doctor_human(report: &locus_core::DoctorReport) {
             report.unresolved_phm.len(),
             format_credential_issues(&report.unresolved_phm).dimmed()
         );
+        let mut causes: Vec<String> = Vec::new();
+        for issue in &report.unresolved_phm {
+            let line = format!(
+                "{}: {}",
+                issue.code,
+                cred_diag::cause(issue, report.phantom_on_path)
+            );
+            if !causes.contains(&line) {
+                causes.push(line);
+            }
+        }
+        for line in causes {
+            println!("               cause {}", line.yellow());
+        }
     } else if report.phantom_on_path {
         println!("  credentials  {}", "ok".green());
     }

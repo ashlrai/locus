@@ -118,6 +118,11 @@ locus pin                 # → acme
 locus whoami
 ```
 
+`locus workspace` writes the file even when an alias has no local binding yet
+(exit 0), but prints a stderr warning naming each missing alias and the
+`locus binding add <alias> ...` command to create it; `locus enter` fails
+until it exists.
+
 **Do not** put `personal` on a client repo allowlist. Personal repos get their own `.locus.toml` with `default_binding = "personal"`.
 
 Walk behavior: nearest `.locus.toml` walking toward filesystem root wins (child overrides parent). If that file is unreadable or malformed, Locus does not fall back to a parent policy or no policy: pin/autopin fail and doctor reports `UNSAFE`.
