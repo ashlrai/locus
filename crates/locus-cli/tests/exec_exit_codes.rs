@@ -135,3 +135,74 @@ fn unstartable_run_child_is_audited_and_cleaned_up() {
         .unwrap_or_default();
     assert!(leftovers.is_empty(), "run session leaked: {leftovers:?}");
 }
+
+#[test]
+fn option_in_command_position_is_refused_before_any_effect() {
+    let f = fixture();
+    let audit = f.home.path().join("audit").join("events.jsonl");
+    let before = std::fs::read_to_string(&audit).unwrap_or_default();
+
+    // `exec` has no --binding: it used to spawn `--binding` (exit 127) as the
+    // pinned binding, after writing a session.exec event.
+    let out = f.locus(&["exec", "--binding", "acme", "--", "true"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.contains("`--binding` is not a `locus exec` option"),
+        "{err}"
+    );
+    assert!(
+        err.contains("locus run --binding <alias> -- <command>"),
+        "{err}"
+    );
+
+    // A mistyped option after the binding minted a temporary run session.
+    for args in [
+        &[
+            "run",
+            "--binding",
+            "personal",
+            "--strict-cred",
+            "--",
+            "true",
+        ][..],
+        &[
+            "ci",
+            "run",
+            "--binding",
+            "personal",
+            "--strict-cred",
+            "--",
+            "true",
+        ][..],
+    ] {
+        let out = f.locus(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("`--strict-cred` is not a"),
+            "{}",
+            stderr(&out)
+        );
+    }
+
+    let after = std::fs::read_to_string(&audit).unwrap_or_default();
+    assert_eq!(
+        before, after,
+        "a refused command must not be audited as run"
+    );
+}
+
+#[test]
+fn run_with_unknown_binding_names_the_known_aliases() {
+    let f = fixture();
+    for args in [
+        &["run", "--binding", "acmee", "--", "true"][..],
+        &["ci", "run", "--binding", "acmee", "--", "true"][..],
+    ] {
+        let out = f.locus(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
+        let err = stderr(&out);
+        assert!(err.contains("known aliases: acme, personal"), "{err}");
+        assert!(err.contains("did you mean `acme`?"), "{err}");
+    }
+}
