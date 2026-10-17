@@ -3464,15 +3464,65 @@ fn handle_tools_list(scope: &RequestScope) -> std::result::Result<Value, Value> 
     Ok(tools_list_payload(tools, pin_alias.as_deref()))
 }
 
+/// Control tools publish closed schemas (`additionalProperties: false`); hold
+/// calls to them before dispatch. An unknown `locus_*` name, a non-object
+/// `arguments`, or a key the schema does not declare is a JSON-RPC -32602,
+/// the same answer an unknown provider tool gets. Value checks (blank or
+/// non-string `alias`, ...) stay in the tools so they can name the next step.
+fn check_control_args(name: &str, args: &Value) -> std::result::Result<(), Value> {
+    let tools = control_tools(true);
+    let Some(tool) = tools.iter().find(|t| t.name == name) else {
+        return Err(rpc_error(
+            -32602,
+            format!("unknown tool `{name}`: control tools are listed by tools/list"),
+        ));
+    };
+    let Some(obj) = args.as_object() else {
+        return Err(rpc_error(
+            -32602,
+            format!("invalid arguments for `{name}`: expected a JSON object"),
+        ));
+    };
+    let declared = tool
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object);
+    let mut undeclared: Vec<&str> = obj
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !declared.is_some_and(|d| d.contains_key(*k)))
+        .collect();
+    if undeclared.is_empty() {
+        return Ok(());
+    }
+    undeclared.sort_unstable();
+    let mut allowed: Vec<&str> = declared
+        .map(|d| d.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    allowed.sort_unstable();
+    Err(rpc_error(
+        -32602,
+        format!(
+            "invalid arguments for `{name}`: undeclared argument(s) [{}]; the schema allows [{}] (additionalProperties: false)",
+            undeclared.join(", "),
+            allowed.join(", ")
+        ),
+    ))
+}
+
 fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Result<Value, Value> {
     let name = params
         .get("name")
         .and_then(|n| n.as_str())
         .ok_or_else(|| rpc_error(-32602, "missing tool name".into()))?;
-    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let args = match params.get("arguments") {
+        None | Some(Value::Null) => json!({}),
+        Some(v) => v.clone(),
+    };
 
     // Control tools (allowed even when frozen — whoami/status/heartbeat report freeze)
     if name.starts_with("locus_") {
+        check_control_args(name, &args)?;
         return call_control(name, &args, scope);
     }
 
@@ -4186,7 +4236,11 @@ fn call_control(
             ))
         }
         "locus_request_pin" => {
-            let alias = args.get("alias").and_then(|a| a.as_str()).unwrap_or("");
+            let alias = args
+                .get("alias")
+                .and_then(|a| a.as_str())
+                .map(str::trim)
+                .unwrap_or("");
             if alias.is_empty() {
                 return Ok(tool_text(
                     json!({

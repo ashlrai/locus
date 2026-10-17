@@ -556,14 +556,14 @@ fn control_auth() -> Result<RequestAuth> {
         Some(capability) => capability,
         None if is_test_harness() => test_control_capability(),
         None => {
-            return Err(LocusError::ExecutorAuthorityUnavailable(
+            return Err(LocusError::ExecutorAuthorityUnavailable(format!(
                 "LOCUS_CONTROL_CAPABILITY is required for control-plane authority.\n  \
                  fix (fresh setup): locus quickstart   # mints + persists an operator capability (0600), then adopts it\n  \
                  fix (manual):      export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"\n  \
-                 fix (persisted):   eval \"$(locus hook zsh)\"   # exports $LOCUS_HOME/control_capability if present\n  \
-                 check:             locus doctor"
-                    .into(),
-            ))
+                 fix (persisted):   {}   # exports $LOCUS_HOME/control_capability if present\n  \
+                 check:             locus doctor",
+                crate::recovery::user_hook_eval_command()
+            )))
         }
     };
     Ok(RequestAuth {
@@ -652,8 +652,9 @@ pub fn mint_persisted_control_capability(home: &Path) -> Result<String> {
     if path.exists() {
         return Err(LocusError::msg(format!(
             "refusing to overwrite existing control capability at {} — export it instead \
-             (eval \"$(locus hook zsh)\") or delete the file deliberately before re-minting",
-            path.display()
+             ({}) or delete the file deliberately before re-minting",
+            path.display(),
+            crate::recovery::user_hook_eval_command()
         )));
     }
     let value = random_hex(32);

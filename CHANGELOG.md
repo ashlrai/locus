@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Stale-pin recovery never names a binding that does not exist.** On a stale
+  pin, `locus pin nosuch` / `enter nosuch` / `switch nosuch` ended the recovery
+  recipe with `locus enter nosuch`, which would fail at its last step. The
+  requested alias is named only when that binding exists; otherwise the recipe
+  names the stale pin's own binding (as `whoami` does). `locus leave` on a stale
+  pin now names that binding too instead of `<alias>`.
+- **Control-capability hints follow `$SHELL`.** `init` / `quickstart` notes,
+  `capability persist`, the quickstart "daily path" line, the missing-capability
+  error and the `doctor` capability findings always said
+  `eval "$(locus hook zsh)"`. They now name the user's shell (zsh, fish as
+  `locus hook fish | source`, else bash), like the stale-pin recovery already did.
+- **`locus approve grant --ttl` is bounded.** It still used the lenient parser:
+  `--ttl 0s`, `--ttl=-5m` and `--ttl=` were accepted. It now takes 1s to 24h
+  like `ci mint` / `mcp mint` and fails before the approval record is read.
+- **`locus watch` says why a tick is not ok.** A present but unverifiable pin
+  was labelled `unpinned` next to `pinned=true`; it is now `invalid` (the
+  `status --oneline` token). When the pin is ready but doctor is WARN/UNSAFE the
+  tick printed only "next ready — Proceed" before exiting 1; it now adds a
+  `why` line with the doctor verdict and finding codes. `--json` is unchanged.
+
+- **MCP control tools enforce their closed schemas.** The `locus_*` tools
+  publish `additionalProperties: false` but ignored undeclared keys
+  (`locus_whoami {"binding": "acme"}`) and non-object `arguments` (`"acme"`),
+  and an unknown `locus_nosuch` came back as an `isError` tool result while an
+  unknown provider tool got `-32602`. All three are now JSON-RPC `-32602`
+  before dispatch, naming the allowed keys (the earlier check, #99, covered
+  synthetic provider tools only). Omitted or `null` `arguments` still mean `{}`.
+  `locus_request_pin` trims the alias, so a whitespace-only alias is "alias
+  required" instead of a message about a binding named `   `.
+- **Mint `--ttl` is bounded.** `locus ci mint|env|run` and `locus mcp mint`
+  accepted any TTL: `--ttl 0s` or `--ttl=-5m` printed an already-expired
+  session or grant token and exited 0 (`ci run --ttl 0s` still ran the child),
+  and `--ttl 48h` was capped silently while `locus enter --ttl 48h` is refused.
+  They now take 1s to 24h (still capped by `policy.max_ttl`) and fail before
+  anything is minted, with the `locus enter` wording. Second-scale TTLs stay
+  allowed for expiry probes.
+- **`locus binding add --provider` names a provider with no adapter.** Only the
+  interactive prompt warned; the flags path that agents and scripts use wrote
+  `--provider githb` silently. It is still written (custom providers use
+  upstream MCP recipes), with a stderr warning listing the built-in providers;
+  `--json` stdout is unchanged.
+- **`locus --json setup` prints JSON.** The global flag was ignored and setup
+  printed human text. It now prints `{"ok", "client", "written",
+  "supervised_command"}` after a write, or `entry` / `entry_toml` for `--print`
+  and `generic`. `setup --client codex --print` now uses the same escaped TOML
+  as the file it writes (it was hand-built and omitted `args = []`).
+
 - **`engagement init --workspace` and `locus workspace` never write through a
   `.locus.toml` symlink.** The existence check followed the link, so a
   dangling `.locus.toml` read as absent and the TOML was written to the link's

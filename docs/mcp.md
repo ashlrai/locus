@@ -254,6 +254,11 @@ locus setup --client generic
 locus agent setup --dry-run --client generic
 ```
 
+With the global `--json`, `locus setup` prints one JSON object instead:
+`{"ok", "client", "written": [paths], "supervised_command"}` after a write, or
+`"entry"` (mcpServers JSON) / `"entry_toml"` (Codex-style TOML) with
+`"written": []` for `--print` and `generic`.
+
 Point the client at `locus-mcp` (absolute path for GUI launchers with a
 minimal PATH). `LOCUS_GROK_MCP_CONFIG` doubles as the probe override for such
 clients so `mcp_registered.grok` can verify them; without a real config path
@@ -263,6 +268,7 @@ the probe never guesses.
 
 - **JSON-RPC 2.0** over stdio — **Content-Length** framing (Claude Code / Cursor) and **NDJSON**  
 - A frame that is not valid JSON gets a JSON-RPC Parse error (`-32700`, `"id": null`) and the server keeps serving; batches and non-object messages get Invalid Request (`-32600`)  
+- `tools/call` checks arguments against the tool's closed schema (`additionalProperties: false`) before dispatch: an unknown tool name, a non-object `arguments`, or an undeclared key gets Invalid params (`-32602`) naming the allowed keys. Control tools and synthetic provider tools both do this; omitted or `null` `arguments` mean `{}`  
 - Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`  
 - **Never** log to stdout from the server — that breaks the protocol (errors go to stderr)  
 - Protocol versions: negotiates `2025-06-18`, `2025-03-26`, or `2024-11-05` (echoes the client's requested version when supported, else answers `2025-06-18`)  
@@ -498,6 +504,8 @@ requests and stateless provider POSTs are refused outright.
 
 ```bash
 # 1. Mint one grant per tenant job (local control only; agents cannot mint).
+#    --ttl takes 1s..24h (capped by the binding's policy.max_ttl); zero,
+#    negative or longer values are refused before anything is minted.
 locus mcp mint --binding cmp --ttl 1h --label "hub-job-42"
 # → {"grant_id":"3f2a…","token":"lmt_<grant_id>.<secret>", …}
 #   The token is printed exactly once — only its HMAC is stored at rest

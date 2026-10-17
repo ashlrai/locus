@@ -258,3 +258,34 @@ fn stale_pin_control_commands_name_the_recovery() {
     assert!(!cwd.path().join(".locus.toml").exists());
     assert!(!home.path().join("bindings/stale-probe.toml").exists());
 }
+
+/// `locus pin nosuch` / `enter nosuch` / `switch nosuch` on a stale pin must
+/// not recommend `locus enter nosuch` (a binding that does not exist, so the
+/// recipe would fail at its last step). Fall back to the stale pin's own
+/// binding, which does exist. `leave` names it too instead of `<alias>`.
+#[test]
+fn stale_pin_recovery_never_names_a_missing_binding() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+
+    for args in [
+        &["pin", "nosuch"][..],
+        &["enter", "nosuch"][..],
+        &["--json", "switch", "nosuch"][..],
+        &["leave"][..],
+    ] {
+        let out = locus_fail_closed(home.path(), cwd.path(), &cap, args);
+        assert!(!out.status.success(), "{args:?} must fail closed");
+        let err = stderr(&out);
+        assert!(
+            !err.contains("locus enter nosuch"),
+            "{args:?} must not suggest a missing binding: {err}"
+        );
+        assert!(
+            err.contains("locus leave --force; locus enter personal"),
+            "{args:?} must name the stale pin's binding: {err}"
+        );
+    }
+    assert!(!home.path().join("bindings/nosuch.toml").exists());
+}
