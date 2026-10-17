@@ -93,5 +93,10 @@ jobs:
       - name: Release build
         run: cargo build --workspace --release
 
+      # npm wrappers at the Cargo version and packable; release locus-mcp keeps
+      # the MCP surface Phantom's companion smoke drives. About 1s.
+      - name: Release and Phantom contract
+        run: node scripts/ci/phantom-contract.mjs
+
       - name: Recipes (examples/recipes against the release build)
         run: node --test examples/recipes

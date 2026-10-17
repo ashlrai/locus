@@ -42,7 +42,8 @@ jobs:
           tool: cargo-nextest
 
       - name: Install jq
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
+        # ubuntu-latest ships jq; apt only runs if an image ever drops it.
+        run: command -v jq >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
 
       - name: Invariant suite (locus-core)
         run: cargo nextest run -p locus-core --test invariants --locked --no-fail-fast

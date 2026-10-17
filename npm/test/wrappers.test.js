@@ -15,7 +15,11 @@ const wrappers = {
 
 function releaseMatrixTargets() {
   const yml = readFileSync(join(root, ".github", "workflows", "release.yml"), "utf8");
-  return [...yml.matchAll(/^\s*-\s*target:\s*([\w-]+)\s*$/gm)].map((m) => m[1]).sort();
+  // Each build job lists its targets space-separated (both macOS targets
+  // share one job), so collect every name from every `targets:` line.
+  return [...yml.matchAll(/^\s*targets:\s*([\w -]+?)\s*$/gm)]
+    .flatMap((m) => m[1].split(/\s+/))
+    .sort();
 }
 
 for (const [name, file] of Object.entries(wrappers)) {
