@@ -49,3 +49,48 @@ fn quickstart_then_enter_switches_binding() {
     assert!(who.status.success(), "whoami failed: {who:?}");
     assert!(out.contains("acme"), "whoami should report acme: {out}");
 }
+
+/// Next-step hints for exporting the control capability follow `$SHELL`
+/// (fish needs `| source`, not `eval "$(…)"`); they used to always say zsh.
+#[test]
+fn capability_hints_follow_the_users_shell() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let run = |shell: &str, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_locus"))
+            .args(args)
+            .env("LOCUS_HOME", home.path())
+            .env_remove("LOCUS_CONTROL_CAPABILITY")
+            .env("SHELL", shell)
+            .env("NO_COLOR", "1")
+            .current_dir(cwd.path())
+            .output()
+            .expect("locus binary runs")
+    };
+
+    let qs = run("/usr/bin/fish", &["quickstart"]);
+    assert!(qs.status.success(), "quickstart failed: {qs:?}");
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&qs.stdout),
+        String::from_utf8_lossy(&qs.stderr)
+    );
+    assert!(all.contains("locus hook fish | source"), "{all}");
+    assert!(
+        !all.contains("hook zsh"),
+        "fish user told to use zsh: {all}"
+    );
+
+    // Persisted but not exported: doctor names the user's shell.
+    let doctor = run("/bin/bash", &["doctor"]);
+    let out = String::from_utf8_lossy(&doctor.stdout);
+    assert!(
+        out.contains("control_capability_not_exported"),
+        "doctor: {out}"
+    );
+    assert!(out.contains("eval \"$(locus hook bash)\""), "doctor: {out}");
+    assert!(
+        !out.contains("hook zsh"),
+        "bash user told to use zsh: {out}"
+    );
+}

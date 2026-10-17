@@ -27,6 +27,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   required" and `locus_request_pin {"alias": 42}` "alias required". They are
   now an `isError` result such as `` `claim` must be a string, got number ``.
   A missing `locus_request_pin` alias points at `locus_list_bindings`.
+- **Stale-pin recovery never names a binding that does not exist.** On a stale
+  pin, `locus pin nosuch` / `enter nosuch` / `switch nosuch` ended the recovery
+  recipe with `locus enter nosuch`, which would fail at its last step. The
+  requested alias is named only when that binding exists; otherwise the recipe
+  names the stale pin's own binding (as `whoami` does). `locus leave` on a stale
+  pin now names that binding too instead of `<alias>`.
+- **Control-capability hints follow `$SHELL`.** `init` / `quickstart` notes,
+  `capability persist`, the quickstart "daily path" line, the missing-capability
+  error and the `doctor` capability findings always said
+  `eval "$(locus hook zsh)"`. They now name the user's shell (zsh, fish as
+  `locus hook fish | source`, else bash), like the stale-pin recovery already did.
+- **`locus approve grant --ttl` is bounded.** It still used the lenient parser:
+  `--ttl 0s`, `--ttl=-5m` and `--ttl=` were accepted. It now takes 1s to 24h
+  like `ci mint` / `mcp mint` and fails before the approval record is read.
+- **`locus watch` says why a tick is not ok.** A present but unverifiable pin
+  was labelled `unpinned` next to `pinned=true`; it is now `invalid` (the
+  `status --oneline` token). When the pin is ready but doctor is WARN/UNSAFE the
+  tick printed only "next ready — Proceed" before exiting 1; it now adds a
+  `why` line with the doctor verdict and finding codes. `--json` is unchanged.
+
 - **MCP control tools enforce their closed schemas.** The `locus_*` tools
   publish `additionalProperties: false` but ignored undeclared keys
   (`locus_whoami {"binding": "acme"}`) and non-object `arguments` (`"acme"`),
