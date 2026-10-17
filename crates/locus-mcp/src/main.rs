@@ -34,8 +34,8 @@ use http_session::{
 use locus_core::{
     build_doctor_report, call_tool_gated, compute_safe_next, control_tools, enforce_policy,
     find_workspace, gather_doctor_external, load_config, split_namespaced_tool, tools_for_binding,
-    verify_claim, verify_session, AdapterTool, ApprovalGate, Binding, Session, Store,
-    WorkerManager, VERSION,
+    validate_control_args, verify_claim, verify_session, AdapterTool, ApprovalGate, Binding,
+    Session, Store, WorkerManager, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -3028,13 +3028,26 @@ fn resource_doctor_json(scope: &RequestScope) -> std::result::Result<Value, Valu
 }
 
 /// Agent-facing text for `locus_request_pin` / `locus_enter_hint` when the
-/// alias names no binding: say so, and point the human at binding setup
-/// instead of a `locus enter` that cannot succeed.
-fn unknown_binding_message(alias: &str) -> String {
-    format!(
-        "There is no binding `{alias}`, so there is nothing to pin. Agents cannot pin or create bindings. \
-         Human: run `locus binding list` to see configured aliases, or `locus binding add {alias}` to create it, \
-         then `locus enter <alias>`."
+/// alias names no binding: say so, name the closest configured alias when the
+/// miss looks like a typo (the agent may retry with it), and point the human at
+/// binding setup instead of a `locus enter` that cannot succeed.
+fn unknown_binding_message(s: &Store, alias: &str) -> (String, Option<String>) {
+    let aliases: Vec<String> = s
+        .list_bindings()
+        .map(|list| list.into_iter().map(|b| b.alias).collect())
+        .unwrap_or_default();
+    let suggestion = locus_core::nearest_alias(alias, &aliases).map(str::to_owned);
+    let did_you_mean = suggestion
+        .as_deref()
+        .map(|best| format!("Did you mean `{best}`? "))
+        .unwrap_or_default();
+    (
+        format!(
+            "There is no binding `{alias}`, so there is nothing to pin. {did_you_mean}Agents cannot pin or create bindings. \
+             Human: run `locus binding list` to see configured aliases, or `locus binding add {alias}` to create it, \
+             then `locus enter <alias>`."
+        ),
+        suggestion,
     )
 }
 
@@ -3930,6 +3943,18 @@ fn call_control(
     args: &Value,
     scope: &RequestScope,
 ) -> std::result::Result<Value, Value> {
+    // The control schemas are closed (additionalProperties: false); a
+    // misspelled or mistyped argument is a tool error the model can correct,
+    // never silently ignored.
+    if let Err(e) = validate_control_args(name, args) {
+        return Ok(tool_text(
+            json!({
+                "error": e.to_string(),
+                "hint": format!("Retry `{name}` with only the arguments in its tools/list inputSchema."),
+            }),
+            true,
+        ));
+    }
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     // Heartbeat: detect drift and freeze when identity control tools are polled.
     if matches!(
@@ -4185,12 +4210,14 @@ fn call_control(
                 );
             }
             if let (Some(a), Some(false)) = (alias, exists) {
+                let (message, suggestion) = unknown_binding_message(&s, a);
                 return Ok(tool_text(
                     json!({
                         "agents_cannot_pin": true,
                         "alias": a,
                         "binding_exists": false,
-                        "message": unknown_binding_message(a),
+                        "did_you_mean": suggestion,
+                        "message": message,
                     }),
                     true,
                 ));
@@ -4256,11 +4283,13 @@ fn call_control(
             if !exists {
                 // Audited above for forensics, but there is nothing to pin:
                 // no request is pending and no `locus enter` would succeed.
+                let (message, suggestion) = unknown_binding_message(&s, alias);
                 return Ok(tool_text(
                     json!({
                         "requested": alias,
                         "binding_exists": false,
-                        "message": unknown_binding_message(alias),
+                        "did_you_mean": suggestion,
+                        "message": message,
                     }),
                     true,
                 ));

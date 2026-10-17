@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP `locus_request_pin` / `locus_enter_hint` name the alias an agent
+  mistyped.** `{"alias": "acmee"}` said only that no such binding exists, so the
+  agent had to list bindings and guess. The result now carries
+  `did_you_mean: "acme"` and the message says so, using the same match as the
+  CLI's `did you mean`.
+- **Alias suggestions no longer name an unrelated tenant.** Up to three edits
+  counted as a typo, so `locus switch nope` suggested `acme`. A suggestion now
+  needs at most one edit per three characters (`persnal` still suggests
+  `personal`).
+- **`locus exec` / `run` / `ci run` exit codes say whether the child ran.**
+  A command that could not be started exited 1, the same as a child that ran
+  and failed, so an agent could not tell "tests failed" from "command not
+  found". Not found now exits 127 and not executable 126 (shell convention),
+  with an error naming the next step (absolute path, `sh -c` for builtins);
+  `--json` keeps the JSON error line. A child killed by a signal exits
+  `128 + signal` instead of 1. `locus mcp --supervised` follows the same rules.
+- **A child that cannot start is still audited and cleaned up.** On a spawn
+  failure `exec`, `run`, `ci run` and `mcp --supervised` returned before their
+  audit event, and `run` / `ci run` also skipped removing their temporary
+  session. The event now records `exit` (127/126) and a `spawn_error`, and the
+  temporary session is removed.
+- **MCP control tools check argument types.** With undeclared keys refused
+  before dispatch (below), a declared argument of the wrong type still reached
+  the tool: `locus_verify_claim {"claim": 42}` answered only "text (or claim)
+  required" and `locus_request_pin {"alias": 42}` "alias required". They are
+  now an `isError` result such as `` `claim` must be a string, got number ``.
+  A missing `locus_request_pin` alias points at `locus_list_bindings`.
 - **`locus binding add` no longer silently replaces an existing binding.**
   Re-adding an alias overwrote its tenant, account, scope and credential ref
   with no warning, under every workspace that names it. It now refuses with

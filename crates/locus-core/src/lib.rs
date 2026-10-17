@@ -66,7 +66,7 @@ pub use adapter_trust::{
 };
 pub use adapters::{
     call_tool, call_tool_gated, control_tools, enforce_policy, known_providers, tools_for_binding,
-    AdapterTool, ApprovalGate, ToolCallResult,
+    validate_control_args, AdapterTool, ApprovalGate, ToolCallResult,
 };
 pub use agent_report::{
     agent_md_content, agent_md_path, agent_md_present, agent_report_from_doctor,
@@ -93,8 +93,8 @@ pub use authority_anchor::{
 };
 pub use autopin::{match_remote_binding, resolve_auto_pin, AutoPinTarget};
 pub use binding::{
-    validate_name_component, Binding, BindingBody, BindingSummary, Policy, PolicyRule,
-    ProviderBinding, Scope, UpstreamSpec,
+    edit_distance, nearest_alias, validate_name_component, Binding, BindingBody, BindingSummary,
+    Policy, PolicyRule, ProviderBinding, Scope, UpstreamSpec,
 };
 pub use config::{
     load_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig, NotifyConfig,

@@ -1068,10 +1068,102 @@ fn main() {
             } else {
                 eprintln!("{} {e:#}", "error:".red().bold());
             }
-            std::process::exit(1);
+            // A child that never started exits like a shell would (127 not
+            // found, 126 not executable), so callers can tell it apart from
+            // the child's own exit 1.
+            let code = e
+                .downcast_ref::<ChildSpawnError>()
+                .map_or(1, ChildSpawnError::exit_code);
+            std::process::exit(code);
         }
         Err(()) => std::process::exit(stdout::STDOUT_CLOSED_EXIT),
     }
+}
+
+/// A child command (`exec`, `run`, `ci run`, `mcp --supervised`) that could
+/// not be started at all. Carries the shell exit code for the failure.
+#[derive(Debug)]
+struct ChildSpawnError {
+    program: String,
+    source: std::io::Error,
+}
+
+impl ChildSpawnError {
+    /// 127 when the program is not found, 126 when it exists but cannot be
+    /// executed (the POSIX shell convention), 1 for any other spawn failure.
+    fn exit_code(&self) -> i32 {
+        match self.source.kind() {
+            std::io::ErrorKind::NotFound => 127,
+            std::io::ErrorKind::PermissionDenied => 126,
+            _ => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for ChildSpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let program = &self.program;
+        match self.source.kind() {
+            std::io::ErrorKind::NotFound => write!(
+                f,
+                "spawn {program}: command not found (exit 127). The child runs with the isolated env's PATH; check the name, pass an absolute path, or run `locus exec -- sh -c '<cmd>'` for shell builtins"
+            ),
+            std::io::ErrorKind::PermissionDenied => write!(
+                f,
+                "spawn {program}: permission denied (exit 126); the file is not executable (try `chmod +x {program}`) or is a directory"
+            ),
+            _ => write!(f, "spawn {program}: {}", self.source),
+        }
+    }
+}
+
+impl std::error::Error for ChildSpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Run a prepared child to completion; a spawn failure becomes a
+/// [`ChildSpawnError`] so `main` exits 127/126 instead of a bare 1.
+fn run_child(child: &mut Command, program: &str) -> Result<std::process::ExitStatus> {
+    child.status().map_err(|source| {
+        anyhow::Error::new(ChildSpawnError {
+            program: program.to_string(),
+            source,
+        })
+    })
+}
+
+/// Audit fields for a child run: its exit code (127/126 when it never
+/// started) and, when the spawn failed, why. A child that cannot start is
+/// still audited, and the run's temporary session still cleaned up.
+fn child_audit_fields(spawned: &Result<std::process::ExitStatus>) -> (Option<i32>, Option<String>) {
+    match spawned {
+        Ok(status) => (status.code(), None),
+        Err(e) => (
+            Some(
+                e.downcast_ref::<ChildSpawnError>()
+                    .map_or(1, ChildSpawnError::exit_code),
+            ),
+            Some(e.to_string()),
+        ),
+    }
+}
+
+/// Exit code to propagate for a finished child: its own code, or
+/// `128 + signal` when a signal killed it (shell convention), never a bare 1.
+fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
 }
 
 /// Set once `--json` is parsed so a failing command reports its error as JSON.
@@ -1753,34 +1845,6 @@ fn cwd() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Levenshtein distance over chars (small alias strings only).
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.iter().enumerate() {
-        let mut cur = vec![i + 1; b.len() + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
-        }
-        prev = cur;
-    }
-    prev[b.len()]
-}
-
-/// Closest known alias to a typo, if plausibly close (at most 3 edits and not
-/// a completely different word).
-fn nearest_alias<'a>(missing: &str, aliases: &'a [String]) -> Option<&'a str> {
-    let needle = missing.to_lowercase();
-    aliases
-        .iter()
-        .map(|c| (edit_distance(&needle, &c.to_lowercase()), c))
-        .filter(|(d, c)| *d <= 3 && *d < c.chars().count().max(needle.chars().count()))
-        .min_by_key(|(d, _)| *d)
-        .map(|(_, c)| c.as_str())
-}
-
 /// Alias ergonomics for enter/pin: a bare BindingNotFound becomes a message
 /// listing known aliases plus a nearest-match suggestion. Never alters the
 /// fail-closed outcome — only the operator-facing text.
@@ -1798,7 +1862,7 @@ fn with_alias_suggestions(s: &Store, err: locus_core::LocusError) -> anyhow::Err
                 "binding not found: {missing} (known aliases: {})",
                 aliases.join(", ")
             );
-            if let Some(best) = nearest_alias(missing, &aliases) {
+            if let Some(best) = locus_core::nearest_alias(missing, &aliases) {
                 msg.push_str(&format!(" — did you mean `{best}`?"));
             }
             return anyhow::anyhow!(msg);
@@ -3415,20 +3479,23 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         );
     }
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         "session.exec",
         &session.binding_alias,
         Some(serde_json::json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "secrets_resolved": iso.secrets_resolved,
             // names only — never values
             "secrets_failed": iso.secrets_failed,
         })),
     )?;
+    let status = spawned?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -3651,13 +3718,15 @@ fn cmd_ci_run(
         );
     }
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         "ci.run",
         &session.binding_alias,
         Some(serde_json::json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "session_id": session.session_id,
             "secrets_resolved": iso.secrets_resolved,
             "secrets_failed": iso.secrets_failed,
@@ -3666,8 +3735,9 @@ fn cmd_ci_run(
 
     let _ = s.cleanup_ci_session(&ci_path, &session);
 
+    let status = spawned?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -3820,13 +3890,15 @@ fn cmd_run(
         );
     }
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         "session.run",
         &session.binding_alias,
         Some(serde_json::json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "share_pin": share_pin,
             "session_id": session.session_id,
             "secrets_resolved": iso.secrets_resolved,
@@ -3839,8 +3911,9 @@ fn cmd_run(
         let _ = s.cleanup_run_session(&run_path, &session);
     }
 
+    let status = spawned?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -3885,20 +3958,23 @@ fn run_exact_session_child(
     }
     child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         audit_op,
         &session.binding_alias,
         Some(json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "session_id": session.session_id,
             "secrets_resolved": 0,
             "exact_session": true,
         })),
     )?;
+    let status = spawned?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -4085,21 +4161,24 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
         }
     }
 
-    let status = child.status().with_context(|| format!("spawn {bin}"))?;
+    let spawned = run_child(&mut child, &bin);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     if let Some((s, session)) = audit_ctx {
         s.audit(
             "session.mcp.supervised",
             &session.binding_alias,
             Some(json!({
                 "phase": "exit",
-                "exit": status.code(),
+                "exit": exit,
+                "spawn_error": spawn_error,
                 "session_id": session.session_id,
                 "secrets_resolved": 0,
             })),
         )?;
     }
+    let status = spawned?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -5477,7 +5556,7 @@ fn resolve_add_answers_interactive(s: &Store, args: &BindingAddArgs) -> Result<A
                 }
                 Ok(())
             })?;
-            if let Some(best) = nearest_alias(&v, &known) {
+            if let Some(best) = locus_core::nearest_alias(&v, &known) {
                 // Soft nudge only — never a hard block (short aliases collide easily).
                 if !prompt_confirm(
                     &format!("similar alias '{best}' already exists — continue with '{v}'?"),
@@ -9521,9 +9600,8 @@ mod switch_flow_tests {
 #[cfg(test)]
 mod alias_ux_tests {
     use super::{
-        edit_distance, missing_workspace_aliases, nearest_alias, repin_hint,
-        stdio_server_entry_toml, with_alias_suggestions, with_auto_alias_suggestions,
-        write_workspace_file,
+        missing_workspace_aliases, repin_hint, stdio_server_entry_toml, with_alias_suggestions,
+        with_auto_alias_suggestions, write_workspace_file,
     };
     use locus_core::{Binding, BindingBody, LocusError, Policy, ProviderBinding, Scope, Store};
 
@@ -9543,25 +9621,6 @@ mod alias_ux_tests {
                 upstream: None,
             }],
         })
-    }
-
-    #[test]
-    fn edit_distance_and_nearest_alias() {
-        assert_eq!(edit_distance("personal", "personal"), 0);
-        assert_eq!(edit_distance("personol", "personal"), 1);
-        assert_eq!(edit_distance("", "abc"), 3);
-
-        let aliases = vec![
-            "personal".to_string(),
-            "ashlrai".to_string(),
-            "cash-margin-partners".to_string(),
-        ];
-        assert_eq!(nearest_alias("personol", &aliases), Some("personal"));
-        assert_eq!(nearest_alias("ashlari", &aliases), Some("ashlrai"));
-        // Case-insensitive.
-        assert_eq!(nearest_alias("Personal", &aliases), Some("personal"));
-        // A completely different word gets no suggestion.
-        assert_eq!(nearest_alias("zzzzzzzzzz", &aliases), None);
     }
 
     #[test]
