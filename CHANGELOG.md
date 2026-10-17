@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A pending approval on one binding no longer blocks every other pin.**
+  `locus_safe_next`, `locus verify session`, `locus watch` and the agent
+  report returned `external_authorization` (not ready) for any pending
+  approval, so one `require_approval` hit on `acme` kept `personal` unready
+  until it was denied. Only the pinned binding's requests count now, and the
+  message names `locus approve deny <id>` to dismiss one.
 - **Unresolvable `phm:` credentials are no longer silent.** `locus doctor`
   only checked `phantom list`, so a ref whose locator exists but which
   `phantom reveal` refuses (current Phantom Secrets refuses the
