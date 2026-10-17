@@ -829,8 +829,8 @@ enum ApproveCmd {
     Wait {
         /// Approval id (`appr_…`)
         id: String,
-        /// Seconds to wait (default: 120)
-        #[arg(long, default_value_t = 120)]
+        /// How long to wait: bare seconds or 90s / 2m / 1h (default: 120)
+        #[arg(long, default_value = "120", value_parser = parse_wait_timeout)]
         timeout: u64,
         /// Poll interval in milliseconds (default: 500)
         #[arg(long, default_value_t = 500)]
@@ -7202,24 +7202,39 @@ fn parse_watch_interval(s: &str) -> Result<std::time::Duration> {
     if s.is_empty() {
         return Ok(std::time::Duration::from_secs(5));
     }
-    let invalid = || anyhow!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)");
-    // Bare seconds (including multi-digit) before unit split so "10" → 10s not 1s.
-    let secs = if s.chars().all(|c| c.is_ascii_digit()) {
-        s.parse::<u64>().map_err(|_| invalid())?
-    } else {
-        let (num, unit) = s.split_at(s.len().saturating_sub(1));
-        let n: u64 = num.parse().map_err(|_| invalid())?;
-        match unit {
-            "s" | "S" => n,
-            "m" | "M" => n.saturating_mul(60),
-            "h" | "H" => n.saturating_mul(3600),
-            _ => return Err(invalid()),
-        }
-    };
+    let secs = parse_duration_secs(s)
+        .ok_or_else(|| anyhow!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)"))?;
     if secs == 0 {
         bail!("invalid watch interval '{s}': must be at least 1s (use e.g. 5s, 30s, 1m)");
     }
     Ok(std::time::Duration::from_secs(secs))
+}
+
+/// Whole seconds from `10` (bare seconds), `5s`, `2m` or `1h`. Shared by
+/// `watch --interval` and `approve wait --timeout`; callers apply their own floor.
+fn parse_duration_secs(s: &str) -> Option<u64> {
+    // Bare seconds (including multi-digit) before unit split so "10" → 10s not 1s.
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
+        return s.parse::<u64>().ok();
+    }
+    if !s.is_ascii() {
+        return None;
+    }
+    let (num, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: u64 = num.parse().ok()?;
+    match unit {
+        "s" | "S" => Some(n),
+        "m" | "M" => Some(n.saturating_mul(60)),
+        "h" | "H" => Some(n.saturating_mul(3600)),
+        _ => None,
+    }
+}
+
+/// clap parser for `approve wait --timeout`: same units as `watch --interval`;
+/// 0 keeps its meaning of a single status check.
+fn parse_wait_timeout(s: &str) -> std::result::Result<u64, String> {
+    parse_duration_secs(s.trim())
+        .ok_or_else(|| format!("use bare seconds or e.g. 90s, 2m, 1h (got '{s}')"))
 }
 
 fn print_doctor_human(report: &locus_core::DoctorReport) {
@@ -9875,6 +9890,42 @@ mod watch_heartbeat_tests {
             assert!(err.contains("at least 1s"), "{zero}: {err}");
         }
         assert_eq!(parse_watch_interval("1").unwrap(), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn approve_wait_timeout_accepts_watch_units() {
+        use clap::Parser;
+        for (raw, secs) in [("1s", 1), ("2m", 120), ("1h", 3600), ("45", 45), ("0", 0)] {
+            let cli = super::Cli::try_parse_from([
+                "locus",
+                "approve",
+                "wait",
+                "appr_x",
+                "--timeout",
+                raw,
+            ])
+            .unwrap_or_else(|e| panic!("{raw}: {e}"));
+            match cli.command {
+                super::Commands::Approve(super::ApproveCmd::Wait { timeout, .. }) => {
+                    assert_eq!(timeout, secs, "{raw}")
+                }
+                _ => panic!("{raw}: not parsed as approve wait"),
+            }
+        }
+        for bad in ["1.5m", "5x", "", "-1s"] {
+            assert!(
+                super::Cli::try_parse_from([
+                    "locus",
+                    "approve",
+                    "wait",
+                    "appr_x",
+                    "--timeout",
+                    bad
+                ])
+                .is_err(),
+                "{bad} must be rejected"
+            );
+        }
     }
 
     #[test]

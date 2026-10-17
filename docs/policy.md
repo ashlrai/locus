@@ -145,7 +145,7 @@ locus approve deny appr_…
 | `locus approve list` | Pending rows; shows authoritative `0/N` and advisory assertion count |
 | `locus approve grant <id> [--as P] [--touchid]` | Records an untrusted local advisory label only; confirmation is not identity authority |
 | `locus approve status <id>` | Full record with explicit trust and disabled authority state |
-| `locus approve wait <id> [--timeout 120]` | Poll until approved / denied / timeout (exit non-zero on deny/timeout) |
+| `locus approve wait <id> [--timeout 120\|2m]` | Poll until approved / denied / timeout (exit non-zero on deny/timeout); `--timeout` takes bare seconds or 90s / 2m / 1h |
 | `locus approve deny <id>` | Terminal deny |
 
 Label default: `--as` → `LOCUS_PRINCIPAL` → `$USER`. These are caller-controlled strings, not authenticated identities.
