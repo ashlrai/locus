@@ -535,23 +535,41 @@ fn run_stdio() -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = stdin.lock();
+    let mut seen_content_length = false;
 
     loop {
         let Some((parsed, framing)) = read_frame(&mut reader)? else {
             break; // EOF
         };
+        seen_content_length |= framing == Framing::ContentLength;
 
-        let response = match parsed {
-            Ok(msg) => dispatch_rpc(&msg, &RequestScope::process()),
+        let (response, framing) = match parsed {
+            Ok(msg) => (dispatch_rpc(&msg, &RequestScope::process()), framing),
             // JSON-RPC 2.0: an unparseable message gets a Parse error with a
             // null id (the id cannot be known), never silence.
-            Err(e) => Some(parse_error_response(&e)),
+            Err(e) => (
+                Some(parse_error_response(&e)),
+                parse_error_framing(seen_content_length, framing),
+            ),
         };
         if let Some(response) = response {
             write_message(&mut stdout, &response, framing)?;
         }
     }
     Ok(())
+}
+
+/// Framing for a Parse error reply. Once the client has spoken
+/// Content-Length, stray bytes (e.g. the tail left by a too-short
+/// Content-Length) read back as an NDJSON line must still be answered with a
+/// Content-Length frame: a bare JSON line would land in the client's header
+/// parser and desync every later response.
+fn parse_error_framing(seen_content_length: bool, frame: Framing) -> Framing {
+    if seen_content_length {
+        Framing::ContentLength
+    } else {
+        frame
+    }
 }
 
 /// Dispatch one JSON-RPC request/notification.
@@ -4605,6 +4623,32 @@ mod stdio_framing_tests {
         let (msg, framing) = read_message(&mut reader).unwrap().unwrap();
         assert_eq!(framing, Framing::Ndjson);
         assert_eq!(msg["id"], 7);
+    }
+
+    #[test]
+    fn parse_error_after_content_length_stays_content_length_framed() {
+        // A too-short Content-Length leaves the body tail on the wire; it is
+        // read back as an NDJSON garbage line. Its Parse error must not go out
+        // as a bare JSON line to a Content-Length client.
+        let body = r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#;
+        let raw = format!("Content-Length: {}\r\n\r\n{body}\r\n", body.len() - 3);
+        let mut reader = Cursor::new(raw.into_bytes());
+        let mut seen = false;
+        let mut framings = Vec::new();
+        while let Some((parsed, framing)) = read_frame(&mut reader).unwrap() {
+            seen |= framing == Framing::ContentLength;
+            assert!(parsed.is_err());
+            framings.push((framing, parse_error_framing(seen, framing)));
+        }
+        assert_eq!(
+            framings,
+            vec![
+                (Framing::ContentLength, Framing::ContentLength),
+                (Framing::Ndjson, Framing::ContentLength),
+            ]
+        );
+        // A pure NDJSON client keeps NDJSON replies.
+        assert_eq!(parse_error_framing(false, Framing::Ndjson), Framing::Ndjson);
     }
 
     #[test]
