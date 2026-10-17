@@ -3390,6 +3390,26 @@ fn status_pin_check(s: &Store, session: &Session, seal_ok: bool) -> StatusPinChe
     }
 }
 
+/// Refuse a child command that starts with `-`. clap hands everything from
+/// the first unknown option onward to the trailing command, so a mistyped or
+/// unsupported option (`locus exec --binding acme -- cmd`,
+/// `locus run -b x --strict-cred -- cmd`) used to mint a session, write an
+/// audit event and then fail to spawn `--binding` (exit 127). No executable
+/// name starts with `-`, so nothing legitimate is refused.
+fn reject_option_as_command(command: &str, args: &[String]) -> Result<()> {
+    let Some(first) = args.first().filter(|a| a.starts_with('-')) else {
+        return Ok(());
+    };
+    let hint = if command == "exec" && (first == "--binding" || first == "-b") {
+        " `locus exec` always runs as the pinned binding; for another binding use \
+         `locus run --binding <alias> -- <command>`."
+            .to_string()
+    } else {
+        format!(" Check the spelling against `locus {command} --help`; options go before `--`.")
+    };
+    bail!("`{first}` is not a `locus {command}` option, and a command cannot start with `-`; nothing ran.{hint}");
+}
+
 fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Result<()> {
     if cmd.is_empty() {
         bail!("usage: locus exec -- <command> [args...]");
@@ -3402,6 +3422,7 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     if args.is_empty() {
         bail!("usage: locus exec -- <command> [args...]");
     }
+    reject_option_as_command("exec", &args)?;
 
     let s = store()?;
     if let Some(session) = delegated_child_session(&s)? {
@@ -3621,6 +3642,7 @@ fn cmd_ci_run(
     if args.is_empty() {
         bail!("usage: locus ci run -b <alias> -- <command> [args...]");
     }
+    reject_option_as_command("ci run", &args)?;
     // Same bounds as `locus enter --ttl`: a zero or negative TTL would mint an
     // already-expired session, and an over-long one would be capped silently.
     let ttl_dur = parse_mint_ttl(&ttl)?;
@@ -3651,7 +3673,9 @@ fn cmd_ci_run(
             "ci.run.delegated",
         );
     }
-    let binding = s.load_binding(&binding_alias)?;
+    let binding = s
+        .load_binding(&binding_alias)
+        .map_err(|e| with_alias_suggestions(&s, e))?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::CiRun)?;
 
     // Snapshot parent pin (active.json / LOCUS_SESSION_ID) before mint.
@@ -3762,6 +3786,7 @@ fn cmd_run(
     if args.is_empty() {
         bail!("usage: locus run -b <alias> -- <command> [args...]");
     }
+    reject_option_as_command("run", &args)?;
 
     let s = store()?;
     if let Some(session) = delegated_child_session(&s)? {
@@ -3792,7 +3817,9 @@ fn cmd_run(
             "session.run.delegated",
         );
     }
-    let binding = s.load_binding(&binding_alias)?;
+    let binding = s
+        .load_binding(&binding_alias)
+        .map_err(|e| with_alias_suggestions(&s, e))?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Run)?;
     // Capture parent pin (if any) so we can prove it is unchanged after run
     // when share_pin is false.

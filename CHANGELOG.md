@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`locus exec` / `run` / `ci run` refuse an option in the command
+  position.** clap passes everything from the first unknown option onward to
+  the child command, so `locus exec --binding acme -- cmd` (exec has no
+  `--binding`) and `locus run -b x --strict-cred -- cmd` minted a session,
+  wrote an audit event and then failed to spawn `--binding` with exit 127, and
+  the exec ran as the pinned binding rather than `acme`. A command starting with
+  `-` now exits 1 before anything runs, naming the option; for exec's
+  `--binding` it points to `locus run --binding <alias> -- <command>`.
+- **`locus run` / `ci run --binding <typo>` name the known aliases.** They said
+  only `binding not found: acmee`; they now list the aliases and suggest the
+  nearest one, as `switch` and `binding show` already did.
 - **MCP `locus_request_pin` / `locus_enter_hint` name the alias an agent
   mistyped.** `{"alias": "acmee"}` said only that no such binding exists, so the
   agent had to list bindings and guess. The result now carries
