@@ -435,7 +435,13 @@ fn anchor_unverified_due_to_absent_capability(
 pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Result<DoctorReport> {
     let home = store.home().display().to_string();
     let seal_ok = store.seal_key().is_ok();
-    let binding_summaries = store.list_bindings()?;
+    // A malformed or unreadable binding file makes `list_bindings` fail
+    // closed. Doctor is the tool an operator reaches for in exactly that
+    // state, so report it as an UNSAFE finding instead of aborting.
+    let (binding_summaries, binding_store_error) = match store.list_bindings() {
+        Ok(list) => (list, None),
+        Err(err) => (Vec::new(), Some(err)),
+    };
     let bindings = binding_summaries.len();
     // Freeze on drift first so findings reflect the frozen session state.
     //
@@ -534,6 +540,17 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     }
 
     // ── Unsafe ────────────────────────────────────────────────────────────
+    if let Some(ref err) = binding_store_error {
+        findings.push(issue(
+            IssueSeverity::Unsafe,
+            "binding_invalid",
+            format!(
+                "{err} — fix or remove the file in {}; `locus binding list` \
+                 fails closed until then",
+                store.bindings_dir().display()
+            ),
+        ));
+    }
     let migration_readiness = crate::credential_migration::migration_readiness(store);
     if !migration_readiness.ready() {
         findings.push(issue(
@@ -688,7 +705,7 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     }
 
     // ── Warn ──────────────────────────────────────────────────────────────
-    if bindings == 0 {
+    if bindings == 0 && binding_store_error.is_none() {
         findings.push(issue(
             IssueSeverity::Warn,
             "no_bindings",
@@ -1732,6 +1749,43 @@ require_pin = true
         assert!(report.workspace.require_pin);
         assert!(report.findings.iter().any(|f| f.code == "require_pin"));
         assert_eq!(report.verdict, DoctorVerdict::Warn);
+    }
+
+    #[test]
+    fn doctor_reports_malformed_binding_file_instead_of_aborting() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        std::fs::write(store.bindings_dir().join("broken.toml"), "garbage [[").unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .expect("doctor must report, not abort, on a malformed binding file");
+        assert_eq!(report.verdict, DoctorVerdict::Unsafe);
+        assert_eq!(report.verdict.exit_code(), 2);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.code == "binding_invalid")
+            .expect("binding_invalid finding");
+        assert!(finding.message.contains("'broken'"), "{}", finding.message);
+        assert!(
+            finding
+                .message
+                .contains(&store.bindings_dir().display().to_string()),
+            "{}",
+            finding.message
+        );
+        // Not misreported as an empty store.
+        assert!(!report.findings.iter().any(|f| f.code == "no_bindings"));
     }
 
     #[test]
