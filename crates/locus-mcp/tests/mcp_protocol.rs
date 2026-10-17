@@ -593,6 +593,58 @@ fn direct_stdio_with_pin_but_no_executor_capability_exposes_no_provider_tools() 
 }
 
 #[test]
+fn control_tool_errors_name_the_next_step() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    store
+        .pin("acme", dir.path(), Some("local-control".into()), false)
+        .unwrap();
+
+    let mut client = McpClient::spawn_opts(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[(locus_core::EXECUTOR_CAPABILITY_ENV, "")],
+    );
+    handshake(&mut client);
+
+    // Pin present but unobservable from this process: providers must say how
+    // to launch, like locus_whoami, not return a bare error string.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_providers", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&resp);
+    assert!(is_err, "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["status"], "executor_authority_unavailable", "{text}");
+    assert!(
+        body["hint"]
+            .as_str()
+            .is_some_and(|h| h.contains("locus mcp --supervised")),
+        "{text}"
+    );
+
+    for args in [json!({}), json!({ "alias": 42 }), json!({ "alias": "" })] {
+        let resp = client.request(
+            "tools/call",
+            json!({ "name": "locus_request_pin", "arguments": args }),
+        );
+        let (text, is_err) = McpClient::tool_text(&resp);
+        assert!(is_err, "{text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"], "alias required", "{text}");
+        assert!(
+            body["hint"]
+                .as_str()
+                .is_some_and(|h| h.contains("locus_list_bindings")),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn ndjson_provider_call_not_pinned() {
     let dir = tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();

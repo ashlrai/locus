@@ -1699,6 +1699,18 @@ impl Store {
             )));
         }
 
+        // Pre-flight every refusal BEFORE the first write: a `.locus.toml`
+        // conflict found after the binding was saved left a half-created
+        // engagement whose retry then failed on "binding already exists".
+        let workspace_target = cwd.join(".locus.toml");
+        if write_workspace && workspace_target.exists() && !force {
+            return Err(LocusError::msg(format!(
+                "{} already exists — nothing was created; re-run with --force to overwrite it, \
+                 or without --workspace to keep it",
+                workspace_target.display()
+            )));
+        }
+
         let binding = client_binding_template(alias, tenant);
         let path = self.save_binding(&binding)?;
 
@@ -1708,12 +1720,7 @@ impl Store {
 
         let mut workspace_path = None;
         if write_workspace {
-            let wp = cwd.join(".locus.toml");
-            if wp.exists() && !force {
-                return Err(LocusError::msg(
-                    ".locus.toml already exists — use --force or skip --workspace",
-                ));
-            }
+            let wp = workspace_target;
             let cfg = WorkspaceConfig {
                 version: 1,
                 default_binding: Some(alias.to_string()),
@@ -4552,6 +4559,42 @@ credential_ref = "ghp_UNSAFE/CANARY"
             store.require_active().unwrap_err(),
             LocusError::NotPinned
         ));
+    }
+
+    #[test]
+    fn engagement_init_workspace_conflict_creates_nothing() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("locus-home");
+        let project = dir.path().join("client");
+        fs::create_dir_all(&project).unwrap();
+        let existing = "version = 1\ndefault_binding = \"other\"\n";
+        fs::write(project.join(".locus.toml"), existing).unwrap();
+        let store = Store::open(&home).unwrap();
+
+        let err = store
+            .engagement_init("acme", "acme-corp", &project, true, true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing was created"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+        // Refused before any write: no binding, no engagement meta, workspace intact.
+        assert!(matches!(
+            store.load_binding("acme").unwrap_err(),
+            LocusError::BindingNotFound(_)
+        ));
+        assert!(store.load_engagement_meta("acme").unwrap().is_none());
+        assert_eq!(
+            fs::read_to_string(project.join(".locus.toml")).unwrap(),
+            existing
+        );
+        assert!(!project.join(".locus").exists());
+
+        // The suggested retry (skip --workspace) now succeeds.
+        let init = store
+            .engagement_init("acme", "acme-corp", &project, false, false, false)
+            .unwrap();
+        assert!(init.binding_path.exists());
+        assert!(init.workspace_path.is_none());
     }
 
     #[test]
