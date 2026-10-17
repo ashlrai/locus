@@ -1060,11 +1060,32 @@ fn main() {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             let e = stale_pin_recovery_fallback(e);
-            eprintln!("{} {e:#}", "error:".red().bold());
+            if JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed) {
+                emit_json_error(&e);
+            } else {
+                eprintln!("{} {e:#}", "error:".red().bold());
+            }
             std::process::exit(1);
         }
         Err(()) => std::process::exit(stdout::STDOUT_CLOSED_EXIT),
     }
+}
+
+/// Set once `--json` is parsed so a failing command reports its error as JSON.
+static JSON_ERRORS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Machine-readable form of a top-level CLI error, matching the `ok` field the
+/// success payloads carry. Same text as the human `error:` line (never secrets).
+fn json_error_payload(e: &anyhow::Error) -> serde_json::Value {
+    json!({ "ok": false, "error": format!("{e:#}") })
+}
+
+/// Print the JSON error as one line on stderr. Stdout keeps the existing
+/// `--json` stream contract (at most one JSON document, e.g. the
+/// `verify session` pack printed before its non-zero exit); errors stay on
+/// stderr, now parseable instead of a human `error:` line.
+fn emit_json_error(e: &anyhow::Error) {
+    eprintln!("{}", json_error_payload(e));
 }
 
 fn run() -> Result<()> {
@@ -1078,6 +1099,7 @@ fn run() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    JSON_ERRORS.store(cli.json, std::sync::atomic::Ordering::Relaxed);
     match cli.command {
         Commands::Init {
             with_samples,
@@ -5848,7 +5870,27 @@ fn cmd_workspace(
     };
     std::fs::write(&path, cfg.to_toml()?)?;
     println!("{} wrote {}", "ok".green().bold(), path.display());
+    // Advisory only: README/e2e flows name aliases before they exist locally,
+    // so a missing binding is a warning (stderr, exit 0), not a rejection.
+    if let Ok(known) = store().and_then(|s| Ok(s.list_bindings()?)) {
+        let known: Vec<&str> = known.iter().map(|b| b.alias.as_str()).collect();
+        for alias in missing_workspace_aliases(&cfg.allowed_bindings, &known) {
+            eprintln!(
+                "{} binding '{alias}' does not exist yet; `locus enter {alias}` will fail until you add it: locus binding add {alias} --provider <provider> --account <label> --credential-ref phm:NAME",
+                "warning:".yellow().bold(),
+            );
+        }
+    }
     Ok(())
+}
+
+/// Workspace aliases (default first, then allowlist) with no local binding.
+fn missing_workspace_aliases<'a>(aliases: &'a [String], known: &[&str]) -> Vec<&'a str> {
+    aliases
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !known.contains(a))
+        .collect()
 }
 
 fn cmd_doctor(json: bool) -> Result<()> {
