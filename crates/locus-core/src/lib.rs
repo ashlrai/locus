@@ -181,7 +181,9 @@ pub use workers::{
     WorkerState, WorkerToolResult, ENV_WORKER_IDLE_SECS, ENV_WORKER_SANDBOX, ENV_WORKER_SANDBOXED,
     ENV_WORKER_SANDBOX_BACKEND, ENV_WORKER_SANDBOX_NO_NETWORK,
 };
-pub use workspace::{find_workspace, WorkspaceConfig};
+pub use workspace::{
+    find_workspace, path_entry_exists, stage_file_replace, StagedFile, WorkspaceConfig,
+};
 
 /// Crate version for `locus --version` / doctor.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

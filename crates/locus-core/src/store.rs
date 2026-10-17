@@ -1702,14 +1702,49 @@ impl Store {
         // Pre-flight every refusal BEFORE the first write: a `.locus.toml`
         // conflict found after the binding was saved left a half-created
         // engagement whose retry then failed on "binding already exists".
+        // Existence is checked without following a final symlink: a dangling
+        // `.locus.toml` link reads as absent through `exists()`, and writing
+        // through it created the link's target outside the project.
         let workspace_target = cwd.join(".locus.toml");
-        if write_workspace && workspace_target.exists() && !force {
+        if write_workspace && crate::workspace::path_entry_exists(&workspace_target) && !force {
             return Err(LocusError::msg(format!(
                 "{} already exists — nothing was created; re-run with --force to overwrite it, \
                  or without --workspace to keep it",
                 workspace_target.display()
             )));
         }
+        let locus_dir = cwd.join(".locus");
+        if write_readme {
+            match fs::symlink_metadata(&locus_dir) {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => {
+                    return Err(LocusError::msg(format!(
+                        "{} exists and is not a plain directory — nothing was created; move it aside \
+                         or re-run with --no-readme",
+                        locus_dir.display()
+                    )));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        // Staged before the binding is saved: an unwritable project directory
+        // (or a directory where `.locus.toml` should be) fails here, with
+        // nothing created.
+        let staged_workspace = if write_workspace {
+            let cfg = WorkspaceConfig {
+                version: 1,
+                default_binding: Some(alias.to_string()),
+                allowed_bindings: vec![alias.to_string()],
+                require_pin: true,
+            };
+            Some(crate::workspace::stage_file_replace(
+                &workspace_target,
+                cfg.to_toml()?.as_bytes(),
+            )?)
+        } else {
+            None
+        };
 
         let binding = client_binding_template(alias, tenant);
         let path = self.save_binding(&binding)?;
@@ -1718,29 +1753,23 @@ impl Store {
         meta.description = Some(format!("{tenant} client engagement"));
         engagement::write_meta(&self.engagements_dir(), &meta)?;
 
-        let mut workspace_path = None;
-        if write_workspace {
-            let wp = workspace_target;
-            let cfg = WorkspaceConfig {
-                version: 1,
-                default_binding: Some(alias.to_string()),
-                allowed_bindings: vec![alias.to_string()],
-                require_pin: true,
-            };
-            fs::write(&wp, cfg.to_toml()?)?;
-            workspace_path = Some(wp);
-        }
+        let workspace_path = match staged_workspace {
+            Some(staged) => Some(staged.commit()?),
+            None => None,
+        };
 
         let mut readme_path = None;
         if write_readme {
-            let locus_dir = cwd.join(".locus");
             fs::create_dir_all(&locus_dir)?;
             let rp = locus_dir.join("README.md");
-            if rp.exists() && !force {
+            if crate::workspace::path_entry_exists(&rp) && !force {
                 // Non-fatal: binding already created
             } else {
-                fs::write(&rp, engagement_readme(alias, tenant))?;
-                readme_path = Some(rp);
+                let staged = crate::workspace::stage_file_replace(
+                    &rp,
+                    engagement_readme(alias, tenant).as_bytes(),
+                )?;
+                readme_path = Some(staged.commit()?);
             }
         }
 
@@ -4595,6 +4624,81 @@ credential_ref = "ghp_UNSAFE/CANARY"
             .unwrap();
         assert!(init.binding_path.exists());
         assert!(init.workspace_path.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn engagement_init_never_writes_through_a_dangling_workspace_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("locus-home");
+        let project = dir.path().join("client");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink("../outside/planted.toml", project.join(".locus.toml")).unwrap();
+        let store = Store::open(&home).unwrap();
+
+        // A dangling link is an existing entry: refused without --force.
+        let err = store
+            .engagement_init("acme", "acme-corp", &project, true, false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing was created"), "{err}");
+        assert!(!outside.join("planted.toml").exists());
+        assert!(store.load_binding("acme").is_err());
+
+        // --force replaces the link itself, never its target.
+        let init = store
+            .engagement_init("acme", "acme-corp", &project, true, false, true)
+            .unwrap();
+        assert!(!outside.join("planted.toml").exists());
+        let wp = init.workspace_path.unwrap();
+        assert!(!fs::symlink_metadata(&wp).unwrap().file_type().is_symlink());
+        assert!(fs::read_to_string(&wp)
+            .unwrap()
+            .contains("default_binding = \"acme\""));
+    }
+
+    #[test]
+    fn engagement_init_readme_or_workspace_obstruction_creates_nothing() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("locus-home");
+        let store = Store::open(&home).unwrap();
+
+        // `.locus` is a file: the README directory cannot be created.
+        let p1 = dir.path().join("p1");
+        fs::create_dir_all(&p1).unwrap();
+        fs::write(p1.join(".locus"), "").unwrap();
+        let err = store
+            .engagement_init("acme", "acme-corp", &p1, false, true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("nothing was created") && err.contains("--no-readme"),
+            "{err}"
+        );
+        assert!(store.load_binding("acme").is_err());
+        assert!(store.load_engagement_meta("acme").unwrap().is_none());
+
+        // `.locus.toml` is a directory: even --force cannot replace it.
+        let p2 = dir.path().join("p2");
+        fs::create_dir_all(p2.join(".locus.toml")).unwrap();
+        let err = store
+            .engagement_init("acme", "acme-corp", &p2, true, false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+        assert!(store.load_binding("acme").is_err());
+        assert!(store.load_engagement_meta("acme").unwrap().is_none());
+        assert_eq!(fs::read_dir(&p2).unwrap().count(), 1, "no staged file left");
+
+        // The retry the first error names succeeds.
+        let init = store
+            .engagement_init("acme", "acme-corp", &p1, false, false, false)
+            .unwrap();
+        assert!(init.binding_path.exists());
     }
 
     #[test]

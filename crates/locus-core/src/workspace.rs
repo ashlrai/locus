@@ -97,6 +97,97 @@ pub fn find_workspace(start: &Path) -> Result<Option<(PathBuf, WorkspaceConfig)>
     Ok(None)
 }
 
+/// True when anything occupies `path`, a broken symlink included.
+///
+/// `Path::exists` follows a final symlink, so a dangling `.locus.toml` link
+/// reads as absent and a later `fs::write` would create the link's target
+/// outside the project. Writers check with this instead.
+pub fn path_entry_exists(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+/// A file written next to its destination and renamed into place by
+/// [`StagedFile::commit`]. Dropped without a commit, the staged copy is removed.
+#[derive(Debug)]
+pub struct StagedFile {
+    tmp: PathBuf,
+    target: PathBuf,
+    committed: bool,
+}
+
+impl StagedFile {
+    /// Rename the staged copy onto the destination. A symlink at the
+    /// destination is replaced itself; its target is never written.
+    pub fn commit(mut self) -> Result<PathBuf> {
+        fs::rename(&self.tmp, &self.target).map_err(|e| {
+            LocusError::msg(format!("could not write {}: {e}", self.target.display()))
+        })?;
+        self.committed = true;
+        Ok(self.target.clone())
+    }
+}
+
+impl Drop for StagedFile {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+/// Stage `contents` for `target` without following a symlink at `target`.
+///
+/// The caller decides whether an existing entry may be replaced (see
+/// [`path_entry_exists`]); this refuses only entries a file must never replace
+/// (a directory or other non-file). Staging proves the directory is writable,
+/// so a caller that stages before its other writes fails before making them.
+pub fn stage_file_replace(target: &Path, contents: &[u8]) -> Result<StagedFile> {
+    use std::io::Write as _;
+    match fs::symlink_metadata(target) {
+        Ok(m) if m.is_file() || m.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(LocusError::msg(format!(
+                "{} exists and is not a regular file; refusing to replace it",
+                target.display()
+            )));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(LocusError::msg(format!(
+                "could not inspect {}: {e}",
+                target.display()
+            )));
+        }
+    }
+    let dir = match target.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    let name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| LocusError::msg(format!("invalid file path {}", target.display())))?;
+    let tmp = dir.join(format!(
+        ".{name}.tmp-{}-{:016x}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    // create_new (O_EXCL) never follows a symlink planted at the temp name.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| LocusError::msg(format!("could not write in {}: {e}", dir.display())))?;
+    let staged = StagedFile {
+        tmp,
+        target: target.to_path_buf(),
+        committed: false,
+    };
+    file.write_all(contents)?;
+    file.sync_all()?;
+    Ok(staged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +282,52 @@ require_pin = true
         if let Err(error) = result {
             assert!(error.to_string().contains("unreadable"));
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_write_replaces_a_symlink_instead_of_writing_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let target = repo.join(".locus.toml");
+        symlink("../outside/planted.toml", &target).unwrap();
+        assert!(
+            !target.exists(),
+            "dangling link reads as absent through exists()"
+        );
+        assert!(path_entry_exists(&target));
+
+        let path = stage_file_replace(&target, b"version = 1\n")
+            .unwrap()
+            .commit()
+            .unwrap();
+        assert_eq!(path, target);
+        assert!(!outside.join("planted.toml").exists());
+        assert!(!fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "version = 1\n");
+        assert_eq!(fs::read_dir(&repo).unwrap().count(), 1, "no temp file left");
+    }
+
+    #[test]
+    fn staged_write_refuses_a_directory_and_cleans_up_when_dropped() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".locus.toml")).unwrap();
+        let err = stage_file_replace(&dir.path().join(".locus.toml"), b"x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+
+        let other = dir.path().join("other.toml");
+        drop(stage_file_replace(&other, b"x").unwrap());
+        assert!(!other.exists());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

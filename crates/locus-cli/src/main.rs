@@ -5926,7 +5926,10 @@ fn write_workspace_file(
     force: bool,
 ) -> Result<WorkspaceWrite> {
     let path = dir.join(".locus.toml");
-    if path.exists() && !force {
+    // Without following a final symlink: a dangling `.locus.toml` link reads
+    // as absent through `exists()`, and writing through it created the link's
+    // target outside the project.
+    if locus_core::path_entry_exists(&path) && !force {
         bail!(
             "{} already exists (pass --force to overwrite)",
             path.display()
@@ -5947,7 +5950,7 @@ fn write_workspace_file(
         allowed_bindings: allowed,
         require_pin,
     };
-    std::fs::write(&path, config.to_toml()?)?;
+    let path = locus_core::stage_file_replace(&path, config.to_toml()?.as_bytes())?.commit()?;
     Ok(WorkspaceWrite { path, config })
 }
 
@@ -7290,9 +7293,11 @@ fn parse_duration_secs(s: &str) -> Option<u64> {
     let (num, unit) = s.split_at(s.len().saturating_sub(1));
     let n: u64 = num.parse().ok()?;
     match unit {
+        // Overflow is invalid input, like an out-of-range bare number, not a
+        // silently saturated u64::MAX.
         "s" | "S" => Some(n),
-        "m" | "M" => Some(n.saturating_mul(60)),
-        "h" | "H" => Some(n.saturating_mul(3600)),
+        "m" | "M" => n.checked_mul(60),
+        "h" | "H" => n.checked_mul(3600),
         _ => None,
     }
 }
@@ -8447,7 +8452,13 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             use std::thread;
             use std::time::{Duration as StdDuration, Instant};
 
-            let deadline = Instant::now() + StdDuration::from_secs(timeout);
+            // `Instant + Duration` panics on overflow; an absurd --timeout is
+            // a usage error, not a crash.
+            let deadline = Instant::now()
+                .checked_add(StdDuration::from_secs(timeout))
+                .ok_or_else(|| {
+                    anyhow!("--timeout {timeout}s is too large (use e.g. 90s, 2m, 1h)")
+                })?;
             let interval = StdDuration::from_millis(interval_ms.max(50));
             loop {
                 let rec = s.load_approval(&id)?;
@@ -9523,6 +9534,29 @@ mod alias_ux_tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn workspace_write_never_follows_a_dangling_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::os::unix::fs::symlink("../planted.toml", repo.join(".locus.toml")).unwrap();
+        let planted = dir.path().join("planted.toml");
+
+        let err = write_workspace_file(&repo, "acme".into(), None, true, false)
+            .err()
+            .unwrap();
+        assert!(format!("{err}").contains("--force"), "{err}");
+        assert!(!planted.exists());
+
+        let w = write_workspace_file(&repo, "acme".into(), None, true, true).unwrap();
+        assert!(!planted.exists(), "wrote through the link");
+        assert!(!std::fs::symlink_metadata(&w.path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
     #[test]
     fn repin_hint_names_the_binding_just_left() {
         assert_eq!(
@@ -10066,7 +10100,16 @@ mod watch_heartbeat_tests {
                 _ => panic!("{raw}: not parsed as approve wait"),
             }
         }
-        for bad in ["1.5m", "5x", "", "-1s"] {
+        // Overflowing units used to saturate to u64::MAX and then panic in
+        // `Instant + Duration` ("overflow when adding duration to instant").
+        for bad in [
+            "1.5m",
+            "5x",
+            "",
+            "-1s",
+            "99999999999999999h",
+            "999999999999999999m",
+        ] {
             assert!(
                 super::Cli::try_parse_from([
                     "locus",
