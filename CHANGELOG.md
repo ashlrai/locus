@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP: a mistyped control tool or argument names the nearest match.**
+  `locus_whoam` answered only "unknown tool ... control tools are listed by
+  tools/list", and an undeclared key listed the allowed ones without saying
+  which was meant. Both -32602 errors now end with "Did you mean
+  `locus_whoami`?" / "Did you mean `aliass` -> `alias`?" when one name is
+  close (the same match `locus_request_pin` uses for aliases).
+- **The unpinned error says `locus enter`.** `no active pin` told people to
+  run `locus pin <alias>`, while `status` and `leave` said `locus enter
+  <alias>`; it now says `locus enter <alias>` and that `locus binding list`
+  shows the aliases.
 - **`locus events --op/--binding` with no match names what the log holds.**
   A mistyped filter (`--op pinn`, `--binding acmee`) printed only "no audit
   events matching op=pinn", so the next query was a guess. The human output now
