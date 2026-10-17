@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-16
+
 ### Added
 
 - **Gemini CLI support.** `locus setup --client gemini` and
@@ -15,33 +17,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into the user file only when it exists. Other keys and servers are preserved
   and malformed JSON is refused untouched. `agent doctor` and the agent report
   gain `mcp_registered.gemini` (additive, defaults to false).
-
-### Fixed
-
-- **Control commands name the stale-pin recovery.** After the pinning shell
-  exits, `locus workspace`, `binding add`, `notify`, `init` and other control
-  commands failed closed with only "human re-pin required". They now print the
-  same `eval "$(locus hook bash)"; locus leave --force; locus enter <alias>`
-  recovery that `enter`, `leave` and `status` already did. Still fails closed.
-- **`locus doctor` reports a malformed binding file instead of aborting.** One
-  unparseable `bindings/*.toml` made `doctor` (and `doctor --json`) exit 1 with
-  a bare error and no report. It now completes, flags an UNSAFE
-  `binding_invalid` finding naming the bindings directory, and exits 2.
-- **npm: a root global install no longer breaks `locus` for other users.** The
-  postinstall replaced the shared bin with a symlink into the installer's HOME
-  (e.g. `/root/.locus/bin`, behind a 0700 `/root`), so other users got
-  "Permission denied". A root install now keeps the wrapper when it is
-  reachable by other users and the native binary is not.
-- **`locus-mcp --version` / `-V`** print `locus-mcp <version>` and exit 0
-  (was "unknown argument", exit 1).
-- **Docs:** the npm README quick start adds the `eval "$(locus hook bash)"`
-  step `pin` needs and links `@ashlrai/locus-mcp` (not an unrelated package);
-  the main README registers `locus mcp --supervised` for provider tools and says
-  plain `locus-mcp` serves control tools only.
-
-## [0.5.1] — 2026-10-16
-
-### Added
 
 - **`locus onboard` wizard and community adapter marketplace** (#85, ported from the
   closed #56). Community adapters are publisher-supplied executable code: a trusted
@@ -66,6 +41,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identifier are intentionally unchanged.
 
 ### Fixed
+
+- **Control commands name the stale-pin recovery.** After the pinning shell
+  exits, `locus workspace`, `binding add`, `notify`, `init` and other control
+  commands failed closed with only "human re-pin required". They now print the
+  same `eval "$(locus hook bash)"; locus leave --force; locus enter <alias>`
+  recovery that `enter`, `leave` and `status` already did. Still fails closed.
+- **`locus doctor` reports a malformed binding file instead of aborting.** One
+  unparseable `bindings/*.toml` made `doctor` (and `doctor --json`) exit 1 with
+  a bare error and no report. It now completes, flags an UNSAFE
+  `binding_invalid` finding naming the bindings directory, and exits 2.
+- **npm: a root global install no longer breaks `locus` for other users.** The
+  postinstall replaced the shared bin with a symlink into the installer's HOME
+  (e.g. `/root/.locus/bin`, behind a 0700 `/root`), so other users got
+  "Permission denied". A root install now keeps the wrapper when it is
+  reachable by other users and the native binary is not.
+- **`locus-mcp --version` / `-V`** print `locus-mcp <version>` and exit 0
+  (was "unknown argument", exit 1).
+- **Docs:** the npm README quick start adds the `eval "$(locus hook bash)"`
+  step `pin` needs and links `@ashlrai/locus-mcp` (not an unrelated package);
+  the main README registers `locus mcp --supervised` for provider tools and says
+  plain `locus-mcp` serves control tools only.
 
 - **`locus hook bash` emits a bash prompt** — the prompt helper now prints ANSI
   colors wrapped in readline's non-printing markers (what `\[`/`\]` stand for)
