@@ -16,14 +16,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with an error naming the next step (absolute path, `sh -c` for builtins);
   `--json` keeps the JSON error line. A child killed by a signal exits
   `128 + signal` instead of 1. `locus mcp --supervised` follows the same rules.
-- **MCP control tools reject arguments their schema does not declare.** The
-  `locus_*` schemas advertise `additionalProperties: false`, but undeclared or
-  mistyped arguments were ignored: `locus_enter_hint {"binding": "acme"}`
-  succeeded with the generic `locus enter`, and `locus_request_pin` answered
-  only "alias required". They are now an `isError` result naming the bad
-  argument and the accepted ones (`{}` / absent / `null` still mean no
-  arguments). A missing `locus_request_pin` alias points at
-  `locus_list_bindings`.
+- **MCP control tools check argument types.** With undeclared keys refused
+  before dispatch (below), a declared argument of the wrong type still reached
+  the tool: `locus_verify_claim {"claim": 42}` answered only "text (or claim)
+  required" and `locus_request_pin {"alias": 42}` "alias required". They are
+  now an `isError` result such as `` `claim` must be a string, got number ``.
+  A missing `locus_request_pin` alias points at `locus_list_bindings`.
+- **MCP control tools enforce their closed schemas.** The `locus_*` tools
+  publish `additionalProperties: false` but ignored undeclared keys
+  (`locus_whoami {"binding": "acme"}`) and non-object `arguments` (`"acme"`),
+  and an unknown `locus_nosuch` came back as an `isError` tool result while an
+  unknown provider tool got `-32602`. All three are now JSON-RPC `-32602`
+  before dispatch, naming the allowed keys (the earlier check, #99, covered
+  synthetic provider tools only). Omitted or `null` `arguments` still mean `{}`.
+  `locus_request_pin` trims the alias, so a whitespace-only alias is "alias
+  required" instead of a message about a binding named `   `.
+- **Mint `--ttl` is bounded.** `locus ci mint|env|run` and `locus mcp mint`
+  accepted any TTL: `--ttl 0s` or `--ttl=-5m` printed an already-expired
+  session or grant token and exited 0 (`ci run --ttl 0s` still ran the child),
+  and `--ttl 48h` was capped silently while `locus enter --ttl 48h` is refused.
+  They now take 1s to 24h (still capped by `policy.max_ttl`) and fail before
+  anything is minted, with the `locus enter` wording. Second-scale TTLs stay
+  allowed for expiry probes.
+- **`locus binding add --provider` names a provider with no adapter.** Only the
+  interactive prompt warned; the flags path that agents and scripts use wrote
+  `--provider githb` silently. It is still written (custom providers use
+  upstream MCP recipes), with a stderr warning listing the built-in providers;
+  `--json` stdout is unchanged.
+- **`locus --json setup` prints JSON.** The global flag was ignored and setup
+  printed human text. It now prints `{"ok", "client", "written",
+  "supervised_command"}` after a write, or `entry` / `entry_toml` for `--print`
+  and `generic`. `setup --client codex --print` now uses the same escaped TOML
+  as the file it writes (it was hand-built and omitted `args = []`).
+
 - **MCP `locus://doctor` reports a malformed binding file instead of erroring.**
   The 0.5.1 doctor fix covered `locus doctor` only; the MCP resource still failed
   the read with `binding 'x' is malformed` (-32000). It now returns the same
