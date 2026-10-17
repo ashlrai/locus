@@ -342,20 +342,23 @@ pub fn control_capability_findings(
                 "control_capability_not_exported",
                 format!(
                     "control capability persisted at {} but LOCUS_CONTROL_CAPABILITY is not \
-                     exported — run: eval \"$(locus hook zsh)\"  (or export \
+                     exported — run: {}  (or export \
                      LOCUS_CONTROL_CAPABILITY=\"$(cat {})\")",
                     file.display(),
+                    crate::recovery::user_hook_eval_command(),
                     file.display()
                 ),
             );
         } else {
             push(
                 "control_capability_missing",
-                "LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) \
-                 will fail. Fix: locus quickstart (mints + persists one), or: export \
-                 LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new \
-                 shells with eval \"$(locus hook zsh)\""
-                    .into(),
+                format!(
+                    "LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) \
+                     will fail. Fix: locus quickstart (mints + persists one), or: export \
+                     LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new \
+                     shells with {}",
+                    crate::recovery::user_hook_eval_command()
+                ),
             );
         }
     }
@@ -386,9 +389,9 @@ pub fn control_capability_findings(
             format!(
                 "LOCUS_CONTROL_CAPABILITY does not match the persisted capability at {} — control \
                  operations may be refused. Locus never silently replaces a capability: export \
-                 the persisted value (eval \"$(locus hook zsh)\") or deliberately remove the \
-                 stale side",
-                file.display()
+                 the persisted value ({}) or deliberately remove the stale side",
+                file.display(),
+                crate::recovery::user_hook_eval_command()
             ),
         );
     }
@@ -642,9 +645,12 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                 findings.push(issue(
                     IssueSeverity::Warn,
                     "executor_authority_unavailable",
-                    "authority anchor unverified: no control capability in this environment \
-                     (read-only check; pin left intact) — eval \"$(locus hook zsh)\" and re-run \
-                     doctor to verify the anchor",
+                    format!(
+                        "authority anchor unverified: no control capability in this environment \
+                         (read-only check; pin left intact) — {} and re-run doctor to verify the \
+                         anchor",
+                        crate::recovery::user_hook_eval_command()
+                    ),
                 ));
             }
             // Supervisor-anchor wedge: the session's authority anchor cannot

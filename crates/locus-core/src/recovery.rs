@@ -37,6 +37,13 @@ pub fn hook_eval_command(shell: &str) -> String {
     }
 }
 
+/// The command that exports `LOCUS_CONTROL_CAPABILITY` in the user's `$SHELL`
+/// (zsh / fish / else bash). Every next-step hint names this, not a fixed shell.
+pub fn user_hook_eval_command() -> String {
+    let shell = std::env::var("SHELL").ok();
+    hook_eval_command(hook_shell(shell.as_deref()))
+}
+
 /// One-line recovery for a stale or unverifiable pin, for an explicit shell.
 ///
 /// `alias` usually comes from a session file that failed verification, so it

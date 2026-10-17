@@ -811,7 +811,7 @@ enum ApproveCmd {
         /// Local review label (default: LOCUS_PRINCIPAL or $USER)
         #[arg(long = "as")]
         as_principal: Option<String>,
-        /// Reserved external-authority TTL; local advisory records ignore it
+        /// Reserved external-authority TTL (1s..24h); local advisory records ignore it
         #[arg(long)]
         ttl: Option<String>,
         /// macOS: blocking confirmation before recording advisory evidence.
@@ -1529,8 +1529,9 @@ fn bootstrap_control_capability_plan(
 ) -> Result<Option<(String, String)>> {
     if let Some(value) = locus_core::read_persisted_control_capability(home)? {
         let mut note = format!(
-            "adopted persisted control capability from {} for this run — persist for new shells: eval \"$(locus hook zsh)\"",
-            locus_core::control_capability_file(home).display()
+            "adopted persisted control capability from {} for this run — persist for new shells: {}",
+            locus_core::control_capability_file(home).display(),
+            locus_core::recovery::user_hook_eval_command()
         );
         if !persist {
             note.push_str(" (already persisted; strict posture: locus capability unpersist)");
@@ -1540,8 +1541,9 @@ fn bootstrap_control_capability_plan(
     if persist {
         let value = locus_core::mint_persisted_control_capability(home)?;
         let note = format!(
-            "minted control capability → {} (0600) — export in new shells: eval \"$(locus hook zsh)\"",
-            locus_core::control_capability_file(home).display()
+            "minted control capability → {} (0600) — export in new shells: {}",
+            locus_core::control_capability_file(home).display(),
+            locus_core::recovery::user_hook_eval_command()
         );
         return Ok(Some((value, note)));
     }
@@ -1670,7 +1672,11 @@ fn cmd_capability(sub: CapabilityCmd, json: bool) -> Result<()> {
                 );
                 println!(
                     "   {}",
-                    "new shells pick it up via: eval \"$(locus hook zsh)\"".dimmed()
+                    format!(
+                        "new shells pick it up via: {}",
+                        locus_core::recovery::user_hook_eval_command()
+                    )
+                    .dimmed()
                 );
             }
             Ok(())
@@ -1912,13 +1918,22 @@ fn cmd_init(with_samples: bool, persist_capability: bool, json: bool) -> Result<
             "  {}",
             "locus quickstart          # first 60s bootstrap".dimmed()
         );
+        let shell = env::var("SHELL").ok();
         println!(
             "  {}",
-            "eval \"$(locus hook zsh)\"  # prompt shows pin / frozen".dimmed()
+            format!(
+                "{}  # prompt shows pin / frozen",
+                locus_core::recovery::user_hook_eval_command()
+            )
+            .dimmed()
         );
         println!(
             "  {}",
-            "locus completion zsh > …  # shell completions".dimmed()
+            format!(
+                "locus completion {} > …  # shell completions",
+                locus_core::recovery::hook_shell(shell.as_deref())
+            )
+            .dimmed()
         );
     }
     Ok(())
@@ -2230,7 +2245,7 @@ fn cmd_quickstart(persist_capability: bool, json: bool) -> Result<()> {
     println!(
         "  {}  ·  {}",
         "locus agent setup --apply".dimmed(),
-        "eval \"$(locus hook zsh)\"".dimmed()
+        locus_core::recovery::user_hook_eval_command().dimmed()
     );
 
     // Soft exit: unsafe still signals; warn does not abort first-run UX
@@ -2649,13 +2664,26 @@ fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyho
         .downcast_ref::<locus_core::LocusError>()
         .is_some_and(locus_core::recovery::is_stale_pin_error);
     if wedged {
+        let alias = recovery_alias(alias);
         anyhow!(
             "{err:#}\n  recover (operator shell; control capability required): {}",
-            locus_core::recovery::stale_pin_recovery(alias)
+            locus_core::recovery::stale_pin_recovery(alias.as_deref())
         )
     } else {
         err
     }
+}
+
+/// Binding to name in a stale-pin recovery recipe: the requested alias only
+/// when that binding exists (`locus pin nosuch` must not end its recipe with
+/// `locus enter nosuch`, which would fail), else the stale pin's own binding,
+/// else none (`<alias>`). Message only: never trusted for authority.
+fn recovery_alias(requested: Option<&str>) -> Option<String> {
+    let s = store().ok()?;
+    if let Some(binding) = requested.and_then(|a| s.load_binding(a).ok()) {
+        return Some(binding.alias);
+    }
+    active_alias_hint(&s)
 }
 
 /// Last-resort [`wedged_session_recovery`] for every command.
@@ -5883,8 +5911,8 @@ fn parse_pin_ttl(raw: &str) -> Result<chrono::Duration> {
     parse_bounded_ttl(raw, chrono::Duration::minutes(1), "1m")
 }
 
-/// `--ttl` for minted CI sessions and MCP grants (`ci mint|env|run`,
-/// `mcp mint`). Same 24h ceiling as a pin; the floor is 1s, so short-lived
+/// `--ttl` for minted CI sessions, MCP grants and approval grants
+/// (`ci mint|env|run`, `mcp mint`, `approve grant`). Same 24h ceiling as a pin; the floor is 1s, so short-lived
 /// expiry probes keep working, but zero or negative (an already-expired
 /// session or grant that was still printed) fails closed.
 fn parse_mint_ttl(raw: &str) -> Result<chrono::Duration> {
@@ -7231,6 +7259,37 @@ impl WatchHeartbeat {
     }
 }
 
+/// Pin label for the human watch line: the verified alias, `invalid` for a
+/// pin that is present but cannot be verified (stale broker, bad seal), or
+/// `unpinned` — same tokens as `locus status --oneline`.
+fn watch_pin_label(hb: &WatchHeartbeat) -> &str {
+    match hb.whoami.as_deref() {
+        Some(alias) => alias,
+        None if hb.pinned || hb.frozen => "invalid",
+        None => "unpinned",
+    }
+}
+
+/// Why a tick is `not_ok` when `safe_next` alone does not say: the pin is
+/// ready but doctor is not SAFE. Names the doctor verdict and finding codes.
+fn watch_not_ok_reason(pack: &locus_core::SessionVerificationPack) -> Option<String> {
+    if pack.session_ok || !pack.safe_next.ready || pack.doctor.ok {
+        return None;
+    }
+    let codes: Vec<&str> = pack
+        .doctor
+        .findings
+        .iter()
+        .filter(|f| f.severity != locus_core::IssueSeverity::Info)
+        .map(|f| f.code.as_str())
+        .collect();
+    Some(format!(
+        "doctor={} [{}] — run `locus doctor` for the fixes",
+        pack.doctor.verdict.as_str(),
+        codes.join(", ")
+    ))
+}
+
 /// Whether a watch tick should end the process with a non-zero exit.
 ///
 /// - `require_ok`: fail closed on any `session_ok=false` (hub / CI).
@@ -7285,7 +7344,7 @@ fn cmd_watch(interval: &str, once: bool, require_ok: bool, json: bool) -> Result
             } else {
                 "not_ok".yellow().bold().to_string()
             };
-            let alias = hb.whoami.as_deref().unwrap_or("unpinned");
+            let alias = watch_pin_label(&hb);
             let frozen_s = if hb.frozen {
                 format!("  {}", "FROZEN".red().bold())
             } else {
@@ -7308,6 +7367,9 @@ fn cmd_watch(interval: &str, once: bool, require_ok: bool, json: bool) -> Result
                 );
                 if let Some(ref cmd) = pack.safe_next.command {
                     println!("  run   {}", cmd.cyan());
+                }
+                if let Some(why) = watch_not_ok_reason(&pack) {
+                    println!("  why   {why}");
                 }
             }
         }
@@ -8406,10 +8468,9 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 .or_else(|| env::var("LOCUS_PRINCIPAL").ok().filter(|s| !s.is_empty()))
                 .or_else(|| env::var("USER").ok().filter(|s| !s.is_empty()))
                 .unwrap_or_else(|| "unknown".into());
-            let ttl_dur = match ttl {
-                Some(ref t) => Some(parse_ttl(t)?),
-                None => None,
-            };
+            // Same bounds as minted sessions / MCP grants: zero, negative or
+            // over-24h fails closed before the record is touched.
+            let ttl_dur = ttl.as_deref().map(parse_mint_ttl).transpose()?;
             if touchid {
                 // Confirm *before* mutating the approval record (fail closed).
                 let preview = s.load_approval(&id)?;
@@ -10084,7 +10145,8 @@ credential_ref = "phm:VERIFY_SESSION_MISSING"
 mod watch_heartbeat_tests {
     use super::{
         attach_control_capability_findings, gather_doctor_external_with_phantom_status,
-        parse_watch_interval, watch_should_fail, WatchHeartbeat,
+        parse_watch_interval, watch_not_ok_reason, watch_pin_label, watch_should_fail,
+        WatchHeartbeat,
     };
     use locus_core::{verify_session, Binding, Store};
     use std::time::Duration;
@@ -10176,6 +10238,53 @@ mod watch_heartbeat_tests {
         // --require-ok fail-closed regardless of pin.
         assert!(watch_should_fail(false, false, true));
         assert!(watch_should_fail(false, true, true));
+    }
+
+    /// A present-but-unverifiable pin is not "unpinned": the human watch line
+    /// used to print `unpinned` next to `pinned=true` on a stale pin.
+    #[test]
+    fn watch_pin_label_distinguishes_invalid_from_unpinned() {
+        let hb = |whoami: Option<&str>, pinned: bool| WatchHeartbeat {
+            kind: "watch".into(),
+            session_ok: false,
+            whoami: whoami.map(str::to_string),
+            doctor_verdict: "UNSAFE".into(),
+            safe_next: "doctor_fix".into(),
+            pinned,
+            frozen: false,
+        };
+        assert_eq!(watch_pin_label(&hb(Some("acme"), true)), "acme");
+        assert_eq!(watch_pin_label(&hb(None, false)), "unpinned");
+        assert_eq!(watch_pin_label(&hb(None, true)), "invalid");
+    }
+
+    /// `session_ok=false` with `safe_next=ready` (doctor WARN on a healthy
+    /// pin) used to print only "next ready — Proceed", hiding why the tick
+    /// failed. Name the doctor findings instead.
+    #[test]
+    fn watch_not_ok_reason_names_doctor_findings_when_next_is_ready() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        let external =
+            gather_doctor_external_with_phantom_status(&store, dir.path().to_path_buf(), true)
+                .unwrap();
+        let mut pack = verify_session(&store, dir.path(), external).unwrap();
+        // Unpinned: safe_next already explains the failure.
+        assert!(!pack.safe_next.ready);
+        assert_eq!(watch_not_ok_reason(&pack), None);
+
+        pack.safe_next.ready = true;
+        pack.doctor.push_finding(
+            locus_core::IssueSeverity::Warn,
+            "phantom_missing",
+            "phantom not on PATH".into(),
+        );
+        pack.session_ok = pack.doctor.ok && pack.safe_next.ready;
+        assert!(!pack.session_ok);
+        let reason = watch_not_ok_reason(&pack).expect("reason when next is ready");
+        assert!(reason.contains("doctor=WARN"), "{reason}");
+        assert!(reason.contains("phantom_missing"), "{reason}");
+        assert!(reason.contains("locus doctor"), "{reason}");
     }
 
     #[test]
