@@ -731,6 +731,12 @@ mod community_concurrency_tests {
     /// teardown deleted that guard while waiting for the client's in-flight lock.
     #[test]
     fn community_inflight_redaction_survives_teardown() {
+        if !crate::test_support::run_in_isolated_process(
+            module_path!(),
+            "community_inflight_redaction_survives_teardown",
+        ) {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let mut environment = Environment(vec![]);
         let signing = SigningKey::from_bytes(&[19; 32]);
