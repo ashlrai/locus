@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with an error naming the next step (absolute path, `sh -c` for builtins);
   `--json` keeps the JSON error line. A child killed by a signal exits
   `128 + signal` instead of 1. `locus mcp --supervised` follows the same rules.
+- **A child that cannot start is still audited and cleaned up.** On a spawn
+  failure `exec`, `run`, `ci run` and `mcp --supervised` returned before their
+  audit event, and `run` / `ci run` also skipped removing their temporary
+  session. The event now records `exit` (127/126) and a `spawn_error`, and the
+  temporary session is removed.
 - **MCP control tools check argument types.** With undeclared keys refused
   before dispatch (below), a declared argument of the wrong type still reached
   the tool: `locus_verify_claim {"claim": 42}` answered only "text (or claim)

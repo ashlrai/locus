@@ -96,3 +96,42 @@ fn signal_killed_child_exits_128_plus_signal() {
     let out = f.locus(&["exec", "--", "sh", "-c", "kill -TERM $$"]);
     assert_eq!(out.status.code(), Some(128 + 15), "{}", stderr(&out));
 }
+
+#[test]
+fn unstartable_run_child_is_audited_and_cleaned_up() {
+    let f = fixture();
+    let out = f.locus(&[
+        "run",
+        "--binding",
+        "personal",
+        "--",
+        "locus-definitely-not-a-command",
+    ]);
+    assert_eq!(out.status.code(), Some(127), "{}", stderr(&out));
+
+    // The audit used to be skipped when the child never started.
+    let audit = std::fs::read_to_string(f.home.path().join("audit").join("events.jsonl")).unwrap();
+    let event: serde_json::Value = audit
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .rfind(|e| e["op"] == "session.run")
+        .unwrap_or_else(|| panic!("no session.run event: {audit}"));
+    assert_eq!(event["detail"]["exit"], 127, "{event}");
+    assert!(
+        event["detail"]["spawn_error"]
+            .as_str()
+            .is_some_and(|e| e.contains("command not found")),
+        "{event}"
+    );
+
+    // ...and so was the temporary run session's cleanup.
+    let leftovers: Vec<_> = std::fs::read_dir(f.home.path().join("sessions"))
+        .map(|d| {
+            d.filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("run-"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(leftovers.is_empty(), "run session leaked: {leftovers:?}");
+}

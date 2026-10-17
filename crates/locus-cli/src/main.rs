@@ -1131,6 +1131,22 @@ fn run_child(child: &mut Command, program: &str) -> Result<std::process::ExitSta
     })
 }
 
+/// Audit fields for a child run: its exit code (127/126 when it never
+/// started) and, when the spawn failed, why. A child that cannot start is
+/// still audited, and the run's temporary session still cleaned up.
+fn child_audit_fields(spawned: &Result<std::process::ExitStatus>) -> (Option<i32>, Option<String>) {
+    match spawned {
+        Ok(status) => (status.code(), None),
+        Err(e) => (
+            Some(
+                e.downcast_ref::<ChildSpawnError>()
+                    .map_or(1, ChildSpawnError::exit_code),
+            ),
+            Some(e.to_string()),
+        ),
+    }
+}
+
 /// Exit code to propagate for a finished child: its own code, or
 /// `128 + signal` when a signal killed it (shell convention), never a bare 1.
 fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
@@ -3460,18 +3476,21 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         );
     }
 
-    let status = run_child(&mut child, program)?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         "session.exec",
         &session.binding_alias,
         Some(serde_json::json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "secrets_resolved": iso.secrets_resolved,
             // names only — never values
             "secrets_failed": iso.secrets_failed,
         })),
     )?;
+    let status = spawned?;
     if !status.success() {
         std::process::exit(child_exit_code(&status));
     }
@@ -3696,13 +3715,15 @@ fn cmd_ci_run(
         );
     }
 
-    let status = run_child(&mut child, program)?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         "ci.run",
         &session.binding_alias,
         Some(serde_json::json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "session_id": session.session_id,
             "secrets_resolved": iso.secrets_resolved,
             "secrets_failed": iso.secrets_failed,
@@ -3711,6 +3732,7 @@ fn cmd_ci_run(
 
     let _ = s.cleanup_ci_session(&ci_path, &session);
 
+    let status = spawned?;
     if !status.success() {
         std::process::exit(child_exit_code(&status));
     }
@@ -3865,13 +3887,15 @@ fn cmd_run(
         );
     }
 
-    let status = run_child(&mut child, program)?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         "session.run",
         &session.binding_alias,
         Some(serde_json::json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "share_pin": share_pin,
             "session_id": session.session_id,
             "secrets_resolved": iso.secrets_resolved,
@@ -3884,6 +3908,7 @@ fn cmd_run(
         let _ = s.cleanup_run_session(&run_path, &session);
     }
 
+    let status = spawned?;
     if !status.success() {
         std::process::exit(child_exit_code(&status));
     }
@@ -3930,18 +3955,21 @@ fn run_exact_session_child(
     }
     child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
-    let status = run_child(&mut child, program)?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         audit_op,
         &session.binding_alias,
         Some(json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "session_id": session.session_id,
             "secrets_resolved": 0,
             "exact_session": true,
         })),
     )?;
+    let status = spawned?;
     if !status.success() {
         std::process::exit(child_exit_code(&status));
     }
@@ -4130,19 +4158,22 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
         }
     }
 
-    let status = run_child(&mut child, &bin)?;
+    let spawned = run_child(&mut child, &bin);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     if let Some((s, session)) = audit_ctx {
         s.audit(
             "session.mcp.supervised",
             &session.binding_alias,
             Some(json!({
                 "phase": "exit",
-                "exit": status.code(),
+                "exit": exit,
+                "spawn_error": spawn_error,
                 "session_id": session.session_id,
                 "secrets_resolved": 0,
             })),
         )?;
     }
+    let status = spawned?;
     if !status.success() {
         std::process::exit(child_exit_code(&status));
     }
