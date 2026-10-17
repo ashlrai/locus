@@ -195,3 +195,49 @@ fn status_without_capability_is_unverified_not_ok() {
     assert!(out.starts_with("UNVERIFIED personal"), "status: {out}");
     assert!(out.contains("eval \"$(locus hook zsh)\""), "status: {out}");
 }
+
+/// Control commands outside the pin family (`workspace`, `binding add`,
+/// `notify`) also fail closed on a stale pin; they must name the same
+/// recovery instead of a bare "human re-pin required".
+#[test]
+fn stale_pin_control_commands_name_the_recovery() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+
+    let cases: &[&[&str]] = &[
+        &["workspace", "--default", "personal"],
+        &[
+            "binding",
+            "add",
+            "stale-probe",
+            "--tenant",
+            "t",
+            "--provider",
+            "github",
+            "--account",
+            "x",
+            "--credential-ref",
+            "env:STALE_PROBE_TOKEN",
+            "--non-interactive",
+        ],
+        &["notify", "on"],
+    ];
+    for args in cases {
+        let out = locus(home.path(), cwd.path(), &cap, args);
+        assert!(!out.status.success(), "{args:?} must fail closed");
+        let err = stderr(&out);
+        assert!(err.contains("human re-pin required"), "{args:?}: {err}");
+        assert!(
+            err.contains("eval \"$(locus hook bash)\"; locus leave --force; locus enter personal"),
+            "{args:?} must name the recovery: {err}"
+        );
+        assert_eq!(
+            err.matches(RECOVERY_TAIL).count(),
+            1,
+            "{args:?} names the recovery once: {err}"
+        );
+    }
+    assert!(!cwd.path().join(".locus.toml").exists());
+    assert!(!home.path().join("bindings/stale-probe.toml").exists());
+}

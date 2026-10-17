@@ -1058,6 +1058,7 @@ fn main() {
     match stdout::catch_stdout_closed(run) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
+            let e = stale_pin_recovery_fallback(e);
             eprintln!("{} {e:#}", "error:".red().bold());
             std::process::exit(1);
         }
@@ -2600,6 +2601,36 @@ fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyho
     } else {
         err
     }
+}
+
+/// Last-resort [`wedged_session_recovery`] for every command.
+///
+/// Control commands that are not pin commands (`workspace`, `binding add`,
+/// `notify`, `init`, ...) fail closed on a stale pin through the shared
+/// control gate, but used to print only "human re-pin required" with no way
+/// out. Name the same recovery `enter` / `leave` / `status` print. Applies
+/// only when an active session exists and the error chain carries a stale-pin
+/// authority error (never a bare JSON error, which can come from anywhere).
+/// Message only: the error itself still fails closed.
+fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
+    let stale = err.chain().any(|cause| {
+        cause
+            .downcast_ref::<locus_core::LocusError>()
+            .is_some_and(|e| {
+                locus_core::recovery::is_stale_pin_error(e)
+                    && !matches!(e, locus_core::LocusError::Json(_))
+            })
+    });
+    if !stale || format!("{err:#}").contains("locus leave --force") {
+        return err;
+    }
+    let Some(alias) = store().ok().and_then(|s| active_alias_hint(&s)) else {
+        return err;
+    };
+    anyhow!(
+        "{err:#}\n  recover (operator shell; control capability required): {}",
+        locus_core::recovery::stale_pin_recovery(Some(&alias))
+    )
 }
 
 /// Alias of the active session file, for recovery hints only (never trusted
@@ -6308,7 +6339,13 @@ fn gather_doctor_external_with_phantom_status(
     cwd: PathBuf,
     phantom: bool,
 ) -> Result<DoctorExternal> {
-    let unresolved_phm = collect_unresolved_phm_refs(s, phantom)?;
+    // An invalid binding file is reported by build_doctor_report as an
+    // UNSAFE `binding_invalid` finding; do not abort the diagnostic here.
+    let unresolved_phm = if s.list_bindings().is_ok() {
+        collect_unresolved_phm_refs(s, phantom)?
+    } else {
+        Vec::new()
+    };
     Ok(DoctorExternal {
         phantom_on_path: phantom,
         unresolved_phm,
