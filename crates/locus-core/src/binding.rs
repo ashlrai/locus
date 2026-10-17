@@ -761,6 +761,39 @@ impl From<&Binding> for BindingSummary {
     }
 }
 
+/// Levenshtein distance over chars (small alias strings only).
+pub fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// Closest known alias to a typo, if plausibly close: at most one edit per
+/// three characters (minimum one, maximum three), so `persnal` suggests
+/// `personal` but `nope` does not suggest `acme`. A wrong suggestion names
+/// another tenant, so this errs toward none.
+pub fn nearest_alias<'a>(missing: &str, aliases: &'a [String]) -> Option<&'a str> {
+    let needle = missing.to_lowercase();
+    aliases
+        .iter()
+        .map(|c| (edit_distance(&needle, &c.to_lowercase()), c))
+        .filter(|(d, c)| {
+            let longest = c.chars().count().max(needle.chars().count());
+            *d <= (longest / 3).clamp(1, 3)
+        })
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1240,5 +1273,28 @@ credential_ref = "phm:X"
         assert!(validate_name_component("alias", "../x").is_err());
         assert!(validate_name_component("alias", "a/b").is_err());
         assert!(validate_name_component("principal", "").is_err());
+    }
+
+    #[test]
+    fn edit_distance_and_nearest_alias() {
+        assert_eq!(edit_distance("personal", "personal"), 0);
+        assert_eq!(edit_distance("personol", "personal"), 1);
+        assert_eq!(edit_distance("", "abc"), 3);
+
+        let aliases = vec![
+            "personal".to_string(),
+            "ashlrai".to_string(),
+            "cash-margin-partners".to_string(),
+        ];
+        assert_eq!(nearest_alias("personol", &aliases), Some("personal"));
+        assert_eq!(nearest_alias("ashlari", &aliases), Some("ashlrai"));
+        // Case-insensitive.
+        assert_eq!(nearest_alias("Personal", &aliases), Some("personal"));
+        // A completely different word gets no suggestion.
+        assert_eq!(nearest_alias("zzzzzzzzzz", &aliases), None);
+        // Every letter different in a short word is not a typo.
+        let short = vec!["acme".to_string(), "personal".to_string()];
+        assert_eq!(nearest_alias("nope", &short), None);
+        assert_eq!(nearest_alias("acmee", &short), Some("acme"));
     }
 }

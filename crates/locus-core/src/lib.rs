@@ -93,8 +93,8 @@ pub use authority_anchor::{
 };
 pub use autopin::{match_remote_binding, resolve_auto_pin, AutoPinTarget};
 pub use binding::{
-    validate_name_component, Binding, BindingBody, BindingSummary, Policy, PolicyRule,
-    ProviderBinding, Scope, UpstreamSpec,
+    edit_distance, nearest_alias, validate_name_component, Binding, BindingBody, BindingSummary,
+    Policy, PolicyRule, ProviderBinding, Scope, UpstreamSpec,
 };
 pub use config::{
     load_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig, NotifyConfig,

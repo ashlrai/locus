@@ -1845,34 +1845,6 @@ fn cwd() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Levenshtein distance over chars (small alias strings only).
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.iter().enumerate() {
-        let mut cur = vec![i + 1; b.len() + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
-        }
-        prev = cur;
-    }
-    prev[b.len()]
-}
-
-/// Closest known alias to a typo, if plausibly close (at most 3 edits and not
-/// a completely different word).
-fn nearest_alias<'a>(missing: &str, aliases: &'a [String]) -> Option<&'a str> {
-    let needle = missing.to_lowercase();
-    aliases
-        .iter()
-        .map(|c| (edit_distance(&needle, &c.to_lowercase()), c))
-        .filter(|(d, c)| *d <= 3 && *d < c.chars().count().max(needle.chars().count()))
-        .min_by_key(|(d, _)| *d)
-        .map(|(_, c)| c.as_str())
-}
-
 /// Alias ergonomics for enter/pin: a bare BindingNotFound becomes a message
 /// listing known aliases plus a nearest-match suggestion. Never alters the
 /// fail-closed outcome — only the operator-facing text.
@@ -1890,7 +1862,7 @@ fn with_alias_suggestions(s: &Store, err: locus_core::LocusError) -> anyhow::Err
                 "binding not found: {missing} (known aliases: {})",
                 aliases.join(", ")
             );
-            if let Some(best) = nearest_alias(missing, &aliases) {
+            if let Some(best) = locus_core::nearest_alias(missing, &aliases) {
                 msg.push_str(&format!(" — did you mean `{best}`?"));
             }
             return anyhow::anyhow!(msg);
@@ -5584,7 +5556,7 @@ fn resolve_add_answers_interactive(s: &Store, args: &BindingAddArgs) -> Result<A
                 }
                 Ok(())
             })?;
-            if let Some(best) = nearest_alias(&v, &known) {
+            if let Some(best) = locus_core::nearest_alias(&v, &known) {
                 // Soft nudge only — never a hard block (short aliases collide easily).
                 if !prompt_confirm(
                     &format!("similar alias '{best}' already exists — continue with '{v}'?"),
@@ -9613,9 +9585,8 @@ mod switch_flow_tests {
 #[cfg(test)]
 mod alias_ux_tests {
     use super::{
-        edit_distance, missing_workspace_aliases, nearest_alias, repin_hint,
-        stdio_server_entry_toml, with_alias_suggestions, with_auto_alias_suggestions,
-        write_workspace_file,
+        missing_workspace_aliases, repin_hint, stdio_server_entry_toml, with_alias_suggestions,
+        with_auto_alias_suggestions, write_workspace_file,
     };
     use locus_core::{Binding, BindingBody, LocusError, Policy, ProviderBinding, Scope, Store};
 
@@ -9635,25 +9606,6 @@ mod alias_ux_tests {
                 upstream: None,
             }],
         })
-    }
-
-    #[test]
-    fn edit_distance_and_nearest_alias() {
-        assert_eq!(edit_distance("personal", "personal"), 0);
-        assert_eq!(edit_distance("personol", "personal"), 1);
-        assert_eq!(edit_distance("", "abc"), 3);
-
-        let aliases = vec![
-            "personal".to_string(),
-            "ashlrai".to_string(),
-            "cash-margin-partners".to_string(),
-        ];
-        assert_eq!(nearest_alias("personol", &aliases), Some("personal"));
-        assert_eq!(nearest_alias("ashlari", &aliases), Some("ashlrai"));
-        // Case-insensitive.
-        assert_eq!(nearest_alias("Personal", &aliases), Some("personal"));
-        // A completely different word gets no suggestion.
-        assert_eq!(nearest_alias("zzzzzzzzzz", &aliases), None);
     }
 
     #[test]

@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP `locus_request_pin` / `locus_enter_hint` name the alias an agent
+  mistyped.** `{"alias": "acmee"}` said only that no such binding exists, so the
+  agent had to list bindings and guess. The result now carries
+  `did_you_mean: "acme"` and the message says so, using the same match as the
+  CLI's `did you mean`.
+- **Alias suggestions no longer name an unrelated tenant.** Up to three edits
+  counted as a typo, so `locus switch nope` suggested `acme`. A suggestion now
+  needs at most one edit per three characters (`persnal` still suggests
+  `personal`).
 - **`locus exec` / `run` / `ci run` exit codes say whether the child ran.**
   A command that could not be started exited 1, the same as a child that ran
   and failed, so an agent could not tell "tests failed" from "command not

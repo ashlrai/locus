@@ -2617,6 +2617,26 @@ fn request_pin_and_enter_hint_unknown_alias_point_at_binding_setup() {
         );
         assert!(body.get("command").is_none(), "{tool}: {text}");
         assert!(body.get("pin_command").is_none(), "{tool}: {text}");
+        // `nope` is not a typo of any alias: no suggestion.
+        assert!(body["did_you_mean"].is_null(), "{tool}: {text}");
+        assert!(!message.contains("Did you mean"), "{tool}: {message}");
+
+        // A typo names the configured alias the agent probably meant.
+        let resp = client.request(
+            "tools/call",
+            json!({ "name": tool, "arguments": { "alias": "acmee" } }),
+        );
+        let (text, is_err) = McpClient::tool_text(&resp);
+        assert!(is_err, "{tool}: {text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["did_you_mean"], "acme", "{tool}: {text}");
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("Did you mean `acme`?"),
+            "{tool}: {text}"
+        );
     }
 
     // A known alias still gets the human pin command.
