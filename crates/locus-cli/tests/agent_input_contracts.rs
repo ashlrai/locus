@@ -198,3 +198,30 @@ fn setup_honors_json() {
         "{stdout}"
     );
 }
+
+/// `approve grant --ttl` uses the same bounded parser as the mint TTLs:
+/// zero, negative, empty and over-24h values are refused before the
+/// approval record is even looked up.
+#[test]
+fn approve_grant_ttl_is_bounded() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = init(home.path(), cwd.path());
+    for (ttl, needle) in [
+        ("--ttl=0s", "too short"),
+        ("--ttl=-5m", "too short"),
+        ("--ttl=48h", "too long"),
+        ("--ttl=", "invalid --ttl"),
+    ] {
+        let out = locus(
+            home.path(),
+            cwd.path(),
+            Some(&cap),
+            &["approve", "grant", "apr_missing", "--as", "alice", ttl],
+        );
+        assert!(!out.status.success(), "{ttl} must fail");
+        let err = text(&out.stderr);
+        assert!(err.contains(needle), "{ttl}: {err}");
+        assert!(!err.contains("approval not found"), "{ttl}: {err}");
+    }
+}
