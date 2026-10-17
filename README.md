@@ -230,6 +230,7 @@ scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 
 ```
 locus init [--with-samples] · quickstart
+locus onboard [--detect-only] [--yes] [--reset]  # guided refs-only tenant setup
 locus pin [alias] [--force] [--client claude] [--ns a,b]
 locus enter <alias>                   # firm workflow pin
 locus leave
@@ -252,9 +253,10 @@ locus ci mint|env|run                 # short-lived sealed sessions for pipeline
 locus engagement init|close           # client engagement lifecycle (binding + workspace)
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
+locus adapter search|install|uninstall  # community adapters (executable code; see docs/adapters.md)
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex|grok|gemini
-locus mcp                             # run the stdio MCP server (same as locus-mcp)
+locus mcp [--supervised]              # run the stdio MCP server; --supervised serves pinned provider tools
 locus agent report|setup|doctor       # AI-native readiness (hub JSON)
 locus goal status                     # northstar progress from GOALS.md
 locus completion zsh|bash|fish        # shell completions
@@ -263,7 +265,7 @@ locus topic <name>                    # dashboard · forensics · serve · goal 
 
 **Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
 
-**Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/ashlr-hub/](./integrations/ashlr-hub/)
+**Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/phantom/](./integrations/phantom/)
 
 Approvals:
 

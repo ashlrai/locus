@@ -27,6 +27,7 @@ Confirm:
 ```bash
 which locus locus-mcp
 locus --help
+locus-mcp --version   # prints `locus-mcp <version>` and exits (also -V)
 ```
 
 ## Human workflow (pin first)
@@ -261,6 +262,7 @@ the probe never guesses.
 ## Protocol notes
 
 - **JSON-RPC 2.0** over stdio — **Content-Length** framing (Claude Code / Cursor) and **NDJSON**  
+- A frame that is not valid JSON gets a JSON-RPC Parse error (`-32700`, `"id": null`) and the server keeps serving; batches and non-object messages get Invalid Request (`-32600`)  
 - Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`  
 - **Never** log to stdout from the server — that breaks the protocol (errors go to stderr)  
 - Protocol versions: negotiates `2025-06-18`, `2025-03-26`, or `2024-11-05` (echoes the client's requested version when supported, else answers `2025-06-18`)  
@@ -577,9 +579,9 @@ Every tool description is prefixed with **`[locus:<alias|unpinned>]`** so the mo
 | `locus_safe_next` | **Single best next action** (enter / re-pin / approval blocked / doctor fix / ready) — call when stuck |
 | `locus_status` | Short pinned/unpinned + seal status |
 | `locus_heartbeat` | Doctor-lite / runtime drift (seal, freeze, binding match) |
-| `locus_enter_hint` | Shell command for the human to pin (`locus enter …`) |
+| `locus_enter_hint` | Shell command for the human to pin (`locus enter …`); an unknown alias returns an error pointing at `locus binding list` / `locus binding add <alias>` |
 | `locus_list_bindings` | Configured aliases/tenants |
-| `locus_request_pin` | Returns instructions for the human; **does not pin** |
+| `locus_request_pin` | Returns instructions for the human; **does not pin**. An unknown alias returns an error (still audited) pointing at `locus binding list` / `locus binding add <alias>` |
 | `locus_verify_claim` | Verification plane: score a free-text claim (`confidence`, `needs_tool`, `suggestion`) before acting |
 | `locus_verify_session` | Hub session pack — same JSON as `locus verify session --json` (`whoami?`, `doctor`, `safe_next`, `session_ok`); runs real external probes (Phantom on PATH, unresolved `phm:` refs) |
 

@@ -50,7 +50,7 @@ A malformed or unreadable `.locus.toml` fails closed.
 
 - One-shot commands: `locus run -b ashlr -- gh pr list` (global pin unchanged).
 - Interactive agent sessions: `locus pin` in the repo, then start the agent.
-- MCP clients: `locus setup --client claude|cursor|codex|grok` wires
+- MCP clients: `locus setup --client claude|cursor|codex|grok|gemini` wires
   `locus-mcp`; it exposes only the pinned binding's tools and never returns
   credential refs or secret values. Agents can request a pin
   (`locus_request_pin`) but cannot pin themselves.
