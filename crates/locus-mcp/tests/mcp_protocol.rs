@@ -626,7 +626,19 @@ fn control_tool_errors_name_the_next_step() {
         "{text}"
     );
 
-    for args in [json!({}), json!({ "alias": 42 }), json!({ "alias": "" })] {
+    // A wrong type is refused by the schema check before the alias lookup.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_request_pin", "arguments": { "alias": 42 } }),
+    );
+    let (text, is_err) = McpClient::tool_text(&resp);
+    assert!(is_err, "{text}");
+    assert!(
+        text.contains("`alias` must be a string, got number"),
+        "{text}"
+    );
+
+    for args in [json!({}), json!({ "alias": "" })] {
         let resp = client.request(
             "tools/call",
             json!({ "name": "locus_request_pin", "arguments": args }),
@@ -2709,4 +2721,68 @@ fn community_tool_admission_precedes_credential_resolution_and_worker_start() {
             "denied request launched a credential-bearing worker"
         );
     }
+}
+
+#[test]
+fn control_tools_reject_mistyped_arguments() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    // Undeclared keys are a -32602 before dispatch
+    // (control_tools_enforce_their_closed_schemas); a declared key of the
+    // wrong type reaches the tool and must be named, not read as missing.
+    for (tool, arguments, expect) in [
+        (
+            "locus_verify_claim",
+            json!({ "claim": 42 }),
+            "`claim` must be a string, got number",
+        ),
+        (
+            "locus_enter_hint",
+            json!({ "alias": 7 }),
+            "`alias` must be a string, got number",
+        ),
+    ] {
+        let resp = client.request(
+            "tools/call",
+            json!({ "name": tool, "arguments": arguments }),
+        );
+        assert!(
+            resp.get("error").is_none(),
+            "{tool}: tool error, not rpc: {resp}"
+        );
+        let (text, is_err) = McpClient::tool_text(&resp);
+        assert!(is_err, "{tool} {arguments}: must be isError: {text}");
+        let body: Value = serde_json::from_str(&text).unwrap();
+        let error = body["error"].as_str().unwrap();
+        assert!(error.contains(expect), "{tool}: {error}");
+        assert!(
+            body["hint"].as_str().unwrap().contains("inputSchema"),
+            "{tool}: {text}"
+        );
+    }
+
+    // Absent / null arguments still mean `{}`.
+    for params in [
+        json!({ "name": "locus_list_bindings" }),
+        json!({ "name": "locus_list_bindings", "arguments": null }),
+    ] {
+        let resp = client.request("tools/call", params);
+        let (text, is_err) = McpClient::tool_text(&resp);
+        assert!(!is_err, "{text}");
+        assert!(text.contains("acme"), "{text}");
+    }
+
+    // Missing required alias names the discovery tool.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_request_pin", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&resp);
+    assert!(is_err, "{text}");
+    assert!(text.contains("locus_list_bindings"), "{text}");
 }

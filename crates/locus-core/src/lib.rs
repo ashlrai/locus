@@ -66,7 +66,7 @@ pub use adapter_trust::{
 };
 pub use adapters::{
     call_tool, call_tool_gated, control_tools, enforce_policy, known_providers, tools_for_binding,
-    AdapterTool, ApprovalGate, ToolCallResult,
+    validate_control_args, AdapterTool, ApprovalGate, ToolCallResult,
 };
 pub use agent_report::{
     agent_md_content, agent_md_path, agent_md_present, agent_report_from_doctor,

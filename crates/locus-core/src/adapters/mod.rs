@@ -920,6 +920,67 @@ pub fn control_tools(pinned: bool) -> Vec<AdapterTool> {
     tools
 }
 
+/// Check `locus_*` control-tool arguments against the advertised closed
+/// schema: arguments must be a JSON object (absent or `null` counts as `{}`),
+/// every key must be a declared property, and declared string properties must
+/// be strings. The error names the accepted arguments, so a misspelled key
+/// (`binding` for `alias`) is refused instead of silently ignored. Unknown
+/// tool names pass (the caller answers those).
+pub fn validate_control_args(tool_name: &str, args: &Value) -> Result<()> {
+    let tools = control_tools(true);
+    let Some(tool) = tools.iter().find(|t| t.name == tool_name) else {
+        return Ok(());
+    };
+    let declared = tool
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object);
+    let mut allowed: Vec<&str> = declared
+        .map(|d| d.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    allowed.sort_unstable();
+    let allowed_list = if allowed.is_empty() {
+        "none (call it with `{}`)".to_string()
+    } else {
+        format!("[{}]", allowed.join(", "))
+    };
+    let obj = match args {
+        Value::Null => return Ok(()),
+        Value::Object(obj) => obj,
+        other => {
+            return Err(LocusError::msg(format!(
+                "invalid arguments for `{tool_name}`: expected a JSON object, got {}; accepted arguments: {allowed_list}",
+                json_type_name(other)
+            )))
+        }
+    };
+    let mut undeclared: Vec<&str> = obj
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !declared.is_some_and(|d| d.contains_key(*k)))
+        .collect();
+    if !undeclared.is_empty() {
+        undeclared.sort_unstable();
+        return Err(LocusError::msg(format!(
+            "invalid arguments for `{tool_name}`: undeclared argument(s) [{}]; accepted arguments: {allowed_list}",
+            undeclared.join(", ")
+        )));
+    }
+    for (key, value) in obj {
+        let want = declared
+            .and_then(|d| d.get(key))
+            .and_then(|p| p.get("type"))
+            .and_then(Value::as_str);
+        if want == Some("string") && !value.is_string() {
+            return Err(LocusError::msg(format!(
+                "invalid arguments for `{tool_name}`: `{key}` must be a string, got {}",
+                json_type_name(value)
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1942,6 +2003,42 @@ mod tests {
         assert!(r.content.get("identity").is_some());
         assert!(r.content.get("domains").is_some());
         assert!(r.content.get("frozen_selectors").is_some());
+    }
+
+    #[test]
+    fn control_args_follow_the_closed_schema() {
+        // Declared, absent and null arguments pass.
+        for (tool, args) in [
+            ("locus_whoami", json!({})),
+            ("locus_whoami", Value::Null),
+            ("locus_enter_hint", json!({ "alias": "acme" })),
+            ("locus_request_pin", json!({ "alias": "acme" })),
+            ("locus_verify_claim", json!({ "claim": "x" })),
+            ("not_a_control_tool", json!({ "anything": 1 })),
+        ] {
+            validate_control_args(tool, &args).unwrap_or_else(|e| panic!("{tool} {args}: {e}"));
+        }
+
+        let e = validate_control_args("locus_enter_hint", &json!({ "binding": "acme" }))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("undeclared argument(s) [binding]")
+                && e.contains("accepted arguments: [alias]"),
+            "{e}"
+        );
+        let e = validate_control_args("locus_whoami", &json!({ "verbose": true }))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("accepted arguments: none"), "{e}");
+        let e = validate_control_args("locus_whoami", &json!("str"))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("expected a JSON object, got string"), "{e}");
+        let e = validate_control_args("locus_verify_claim", &json!({ "claim": 42 }))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("`claim` must be a string, got number"), "{e}");
     }
 
     #[test]
