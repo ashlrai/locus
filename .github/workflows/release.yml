@@ -18,9 +18,9 @@ env:
 
 jobs:
   build:
-    # The PR dry run builds Linux only: macOS targets get a no-op job on
-    # ubuntu so they never queue behind the shared macOS runners.
-    name: Build ${{ matrix.target }}${{ github.event_name == 'pull_request' && matrix.release_only && ' (release only)' || '' }}
+    # The PR dry run builds Linux only: the macOS job becomes a no-op on
+    # ubuntu so it never queues behind the shared macOS runners.
+    name: Build ${{ matrix.name }}${{ github.event_name == 'pull_request' && matrix.release_only && ' (release only)' || '' }}
     runs-on: ${{ github.event_name == 'pull_request' && matrix.release_only && 'ubuntu-latest' || matrix.os }}
     env:
       SKIP_BUILD: ${{ github.event_name == 'pull_request' && matrix.release_only }}
@@ -28,14 +28,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-darwin
+          # Both macOS targets build in one job: Apple Silicon natively and
+          # Intel cross-compiled (macos-13 is scarce), in one cargo
+          # invocation. Two jobs meant two waits for the shared macOS slots,
+          # which other repositories' CI keeps busy for hours at a time.
+          - name: apple-darwin
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
             os: macos-latest
             release_only: true
-          # Cross-compile Intel mac from Apple Silicon runners (macos-13 is scarce)
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            release_only: true
-          - target: x86_64-unknown-linux-gnu
+          # Same steps and the same loops as the macOS job, so the PR dry run
+          # exercises the code path a tag release takes.
+          - name: x86_64-unknown-linux-gnu
+            targets: x86_64-unknown-linux-gnu
+            rust_targets: x86_64-unknown-linux-gnu
             os: ubuntu-latest
 
     steps:
@@ -47,56 +53,65 @@ jobs:
         if: env.SKIP_BUILD != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust_targets }}
 
       - name: Cache cargo
         if: env.SKIP_BUILD != 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.name }}
 
       - name: Build release binaries
         if: env.SKIP_BUILD != 'true'
+        shell: bash
+        env:
+          TARGETS: ${{ matrix.targets }}
         run: |
-          cargo build --release --target ${{ matrix.target }} -p locus-cli -p locus-mcp
+          set -euo pipefail
+          args=()
+          for t in $TARGETS; do args+=(--target "$t"); done
+          cargo build --release "${args[@]}" -p locus-cli -p locus-mcp
 
       - name: Package artifacts
         if: env.SKIP_BUILD != 'true'
         shell: bash
+        env:
+          TARGETS: ${{ matrix.targets }}
         run: |
           set -euo pipefail
-          TARGET="${{ matrix.target }}"
           OUT="dist"
           mkdir -p "$OUT"
-          BIN_DIR="target/${TARGET}/release"
-          # Strip where available (macOS/Linux)
-          if command -v strip >/dev/null 2>&1; then
-            strip "${BIN_DIR}/locus" || true
-            strip "${BIN_DIR}/locus-mcp" || true
-          fi
-          STAGE="locus-${TARGET}"
-          mkdir -p "${OUT}/${STAGE}"
-          cp "${BIN_DIR}/locus" "${OUT}/${STAGE}/"
-          cp "${BIN_DIR}/locus-mcp" "${OUT}/${STAGE}/"
-          cp README.md LICENSE "${OUT}/${STAGE}/" 2>/dev/null || true
-          (
-            cd "$OUT"
-            tar -czf "locus-${TARGET}.tar.gz" "${STAGE}"
-            # Checksum of the final archive bytes, in `sha256sum -c` format.
-            # Integrity metadata only: not a signature or publisher attestation.
-            shasum -a 256 "locus-${TARGET}.tar.gz" > "locus-${TARGET}.tar.gz.sha256"
-            shasum -a 256 -c "locus-${TARGET}.tar.gz.sha256"
-          )
-          echo "Packed locus-${TARGET}.tar.gz"
+          for TARGET in $TARGETS; do
+            BIN_DIR="target/${TARGET}/release"
+            # Strip where available (macOS/Linux)
+            if command -v strip >/dev/null 2>&1; then
+              strip "${BIN_DIR}/locus" || true
+              strip "${BIN_DIR}/locus-mcp" || true
+            fi
+            STAGE="locus-${TARGET}"
+            mkdir -p "${OUT}/${STAGE}"
+            cp "${BIN_DIR}/locus" "${OUT}/${STAGE}/"
+            cp "${BIN_DIR}/locus-mcp" "${OUT}/${STAGE}/"
+            cp README.md LICENSE "${OUT}/${STAGE}/" 2>/dev/null || true
+            (
+              cd "$OUT"
+              tar -czf "locus-${TARGET}.tar.gz" "${STAGE}"
+              # Checksum of the final archive bytes, in `sha256sum -c` format.
+              # Integrity metadata only: not a signature or publisher attestation.
+              shasum -a 256 "locus-${TARGET}.tar.gz" > "locus-${TARGET}.tar.gz.sha256"
+              shasum -a 256 -c "locus-${TARGET}.tar.gz.sha256"
+            )
+            echo "Packed locus-${TARGET}.tar.gz"
+          done
 
       - name: Upload artifact
         if: env.SKIP_BUILD != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: locus-${{ matrix.target }}
+          name: locus-${{ matrix.name }}
           path: |
-            dist/locus-${{ matrix.target }}.tar.gz
-            dist/locus-${{ matrix.target }}.tar.gz.sha256
+            dist/locus-*.tar.gz
+            dist/locus-*.tar.gz.sha256
           if-no-files-found: error
 
   release:
