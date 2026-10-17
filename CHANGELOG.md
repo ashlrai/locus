@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`locus exec` / `run` / `ci run` exit codes say whether the child ran.**
+  A command that could not be started exited 1, the same as a child that ran
+  and failed, so an agent could not tell "tests failed" from "command not
+  found". Not found now exits 127 and not executable 126 (shell convention),
+  with an error naming the next step (absolute path, `sh -c` for builtins);
+  `--json` keeps the JSON error line. A child killed by a signal exits
+  `128 + signal` instead of 1. `locus mcp --supervised` follows the same rules.
+- **MCP control tools reject arguments their schema does not declare.** The
+  `locus_*` schemas advertise `additionalProperties: false`, but undeclared or
+  mistyped arguments were ignored: `locus_enter_hint {"binding": "acme"}`
+  succeeded with the generic `locus enter`, and `locus_request_pin` answered
+  only "alias required". They are now an `isError` result naming the bad
+  argument and the accepted ones (`{}` / absent / `null` still mean no
+  arguments). A missing `locus_request_pin` alias points at
+  `locus_list_bindings`.
 - **MCP `locus://doctor` reports a malformed binding file instead of erroring.**
   The 0.5.1 doctor fix covered `locus doctor` only; the MCP resource still failed
   the read with `binding 'x' is malformed` (-32000). It now returns the same

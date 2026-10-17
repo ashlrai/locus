@@ -34,8 +34,8 @@ use http_session::{
 use locus_core::{
     build_doctor_report, call_tool_gated, compute_safe_next, control_tools, enforce_policy,
     find_workspace, gather_doctor_external, load_config, split_namespaced_tool, tools_for_binding,
-    verify_claim, verify_session, AdapterTool, ApprovalGate, Binding, Session, Store,
-    WorkerManager, VERSION,
+    validate_control_args, verify_claim, verify_session, AdapterTool, ApprovalGate, Binding,
+    Session, Store, WorkerManager, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -3880,6 +3880,18 @@ fn call_control(
     args: &Value,
     scope: &RequestScope,
 ) -> std::result::Result<Value, Value> {
+    // The control schemas are closed (additionalProperties: false); a
+    // misspelled or mistyped argument is a tool error the model can correct,
+    // never silently ignored.
+    if let Err(e) = validate_control_args(name, args) {
+        return Ok(tool_text(
+            json!({
+                "error": e.to_string(),
+                "hint": format!("Retry `{name}` with only the arguments in its tools/list inputSchema."),
+            }),
+            true,
+        ));
+    }
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     // Heartbeat: detect drift and freeze when identity control tools are polled.
     if matches!(
@@ -4188,7 +4200,13 @@ fn call_control(
         "locus_request_pin" => {
             let alias = args.get("alias").and_then(|a| a.as_str()).unwrap_or("");
             if alias.is_empty() {
-                return Ok(tool_text(json!({ "error": "alias required" }), true));
+                return Ok(tool_text(
+                    json!({
+                        "error": "alias required",
+                        "hint": "Pass {\"alias\": \"<binding>\"}; locus_list_bindings lists the configured aliases.",
+                    }),
+                    true,
+                ));
             }
             // Verify binding exists
             let exists = s.load_binding(alias).is_ok();

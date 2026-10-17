@@ -1065,10 +1065,86 @@ fn main() {
             } else {
                 eprintln!("{} {e:#}", "error:".red().bold());
             }
-            std::process::exit(1);
+            // A child that never started exits like a shell would (127 not
+            // found, 126 not executable), so callers can tell it apart from
+            // the child's own exit 1.
+            let code = e
+                .downcast_ref::<ChildSpawnError>()
+                .map_or(1, ChildSpawnError::exit_code);
+            std::process::exit(code);
         }
         Err(()) => std::process::exit(stdout::STDOUT_CLOSED_EXIT),
     }
+}
+
+/// A child command (`exec`, `run`, `ci run`, `mcp --supervised`) that could
+/// not be started at all. Carries the shell exit code for the failure.
+#[derive(Debug)]
+struct ChildSpawnError {
+    program: String,
+    source: std::io::Error,
+}
+
+impl ChildSpawnError {
+    /// 127 when the program is not found, 126 when it exists but cannot be
+    /// executed (the POSIX shell convention), 1 for any other spawn failure.
+    fn exit_code(&self) -> i32 {
+        match self.source.kind() {
+            std::io::ErrorKind::NotFound => 127,
+            std::io::ErrorKind::PermissionDenied => 126,
+            _ => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for ChildSpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let program = &self.program;
+        match self.source.kind() {
+            std::io::ErrorKind::NotFound => write!(
+                f,
+                "spawn {program}: command not found (exit 127). The child runs with the isolated env's PATH; check the name, pass an absolute path, or run `locus exec -- sh -c '<cmd>'` for shell builtins"
+            ),
+            std::io::ErrorKind::PermissionDenied => write!(
+                f,
+                "spawn {program}: permission denied (exit 126); the file is not executable (try `chmod +x {program}`) or is a directory"
+            ),
+            _ => write!(f, "spawn {program}: {}", self.source),
+        }
+    }
+}
+
+impl std::error::Error for ChildSpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Run a prepared child to completion; a spawn failure becomes a
+/// [`ChildSpawnError`] so `main` exits 127/126 instead of a bare 1.
+fn run_child(child: &mut Command, program: &str) -> Result<std::process::ExitStatus> {
+    child.status().map_err(|source| {
+        anyhow::Error::new(ChildSpawnError {
+            program: program.to_string(),
+            source,
+        })
+    })
+}
+
+/// Exit code to propagate for a finished child: its own code, or
+/// `128 + signal` when a signal killed it (shell convention), never a bare 1.
+fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
 }
 
 /// Set once `--json` is parsed so a failing command reports its error as JSON.
@@ -3356,7 +3432,7 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         );
     }
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let status = run_child(&mut child, program)?;
     s.audit(
         "session.exec",
         &session.binding_alias,
@@ -3369,7 +3445,7 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         })),
     )?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -3590,7 +3666,7 @@ fn cmd_ci_run(
         );
     }
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let status = run_child(&mut child, program)?;
     s.audit(
         "ci.run",
         &session.binding_alias,
@@ -3606,7 +3682,7 @@ fn cmd_ci_run(
     let _ = s.cleanup_ci_session(&ci_path, &session);
 
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -3759,7 +3835,7 @@ fn cmd_run(
         );
     }
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let status = run_child(&mut child, program)?;
     s.audit(
         "session.run",
         &session.binding_alias,
@@ -3779,7 +3855,7 @@ fn cmd_run(
     }
 
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -3824,7 +3900,7 @@ fn run_exact_session_child(
     }
     child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let status = run_child(&mut child, program)?;
     s.audit(
         audit_op,
         &session.binding_alias,
@@ -3837,7 +3913,7 @@ fn run_exact_session_child(
         })),
     )?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -4024,7 +4100,7 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
         }
     }
 
-    let status = child.status().with_context(|| format!("spawn {bin}"))?;
+    let status = run_child(&mut child, &bin)?;
     if let Some((s, session)) = audit_ctx {
         s.audit(
             "session.mcp.supervised",
@@ -4038,7 +4114,7 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
         )?;
     }
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
