@@ -103,6 +103,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `generic`. `setup --client codex --print` now uses the same escaped TOML
   as the file it writes (it was hand-built and omitted `args = []`).
 
+- **`engagement init --workspace` and `locus workspace` never write through a
+  `.locus.toml` symlink.** The existence check followed the link, so a
+  dangling `.locus.toml` read as absent and the TOML was written to the link's
+  target, outside the project, while the command reported writing
+  `.locus.toml`. Any entry at that path (a broken link included) now needs
+  `--force`, and the file is staged next to it and renamed into place, which
+  replaces the link itself. `engagement init` also stages the workspace file
+  and checks `.locus/` before saving the binding, so a `.locus` file, a
+  `.locus.toml` directory or an unwritable project creates nothing instead of
+  leaving a binding whose retry fails on "binding already exists".
+- **`locus approve wait --timeout` with an overflowing value is a usage error,
+  not a panic.** `99999999999999999h` saturated to `u64::MAX` and the deadline
+  arithmetic panicked (exit 101); unit values that overflow are now rejected
+  by the parser and a huge bare number reports `--timeout ... is too large`.
 - **MCP `locus://doctor` reports a malformed binding file instead of erroring.**
   The 0.5.1 doctor fix covered `locus doctor` only; the MCP resource still failed
   the read with `binding 'x' is malformed` (-32000). It now returns the same

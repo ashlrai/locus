@@ -155,3 +155,40 @@ fn binding_add_refuses_to_replace_an_existing_alias_without_force() {
     assert!(!show.status.success());
     assert!(stderr.contains("did you mean `dup`?"), "{stderr}");
 }
+
+#[cfg(unix)]
+#[test]
+fn binding_add_never_writes_through_a_dangling_symlink() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let victim = outside.path().join("victim.toml");
+    let bindings = home.path().join("bindings");
+    std::fs::create_dir_all(&bindings).unwrap();
+    std::os::unix::fs::symlink(&victim, bindings.join("dang.toml")).unwrap();
+    let add = |extra: &[&str]| {
+        let mut args = vec![
+            "--json",
+            "binding",
+            "add",
+            "dang",
+            "--tenant",
+            "dang",
+            "--provider",
+            "github",
+            "--account",
+            "acct",
+            "--credential-ref",
+            "env:DANG_TOKEN",
+            "--non-interactive",
+        ];
+        args.extend_from_slice(extra);
+        locus(home.path(), cwd.path(), Some(CAP), &args)
+    };
+    // The link is an existing entry: refused like any existing alias.
+    assert_json_error(&add(&[]), "binding 'dang' already exists");
+    assert!(!victim.exists(), "nothing written outside LOCUS_HOME");
+    // --force replaces a binding, never the file a link points at.
+    assert_json_error(&add(&["--force"]), "symlink");
+    assert!(!victim.exists(), "nothing written outside LOCUS_HOME");
+}
