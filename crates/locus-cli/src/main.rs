@@ -583,7 +583,7 @@ enum McpCmd {
         /// Binding alias to bind the grant to
         #[arg(short = 'b', long = "binding")]
         binding: String,
-        /// Grant TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        /// Grant TTL (e.g. 15m, 1h; min 1s, max 24h). Capped by binding max_ttl.
         #[arg(long, default_value = "1h")]
         ttl: String,
         /// Free-form operator label (shown in `locus mcp list`)
@@ -626,7 +626,7 @@ enum CiCmd {
         /// Binding alias to mint against
         #[arg(short = 'b', long = "binding")]
         binding: String,
-        /// Session TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        /// Session TTL (e.g. 15m, 1h; min 1s, max 24h). Capped by binding max_ttl.
         #[arg(long, default_value = "15m")]
         ttl: String,
         /// Allow bindings outside workspace allowlist
@@ -641,7 +641,7 @@ enum CiCmd {
         /// Binding alias
         #[arg(short = 'b', long = "binding")]
         binding: String,
-        /// Session TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        /// Session TTL (e.g. 15m, 1h; min 1s, max 24h). Capped by binding max_ttl.
         #[arg(long, default_value = "15m")]
         ttl: String,
         /// Allow bindings outside workspace allowlist
@@ -656,7 +656,7 @@ enum CiCmd {
         /// Binding alias
         #[arg(short = 'b', long = "binding")]
         binding: String,
-        /// Session TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        /// Session TTL (e.g. 15m, 1h; min 1s, max 24h). Capped by binding max_ttl.
         #[arg(long, default_value = "15m")]
         ttl: String,
         /// Allow bindings outside workspace allowlist
@@ -1185,7 +1185,7 @@ fn run() -> Result<()> {
             client,
             print,
             mcp_bin,
-        } => cmd_setup(&client, print, mcp_bin),
+        } => cmd_setup(&client, print, mcp_bin, cli.json),
         Commands::Approve(sub) => cmd_approve(sub, cli.json),
         Commands::Notify(sub) => cmd_notify(sub, cli.json),
         Commands::Events {
@@ -3437,7 +3437,7 @@ fn cmd_ci_mint(
 ) -> Result<()> {
     require_local_control_boundary("locus ci mint")?;
     let s = store()?;
-    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
+    let ttl_dur = parse_mint_ttl(&ttl)?;
     let (session, path) = s
         .create_ci_session(&binding_alias, &cwd(), force, Some(ttl_dur))
         .with_context(|| format!("mint CI session for `{binding_alias}`"))?;
@@ -3479,7 +3479,7 @@ fn cmd_ci_mint(
 fn cmd_ci_env(binding_alias: String, ttl: String, force: bool, resolve: bool) -> Result<()> {
     require_local_control_boundary("locus ci env")?;
     let s = store()?;
-    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
+    let ttl_dur = parse_mint_ttl(&ttl)?;
     let (session, _path) = s
         .create_ci_session(&binding_alias, &cwd(), force, Some(ttl_dur))
         .with_context(|| format!("mint CI session for `{binding_alias}`"))?;
@@ -3523,6 +3523,9 @@ fn cmd_ci_run(
     if args.is_empty() {
         bail!("usage: locus ci run -b <alias> -- <command> [args...]");
     }
+    // Same bounds as `locus enter --ttl`: a zero or negative TTL would mint an
+    // already-expired session, and an over-long one would be capped silently.
+    let ttl_dur = parse_mint_ttl(&ttl)?;
 
     let s = store()?;
     if let Some(session) = delegated_child_session(&s)? {
@@ -3553,7 +3556,6 @@ fn cmd_ci_run(
     let binding = s.load_binding(&binding_alias)?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::CiRun)?;
 
-    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
     // Snapshot parent pin (active.json / LOCUS_SESSION_ID) before mint.
     let parent_before = s.active_session()?;
 
@@ -4100,7 +4102,7 @@ fn cmd_mcp_mint(
 ) -> Result<()> {
     require_local_control_boundary("locus mcp mint")?;
     let s = store()?;
-    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
+    let ttl_dur = parse_mint_ttl(&ttl)?;
     let (session, grant, token) = s
         .create_mcp_grant(&binding_alias, &cwd(), Some(ttl_dur), label, force)
         .with_context(|| format!("mint MCP grant for `{binding_alias}`"))?;
@@ -5467,12 +5469,8 @@ fn resolve_add_answers_interactive(s: &Store, args: &BindingAddArgs) -> Result<A
                 known_providers().join(", ").cyan()
             );
             let v = prompt_value("provider", "--provider", None, &|_| Ok(()))?;
-            if !known_providers().contains(&v.as_str()) {
-                println!(
-                    "{} no built-in adapter for '{}' — tools require an upstream MCP recipe (locus upstream list)",
-                    "warning:".yellow().bold(),
-                    v
-                );
+            if let Some(w) = unknown_provider_warning(&v) {
+                println!("{} {w}", "warning:".yellow().bold());
             }
             v
         }
@@ -5651,6 +5649,15 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
     } else {
         resolve_add_answers(&args)?
     };
+    // A prompted provider is checked at the prompt; a `--provider` flag (agents,
+    // scripts) wrote a typo like `githb` silently. Still written (custom
+    // providers are served by upstream MCP recipes), but said on stderr so
+    // stdout keeps its --json contract.
+    if community.is_none() && args.provider.is_some() {
+        if let Some(w) = unknown_provider_warning(&answers.provider) {
+            eprintln!("{} {w}", "warning:".yellow().bold());
+        }
+    }
     let mut b = binding_from_answers(&answers);
     if let Some(manifest) = community {
         if !answers.credential_ref.starts_with("env:") {
@@ -5828,18 +5835,49 @@ fn prompt_confirm(question: &str, default_yes: bool) -> Result<bool> {
     })
 }
 
+/// `None` when `provider` has a built-in adapter; otherwise the warning that
+/// names the built-ins and the upstream-recipe route.
+fn unknown_provider_warning(provider: &str) -> Option<String> {
+    if known_providers()
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(provider))
+    {
+        return None;
+    }
+    Some(format!(
+        "no built-in adapter for '{provider}' (built-in: {}) — tools require an upstream MCP recipe (locus upstream list)",
+        known_providers().join(", ")
+    ))
+}
+
 /// Bounds-checked `--ttl` parse. `locus_core::parse_ttl` is lenient (accepts
 /// "", zero, negatives) — this wrapper is the fail-closed gate for operator
 /// input: min 1m, max 24h.
 fn parse_pin_ttl(raw: &str) -> Result<chrono::Duration> {
+    parse_bounded_ttl(raw, chrono::Duration::minutes(1), "1m")
+}
+
+/// `--ttl` for minted CI sessions and MCP grants (`ci mint|env|run`,
+/// `mcp mint`). Same 24h ceiling as a pin; the floor is 1s, so short-lived
+/// expiry probes keep working, but zero or negative (an already-expired
+/// session or grant that was still printed) fails closed.
+fn parse_mint_ttl(raw: &str) -> Result<chrono::Duration> {
+    parse_bounded_ttl(raw, chrono::Duration::seconds(1), "1s")
+}
+
+fn parse_bounded_ttl(
+    raw: &str,
+    min: chrono::Duration,
+    min_label: &str,
+) -> Result<chrono::Duration> {
     let trimmed = raw.trim();
-    let invalid = || anyhow!("invalid --ttl '{raw}': use 30m / 2h / 1d (min 1m, max 24h)");
+    let invalid = || anyhow!("invalid --ttl '{raw}': use 30m / 2h / 1d (min {min_label}, max 24h)");
     if trimmed.is_empty() {
         return Err(invalid());
     }
     let d = parse_ttl(trimmed).map_err(|_| invalid())?;
-    if d < chrono::Duration::minutes(1) {
-        bail!("--ttl {raw} is too short: minimum is 1m");
+    if d < min {
+        bail!("--ttl {raw} is too short: minimum is {min_label}");
     }
     if d > chrono::Duration::hours(24) {
         bail!(
@@ -7790,8 +7828,14 @@ fn supervised_mcp_hint(locus_bin: &str) -> [String; 3] {
     ]
 }
 
-fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<()> {
-    if !print_only && matches!(client, "claude" | "cursor" | "codex" | "grok" | "gemini") {
+fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>, json: bool) -> Result<()> {
+    if !matches!(
+        client,
+        "claude" | "cursor" | "codex" | "grok" | "gemini" | "generic"
+    ) {
+        bail!("unknown client: {client} (claude|cursor|codex|grok|gemini|generic)");
+    }
+    if !print_only && client != "generic" {
         require_local_control_boundary("locus setup")?;
     }
     let bin = resolve_mcp_bin(mcp_bin);
@@ -7805,131 +7849,126 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
         "args": [],
         "env": mcp_agent_env(client),
     });
+    let json_entry = serde_json::json!({ "mcpServers": { "locus": server_entry } });
+    let toml_entry = stdio_server_entry_toml(&bin, client);
+    let toml_client = matches!(client, "codex" | "grok");
 
+    // Print-only: nothing is written. `generic` has no known config path, so
+    // it is always print-only and emits both shapes.
+    if print_only || client == "generic" {
+        if json {
+            let mut out = serde_json::json!({ "ok": true, "client": client, "written": [] });
+            if client == "generic" || !toml_client {
+                out["entry"] = json_entry.clone();
+            }
+            if client == "generic" || toml_client {
+                out["entry_toml"] = serde_json::json!(toml_entry);
+            }
+            println!("{out}");
+            return Ok(());
+        }
+        if client != "generic" {
+            if toml_client {
+                print!("{toml_entry}");
+            } else {
+                println!("{}", serde_json::to_string_pretty(&json_entry)?);
+            }
+            return Ok(());
+        }
+        // Any generic stdio MCP client: no known on-disk config path, so
+        // never write — emit both shapes for paste (`--print` implied).
+        println!("# Locus MCP server entry — paste into the client's MCP settings.");
+        println!("# Generic client config path unknown; nothing was written.");
+        println!("# JSON shape (mcpServers-style clients):");
+        println!("{}", serde_json::to_string_pretty(&json_entry)?);
+        println!();
+        println!("# TOML shape (Codex-style clients):");
+        println!("{toml_entry}");
+        println!("# Optional: export LOCUS_GROK_MCP_CONFIG=<path-to-its-config> so");
+        println!("# `locus agent doctor` / `locus agent report` can verify registration");
+        println!("# (JSON mcpServers shape or TOML [mcp_servers] shape).");
+        return Ok(());
+    }
+
+    let mut written: Vec<std::path::PathBuf> = Vec::new();
     match client {
         "claude" => {
             // Project-local .mcp.json or user can merge into Claude settings
-            let entry = serde_json::json!({
-                "mcpServers": {
-                    "locus": server_entry
-                }
-            });
-            if print_only {
-                println!("{}", serde_json::to_string_pretty(&entry)?);
-                return Ok(());
-            }
             let path = cwd().join(".mcp.json");
             merge_mcp_json(&path, "locus", &server_entry)?;
-            println!("{} wrote/merged {}", "ok".green().bold(), path.display());
+            written.push(path);
+        }
+        "cursor" | "gemini" => {
+            // project-level, plus the user file only when it already exists
+            let rel = if client == "cursor" {
+                [".cursor", "mcp.json"]
+            } else {
+                [".gemini", "settings.json"]
+            };
+            let project = cwd().join(rel[0]).join(rel[1]);
+            if let Some(parent) = project.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            merge_mcp_json(&project, "locus", &server_entry)?;
+            written.push(project);
+            if let Some(home) = dirs::home_dir() {
+                let global = home.join(rel[0]).join(rel[1]);
+                if global.exists() {
+                    merge_mcp_json(&global, "locus", &server_entry)?;
+                    written.push(global);
+                }
+            }
+        }
+        _ => {
+            // codex: ~/.codex/config.toml. Grok Build: ~/.grok/config.toml with
+            // Codex-style [mcp_servers.<name>] tables — same fail-closed
+            // toml_edit merge.
+            let home = dirs::home_dir().with_context(|| format!("home dir for {client} config"))?;
+            let path = home.join(format!(".{client}")).join("config.toml");
+            merge_codex_mcp(&path, &bin, client)?;
+            written.push(path);
+        }
+    }
+
+    let locus_bin = locus_self_bin();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "client": client,
+                "written": written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                "serves": "control_tools",
+                "supervised_command": format!("{locus_bin} mcp --supervised"),
+            })
+        );
+        return Ok(());
+    }
+
+    for (i, path) in written.iter().enumerate() {
+        let verb = if i == 0 {
+            "wrote/merged"
+        } else {
+            "also merged"
+        };
+        println!("{} {verb} {}", "ok".green().bold(), path.display());
+    }
+    match client {
+        "claude" => {
             println!(
                 "   also pin before agent work: {}",
                 "locus pin <alias>".cyan()
             );
             println!("   verify: locus whoami && claude");
         }
-        "cursor" => {
-            let entry = serde_json::json!({
-                "mcpServers": {
-                    "locus": server_entry
-                }
-            });
-            if print_only {
-                println!("{}", serde_json::to_string_pretty(&entry)?);
-                return Ok(());
-            }
-            // project-level
-            let project = cwd().join(".cursor").join("mcp.json");
-            if let Some(parent) = project.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            merge_mcp_json(&project, "locus", &server_entry)?;
-            println!("{} wrote/merged {}", "ok".green().bold(), project.display());
-            // global
-            if let Some(home) = dirs::home_dir() {
-                let global = home.join(".cursor").join("mcp.json");
-                if global.exists() {
-                    merge_mcp_json(&global, "locus", &server_entry)?;
-                    println!("{} also merged {}", "ok".green().bold(), global.display());
-                }
-            }
-        }
-        "gemini" => {
-            let entry = serde_json::json!({ "mcpServers": { "locus": server_entry } });
-            if print_only {
-                println!("{}", serde_json::to_string_pretty(&entry)?);
-                return Ok(());
-            }
-            let project = cwd().join(".gemini").join("settings.json");
-            if let Some(parent) = project.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            merge_mcp_json(&project, "locus", &server_entry)?;
-            println!("{} wrote/merged {}", "ok".green().bold(), project.display());
-            if let Some(home) = dirs::home_dir() {
-                let global = home.join(".gemini").join("settings.json");
-                if global.exists() {
-                    merge_mcp_json(&global, "locus", &server_entry)?;
-                    println!("{} also merged {}", "ok".green().bold(), global.display());
-                }
-            }
-            println!(
-                "   verify: locus agent doctor   # mcp_registered.gemini (or `gemini mcp list`)"
-            );
-        }
-        "grok" => {
-            // Grok Build: documented config at ~/.grok/config.toml with
-            // Codex-style [mcp_servers.<name>] tables — same fail-closed
-            // toml_edit merge as codex.
-            if print_only {
-                println!("{}", stdio_server_entry_toml(&bin, client));
-                return Ok(());
-            }
-            let home = dirs::home_dir().context("home dir for grok config")?;
-            let path = home.join(".grok").join("config.toml");
-            merge_codex_mcp(&path, &bin, "grok")?;
-            println!("{} wrote/merged {}", "ok".green().bold(), path.display());
-            println!("   verify: locus agent doctor   # mcp_registered.grok");
-        }
-        "generic" => {
-            // Any generic stdio MCP client: no known on-disk config path, so
-            // never write — emit both shapes for paste (`--print` implied).
-            println!("# Locus MCP server entry — paste into the client's MCP settings.");
-            println!("# Generic client config path unknown; nothing was written.");
-            println!("# JSON shape (mcpServers-style clients):");
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "mcpServers": { "locus": server_entry }
-                }))?
-            );
-            println!();
-            println!("# TOML shape (Codex-style clients):");
-            println!("{}", stdio_server_entry_toml(&bin, client));
-            println!("# Optional: export LOCUS_GROK_MCP_CONFIG=<path-to-its-config> so");
-            println!("# `locus agent doctor` / `locus agent report` can verify registration");
-            println!("# (JSON mcpServers shape or TOML [mcp_servers] shape).");
-            return Ok(());
-        }
-        "codex" => {
-            if print_only {
-                println!("[mcp_servers.locus]");
-                println!("command = \"{bin}\"");
-                println!();
-                println!("[mcp_servers.locus.env]");
-                println!("LOCUS_AUTO_PIN = \"cwd\"");
-                println!("LOCUS_CLIENT = \"codex\"");
-                return Ok(());
-            }
-            let home = dirs::home_dir().context("home dir for codex config")?;
-            let path = home.join(".codex").join("config.toml");
-            merge_codex_mcp(&path, &bin, "codex")?;
-            println!("{} wrote/merged {}", "ok".green().bold(), path.display());
-        }
-        other => bail!("unknown client: {other} (claude|cursor|codex|grok|gemini|generic)"),
+        "gemini" => println!(
+            "   verify: locus agent doctor   # mcp_registered.gemini (or `gemini mcp list`)"
+        ),
+        "grok" => println!("   verify: locus agent doctor   # mcp_registered.grok"),
+        _ => {}
     }
-
     println!();
-    for line in supervised_mcp_hint(&locus_self_bin()) {
+    for line in supervised_mcp_hint(&locus_bin) {
         println!("{line}");
     }
     println!();
@@ -9569,8 +9608,8 @@ mod alias_ux_tests {
 #[cfg(test)]
 mod ttl_and_client_add_tests {
     use super::{
-        binding_from_answers, human_dur, missing_add_flags, parse_pin_ttl, resolve_add_answers,
-        scope_prompts, split_repos, AddAnswers, BindingAddArgs,
+        binding_from_answers, human_dur, missing_add_flags, parse_mint_ttl, parse_pin_ttl,
+        resolve_add_answers, scope_prompts, split_repos, AddAnswers, BindingAddArgs,
     };
     use locus_core::Store;
 
@@ -9592,6 +9631,12 @@ mod ttl_and_client_add_tests {
         assert_eq!(parse_pin_ttl("2h").unwrap(), chrono::Duration::hours(2));
         assert_eq!(parse_pin_ttl("1d").unwrap(), chrono::Duration::hours(24));
         assert_eq!(parse_pin_ttl("1m").unwrap(), chrono::Duration::minutes(1));
+
+        // Mint TTLs keep the 24h ceiling but allow second-scale expiry probes.
+        assert_eq!(parse_mint_ttl("1s").unwrap(), chrono::Duration::seconds(1));
+        for bad in ["0s", "-5m", "25h", "abc", ""] {
+            assert!(parse_mint_ttl(bad).is_err(), "{bad}");
+        }
 
         for (bad, frag) in [
             ("0m", "too short"),
