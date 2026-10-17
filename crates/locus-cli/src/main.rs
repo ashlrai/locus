@@ -11,6 +11,7 @@
 #[macro_use]
 mod stdout;
 
+mod cred_diag;
 mod serve;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -3292,10 +3293,12 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         );
     }
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
+    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
         bail!(
-            "credential resolve failed: {}",
-            format_credential_issues(&iso.secrets_failed)
+            "credential resolve failed (--strict-creds): {}",
+            cred_lines.join("; ")
         );
     }
     let executor_capability = s.grant_executor_capability(&session)?;
@@ -3323,11 +3326,11 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    if !iso.secrets_failed.is_empty() {
+    for line in &cred_lines {
         eprintln!(
-            "{} unresolved credentials: {}",
+            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
             "warn".yellow(),
-            format_credential_issues(&iso.secrets_failed)
+            line
         );
     }
 
@@ -3522,11 +3525,13 @@ fn cmd_ci_run(
 
     // Child gets full isolated env (may resolve secrets for the command to work).
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
+    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_ci_session(&ci_path, &session);
         bail!(
-            "credential resolve failed: {}",
-            format_credential_issues(&iso.secrets_failed)
+            "credential resolve failed (--strict-creds): {}",
+            cred_lines.join("; ")
         );
     }
     let executor_capability = s.grant_executor_capability(&session)?;
@@ -3555,11 +3560,11 @@ fn cmd_ci_run(
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    if !iso.secrets_failed.is_empty() {
+    for line in &cred_lines {
         eprintln!(
-            "{} unresolved credentials: {}",
+            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
             "warn".yellow(),
-            format_credential_issues(&iso.secrets_failed)
+            line
         );
     }
 
@@ -3668,11 +3673,13 @@ fn cmd_run(
     }
 
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
+    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_run_session(&run_path, &session);
         bail!(
-            "credential resolve failed: {}",
-            format_credential_issues(&iso.secrets_failed)
+            "credential resolve failed (--strict-creds): {}",
+            cred_lines.join("; ")
         );
     }
     let executor_capability = s.grant_executor_capability(&session)?;
@@ -3722,11 +3729,11 @@ fn cmd_run(
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    if !iso.secrets_failed.is_empty() {
+    for line in &cred_lines {
         eprintln!(
-            "{} unresolved credentials: {}",
+            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
             "warn".yellow(),
-            format_credential_issues(&iso.secrets_failed)
+            line
         );
     }
 
@@ -6342,7 +6349,13 @@ fn gather_doctor_external_with_phantom_status(
     // An invalid binding file is reported by build_doctor_report as an
     // UNSAFE `binding_invalid` finding; do not abort the diagnostic here.
     let unresolved_phm = if s.list_bindings().is_ok() {
-        collect_unresolved_phm_refs(s, phantom)?
+        let mut unresolved = collect_unresolved_phm_refs(s, phantom)?;
+        // `phantom list` only proves the locator exists; probe the real
+        // resolve path so a refused/failed reveal is not reported as ok.
+        let extra = cred_diag::probe_phm_reveal(s, phantom, &unresolved);
+        unresolved.extend(extra);
+        unresolved.sort_by(|a, b| a.provider.cmp(&b.provider));
+        unresolved
     } else {
         Vec::new()
     };
@@ -7265,6 +7278,20 @@ fn print_doctor_human(report: &locus_core::DoctorReport) {
             report.unresolved_phm.len(),
             format_credential_issues(&report.unresolved_phm).dimmed()
         );
+        let mut causes: Vec<String> = Vec::new();
+        for issue in &report.unresolved_phm {
+            let line = format!(
+                "{}: {}",
+                issue.code,
+                cred_diag::cause(issue, report.phantom_on_path)
+            );
+            if !causes.contains(&line) {
+                causes.push(line);
+            }
+        }
+        for line in causes {
+            println!("               cause {}", line.yellow());
+        }
     } else if report.phantom_on_path {
         println!("  credentials  {}", "ok".green());
     }
