@@ -239,6 +239,17 @@ impl Store {
     // ── Bindings ──────────────────────────────────────────────────────────
 
     pub fn save_binding(&self, binding: &Binding) -> Result<PathBuf> {
+        self.write_binding(binding, true)
+    }
+
+    /// [`Store::save_binding`] that refuses, under the bindings lock, to
+    /// replace an existing binding unless `replace` is set, so a check made
+    /// before the write cannot be raced by another writer.
+    pub fn create_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
+        self.write_binding(binding, replace)
+    }
+
+    fn write_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
         self.require_local_control("save binding")?;
         binding.validate()?;
         // Double-check alias cannot escape bindings/ (also enforced in validate)
@@ -257,6 +268,26 @@ impl Store {
         let _lock = crate::credential_migration::lock_bindings(self)?;
         let path = self.bindings_dir().join(format!("{}.toml", binding.alias));
         ensure_under_dir(&self.bindings_dir(), &path)?;
+        // `fs::write` follows a symlink, and a dangling one passes the
+        // containment check above, so a planted `bindings/x.toml` link would
+        // send the binding to wherever it points. Never write through one.
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(LocusError::msg(format!(
+                    "binding '{}' is a symlink ({}); refusing to write through it — \
+                     remove it and rerun",
+                    binding.alias,
+                    path.display()
+                )));
+            }
+            Ok(_) if !replace => {
+                return Err(LocusError::msg(format!(
+                    "binding '{}' already exists; nothing written",
+                    binding.alias
+                )));
+            }
+            _ => {}
+        }
         fs::write(&path, binding.to_toml()?)?;
         self.audit("binding.save", &binding.alias, None)?;
         Ok(path)
@@ -4467,6 +4498,45 @@ credential_ref = "ghp_UNSAFE/CANARY"
         let runtime = store.verify_runtime().unwrap();
         assert!(!runtime.seal_ok);
         assert!(runtime.issues.iter().any(|issue| issue == "invalid_seal"));
+    }
+
+    #[test]
+    fn save_binding_never_writes_through_a_symlink() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        fs::create_dir_all(store.bindings_dir()).unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.toml");
+        // Dangling: the containment check alone lets it through.
+        std::os::unix::fs::symlink(&victim, store.bindings_dir().join("acme.toml")).unwrap();
+
+        let b = sample_binding("acme", "acme-corp", "p1");
+        let err = store.save_binding(&b).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(!victim.exists(), "nothing written outside the store");
+        let err = store.create_binding(&b, true).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(!victim.exists());
+    }
+
+    #[test]
+    fn create_binding_refuses_an_existing_alias_unless_replacing() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .create_binding(&sample_binding("acme", "acme-corp", "p1"), false)
+            .unwrap();
+        let err = store
+            .create_binding(&sample_binding("acme", "other", "p2"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(store.load_binding("acme").unwrap().tenant, "acme-corp");
+        store
+            .create_binding(&sample_binding("acme", "other", "p2"), true)
+            .unwrap();
+        assert_eq!(store.load_binding("acme").unwrap().tenant, "other");
     }
 
     #[test]

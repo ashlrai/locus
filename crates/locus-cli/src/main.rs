@@ -5755,10 +5755,12 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
 
     // An existing binding is never replaced silently: its scope and
     // credential ref would change under every workspace that names it.
+    // symlink_metadata: a dangling symlink is an existing entry too.
     let exists = s
         .bindings_dir()
         .join(format!("{}.toml", answers.alias))
-        .exists();
+        .symlink_metadata()
+        .is_ok();
     if exists && !args.force && !(can_prompt && guided) {
         bail!(
             "binding '{alias}' already exists; nothing written. \
@@ -5781,7 +5783,9 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
         }
     }
 
-    let path = s.save_binding(&b)?;
+    // Re-checked under the bindings lock: another writer may have created
+    // the alias since `exists` was read (or while the prompt waited).
+    let path = s.create_binding(&b, exists || args.force)?;
     if json {
         println!(
             "{}",
