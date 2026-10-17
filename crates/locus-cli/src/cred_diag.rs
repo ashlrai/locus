@@ -232,12 +232,12 @@ pub(crate) fn describe_unresolved(
                 vars.join(",")
             };
             format!(
-                "binding={} provider={} env={} source={} code={}: {}",
+                "binding={} provider={} source={} code={} env={}: {}",
                 binding.alias,
                 issue.provider,
-                env,
                 issue.source,
                 issue.code,
+                env,
                 cause(issue, phantom_on_path)
             )
         })

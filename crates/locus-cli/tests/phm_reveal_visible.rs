@@ -152,7 +152,7 @@ fn refused_reveal_is_flagged_by_doctor_and_exec() {
     assert!(out.status.success(), "non-strict exec still runs: {stderr}");
     assert!(stdout.contains("GH_TOKEN=unset"), "{stdout}");
     assert!(
-        stderr.contains("binding=personal provider=github env=GH_TOKEN,GITHUB_TOKEN"),
+        stderr.contains("binding=personal provider=github source=phantom code=reveal-failed env=GH_TOKEN,GITHUB_TOKEN"),
         "{stderr}"
     );
     assert!(stderr.contains("code=reveal-failed"), "{stderr}");
