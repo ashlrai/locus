@@ -929,8 +929,13 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
 
     // Pending approvals require authority from outside the caller-controlled
     // CLI/dashboard plane. Never turn local advisory labels into a retry loop.
+    // Only the pinned binding's requests gate this pin: another binding's
+    // pending record authorizes nothing here and must not wedge it.
     let pending = store.pending_approvals()?;
-    if let Some(rec) = pending.first() {
+    if let Some(rec) = pending
+        .iter()
+        .find(|r| binding.as_deref() == Some(r.binding.as_str()))
+    {
         let dual = store.tool_requires_dual_control(&rec.binding, &rec.tool);
         let required = crate::approval::required_grant_count(dual);
         let mode = if dual {
@@ -943,8 +948,8 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
             command: None,
             agent_tool: None,
             message: format!(
-                "Provider execution for `{}` on binding `{}` is blocked pending a closed, independently authenticated external authorization envelope ({mode}, {required} authoritative approver(s)). This release has no external verifier. Local CLI/dashboard labels are advisory only; do not retry the tool after recording one.",
-                rec.tool, rec.binding
+                "Provider execution for `{}` on binding `{}` is blocked pending a closed, independently authenticated external authorization envelope ({mode}, {required} authoritative approver(s)). This release has no external verifier. Local CLI/dashboard labels are advisory only; do not retry the tool after recording one. Human: `locus approve deny {}` dismisses the request.",
+                rec.tool, rec.binding, rec.id
             ),
             ready: false,
             approval_id: Some(rec.id.clone()),
@@ -1802,6 +1807,65 @@ require_pin = true
         assert!(next.message.contains("do not retry"));
         assert!(!next.message.contains("dual-control"));
         assert!(!next.message.contains("need second principal"));
+    }
+
+    #[test]
+    fn safe_next_ignores_pending_approval_of_another_binding() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        store
+            .create_pending_approval(
+                "github.some_tool",
+                "acme",
+                &serde_json::json!({}),
+                "sess_test",
+                "agent",
+            )
+            .unwrap();
+        store.leave().unwrap();
+        store.pin("personal", dir.path(), None, false).unwrap();
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "ready", "{}", next.message);
+        assert!(next.ready);
+        assert_eq!(next.binding.as_deref(), Some("personal"));
+        assert!(next.approval_id.is_none());
+    }
+
+    #[test]
+    fn safe_next_external_authorization_names_how_to_dismiss() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let rec = store
+            .create_pending_approval(
+                "github.some_tool",
+                "acme",
+                &serde_json::json!({}),
+                "sess_test",
+                "agent",
+            )
+            .unwrap();
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "external_authorization");
+        assert!(
+            next.message
+                .contains(&format!("`locus approve deny {}`", rec.id)),
+            "message should name the human dismissal: {}",
+            next.message
+        );
+        assert!(next.message.contains("do not retry"));
     }
 
     #[test]
