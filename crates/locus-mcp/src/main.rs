@@ -4203,7 +4203,7 @@ fn call_control(
                 return Ok(tool_text(
                     json!({
                         "error": "alias required",
-                        "hint": "Pass {\"alias\": \"<binding>\"}; locus_list_bindings lists the configured aliases.",
+                        "hint": "pass {\"alias\": \"<binding alias>\"}; locus_list_bindings lists the configured aliases",
                     }),
                     true,
                 ));
@@ -4239,7 +4239,9 @@ fn call_control(
         }
         "locus_providers" => match scope_whoami(&s, scope) {
             Ok(w) => Ok(tool_text(json!({ "providers": w.providers }), false)),
-            Err(e) => Ok(tool_text(json!({ "error": e.to_string() }), true)),
+            // Same body as locus_whoami so an unobservable pin names the
+            // supervised launch instead of a bare error string.
+            Err(e) => Ok(tool_text(whoami_error_body(&e), true)),
         },
         "locus_verify_claim" => {
             let text = args

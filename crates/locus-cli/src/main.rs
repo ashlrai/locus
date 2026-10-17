@@ -1249,7 +1249,7 @@ fn run() -> Result<()> {
             allow,
             require_pin,
             force,
-        } => cmd_workspace(default, allow, require_pin, force),
+        } => cmd_workspace(default, allow, require_pin, force, cli.json),
         Commands::Doctor => cmd_doctor(cli.json),
         Commands::Watch {
             interval,
@@ -1874,6 +1874,35 @@ fn with_alias_suggestions(s: &Store, err: locus_core::LocusError) -> anyhow::Err
     err.into()
 }
 
+/// [`with_alias_suggestions`] for a bare `enter` / `pin`: when the missing
+/// alias came from the workspace `default_binding`, say which `.locus.toml`
+/// named it and how to fix either side. Text only; the refusal stands.
+fn with_auto_alias_suggestions(
+    s: &Store,
+    cwd: &Path,
+    err: locus_core::LocusError,
+) -> anyhow::Error {
+    let missing = match &err {
+        locus_core::LocusError::BindingNotFound(missing) => Some(missing.clone()),
+        _ => None,
+    };
+    let out = with_alias_suggestions(s, err);
+    let Some(missing) = missing else {
+        return out;
+    };
+    match find_workspace(cwd) {
+        Ok(Some((path, cfg))) if cfg.default_binding.as_deref() == Some(missing.as_str()) => out
+            .context(format!(
+                "{} sets default_binding = \"{missing}\", which is not configured here; \
+                 create it (`locus binding add {missing}`), point the workspace at an \
+                 existing binding (`locus workspace --default <alias> --force`), or \
+                 `locus enter <alias>`",
+                path.display()
+            )),
+        _ => out,
+    }
+}
+
 /// Local identity dashboard HTTP server (blocks until Ctrl-C).
 fn cmd_serve(port: u16, token: Option<String>, open_browser: bool) -> Result<()> {
     // Fail early if home is unreadable so users get a clear error before bind.
@@ -2303,7 +2332,7 @@ fn cmd_enter(
             .map_err(|e| wedged_session_recovery_for(with_alias_suggestions(&s, e), Some(&a)))?,
         None => s
             .pin_auto_with_ttl(&cwd(), client, force, requested_ttl)
-            .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
+            .map_err(|e| wedged_session_recovery(with_auto_alias_suggestions(&s, &cwd(), e)))?,
     };
     let binding = s.load_binding(&session.binding_alias)?;
     let providers_n = binding.providers.len();
@@ -2576,7 +2605,7 @@ fn cmd_pin(
                 .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
             None => s
                 .pin_auto_with_ttl(&cwd(), client, force, requested_ttl)
-                .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
+                .map_err(|e| wedged_session_recovery(with_auto_alias_suggestions(&s, &cwd(), e)))?,
         }
     };
     // Surface a silent policy.max_ttl clamp (5s slack for pin-time skew).
@@ -2738,6 +2767,15 @@ fn active_alias_hint(s: &Store) -> Option<String> {
     Some(s.active_session().ok().flatten()?.binding_alias)
 }
 
+/// Re-pin suggestion after `locus leave`: name the binding just left (a
+/// hard-coded sample alias pointed at a binding the operator may not have).
+fn repin_hint(left: Option<&str>) -> String {
+    match left {
+        Some(alias) => format!("locus enter {alias}  or  locus enter <alias>"),
+        None => "locus enter <alias>  (aliases: locus binding list)".to_string(),
+    }
+}
+
 fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {
     if force {
         return cmd_leave_force(no_verifier, json);
@@ -2753,11 +2791,7 @@ fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {
                 println!("{}", serde_json::json!({ "left": false }));
             } else {
                 println!("{} no active pin — already clear", "->".dimmed());
-                println!(
-                    "   re-pin: {}  or  {}",
-                    "locus enter <alias>".cyan(),
-                    "locus pin personal".cyan()
-                );
+                println!("   re-pin: {}", repin_hint(None).cyan());
             }
         }
         Some(session) => {
@@ -2783,9 +2817,8 @@ fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {
                     "[locus:leave]".dimmed()
                 );
                 println!(
-                    "   re-pin: {}  or  {}",
-                    "locus enter <alias>".cyan(),
-                    "locus pin personal".cyan()
+                    "   re-pin: {}",
+                    repin_hint(Some(&session.binding_alias)).cyan()
                 );
             }
         }
@@ -2819,11 +2852,7 @@ fn cmd_leave_force(no_verifier: bool, json: bool) -> Result<()> {
         );
     } else if !outcome.cleared {
         println!("{} no active pin — already clear", "->".dimmed());
-        println!(
-            "   re-pin: {}  or  {}",
-            "locus enter <alias>".cyan(),
-            "locus pin personal".cyan()
-        );
+        println!("   re-pin: {}", repin_hint(None).cyan());
     } else {
         println!(
             "{} force-cleared active session{}{}",
@@ -2851,9 +2880,8 @@ fn cmd_leave_force(no_verifier: bool, json: bool) -> Result<()> {
             "session.force_leave".dimmed()
         );
         println!(
-            "   re-pin: {}  or  {}",
-            "locus enter <alias>".cyan(),
-            "locus pin personal".cyan()
+            "   re-pin: {}",
+            repin_hint(outcome.binding_alias.as_deref()).cyan()
         );
     }
     Ok(())
@@ -4590,7 +4618,7 @@ fn cmd_onboard(detect_only: bool, yes: bool, reset: bool, json: bool) -> Result<
                 }
             },
         )?;
-        cmd_workspace(default, None, true, false)?;
+        cmd_workspace(default, None, true, false, false)?;
         plan.workspaces.push(cwd().display().to_string());
         plan.mark_done(locus_core::steps::WORKSPACES);
         plan.save(s.home())?;
@@ -5920,9 +5948,60 @@ fn cmd_workspace(
     allow: Option<String>,
     require_pin: bool,
     force: bool,
+    json: bool,
 ) -> Result<()> {
     require_local_control_boundary("locus workspace")?;
-    let path = cwd().join(".locus.toml");
+    let written = write_workspace_file(&cwd(), default, allow, require_pin, force)?;
+    // Advisory only: README/e2e flows name aliases before they exist locally,
+    // so a missing binding is a warning (stderr, exit 0), not a rejection.
+    // An unreadable store yields no warning and an empty `unknown_bindings`.
+    let missing: Vec<String> = store()
+        .and_then(|s| Ok(s.list_bindings()?))
+        .map(|known| {
+            let known: Vec<&str> = known.iter().map(|b| b.alias.as_str()).collect();
+            missing_workspace_aliases(&written.config.allowed_bindings, &known)
+                .into_iter()
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "path": written.path.display().to_string(),
+                "default_binding": written.config.default_binding,
+                "allowed_bindings": written.config.allowed_bindings,
+                "require_pin": written.config.require_pin,
+                "unknown_bindings": missing,
+            }))?
+        );
+        return Ok(());
+    }
+    println!("{} wrote {}", "ok".green().bold(), written.path.display());
+    for alias in &missing {
+        eprintln!(
+            "{} binding '{alias}' does not exist yet; `locus enter {alias}` will fail until you add it: locus binding add {alias} --provider <provider> --account <label> --credential-ref phm:NAME",
+            "warning:".yellow().bold(),
+        );
+    }
+    Ok(())
+}
+
+struct WorkspaceWrite {
+    path: PathBuf,
+    config: WorkspaceConfig,
+}
+
+fn write_workspace_file(
+    dir: &Path,
+    default: String,
+    allow: Option<String>,
+    require_pin: bool,
+    force: bool,
+) -> Result<WorkspaceWrite> {
+    let path = dir.join(".locus.toml");
     if path.exists() && !force {
         bail!(
             "{} already exists (pass --force to overwrite)",
@@ -5938,26 +6017,14 @@ fn cmd_workspace(
             }
         }
     }
-    let cfg = WorkspaceConfig {
+    let config = WorkspaceConfig {
         version: 1,
         default_binding: Some(default),
         allowed_bindings: allowed,
         require_pin,
     };
-    std::fs::write(&path, cfg.to_toml()?)?;
-    println!("{} wrote {}", "ok".green().bold(), path.display());
-    // Advisory only: README/e2e flows name aliases before they exist locally,
-    // so a missing binding is a warning (stderr, exit 0), not a rejection.
-    if let Ok(known) = store().and_then(|s| Ok(s.list_bindings()?)) {
-        let known: Vec<&str> = known.iter().map(|b| b.alias.as_str()).collect();
-        for alias in missing_workspace_aliases(&cfg.allowed_bindings, &known) {
-            eprintln!(
-                "{} binding '{alias}' does not exist yet; `locus enter {alias}` will fail until you add it: locus binding add {alias} --provider <provider> --account <label> --credential-ref phm:NAME",
-                "warning:".yellow().bold(),
-            );
-        }
-    }
-    Ok(())
+    std::fs::write(&path, config.to_toml()?)?;
+    Ok(WorkspaceWrite { path, config })
 }
 
 /// Workspace aliases (default first, then allowlist) with no local binding.
@@ -9388,7 +9455,11 @@ mod switch_flow_tests {
 
 #[cfg(test)]
 mod alias_ux_tests {
-    use super::{edit_distance, nearest_alias, stdio_server_entry_toml, with_alias_suggestions};
+    use super::{
+        edit_distance, missing_workspace_aliases, nearest_alias, repin_hint,
+        stdio_server_entry_toml, with_alias_suggestions, with_auto_alias_suggestions,
+        write_workspace_file,
+    };
     use locus_core::{Binding, BindingBody, LocusError, Policy, ProviderBinding, Scope, Store};
 
     fn binding(alias: &str) -> Binding {
@@ -9454,6 +9525,89 @@ mod alias_ux_tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("no bindings exist yet"), "{msg}");
         assert!(msg.contains("locus init --with-samples"), "{msg}");
+    }
+
+    #[test]
+    fn bare_enter_names_workspace_default_that_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path().join("home")).unwrap();
+        s.save_binding(&binding("personal")).unwrap();
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(project.join("sub")).unwrap();
+        std::fs::write(
+            project.join(".locus.toml"),
+            "version = 1\ndefault_binding = \"ghost\"\n",
+        )
+        .unwrap();
+
+        let err = with_auto_alias_suggestions(
+            &s,
+            &project.join("sub"),
+            LocusError::BindingNotFound("ghost".into()),
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("default_binding = \"ghost\""), "{msg}");
+        assert!(msg.contains(".locus.toml"), "{msg}");
+        assert!(msg.contains("locus binding add ghost"), "{msg}");
+        assert!(
+            msg.contains("locus workspace --default <alias> --force"),
+            "{msg}"
+        );
+        // The underlying alias listing is kept.
+        assert!(msg.contains("known aliases: personal"), "{msg}");
+
+        // An alias that did not come from the workspace gets no workspace text.
+        let err =
+            with_auto_alias_suggestions(&s, &project, LocusError::BindingNotFound("other".into()));
+        assert!(!format!("{err:#}").contains(".locus.toml"));
+        // Other errors pass through.
+        let err = with_auto_alias_suggestions(&s, &project, LocusError::NotPinned);
+        assert!(format!("{err:#}").contains("no active pin"));
+    }
+
+    #[test]
+    fn workspace_write_and_missing_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = write_workspace_file(
+            dir.path(),
+            "acme".into(),
+            Some("acme, ghost,other".into()),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(w.config.allowed_bindings, vec!["acme", "ghost", "other"]);
+        let on_disk = std::fs::read_to_string(&w.path).unwrap();
+        assert!(on_disk.contains("default_binding = \"acme\""), "{on_disk}");
+        // The unknown_bindings / warning set: allowlist order, known skipped.
+        assert_eq!(
+            missing_workspace_aliases(&w.config.allowed_bindings, &["acme", "other"]),
+            vec!["ghost"]
+        );
+
+        // Existing file refuses without --force and is left untouched.
+        let err = write_workspace_file(dir.path(), "x".into(), None, false, false)
+            .err()
+            .unwrap();
+        assert!(format!("{err}").contains("--force"));
+        assert_eq!(std::fs::read_to_string(&w.path).unwrap(), on_disk);
+
+        let w = write_workspace_file(dir.path(), "ghost".into(), None, false, true).unwrap();
+        assert_eq!(
+            missing_workspace_aliases(&w.config.allowed_bindings, &["acme"]),
+            vec!["ghost"]
+        );
+    }
+
+    #[test]
+    fn repin_hint_names_the_binding_just_left() {
+        assert_eq!(
+            repin_hint(Some("acme")),
+            "locus enter acme  or  locus enter <alias>"
+        );
+        let none = repin_hint(None);
+        assert!(none.contains("locus binding list"), "{none}");
+        assert!(!none.contains("personal"), "{none}");
     }
 
     #[test]
