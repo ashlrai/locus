@@ -66,7 +66,7 @@ pub use adapter_trust::{
 };
 pub use adapters::{
     call_tool, call_tool_gated, control_tools, enforce_policy, known_providers, tools_for_binding,
-    AdapterTool, ApprovalGate, ToolCallResult,
+    validate_control_args, AdapterTool, ApprovalGate, ToolCallResult,
 };
 pub use agent_report::{
     agent_md_content, agent_md_path, agent_md_present, agent_report_from_doctor,
@@ -93,8 +93,8 @@ pub use authority_anchor::{
 };
 pub use autopin::{match_remote_binding, resolve_auto_pin, AutoPinTarget};
 pub use binding::{
-    validate_name_component, Binding, BindingBody, BindingSummary, Policy, PolicyRule,
-    ProviderBinding, Scope, UpstreamSpec,
+    edit_distance, nearest_alias, validate_name_component, Binding, BindingBody, BindingSummary,
+    Policy, PolicyRule, ProviderBinding, Scope, UpstreamSpec,
 };
 pub use config::{
     load_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig, NotifyConfig,
@@ -181,7 +181,9 @@ pub use workers::{
     WorkerState, WorkerToolResult, ENV_WORKER_IDLE_SECS, ENV_WORKER_SANDBOX, ENV_WORKER_SANDBOXED,
     ENV_WORKER_SANDBOX_BACKEND, ENV_WORKER_SANDBOX_NO_NETWORK,
 };
-pub use workspace::{find_workspace, WorkspaceConfig};
+pub use workspace::{
+    find_workspace, path_entry_exists, stage_file_replace, StagedFile, WorkspaceConfig,
+};
 
 /// Crate version for `locus --version` / doctor.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

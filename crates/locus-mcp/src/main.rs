@@ -34,8 +34,8 @@ use http_session::{
 use locus_core::{
     build_doctor_report, call_tool_gated, compute_safe_next, control_tools, enforce_policy,
     find_workspace, gather_doctor_external, load_config, split_namespaced_tool, tools_for_binding,
-    verify_claim, verify_session, AdapterTool, ApprovalGate, Binding, Session, Store,
-    WorkerManager, VERSION,
+    validate_control_args, verify_claim, verify_session, AdapterTool, ApprovalGate, Binding,
+    Session, Store, WorkerManager, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -535,23 +535,41 @@ fn run_stdio() -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = stdin.lock();
+    let mut seen_content_length = false;
 
     loop {
         let Some((parsed, framing)) = read_frame(&mut reader)? else {
             break; // EOF
         };
+        seen_content_length |= framing == Framing::ContentLength;
 
-        let response = match parsed {
-            Ok(msg) => dispatch_rpc(&msg, &RequestScope::process()),
+        let (response, framing) = match parsed {
+            Ok(msg) => (dispatch_rpc(&msg, &RequestScope::process()), framing),
             // JSON-RPC 2.0: an unparseable message gets a Parse error with a
             // null id (the id cannot be known), never silence.
-            Err(e) => Some(parse_error_response(&e)),
+            Err(e) => (
+                Some(parse_error_response(&e)),
+                parse_error_framing(seen_content_length, framing),
+            ),
         };
         if let Some(response) = response {
             write_message(&mut stdout, &response, framing)?;
         }
     }
     Ok(())
+}
+
+/// Framing for a Parse error reply. Once the client has spoken
+/// Content-Length, stray bytes (e.g. the tail left by a too-short
+/// Content-Length) read back as an NDJSON line must still be answered with a
+/// Content-Length frame: a bare JSON line would land in the client's header
+/// parser and desync every later response.
+fn parse_error_framing(seen_content_length: bool, frame: Framing) -> Framing {
+    if seen_content_length {
+        Framing::ContentLength
+    } else {
+        frame
+    }
 }
 
 /// Dispatch one JSON-RPC request/notification.
@@ -3010,13 +3028,26 @@ fn resource_doctor_json(scope: &RequestScope) -> std::result::Result<Value, Valu
 }
 
 /// Agent-facing text for `locus_request_pin` / `locus_enter_hint` when the
-/// alias names no binding: say so, and point the human at binding setup
-/// instead of a `locus enter` that cannot succeed.
-fn unknown_binding_message(alias: &str) -> String {
-    format!(
-        "There is no binding `{alias}`, so there is nothing to pin. Agents cannot pin or create bindings. \
-         Human: run `locus binding list` to see configured aliases, or `locus binding add {alias}` to create it, \
-         then `locus enter <alias>`."
+/// alias names no binding: say so, name the closest configured alias when the
+/// miss looks like a typo (the agent may retry with it), and point the human at
+/// binding setup instead of a `locus enter` that cannot succeed.
+fn unknown_binding_message(s: &Store, alias: &str) -> (String, Option<String>) {
+    let aliases: Vec<String> = s
+        .list_bindings()
+        .map(|list| list.into_iter().map(|b| b.alias).collect())
+        .unwrap_or_default();
+    let suggestion = locus_core::nearest_alias(alias, &aliases).map(str::to_owned);
+    let did_you_mean = suggestion
+        .as_deref()
+        .map(|best| format!("Did you mean `{best}`? "))
+        .unwrap_or_default();
+    (
+        format!(
+            "There is no binding `{alias}`, so there is nothing to pin. {did_you_mean}Agents cannot pin or create bindings. \
+             Human: run `locus binding list` to see configured aliases, or `locus binding add {alias}` to create it, \
+             then `locus enter <alias>`."
+        ),
+        suggestion,
     )
 }
 
@@ -3446,16 +3477,96 @@ fn handle_tools_list(scope: &RequestScope) -> std::result::Result<Value, Value> 
     Ok(tools_list_payload(tools, pin_alias.as_deref()))
 }
 
+/// Control tools publish closed schemas (`additionalProperties: false`); hold
+/// calls to them before dispatch. An unknown `locus_*` name, a non-object
+/// `arguments`, or a key the schema does not declare is a JSON-RPC -32602,
+/// the same answer an unknown provider tool gets. Value checks (blank or
+/// non-string `alias`, ...) stay in the tools so they can name the next step.
+fn check_control_args(name: &str, args: &Value) -> std::result::Result<(), Value> {
+    let tools = control_tools(true);
+    let Some(tool) = tools.iter().find(|t| t.name == name) else {
+        // A mistyped control name (`locus_whoam`) names the tool it was
+        // probably meant to be, so the agent retries instead of listing.
+        let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+        let hint = locus_core::nearest_alias(name, &names)
+            .map(|n| format!(" Did you mean `{n}`?"))
+            .unwrap_or_default();
+        return Err(rpc_error(
+            -32602,
+            format!("unknown tool `{name}`: control tools are listed by tools/list.{hint}"),
+        ));
+    };
+    let Some(obj) = args.as_object() else {
+        return Err(rpc_error(
+            -32602,
+            format!("invalid arguments for `{name}`: expected a JSON object"),
+        ));
+    };
+    let declared = tool
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object);
+    let mut undeclared: Vec<&str> = obj
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !declared.is_some_and(|d| d.contains_key(*k)))
+        .collect();
+    if undeclared.is_empty() {
+        return Ok(());
+    }
+    undeclared.sort_unstable();
+    let mut allowed: Vec<&str> = declared
+        .map(|d| d.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    allowed.sort_unstable();
+    let allowed_owned: Vec<String> = allowed.iter().map(|k| k.to_string()).collect();
+    let suggestions: Vec<String> = undeclared
+        .iter()
+        .filter_map(|k| {
+            locus_core::nearest_alias(k, &allowed_owned).map(|near| format!("`{k}` -> `{near}`"))
+        })
+        .collect();
+    let hint = if suggestions.is_empty() {
+        String::new()
+    } else {
+        format!(" Did you mean {}?", suggestions.join(", "))
+    };
+    Err(rpc_error(
+        -32602,
+        format!(
+            "invalid arguments for `{name}`: undeclared argument(s) [{}]; the schema allows [{}] (additionalProperties: false).{hint}",
+            undeclared.join(", "),
+            allowed.join(", ")
+        ),
+    ))
+}
+
 fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Result<Value, Value> {
     let name = params
         .get("name")
         .and_then(|n| n.as_str())
         .ok_or_else(|| rpc_error(-32602, "missing tool name".into()))?;
-    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let args = match params.get("arguments") {
+        None | Some(Value::Null) => json!({}),
+        Some(v) => v.clone(),
+    };
 
     // Control tools (allowed even when frozen — whoami/status/heartbeat report freeze)
     if name.starts_with("locus_") {
+        check_control_args(name, &args)?;
         return call_control(name, &args, scope);
+    }
+
+    // Every provider tool is `provider.tool` (namespaced: `alias__provider.tool`),
+    // so a dotless name is unknown to every binding. Say so before the runtime
+    // health checks: the answer needs no pin and reveals nothing about one.
+    if !name.contains('.') {
+        return Err(rpc_error(
+            -32602,
+            format!(
+                "unknown tool `{name}`: provider tools are named `provider.tool` and control tools `locus_*`; see tools/list"
+            ),
+        ));
     }
 
     // Provider tools require a healthy pin
@@ -3850,6 +3961,18 @@ fn call_control(
     args: &Value,
     scope: &RequestScope,
 ) -> std::result::Result<Value, Value> {
+    // The control schemas are closed (additionalProperties: false); a
+    // misspelled or mistyped argument is a tool error the model can correct,
+    // never silently ignored.
+    if let Err(e) = validate_control_args(name, args) {
+        return Ok(tool_text(
+            json!({
+                "error": e.to_string(),
+                "hint": format!("Retry `{name}` with only the arguments in its tools/list inputSchema."),
+            }),
+            true,
+        ));
+    }
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     // Heartbeat: detect drift and freeze when identity control tools are polled.
     if matches!(
@@ -4105,12 +4228,14 @@ fn call_control(
                 );
             }
             if let (Some(a), Some(false)) = (alias, exists) {
+                let (message, suggestion) = unknown_binding_message(&s, a);
                 return Ok(tool_text(
                     json!({
                         "agents_cannot_pin": true,
                         "alias": a,
                         "binding_exists": false,
-                        "message": unknown_binding_message(a),
+                        "did_you_mean": suggestion,
+                        "message": message,
                     }),
                     true,
                 ));
@@ -4156,9 +4281,19 @@ fn call_control(
             ))
         }
         "locus_request_pin" => {
-            let alias = args.get("alias").and_then(|a| a.as_str()).unwrap_or("");
+            let alias = args
+                .get("alias")
+                .and_then(|a| a.as_str())
+                .map(str::trim)
+                .unwrap_or("");
             if alias.is_empty() {
-                return Ok(tool_text(json!({ "error": "alias required" }), true));
+                return Ok(tool_text(
+                    json!({
+                        "error": "alias required",
+                        "hint": "pass {\"alias\": \"<binding alias>\"}; locus_list_bindings lists the configured aliases",
+                    }),
+                    true,
+                ));
             }
             // Verify binding exists
             let exists = s.load_binding(alias).is_ok();
@@ -4166,11 +4301,13 @@ fn call_control(
             if !exists {
                 // Audited above for forensics, but there is nothing to pin:
                 // no request is pending and no `locus enter` would succeed.
+                let (message, suggestion) = unknown_binding_message(&s, alias);
                 return Ok(tool_text(
                     json!({
                         "requested": alias,
                         "binding_exists": false,
-                        "message": unknown_binding_message(alias),
+                        "did_you_mean": suggestion,
+                        "message": message,
                     }),
                     true,
                 ));
@@ -4191,7 +4328,9 @@ fn call_control(
         }
         "locus_providers" => match scope_whoami(&s, scope) {
             Ok(w) => Ok(tool_text(json!({ "providers": w.providers }), false)),
-            Err(e) => Ok(tool_text(json!({ "error": e.to_string() }), true)),
+            // Same body as locus_whoami so an unobservable pin names the
+            // supervised launch instead of a bare error string.
+            Err(e) => Ok(tool_text(whoami_error_body(&e), true)),
         },
         "locus_verify_claim" => {
             let text = args
@@ -4596,6 +4735,32 @@ mod stdio_framing_tests {
     }
 
     #[test]
+    fn parse_error_after_content_length_stays_content_length_framed() {
+        // A too-short Content-Length leaves the body tail on the wire; it is
+        // read back as an NDJSON garbage line. Its Parse error must not go out
+        // as a bare JSON line to a Content-Length client.
+        let body = r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#;
+        let raw = format!("Content-Length: {}\r\n\r\n{body}\r\n", body.len() - 3);
+        let mut reader = Cursor::new(raw.into_bytes());
+        let mut seen = false;
+        let mut framings = Vec::new();
+        while let Some((parsed, framing)) = read_frame(&mut reader).unwrap() {
+            seen |= framing == Framing::ContentLength;
+            assert!(parsed.is_err());
+            framings.push((framing, parse_error_framing(seen, framing)));
+        }
+        assert_eq!(
+            framings,
+            vec![
+                (Framing::ContentLength, Framing::ContentLength),
+                (Framing::Ndjson, Framing::ContentLength),
+            ]
+        );
+        // A pure NDJSON client keeps NDJSON replies.
+        assert_eq!(parse_error_framing(false, Framing::Ndjson), Framing::Ndjson);
+    }
+
+    #[test]
     fn unparseable_frames_surface_as_parse_errors_and_framing_survives() {
         let mut raw = String::from("not-json\n");
         raw.push_str("Content-Length: 5\r\n\r\n{bad}");
@@ -4981,6 +5146,40 @@ mod lifecycle_hint_tests {
             negotiate_protocol_version(&json!({})),
             SUPPORTED_PROTOCOL_VERSIONS[0]
         );
+    }
+
+    #[test]
+    fn mistyped_control_tool_and_argument_name_the_nearest_match() {
+        let err = check_control_args("locus_whoam", &json!({})).unwrap_err();
+        let msg = err["message"].as_str().unwrap();
+        assert!(msg.starts_with("unknown tool `locus_whoam`"), "{msg}");
+        assert!(msg.ends_with("Did you mean `locus_whoami`?"), "{msg}");
+
+        let err = check_control_args("locus_nonsense_tool", &json!({})).unwrap_err();
+        assert!(
+            !err["message"].as_str().unwrap().contains("Did you mean"),
+            "{err}"
+        );
+
+        let err = check_control_args("locus_request_pin", &json!({"aliass": "acme"})).unwrap_err();
+        let msg = err["message"].as_str().unwrap();
+        assert_eq!(err["code"], json!(-32602), "{err}");
+        assert!(msg.contains("undeclared argument(s) [aliass]"), "{msg}");
+        assert!(msg.ends_with("Did you mean `aliass` -> `alias`?"), "{msg}");
+    }
+
+    #[test]
+    fn dotless_tool_name_is_unknown_before_runtime_health() {
+        for name in ["nonexistent_tool", "acme__bogus", "githubscope"] {
+            let err = handle_tools_call(
+                &json!({ "name": name, "arguments": {} }),
+                &RequestScope::process(),
+            )
+            .unwrap_err();
+            assert_eq!(err["code"], json!(-32602), "{name}: {err}");
+            let msg = err["message"].as_str().unwrap();
+            assert!(msg.starts_with(&format!("unknown tool `{name}`")), "{msg}");
+        }
     }
 
     #[test]

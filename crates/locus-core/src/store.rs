@@ -239,6 +239,17 @@ impl Store {
     // ── Bindings ──────────────────────────────────────────────────────────
 
     pub fn save_binding(&self, binding: &Binding) -> Result<PathBuf> {
+        self.write_binding(binding, true)
+    }
+
+    /// [`Store::save_binding`] that refuses, under the bindings lock, to
+    /// replace an existing binding unless `replace` is set, so a check made
+    /// before the write cannot be raced by another writer.
+    pub fn create_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
+        self.write_binding(binding, replace)
+    }
+
+    fn write_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
         self.require_local_control("save binding")?;
         binding.validate()?;
         // Double-check alias cannot escape bindings/ (also enforced in validate)
@@ -257,6 +268,26 @@ impl Store {
         let _lock = crate::credential_migration::lock_bindings(self)?;
         let path = self.bindings_dir().join(format!("{}.toml", binding.alias));
         ensure_under_dir(&self.bindings_dir(), &path)?;
+        // `fs::write` follows a symlink, and a dangling one passes the
+        // containment check above, so a planted `bindings/x.toml` link would
+        // send the binding to wherever it points. Never write through one.
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(LocusError::msg(format!(
+                    "binding '{}' is a symlink ({}); refusing to write through it — \
+                     remove it and rerun",
+                    binding.alias,
+                    path.display()
+                )));
+            }
+            Ok(_) if !replace => {
+                return Err(LocusError::msg(format!(
+                    "binding '{}' already exists; nothing written",
+                    binding.alias
+                )));
+            }
+            _ => {}
+        }
         fs::write(&path, binding.to_toml()?)?;
         self.audit("binding.save", &binding.alias, None)?;
         Ok(path)
@@ -1699,6 +1730,53 @@ impl Store {
             )));
         }
 
+        // Pre-flight every refusal BEFORE the first write: a `.locus.toml`
+        // conflict found after the binding was saved left a half-created
+        // engagement whose retry then failed on "binding already exists".
+        // Existence is checked without following a final symlink: a dangling
+        // `.locus.toml` link reads as absent through `exists()`, and writing
+        // through it created the link's target outside the project.
+        let workspace_target = cwd.join(".locus.toml");
+        if write_workspace && crate::workspace::path_entry_exists(&workspace_target) && !force {
+            return Err(LocusError::msg(format!(
+                "{} already exists — nothing was created; re-run with --force to overwrite it, \
+                 or without --workspace to keep it",
+                workspace_target.display()
+            )));
+        }
+        let locus_dir = cwd.join(".locus");
+        if write_readme {
+            match fs::symlink_metadata(&locus_dir) {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => {
+                    return Err(LocusError::msg(format!(
+                        "{} exists and is not a plain directory — nothing was created; move it aside \
+                         or re-run with --no-readme",
+                        locus_dir.display()
+                    )));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        // Staged before the binding is saved: an unwritable project directory
+        // (or a directory where `.locus.toml` should be) fails here, with
+        // nothing created.
+        let staged_workspace = if write_workspace {
+            let cfg = WorkspaceConfig {
+                version: 1,
+                default_binding: Some(alias.to_string()),
+                allowed_bindings: vec![alias.to_string()],
+                require_pin: true,
+            };
+            Some(crate::workspace::stage_file_replace(
+                &workspace_target,
+                cfg.to_toml()?.as_bytes(),
+            )?)
+        } else {
+            None
+        };
+
         let binding = client_binding_template(alias, tenant);
         let path = self.save_binding(&binding)?;
 
@@ -1706,34 +1784,23 @@ impl Store {
         meta.description = Some(format!("{tenant} client engagement"));
         engagement::write_meta(&self.engagements_dir(), &meta)?;
 
-        let mut workspace_path = None;
-        if write_workspace {
-            let wp = cwd.join(".locus.toml");
-            if wp.exists() && !force {
-                return Err(LocusError::msg(
-                    ".locus.toml already exists — use --force or skip --workspace",
-                ));
-            }
-            let cfg = WorkspaceConfig {
-                version: 1,
-                default_binding: Some(alias.to_string()),
-                allowed_bindings: vec![alias.to_string()],
-                require_pin: true,
-            };
-            fs::write(&wp, cfg.to_toml()?)?;
-            workspace_path = Some(wp);
-        }
+        let workspace_path = match staged_workspace {
+            Some(staged) => Some(staged.commit()?),
+            None => None,
+        };
 
         let mut readme_path = None;
         if write_readme {
-            let locus_dir = cwd.join(".locus");
             fs::create_dir_all(&locus_dir)?;
             let rp = locus_dir.join("README.md");
-            if rp.exists() && !force {
+            if crate::workspace::path_entry_exists(&rp) && !force {
                 // Non-fatal: binding already created
             } else {
-                fs::write(&rp, engagement_readme(alias, tenant))?;
-                readme_path = Some(rp);
+                let staged = crate::workspace::stage_file_replace(
+                    &rp,
+                    engagement_readme(alias, tenant).as_bytes(),
+                )?;
+                readme_path = Some(staged.commit()?);
             }
         }
 
@@ -4434,6 +4501,45 @@ credential_ref = "ghp_UNSAFE/CANARY"
     }
 
     #[test]
+    fn save_binding_never_writes_through_a_symlink() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        fs::create_dir_all(store.bindings_dir()).unwrap();
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("victim.toml");
+        // Dangling: the containment check alone lets it through.
+        std::os::unix::fs::symlink(&victim, store.bindings_dir().join("acme.toml")).unwrap();
+
+        let b = sample_binding("acme", "acme-corp", "p1");
+        let err = store.save_binding(&b).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(!victim.exists(), "nothing written outside the store");
+        let err = store.create_binding(&b, true).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(!victim.exists());
+    }
+
+    #[test]
+    fn create_binding_refuses_an_existing_alias_unless_replacing() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .create_binding(&sample_binding("acme", "acme-corp", "p1"), false)
+            .unwrap();
+        let err = store
+            .create_binding(&sample_binding("acme", "other", "p2"), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("already exists"), "{err}");
+        assert_eq!(store.load_binding("acme").unwrap().tenant, "acme-corp");
+        store
+            .create_binding(&sample_binding("acme", "other", "p2"), true)
+            .unwrap();
+        assert_eq!(store.load_binding("acme").unwrap().tenant, "other");
+    }
+
+    #[test]
     fn save_binding_rejects_empty_providers_and_bad_alias() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -4552,6 +4658,117 @@ credential_ref = "ghp_UNSAFE/CANARY"
             store.require_active().unwrap_err(),
             LocusError::NotPinned
         ));
+    }
+
+    #[test]
+    fn engagement_init_workspace_conflict_creates_nothing() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("locus-home");
+        let project = dir.path().join("client");
+        fs::create_dir_all(&project).unwrap();
+        let existing = "version = 1\ndefault_binding = \"other\"\n";
+        fs::write(project.join(".locus.toml"), existing).unwrap();
+        let store = Store::open(&home).unwrap();
+
+        let err = store
+            .engagement_init("acme", "acme-corp", &project, true, true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing was created"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+        // Refused before any write: no binding, no engagement meta, workspace intact.
+        assert!(matches!(
+            store.load_binding("acme").unwrap_err(),
+            LocusError::BindingNotFound(_)
+        ));
+        assert!(store.load_engagement_meta("acme").unwrap().is_none());
+        assert_eq!(
+            fs::read_to_string(project.join(".locus.toml")).unwrap(),
+            existing
+        );
+        assert!(!project.join(".locus").exists());
+
+        // The suggested retry (skip --workspace) now succeeds.
+        let init = store
+            .engagement_init("acme", "acme-corp", &project, false, false, false)
+            .unwrap();
+        assert!(init.binding_path.exists());
+        assert!(init.workspace_path.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn engagement_init_never_writes_through_a_dangling_workspace_link() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("locus-home");
+        let project = dir.path().join("client");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        symlink("../outside/planted.toml", project.join(".locus.toml")).unwrap();
+        let store = Store::open(&home).unwrap();
+
+        // A dangling link is an existing entry: refused without --force.
+        let err = store
+            .engagement_init("acme", "acme-corp", &project, true, false, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nothing was created"), "{err}");
+        assert!(!outside.join("planted.toml").exists());
+        assert!(store.load_binding("acme").is_err());
+
+        // --force replaces the link itself, never its target.
+        let init = store
+            .engagement_init("acme", "acme-corp", &project, true, false, true)
+            .unwrap();
+        assert!(!outside.join("planted.toml").exists());
+        let wp = init.workspace_path.unwrap();
+        assert!(!fs::symlink_metadata(&wp).unwrap().file_type().is_symlink());
+        assert!(fs::read_to_string(&wp)
+            .unwrap()
+            .contains("default_binding = \"acme\""));
+    }
+
+    #[test]
+    fn engagement_init_readme_or_workspace_obstruction_creates_nothing() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("locus-home");
+        let store = Store::open(&home).unwrap();
+
+        // `.locus` is a file: the README directory cannot be created.
+        let p1 = dir.path().join("p1");
+        fs::create_dir_all(&p1).unwrap();
+        fs::write(p1.join(".locus"), "").unwrap();
+        let err = store
+            .engagement_init("acme", "acme-corp", &p1, false, true, false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("nothing was created") && err.contains("--no-readme"),
+            "{err}"
+        );
+        assert!(store.load_binding("acme").is_err());
+        assert!(store.load_engagement_meta("acme").unwrap().is_none());
+
+        // `.locus.toml` is a directory: even --force cannot replace it.
+        let p2 = dir.path().join("p2");
+        fs::create_dir_all(p2.join(".locus.toml")).unwrap();
+        let err = store
+            .engagement_init("acme", "acme-corp", &p2, true, false, true)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+        assert!(store.load_binding("acme").is_err());
+        assert!(store.load_engagement_meta("acme").unwrap().is_none());
+        assert_eq!(fs::read_dir(&p2).unwrap().count(), 1, "no staged file left");
+
+        // The retry the first error names succeeds.
+        let init = store
+            .engagement_init("acme", "acme-corp", &p1, false, false, false)
+            .unwrap();
+        assert!(init.binding_path.exists());
     }
 
     #[test]

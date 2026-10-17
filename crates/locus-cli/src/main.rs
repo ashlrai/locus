@@ -583,7 +583,7 @@ enum McpCmd {
         /// Binding alias to bind the grant to
         #[arg(short = 'b', long = "binding")]
         binding: String,
-        /// Grant TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        /// Grant TTL (e.g. 15m, 1h; min 1s, max 24h). Capped by binding max_ttl.
         #[arg(long, default_value = "1h")]
         ttl: String,
         /// Free-form operator label (shown in `locus mcp list`)
@@ -626,7 +626,7 @@ enum CiCmd {
         /// Binding alias to mint against
         #[arg(short = 'b', long = "binding")]
         binding: String,
-        /// Session TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        /// Session TTL (e.g. 15m, 1h; min 1s, max 24h). Capped by binding max_ttl.
         #[arg(long, default_value = "15m")]
         ttl: String,
         /// Allow bindings outside workspace allowlist
@@ -641,7 +641,7 @@ enum CiCmd {
         /// Binding alias
         #[arg(short = 'b', long = "binding")]
         binding: String,
-        /// Session TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        /// Session TTL (e.g. 15m, 1h; min 1s, max 24h). Capped by binding max_ttl.
         #[arg(long, default_value = "15m")]
         ttl: String,
         /// Allow bindings outside workspace allowlist
@@ -656,7 +656,7 @@ enum CiCmd {
         /// Binding alias
         #[arg(short = 'b', long = "binding")]
         binding: String,
-        /// Session TTL (e.g. 15m, 1h). Capped by binding max_ttl.
+        /// Session TTL (e.g. 15m, 1h; min 1s, max 24h). Capped by binding max_ttl.
         #[arg(long, default_value = "15m")]
         ttl: String,
         /// Allow bindings outside workspace allowlist
@@ -811,7 +811,7 @@ enum ApproveCmd {
         /// Local review label (default: LOCUS_PRINCIPAL or $USER)
         #[arg(long = "as")]
         as_principal: Option<String>,
-        /// Reserved external-authority TTL; local advisory records ignore it
+        /// Reserved external-authority TTL (1s..24h); local advisory records ignore it
         #[arg(long)]
         ttl: Option<String>,
         /// macOS: blocking confirmation before recording advisory evidence.
@@ -829,8 +829,8 @@ enum ApproveCmd {
     Wait {
         /// Approval id (`appr_…`)
         id: String,
-        /// Seconds to wait (default: 120)
-        #[arg(long, default_value_t = 120)]
+        /// How long to wait: bare seconds or 90s / 2m / 1h (default: 120)
+        #[arg(long, default_value = "120", value_parser = parse_wait_timeout)]
         timeout: u64,
         /// Poll interval in milliseconds (default: 500)
         #[arg(long, default_value_t = 500)]
@@ -1045,6 +1045,9 @@ struct BindingAddArgs {
     /// Validate and print the binding TOML without writing
     #[arg(long)]
     dry_run: bool,
+    /// Replace an existing binding with the same alias
+    #[arg(long)]
+    force: bool,
 }
 
 fn main() {
@@ -1065,10 +1068,102 @@ fn main() {
             } else {
                 eprintln!("{} {e:#}", "error:".red().bold());
             }
-            std::process::exit(1);
+            // A child that never started exits like a shell would (127 not
+            // found, 126 not executable), so callers can tell it apart from
+            // the child's own exit 1.
+            let code = e
+                .downcast_ref::<ChildSpawnError>()
+                .map_or(1, ChildSpawnError::exit_code);
+            std::process::exit(code);
         }
         Err(()) => std::process::exit(stdout::STDOUT_CLOSED_EXIT),
     }
+}
+
+/// A child command (`exec`, `run`, `ci run`, `mcp --supervised`) that could
+/// not be started at all. Carries the shell exit code for the failure.
+#[derive(Debug)]
+struct ChildSpawnError {
+    program: String,
+    source: std::io::Error,
+}
+
+impl ChildSpawnError {
+    /// 127 when the program is not found, 126 when it exists but cannot be
+    /// executed (the POSIX shell convention), 1 for any other spawn failure.
+    fn exit_code(&self) -> i32 {
+        match self.source.kind() {
+            std::io::ErrorKind::NotFound => 127,
+            std::io::ErrorKind::PermissionDenied => 126,
+            _ => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for ChildSpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let program = &self.program;
+        match self.source.kind() {
+            std::io::ErrorKind::NotFound => write!(
+                f,
+                "spawn {program}: command not found (exit 127). The child runs with the isolated env's PATH; check the name, pass an absolute path, or run `locus exec -- sh -c '<cmd>'` for shell builtins"
+            ),
+            std::io::ErrorKind::PermissionDenied => write!(
+                f,
+                "spawn {program}: permission denied (exit 126); the file is not executable (try `chmod +x {program}`) or is a directory"
+            ),
+            _ => write!(f, "spawn {program}: {}", self.source),
+        }
+    }
+}
+
+impl std::error::Error for ChildSpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+/// Run a prepared child to completion; a spawn failure becomes a
+/// [`ChildSpawnError`] so `main` exits 127/126 instead of a bare 1.
+fn run_child(child: &mut Command, program: &str) -> Result<std::process::ExitStatus> {
+    child.status().map_err(|source| {
+        anyhow::Error::new(ChildSpawnError {
+            program: program.to_string(),
+            source,
+        })
+    })
+}
+
+/// Audit fields for a child run: its exit code (127/126 when it never
+/// started) and, when the spawn failed, why. A child that cannot start is
+/// still audited, and the run's temporary session still cleaned up.
+fn child_audit_fields(spawned: &Result<std::process::ExitStatus>) -> (Option<i32>, Option<String>) {
+    match spawned {
+        Ok(status) => (status.code(), None),
+        Err(e) => (
+            Some(
+                e.downcast_ref::<ChildSpawnError>()
+                    .map_or(1, ChildSpawnError::exit_code),
+            ),
+            Some(e.to_string()),
+        ),
+    }
+}
+
+/// Exit code to propagate for a finished child: its own code, or
+/// `128 + signal` when a signal killed it (shell convention), never a bare 1.
+fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
+    if let Some(code) = status.code() {
+        return code;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    1
 }
 
 /// Set once `--json` is parsed so a failing command reports its error as JSON.
@@ -1173,7 +1268,7 @@ fn run() -> Result<()> {
             allow,
             require_pin,
             force,
-        } => cmd_workspace(default, allow, require_pin, force),
+        } => cmd_workspace(default, allow, require_pin, force, cli.json),
         Commands::Doctor => cmd_doctor(cli.json),
         Commands::Watch {
             interval,
@@ -1185,7 +1280,7 @@ fn run() -> Result<()> {
             client,
             print,
             mcp_bin,
-        } => cmd_setup(&client, print, mcp_bin),
+        } => cmd_setup(&client, print, mcp_bin, cli.json),
         Commands::Approve(sub) => cmd_approve(sub, cli.json),
         Commands::Notify(sub) => cmd_notify(sub, cli.json),
         Commands::Events {
@@ -1526,8 +1621,9 @@ fn bootstrap_control_capability_plan(
 ) -> Result<Option<(String, String)>> {
     if let Some(value) = locus_core::read_persisted_control_capability(home)? {
         let mut note = format!(
-            "adopted persisted control capability from {} for this run — persist for new shells: eval \"$(locus hook zsh)\"",
-            locus_core::control_capability_file(home).display()
+            "adopted persisted control capability from {} for this run — persist for new shells: {}",
+            locus_core::control_capability_file(home).display(),
+            locus_core::recovery::user_hook_eval_command()
         );
         if !persist {
             note.push_str(" (already persisted; strict posture: locus capability unpersist)");
@@ -1537,8 +1633,9 @@ fn bootstrap_control_capability_plan(
     if persist {
         let value = locus_core::mint_persisted_control_capability(home)?;
         let note = format!(
-            "minted control capability → {} (0600) — export in new shells: eval \"$(locus hook zsh)\"",
-            locus_core::control_capability_file(home).display()
+            "minted control capability → {} (0600) — export in new shells: {}",
+            locus_core::control_capability_file(home).display(),
+            locus_core::recovery::user_hook_eval_command()
         );
         return Ok(Some((value, note)));
     }
@@ -1667,7 +1764,11 @@ fn cmd_capability(sub: CapabilityCmd, json: bool) -> Result<()> {
                 );
                 println!(
                     "   {}",
-                    "new shells pick it up via: eval \"$(locus hook zsh)\"".dimmed()
+                    format!(
+                        "new shells pick it up via: {}",
+                        locus_core::recovery::user_hook_eval_command()
+                    )
+                    .dimmed()
                 );
             }
             Ok(())
@@ -1744,34 +1845,6 @@ fn cwd() -> PathBuf {
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// Levenshtein distance over chars (small alias strings only).
-fn edit_distance(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let mut prev: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.iter().enumerate() {
-        let mut cur = vec![i + 1; b.len() + 1];
-        for (j, cb) in b.iter().enumerate() {
-            let cost = usize::from(ca != cb);
-            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
-        }
-        prev = cur;
-    }
-    prev[b.len()]
-}
-
-/// Closest known alias to a typo, if plausibly close (at most 3 edits and not
-/// a completely different word).
-fn nearest_alias<'a>(missing: &str, aliases: &'a [String]) -> Option<&'a str> {
-    let needle = missing.to_lowercase();
-    aliases
-        .iter()
-        .map(|c| (edit_distance(&needle, &c.to_lowercase()), c))
-        .filter(|(d, c)| *d <= 3 && *d < c.chars().count().max(needle.chars().count()))
-        .min_by_key(|(d, _)| *d)
-        .map(|(_, c)| c.as_str())
-}
-
 /// Alias ergonomics for enter/pin: a bare BindingNotFound becomes a message
 /// listing known aliases plus a nearest-match suggestion. Never alters the
 /// fail-closed outcome — only the operator-facing text.
@@ -1789,13 +1862,42 @@ fn with_alias_suggestions(s: &Store, err: locus_core::LocusError) -> anyhow::Err
                 "binding not found: {missing} (known aliases: {})",
                 aliases.join(", ")
             );
-            if let Some(best) = nearest_alias(missing, &aliases) {
+            if let Some(best) = locus_core::nearest_alias(missing, &aliases) {
                 msg.push_str(&format!(" — did you mean `{best}`?"));
             }
             return anyhow::anyhow!(msg);
         }
     }
     err.into()
+}
+
+/// [`with_alias_suggestions`] for a bare `enter` / `pin`: when the missing
+/// alias came from the workspace `default_binding`, say which `.locus.toml`
+/// named it and how to fix either side. Text only; the refusal stands.
+fn with_auto_alias_suggestions(
+    s: &Store,
+    cwd: &Path,
+    err: locus_core::LocusError,
+) -> anyhow::Error {
+    let missing = match &err {
+        locus_core::LocusError::BindingNotFound(missing) => Some(missing.clone()),
+        _ => None,
+    };
+    let out = with_alias_suggestions(s, err);
+    let Some(missing) = missing else {
+        return out;
+    };
+    match find_workspace(cwd) {
+        Ok(Some((path, cfg))) if cfg.default_binding.as_deref() == Some(missing.as_str()) => out
+            .context(format!(
+                "{} sets default_binding = \"{missing}\", which is not configured here; \
+                 create it (`locus binding add {missing}`), point the workspace at an \
+                 existing binding (`locus workspace --default <alias> --force`), or \
+                 `locus enter <alias>`",
+                path.display()
+            )),
+        _ => out,
+    }
 }
 
 /// Local identity dashboard HTTP server (blocks until Ctrl-C).
@@ -1880,13 +1982,22 @@ fn cmd_init(with_samples: bool, persist_capability: bool, json: bool) -> Result<
             "  {}",
             "locus quickstart          # first 60s bootstrap".dimmed()
         );
+        let shell = env::var("SHELL").ok();
         println!(
             "  {}",
-            "eval \"$(locus hook zsh)\"  # prompt shows pin / frozen".dimmed()
+            format!(
+                "{}  # prompt shows pin / frozen",
+                locus_core::recovery::user_hook_eval_command()
+            )
+            .dimmed()
         );
         println!(
             "  {}",
-            "locus completion zsh > …  # shell completions".dimmed()
+            format!(
+                "locus completion {} > …  # shell completions",
+                locus_core::recovery::hook_shell(shell.as_deref())
+            )
+            .dimmed()
         );
     }
     Ok(())
@@ -2198,7 +2309,7 @@ fn cmd_quickstart(persist_capability: bool, json: bool) -> Result<()> {
     println!(
         "  {}  ·  {}",
         "locus agent setup --apply".dimmed(),
-        "eval \"$(locus hook zsh)\"".dimmed()
+        locus_core::recovery::user_hook_eval_command().dimmed()
     );
 
     // Soft exit: unsafe still signals; warn does not abort first-run UX
@@ -2227,7 +2338,7 @@ fn cmd_enter(
             .map_err(|e| wedged_session_recovery_for(with_alias_suggestions(&s, e), Some(&a)))?,
         None => s
             .pin_auto_with_ttl(&cwd(), client, force, requested_ttl)
-            .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
+            .map_err(|e| wedged_session_recovery(with_auto_alias_suggestions(&s, &cwd(), e)))?,
     };
     let binding = s.load_binding(&session.binding_alias)?;
     let providers_n = binding.providers.len();
@@ -2500,7 +2611,7 @@ fn cmd_pin(
                 .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
             None => s
                 .pin_auto_with_ttl(&cwd(), client, force, requested_ttl)
-                .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?,
+                .map_err(|e| wedged_session_recovery(with_auto_alias_suggestions(&s, &cwd(), e)))?,
         }
     };
     // Surface a silent policy.max_ttl clamp (5s slack for pin-time skew).
@@ -2617,13 +2728,26 @@ fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyho
         .downcast_ref::<locus_core::LocusError>()
         .is_some_and(locus_core::recovery::is_stale_pin_error);
     if wedged {
+        let alias = recovery_alias(alias);
         anyhow!(
             "{err:#}\n  recover (operator shell; control capability required): {}",
-            locus_core::recovery::stale_pin_recovery(alias)
+            locus_core::recovery::stale_pin_recovery(alias.as_deref())
         )
     } else {
         err
     }
+}
+
+/// Binding to name in a stale-pin recovery recipe: the requested alias only
+/// when that binding exists (`locus pin nosuch` must not end its recipe with
+/// `locus enter nosuch`, which would fail), else the stale pin's own binding,
+/// else none (`<alias>`). Message only: never trusted for authority.
+fn recovery_alias(requested: Option<&str>) -> Option<String> {
+    let s = store().ok()?;
+    if let Some(binding) = requested.and_then(|a| s.load_binding(a).ok()) {
+        return Some(binding.alias);
+    }
+    active_alias_hint(&s)
 }
 
 /// Last-resort [`wedged_session_recovery`] for every command.
@@ -2662,6 +2786,15 @@ fn active_alias_hint(s: &Store) -> Option<String> {
     Some(s.active_session().ok().flatten()?.binding_alias)
 }
 
+/// Re-pin suggestion after `locus leave`: name the binding just left (a
+/// hard-coded sample alias pointed at a binding the operator may not have).
+fn repin_hint(left: Option<&str>) -> String {
+    match left {
+        Some(alias) => format!("locus enter {alias}  or  locus enter <alias>"),
+        None => "locus enter <alias>  (aliases: locus binding list)".to_string(),
+    }
+}
+
 fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {
     if force {
         return cmd_leave_force(no_verifier, json);
@@ -2677,11 +2810,7 @@ fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {
                 println!("{}", serde_json::json!({ "left": false }));
             } else {
                 println!("{} no active pin — already clear", "->".dimmed());
-                println!(
-                    "   re-pin: {}  or  {}",
-                    "locus enter <alias>".cyan(),
-                    "locus pin personal".cyan()
-                );
+                println!("   re-pin: {}", repin_hint(None).cyan());
             }
         }
         Some(session) => {
@@ -2707,9 +2836,8 @@ fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {
                     "[locus:leave]".dimmed()
                 );
                 println!(
-                    "   re-pin: {}  or  {}",
-                    "locus enter <alias>".cyan(),
-                    "locus pin personal".cyan()
+                    "   re-pin: {}",
+                    repin_hint(Some(&session.binding_alias)).cyan()
                 );
             }
         }
@@ -2743,11 +2871,7 @@ fn cmd_leave_force(no_verifier: bool, json: bool) -> Result<()> {
         );
     } else if !outcome.cleared {
         println!("{} no active pin — already clear", "->".dimmed());
-        println!(
-            "   re-pin: {}  or  {}",
-            "locus enter <alias>".cyan(),
-            "locus pin personal".cyan()
-        );
+        println!("   re-pin: {}", repin_hint(None).cyan());
     } else {
         println!(
             "{} force-cleared active session{}{}",
@@ -2775,9 +2899,8 @@ fn cmd_leave_force(no_verifier: bool, json: bool) -> Result<()> {
             "session.force_leave".dimmed()
         );
         println!(
-            "   re-pin: {}  or  {}",
-            "locus enter <alias>".cyan(),
-            "locus pin personal".cyan()
+            "   re-pin: {}",
+            repin_hint(outcome.binding_alias.as_deref()).cyan()
         );
     }
     Ok(())
@@ -3267,6 +3390,26 @@ fn status_pin_check(s: &Store, session: &Session, seal_ok: bool) -> StatusPinChe
     }
 }
 
+/// Refuse a child command that starts with `-`. clap hands everything from
+/// the first unknown option onward to the trailing command, so a mistyped or
+/// unsupported option (`locus exec --binding acme -- cmd`,
+/// `locus run -b x --strict-cred -- cmd`) used to mint a session, write an
+/// audit event and then fail to spawn `--binding` (exit 127). No executable
+/// name starts with `-`, so nothing legitimate is refused.
+fn reject_option_as_command(command: &str, args: &[String]) -> Result<()> {
+    let Some(first) = args.first().filter(|a| a.starts_with('-')) else {
+        return Ok(());
+    };
+    let hint = if command == "exec" && (first == "--binding" || first == "-b") {
+        " `locus exec` always runs as the pinned binding; for another binding use \
+         `locus run --binding <alias> -- <command>`."
+            .to_string()
+    } else {
+        format!(" Check the spelling against `locus {command} --help`; options go before `--`.")
+    };
+    bail!("`{first}` is not a `locus {command}` option, and a command cannot start with `-`; nothing ran.{hint}");
+}
+
 fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Result<()> {
     if cmd.is_empty() {
         bail!("usage: locus exec -- <command> [args...]");
@@ -3279,6 +3422,7 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
     if args.is_empty() {
         bail!("usage: locus exec -- <command> [args...]");
     }
+    reject_option_as_command("exec", &args)?;
 
     let s = store()?;
     if let Some(session) = delegated_child_session(&s)? {
@@ -3356,20 +3500,23 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
         );
     }
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         "session.exec",
         &session.binding_alias,
         Some(serde_json::json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "secrets_resolved": iso.secrets_resolved,
             // names only — never values
             "secrets_failed": iso.secrets_failed,
         })),
     )?;
+    let status = spawned?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -3409,7 +3556,7 @@ fn cmd_ci_mint(
 ) -> Result<()> {
     require_local_control_boundary("locus ci mint")?;
     let s = store()?;
-    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
+    let ttl_dur = parse_mint_ttl(&ttl)?;
     let (session, path) = s
         .create_ci_session(&binding_alias, &cwd(), force, Some(ttl_dur))
         .with_context(|| format!("mint CI session for `{binding_alias}`"))?;
@@ -3451,7 +3598,7 @@ fn cmd_ci_mint(
 fn cmd_ci_env(binding_alias: String, ttl: String, force: bool, resolve: bool) -> Result<()> {
     require_local_control_boundary("locus ci env")?;
     let s = store()?;
-    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
+    let ttl_dur = parse_mint_ttl(&ttl)?;
     let (session, _path) = s
         .create_ci_session(&binding_alias, &cwd(), force, Some(ttl_dur))
         .with_context(|| format!("mint CI session for `{binding_alias}`"))?;
@@ -3495,6 +3642,10 @@ fn cmd_ci_run(
     if args.is_empty() {
         bail!("usage: locus ci run -b <alias> -- <command> [args...]");
     }
+    reject_option_as_command("ci run", &args)?;
+    // Same bounds as `locus enter --ttl`: a zero or negative TTL would mint an
+    // already-expired session, and an over-long one would be capped silently.
+    let ttl_dur = parse_mint_ttl(&ttl)?;
 
     let s = store()?;
     if let Some(session) = delegated_child_session(&s)? {
@@ -3522,10 +3673,11 @@ fn cmd_ci_run(
             "ci.run.delegated",
         );
     }
-    let binding = s.load_binding(&binding_alias)?;
+    let binding = s
+        .load_binding(&binding_alias)
+        .map_err(|e| with_alias_suggestions(&s, e))?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::CiRun)?;
 
-    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
     // Snapshot parent pin (active.json / LOCUS_SESSION_ID) before mint.
     let parent_before = s.active_session()?;
 
@@ -3590,13 +3742,15 @@ fn cmd_ci_run(
         );
     }
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         "ci.run",
         &session.binding_alias,
         Some(serde_json::json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "session_id": session.session_id,
             "secrets_resolved": iso.secrets_resolved,
             "secrets_failed": iso.secrets_failed,
@@ -3605,8 +3759,9 @@ fn cmd_ci_run(
 
     let _ = s.cleanup_ci_session(&ci_path, &session);
 
+    let status = spawned?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -3631,6 +3786,7 @@ fn cmd_run(
     if args.is_empty() {
         bail!("usage: locus run -b <alias> -- <command> [args...]");
     }
+    reject_option_as_command("run", &args)?;
 
     let s = store()?;
     if let Some(session) = delegated_child_session(&s)? {
@@ -3661,7 +3817,9 @@ fn cmd_run(
             "session.run.delegated",
         );
     }
-    let binding = s.load_binding(&binding_alias)?;
+    let binding = s
+        .load_binding(&binding_alias)
+        .map_err(|e| with_alias_suggestions(&s, e))?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Run)?;
     // Capture parent pin (if any) so we can prove it is unchanged after run
     // when share_pin is false.
@@ -3759,13 +3917,15 @@ fn cmd_run(
         );
     }
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         "session.run",
         &session.binding_alias,
         Some(serde_json::json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "share_pin": share_pin,
             "session_id": session.session_id,
             "secrets_resolved": iso.secrets_resolved,
@@ -3778,8 +3938,9 @@ fn cmd_run(
         let _ = s.cleanup_run_session(&run_path, &session);
     }
 
+    let status = spawned?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -3824,20 +3985,23 @@ fn run_exact_session_child(
     }
     child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
 
-    let status = child.status().with_context(|| format!("spawn {program}"))?;
+    let spawned = run_child(&mut child, program);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         audit_op,
         &session.binding_alias,
         Some(json!({
             "cmd": args,
-            "exit": status.code(),
+            "exit": exit,
+            "spawn_error": spawn_error,
             "session_id": session.session_id,
             "secrets_resolved": 0,
             "exact_session": true,
         })),
     )?;
+    let status = spawned?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -4024,21 +4188,24 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
         }
     }
 
-    let status = child.status().with_context(|| format!("spawn {bin}"))?;
+    let spawned = run_child(&mut child, &bin);
+    let (exit, spawn_error) = child_audit_fields(&spawned);
     if let Some((s, session)) = audit_ctx {
         s.audit(
             "session.mcp.supervised",
             &session.binding_alias,
             Some(json!({
                 "phase": "exit",
-                "exit": status.code(),
+                "exit": exit,
+                "spawn_error": spawn_error,
                 "session_id": session.session_id,
                 "secrets_resolved": 0,
             })),
         )?;
     }
+    let status = spawned?;
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        std::process::exit(child_exit_code(&status));
     }
     Ok(())
 }
@@ -4072,7 +4239,7 @@ fn cmd_mcp_mint(
 ) -> Result<()> {
     require_local_control_boundary("locus mcp mint")?;
     let s = store()?;
-    let ttl_dur = parse_ttl(&ttl).context("parse --ttl")?;
+    let ttl_dur = parse_mint_ttl(&ttl)?;
     let (session, grant, token) = s
         .create_mcp_grant(&binding_alias, &cwd(), Some(ttl_dur), label, force)
         .with_context(|| format!("mint MCP grant for `{binding_alias}`"))?;
@@ -4514,7 +4681,7 @@ fn cmd_onboard(detect_only: bool, yes: bool, reset: bool, json: bool) -> Result<
                 }
             },
         )?;
-        cmd_workspace(default, None, true, false)?;
+        cmd_workspace(default, None, true, false, false)?;
         plan.workspaces.push(cwd().display().to_string());
         plan.mark_done(locus_core::steps::WORKSPACES);
         plan.save(s.home())?;
@@ -5233,7 +5400,9 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
             }
         }
         BindingCmd::Show { alias } => {
-            let mut b = s.load_binding(&alias)?;
+            let mut b = s
+                .load_binding(&alias)
+                .map_err(|e| with_alias_suggestions(&s, e))?;
             for provider in &mut b.providers {
                 let source = locus_core::credential_metadata(&provider.credential_ref).source;
                 provider.credential_ref = format!("<redacted:{source}>");
@@ -5275,7 +5444,8 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
             if !yes {
                 bail!("refusing to remove without --yes");
             }
-            s.remove_binding(&alias)?;
+            s.remove_binding(&alias)
+                .map_err(|e| with_alias_suggestions(&s, e))?;
             if json {
                 println!("{}", serde_json::json!({ "removed": alias }));
             } else {
@@ -5413,7 +5583,7 @@ fn resolve_add_answers_interactive(s: &Store, args: &BindingAddArgs) -> Result<A
                 }
                 Ok(())
             })?;
-            if let Some(best) = nearest_alias(&v, &known) {
+            if let Some(best) = locus_core::nearest_alias(&v, &known) {
                 // Soft nudge only — never a hard block (short aliases collide easily).
                 if !prompt_confirm(
                     &format!("similar alias '{best}' already exists — continue with '{v}'?"),
@@ -5439,12 +5609,8 @@ fn resolve_add_answers_interactive(s: &Store, args: &BindingAddArgs) -> Result<A
                 known_providers().join(", ").cyan()
             );
             let v = prompt_value("provider", "--provider", None, &|_| Ok(()))?;
-            if !known_providers().contains(&v.as_str()) {
-                println!(
-                    "{} no built-in adapter for '{}' — tools require an upstream MCP recipe (locus upstream list)",
-                    "warning:".yellow().bold(),
-                    v
-                );
+            if let Some(w) = unknown_provider_warning(&v) {
+                println!("{} {w}", "warning:".yellow().bold());
             }
             v
         }
@@ -5623,6 +5789,15 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
     } else {
         resolve_add_answers(&args)?
     };
+    // A prompted provider is checked at the prompt; a `--provider` flag (agents,
+    // scripts) wrote a typo like `githb` silently. Still written (custom
+    // providers are served by upstream MCP recipes), but said on stderr so
+    // stdout keeps its --json contract.
+    if community.is_none() && args.provider.is_some() {
+        if let Some(w) = unknown_provider_warning(&answers.provider) {
+            eprintln!("{} {w}", "warning:".yellow().bold());
+        }
+    }
     let mut b = binding_from_answers(&answers);
     if let Some(manifest) = community {
         if !answers.credential_ref.starts_with("env:") {
@@ -5684,15 +5859,39 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
         return Ok(());
     }
 
+    // An existing binding is never replaced silently: its scope and
+    // credential ref would change under every workspace that names it.
+    // symlink_metadata: a dangling symlink is an existing entry too.
+    let exists = s
+        .bindings_dir()
+        .join(format!("{}.toml", answers.alias))
+        .symlink_metadata()
+        .is_ok();
+    if exists && !args.force && !(can_prompt && guided) {
+        bail!(
+            "binding '{alias}' already exists; nothing written. \
+             Review it with `locus binding show {alias}`, rerun with --force to replace it, \
+             or choose another alias",
+            alias = answers.alias
+        );
+    }
+
     if can_prompt && guided {
         println!();
         println!("{toml}");
-        if !prompt_confirm(&format!("write binding '{}'?", answers.alias), true)? {
+        let question = if exists && !args.force {
+            format!("binding '{}' already exists; replace it?", answers.alias)
+        } else {
+            format!("write binding '{}'?", answers.alias)
+        };
+        if !prompt_confirm(&question, !exists || args.force)? {
             bail!("aborted — nothing written");
         }
     }
 
-    let path = s.save_binding(&b)?;
+    // Re-checked under the bindings lock: another writer may have created
+    // the alias since `exists` was read (or while the prompt waited).
+    let path = s.create_binding(&b, exists || args.force)?;
     if json {
         println!(
             "{}",
@@ -5800,18 +5999,49 @@ fn prompt_confirm(question: &str, default_yes: bool) -> Result<bool> {
     })
 }
 
+/// `None` when `provider` has a built-in adapter; otherwise the warning that
+/// names the built-ins and the upstream-recipe route.
+fn unknown_provider_warning(provider: &str) -> Option<String> {
+    if known_providers()
+        .iter()
+        .any(|p| p.eq_ignore_ascii_case(provider))
+    {
+        return None;
+    }
+    Some(format!(
+        "no built-in adapter for '{provider}' (built-in: {}) — tools require an upstream MCP recipe (locus upstream list)",
+        known_providers().join(", ")
+    ))
+}
+
 /// Bounds-checked `--ttl` parse. `locus_core::parse_ttl` is lenient (accepts
 /// "", zero, negatives) — this wrapper is the fail-closed gate for operator
 /// input: min 1m, max 24h.
 fn parse_pin_ttl(raw: &str) -> Result<chrono::Duration> {
+    parse_bounded_ttl(raw, chrono::Duration::minutes(1), "1m")
+}
+
+/// `--ttl` for minted CI sessions, MCP grants and approval grants
+/// (`ci mint|env|run`, `mcp mint`, `approve grant`). Same 24h ceiling as a pin; the floor is 1s, so short-lived
+/// expiry probes keep working, but zero or negative (an already-expired
+/// session or grant that was still printed) fails closed.
+fn parse_mint_ttl(raw: &str) -> Result<chrono::Duration> {
+    parse_bounded_ttl(raw, chrono::Duration::seconds(1), "1s")
+}
+
+fn parse_bounded_ttl(
+    raw: &str,
+    min: chrono::Duration,
+    min_label: &str,
+) -> Result<chrono::Duration> {
     let trimmed = raw.trim();
-    let invalid = || anyhow!("invalid --ttl '{raw}': use 30m / 2h / 1d (min 1m, max 24h)");
+    let invalid = || anyhow!("invalid --ttl '{raw}': use 30m / 2h / 1d (min {min_label}, max 24h)");
     if trimmed.is_empty() {
         return Err(invalid());
     }
     let d = parse_ttl(trimmed).map_err(|_| invalid())?;
-    if d < chrono::Duration::minutes(1) {
-        bail!("--ttl {raw} is too short: minimum is 1m");
+    if d < min {
+        bail!("--ttl {raw} is too short: minimum is {min_label}");
     }
     if d > chrono::Duration::hours(24) {
         bail!(
@@ -5844,10 +6074,64 @@ fn cmd_workspace(
     allow: Option<String>,
     require_pin: bool,
     force: bool,
+    json: bool,
 ) -> Result<()> {
     require_local_control_boundary("locus workspace")?;
-    let path = cwd().join(".locus.toml");
-    if path.exists() && !force {
+    let written = write_workspace_file(&cwd(), default, allow, require_pin, force)?;
+    // Advisory only: README/e2e flows name aliases before they exist locally,
+    // so a missing binding is a warning (stderr, exit 0), not a rejection.
+    // An unreadable store yields no warning and an empty `unknown_bindings`.
+    let missing: Vec<String> = store()
+        .and_then(|s| Ok(s.list_bindings()?))
+        .map(|known| {
+            let known: Vec<&str> = known.iter().map(|b| b.alias.as_str()).collect();
+            missing_workspace_aliases(&written.config.allowed_bindings, &known)
+                .into_iter()
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": true,
+                "path": written.path.display().to_string(),
+                "default_binding": written.config.default_binding,
+                "allowed_bindings": written.config.allowed_bindings,
+                "require_pin": written.config.require_pin,
+                "unknown_bindings": missing,
+            }))?
+        );
+        return Ok(());
+    }
+    println!("{} wrote {}", "ok".green().bold(), written.path.display());
+    for alias in &missing {
+        eprintln!(
+            "{} binding '{alias}' does not exist yet; `locus enter {alias}` will fail until you add it: locus binding add {alias} --provider <provider> --account <label> --credential-ref phm:NAME",
+            "warning:".yellow().bold(),
+        );
+    }
+    Ok(())
+}
+
+struct WorkspaceWrite {
+    path: PathBuf,
+    config: WorkspaceConfig,
+}
+
+fn write_workspace_file(
+    dir: &Path,
+    default: String,
+    allow: Option<String>,
+    require_pin: bool,
+    force: bool,
+) -> Result<WorkspaceWrite> {
+    let path = dir.join(".locus.toml");
+    // Without following a final symlink: a dangling `.locus.toml` link reads
+    // as absent through `exists()`, and writing through it created the link's
+    // target outside the project.
+    if locus_core::path_entry_exists(&path) && !force {
         bail!(
             "{} already exists (pass --force to overwrite)",
             path.display()
@@ -5862,26 +6146,14 @@ fn cmd_workspace(
             }
         }
     }
-    let cfg = WorkspaceConfig {
+    let config = WorkspaceConfig {
         version: 1,
         default_binding: Some(default),
         allowed_bindings: allowed,
         require_pin,
     };
-    std::fs::write(&path, cfg.to_toml()?)?;
-    println!("{} wrote {}", "ok".green().bold(), path.display());
-    // Advisory only: README/e2e flows name aliases before they exist locally,
-    // so a missing binding is a warning (stderr, exit 0), not a rejection.
-    if let Ok(known) = store().and_then(|s| Ok(s.list_bindings()?)) {
-        let known: Vec<&str> = known.iter().map(|b| b.alias.as_str()).collect();
-        for alias in missing_workspace_aliases(&cfg.allowed_bindings, &known) {
-            eprintln!(
-                "{} binding '{alias}' does not exist yet; `locus enter {alias}` will fail until you add it: locus binding add {alias} --provider <provider> --account <label> --credential-ref phm:NAME",
-                "warning:".yellow().bold(),
-            );
-        }
-    }
-    Ok(())
+    let path = locus_core::stage_file_replace(&path, config.to_toml()?.as_bytes())?.commit()?;
+    Ok(WorkspaceWrite { path, config })
 }
 
 /// Workspace aliases (default first, then allowlist) with no local binding.
@@ -7100,6 +7372,37 @@ impl WatchHeartbeat {
     }
 }
 
+/// Pin label for the human watch line: the verified alias, `invalid` for a
+/// pin that is present but cannot be verified (stale broker, bad seal), or
+/// `unpinned` — same tokens as `locus status --oneline`.
+fn watch_pin_label(hb: &WatchHeartbeat) -> &str {
+    match hb.whoami.as_deref() {
+        Some(alias) => alias,
+        None if hb.pinned || hb.frozen => "invalid",
+        None => "unpinned",
+    }
+}
+
+/// Why a tick is `not_ok` when `safe_next` alone does not say: the pin is
+/// ready but doctor is not SAFE. Names the doctor verdict and finding codes.
+fn watch_not_ok_reason(pack: &locus_core::SessionVerificationPack) -> Option<String> {
+    if pack.session_ok || !pack.safe_next.ready || pack.doctor.ok {
+        return None;
+    }
+    let codes: Vec<&str> = pack
+        .doctor
+        .findings
+        .iter()
+        .filter(|f| f.severity != locus_core::IssueSeverity::Info)
+        .map(|f| f.code.as_str())
+        .collect();
+    Some(format!(
+        "doctor={} [{}] — run `locus doctor` for the fixes",
+        pack.doctor.verdict.as_str(),
+        codes.join(", ")
+    ))
+}
+
 /// Whether a watch tick should end the process with a non-zero exit.
 ///
 /// - `require_ok`: fail closed on any `session_ok=false` (hub / CI).
@@ -7154,7 +7457,7 @@ fn cmd_watch(interval: &str, once: bool, require_ok: bool, json: bool) -> Result
             } else {
                 "not_ok".yellow().bold().to_string()
             };
-            let alias = hb.whoami.as_deref().unwrap_or("unpinned");
+            let alias = watch_pin_label(&hb);
             let frozen_s = if hb.frozen {
                 format!("  {}", "FROZEN".red().bold())
             } else {
@@ -7177,6 +7480,9 @@ fn cmd_watch(interval: &str, once: bool, require_ok: bool, json: bool) -> Result
                 );
                 if let Some(ref cmd) = pack.safe_next.command {
                     println!("  run   {}", cmd.cyan());
+                }
+                if let Some(why) = watch_not_ok_reason(&pack) {
+                    println!("  why   {why}");
                 }
             }
         }
@@ -7202,24 +7508,41 @@ fn parse_watch_interval(s: &str) -> Result<std::time::Duration> {
     if s.is_empty() {
         return Ok(std::time::Duration::from_secs(5));
     }
-    let invalid = || anyhow!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)");
-    // Bare seconds (including multi-digit) before unit split so "10" → 10s not 1s.
-    let secs = if s.chars().all(|c| c.is_ascii_digit()) {
-        s.parse::<u64>().map_err(|_| invalid())?
-    } else {
-        let (num, unit) = s.split_at(s.len().saturating_sub(1));
-        let n: u64 = num.parse().map_err(|_| invalid())?;
-        match unit {
-            "s" | "S" => n,
-            "m" | "M" => n.saturating_mul(60),
-            "h" | "H" => n.saturating_mul(3600),
-            _ => return Err(invalid()),
-        }
-    };
+    let secs = parse_duration_secs(s)
+        .ok_or_else(|| anyhow!("invalid watch interval '{s}' (use e.g. 5s, 30s, 1m)"))?;
     if secs == 0 {
         bail!("invalid watch interval '{s}': must be at least 1s (use e.g. 5s, 30s, 1m)");
     }
     Ok(std::time::Duration::from_secs(secs))
+}
+
+/// Whole seconds from `10` (bare seconds), `5s`, `2m` or `1h`. Shared by
+/// `watch --interval` and `approve wait --timeout`; callers apply their own floor.
+fn parse_duration_secs(s: &str) -> Option<u64> {
+    // Bare seconds (including multi-digit) before unit split so "10" → 10s not 1s.
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()) {
+        return s.parse::<u64>().ok();
+    }
+    if !s.is_ascii() {
+        return None;
+    }
+    let (num, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: u64 = num.parse().ok()?;
+    match unit {
+        // Overflow is invalid input, like an out-of-range bare number, not a
+        // silently saturated u64::MAX.
+        "s" | "S" => Some(n),
+        "m" | "M" => n.checked_mul(60),
+        "h" | "H" => n.checked_mul(3600),
+        _ => None,
+    }
+}
+
+/// clap parser for `approve wait --timeout`: same units as `watch --interval`;
+/// 0 keeps its meaning of a single status check.
+fn parse_wait_timeout(s: &str) -> std::result::Result<u64, String> {
+    parse_duration_secs(s.trim())
+        .ok_or_else(|| format!("use bare seconds or e.g. 90s, 2m, 1h (got '{s}')"))
 }
 
 fn print_doctor_human(report: &locus_core::DoctorReport) {
@@ -7708,8 +8031,14 @@ fn supervised_mcp_hint(locus_bin: &str) -> [String; 3] {
     ]
 }
 
-fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<()> {
-    if !print_only && matches!(client, "claude" | "cursor" | "codex" | "grok" | "gemini") {
+fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>, json: bool) -> Result<()> {
+    if !matches!(
+        client,
+        "claude" | "cursor" | "codex" | "grok" | "gemini" | "generic"
+    ) {
+        bail!("unknown client: {client} (claude|cursor|codex|grok|gemini|generic)");
+    }
+    if !print_only && client != "generic" {
         require_local_control_boundary("locus setup")?;
     }
     let bin = resolve_mcp_bin(mcp_bin);
@@ -7723,131 +8052,126 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
         "args": [],
         "env": mcp_agent_env(client),
     });
+    let json_entry = serde_json::json!({ "mcpServers": { "locus": server_entry } });
+    let toml_entry = stdio_server_entry_toml(&bin, client);
+    let toml_client = matches!(client, "codex" | "grok");
 
+    // Print-only: nothing is written. `generic` has no known config path, so
+    // it is always print-only and emits both shapes.
+    if print_only || client == "generic" {
+        if json {
+            let mut out = serde_json::json!({ "ok": true, "client": client, "written": [] });
+            if client == "generic" || !toml_client {
+                out["entry"] = json_entry.clone();
+            }
+            if client == "generic" || toml_client {
+                out["entry_toml"] = serde_json::json!(toml_entry);
+            }
+            println!("{out}");
+            return Ok(());
+        }
+        if client != "generic" {
+            if toml_client {
+                print!("{toml_entry}");
+            } else {
+                println!("{}", serde_json::to_string_pretty(&json_entry)?);
+            }
+            return Ok(());
+        }
+        // Any generic stdio MCP client: no known on-disk config path, so
+        // never write — emit both shapes for paste (`--print` implied).
+        println!("# Locus MCP server entry — paste into the client's MCP settings.");
+        println!("# Generic client config path unknown; nothing was written.");
+        println!("# JSON shape (mcpServers-style clients):");
+        println!("{}", serde_json::to_string_pretty(&json_entry)?);
+        println!();
+        println!("# TOML shape (Codex-style clients):");
+        println!("{toml_entry}");
+        println!("# Optional: export LOCUS_GROK_MCP_CONFIG=<path-to-its-config> so");
+        println!("# `locus agent doctor` / `locus agent report` can verify registration");
+        println!("# (JSON mcpServers shape or TOML [mcp_servers] shape).");
+        return Ok(());
+    }
+
+    let mut written: Vec<std::path::PathBuf> = Vec::new();
     match client {
         "claude" => {
             // Project-local .mcp.json or user can merge into Claude settings
-            let entry = serde_json::json!({
-                "mcpServers": {
-                    "locus": server_entry
-                }
-            });
-            if print_only {
-                println!("{}", serde_json::to_string_pretty(&entry)?);
-                return Ok(());
-            }
             let path = cwd().join(".mcp.json");
             merge_mcp_json(&path, "locus", &server_entry)?;
-            println!("{} wrote/merged {}", "ok".green().bold(), path.display());
+            written.push(path);
+        }
+        "cursor" | "gemini" => {
+            // project-level, plus the user file only when it already exists
+            let rel = if client == "cursor" {
+                [".cursor", "mcp.json"]
+            } else {
+                [".gemini", "settings.json"]
+            };
+            let project = cwd().join(rel[0]).join(rel[1]);
+            if let Some(parent) = project.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            merge_mcp_json(&project, "locus", &server_entry)?;
+            written.push(project);
+            if let Some(home) = dirs::home_dir() {
+                let global = home.join(rel[0]).join(rel[1]);
+                if global.exists() {
+                    merge_mcp_json(&global, "locus", &server_entry)?;
+                    written.push(global);
+                }
+            }
+        }
+        _ => {
+            // codex: ~/.codex/config.toml. Grok Build: ~/.grok/config.toml with
+            // Codex-style [mcp_servers.<name>] tables — same fail-closed
+            // toml_edit merge.
+            let home = dirs::home_dir().with_context(|| format!("home dir for {client} config"))?;
+            let path = home.join(format!(".{client}")).join("config.toml");
+            merge_codex_mcp(&path, &bin, client)?;
+            written.push(path);
+        }
+    }
+
+    let locus_bin = locus_self_bin();
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": true,
+                "client": client,
+                "written": written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+                "serves": "control_tools",
+                "supervised_command": format!("{locus_bin} mcp --supervised"),
+            })
+        );
+        return Ok(());
+    }
+
+    for (i, path) in written.iter().enumerate() {
+        let verb = if i == 0 {
+            "wrote/merged"
+        } else {
+            "also merged"
+        };
+        println!("{} {verb} {}", "ok".green().bold(), path.display());
+    }
+    match client {
+        "claude" => {
             println!(
                 "   also pin before agent work: {}",
                 "locus pin <alias>".cyan()
             );
             println!("   verify: locus whoami && claude");
         }
-        "cursor" => {
-            let entry = serde_json::json!({
-                "mcpServers": {
-                    "locus": server_entry
-                }
-            });
-            if print_only {
-                println!("{}", serde_json::to_string_pretty(&entry)?);
-                return Ok(());
-            }
-            // project-level
-            let project = cwd().join(".cursor").join("mcp.json");
-            if let Some(parent) = project.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            merge_mcp_json(&project, "locus", &server_entry)?;
-            println!("{} wrote/merged {}", "ok".green().bold(), project.display());
-            // global
-            if let Some(home) = dirs::home_dir() {
-                let global = home.join(".cursor").join("mcp.json");
-                if global.exists() {
-                    merge_mcp_json(&global, "locus", &server_entry)?;
-                    println!("{} also merged {}", "ok".green().bold(), global.display());
-                }
-            }
-        }
-        "gemini" => {
-            let entry = serde_json::json!({ "mcpServers": { "locus": server_entry } });
-            if print_only {
-                println!("{}", serde_json::to_string_pretty(&entry)?);
-                return Ok(());
-            }
-            let project = cwd().join(".gemini").join("settings.json");
-            if let Some(parent) = project.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            merge_mcp_json(&project, "locus", &server_entry)?;
-            println!("{} wrote/merged {}", "ok".green().bold(), project.display());
-            if let Some(home) = dirs::home_dir() {
-                let global = home.join(".gemini").join("settings.json");
-                if global.exists() {
-                    merge_mcp_json(&global, "locus", &server_entry)?;
-                    println!("{} also merged {}", "ok".green().bold(), global.display());
-                }
-            }
-            println!(
-                "   verify: locus agent doctor   # mcp_registered.gemini (or `gemini mcp list`)"
-            );
-        }
-        "grok" => {
-            // Grok Build: documented config at ~/.grok/config.toml with
-            // Codex-style [mcp_servers.<name>] tables — same fail-closed
-            // toml_edit merge as codex.
-            if print_only {
-                println!("{}", stdio_server_entry_toml(&bin, client));
-                return Ok(());
-            }
-            let home = dirs::home_dir().context("home dir for grok config")?;
-            let path = home.join(".grok").join("config.toml");
-            merge_codex_mcp(&path, &bin, "grok")?;
-            println!("{} wrote/merged {}", "ok".green().bold(), path.display());
-            println!("   verify: locus agent doctor   # mcp_registered.grok");
-        }
-        "generic" => {
-            // Any generic stdio MCP client: no known on-disk config path, so
-            // never write — emit both shapes for paste (`--print` implied).
-            println!("# Locus MCP server entry — paste into the client's MCP settings.");
-            println!("# Generic client config path unknown; nothing was written.");
-            println!("# JSON shape (mcpServers-style clients):");
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "mcpServers": { "locus": server_entry }
-                }))?
-            );
-            println!();
-            println!("# TOML shape (Codex-style clients):");
-            println!("{}", stdio_server_entry_toml(&bin, client));
-            println!("# Optional: export LOCUS_GROK_MCP_CONFIG=<path-to-its-config> so");
-            println!("# `locus agent doctor` / `locus agent report` can verify registration");
-            println!("# (JSON mcpServers shape or TOML [mcp_servers] shape).");
-            return Ok(());
-        }
-        "codex" => {
-            if print_only {
-                println!("[mcp_servers.locus]");
-                println!("command = \"{bin}\"");
-                println!();
-                println!("[mcp_servers.locus.env]");
-                println!("LOCUS_AUTO_PIN = \"cwd\"");
-                println!("LOCUS_CLIENT = \"codex\"");
-                return Ok(());
-            }
-            let home = dirs::home_dir().context("home dir for codex config")?;
-            let path = home.join(".codex").join("config.toml");
-            merge_codex_mcp(&path, &bin, "codex")?;
-            println!("{} wrote/merged {}", "ok".green().bold(), path.display());
-        }
-        other => bail!("unknown client: {other} (claude|cursor|codex|grok|gemini|generic)"),
+        "gemini" => println!(
+            "   verify: locus agent doctor   # mcp_registered.gemini (or `gemini mcp list`)"
+        ),
+        "grok" => println!("   verify: locus agent doctor   # mcp_registered.grok"),
+        _ => {}
     }
-
     println!();
-    for line in supervised_mcp_hint(&locus_self_bin()) {
+    for line in supervised_mcp_hint(&locus_bin) {
         println!("{line}");
     }
     println!();
@@ -7859,6 +8183,38 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>) -> Result<
 
 /// Thin audit reader: last N events from `$LOCUS_HOME/audit/events.jsonl`.
 /// Never resolves credentials; ops/details only.
+/// For an events filter that matched nothing, list the ops or bindings the
+/// log does contain (deduplicated, sorted). `None` when the log is empty or
+/// no filter was given, so an empty log keeps its plain message.
+fn events_filter_hint(
+    all: &[locus_core::AuditEvent],
+    op: Option<&str>,
+    binding: Option<&str>,
+) -> Option<String> {
+    if all.is_empty() {
+        return None;
+    }
+    let distinct = |f: fn(&locus_core::AuditEvent) -> &str| -> String {
+        let set: std::collections::BTreeSet<&str> = all.iter().map(f).collect();
+        set.into_iter().collect::<Vec<_>>().join(", ")
+    };
+    let mut parts = Vec::new();
+    if op.is_some() {
+        parts.push(format!("ops in the log: {}", distinct(|e| e.op.as_str())));
+    }
+    if binding.is_some() {
+        parts.push(format!(
+            "bindings in the log: {}",
+            distinct(|e| e.binding.as_str())
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
 fn cmd_events(last: usize, op: Option<String>, binding: Option<String>, json: bool) -> Result<()> {
     let s = store()?;
     let all = s.read_audit_events()?;
@@ -7887,6 +8243,12 @@ fn cmd_events(last: usize, op: Option<String>, binding: Option<String>, json: bo
             }
         );
         println!("   {}", s.audit_path().display().to_string().dimmed());
+        // A filter that matches nothing is usually a typo (`--op pinn`,
+        // `--binding acmee`): name what the log does hold so the next query
+        // can be right without reading the raw file.
+        if let Some(hint) = events_filter_hint(&all, op.as_deref(), binding.as_deref()) {
+            println!("   {hint}");
+        }
         return Ok(());
     }
 
@@ -8259,10 +8621,9 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
                 .or_else(|| env::var("LOCUS_PRINCIPAL").ok().filter(|s| !s.is_empty()))
                 .or_else(|| env::var("USER").ok().filter(|s| !s.is_empty()))
                 .unwrap_or_else(|| "unknown".into());
-            let ttl_dur = match ttl {
-                Some(ref t) => Some(parse_ttl(t)?),
-                None => None,
-            };
+            // Same bounds as minted sessions / MCP grants: zero, negative or
+            // over-24h fails closed before the record is touched.
+            let ttl_dur = ttl.as_deref().map(parse_mint_ttl).transpose()?;
             if touchid {
                 // Confirm *before* mutating the approval record (fail closed).
                 let preview = s.load_approval(&id)?;
@@ -8365,7 +8726,13 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             use std::thread;
             use std::time::{Duration as StdDuration, Instant};
 
-            let deadline = Instant::now() + StdDuration::from_secs(timeout);
+            // `Instant + Duration` panics on overflow; an absurd --timeout is
+            // a usage error, not a crash.
+            let deadline = Instant::now()
+                .checked_add(StdDuration::from_secs(timeout))
+                .ok_or_else(|| {
+                    anyhow!("--timeout {timeout}s is too large (use e.g. 90s, 2m, 1h)")
+                })?;
             let interval = StdDuration::from_millis(interval_ms.max(50));
             loop {
                 let rec = s.load_approval(&id)?;
@@ -9297,7 +9664,10 @@ mod switch_flow_tests {
 
 #[cfg(test)]
 mod alias_ux_tests {
-    use super::{edit_distance, nearest_alias, stdio_server_entry_toml, with_alias_suggestions};
+    use super::{
+        missing_workspace_aliases, repin_hint, stdio_server_entry_toml, with_alias_suggestions,
+        with_auto_alias_suggestions, write_workspace_file,
+    };
     use locus_core::{Binding, BindingBody, LocusError, Policy, ProviderBinding, Scope, Store};
 
     fn binding(alias: &str) -> Binding {
@@ -9316,25 +9686,6 @@ mod alias_ux_tests {
                 upstream: None,
             }],
         })
-    }
-
-    #[test]
-    fn edit_distance_and_nearest_alias() {
-        assert_eq!(edit_distance("personal", "personal"), 0);
-        assert_eq!(edit_distance("personol", "personal"), 1);
-        assert_eq!(edit_distance("", "abc"), 3);
-
-        let aliases = vec![
-            "personal".to_string(),
-            "ashlrai".to_string(),
-            "cash-margin-partners".to_string(),
-        ];
-        assert_eq!(nearest_alias("personol", &aliases), Some("personal"));
-        assert_eq!(nearest_alias("ashlari", &aliases), Some("ashlrai"));
-        // Case-insensitive.
-        assert_eq!(nearest_alias("Personal", &aliases), Some("personal"));
-        // A completely different word gets no suggestion.
-        assert_eq!(nearest_alias("zzzzzzzzzz", &aliases), None);
     }
 
     #[test]
@@ -9363,6 +9714,112 @@ mod alias_ux_tests {
         let msg = format!("{err:#}");
         assert!(msg.contains("no bindings exist yet"), "{msg}");
         assert!(msg.contains("locus init --with-samples"), "{msg}");
+    }
+
+    #[test]
+    fn bare_enter_names_workspace_default_that_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path().join("home")).unwrap();
+        s.save_binding(&binding("personal")).unwrap();
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(project.join("sub")).unwrap();
+        std::fs::write(
+            project.join(".locus.toml"),
+            "version = 1\ndefault_binding = \"ghost\"\n",
+        )
+        .unwrap();
+
+        let err = with_auto_alias_suggestions(
+            &s,
+            &project.join("sub"),
+            LocusError::BindingNotFound("ghost".into()),
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains("default_binding = \"ghost\""), "{msg}");
+        assert!(msg.contains(".locus.toml"), "{msg}");
+        assert!(msg.contains("locus binding add ghost"), "{msg}");
+        assert!(
+            msg.contains("locus workspace --default <alias> --force"),
+            "{msg}"
+        );
+        // The underlying alias listing is kept.
+        assert!(msg.contains("known aliases: personal"), "{msg}");
+
+        // An alias that did not come from the workspace gets no workspace text.
+        let err =
+            with_auto_alias_suggestions(&s, &project, LocusError::BindingNotFound("other".into()));
+        assert!(!format!("{err:#}").contains(".locus.toml"));
+        // Other errors pass through.
+        let err = with_auto_alias_suggestions(&s, &project, LocusError::NotPinned);
+        assert!(format!("{err:#}").contains("no active pin"));
+    }
+
+    #[test]
+    fn workspace_write_and_missing_aliases() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = write_workspace_file(
+            dir.path(),
+            "acme".into(),
+            Some("acme, ghost,other".into()),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(w.config.allowed_bindings, vec!["acme", "ghost", "other"]);
+        let on_disk = std::fs::read_to_string(&w.path).unwrap();
+        assert!(on_disk.contains("default_binding = \"acme\""), "{on_disk}");
+        // The unknown_bindings / warning set: allowlist order, known skipped.
+        assert_eq!(
+            missing_workspace_aliases(&w.config.allowed_bindings, &["acme", "other"]),
+            vec!["ghost"]
+        );
+
+        // Existing file refuses without --force and is left untouched.
+        let err = write_workspace_file(dir.path(), "x".into(), None, false, false)
+            .err()
+            .unwrap();
+        assert!(format!("{err}").contains("--force"));
+        assert_eq!(std::fs::read_to_string(&w.path).unwrap(), on_disk);
+
+        let w = write_workspace_file(dir.path(), "ghost".into(), None, false, true).unwrap();
+        assert_eq!(
+            missing_workspace_aliases(&w.config.allowed_bindings, &["acme"]),
+            vec!["ghost"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_write_never_follows_a_dangling_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::os::unix::fs::symlink("../planted.toml", repo.join(".locus.toml")).unwrap();
+        let planted = dir.path().join("planted.toml");
+
+        let err = write_workspace_file(&repo, "acme".into(), None, true, false)
+            .err()
+            .unwrap();
+        assert!(format!("{err}").contains("--force"), "{err}");
+        assert!(!planted.exists());
+
+        let w = write_workspace_file(&repo, "acme".into(), None, true, true).unwrap();
+        assert!(!planted.exists(), "wrote through the link");
+        assert!(!std::fs::symlink_metadata(&w.path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn repin_hint_names_the_binding_just_left() {
+        assert_eq!(
+            repin_hint(Some("acme")),
+            "locus enter acme  or  locus enter <alias>"
+        );
+        let none = repin_hint(None);
+        assert!(none.contains("locus binding list"), "{none}");
+        assert!(!none.contains("personal"), "{none}");
     }
 
     #[test]
@@ -9400,8 +9857,8 @@ mod alias_ux_tests {
 #[cfg(test)]
 mod ttl_and_client_add_tests {
     use super::{
-        binding_from_answers, human_dur, missing_add_flags, parse_pin_ttl, resolve_add_answers,
-        scope_prompts, split_repos, AddAnswers, BindingAddArgs,
+        binding_from_answers, human_dur, missing_add_flags, parse_mint_ttl, parse_pin_ttl,
+        resolve_add_answers, scope_prompts, split_repos, AddAnswers, BindingAddArgs,
     };
     use locus_core::Store;
 
@@ -9423,6 +9880,12 @@ mod ttl_and_client_add_tests {
         assert_eq!(parse_pin_ttl("2h").unwrap(), chrono::Duration::hours(2));
         assert_eq!(parse_pin_ttl("1d").unwrap(), chrono::Duration::hours(24));
         assert_eq!(parse_pin_ttl("1m").unwrap(), chrono::Duration::minutes(1));
+
+        // Mint TTLs keep the 24h ceiling but allow second-scale expiry probes.
+        assert_eq!(parse_mint_ttl("1s").unwrap(), chrono::Duration::seconds(1));
+        for bad in ["0s", "-5m", "25h", "abc", ""] {
+            assert!(parse_mint_ttl(bad).is_err(), "{bad}");
+        }
 
         for (bad, frag) in [
             ("0m", "too short"),
@@ -9844,7 +10307,8 @@ credential_ref = "phm:VERIFY_SESSION_MISSING"
 mod watch_heartbeat_tests {
     use super::{
         attach_control_capability_findings, gather_doctor_external_with_phantom_status,
-        parse_watch_interval, watch_should_fail, WatchHeartbeat,
+        parse_watch_interval, watch_not_ok_reason, watch_pin_label, watch_should_fail,
+        WatchHeartbeat,
     };
     use locus_core::{verify_session, Binding, Store};
     use std::time::Duration;
@@ -9878,6 +10342,51 @@ mod watch_heartbeat_tests {
     }
 
     #[test]
+    fn approve_wait_timeout_accepts_watch_units() {
+        use clap::Parser;
+        for (raw, secs) in [("1s", 1), ("2m", 120), ("1h", 3600), ("45", 45), ("0", 0)] {
+            let cli = super::Cli::try_parse_from([
+                "locus",
+                "approve",
+                "wait",
+                "appr_x",
+                "--timeout",
+                raw,
+            ])
+            .unwrap_or_else(|e| panic!("{raw}: {e}"));
+            match cli.command {
+                super::Commands::Approve(super::ApproveCmd::Wait { timeout, .. }) => {
+                    assert_eq!(timeout, secs, "{raw}")
+                }
+                _ => panic!("{raw}: not parsed as approve wait"),
+            }
+        }
+        // Overflowing units used to saturate to u64::MAX and then panic in
+        // `Instant + Duration` ("overflow when adding duration to instant").
+        for bad in [
+            "1.5m",
+            "5x",
+            "",
+            "-1s",
+            "99999999999999999h",
+            "999999999999999999m",
+        ] {
+            assert!(
+                super::Cli::try_parse_from([
+                    "locus",
+                    "approve",
+                    "wait",
+                    "appr_x",
+                    "--timeout",
+                    bad
+                ])
+                .is_err(),
+                "{bad} must be rejected"
+            );
+        }
+    }
+
+    #[test]
     fn parse_watch_interval_errors_carry_hint() {
         for bad in ["30sec", "nope", "5x", "1.5m", "s"] {
             let err = format!("{:#}", parse_watch_interval(bad).unwrap_err());
@@ -9900,6 +10409,53 @@ mod watch_heartbeat_tests {
         // --require-ok fail-closed regardless of pin.
         assert!(watch_should_fail(false, false, true));
         assert!(watch_should_fail(false, true, true));
+    }
+
+    /// A present-but-unverifiable pin is not "unpinned": the human watch line
+    /// used to print `unpinned` next to `pinned=true` on a stale pin.
+    #[test]
+    fn watch_pin_label_distinguishes_invalid_from_unpinned() {
+        let hb = |whoami: Option<&str>, pinned: bool| WatchHeartbeat {
+            kind: "watch".into(),
+            session_ok: false,
+            whoami: whoami.map(str::to_string),
+            doctor_verdict: "UNSAFE".into(),
+            safe_next: "doctor_fix".into(),
+            pinned,
+            frozen: false,
+        };
+        assert_eq!(watch_pin_label(&hb(Some("acme"), true)), "acme");
+        assert_eq!(watch_pin_label(&hb(None, false)), "unpinned");
+        assert_eq!(watch_pin_label(&hb(None, true)), "invalid");
+    }
+
+    /// `session_ok=false` with `safe_next=ready` (doctor WARN on a healthy
+    /// pin) used to print only "next ready — Proceed", hiding why the tick
+    /// failed. Name the doctor findings instead.
+    #[test]
+    fn watch_not_ok_reason_names_doctor_findings_when_next_is_ready() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        let external =
+            gather_doctor_external_with_phantom_status(&store, dir.path().to_path_buf(), true)
+                .unwrap();
+        let mut pack = verify_session(&store, dir.path(), external).unwrap();
+        // Unpinned: safe_next already explains the failure.
+        assert!(!pack.safe_next.ready);
+        assert_eq!(watch_not_ok_reason(&pack), None);
+
+        pack.safe_next.ready = true;
+        pack.doctor.push_finding(
+            locus_core::IssueSeverity::Warn,
+            "phantom_missing",
+            "phantom not on PATH".into(),
+        );
+        pack.session_ok = pack.doctor.ok && pack.safe_next.ready;
+        assert!(!pack.session_ok);
+        let reason = watch_not_ok_reason(&pack).expect("reason when next is ready");
+        assert!(reason.contains("doctor=WARN"), "{reason}");
+        assert!(reason.contains("phantom_missing"), "{reason}");
+        assert!(reason.contains("locus doctor"), "{reason}");
     }
 
     #[test]
@@ -10131,5 +10687,35 @@ mod hook_and_help_tests {
             .filter(|name| !words.contains(&name.as_str()))
             .collect();
         assert!(missing.is_empty(), "missing from help groups: {missing:?}");
+    }
+}
+
+#[cfg(test)]
+mod events_filter_hint_tests {
+    use super::events_filter_hint;
+
+    #[test]
+    fn names_what_the_log_holds() {
+        let ev = |op: &str, binding: &str| locus_core::AuditEvent {
+            ts: "1".into(),
+            op: op.into(),
+            binding: binding.into(),
+            detail: None,
+        };
+        let all = vec![
+            ev("session.pin", "personal"),
+            ev("session.exec", "acme"),
+            ev("session.pin", "acme"),
+        ];
+        assert_eq!(
+            events_filter_hint(&all, Some("pinn"), None).as_deref(),
+            Some("ops in the log: session.exec, session.pin")
+        );
+        assert_eq!(
+            events_filter_hint(&all, Some("x"), Some("acmee")).as_deref(),
+            Some("ops in the log: session.exec, session.pin; bindings in the log: acme, personal")
+        );
+        assert_eq!(events_filter_hint(&all, None, None), None);
+        assert_eq!(events_filter_hint(&[], Some("pin"), None), None);
     }
 }

@@ -10,7 +10,9 @@ pub enum LocusError {
     #[error("binding not found: {0}")]
     BindingNotFound(String),
 
-    #[error("no active pin — run `locus pin <alias>` first")]
+    #[error(
+        "no active pin — run `locus enter <alias>` first (`locus binding list` shows aliases)"
+    )]
     NotPinned,
 
     #[error("invalid session seal")]
