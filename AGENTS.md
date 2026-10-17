@@ -63,7 +63,7 @@ locus exec -- env | grep LOCUS_
 | Path | Role |
 |------|------|
 | `crates/locus-core` | Binding, session, seal, policy, store, isolation, adapters, workers |
-| `crates/locus-cli` | `locus` — pin, leave, whoami, exec, binding, workspace, setup, doctor |
+| `crates/locus-cli` | `locus` — enter, pin, leave, whoami, exec, run, binding, onboard, setup, mcp, doctor, … (`locus --help` lists every command by group) |
 | `crates/locus-mcp` | Stdio MCP server hard-scoped to active pin |
 | `docs/` | Operational how-tos (MCP, adapters, workers, architecture, firm mode) |
 | `examples/` | Sample bindings + `.locus.toml` |
@@ -142,7 +142,7 @@ When the **user** has Locus wired (not when hacking this repo):
 
 1. Call `locus_whoami` / `locus whoami` before infrastructure mutations if context is unclear.
 2. Treat pin as authoritative — do not invent alternate `project_ref` / teams.
-3. If tools are missing or wrong tenant: ask the human to `locus pin <alias>`; do not claim you can re-pin.
+3. If tools are missing or wrong tenant: ask the human to `locus pin <alias>`; do not claim you can re-pin. A pin alone gives control tools plus `locus_providers`; provider tools also need the client to launch `locus mcp --supervised`. If `locus_request_pin` says the binding does not exist, relay `locus binding list` / `locus binding add <alias>`, not `locus enter`.
 4. Destructive tools may block on `require_approval`. Only a closed external authorization envelope can release provider execution. Local CLI labels are advisory; do not retry after recording one.
 
 Firm / multi-client workflow: [docs/firm-mode.md](./docs/firm-mode.md).
@@ -157,7 +157,8 @@ Firm / multi-client workflow: [docs/firm-mode.md](./docs/firm-mode.md).
 | [docs/firm-mode.md](./docs/firm-mode.md) | Agencies: bindings, dual-control, workspaces |
 | [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
 | [examples/agency-starter/](./examples/agency-starter/) | Sample multi-client bindings + offboarding |
-| [docs/mcp.md](./docs/mcp.md) | Wire `locus-mcp` into clients |
+| [docs/mcp.md](./docs/mcp.md) | Wire `locus-mcp` into clients (provider tools need `locus mcp --supervised`) |
+| [docs/onboarding.md](./docs/onboarding.md) | `locus onboard` wizard + multi-client, multi-tenant walkthrough |
 | [docs/adapters.md](./docs/adapters.md) | Write a provider adapter |
 | [docs/workers.md](./docs/workers.md) | Synthetic vs MCP stdio workers |
 | [docs/hub-integration.md](./docs/hub-integration.md) | Phantom (hub) contract + agent report |
