@@ -89,3 +89,69 @@ fn workspace_warns_on_aliases_without_a_binding() {
     );
     assert!(!stderr.contains("'personal'"), "existing binding: {stderr}");
 }
+
+const CAP: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+#[test]
+fn binding_add_refuses_to_replace_an_existing_alias_without_force() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let add = |account: &str, extra: &[&str]| {
+        let mut args = vec![
+            "--json",
+            "binding",
+            "add",
+            "dup",
+            "--tenant",
+            "dup",
+            "--provider",
+            "github",
+            "--account",
+            account,
+            "--credential-ref",
+            "env:DUP_TOKEN",
+            "--non-interactive",
+        ];
+        args.extend_from_slice(extra);
+        locus(home.path(), cwd.path(), Some(CAP), &args)
+    };
+    let toml = home.path().join("bindings").join("dup.toml");
+
+    let first = add("first", &[]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let original = std::fs::read_to_string(&toml).unwrap();
+
+    let second = add("second", &[]);
+    assert_json_error(&second, "binding 'dup' already exists");
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(
+        stderr.contains("locus binding show dup") && stderr.contains("--force"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&toml).unwrap(), original);
+
+    // A dry run still previews without writing.
+    let dry = add("second", &["--dry-run"]);
+    assert!(dry.status.success());
+    assert_eq!(std::fs::read_to_string(&toml).unwrap(), original);
+
+    let forced = add("second", &["--force"]);
+    assert!(
+        forced.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forced.stderr)
+    );
+    assert!(std::fs::read_to_string(&toml)
+        .unwrap()
+        .contains("\"second\""));
+
+    // A mistyped alias on `binding show` names the real one.
+    let show = locus(home.path(), cwd.path(), None, &["binding", "show", "dupp"]);
+    let stderr = String::from_utf8_lossy(&show.stderr);
+    assert!(!show.status.success());
+    assert!(stderr.contains("did you mean `dup`?"), "{stderr}");
+}

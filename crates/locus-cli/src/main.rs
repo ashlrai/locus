@@ -1045,6 +1045,9 @@ struct BindingAddArgs {
     /// Validate and print the binding TOML without writing
     #[arg(long)]
     dry_run: bool,
+    /// Replace an existing binding with the same alias
+    #[arg(long)]
+    force: bool,
 }
 
 fn main() {
@@ -5291,7 +5294,9 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
             }
         }
         BindingCmd::Show { alias } => {
-            let mut b = s.load_binding(&alias)?;
+            let mut b = s
+                .load_binding(&alias)
+                .map_err(|e| with_alias_suggestions(&s, e))?;
             for provider in &mut b.providers {
                 let source = locus_core::credential_metadata(&provider.credential_ref).source;
                 provider.credential_ref = format!("<redacted:{source}>");
@@ -5333,7 +5338,8 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
             if !yes {
                 bail!("refusing to remove without --yes");
             }
-            s.remove_binding(&alias)?;
+            s.remove_binding(&alias)
+                .map_err(|e| with_alias_suggestions(&s, e))?;
             if json {
                 println!("{}", serde_json::json!({ "removed": alias }));
             } else {
@@ -5747,10 +5753,30 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
         return Ok(());
     }
 
+    // An existing binding is never replaced silently: its scope and
+    // credential ref would change under every workspace that names it.
+    let exists = s
+        .bindings_dir()
+        .join(format!("{}.toml", answers.alias))
+        .exists();
+    if exists && !args.force && !(can_prompt && guided) {
+        bail!(
+            "binding '{alias}' already exists; nothing written. \
+             Review it with `locus binding show {alias}`, rerun with --force to replace it, \
+             or choose another alias",
+            alias = answers.alias
+        );
+    }
+
     if can_prompt && guided {
         println!();
         println!("{toml}");
-        if !prompt_confirm(&format!("write binding '{}'?", answers.alias), true)? {
+        let question = if exists && !args.force {
+            format!("binding '{}' already exists; replace it?", answers.alias)
+        } else {
+            format!("write binding '{}'?", answers.alias)
+        };
+        if !prompt_confirm(&question, !exists || args.force)? {
             bail!("aborted — nothing written");
         }
     }
