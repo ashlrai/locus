@@ -15,6 +15,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   approval, so one `require_approval` hit on `acme` kept `personal` unready
   until it was denied. Only the pinned binding's requests count now, and the
   message names `locus approve deny <id>` to dismiss one.
+- **Unresolvable `phm:` credentials are no longer silent.** `locus doctor`
+  only checked `phantom list`, so a ref whose locator exists but which
+  `phantom reveal` refuses (current Phantom Secrets refuses the
+  non-interactive reveal Locus uses) reported "credentials ok". Doctor (and
+  `doctor --json`, `verify session`, `watch`, `agent report`) now probes the
+  real resolve path for listed `phm:` refs and flags failures in
+  `unresolved_phm` as `code=reveal-failed` / `reveal-timeout`, with a human
+  cause line. `locus exec` / `run` / `ci run` warn once per unresolved ref
+  naming the binding, provider, env vars left unset and the cause;
+  `--strict-creds` still fails before the child runs, now with the same
+  detail. Values and locator names are never printed. The MCP doctor surface
+  is unchanged.
 - **`--json` failures are JSON.** With the global `--json`, a failing command
   (e.g. `locus --json whoami` while unpinned) printed a human `error:` line, so
   agents got non-JSON. The error line on stderr is now `{"ok": false,
