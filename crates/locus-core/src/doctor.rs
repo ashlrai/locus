@@ -272,7 +272,14 @@ pub fn gather_doctor_external(
     cwd: std::path::PathBuf,
 ) -> crate::Result<DoctorExternal> {
     let phantom = crate::credential::phantom_on_path();
-    let unresolved_phm = crate::credential::collect_unresolved_phm_refs(store, phantom)?;
+    // An invalid binding file is reported by build_doctor_report as an UNSAFE
+    // `binding_invalid` finding; do not abort the diagnostic here (the MCP
+    // `locus_doctor` tool reaches doctor through this helper).
+    let unresolved_phm = if store.list_bindings().is_ok() {
+        crate::credential::collect_unresolved_phm_refs(store, phantom)?
+    } else {
+        Vec::new()
+    };
     Ok(DoctorExternal {
         phantom_on_path: phantom,
         unresolved_phm,
@@ -1749,6 +1756,25 @@ require_pin = true
         assert!(report.workspace.require_pin);
         assert!(report.findings.iter().any(|f| f.code == "require_pin"));
         assert_eq!(report.verdict, DoctorVerdict::Warn);
+    }
+
+    /// The shared external-facts helper (used by the MCP `locus_doctor` tool)
+    /// must not abort on a malformed binding either, or the report below is
+    /// unreachable from MCP.
+    #[test]
+    fn gather_doctor_external_tolerates_malformed_binding_file() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        std::fs::write(store.bindings_dir().join("broken.toml"), "garbage [[").unwrap();
+
+        let external = gather_doctor_external(&store, dir.path().to_path_buf())
+            .expect("gathering external facts must not abort on a malformed binding");
+        let report = build_doctor_report(&store, external).unwrap();
+        assert_eq!(report.verdict, DoctorVerdict::Unsafe);
+        assert!(report.findings.iter().any(|f| f.code == "binding_invalid"));
     }
 
     #[test]
