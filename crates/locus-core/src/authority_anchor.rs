@@ -2622,6 +2622,16 @@ mod tests {
 
     #[test]
     fn linked_singleton_lock_is_rejected_before_broker_start() {
+        // After the rejected start, ensure_broker polls for another current
+        // broker until the start timeout (15s under test) before failing.
+        // Bound that wait in a child process instead of mutating shared env.
+        if !crate::test_support::run_in_isolated_process_with_env(
+            module_path!(),
+            "linked_singleton_lock_is_rejected_before_broker_start",
+            &[(BROKER_START_TIMEOUT_ENV, "500")],
+        ) {
+            return;
+        }
         let dir = tempdir().unwrap();
         fs::create_dir_all(runtime_dir(dir.path())).unwrap();
         let lock = broker_lock_path(dir.path());
