@@ -3485,9 +3485,15 @@ fn handle_tools_list(scope: &RequestScope) -> std::result::Result<Value, Value> 
 fn check_control_args(name: &str, args: &Value) -> std::result::Result<(), Value> {
     let tools = control_tools(true);
     let Some(tool) = tools.iter().find(|t| t.name == name) else {
+        // A mistyped control name (`locus_whoam`) names the tool it was
+        // probably meant to be, so the agent retries instead of listing.
+        let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+        let hint = locus_core::nearest_alias(name, &names)
+            .map(|n| format!(" Did you mean `{n}`?"))
+            .unwrap_or_default();
         return Err(rpc_error(
             -32602,
-            format!("unknown tool `{name}`: control tools are listed by tools/list"),
+            format!("unknown tool `{name}`: control tools are listed by tools/list.{hint}"),
         ));
     };
     let Some(obj) = args.as_object() else {
@@ -3513,10 +3519,22 @@ fn check_control_args(name: &str, args: &Value) -> std::result::Result<(), Value
         .map(|d| d.keys().map(String::as_str).collect())
         .unwrap_or_default();
     allowed.sort_unstable();
+    let allowed_owned: Vec<String> = allowed.iter().map(|k| k.to_string()).collect();
+    let suggestions: Vec<String> = undeclared
+        .iter()
+        .filter_map(|k| {
+            locus_core::nearest_alias(k, &allowed_owned).map(|near| format!("`{k}` -> `{near}`"))
+        })
+        .collect();
+    let hint = if suggestions.is_empty() {
+        String::new()
+    } else {
+        format!(" Did you mean {}?", suggestions.join(", "))
+    };
     Err(rpc_error(
         -32602,
         format!(
-            "invalid arguments for `{name}`: undeclared argument(s) [{}]; the schema allows [{}] (additionalProperties: false)",
+            "invalid arguments for `{name}`: undeclared argument(s) [{}]; the schema allows [{}] (additionalProperties: false).{hint}",
             undeclared.join(", "),
             allowed.join(", ")
         ),
@@ -5128,6 +5146,26 @@ mod lifecycle_hint_tests {
             negotiate_protocol_version(&json!({})),
             SUPPORTED_PROTOCOL_VERSIONS[0]
         );
+    }
+
+    #[test]
+    fn mistyped_control_tool_and_argument_name_the_nearest_match() {
+        let err = check_control_args("locus_whoam", &json!({})).unwrap_err();
+        let msg = err["message"].as_str().unwrap();
+        assert!(msg.starts_with("unknown tool `locus_whoam`"), "{msg}");
+        assert!(msg.ends_with("Did you mean `locus_whoami`?"), "{msg}");
+
+        let err = check_control_args("locus_nonsense_tool", &json!({})).unwrap_err();
+        assert!(
+            !err["message"].as_str().unwrap().contains("Did you mean"),
+            "{err}"
+        );
+
+        let err = check_control_args("locus_request_pin", &json!({"aliass": "acme"})).unwrap_err();
+        let msg = err["message"].as_str().unwrap();
+        assert_eq!(err["code"], json!(-32602), "{err}");
+        assert!(msg.contains("undeclared argument(s) [aliass]"), "{msg}");
+        assert!(msg.ends_with("Did you mean `aliass` -> `alias`?"), "{msg}");
     }
 
     #[test]
