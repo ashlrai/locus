@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`locus binding add` no longer silently replaces an existing binding.**
+  Re-adding an alias overwrote its tenant, account, scope and credential ref
+  with no warning, under every workspace that names it. It now refuses with
+  `binding 'x' already exists; nothing written`, pointing at
+  `locus binding show x`. Pass `--force` to replace it. A guided add asks
+  before replacing, defaulting to no, and `--dry-run` still previews.
+- **`locus binding show` and `binding rm` suggest the alias you meant.** A typo
+  listed nothing; they now give the same known-aliases list and nearest match
+  as `locus enter`.
 - **MCP `locus://doctor` reports a malformed binding file instead of erroring.**
   The 0.5.1 doctor fix covered `locus doctor` only; the MCP resource still failed
   the read with `binding 'x' is malformed` (-32000). It now returns the same
