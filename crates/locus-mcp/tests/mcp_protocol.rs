@@ -645,6 +645,79 @@ fn control_tool_errors_name_the_next_step() {
 }
 
 #[test]
+fn control_tools_enforce_their_closed_schemas() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    let invalid = |client: &mut McpClient, name: &str, args: Value, needle: &str| {
+        let resp = client.request("tools/call", json!({ "name": name, "arguments": args }));
+        assert_eq!(resp["error"]["code"], -32602, "{name} {args}: {resp}");
+        let msg = resp["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains(needle), "{name}: {msg}");
+        assert!(resp.get("result").is_none(), "{resp}");
+    };
+
+    // Undeclared keys on additionalProperties:false schemas.
+    invalid(
+        &mut client,
+        "locus_whoami",
+        json!({ "binding": "acme" }),
+        "undeclared argument(s) [binding]",
+    );
+    invalid(
+        &mut client,
+        "locus_request_pin",
+        json!({ "alias": "acme", "force": true }),
+        "the schema allows [alias]",
+    );
+    // `arguments` must be an object.
+    invalid(
+        &mut client,
+        "locus_whoami",
+        json!("acme"),
+        "expected a JSON object",
+    );
+    // Unknown control tool: same -32602 as an unknown provider tool.
+    invalid(
+        &mut client,
+        "locus_nosuch",
+        json!({}),
+        "unknown tool `locus_nosuch`",
+    );
+
+    // `arguments: null` / omitted still mean "no arguments".
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_list_bindings", "arguments": null }),
+    );
+    let (_, is_err) = McpClient::tool_text(&resp);
+    assert!(!is_err, "{resp}");
+
+    // A whitespace-only alias is blank, not a binding named "   ".
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_request_pin", "arguments": { "alias": "   " } }),
+    );
+    let (text, is_err) = McpClient::tool_text(&resp);
+    assert!(is_err, "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["error"], "alias required", "{text}");
+    // A padded real alias is the alias.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_request_pin", "arguments": { "alias": " acme " } }),
+    );
+    let (text, is_err) = McpClient::tool_text(&resp);
+    assert!(!is_err, "{text}");
+    let body: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(body["command"], "locus enter acme", "{text}");
+}
+
+#[test]
 fn ndjson_provider_call_not_pinned() {
     let dir = tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
