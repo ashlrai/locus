@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **MCP `locus://doctor` reports a malformed binding file instead of erroring.**
+  The 0.5.1 doctor fix covered `locus doctor` only; the MCP resource still failed
+  the read with `binding 'x' is malformed` (-32000). It now returns the same
+  UNSAFE report with a `binding_invalid` finding.
 - **A pending approval on one binding no longer blocks every other pin.**
   `locus_safe_next`, `locus verify session`, `locus watch` and the agent
   report returned `external_authorization` (not ready) for any pending

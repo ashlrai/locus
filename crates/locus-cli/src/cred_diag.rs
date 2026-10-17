@@ -74,16 +74,29 @@ fn phm_refs_needing_probe(
 }
 
 /// Run `reveal` for each name once; one issue per failing provider.
+///
+/// After the first `reveal-timeout` no further reveal is spawned: every
+/// remaining name is reported as timed out too. Each reveal may take the full
+/// core deadline (10s), so probing a hung vault name by name would stall
+/// `locus doctor` / `quickstart` / a hub `watch --once` heartbeat for
+/// 10s x N refs. Reporting the rest as timed out keeps the verdict fail
+/// closed (never "ok") while bounding the probe to one deadline.
 fn probe_with(
     needed: Vec<(String, String)>,
     reveal: impl Fn(&str) -> Option<&'static str>,
 ) -> Vec<CredentialResolutionIssue> {
     let mut outcomes: HashMap<String, Option<&'static str>> = HashMap::new();
     let mut issues: Vec<CredentialResolutionIssue> = Vec::new();
+    let mut timed_out = false;
     for (provider, name) in needed {
-        let failure = *outcomes
-            .entry(name.clone())
-            .or_insert_with(|| reveal(&name));
+        let failure = *outcomes.entry(name.clone()).or_insert_with(|| {
+            if timed_out {
+                return Some(REVEAL_TIMEOUT);
+            }
+            let outcome = reveal(&name);
+            timed_out = outcome == Some(REVEAL_TIMEOUT);
+            outcome
+        });
         if let Some(code) = failure {
             if !issues.iter().any(|i| i.provider == provider) {
                 issues.push(CredentialResolutionIssue {
@@ -279,6 +292,36 @@ mod tests {
                 issue("github", "phantom", REVEAL_FAILED),
                 issue("supabase", "phantom", REVEAL_FAILED),
             ]
+        );
+    }
+
+    #[test]
+    fn probe_stops_spawning_reveals_after_first_timeout() {
+        let calls = Cell::new(0);
+        let issues = probe_with(
+            vec![
+                ("github".into(), "GH".into()),
+                ("supabase".into(), "SB".into()),
+                ("vercel".into(), "VC".into()),
+            ],
+            |_| {
+                calls.set(calls.get() + 1);
+                Some(REVEAL_TIMEOUT)
+            },
+        );
+        assert_eq!(
+            calls.get(),
+            1,
+            "a hung vault is asked once, not once per ref"
+        );
+        assert_eq!(
+            issues,
+            vec![
+                issue("github", "phantom", REVEAL_TIMEOUT),
+                issue("supabase", "phantom", REVEAL_TIMEOUT),
+                issue("vercel", "phantom", REVEAL_TIMEOUT),
+            ],
+            "unprobed refs stay flagged (fail closed), never reported ok"
         );
     }
 
