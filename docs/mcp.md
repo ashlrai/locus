@@ -262,6 +262,7 @@ the probe never guesses.
 ## Protocol notes
 
 - **JSON-RPC 2.0** over stdio — **Content-Length** framing (Claude Code / Cursor) and **NDJSON**  
+- A frame that is not valid JSON gets a JSON-RPC Parse error (`-32700`, `"id": null`) and the server keeps serving; batches and non-object messages get Invalid Request (`-32600`)  
 - Supported methods: `initialize`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, `prompts/get`  
 - **Never** log to stdout from the server — that breaks the protocol (errors go to stderr)  
 - Protocol versions: negotiates `2025-06-18`, `2025-03-26`, or `2024-11-05` (echoes the client's requested version when supported, else answers `2025-06-18`)  

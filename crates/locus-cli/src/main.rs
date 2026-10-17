@@ -1059,11 +1059,32 @@ fn main() {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             let e = stale_pin_recovery_fallback(e);
-            eprintln!("{} {e:#}", "error:".red().bold());
+            if JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed) {
+                emit_json_error(&e);
+            } else {
+                eprintln!("{} {e:#}", "error:".red().bold());
+            }
             std::process::exit(1);
         }
         Err(()) => std::process::exit(stdout::STDOUT_CLOSED_EXIT),
     }
+}
+
+/// Set once `--json` is parsed so a failing command reports its error as JSON.
+static JSON_ERRORS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Machine-readable form of a top-level CLI error, matching the `ok` field the
+/// success payloads carry. Same text as the human `error:` line (never secrets).
+fn json_error_payload(e: &anyhow::Error) -> serde_json::Value {
+    json!({ "ok": false, "error": format!("{e:#}") })
+}
+
+/// Print the JSON error as one line on stderr. Stdout keeps the existing
+/// `--json` stream contract (at most one JSON document, e.g. the
+/// `verify session` pack printed before its non-zero exit); errors stay on
+/// stderr, now parseable instead of a human `error:` line.
+fn emit_json_error(e: &anyhow::Error) {
+    eprintln!("{}", json_error_payload(e));
 }
 
 fn run() -> Result<()> {
@@ -1077,6 +1098,7 @@ fn run() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    JSON_ERRORS.store(cli.json, std::sync::atomic::Ordering::Relaxed);
     match cli.command {
         Commands::Init {
             with_samples,
@@ -5846,13 +5868,20 @@ fn cmd_workspace(
     json: bool,
 ) -> Result<()> {
     require_local_control_boundary("locus workspace")?;
-    // Unknown aliases warn, not refuse: a committed .locus.toml can name a
-    // binding each teammate creates locally. Unreadable store = no warning.
-    let known: Vec<String> = store()
+    let written = write_workspace_file(&cwd(), default, allow, require_pin, force)?;
+    // Advisory only: README/e2e flows name aliases before they exist locally,
+    // so a missing binding is a warning (stderr, exit 0), not a rejection.
+    // An unreadable store yields no warning and an empty `unknown_bindings`.
+    let missing: Vec<String> = store()
         .and_then(|s| Ok(s.list_bindings()?))
-        .map(|list| list.into_iter().flat_map(|b| [b.alias, b.id]).collect())
+        .map(|known| {
+            let known: Vec<&str> = known.iter().map(|b| b.alias.as_str()).collect();
+            missing_workspace_aliases(&written.config.allowed_bindings, &known)
+                .into_iter()
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default();
-    let written = write_workspace_file(&cwd(), default, allow, require_pin, force, &known)?;
     if json {
         println!(
             "{}",
@@ -5862,18 +5891,16 @@ fn cmd_workspace(
                 "default_binding": written.config.default_binding,
                 "allowed_bindings": written.config.allowed_bindings,
                 "require_pin": written.config.require_pin,
-                "unknown_bindings": written.unknown,
+                "unknown_bindings": missing,
             }))?
         );
         return Ok(());
     }
     println!("{} wrote {}", "ok".green().bold(), written.path.display());
-    if !written.unknown.is_empty() {
+    for alias in &missing {
         eprintln!(
-            "{} not configured in this Locus home: {} — `locus enter` here fails until you \
-             create it (`locus binding add <alias>`); see `locus binding list`",
-            "warn".yellow().bold(),
-            written.unknown.join(", ")
+            "{} binding '{alias}' does not exist yet; `locus enter {alias}` will fail until you add it: locus binding add {alias} --provider <provider> --account <label> --credential-ref phm:NAME",
+            "warning:".yellow().bold(),
         );
     }
     Ok(())
@@ -5882,8 +5909,6 @@ fn cmd_workspace(
 struct WorkspaceWrite {
     path: PathBuf,
     config: WorkspaceConfig,
-    /// Aliases the file names that are not a configured binding alias or id.
-    unknown: Vec<String>,
 }
 
 fn write_workspace_file(
@@ -5892,7 +5917,6 @@ fn write_workspace_file(
     allow: Option<String>,
     require_pin: bool,
     force: bool,
-    known: &[String],
 ) -> Result<WorkspaceWrite> {
     let path = dir.join(".locus.toml");
     if path.exists() && !force {
@@ -5910,11 +5934,6 @@ fn write_workspace_file(
             }
         }
     }
-    let unknown = allowed
-        .iter()
-        .filter(|a| !known.iter().any(|k| k == *a))
-        .cloned()
-        .collect();
     let config = WorkspaceConfig {
         version: 1,
         default_binding: Some(default),
@@ -5922,11 +5941,16 @@ fn write_workspace_file(
         require_pin,
     };
     std::fs::write(&path, config.to_toml()?)?;
-    Ok(WorkspaceWrite {
-        path,
-        config,
-        unknown,
-    })
+    Ok(WorkspaceWrite { path, config })
+}
+
+/// Workspace aliases (default first, then allowlist) with no local binding.
+fn missing_workspace_aliases<'a>(aliases: &'a [String], known: &[&str]) -> Vec<&'a str> {
+    aliases
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !known.contains(a))
+        .collect()
 }
 
 fn cmd_doctor(json: bool) -> Result<()> {
@@ -9314,8 +9338,9 @@ mod switch_flow_tests {
 #[cfg(test)]
 mod alias_ux_tests {
     use super::{
-        edit_distance, nearest_alias, repin_hint, stdio_server_entry_toml, with_alias_suggestions,
-        with_auto_alias_suggestions, write_workspace_file,
+        edit_distance, missing_workspace_aliases, nearest_alias, repin_hint,
+        stdio_server_entry_toml, with_alias_suggestions, with_auto_alias_suggestions,
+        write_workspace_file,
     };
     use locus_core::{Binding, BindingBody, LocusError, Policy, ProviderBinding, Scope, Store};
 
@@ -9423,33 +9448,37 @@ mod alias_ux_tests {
     }
 
     #[test]
-    fn workspace_write_reports_unconfigured_aliases() {
+    fn workspace_write_and_missing_aliases() {
         let dir = tempfile::tempdir().unwrap();
-        let known = vec!["acme".to_string(), "bnd_acme".to_string()];
         let w = write_workspace_file(
             dir.path(),
             "acme".into(),
-            Some("acme, ghost,bnd_acme".into()),
+            Some("acme, ghost,other".into()),
             true,
             false,
-            &known,
         )
         .unwrap();
-        assert_eq!(w.unknown, vec!["ghost".to_string()]);
-        assert_eq!(w.config.allowed_bindings, vec!["acme", "ghost", "bnd_acme"]);
+        assert_eq!(w.config.allowed_bindings, vec!["acme", "ghost", "other"]);
         let on_disk = std::fs::read_to_string(&w.path).unwrap();
         assert!(on_disk.contains("default_binding = \"acme\""), "{on_disk}");
+        // The unknown_bindings / warning set: allowlist order, known skipped.
+        assert_eq!(
+            missing_workspace_aliases(&w.config.allowed_bindings, &["acme", "other"]),
+            vec!["ghost"]
+        );
 
         // Existing file refuses without --force and is left untouched.
-        let err = write_workspace_file(dir.path(), "x".into(), None, false, false, &known)
+        let err = write_workspace_file(dir.path(), "x".into(), None, false, false)
             .err()
             .unwrap();
         assert!(format!("{err}").contains("--force"));
         assert_eq!(std::fs::read_to_string(&w.path).unwrap(), on_disk);
 
-        let w =
-            write_workspace_file(dir.path(), "ghost".into(), None, false, true, &known).unwrap();
-        assert_eq!(w.unknown, vec!["ghost".to_string()]);
+        let w = write_workspace_file(dir.path(), "ghost".into(), None, false, true).unwrap();
+        assert_eq!(
+            missing_workspace_aliases(&w.config.allowed_bindings, &["acme"]),
+            vec!["ghost"]
+        );
     }
 
     #[test]
