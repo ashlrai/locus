@@ -1058,6 +1058,7 @@ fn main() {
     match stdout::catch_stdout_closed(run) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
+            let e = with_top_level_recovery(e, None);
             eprintln!("{} {e:#}", "error:".red().bold());
             std::process::exit(1);
         }
@@ -2600,6 +2601,32 @@ fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyho
     } else {
         err
     }
+}
+
+/// Last-resort recovery hint for any command that failed on a wedged pin.
+///
+/// Commands that check local control (`onboard`, `binding add`, `workspace`,
+/// `approve`, `mcp mint`, `exec`, ...) surface the stale-pin error without
+/// the recovery recipe `enter`/`leave`/`whoami` print. Errors already routed
+/// through [`wedged_session_recovery_for`] no longer downcast, so the hint is
+/// never doubled. `alias` overrides the active-session lookup (tests).
+/// Bare JSON errors are left alone here: outside the session paths that
+/// already route them, they do not imply a wedged pin.
+fn with_top_level_recovery(err: anyhow::Error, alias: Option<&str>) -> anyhow::Error {
+    let wedged = err
+        .downcast_ref::<locus_core::LocusError>()
+        .is_some_and(|e| {
+            !matches!(e, locus_core::LocusError::Json(_))
+                && locus_core::recovery::is_stale_pin_error(e)
+        });
+    if !wedged {
+        return err;
+    }
+    let active = match alias {
+        Some(a) => Some(a.to_string()),
+        None => store().ok().and_then(|s| active_alias_hint(&s)),
+    };
+    wedged_session_recovery_for(err, active.as_deref())
 }
 
 /// Alias of the active session file, for recovery hints only (never trusted
@@ -8901,6 +8928,29 @@ mod setup_merge_tests {
         let (bin, fallback) = resolve_mcp_bin_with_fallback(Some("/x/locus-mcp".into()));
         assert_eq!(bin, "/x/locus-mcp");
         assert!(!fallback);
+    }
+
+    #[test]
+    fn top_level_error_names_stale_pin_recovery_once() {
+        let err = anyhow::Error::new(locus_core::LocusError::AuthorityAnchorMismatch)
+            .context("verify selected session authority");
+        let msg = format!("{:#}", super::with_top_level_recovery(err, Some("acme")));
+        assert!(msg.contains("verify selected session authority"), "{msg}");
+        assert!(
+            msg.contains("locus leave --force; locus enter acme"),
+            "{msg}"
+        );
+
+        let routed = super::wedged_session_recovery_for(
+            anyhow::Error::new(locus_core::LocusError::AuthorityAnchorMismatch),
+            Some("acme"),
+        );
+        let msg = format!("{:#}", super::with_top_level_recovery(routed, Some("acme")));
+        assert_eq!(msg.matches("recover (").count(), 1, "{msg}");
+
+        let other = anyhow::anyhow!("binding not found");
+        let msg = format!("{:#}", super::with_top_level_recovery(other, Some("acme")));
+        assert_eq!(msg, "binding not found");
     }
 
     #[test]

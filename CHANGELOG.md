@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A pending approval on one binding no longer blocks every other pin.**
+  `locus_safe_next`, `locus verify session`, `locus watch` and the agent
+  report returned `external_authorization` (not ready) for any pending
+  approval, so one `require_approval` hit on `acme` kept `personal` unready
+  until it was denied. Only the pinned binding's requests count now, and the
+  message names `locus approve deny <id>` to dismiss one.
+- **Every command that fails on a stale pin names the recovery.** `exec`,
+  `onboard`, `binding add`, `workspace`, `approve grant` and `mcp mint` printed
+  "human re-pin required" with no next step; they now add the same
+  `eval "$(locus hook bash)"; locus leave --force; locus enter <alias>` line
+  that `whoami` and `enter` print.
 - **npm: a root global install no longer breaks `locus` for other users.** The
   postinstall replaced the shared bin with a symlink into the installer's HOME
   (e.g. `/root/.locus/bin`, behind a 0700 `/root`), so other users got
