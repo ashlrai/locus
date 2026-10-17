@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`locus events --op/--binding` with no match names what the log holds.**
+  A mistyped filter (`--op pinn`, `--binding acmee`) printed only "no audit
+  events matching op=pinn", so the next query was a guess. The human output now
+  adds the distinct ops (and, for `--binding`, the bindings) present in the
+  log. `--json` still prints `[]`.
 - **`locus exec` / `run` / `ci run` refuse an option in the command
   position.** clap passes everything from the first unknown option onward to
   the child command, so `locus exec --binding acme -- cmd` (exec has no
