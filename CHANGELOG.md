@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **MCP `locus://doctor` reports a malformed binding file instead of erroring.**
+  The 0.5.1 doctor fix covered `locus doctor` only; the MCP resource still failed
+  the read with `binding 'x' is malformed` (-32000). It now returns the same
+  UNSAFE report with a `binding_invalid` finding.
+
 ## [0.5.1] — 2026-10-16
 
 ### Added
