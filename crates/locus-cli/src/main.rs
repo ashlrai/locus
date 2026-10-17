@@ -8183,6 +8183,38 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>, json: bool
 
 /// Thin audit reader: last N events from `$LOCUS_HOME/audit/events.jsonl`.
 /// Never resolves credentials; ops/details only.
+/// For an events filter that matched nothing, list the ops or bindings the
+/// log does contain (deduplicated, sorted). `None` when the log is empty or
+/// no filter was given, so an empty log keeps its plain message.
+fn events_filter_hint(
+    all: &[locus_core::AuditEvent],
+    op: Option<&str>,
+    binding: Option<&str>,
+) -> Option<String> {
+    if all.is_empty() {
+        return None;
+    }
+    let distinct = |f: fn(&locus_core::AuditEvent) -> &str| -> String {
+        let set: std::collections::BTreeSet<&str> = all.iter().map(f).collect();
+        set.into_iter().collect::<Vec<_>>().join(", ")
+    };
+    let mut parts = Vec::new();
+    if op.is_some() {
+        parts.push(format!("ops in the log: {}", distinct(|e| e.op.as_str())));
+    }
+    if binding.is_some() {
+        parts.push(format!(
+            "bindings in the log: {}",
+            distinct(|e| e.binding.as_str())
+        ));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
 fn cmd_events(last: usize, op: Option<String>, binding: Option<String>, json: bool) -> Result<()> {
     let s = store()?;
     let all = s.read_audit_events()?;
@@ -8211,6 +8243,12 @@ fn cmd_events(last: usize, op: Option<String>, binding: Option<String>, json: bo
             }
         );
         println!("   {}", s.audit_path().display().to_string().dimmed());
+        // A filter that matches nothing is usually a typo (`--op pinn`,
+        // `--binding acmee`): name what the log does hold so the next query
+        // can be right without reading the raw file.
+        if let Some(hint) = events_filter_hint(&all, op.as_deref(), binding.as_deref()) {
+            println!("   {hint}");
+        }
         return Ok(());
     }
 
@@ -10649,5 +10687,35 @@ mod hook_and_help_tests {
             .filter(|name| !words.contains(&name.as_str()))
             .collect();
         assert!(missing.is_empty(), "missing from help groups: {missing:?}");
+    }
+}
+
+#[cfg(test)]
+mod events_filter_hint_tests {
+    use super::events_filter_hint;
+
+    #[test]
+    fn names_what_the_log_holds() {
+        let ev = |op: &str, binding: &str| locus_core::AuditEvent {
+            ts: "1".into(),
+            op: op.into(),
+            binding: binding.into(),
+            detail: None,
+        };
+        let all = vec![
+            ev("session.pin", "personal"),
+            ev("session.exec", "acme"),
+            ev("session.pin", "acme"),
+        ];
+        assert_eq!(
+            events_filter_hint(&all, Some("pinn"), None).as_deref(),
+            Some("ops in the log: session.exec, session.pin")
+        );
+        assert_eq!(
+            events_filter_hint(&all, Some("x"), Some("acmee")).as_deref(),
+            Some("ops in the log: session.exec, session.pin; bindings in the log: acme, personal")
+        );
+        assert_eq!(events_filter_hint(&all, None, None), None);
+        assert_eq!(events_filter_hint(&[], Some("pin"), None), None);
     }
 }
