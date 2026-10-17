@@ -153,6 +153,10 @@ Do not merge `process.env` wholesale into job children.
 ## CLI contracts (shell these out)
 
 Global flag: `--json` is available on most commands and is **required** for hub machine consumers.
+When a command run with the global `--json` fails, stderr carries one JSON line
+`{"ok": false, "error": "<message>"}` instead of the human `error:` line (same
+text, never secret values); stdout is unchanged and the exit code stays
+non-zero.
 
 ### Exit codes
 
