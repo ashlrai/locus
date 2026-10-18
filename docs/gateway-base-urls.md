@@ -10,3 +10,27 @@ Read-only audit of how Locus handles provider base URLs, relevant to pointing an
 
 ## What this means for a gateway
 A gateway base URL for an agent launched under `locus exec` has to be set by whatever launches the agent inside the isolated environment; exporting it in the parent shell is not enough. Locus offers no flag to pass extra variables through today, and this note does not propose one. Any change to the allowlist would widen what an isolated child can see and needs its own security review.
+
+## Setting a gateway URL inside `locus exec`
+Because the child environment is rebuilt from the allowlist, set the URL on the command that `locus exec` runs, not in the parent shell. `PATH` is on the allowlist, so the standard `env` tool is available to the child:
+
+```sh
+# Wrong: dropped by locus exec, the agent never sees it
+export OPENAI_BASE_URL=http://127.0.0.1:4000
+locus exec -- my-agent
+
+# Right: set inside the isolated child
+locus exec -- env OPENAI_BASE_URL=http://127.0.0.1:4000 my-agent
+```
+
+Or put the variable in a small launcher script that `locus exec` runs:
+
+```sh
+locus exec -- ./run-agent.sh   # run-agent.sh exports OPENAI_BASE_URL, then starts the agent
+```
+
+Notes:
+- Use a loopback or otherwise trusted gateway URL. Keep real provider keys on the gateway side; Locus still injects only its own key variables into the child.
+- Proxy variables (`HTTPS_PROXY` and similar) follow the same rule and must be set the same way.
+- This is based on reading `isolation.rs`; the examples were not run against a built binary for this note.
+- No behavior change is proposed. Passing extra variables through automatically would widen the isolated environment and needs its own security review.
