@@ -156,7 +156,8 @@ Global flag: `--json` is available on most commands and is **required** for hub 
 When a command run with the global `--json` fails, stderr carries one JSON line
 `{"ok": false, "error": "<message>"}` instead of the human `error:` line (same
 text, never secret values); stdout is unchanged and the exit code stays
-non-zero.
+non-zero. Usage errors (unknown flag or subcommand, missing argument) take the
+same shape when `--json` appears before any `--`, and keep exit code 2.
 
 ### Exit codes
 

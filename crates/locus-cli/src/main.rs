@@ -405,8 +405,8 @@ enum Commands {
     /// for fleet pulse / OTLP / optional SIEM webhook. See docs/observability.md.
     #[command(next_help_heading = "Audit")]
     Events {
-        /// Max events from the end of the log
-        #[arg(long, default_value_t = 50)]
+        /// Max events from the end of the log (`--limit` also accepted)
+        #[arg(long, alias = "limit", default_value_t = 50)]
         last: usize,
         /// Filter by op (exact or substring, e.g. `session.pin`, `scope_freeze`)
         #[arg(long)]
@@ -733,8 +733,8 @@ enum EngagementCmd {
 enum EventsAction {
     /// Export audit events as JSON lines (fleet pulse) or OTLP logs JSON
     Export {
-        /// Max events from the end of the log
-        #[arg(long, default_value_t = 200)]
+        /// Max events from the end of the log (`--limit` also accepted)
+        #[arg(long, alias = "limit", default_value_t = 200)]
         last: usize,
         /// Filter by op (exact or substring)
         #[arg(long)]
@@ -1183,6 +1183,53 @@ fn emit_json_error(e: &anyhow::Error) {
     eprintln!("{}", json_error_payload(e));
 }
 
+/// `--json` given before any `--` (after it, the flag belongs to the child).
+fn argv_requests_json<I: IntoIterator<Item = String>>(args: I) -> bool {
+    args.into_iter()
+        .take_while(|a| a != "--")
+        .any(|a| a == "--json")
+}
+
+/// A usage error (unknown flag, missing argument, unknown subcommand) as the
+/// one-line `{"ok":false,"error":...}` that every other `--json` failure
+/// prints on stderr. Help and version output are not errors and pass through.
+fn json_parse_error_payload(e: &clap::Error) -> Option<serde_json::Value> {
+    use clap::error::ErrorKind;
+    if matches!(
+        e.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    ) {
+        return None;
+    }
+    let text = e.render().to_string();
+    let mut error = String::new();
+    for line in text.lines().map(str::trim).filter(|l| {
+        !l.is_empty() && !l.starts_with("Usage:") && !l.starts_with("For more information")
+    }) {
+        let line = line.strip_prefix("error: ").unwrap_or(line);
+        if !error.is_empty() {
+            // A list after "were not provided:" continues the sentence.
+            error.push_str(if error.ends_with(':') { " " } else { "; " });
+        }
+        error.push_str(line);
+    }
+    Some(json!({ "ok": false, "error": error }))
+}
+
+/// Exit for a failed parse with clap's own exit code (2 for usage errors),
+/// printing JSON instead of clap's prose when the argv asked for `--json`.
+fn exit_on_parse_error<I: IntoIterator<Item = String>>(e: clap::Error, args: I) -> ! {
+    if argv_requests_json(args) {
+        if let Some(payload) = json_parse_error_payload(&e) {
+            eprintln!("{payload}");
+            std::process::exit(e.exit_code());
+        }
+    }
+    e.exit()
+}
+
 fn run() -> Result<()> {
     // Support `locus help topic <name>` without fighting clap's built-in help.
     {
@@ -1193,7 +1240,10 @@ fn run() -> Result<()> {
         }
     }
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(e) => exit_on_parse_error(e, env::args().skip(1)),
+    };
     JSON_ERRORS.store(cli.json, std::sync::atomic::Ordering::Relaxed);
     match cli.command {
         Commands::Init {
@@ -10717,5 +10767,63 @@ mod events_filter_hint_tests {
         );
         assert_eq!(events_filter_hint(&all, None, None), None);
         assert_eq!(events_filter_hint(&[], Some("pin"), None), None);
+    }
+}
+
+#[cfg(test)]
+mod json_parse_error_tests {
+    use clap::Parser;
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn json_before_the_separator_counts_and_after_it_belongs_to_the_child() {
+        assert!(super::argv_requests_json(args(&["whoami", "--json"])));
+        assert!(super::argv_requests_json(args(&[
+            "--json", "events", "--limit", "2"
+        ])));
+        assert!(!super::argv_requests_json(args(&[
+            "exec", "--", "tool", "--json"
+        ])));
+        assert!(!super::argv_requests_json(args(&["whoami", "--jsn"])));
+    }
+
+    #[test]
+    fn usage_errors_become_one_json_line_with_the_tip() {
+        let e = super::Cli::try_parse_from(["locus", "--json", "whoami", "--jsn"]).unwrap_err();
+        let v = super::json_parse_error_payload(&e).expect("usage error");
+        assert_eq!(v["ok"], false);
+        let msg = v["error"].as_str().unwrap();
+        assert!(msg.contains("unexpected argument '--jsn' found"), "{msg}");
+        assert!(msg.contains("--json"), "tip kept: {msg}");
+        assert!(!msg.contains("Usage:") && !msg.contains('\n'), "{msg}");
+        assert_eq!(e.exit_code(), 2);
+
+        let e = super::Cli::try_parse_from(["locus", "--json", "approvals"]).unwrap_err();
+        let v = super::json_parse_error_payload(&e).unwrap();
+        assert!(v["error"].as_str().unwrap().contains("approve"), "{v}");
+    }
+
+    #[test]
+    fn events_accepts_limit_for_last() {
+        for argv in [
+            vec!["locus", "events", "--limit", "3"],
+            vec!["locus", "events", "export", "--limit", "3"],
+        ] {
+            assert!(super::Cli::try_parse_from(&argv).is_ok(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn help_and_version_are_not_errors() {
+        for argv in [
+            ["locus", "--json", "--help"],
+            ["locus", "--json", "--version"],
+        ] {
+            let e = super::Cli::try_parse_from(argv).unwrap_err();
+            assert!(super::json_parse_error_payload(&e).is_none(), "{argv:?}");
+        }
     }
 }
