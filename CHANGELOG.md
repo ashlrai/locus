@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-18
+
+### Added
+
+- **Gemini CLI support.** `locus setup --client gemini` and
+  `locus agent setup --apply --client gemini` (also part of `--client all`)
+  register `locus-mcp` in `.gemini/settings.json` under `mcpServers`, merging
+  into the user file only when it exists. Other keys and servers are preserved
+  and malformed JSON is refused untouched. `agent doctor` and the agent report
+  gain `mcp_registered.gemini` (additive, defaults to false).
+
+- **`locus onboard` wizard and community adapter marketplace** (#85, ported from the
+  closed #56). Community adapters are publisher-supplied executable code: a trusted
+  signature binds the installable envelope to a configured verification key but does
+  not establish that a command is safe, and installation always needs explicit consent.
+  Community credential sources are limited to `env:` references. Read
+  `docs/adapters.md` before installing any community adapter.
+
+- **`INTEGRATION.md`** — sketch of how Phantom plugs into Locus (opt-in/out):
+  the account-separation guarantees, per-job `ci mint` flow, pre-mutate gate,
+  and failure modes.
+- **`DESIGN-onboarding-wizard.md`, `DESIGN-adapter-marketplace.md`** —
+  design proposals for guided setup and adapter discovery. The shipped
+  behavior is described under `locus onboard` above and in `docs/adapters.md`.
+
+### Changed
+
+- **ashlr-hub to Phantom rename** — the hub was renamed to Phantom (same repo).
+  `integrations/phantom/` is added alongside the existing compatibility directory
+  `integrations/ashlr-hub/`; docs and scripts use the new path. Historical changelog
+  entries, quoted PR URLs, and the runtime `LOCUS_CLIENT="ashlr-hub"`
+  identifier are intentionally unchanged.
+
 ### Fixed
 
 - **`--json` usage errors are JSON.** `locus --json whoami --jsn` or
@@ -176,41 +209,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.locus.toml` (exit 0), but now warns on stderr with the missing alias and
   the `locus binding add` command, instead of failing later at `locus enter`.
 
-## [0.5.1] — 2026-10-16
-
-### Added
-
-- **Gemini CLI support.** `locus setup --client gemini` and
-  `locus agent setup --apply --client gemini` (also part of `--client all`)
-  register `locus-mcp` in `.gemini/settings.json` under `mcpServers`, merging
-  into the user file only when it exists. Other keys and servers are preserved
-  and malformed JSON is refused untouched. `agent doctor` and the agent report
-  gain `mcp_registered.gemini` (additive, defaults to false).
-
-- **`locus onboard` wizard and community adapter marketplace** (#85, ported from the
-  closed #56). Community adapters are publisher-supplied executable code: a trusted
-  signature binds the installable envelope to a configured verification key but does
-  not establish that a command is safe, and installation always needs explicit consent.
-  Community credential sources are limited to `env:` references. Read
-  `docs/adapters.md` before installing any community adapter.
-
-- **`INTEGRATION.md`** — sketch of how Phantom plugs into Locus (opt-in/out):
-  the account-separation guarantees, per-job `ci mint` flow, pre-mutate gate,
-  and failure modes.
-- **`DESIGN-onboarding-wizard.md`, `DESIGN-adapter-marketplace.md`** —
-  design proposals for guided setup and adapter discovery. The shipped
-  behavior is described under `locus onboard` above and in `docs/adapters.md`.
-
-### Changed
-
-- **ashlr-hub to Phantom rename** — the hub was renamed to Phantom (same repo).
-  `integrations/phantom/` is added alongside the existing compatibility directory
-  `integrations/ashlr-hub/`; docs and scripts use the new path. Historical changelog
-  entries, quoted PR URLs, and the runtime `LOCUS_CLIENT="ashlr-hub"`
-  identifier are intentionally unchanged.
-
-### Fixed
-
 - **Control commands name the stale-pin recovery.** After the pinning shell
   exits, `locus workspace`, `binding add`, `notify`, `init` and other control
   commands failed closed with only "human re-pin required". They now print the
@@ -310,7 +308,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adapters (9 providers total). A drift-guard test asserts the registry id set
   equals the dispatchable provider set so future adapters cannot miss either
   surface.
-
 
 ### Changed
 
