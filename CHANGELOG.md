@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--json` usage errors are JSON.** `locus --json whoami --jsn` or
+  `locus --json approvals` printed clap's multi-line prose, so an agent that
+  asked for JSON got text it could not parse. A usage error now prints the
+  same one-line `{"ok":false,"error":...}` on stderr as every other `--json`
+  failure, keeping clap's tip ("a similar argument exists: '--json'") and
+  exit code 2. A `--json` after `--` still belongs to the child command.
+- **`locus events --limit N`** is accepted as `--last N` (also on
+  `events export`); it was refused as an unknown argument.
 - **MCP: a mistyped control tool or argument names the nearest match.**
   `locus_whoam` answered only "unknown tool ... control tools are listed by
   tools/list", and an undeclared key listed the allowed ones without saying
