@@ -43,6 +43,38 @@ pub struct LocusConfig {
     /// Signed, value-free log of credential injections, **off by default**.
     #[serde(default)]
     pub credential_audit: CredentialAuditConfig,
+    /// Gateway base URL passed to the isolated child, **off by default**.
+    #[serde(default)]
+    pub gateway: GatewayConfig,
+}
+
+/// `[gateway]`: opt-in base URL for the isolated `locus exec` child. Off and
+/// absent by default, which keeps the child environment exactly as before.
+/// See `docs/gateway-base-url.md`; validation lives in `gateway.rs`.
+///
+/// ```toml
+/// [gateway]
+/// enabled = true
+/// base_url = "http://127.0.0.1:4000/v1"
+/// child_env = ["OPENAI_BASE_URL"]
+/// # Required for any host that is not 127.0.0.1 or [::1]:
+/// # allowed_hosts = ["gw.example.com:443"]
+/// ```
+///
+/// Only the URL is passed. No key, token or header is ever forwarded.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GatewayConfig {
+    /// Must be `true` to opt in.
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Child variable names that receive the URL (`*_BASE_URL` or `*_API_BASE`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub child_env: Vec<String>,
+    /// Exact `host:port` entries; required for a non-loopback host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_hosts: Vec<String>,
 }
 
 /// `[credential_audit]`: opt-in, signed, value-free record of every credential

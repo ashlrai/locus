@@ -26,6 +26,7 @@ pub mod engagement;
 pub mod error;
 pub mod events;
 pub mod forensics;
+pub mod gateway;
 pub mod graph;
 pub mod http_sessions;
 pub mod isolation;

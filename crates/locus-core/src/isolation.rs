@@ -157,6 +157,31 @@ pub fn build_isolated_env_opts(
     let mut secrets_resolved = 0usize;
     let mut secrets_failed = Vec::new();
 
+    // Opt-in `[gateway]`: the URL comes from config only, never the parent env.
+    // Off (the default) changes nothing. An opted-in but invalid block fails
+    // closed: no credential is resolved, so a key never reaches a child that
+    // would talk to the provider directly instead of the configured gateway.
+    let mut resolve_secrets = resolve_secrets;
+    match crate::gateway::resolve_from_home() {
+        crate::gateway::GatewayChild::Off => {}
+        crate::gateway::GatewayChild::Set {
+            target,
+            vars: names,
+        } => {
+            for name in names {
+                vars.entry(name).or_insert_with(|| target.base_url.clone());
+            }
+        }
+        crate::gateway::GatewayChild::Refused(code) => {
+            resolve_secrets = false;
+            secrets_failed.push(CredentialResolutionIssue {
+                provider: "gateway".into(),
+                source: "gateway".into(),
+                code: code.into(),
+            });
+        }
+    }
+
     if resolve_secrets {
         let outcome = resolve_binding_secrets(binding);
         let allowed_secret_keys = binding
@@ -174,7 +199,7 @@ pub fn build_isolated_env_opts(
                 secrets_resolved += 1;
             }
         }
-        secrets_failed = outcome.issues;
+        secrets_failed.extend(outcome.issues);
         // Opt-in signed, value-free audit (`[credential_audit]`); no-op when off.
         let audit_issues = crate::credential_audit::audit_injected(
             session,
