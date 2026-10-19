@@ -30,6 +30,7 @@ pub mod forensics;
 pub mod gateway;
 pub mod graph;
 pub mod http_sessions;
+pub mod inherit_env;
 pub mod isolation;
 pub mod marketplace;
 pub mod onboard;
