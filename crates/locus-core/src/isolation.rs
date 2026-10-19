@@ -166,13 +166,27 @@ pub fn build_isolated_env_opts(
                 crate::credential::inject_keys_for_binding_provider(provider).unwrap_or_default()
             })
             .collect::<std::collections::BTreeSet<_>>();
+        let mut injected = std::collections::BTreeSet::new();
         for (k, v) in outcome.env {
             if allowed_secret_keys.contains(k.as_str()) {
+                injected.insert(k.clone());
                 vars.insert(k, v.as_str().to_string());
                 secrets_resolved += 1;
             }
         }
         secrets_failed = outcome.issues;
+        // Opt-in signed, value-free audit (`[credential_audit]`); no-op when off.
+        let audit_issues = crate::credential_audit::audit_injected(
+            session,
+            binding,
+            &mut vars,
+            &injected,
+            "child-env",
+        );
+        if !audit_issues.is_empty() {
+            secrets_resolved = injected.iter().filter(|k| vars.contains_key(*k)).count();
+            secrets_failed.extend(audit_issues);
+        }
         for p in &binding.providers {
             let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());
             let keys = crate::credential::inject_keys_for_binding_provider(p).unwrap_or_default();
@@ -316,9 +330,19 @@ pub fn build_ci_env_map(
 
     if allow_secrets {
         let outcome = resolve_binding_secrets(binding);
+        let mut injected = std::collections::BTreeSet::new();
         for (k, v) in outcome.env {
+            injected.insert(k.clone());
             vars.insert(k, v.as_str().to_string());
         }
+        // Opt-in signed, value-free audit; withheld on write failure.
+        let _ = crate::credential_audit::audit_injected(
+            session,
+            binding,
+            &mut vars,
+            &injected,
+            "ci-export",
+        );
         for p in &binding.providers {
             let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());
             let keys = crate::credential::inject_keys_for_binding_provider(p).unwrap_or_default();
