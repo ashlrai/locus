@@ -147,7 +147,11 @@ fn only_configured(raw: &str) -> Result<(), String> {
 }
 
 /// Spawn the child client with exactly `vars` and return the raw request.
-fn run_child(vars: &BTreeMap<String, String>, base: &str, stub: std::thread::JoinHandle<String>) -> String {
+fn run_child(
+    vars: &BTreeMap<String, String>,
+    base: &str,
+    stub: std::thread::JoinHandle<String>,
+) -> String {
     let _ = base;
     let status = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_client", "--nocapture", "--test-threads=1"])
@@ -189,11 +193,21 @@ fn litellm_proxy_end_to_end() {
     std::env::set_var("OPENAI_API_KEY", PLACEHOLDER);
     store.save_config(&config(&["OPENAI_API_KEY"])).unwrap();
     let iso = build_isolated_env_opts(&s, &b, true);
-    assert_eq!(iso.vars.get("OPENAI_BASE_URL"), Some(&base), "(a) configured base URL");
+    assert_eq!(
+        iso.vars.get("OPENAI_BASE_URL"),
+        Some(&base),
+        "(a) configured base URL"
+    );
     let raw = run_child(&iso.vars, &base, stub);
     let line = raw.lines().next().unwrap_or("");
-    assert!(line.starts_with("POST /v1/chat/completions "), "(b) path: {line}");
-    assert!(raw.contains(&format!("authorization: Bearer {PLACEHOLDER}")), "(c) placeholder sent");
+    assert!(
+        line.starts_with("POST /v1/chat/completions "),
+        "(b) path: {line}"
+    );
+    assert!(
+        raw.contains(&format!("authorization: Bearer {PLACEHOLDER}")),
+        "(c) placeholder sent"
+    );
     only_configured(&raw).unwrap();
 
     // 2. A real (non-placeholder) OPENAI_API_KEY in the parent never crosses.
