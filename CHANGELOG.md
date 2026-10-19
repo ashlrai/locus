@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in session budget caps.** `[budget] max_actions` / `max_minutes` in
+  `config.toml` refuse further MCP tool calls once a session has used N calls or
+  N minutes (from its first counted call). Off by default: with no `[budget]`
+  nothing is read or written. The stop is sticky per session, audited once as
+  `budget.exhausted`, and applies or undoes nothing on its own. See
+  `docs/session-budget.md`.
+
 ## [0.5.1] — 2026-10-18
 
 ### Added
