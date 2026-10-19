@@ -46,6 +46,25 @@ pub struct LocusConfig {
     /// Gateway base URL passed to the isolated child, **off by default**.
     #[serde(default)]
     pub gateway: GatewayConfig,
+    /// Exact parent variable names the isolated child may inherit, **none by default**.
+    #[serde(default)]
+    pub exec: ExecConfig,
+}
+
+/// `[exec]`: options for the isolated `locus exec` child.
+///
+/// ```toml
+/// [exec]
+/// # Exact names only, no globs. Key-shaped names cross only as phm_ placeholders.
+/// inherit_env = ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "PHANTOM_PROXY_PORT"]
+/// ```
+///
+/// Empty or absent (the default) inherits nothing. Rules live in
+/// `inherit_env.rs`; see `docs/PHANTOM-USAGE.md`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExecConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherit_env: Vec<String>,
 }
 
 /// `[gateway]`: opt-in base URL for the isolated `locus exec` child. Off and

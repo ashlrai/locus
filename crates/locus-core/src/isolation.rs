@@ -61,10 +61,12 @@ pub fn build_isolated_env_opts(
 ) -> IsolatedEnv {
     let mut vars = BTreeMap::new();
     let mut scrubbed = Vec::new();
+    let mut parent = BTreeMap::new();
     // Positive construction: unknown parent keys never reach the child.
     for (k, v) in std::env::vars() {
         if !is_runtime_env_key(&k) {
-            scrubbed.push(k);
+            scrubbed.push(k.clone());
+            parent.insert(k, v);
             continue;
         }
         vars.insert(k, v);
@@ -219,6 +221,24 @@ pub fn build_isolated_env_opts(
             vars.insert(flag, if ok { "1".into() } else { "0".into() });
         }
     }
+
+    // Opt-in `[exec] inherit_env`: exact names only, applied last so Locus's
+    // own variables, the gateway URL and injected credentials always win.
+    // Empty (the default) changes nothing. Key-shaped names cross only as
+    // `phm_` placeholders; see `inherit_env.rs`.
+    if let Ok(home) = crate::store::locus_home() {
+        let cfg = crate::config::load_config(&home);
+        if !cfg.exec.inherit_env.is_empty() {
+            secrets_failed.extend(crate::inherit_env::apply(
+                &cfg.exec.inherit_env,
+                &cfg.gateway.allowed_hosts,
+                &parent,
+                &mut vars,
+                &mut scrubbed,
+            ));
+        }
+    }
+    drop(parent);
 
     IsolatedEnv {
         vars,

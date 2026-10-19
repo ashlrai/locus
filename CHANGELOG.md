@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in `[exec] inherit_env`** lets the isolated `locus exec` child inherit exact, named parent variables. It is empty by default, which leaves the child environment unchanged. Key-shaped names cross only as `phm_` placeholders from `phantom exec`. Values that look like well-known keys, and URLs with userinfo, are refused. `*_BASE_URL` values must pass the `[gateway]` rules. Locus's own variables, the gateway URL and injected credentials always win. Refusals use closed codes without names or values. See [docs/PHANTOM-USAGE.md](docs/PHANTOM-USAGE.md).
 - **`doctor --fix` core module (not wired to the CLI yet).** `locus_core::doctor_fix`
   plans repairs as a dry run by default: stale `allowed_bindings` entries, a stale
   `default_binding`, and legacy bare Phantom names (rewritten to `phm:NAME` through the
