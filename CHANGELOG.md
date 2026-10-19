@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **`locus dashboard` / `locus serve --open` no longer put `LOCUS_DASHBOARD_TOKEN` in the opened URL.** The browser opener (`open`, `xdg-open`, `gio`, `cmd /C start`) received `http://127.0.0.1:<port>/?token=<token>` as an argument, visible to other local users in `ps`, and the browser kept it in history. The plain URL is opened; with a token set the page's token gate asks for it once. `?token=` is still accepted by the API.
+
 ### Added
 
 - **`doctor --fix` core module (not wired to the CLI yet).** `locus_core::doctor_fix`
