@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in gateway base URL for `locus exec`.** `[gateway] enabled = true` with
+  `base_url` and `child_env` sets the listed `*_BASE_URL` variables in the isolated
+  child to the configured URL. Same rules as phantom's gateway validator: `https`, or
+  `http` only for `127.0.0.1` and `[::1]`; any other host needs an exact `host:port`
+  in `allowed_hosts`. Only the URL is passed, never a key. A refused block fails
+  closed (no credentials resolved, closed reason code). Off by default with no change
+  when unset; parent shell base URLs are still dropped. See `docs/gateway-base-url.md`.
 - **Opt-in signed credential injection audit.** `[credential_audit] enabled = true`
   appends one value-free line per injected provider to
   `audit/credential-injections.jsonl` (provider, reference, env var names, target,

@@ -1,5 +1,7 @@
 # Model gateways and base URLs (audit note)
 
+> Update: an opt-in `[gateway]` config block now passes a validated base URL to the `locus exec` child. See [gateway-base-url.md](gateway-base-url.md). The default behaviour described below is unchanged.
+
 Read-only audit of how Locus handles provider base URLs, relevant to pointing an agent at a model gateway (for example a local LiteLLM proxy or a Phantom route). No behavior was changed. Checked on main by reading the source.
 
 ## Findings
