@@ -37,12 +37,12 @@ pub struct LocusConfig {
     /// Desktop notifications — **off by default** (agent spam is worse than silence).
     #[serde(default)]
     pub notify: NotifyConfig,
-    /// Session budget caps — **off by default** (no cap unless configured).
+    /// Session budget caps, **off by default** (no cap unless configured).
     #[serde(default)]
     pub budget: BudgetConfig,
 }
 
-/// `[budget]` — opt-in caps that stop an agent session after N tool calls or
+/// `[budget]`: opt-in caps that stop an agent session after N tool calls or
 /// N minutes. Absent or empty means no cap and no behavior change.
 ///
 /// ```toml
