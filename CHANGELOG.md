@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Using Locus with Phantom** ([docs/PHANTOM-USAGE.md](docs/PHANTOM-USAGE.md)): `phantom exec` and the `locus exec` allowlist, the `[gateway]` block, `phm:` reference status, and LiteLLM 1.83.0 or newer (prefer a current release).
+
 ### Security
 
 - **`locus dashboard` / `locus serve --open` no longer put `LOCUS_DASHBOARD_TOKEN` in the opened URL.** The browser opener (`open`, `xdg-open`, `gio`, `cmd /C start`) received `http://127.0.0.1:<port>/?token=<token>` as an argument, visible to other local users in `ps`, and the browser kept it in history. The plain URL is opened; with a token set the page's token gate asks for it once. `?token=` is still accepted by the API.
