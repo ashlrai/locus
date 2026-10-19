@@ -40,6 +40,8 @@ If `LOCUS_DASHBOARD_TOKEN` (or `--token`) is set, every `/api/*` call requires:
 - `X-Locus-Token: <token>`, or
 - `?token=<token>`
 
+`locus dashboard` / `locus serve --open` open the plain URL, never `?token=`, because the browser opener gets the URL as a process argument (visible in `ps`) and the browser keeps it in history. With a token set, the page asks for it once and keeps it in that browser.
+
 ## Static UI
 
 `public/index.html` is embedded into the `locus` binary at compile time and served by `locus serve` / `locus dashboard`. Edit the HTML and rebuild to pick up changes.
