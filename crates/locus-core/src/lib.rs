@@ -22,6 +22,7 @@ pub mod credential;
 pub mod credential_audit;
 mod credential_migration;
 pub mod doctor;
+pub mod doctor_fix;
 pub mod engagement;
 pub mod error;
 pub mod events;

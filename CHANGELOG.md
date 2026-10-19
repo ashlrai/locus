@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`doctor --fix` core module (not wired to the CLI yet).** `locus_core::doctor_fix`
+  plans repairs as a dry run by default: stale `allowed_bindings` entries, a stale
+  `default_binding`, and legacy bare Phantom names (rewritten to `phm:NAME` through the
+  existing journaled migration). Applying needs an explicit `apply_fixes` call, which
+  backs up each file first (`<file>.bak-<UTC ts>`, mode 0600, or
+  `<home>/backups/doctor-fix-<ts>/` for bindings). It refuses to remove the last
+  allowlist entry, since an empty list allows every binding. Malformed and dangling refs
+  are report only. It never resolves or reveals values and never runs Phantom; dangling
+  checks use a name list the caller supplies. See `docs/doctor-fix.md`.
 - **Opt-in gateway base URL for `locus exec`.** `[gateway] enabled = true` with
   `base_url` and `child_env` sets the listed `*_BASE_URL` variables in the isolated
   child to the configured URL. Same rules as phantom's gateway validator: `https`, or
