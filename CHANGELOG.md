@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Audit webhook errors no longer carry the webhook URL.** A failed `locus events export --sink webhook` post (URL from `--url` or `LOCUS_AUDIT_WEBHOOK_URL`) (a non-2xx status or a connection error) put ureq's error text in the message, and that text starts with the full URL: user name, password, path token and query token included. The error now names only `scheme://host` and the status or transport kind. A new test posts to a 401, a 500 and a closed port with canary tokens in the path, query and password and fails on any 8-character run of them.
+
 - **`locus dashboard` / `locus serve --open` no longer put `LOCUS_DASHBOARD_TOKEN` in the opened URL.** The browser opener (`open`, `xdg-open`, `gio`, `cmd /C start`) received `http://127.0.0.1:<port>/?token=<token>` as an argument, visible to other local users in `ps`, and the browser kept it in history. The plain URL is opened; with a token set the page's token gate asks for it once. `?token=` is still accepted by the API.
 
 ### Added
