@@ -19,6 +19,7 @@ pub mod binding;
 pub mod budget;
 pub mod config;
 pub mod credential;
+pub mod credential_audit;
 mod credential_migration;
 pub mod doctor;
 pub mod engagement;

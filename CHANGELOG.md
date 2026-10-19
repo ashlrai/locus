@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Opt-in signed credential injection audit.** `[credential_audit] enabled = true`
+  appends one value-free line per injected provider to
+  `audit/credential-injections.jsonl` (provider, reference, env var names, target,
+  binding, session, time), HMAC-SHA256 signed and chained under a local `0600` key.
+  Never records values or hashes of values. Fails closed (credential withheld) if
+  a record cannot be written. Off by default. See `docs/credential-audit.md`.
+
 - **Opt-in session budget caps.** `[budget] max_actions` / `max_minutes` in
   `config.toml` refuse further MCP tool calls once a session has used N calls or
   N minutes (from its first counted call). Off by default: with no `[budget]`

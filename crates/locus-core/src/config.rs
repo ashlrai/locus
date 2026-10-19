@@ -40,6 +40,22 @@ pub struct LocusConfig {
     /// Session budget caps, **off by default** (no cap unless configured).
     #[serde(default)]
     pub budget: BudgetConfig,
+    /// Signed, value-free log of credential injections, **off by default**.
+    #[serde(default)]
+    pub credential_audit: CredentialAuditConfig,
+}
+
+/// `[credential_audit]`: opt-in, signed, value-free record of every credential
+/// placed into a child environment. See `docs/credential-audit.md`.
+///
+/// ```toml
+/// [credential_audit]
+/// enabled = true
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CredentialAuditConfig {
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// `[budget]`: opt-in caps that stop an agent session after N tool calls or
