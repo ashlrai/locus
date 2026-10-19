@@ -16,6 +16,7 @@ pub mod approval;
 mod authority_anchor;
 pub mod autopin;
 pub mod binding;
+pub mod budget;
 pub mod config;
 pub mod credential;
 mod credential_migration;

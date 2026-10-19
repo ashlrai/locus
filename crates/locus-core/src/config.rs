@@ -37,6 +37,45 @@ pub struct LocusConfig {
     /// Desktop notifications — **off by default** (agent spam is worse than silence).
     #[serde(default)]
     pub notify: NotifyConfig,
+    /// Session budget caps, **off by default** (no cap unless configured).
+    #[serde(default)]
+    pub budget: BudgetConfig,
+}
+
+/// `[budget]`: opt-in caps that stop an agent session after N tool calls or
+/// N minutes. Absent or empty means no cap and no behavior change.
+///
+/// ```toml
+/// [budget]
+/// max_actions = 200   # tool calls per session
+/// max_minutes = 90    # minutes from the session's first counted call
+/// ```
+///
+/// A cap of `0` is treated as unset (a zero budget would lock every session
+/// out silently; remove the key or set a positive number).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BudgetConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_actions: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_minutes: Option<u64>,
+}
+
+impl BudgetConfig {
+    /// Effective action cap (`None` when unset or zero).
+    pub fn actions_cap(&self) -> Option<u64> {
+        self.max_actions.filter(|n| *n > 0)
+    }
+
+    /// Effective minutes cap (`None` when unset or zero).
+    pub fn minutes_cap(&self) -> Option<u64> {
+        self.max_minutes.filter(|n| *n > 0)
+    }
+
+    /// True when at least one cap is configured.
+    pub fn is_enabled(&self) -> bool {
+        self.actions_cap().is_some() || self.minutes_cap().is_some()
+    }
 }
 
 /// `[notify]` — opt-in desktop banners for pending approvals.

@@ -253,6 +253,28 @@ pub fn enforce_policy(
     if let Some(blocked) = enforce_read_only_scope(binding, tool_name) {
         return Ok(Some(blocked));
     }
+    // Opt-in session budget (`[budget]` in config.toml). With no cap configured
+    // this is a no-op that does no I/O. Needs a session id, so calls without a
+    // gate (CLI-side dispatch) are not counted.
+    if let Some(g) = gate {
+        let cfg = g.store.load_config().budget;
+        if cfg.is_enabled() {
+            match crate::budget::charge(g.store, &cfg, g.session_id, chrono::Utc::now())? {
+                crate::budget::BudgetVerdict::Allowed => {}
+                crate::budget::BudgetVerdict::Exhausted { reason } => {
+                    return Ok(Some(ToolCallResult {
+                        ok: false,
+                        content: json!({
+                            "error": "session_budget_exhausted",
+                            "detail": reason,
+                            "hint": "This session reached its configured budget. A human can raise or remove [budget] in config.toml, or pin a new session."
+                        }),
+                        policy: None,
+                    }));
+                }
+            }
+        }
+    }
     let verdict = evaluate(&binding.policy, tool_name);
     match verdict.decision {
         Decision::Deny => Ok(Some(ToolCallResult {
