@@ -136,7 +136,7 @@ Production fleets that have enrolled repos but have **not** set `locus.firm: tru
 | Degraded enrollment probe | firm check skipped |
 | Mutating job preflight | **unchanged** — soft-warn does not gate dispatch |
 
-Firm remains **opt-in** (`locus.firm` / `locus.enforce` / `LOCUS_ENFORCE`). Monorepo default stays off. Production checklist lives on the hub as `docs/LOCUS-FIRM-FLEET.md` (hub [PR #277](https://github.com/ashlrai/ashlr-hub/pull/277)).
+Firm remains **opt-in** (`locus.firm` / `locus.enforce` / `LOCUS_ENFORCE`). Monorepo default stays off. Production checklist lives on the hub as `docs/LOCUS-FIRM-FLEET.md` (hub [PR #277](https://github.com/ashlrai/phantom/pull/277)).
 
 ### Scrubbed mint env (`withLocusSession`)
 
@@ -527,7 +527,7 @@ await withLocusSession("acme", async ({ env }) => {
 
 Hub fleets can consume the verification plane as a **values-free** session heartbeat
 (aliases + verdicts only — never secrets). Drop-in helpers mirror hub PR
-[#273](https://github.com/ashlrai/ashlr-hub/pull/273):
+[#273](https://github.com/ashlrai/phantom/pull/273):
 
 | Helper | CLI | Shape |
 |--------|-----|-------|
