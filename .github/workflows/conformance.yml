@@ -27,33 +27,63 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Docs-only PRs skip the heavy steps below, but this job still runs and
+      # reports, so the required check never strands. Pushes, dispatches and
+      # any PR touching a non-docs path run everything. If the diff cannot be
+      # read, everything runs (fail open to the full suite).
+      - name: Classify changes
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          code=true
+          if [ "$EVENT" = "pull_request" ] && files="$(git diff --name-only "$BASE...$HEAD")" && [ -n "$files" ]; then
+            if ! printf '%s\n' "$files" | grep -Evq '^(docs/[^/]+\.md|docs/assets/.*|[A-Za-z_-]+\.md|LICENSE)$'; then
+              code=false
+            fi
+          fi
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "full conformance suite: $code"
 
       - name: Install Rust toolchain
+        if: steps.scope.outputs.code == 'true'
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
+        if: steps.scope.outputs.code == 'true'
         uses: Swatinem/rust-cache@v2
         with:
           key: conformance
 
       - name: Install cargo-nextest
+        if: steps.scope.outputs.code == 'true'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
 
       - name: Install jq
+        if: steps.scope.outputs.code == 'true'
         # ubuntu-latest ships jq; apt only runs if an image ever drops it.
         run: command -v jq >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq jq; }
 
       - name: Invariant suite (locus-core)
+        if: steps.scope.outputs.code == 'true'
         run: cargo nextest run -p locus-core --test invariants --locked --no-fail-fast
 
       - name: MCP protocol + transport (locus-mcp)
+        if: steps.scope.outputs.code == 'true'
         run: cargo nextest run -p locus-mcp --locked --no-fail-fast
 
       - name: Hub contract smoke
+        if: steps.scope.outputs.code == 'true'
         run: ./scripts/hub-smoke.sh
 
       - name: End-to-end shell pack
+        if: steps.scope.outputs.code == 'true'
         run: ./scripts/e2e.sh
         timeout-minutes: 60
