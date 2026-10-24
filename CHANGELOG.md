@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-24
+
 ### Documentation
 
 - **Using Locus with Phantom** ([docs/PHANTOM-USAGE.md](docs/PHANTOM-USAGE.md)): `phantom exec` and the `locus exec` allowlist, the `[gateway]` block, `phm:` reference status, and LiteLLM 1.83.0 or newer (prefer a current release).
@@ -50,7 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `budget.exhausted`, and applies or undoes nothing on its own. See
   `docs/session-budget.md`.
 
-## [0.5.1] — 2026-10-18
 
 ### Added
 
