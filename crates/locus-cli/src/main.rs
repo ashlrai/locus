@@ -3344,6 +3344,8 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                         "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
                         "namespaces": session.all_aliases(),
                         "authority_verified": check.verified,
+                        "expires_at": session.expires_at.to_rfc3339(),
+                        "expires_in_secs": (session.expires_at - chrono::Utc::now()).num_seconds().max(0),
                         "ok": ok,
                         "error": check.error,
                         "recovery": check.recovery,
@@ -3374,6 +3376,19 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                     session.tenant,
                     session.session_id.dimmed()
                 );
+                if !frozen {
+                    let left = (session.expires_at - chrono::Utc::now()).num_seconds();
+                    let line = format!("  expires  {}", pin_time_left(left));
+                    if left < PIN_EXPIRY_WARN_SECS {
+                        println!(
+                            "{}  {}",
+                            line.yellow(),
+                            format!("(renew: locus enter {})", session.binding_alias).dimmed()
+                        );
+                    } else {
+                        println!("{}", line.dimmed());
+                    }
+                }
                 if frozen {
                     println!(
                         "  session_frozen: re-pin ({})",
@@ -3394,6 +3409,22 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `locus status` turns the pin's expiry line yellow below this many seconds.
+const PIN_EXPIRY_WARN_SECS: i64 = 15 * 60;
+
+/// Human form of a pin's remaining lifetime: `in 2h 05m`, `in 4m`, `now`.
+fn pin_time_left(secs: i64) -> String {
+    if secs <= 0 {
+        return "now (expired)".into();
+    }
+    let (h, m) = (secs / 3600, (secs % 3600) / 60);
+    match (h, m) {
+        (0, 0) => "in under a minute".into(),
+        (0, m) => format!("in {m}m"),
+        (h, m) => format!("in {h}h {m:02}m"),
+    }
 }
 
 /// Outcome of the verification `locus status` shares with `locus whoami`.
@@ -10902,5 +10933,25 @@ mod json_parse_error_tests {
             let e = super::Cli::try_parse_from(argv).unwrap_err();
             assert!(super::json_parse_error_payload(&e).is_none(), "{argv:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod pin_time_left_tests {
+    use super::{pin_time_left, PIN_EXPIRY_WARN_SECS};
+
+    #[test]
+    fn formats_remaining_pin_lifetime() {
+        assert_eq!(pin_time_left(8 * 3600), "in 8h 00m");
+        assert_eq!(pin_time_left(2 * 3600 + 5 * 60 + 59), "in 2h 05m");
+        assert_eq!(pin_time_left(4 * 60 + 10), "in 4m");
+        assert_eq!(pin_time_left(30), "in under a minute");
+        assert_eq!(pin_time_left(0), "now (expired)");
+        assert_eq!(pin_time_left(-5), "now (expired)");
+    }
+
+    #[test]
+    fn warn_threshold_is_fifteen_minutes() {
+        assert_eq!(PIN_EXPIRY_WARN_SECS, 900);
     }
 }

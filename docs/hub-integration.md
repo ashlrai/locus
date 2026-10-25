@@ -264,8 +264,14 @@ locus status --oneline
 locus status --json
 # unpinned: { "pinned": false }
 # pinned:   { "pinned": true, "binding", "tenant", "session_id", "seal_ok",
-#             "frozen", "frozen_reason", "expired", "mode", "namespaces" }
+#             "frozen", "frozen_reason", "expired", "expires_at",
+#             "expires_in_secs", "mode", "namespaces" }
 ```
+
+`expires_at` is RFC 3339 UTC and `expires_in_secs` is clamped at 0 (the same
+field `locus enter --json` returns). Plain `locus status` prints the remaining
+time as `expires  in 2h 05m` and turns it yellow with a `locus enter <alias>`
+hint under 15 minutes. `--oneline` is unchanged.
 
 ---
 
