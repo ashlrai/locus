@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `locus doctor --fix` checks `phm:` references against `phantom list --json` when the current directory has a `.phantom.toml`. A name Phantom does not list is reported as `dangling_phm_ref` (report only). Exactly `list --json` is run, with a minimal environment, a 3 second timeout and stderr discarded. Names are never printed. Any failure keeps `phm_unavailable`. `--json` adds `phantom_names` (status plus a count or a reason). Needs phantom-secrets 0.6.0 or newer. Guide: docs/doctor-fix.md.
 - The `--ashlr-handshake` output lists the `doctor-fix` capability, so companions such as `stack doctor --ecosystem` can suggest `locus doctor --fix` only when this locus supports it.
 - `locus doctor --fix` previews safe repairs (stale `allowed_bindings` entries, a stale `default_binding`, legacy bare Phantom names) and writes nothing; `locus doctor --fix --apply` makes them, backing up each file first. It never removes the last allowlist entry, never runs Phantom, and needs local control to apply. Guide: docs/doctor-fix.md.
 - `locus status` shows how long the pin has left (`expires  in 2h 05m`), yellow with a `locus enter <alias>` hint under 15 minutes; `locus status --json` adds `expires_at` and `expires_in_secs`. `--oneline` is unchanged.
