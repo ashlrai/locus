@@ -1,5 +1,8 @@
 # Agency Starter
 
+Credential compatibility in this unreleased source checkout: use explicitly supplied `env:VAR` references for execution. The kit’s retained `phm:` references are migration metadata and cannot resolve through Secrets v0.7.9; replace them deliberately for supervised env-backed use. See [credential compatibility](./credential-compatibility.md).
+
+
 Operational guide for a contract firm (or founder with N clients) running **Locus** so agents cannot act in the wrong tenant.
 
 **Kit on disk:** [`examples/agency-starter/`](../examples/agency-starter/) — bindings, workspace templates, dual-control policy snippet, and a full personal ↔ client A ↔ client B workflow with offboarding.

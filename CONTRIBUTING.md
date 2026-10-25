@@ -11,7 +11,7 @@ Thanks for helping make wrong-account action mechanically impossible.
   export PATH="$HOME/.cargo/bin:$PATH"
   ```
 
-- Optional: [Phantom](https://phm.dev) CLI (`phantom`) if you want to exercise `phm:` credential refs end-to-end
+- Credential resolution uses explicit `env:VAR` references with synthetic values in tests. Stored `phm:` references fail closed until a supported scoped bridge exists; do not capture Phantom reveal output. See [credential compatibility](./docs/credential-compatibility.md).
 
 ## Clone and build
 
