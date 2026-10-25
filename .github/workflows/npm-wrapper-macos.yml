@@ -1,0 +1,96 @@
+# macOS smoke test for the npm wrappers: pack, install the tarball globally,
+# run `locus --version`, and fail on a wrapper self-exec loop (the 0.5.0 hang).
+# Not a required check. Runs only when the wrappers or this file change, or
+# by hand.
+name: npm wrapper macOS smoke
+
+on:
+  pull_request:
+    paths:
+      - "npm/**"
+      - "npm-mcp/**"
+      - ".github/workflows/npm-wrapper-macos.yml"
+  push:
+    branches: [main]
+    paths:
+      - "npm/**"
+      - "npm-mcp/**"
+      - ".github/workflows/npm-wrapper-macos.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-wrapper-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: npm pack + install + locus --version (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Pack and install the wrapper tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd npm
+          tarball="$(npm pack --silent)"
+          echo "packed ${tarball}"
+          # Keep the JS wrapper as the bin so the PATH lookup that looped in
+          # 0.5.0 is what runs (postinstall would otherwise link a native binary).
+          LOCUS_NPM_NO_LINK=1 npm install -g "./${tarball}"
+          echo "NPM_BIN=$(npm prefix -g)/bin" >> "$GITHUB_ENV"
+          echo "LOCUS_VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
+
+      - name: "No cached binary, no cargo: the wrapper finishes and runs once"
+        shell: bash
+        run: |
+          set -euo pipefail
+          home="$(mktemp -d)"
+          fake="$(mktemp -d)"
+          printf '#!/bin/sh\nexit 1\n' > "$fake/cargo"
+          chmod +x "$fake/cargo"
+          marker="$home/starts.log"
+          printf 'require("fs").appendFileSync(%s, "x");\n' "\"$marker\"" > "$home/count.js"
+          HOME="$home" PATH="$NPM_BIN:$fake:$(dirname "$(command -v node)"):/usr/bin:/bin" \
+          NODE_OPTIONS="--require $home/count.js" LOCUS_NPM_NO_LINK=1 \
+          node -e '
+            const { spawnSync } = require("child_process");
+            const r = spawnSync("locus", ["--version"], { encoding: "utf8", timeout: 120000, killSignal: "SIGKILL" });
+            process.stdout.write(r.stdout || ""); process.stderr.write(r.stderr || "");
+            if (r.signal) { console.error("locus --version was killed after 120s (wrapper loop?)"); process.exit(1); }
+          '
+          starts="$(wc -c < "$marker" | tr -d " ")"
+          echo "wrapper starts: ${starts}"
+          # One start for the node -e runner and one for the wrapper.
+          [ "$starts" -le 2 ] || { echo "wrapper started ${starts} times: it executed itself" >&2; exit 1; }
+
+      - name: "Cached native binary: locus --version prints the package version"
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --locked -p locus-cli
+          home="$(mktemp -d)"
+          mkdir -p "$home/.locus/bin"
+          cp target/release/locus "$home/.locus/bin/locus"
+          out="$(HOME="$home" PATH="$NPM_BIN:$(dirname "$(command -v node)"):/usr/bin:/bin" LOCUS_NPM_NO_LINK=1 \
+            node -e '
+              const { spawnSync } = require("child_process");
+              const r = spawnSync("locus", ["--version"], { encoding: "utf8", timeout: 60000, killSignal: "SIGKILL" });
+              if (r.signal) { console.error("locus --version was killed after 60s (wrapper loop?)"); process.exit(1); }
+              process.stderr.write(r.stderr || ""); process.stdout.write(r.stdout || ""); process.exit(r.status ?? 1);
+            ')"
+          echo "$out"
+          echo "$out" | grep -q "${LOCUS_VERSION}" || { echo "expected version ${LOCUS_VERSION}" >&2; exit 1; }
