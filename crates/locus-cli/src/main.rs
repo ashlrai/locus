@@ -14,6 +14,7 @@ mod stdout;
 mod cred_diag;
 mod handshake;
 mod phantom_preflight;
+mod phm_names;
 mod serve;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -6314,16 +6315,22 @@ fn cmd_doctor(json: bool) -> Result<()> {
 }
 
 /// `locus doctor --fix [--apply]`: preview, then (only with `--apply`) make
-/// the repairs planned by `locus_core::doctor_fix`. Phantom is never started
-/// here, so every `phm:` reference is reported as unavailable (fail closed)
-/// rather than checked against a vault listing. Output carries binding
-/// aliases, provider labels and file paths only, never reference strings.
+/// the repairs planned by `locus_core::doctor_fix`. In a Phantom project
+/// (cwd has `.phantom.toml`) the value-free `phantom list --json` probe in
+/// `phm_names` supplies the name list; otherwise, or on any probe failure,
+/// every `phm:` reference is reported as unavailable (fail closed). Output
+/// carries binding aliases, provider labels and file paths only, never
+/// reference strings or Phantom names.
 ///
 /// Exit codes: 0 when there is nothing to fix, the preview listed fixes, or
 /// every fix applied; 1 when an applied fix was refused or skipped.
 fn cmd_doctor_fix(json: bool, apply: bool) -> Result<()> {
     let s = store()?;
-    let plan = locus_core::doctor_fix::plan_fixes(&s, &cwd(), None)?;
+    let here = cwd();
+    // Value-free `phantom list --json`, only here (never on a resolution path)
+    // and only when this directory is a Phantom project. Fails closed to None.
+    let names = phm_names::probe(&here);
+    let plan = locus_core::doctor_fix::plan_fixes(&s, &here, names.names.as_ref())?;
     let outcome = if apply && !plan.fixes.is_empty() {
         Some(locus_core::doctor_fix::apply_fixes(&s, &plan)?)
     } else {
@@ -6334,12 +6341,23 @@ fn cmd_doctor_fix(json: bool, apply: bool) -> Result<()> {
     if json {
         let value = serde_json::json!({
             "mode": if apply { "apply" } else { "dry_run" },
+            "phantom_names": names.status,
             "plan": plan,
             "outcome": outcome,
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         print_doctor_fix_human(&plan, outcome.as_ref(), apply);
+        match &names.status {
+            phm_names::NamesStatus::Listed { count } => {
+                println!(
+                    "phantom names: listed ({count}); phm references were checked against them"
+                )
+            }
+            phm_names::NamesStatus::Unavailable { reason } => {
+                println!("phantom names: unavailable ({reason}); phm references are unverified")
+            }
+        }
     }
     if failed {
         std::process::exit(1);

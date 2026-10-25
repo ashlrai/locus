@@ -327,3 +327,13 @@ fn phantom_is_never_started() {
         fs::read_to_string(&marker)
     );
 }
+
+#[test]
+fn an_empty_name_list_marks_every_phm_ref_dangling() {
+    let f = fixture("allowed_bindings = [\"acme\"]\n");
+    let empty = BTreeSet::new();
+    let plan = plan_fixes(&f.store, &f.project, Some(&empty)).unwrap();
+    let c = codes(&plan);
+    assert!(c.contains(&"dangling_phm_ref".to_string()), "{c:?}");
+    assert!(!c.contains(&"phm_unavailable".to_string()), "{c:?}");
+}
