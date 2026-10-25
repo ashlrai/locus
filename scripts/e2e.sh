@@ -1342,9 +1342,11 @@ child_env="$(LOCUS_RELEASE_ENV_LOCATOR_CANARY="release-secret-value" \
 ok "child env scrubs locator key and injects only provider-standard secret keys"
 
 ln -s missing-policy.toml "$SECURITY_WS/.locus.toml"
+# env-probe (an env: reference) rather than legacy (phm:), whose credential
+# preflight now fails closed before the workspace link is inspected.
 for command in \
-  "pin legacy --force" \
-  "run -b legacy --force -- true"; do
+  "pin env-probe --force" \
+  "run -b env-probe --force -- true"; do
   set +e
   broken_out="$(cd "$SECURITY_WS" && LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" $command 2>&1)"
   broken_ec=$?
