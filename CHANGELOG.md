@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `locus status` shows how long the pin has left (`expires  in 2h 05m`), yellow with a `locus enter <alias>` hint under 15 minutes; `locus status --json` adds `expires_at` and `expires_in_secs`. `--oneline` is unchanged.
 - `locus --ashlr-handshake` prints the Ashlr companion handshake v1 (name, version, protocols, capabilities, local health, files Locus may edit) as one JSON line, before argument parsing and without opening the store. Contract: docs/ashlr-handshake.md.
 
 ## [0.5.1] — 2026-10-24
