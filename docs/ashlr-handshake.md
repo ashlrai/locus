@@ -13,7 +13,7 @@ contract is implemented by `stack --ashlr-handshake` (ashlr-stack) and
   "command": "locus",
   "version": "0.5.1",
   "protocols": { "ashlr.handshake": 1, "phantom.agent.preflight": 1 },
-  "capabilities": ["workspace-identity-pinning", "credential-bindings", "phm-references", "mcp-server", "agent-setup", "agent-preflight", "doctor-json"],
+  "capabilities": ["workspace-identity-pinning", "credential-bindings", "phm-references", "mcp-server", "agent-setup", "agent-preflight", "doctor-json", "doctor-fix"],
   "health": { "status": "ok", "checks": [{ "id": "locus-home", "status": "ok" }, { "id": "phantom-on-path", "status": "absent" }] },
   "edits": ["~/.locus/", ".locus.toml", ".mcp.json", "~/.cursor/mcp.json", "~/.codex/config.toml", "~/.grok/config.toml", "~/.gemini/settings.json"],
   "receipts": []

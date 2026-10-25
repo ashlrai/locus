@@ -22,3 +22,32 @@ fn prints_one_json_line_and_creates_nothing() {
     assert_eq!(v["health"]["status"], "degraded");
     assert!(!locus_home.exists());
 }
+
+/// `doctor-fix` is advertised, and the flag it promises really exists.
+#[test]
+fn advertises_doctor_fix_and_the_flag_exists() {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .arg("--ashlr-handshake")
+        .env("LOCUS_HOME", home.path().join("never-created"))
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let caps: Vec<&str> = v["capabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert!(caps.contains(&"doctor-fix"), "{caps:?}");
+
+    let help = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .args(["doctor", "--help"])
+        .env("LOCUS_HOME", home.path().join("never-created"))
+        .env("HOME", home.path())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("--fix") && text.contains("--apply"), "{text}");
+}
