@@ -129,8 +129,19 @@ enum Commands {
     },
 
     /// Health check for the local control plane
+    ///
+    /// `--fix` previews safe repairs (stale workspace allowlist entries, a
+    /// stale `default_binding`, legacy bare Phantom names) and writes nothing.
+    /// Add `--apply` to make them; every changed file is backed up first.
     #[command(next_help_heading = "Setup")]
-    Doctor,
+    Doctor {
+        /// Preview repairs for stale workspace entries and legacy refs (writes nothing)
+        #[arg(long)]
+        fix: bool,
+        /// With --fix: apply the previewed repairs, backing up each file first
+        #[arg(long, requires = "fix")]
+        apply: bool,
+    },
 
     /// Continuous session heartbeat for hub (verify_session each tick)
     ///
@@ -1327,7 +1338,8 @@ fn run() -> Result<()> {
             require_pin,
             force,
         } => cmd_workspace(default, allow, require_pin, force, cli.json),
-        Commands::Doctor => cmd_doctor(cli.json),
+        Commands::Doctor { fix: true, apply } => cmd_doctor_fix(cli.json, apply),
+        Commands::Doctor { .. } => cmd_doctor(cli.json),
         Commands::Watch {
             interval,
             once,
@@ -6298,6 +6310,82 @@ fn cmd_doctor(json: bool) -> Result<()> {
         DoctorVerdict::Safe => Ok(()),
         DoctorVerdict::Warn => std::process::exit(1),
         DoctorVerdict::Unsafe => std::process::exit(2),
+    }
+}
+
+/// `locus doctor --fix [--apply]`: preview, then (only with `--apply`) make
+/// the repairs planned by `locus_core::doctor_fix`. Phantom is never started
+/// here, so every `phm:` reference is reported as unavailable (fail closed)
+/// rather than checked against a vault listing. Output carries binding
+/// aliases, provider labels and file paths only, never reference strings.
+///
+/// Exit codes: 0 when there is nothing to fix, the preview listed fixes, or
+/// every fix applied; 1 when an applied fix was refused or skipped.
+fn cmd_doctor_fix(json: bool, apply: bool) -> Result<()> {
+    let s = store()?;
+    let plan = locus_core::doctor_fix::plan_fixes(&s, &cwd(), None)?;
+    let outcome = if apply && !plan.fixes.is_empty() {
+        Some(locus_core::doctor_fix::apply_fixes(&s, &plan)?)
+    } else {
+        None
+    };
+    let failed = outcome.as_ref().is_some_and(|o| !o.all_applied());
+
+    if json {
+        let value = serde_json::json!({
+            "mode": if apply { "apply" } else { "dry_run" },
+            "plan": plan,
+            "outcome": outcome,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        print_doctor_fix_human(&plan, outcome.as_ref(), apply);
+    }
+    if failed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn print_doctor_fix_human(
+    plan: &locus_core::doctor_fix::FixPlan,
+    outcome: Option<&locus_core::doctor_fix::FixOutcome>,
+    apply: bool,
+) {
+    if plan.fixes.is_empty() {
+        println!("doctor --fix: nothing to repair");
+    } else if let Some(out) = outcome {
+        println!("doctor --fix --apply:");
+        for r in &out.results {
+            let mark = if r.applied { "fixed  " } else { "skipped" };
+            println!("  {mark} {}", r.fix.describe());
+            if let Some(b) = &r.backup {
+                println!("          backup: {}", b.display());
+            }
+            if let Some(m) = &r.message {
+                println!("          {m}");
+            }
+        }
+    } else {
+        println!("doctor --fix (dry run, nothing written):");
+        for f in &plan.fixes {
+            println!("  would fix  {}", f.describe());
+        }
+        if !apply {
+            println!("Run `locus doctor --fix --apply` to make these changes (each file is backed up first).");
+        }
+    }
+    if !plan.report_only.is_empty() {
+        println!("Needs a manual look (never changed automatically):");
+        for r in &plan.report_only {
+            let who = r
+                .alias
+                .as_deref()
+                .map(|a| format!("binding '{a}': "))
+                .or_else(|| r.file.as_ref().map(|f| format!("{}: ", f.display())))
+                .unwrap_or_default();
+            println!("  [{}] {who}{}", r.code, r.message);
+        }
     }
 }
 

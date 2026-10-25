@@ -1,7 +1,6 @@
 //! `doctor --fix` logic: plan repairs, apply them only on an explicit call.
 //!
-//! Not wired to the CLI yet (the `doctor` subcommand lives in a file another
-//! open change is editing). Dry run is the default: [`plan_fixes`] reads and
+//! Wired to the CLI as `locus doctor --fix [--apply]`. Dry run is the default: [`plan_fixes`] reads and
 //! returns a [`FixPlan`] and writes nothing. [`apply_fixes`] is the explicit
 //! step; it backs up every file before changing it.
 //!

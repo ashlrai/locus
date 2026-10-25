@@ -1,7 +1,20 @@
-# doctor --fix (core module)
+# doctor --fix
 
-`locus_core::doctor_fix` holds the repair logic for `locus doctor --fix`. The CLI flag is
-not wired yet; it lands after the CLI rework in #54.
+`locus doctor --fix` previews repairs and writes nothing. `locus doctor --fix --apply`
+makes them, backing up each file first. Add `--json` for a `{mode, plan, outcome}` object.
+
+```bash
+locus doctor --fix            # dry run: lists "would fix" lines and manual findings
+locus doctor --fix --apply    # needs local control (LOCUS_CONTROL_CAPABILITY)
+```
+
+Exit codes: 0 when there is nothing to repair, after a preview, or when every fix applied;
+1 when an applied fix was skipped (for example the file changed between plan and apply).
+`--apply` without `--fix` is a usage error.
+
+The CLI never runs Phantom for this, so it passes no Phantom name list and every `phm:`
+reference shows up as `phm_unavailable` (report only, fail closed). The logic lives in
+`locus_core::doctor_fix`.
 
 ## Dry run by default
 
