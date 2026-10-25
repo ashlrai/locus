@@ -12,6 +12,7 @@
 mod stdout;
 
 mod cred_diag;
+mod phantom_preflight;
 mod serve;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -6230,13 +6231,32 @@ fn cmd_doctor(json: bool) -> Result<()> {
 
     let report = gather_doctor_report(&s)?;
 
+    // Opt-in (LOCUS_PHANTOM_PREFLIGHT=1 or strict): Phantom's value-free agent
+    // preflight. Verdict and check ids only; a refusal lifts SAFE to exit 1.
+    let preflight = phantom_preflight::evaluate(
+        phantom_preflight::mode_from(std::env::var("LOCUS_PHANTOM_PREFLIGHT").ok().as_deref()),
+        phantom_preflight::run_phantom,
+    );
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        let mut value = serde_json::to_value(&report)?;
+        if let (Some(p), Some(obj)) = (&preflight, value.as_object_mut()) {
+            obj.insert("phantom_preflight".into(), serde_json::to_value(p)?);
+        }
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         print_doctor_human(&report);
+        if let Some(p) = &preflight {
+            match &p.message {
+                Some(m) => println!("{m}"),
+                None => println!("phantom preflight: ready"),
+            }
+        }
     }
 
+    let refused = preflight.as_ref().is_some_and(|p| p.refuse);
     match report.verdict {
+        DoctorVerdict::Safe if refused => std::process::exit(1),
         DoctorVerdict::Safe => Ok(()),
         DoctorVerdict::Warn => std::process::exit(1),
         DoctorVerdict::Unsafe => std::process::exit(2),
