@@ -22,8 +22,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: npm-wrapper-macos-${{ github.ref }}
-  cancel-in-progress: true
+  group: npm-wrapper-macos-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   smoke:
