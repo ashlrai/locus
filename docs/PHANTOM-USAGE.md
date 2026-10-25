@@ -64,3 +64,13 @@ For Locus, the LiteLLM proxy is what `[gateway] base_url` points at, for example
 ## What is tested
 
 The `[gateway]` rules and the child environment are covered by tests in `crates/locus-core/tests/gateway_base_url.rs`, and `[exec] inherit_env` by `crates/locus-core/tests/inherit_env.rs` and the unit tests in `inherit_env.rs`. The default-path pin in `crates/locus-core/tests/isolation.rs` is unchanged. This page was written by reading the source and the linked docs. The `phantom exec` combinations above and a live LiteLLM proxy were not run for it.
+
+## Guard your agent's identity
+
+When a script or agent must act as one account, add `--expect`:
+
+```bash
+locus exec --expect acme -- gh pr create
+```
+
+If `acme` is not the pinned binding (another alias is pinned, nothing is pinned, or the pin is frozen), Locus exits 1 before the command starts and prints which alias is pinned and `locus enter acme`. The message names aliases only, never credential references. It only refuses; it never pins or resolves anything for you.

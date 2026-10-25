@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `locus exec --expect <alias> -- <cmd>` refuses before the child starts (exit 1, the existing pre-spawn refusal code) unless the pinned binding is `<alias>`: a mismatch, no pin or a frozen pin never runs the command. The refusal names aliases only and says `locus enter <alias>`; `--json` returns the usual error document with a `pin_mismatch:` message. Without `--expect` nothing changes.
 - `locus doctor --fix`: when `phantom list --json` returns an empty list while bindings hold `phm:` references, `phantom_names` is `unavailable` with reason `empty_list` and every reference stays `phm_unavailable`, never `dangling_phm_ref` (phantom-secrets 0.6.0 to 0.7.9 print `[]` for a locked vault). With no `phm:` references an empty list is still `listed`.
 - `locus doctor --fix` checks `phm:` references against `phantom list --json` when the current directory has a `.phantom.toml`. A name Phantom does not list is reported as `dangling_phm_ref` (report only). Exactly `list --json` is run, with a minimal environment, a 3 second timeout and stderr discarded. Names are never printed. Any failure keeps `phm_unavailable`. `--json` adds `phantom_names` (status plus a count or a reason). Needs phantom-secrets 0.6.0 or newer. Guide: docs/doctor-fix.md.
 - The `--ashlr-handshake` output lists the `doctor-fix` capability, so companions such as `stack doctor --ecosystem` can suggest `locus doctor --fix` only when this locus supports it.
