@@ -6393,6 +6393,30 @@ fn cmd_doctor(json: bool) -> Result<()> {
 /// Exit codes: 0 when there is nothing to fix, the preview listed fixes, or
 /// every fix applied; 1 when an applied fix was refused or skipped.
 fn cmd_doctor_fix(json: bool, apply: bool) -> Result<()> {
+    // The preview is documented as writing nothing. Opening the store would
+    // initialize a fresh LOCUS_HOME (directories and daemon.key), so a dry run
+    // without a home reports an empty plan instead (handshake contract v1,
+    // gated capability `doctor-fix`).
+    if !apply && !locus_core::store::locus_home()?.exists() {
+        let plan = locus_core::doctor_fix::FixPlan::default();
+        // No bindings exist yet, so no Phantom name list is needed.
+        let names = phm_names::NamesStatus::Unavailable {
+            reason: "no_locus_home",
+        };
+        if json {
+            let value = serde_json::json!({
+                "mode": "dry_run",
+                "phantom_names": names,
+                "plan": plan,
+                "outcome": Option::<locus_core::doctor_fix::FixOutcome>::None,
+            });
+            println!("{}", serde_json::to_string_pretty(&value)?);
+        } else {
+            print_doctor_fix_human(&plan, None, false);
+            println!("locus home not initialized; run `locus init` first");
+        }
+        return Ok(());
+    }
     let s = store()?;
     let here = cwd();
     // Value-free `phantom list --json`, only here (never on a resolution path)
