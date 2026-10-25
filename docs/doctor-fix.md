@@ -32,15 +32,16 @@ The probe:
 
 `--json` adds `phantom_names`: `{ "status": "listed", "count": N }`, or
 `{ "status": "unavailable", "reason": R }` with `R` one of `no_phantom_project`,
-`not_installed`, `timeout`, `exit_nonzero` or `bad_output`. The text output ends with
+`not_installed`, `timeout`, `exit_nonzero`, `bad_output` or `empty_list`. The text output ends with
 one `phantom names:` line saying which.
 
 Minimum Phantom: phantom-secrets 0.6.0 is the first release with `phantom list --json`
-(names plus `detected_service`, no values). Releases up to 0.7.9 print `[]` with exit 0
-when the project vault is locked (an encrypted-file vault without its passphrase), so on
-those versions a locked vault makes every `phm:` reference read as `dangling_phm_ref`;
-unlock the vault and run it again. phantom-secrets main already exits 1 for a locked
-vault, which reads as `exit_nonzero`.
+(names plus `detected_service`, no values). Releases 0.6.0 to 0.7.9 print `[]` with exit 0 when the project vault is locked (an
+encrypted-file vault without its passphrase). So a valid but empty list while bindings
+hold `phm:` references is reported as `unavailable` with reason `empty_list`, and every
+reference stays `phm_unavailable`, never `dangling_phm_ref`; unlock the vault and run it
+again. With no `phm:` references an empty list is a normal `listed` answer. phantom-secrets
+main already exits 1 for a locked vault, which reads as `exit_nonzero`.
 
 ## Dry run by default
 

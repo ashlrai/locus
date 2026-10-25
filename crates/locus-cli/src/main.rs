@@ -6329,7 +6329,19 @@ fn cmd_doctor_fix(json: bool, apply: bool) -> Result<()> {
     let here = cwd();
     // Value-free `phantom list --json`, only here (never on a resolution path)
     // and only when this directory is a Phantom project. Fails closed to None.
-    let names = phm_names::probe(&here);
+    let mut names = phm_names::probe(&here);
+    if names.names.as_ref().is_some_and(|n| n.is_empty()) {
+        // Guard: an empty list with phm refs present reads as unavailable,
+        // never dangling (a locked vault on older Phantom prints `[]`).
+        let unverified = locus_core::doctor_fix::plan_fixes(&s, &here, None)?;
+        if unverified
+            .report_only
+            .iter()
+            .any(|r| r.code == "phm_unavailable")
+        {
+            names = phm_names::empty_list();
+        }
+    }
     let plan = locus_core::doctor_fix::plan_fixes(&s, &here, names.names.as_ref())?;
     let outcome = if apply && !plan.fixes.is_empty() {
         Some(locus_core::doctor_fix::apply_fixes(&s, &plan)?)

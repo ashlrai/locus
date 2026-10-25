@@ -50,6 +50,13 @@ pub struct Probe {
     pub status: NamesStatus,
 }
 
+/// A valid but empty list while bindings hold `phm:` refs: phantom-secrets
+/// 0.6.0 to 0.7.9 print `[]` with exit 0 for a locked vault, so an empty
+/// answer cannot prove a ref is dangling. Callers keep every ref unavailable.
+pub fn empty_list() -> Probe {
+    unavailable("empty_list")
+}
+
 fn unavailable(reason: &'static str) -> Probe {
     Probe {
         names: None,

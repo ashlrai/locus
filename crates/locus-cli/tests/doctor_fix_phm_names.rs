@@ -181,6 +181,7 @@ fn lists_both_names_no_phm_findings() {
 fn every_bad_answer_fails_closed_with_its_reason() {
     let cases: &[(&str, bool, &str)] = &[
         ("printf '[]'", false, "no_phantom_project"),
+        ("printf '[]'", true, "empty_list"),
         ("exit 1", true, "exit_nonzero"),
         ("printf 'junk'", true, "bad_output"),
         ("printf '{}'", true, "bad_output"),
@@ -332,4 +333,30 @@ fn probe_has_one_call_site_in_doctor_fix() {
             f.display()
         );
     }
+}
+
+/// An empty list with no phm refs is a valid answer, not `empty_list`.
+#[test]
+fn empty_list_without_phm_refs_is_listed() {
+    let e = setup("printf '[]'", true);
+    let b = Binding::from_body(BindingBody {
+        id: "bnd_acme".into(),
+        alias: "acme".into(),
+        tenant: "acme".into(),
+        principal: None,
+        description: None,
+        policy: Policy::default(),
+        providers: vec![provider("github", "env:LOCUS_EMPTY_LIST_TOKEN")],
+    });
+    fs::write(
+        e.home.path().join("bindings").join("acme.toml"),
+        b.to_toml().unwrap(),
+    )
+    .unwrap();
+    let (v, _) = e.fix_json();
+    assert_eq!(
+        v["phantom_names"],
+        serde_json::json!({"status":"listed","count":0})
+    );
+    assert!(codes(&v).is_empty(), "{v}");
 }
