@@ -37,7 +37,8 @@ pub fn build(version: &str, home_initialized: bool, phantom_on_path: bool) -> Va
             "mcp-server",
             "agent-setup",
             "agent-preflight",
-            "doctor-json"
+            "doctor-json",
+            "doctor-fix"
         ],
         "health": {
             "status": status,
