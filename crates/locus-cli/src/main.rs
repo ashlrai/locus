@@ -12,6 +12,7 @@
 mod stdout;
 
 mod cred_diag;
+mod handshake;
 mod phantom_preflight;
 mod serve;
 
@@ -1057,6 +1058,12 @@ fn main() {
             eprintln!("authority anchor error: {error}");
             std::process::exit(1);
         }
+        return;
+    }
+    // Companion handshake (docs/ashlr-handshake.md): before clap and the
+    // store, so it never needs a subcommand and reads no bindings.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if handshake::answer_if_requested(&argv, env!("CARGO_PKG_VERSION")) {
         return;
     }
     // A closed stdout (`locus doctor | head -1`) exits 141 instead of panicking.

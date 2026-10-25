@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `locus --ashlr-handshake` prints the Ashlr companion handshake v1 (name, version, protocols, capabilities, local health, files Locus may edit) as one JSON line, before argument parsing and without opening the store. Contract: docs/ashlr-handshake.md.
+
 ## [0.5.1] — 2026-10-24
 
 ### Documentation
