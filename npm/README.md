@@ -12,35 +12,29 @@ npm install -g locus-cli
 npx locus-cli --help
 ```
 
-On first run the wrapper reuses a verified cache or an existing native Locus
-v0.5.0 on PATH (skipping npm launchers). Otherwise it downloads the matching
-v0.5.0 GitHub release archive and checks a SHA-256 digest shipped in this npm
-package before extracting it into `~/.locus/bin`.
+On first run the wrapper:
 
-Prebuilt releases support macOS arm64/x64 and Linux x64. Missing assets,
-unsupported platforms, network failures and checksum failures stop with an
-explicit source install command. The wrapper never runs Cargo automatically:
+1. Downloads the matching GitHub release binary into `~/.locus/bin`, or
+2. Falls back to `cargo install --git https://github.com/ashlrai/locus locus-cli --locked`. On platforms
+   without a prebuilt release binary (today: Linux arm64 and Windows) it says so
+   and goes straight to this step, which can take several minutes.
 
-```bash
-cargo install --git https://github.com/ashlrai/locus --tag v0.5.0 locus-cli --locked
-```
-
-Requires Node ≥ 16. Manual source installation needs [Rust](https://rustup.rs).
-Cached installs include a version, target and integrity receipt; older caches
-with only a `.version` sidecar are refreshed once. A verified cache runs offline.
-The wrapper downloads executable tooling only; it does not initialize Locus,
-pin a binding, acquire credentials or change the calling shell's identity.
+Requires Node ≥ 16. Cargo fallback needs [Rust](https://rustup.rs).
 
 ## Quick start
 
 ```bash
-locus init --with-samples
-locus pin personal
+locus quickstart                 # sample bindings, pin, whoami, doctor
+eval "$(locus hook bash)"        # or zsh; exports the control capability
 locus whoami
 locus exec -- env | grep LOCUS_
 ```
 
+Step by step instead of `quickstart`: `locus init --with-samples`, then
+`eval "$(locus hook bash)"`, then `locus pin personal`. Without the hook line,
+`pin` fails with `LOCUS_CONTROL_CAPABILITY is required`.
+
 ## Related
 
-- MCP server: [`locus-mcp`](https://www.npmjs.com/package/locus-mcp)
+- MCP server: [`@ashlrai/locus-mcp`](https://www.npmjs.com/package/@ashlrai/locus-mcp)
 - Source / Homebrew: https://github.com/ashlrai/locus

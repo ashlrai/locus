@@ -34,8 +34,8 @@ use http_session::{
 use locus_core::{
     build_doctor_report, call_tool_gated, compute_safe_next, control_tools, enforce_policy,
     find_workspace, gather_doctor_external, load_config, split_namespaced_tool, tools_for_binding,
-    verify_claim, verify_session, AdapterTool, ApprovalGate, Binding, Session, Store,
-    WorkerManager, VERSION,
+    validate_control_args, verify_claim, verify_session, AdapterTool, ApprovalGate, Binding,
+    Session, Store, WorkerManager, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -446,6 +446,11 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
                 print_help();
                 std::process::exit(0);
             }
+            "--version" | "-V" => {
+                // Not a protocol session: the process exits before serving.
+                println!("locus-mcp {VERSION}");
+                std::process::exit(0);
+            }
             other if other.starts_with("--http=") => {
                 http_flag = true;
                 http_arg = Some(other.trim_start_matches("--http=").to_string());
@@ -490,7 +495,8 @@ fn print_help() {
            locus-mcp                 stdio MCP (Claude Code / Cursor default)\n\
            locus-mcp --http [ADDR]   Streamable-HTTP-lite on ADDR (default {DEFAULT_HTTP_ADDR})\n\
            locus-mcp --http --multi-tenant   per-request tenant routing via\n\
-                                     X-Locus-Tenant-Token (mint: `locus mcp mint`)\n\n\
+                                     X-Locus-Tenant-Token (mint: `locus mcp mint`)\n\
+           locus-mcp --version       print the version and exit\n\n\
          HTTP endpoints:\n\
            GET  /health              unauthenticated liveness\n\
            GET  /mcp                 capabilities + tool names (token; values-free)\n\
@@ -529,22 +535,68 @@ fn run_stdio() -> Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = stdin.lock();
+    let mut seen_content_length = false;
 
     loop {
-        let Some((msg, framing)) = read_message(&mut reader)? else {
+        let Some((parsed, framing)) = read_frame(&mut reader)? else {
             break; // EOF
         };
+        seen_content_length |= framing == Framing::ContentLength;
 
-        if let Some(response) = dispatch_rpc(&msg, &RequestScope::process()) {
+        let (response, framing) = match parsed {
+            Ok(msg) => (dispatch_rpc(&msg, &RequestScope::process()), framing),
+            // JSON-RPC 2.0: an unparseable message gets a Parse error with a
+            // null id (the id cannot be known), never silence.
+            Err(e) => (
+                Some(parse_error_response(&e)),
+                parse_error_framing(seen_content_length, framing),
+            ),
+        };
+        if let Some(response) = response {
             write_message(&mut stdout, &response, framing)?;
         }
     }
     Ok(())
 }
 
+/// Framing for a Parse error reply. Once the client has spoken
+/// Content-Length, stray bytes (e.g. the tail left by a too-short
+/// Content-Length) read back as an NDJSON line must still be answered with a
+/// Content-Length frame: a bare JSON line would land in the client's header
+/// parser and desync every later response.
+fn parse_error_framing(seen_content_length: bool, frame: Framing) -> Framing {
+    if seen_content_length {
+        Framing::ContentLength
+    } else {
+        frame
+    }
+}
+
 /// Dispatch one JSON-RPC request/notification.
 /// Returns `None` for notifications (no response).
 fn dispatch_rpc(msg: &Value, scope: &RequestScope) -> Option<Value> {
+    // A JSON-RPC batch (array) or any non-object used to fall through as a
+    // "notification" and get no reply at all, leaving the client waiting
+    // forever. Batching was removed from MCP in 2025-06-18; answer with an
+    // explicit Invalid Request instead of silence.
+    if !msg.is_object() {
+        let message = if msg.is_array() {
+            "invalid request: JSON-RPC batches are not supported; send one message per frame"
+        } else {
+            "invalid request: expected a JSON-RPC object"
+        };
+        return Some(json!({
+            "jsonrpc": "2.0",
+            "id": Value::Null,
+            "error": rpc_error(-32600, message.into()),
+        }));
+    }
+    // A response to a server-initiated request (no method, has result/error).
+    // locus-mcp sends no requests, so there is nothing to correlate; never
+    // answer a response with "method not found".
+    if msg.get("method").is_none() && (msg.get("result").is_some() || msg.get("error").is_some()) {
+        return None;
+    }
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(json!({}));
@@ -985,12 +1037,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
         let msg: Value = match serde_json::from_slice(&body) {
             Ok(v) => v,
             Err(e) => {
-                let body = json!({
-                    "jsonrpc": "2.0",
-                    "id": Value::Null,
-                    "error": { "code": -32700, "message": format!("parse error: {e}") },
-                });
-                return write_http_json(&mut stream, 400, &body, None);
+                return write_http_json(&mut stream, 400, &parse_error_response(&e), None);
             }
         };
         let rpc_method = msg.get("method").and_then(|m| m.as_str());
@@ -2168,14 +2215,43 @@ fn read_line_bounded<R: BufRead>(reader: &mut R, limit: usize) -> Result<Option<
     Ok(Some(line))
 }
 
-/// Read one MCP message. Supports Content-Length headers and NDJSON lines.
+/// JSON-RPC 2.0 Parse error (-32700). The id is always null: it cannot be
+/// read from a message that does not parse. The serde error carries only a
+/// position, never the offending bytes.
+fn parse_error_response(e: &serde_json::Error) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": Value::Null,
+        "error": { "code": -32700, "message": format!("parse error: {e}") },
+    })
+}
+
+/// Read one MCP message, skipping frames that are not valid JSON.
+#[cfg(test)]
+fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<(Value, Framing)>> {
+    loop {
+        match read_frame(reader)? {
+            None => return Ok(None),
+            Some((Ok(msg), framing)) => return Ok(Some((msg, framing))),
+            Some((Err(_), _)) => continue,
+        }
+    }
+}
+
+/// Read one MCP frame. Supports Content-Length headers and NDJSON lines.
+///
+/// A frame whose bytes were read intact but are not JSON is returned as an
+/// inner `Err` so the caller can answer it with a Parse error and keep
+/// serving; framing/size violations stay outer errors (fail closed).
 ///
 /// Every line read is byte-capped via [`read_line_bounded`] (NDJSON/first
 /// lines at [`HTTP_MAX_BODY_BYTES`], header lines at
 /// [`HTTP_MAX_HEADER_BYTES`], header count at [`HTTP_MAX_HEADER_COUNT`]) so a
 /// hostile stream can neither OOM the process with a newline-free flood nor
 /// exhaust the stack — blank/garbage lines loop instead of recursing.
-fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<(Value, Framing)>> {
+type Frame = (std::result::Result<Value, serde_json::Error>, Framing);
+
+fn read_frame<R: BufRead>(reader: &mut R) -> Result<Option<Frame>> {
     loop {
         // The first line may itself be a whole NDJSON message, so it gets the
         // body-size cap rather than the (smaller) header-line cap.
@@ -2236,19 +2312,20 @@ fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<(Value, Framing)>> 
             reader
                 .read_exact(&mut buf)
                 .context("read Content-Length body")?;
-            let msg: Value = serde_json::from_slice(&buf).context("json body")?;
-            return Ok(Some((msg, Framing::ContentLength)));
+            let parsed = serde_json::from_slice::<Value>(&buf);
+            if let Err(e) = &parsed {
+                eprintln!("locus-mcp: bad json: {e}");
+            }
+            return Ok(Some((parsed, Framing::ContentLength)));
         }
 
         // NDJSON: first non-empty line is the JSON object.
-        match serde_json::from_str::<Value>(trimmed) {
-            Ok(msg) => return Ok(Some((msg, Framing::Ndjson))),
-            Err(e) => {
-                eprintln!("locus-mcp: bad json: {e}");
-                // Skip garbage line; keep serving
-                continue;
-            }
+        let parsed = serde_json::from_str::<Value>(trimmed);
+        if let Err(e) = &parsed {
+            // stderr only; the Parse error response goes out on stdout.
+            eprintln!("locus-mcp: bad json: {e}");
         }
+        return Ok(Some((parsed, Framing::Ndjson)));
     }
 }
 
@@ -2283,6 +2360,40 @@ fn handle_notification(method: &str, _params: &Value) {
     }
 }
 
+/// One actionable message for every surface of a server launched without an
+/// executor capability (the plain `locus-mcp` client entry): it cannot observe
+/// the pin, and re-pinning or `locus doctor` (which runs with the operator's
+/// capability and reports healthy) never helps.
+const EXECUTOR_AUTHORITY_HINT: &str = "This locus-mcp has no executor capability for the current pin, so it cannot observe the pin and provider tools stay unavailable (re-pinning alone will not help). Human: launch it as `locus mcp --supervised`, or restart it that way after a re-pin (needs LOCUS_CONTROL_CAPABILITY and a live pin in the launching environment), or run the agent under `locus exec`. Agents: locus_verify_session / locus_safe_next.";
+
+const EXECUTOR_AUTHORITY_ISSUE: &str = "executor_authority_unavailable";
+
+fn has_executor_authority_issue(issues: &[String]) -> bool {
+    issues.iter().any(|i| i == EXECUTOR_AUTHORITY_ISSUE)
+}
+
+/// `initialize.instructions` pin line when `whoami` fails. A server with no
+/// executor capability (the plain client entry) cannot observe the pin at all:
+/// telling the agent it is "unpinned" sends the human to re-pin, which never
+/// helps.
+fn unpinned_instruction_line(e: &locus_core::LocusError) -> &'static str {
+    if matches!(e, locus_core::LocusError::ExecutorAuthorityUnavailable(_)) {
+        "• Pin not observable — this locus-mcp has no executor capability for the current pin, so only locus_* control tools are available even if a human has pinned (re-pinning alone will not help). Ask the human to launch it as `locus mcp --supervised` (restart it after a re-pin) or to run the agent under `locus exec`. There is no ambient personal fallthrough."
+    } else {
+        "• Currently unpinned — only locus_* control tools are available. There is no ambient personal fallthrough."
+    }
+}
+
+/// Hint for a provider `tools/call` refused because the runtime is unhealthy
+/// for a reason other than unpinned / seal / frozen / expired.
+fn runtime_unhealthy_hint(issues: &[String]) -> &'static str {
+    if has_executor_authority_issue(issues) {
+        EXECUTOR_AUTHORITY_HINT
+    } else {
+        "Identity drift detected. Human: `locus doctor` (or `locus verify session`), then re-pin if needed. Agents: call locus_heartbeat."
+    }
+}
+
 fn rpc_error(code: i64, message: String) -> Value {
     json!({ "code": code, "message": message })
 }
@@ -2302,7 +2413,7 @@ fn agent_instructions(session_anchor: Option<&SessionAnchor>) -> String {
                     w.tenant,
                     w.mode
                 ),
-                Err(_) => "• Currently unpinned — only locus_* control tools are available. There is no ambient personal fallthrough.".into(),
+                Err(e) => unpinned_instruction_line(&e).into(),
             }
         }
         Err(_) => "• Store unavailable — treat session as unpinned.".into(),
@@ -2328,13 +2439,31 @@ fn agent_instructions(session_anchor: Option<&SessionAnchor>) -> String {
     lines.join("\n")
 }
 
-fn handle_initialize(_params: &Value, scope: &RequestScope) -> Value {
+/// MCP protocol revisions this server speaks, newest first. Everything
+/// locus-mcp uses (tools, resources, prompts, listChanged, instructions) is
+/// unchanged across them.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// MCP version negotiation: echo the client's requested revision when we
+/// support it; otherwise answer our latest and let the client decide whether
+/// to continue (spec: lifecycle / version negotiation).
+fn negotiate_protocol_version(params: &Value) -> &'static str {
+    let requested = params.get("protocolVersion").and_then(Value::as_str);
+    SUPPORTED_PROTOCOL_VERSIONS
+        .iter()
+        .copied()
+        .find(|v| Some(*v) == requested)
+        .unwrap_or(SUPPORTED_PROTOCOL_VERSIONS[0])
+}
+
+fn handle_initialize(params: &Value, scope: &RequestScope) -> Value {
+    let protocol_version = negotiate_protocol_version(params);
     if let Some(t) = &scope.tenant {
         // Tenant sessions: the anchor was pre-set at session mint from the
         // grant session's observation and is write-once — re-initialize never
         // rotates it, and the global pin is never consulted.
         return json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": protocol_version,
             "capabilities": {
                 "tools": { "listChanged": true },
                 "resources": { "subscribe": false, "listChanged": true },
@@ -2388,7 +2517,7 @@ fn handle_initialize(_params: &Value, scope: &RequestScope) -> Value {
 
     // listChanged=true: catalog may change after a human pin/leave; clients should re-list.
     json!({
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": protocol_version,
         "capabilities": {
             "tools": { "listChanged": true },
             "resources": { "subscribe": false, "listChanged": true },
@@ -2850,14 +2979,20 @@ fn handle_resources_read(
 fn resource_session_json(scope: &RequestScope) -> std::result::Result<Value, Value> {
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     let _ = scope_drift(&s, scope);
-    let who = scope_whoami(&s, scope).ok();
-    let mut body = match &who {
-        Some(w) => serde_json::to_value(w).unwrap_or(json!({})),
-        None => json!({
+    let who_result = scope_whoami(&s, scope);
+    let mut body = match &who_result {
+        Ok(w) => serde_json::to_value(w).unwrap_or(json!({})),
+        Err(locus_core::LocusError::ExecutorAuthorityUnavailable(_)) => json!({
+            "pinned": Value::Null,
+            "status": EXECUTOR_AUTHORITY_ISSUE,
+            "hint": EXECUTOR_AUTHORITY_HINT,
+        }),
+        Err(_) => json!({
             "pinned": false,
             "hint": "No active pin. Human: `locus pin <alias>` or `locus enter <alias>`. Agents: locus_request_pin / locus_enter_hint."
         }),
     };
+    let who = who_result.ok();
     if let Some(t) = &scope.tenant {
         body["grant_id"] = json!(t.grant_id);
     }
@@ -2890,6 +3025,30 @@ fn resource_doctor_json(scope: &RequestScope) -> std::result::Result<Value, Valu
         gather_doctor_external(&s, cwd()).map_err(|e| rpc_error(-32000, e.to_string()))?;
     let report = build_doctor_report(&s, external).map_err(|e| rpc_error(-32000, e.to_string()))?;
     Ok(serde_json::to_value(report).unwrap_or(json!({})))
+}
+
+/// Agent-facing text for `locus_request_pin` / `locus_enter_hint` when the
+/// alias names no binding: say so, name the closest configured alias when the
+/// miss looks like a typo (the agent may retry with it), and point the human at
+/// binding setup instead of a `locus enter` that cannot succeed.
+fn unknown_binding_message(s: &Store, alias: &str) -> (String, Option<String>) {
+    let aliases: Vec<String> = s
+        .list_bindings()
+        .map(|list| list.into_iter().map(|b| b.alias).collect())
+        .unwrap_or_default();
+    let suggestion = locus_core::nearest_alias(alias, &aliases).map(str::to_owned);
+    let did_you_mean = suggestion
+        .as_deref()
+        .map(|best| format!("Did you mean `{best}`? "))
+        .unwrap_or_default();
+    (
+        format!(
+            "There is no binding `{alias}`, so there is nothing to pin. {did_you_mean}Agents cannot pin or create bindings. \
+             Human: run `locus binding list` to see configured aliases, or `locus binding add {alias}` to create it, \
+             then `locus enter <alias>`."
+        ),
+        suggestion,
+    )
 }
 
 fn resource_bindings_json(scope: &RequestScope) -> std::result::Result<Value, Value> {
@@ -3038,6 +3197,11 @@ fn build_locus_context_prompt(scope: &RequestScope) -> String {
                 }
             }
         }
+        Err(locus_core::LocusError::ExecutorAuthorityUnavailable(_)) => {
+            lines.push("### Active pin".into());
+            lines.push("- **pinned**: unknown (not observable from this server)".into());
+            lines.push(format!("- {EXECUTOR_AUTHORITY_HINT}"));
+        }
         Err(_) => {
             lines.push("### Active pin".into());
             lines.push("- **pinned**: false".into());
@@ -3082,6 +3246,25 @@ fn build_locus_context_prompt(scope: &RequestScope) -> String {
 }
 
 // ─── Tools list / call ──────────────────────────────────────────────────────
+
+/// Error body for `locus_whoami`. A server launched without an executor
+/// capability (the plain client entry) cannot observe the pin at all; it must
+/// not claim `pinned: false` or tell the human to re-pin, which never helps.
+fn whoami_error_body(e: &locus_core::LocusError) -> Value {
+    if matches!(e, locus_core::LocusError::ExecutorAuthorityUnavailable(_)) {
+        return json!({
+            "pinned": Value::Null,
+            "status": EXECUTOR_AUTHORITY_ISSUE,
+            "error": e.to_string(),
+            "hint": EXECUTOR_AUTHORITY_HINT,
+        });
+    }
+    json!({
+        "pinned": false,
+        "error": e.to_string(),
+        "hint": "Run `locus pin <alias>` in this workspace. Agents: locus_enter_hint."
+    })
+}
 
 /// Map tools to MCP list payload; ensure `locus_whoami` first + locus tags.
 fn tools_list_payload(mut tools: Vec<AdapterTool>, pin_alias: Option<&str>) -> Value {
@@ -3294,16 +3477,96 @@ fn handle_tools_list(scope: &RequestScope) -> std::result::Result<Value, Value> 
     Ok(tools_list_payload(tools, pin_alias.as_deref()))
 }
 
+/// Control tools publish closed schemas (`additionalProperties: false`); hold
+/// calls to them before dispatch. An unknown `locus_*` name, a non-object
+/// `arguments`, or a key the schema does not declare is a JSON-RPC -32602,
+/// the same answer an unknown provider tool gets. Value checks (blank or
+/// non-string `alias`, ...) stay in the tools so they can name the next step.
+fn check_control_args(name: &str, args: &Value) -> std::result::Result<(), Value> {
+    let tools = control_tools(true);
+    let Some(tool) = tools.iter().find(|t| t.name == name) else {
+        // A mistyped control name (`locus_whoam`) names the tool it was
+        // probably meant to be, so the agent retries instead of listing.
+        let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+        let hint = locus_core::nearest_alias(name, &names)
+            .map(|n| format!(" Did you mean `{n}`?"))
+            .unwrap_or_default();
+        return Err(rpc_error(
+            -32602,
+            format!("unknown tool `{name}`: control tools are listed by tools/list.{hint}"),
+        ));
+    };
+    let Some(obj) = args.as_object() else {
+        return Err(rpc_error(
+            -32602,
+            format!("invalid arguments for `{name}`: expected a JSON object"),
+        ));
+    };
+    let declared = tool
+        .input_schema
+        .get("properties")
+        .and_then(Value::as_object);
+    let mut undeclared: Vec<&str> = obj
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !declared.is_some_and(|d| d.contains_key(*k)))
+        .collect();
+    if undeclared.is_empty() {
+        return Ok(());
+    }
+    undeclared.sort_unstable();
+    let mut allowed: Vec<&str> = declared
+        .map(|d| d.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    allowed.sort_unstable();
+    let allowed_owned: Vec<String> = allowed.iter().map(|k| k.to_string()).collect();
+    let suggestions: Vec<String> = undeclared
+        .iter()
+        .filter_map(|k| {
+            locus_core::nearest_alias(k, &allowed_owned).map(|near| format!("`{k}` -> `{near}`"))
+        })
+        .collect();
+    let hint = if suggestions.is_empty() {
+        String::new()
+    } else {
+        format!(" Did you mean {}?", suggestions.join(", "))
+    };
+    Err(rpc_error(
+        -32602,
+        format!(
+            "invalid arguments for `{name}`: undeclared argument(s) [{}]; the schema allows [{}] (additionalProperties: false).{hint}",
+            undeclared.join(", "),
+            allowed.join(", ")
+        ),
+    ))
+}
+
 fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Result<Value, Value> {
     let name = params
         .get("name")
         .and_then(|n| n.as_str())
         .ok_or_else(|| rpc_error(-32602, "missing tool name".into()))?;
-    let args = params.get("arguments").cloned().unwrap_or(json!({}));
+    let args = match params.get("arguments") {
+        None | Some(Value::Null) => json!({}),
+        Some(v) => v.clone(),
+    };
 
     // Control tools (allowed even when frozen — whoami/status/heartbeat report freeze)
     if name.starts_with("locus_") {
+        check_control_args(name, &args)?;
         return call_control(name, &args, scope);
+    }
+
+    // Every provider tool is `provider.tool` (namespaced: `alias__provider.tool`),
+    // so a dotless name is unknown to every binding. Say so before the runtime
+    // health checks: the answer needs no pin and reveals nothing about one.
+    if !name.contains('.') {
+        return Err(rpc_error(
+            -32602,
+            format!(
+                "unknown tool `{name}`: provider tools are named `provider.tool` and control tools `locus_*`; see tools/list"
+            ),
+        ));
     }
 
     // Provider tools require a healthy pin
@@ -3409,8 +3672,8 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
         return Ok(tool_text(
             json!({
                 "error": "runtime_unhealthy",
+                "hint": runtime_unhealthy_hint(&drift.issues),
                 "issues": drift.issues,
-                "hint": "Identity drift detected. Human: `locus heartbeat` / `locus doctor`, then re-pin if needed. Agents: call locus_heartbeat.",
             }),
             true,
         ));
@@ -3514,6 +3777,25 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
         store: &s,
         session_id: &session.session_id,
         principal: principal_owned.as_deref(),
+    };
+
+    // Signed community admission precedes credentials, worker startup and routing.
+    let args = if let Some(provider) = binding
+        .providers
+        .iter()
+        .find(|provider| tool_name.starts_with(&format!("{}.", provider.provider)))
+    {
+        match provider.community_tool_args(&binding.policy, tool_name, &args) {
+            Ok(scoped) => scoped,
+            Err(error) => {
+                return Ok(tool_text(
+                    json!({"error":"community_admission_denied", "detail":error.to_string(), "tool":name}),
+                    true,
+                ))
+            }
+        }
+    } else {
+        args
     };
 
     let synthetic = tools_for_binding(binding);
@@ -3679,6 +3961,18 @@ fn call_control(
     args: &Value,
     scope: &RequestScope,
 ) -> std::result::Result<Value, Value> {
+    // The control schemas are closed (additionalProperties: false); a
+    // misspelled or mistyped argument is a tool error the model can correct,
+    // never silently ignored.
+    if let Err(e) = validate_control_args(name, args) {
+        return Ok(tool_text(
+            json!({
+                "error": e.to_string(),
+                "hint": format!("Retry `{name}` with only the arguments in its tools/list inputSchema."),
+            }),
+            true,
+        ));
+    }
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
     // Heartbeat: detect drift and freeze when identity control tools are polled.
     if matches!(
@@ -3779,6 +4073,19 @@ fn call_control(
                 body["ready"] = json!(false);
                 body["command"] = json!(format!("locus enter {anchored_alias}"));
                 is_err = true;
+            } else if let Some(issues) = scope_drift(&s, scope)
+                .ok()
+                .map(|d| d.issues)
+                .filter(|issues| !next.ready && has_executor_authority_issue(issues))
+            {
+                // Plain client entry: the pin is unobservable from this
+                // process. `locus doctor` (operator capability) reports
+                // healthy, so pointing there loops; name the real fix.
+                body["action"] = json!("launch_supervised");
+                body["command"] = json!("locus mcp --supervised");
+                body["message"] = json!(EXECUTOR_AUTHORITY_HINT);
+                body["issues"] = json!(issues);
+                is_err = true;
             }
             // Informational: isError only when not ready so agents notice the gate.
             Ok(tool_text(body, is_err))
@@ -3791,14 +4098,7 @@ fn call_control(
                 }
                 Ok(tool_text(attach_report(body), false))
             }
-            Err(e) => Ok(tool_text(
-                attach_report(json!({
-                    "pinned": false,
-                    "error": e.to_string(),
-                    "hint": "Run `locus pin <alias>` in this workspace. Agents: locus_enter_hint."
-                })),
-                true,
-            )),
+            Err(e) => Ok(tool_text(attach_report(whoami_error_body(&e)), true)),
         },
         "locus_status" => {
             if let Some(t) = &scope.tenant {
@@ -3828,20 +4128,39 @@ fn call_control(
                 Some(session) => {
                     let key = s.seal_key().map_err(|e| rpc_error(-32000, e.to_string()))?;
                     let seal_ok = session.verify_seal(&key).is_ok();
+                    // The HMAC seal alone does not make a pin usable: its
+                    // authority anchor (broker) may be retired or unobservable
+                    // from this process. Report the same runtime verdict the
+                    // provider gate uses so `pinned: true, seal_ok: true`
+                    // never reads as "ready" when every provider call refuses.
+                    let drift = scope_drift(&s, scope).ok();
+                    let ok = drift.as_ref().is_some_and(|d| d.ok);
+                    let issues = drift.as_ref().map(|d| d.issues.clone()).unwrap_or_default();
+                    let hint = if ok {
+                        None
+                    } else if has_executor_authority_issue(&issues) {
+                        Some(EXECUTOR_AUTHORITY_HINT)
+                    } else {
+                        Some("pin present but not usable — call locus_heartbeat / locus_safe_next; a human may need to re-pin (`locus leave --force`, then `locus enter <alias>`)")
+                    };
                     Ok(tool_text(
                         attach_report(json!({
                             "pinned": true,
+                            "ok": ok,
                             "binding": session.binding_alias,
                             "tenant": session.tenant,
                             "session_id": session.session_id,
                             "seal_ok": seal_ok,
+                            "authority_anchor_ok": drift.as_ref().is_some_and(|d| d.authority_anchor_ok),
                             "expired": session.is_expired(),
                             "frozen": session.frozen,
                             "frozen_reason": session.frozen_reason,
                             "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
                             "namespaces": session.all_aliases(),
+                            "issues": issues,
+                            "hint": hint,
                         })),
-                        false,
+                        !ok,
                     ))
                 }
             }
@@ -3859,6 +4178,8 @@ fn call_control(
                 Some("invalid seal — human must re-pin")
             } else if drift.expired {
                 Some("pin TTL expired — human must re-pin")
+            } else if has_executor_authority_issue(&drift.issues) {
+                Some(EXECUTOR_AUTHORITY_HINT)
             } else {
                 Some("runtime unhealthy — run `locus doctor`")
             };
@@ -3906,6 +4227,19 @@ fn call_control(
                     Some(json!({ "binding_exists": exists })),
                 );
             }
+            if let (Some(a), Some(false)) = (alias, exists) {
+                let (message, suggestion) = unknown_binding_message(&s, a);
+                return Ok(tool_text(
+                    json!({
+                        "agents_cannot_pin": true,
+                        "alias": a,
+                        "binding_exists": false,
+                        "did_you_mean": suggestion,
+                        "message": message,
+                    }),
+                    true,
+                ));
+            }
             let message = match alias {
                 Some(_) => format!(
                     "Agents cannot pin. Ask the human to run `{enter_cmd}` (or `{pin_cmd}`) in a terminal, then continue."
@@ -3947,13 +4281,37 @@ fn call_control(
             ))
         }
         "locus_request_pin" => {
-            let alias = args.get("alias").and_then(|a| a.as_str()).unwrap_or("");
+            let alias = args
+                .get("alias")
+                .and_then(|a| a.as_str())
+                .map(str::trim)
+                .unwrap_or("");
             if alias.is_empty() {
-                return Ok(tool_text(json!({ "error": "alias required" }), true));
+                return Ok(tool_text(
+                    json!({
+                        "error": "alias required",
+                        "hint": "pass {\"alias\": \"<binding alias>\"}; locus_list_bindings lists the configured aliases",
+                    }),
+                    true,
+                ));
             }
             // Verify binding exists
             let exists = s.load_binding(alias).is_ok();
             let _ = s.audit("mcp.request_pin", alias, Some(json!({ "exists": exists })));
+            if !exists {
+                // Audited above for forensics, but there is nothing to pin:
+                // no request is pending and no `locus enter` would succeed.
+                let (message, suggestion) = unknown_binding_message(&s, alias);
+                return Ok(tool_text(
+                    json!({
+                        "requested": alias,
+                        "binding_exists": false,
+                        "did_you_mean": suggestion,
+                        "message": message,
+                    }),
+                    true,
+                ));
+            }
             Ok(tool_text(
                 json!({
                     "requested": alias,
@@ -3970,7 +4328,9 @@ fn call_control(
         }
         "locus_providers" => match scope_whoami(&s, scope) {
             Ok(w) => Ok(tool_text(json!({ "providers": w.providers }), false)),
-            Err(e) => Ok(tool_text(json!({ "error": e.to_string() }), true)),
+            // Same body as locus_whoami so an unobservable pin names the
+            // supervised launch instead of a bare error string.
+            Err(e) => Ok(tool_text(whoami_error_body(&e), true)),
         },
         "locus_verify_claim" => {
             let text = args
@@ -4100,6 +4460,27 @@ fn tool_text(value: Value, is_error: bool) -> Value {
         "content": [{ "type": "text", "text": text }],
         "isError": is_error
     })
+}
+
+#[cfg(test)]
+mod whoami_error_tests {
+    use super::*;
+
+    #[test]
+    fn whoami_error_without_executor_authority_does_not_claim_unpinned() {
+        let body = whoami_error_body(&locus_core::LocusError::ExecutorAuthorityUnavailable(
+            "this process requires a supervised executor capability".into(),
+        ));
+        assert!(body["pinned"].is_null());
+        assert_eq!(body["status"], "executor_authority_unavailable");
+        let hint = body["hint"].as_str().unwrap();
+        assert!(hint.contains("locus mcp --supervised"));
+        assert!(!hint.contains("Run `locus pin"));
+
+        let other = whoami_error_body(&locus_core::LocusError::NotPinned);
+        assert_eq!(other["pinned"], false);
+        assert!(other["hint"].as_str().unwrap().contains("locus pin"));
+    }
 }
 
 #[cfg(test)]
@@ -4351,6 +4732,54 @@ mod stdio_framing_tests {
         let (msg, framing) = read_message(&mut reader).unwrap().unwrap();
         assert_eq!(framing, Framing::Ndjson);
         assert_eq!(msg["id"], 7);
+    }
+
+    #[test]
+    fn parse_error_after_content_length_stays_content_length_framed() {
+        // A too-short Content-Length leaves the body tail on the wire; it is
+        // read back as an NDJSON garbage line. Its Parse error must not go out
+        // as a bare JSON line to a Content-Length client.
+        let body = r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#;
+        let raw = format!("Content-Length: {}\r\n\r\n{body}\r\n", body.len() - 3);
+        let mut reader = Cursor::new(raw.into_bytes());
+        let mut seen = false;
+        let mut framings = Vec::new();
+        while let Some((parsed, framing)) = read_frame(&mut reader).unwrap() {
+            seen |= framing == Framing::ContentLength;
+            assert!(parsed.is_err());
+            framings.push((framing, parse_error_framing(seen, framing)));
+        }
+        assert_eq!(
+            framings,
+            vec![
+                (Framing::ContentLength, Framing::ContentLength),
+                (Framing::Ndjson, Framing::ContentLength),
+            ]
+        );
+        // A pure NDJSON client keeps NDJSON replies.
+        assert_eq!(parse_error_framing(false, Framing::Ndjson), Framing::Ndjson);
+    }
+
+    #[test]
+    fn unparseable_frames_surface_as_parse_errors_and_framing_survives() {
+        let mut raw = String::from("not-json\n");
+        raw.push_str("Content-Length: 5\r\n\r\n{bad}");
+        raw.push_str(r#"{"jsonrpc":"2.0","id":8,"method":"ping"}"#);
+        raw.push('\n');
+        let mut reader = Cursor::new(raw.into_bytes());
+
+        let (parsed, framing) = read_frame(&mut reader).unwrap().unwrap();
+        assert_eq!(framing, Framing::Ndjson);
+        let resp = parse_error_response(&parsed.expect_err("garbage line"));
+        assert_eq!(resp["error"]["code"], -32700);
+        assert_eq!(resp["id"], Value::Null);
+
+        let (parsed, framing) = read_frame(&mut reader).unwrap().unwrap();
+        assert_eq!(framing, Framing::ContentLength);
+        assert!(parsed.is_err(), "garbage Content-Length body");
+
+        let (parsed, _) = read_frame(&mut reader).unwrap().unwrap();
+        assert_eq!(parsed.unwrap()["id"], 8);
     }
 
     #[test]
@@ -4694,5 +5123,82 @@ mod catalog_shaping_tests {
             assert_eq!(orig.name, out.name);
             assert_eq!(orig.description, out.description);
         }
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_hint_tests {
+    use super::*;
+
+    #[test]
+    fn protocol_version_echoes_supported_and_falls_back_to_latest() {
+        for v in SUPPORTED_PROTOCOL_VERSIONS {
+            assert_eq!(
+                negotiate_protocol_version(&json!({ "protocolVersion": v })),
+                *v
+            );
+        }
+        assert_eq!(
+            negotiate_protocol_version(&json!({ "protocolVersion": "2030-01-01" })),
+            SUPPORTED_PROTOCOL_VERSIONS[0]
+        );
+        assert_eq!(
+            negotiate_protocol_version(&json!({})),
+            SUPPORTED_PROTOCOL_VERSIONS[0]
+        );
+    }
+
+    #[test]
+    fn mistyped_control_tool_and_argument_name_the_nearest_match() {
+        let err = check_control_args("locus_whoam", &json!({})).unwrap_err();
+        let msg = err["message"].as_str().unwrap();
+        assert!(msg.starts_with("unknown tool `locus_whoam`"), "{msg}");
+        assert!(msg.ends_with("Did you mean `locus_whoami`?"), "{msg}");
+
+        let err = check_control_args("locus_nonsense_tool", &json!({})).unwrap_err();
+        assert!(
+            !err["message"].as_str().unwrap().contains("Did you mean"),
+            "{err}"
+        );
+
+        let err = check_control_args("locus_request_pin", &json!({"aliass": "acme"})).unwrap_err();
+        let msg = err["message"].as_str().unwrap();
+        assert_eq!(err["code"], json!(-32602), "{err}");
+        assert!(msg.contains("undeclared argument(s) [aliass]"), "{msg}");
+        assert!(msg.ends_with("Did you mean `aliass` -> `alias`?"), "{msg}");
+    }
+
+    #[test]
+    fn dotless_tool_name_is_unknown_before_runtime_health() {
+        for name in ["nonexistent_tool", "acme__bogus", "githubscope"] {
+            let err = handle_tools_call(
+                &json!({ "name": name, "arguments": {} }),
+                &RequestScope::process(),
+            )
+            .unwrap_err();
+            assert_eq!(err["code"], json!(-32602), "{name}: {err}");
+            let msg = err["message"].as_str().unwrap();
+            assert!(msg.starts_with(&format!("unknown tool `{name}`")), "{msg}");
+        }
+    }
+
+    #[test]
+    fn runtime_unhealthy_hints_name_real_commands() {
+        let exec = runtime_unhealthy_hint(&["executor_authority_unavailable".into()]);
+        assert!(exec.contains("locus mcp --supervised"), "{exec}");
+        let other = runtime_unhealthy_hint(&["authority_anchor_unavailable".into()]);
+        assert!(other.contains("locus doctor"), "{other}");
+        // `locus heartbeat` is not a CLI command (the MCP tool is locus_heartbeat).
+        assert!(!exec.contains("locus heartbeat") && !other.contains("locus heartbeat"));
+    }
+
+    #[test]
+    fn instruction_line_distinguishes_unobservable_from_unpinned() {
+        let unobservable = unpinned_instruction_line(
+            &locus_core::LocusError::ExecutorAuthorityUnavailable("x".into()),
+        );
+        assert!(unobservable.contains("Pin not observable"));
+        let unpinned = unpinned_instruction_line(&locus_core::LocusError::NotPinned);
+        assert!(unpinned.contains("Currently unpinned"));
     }
 }

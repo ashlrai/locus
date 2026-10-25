@@ -61,10 +61,12 @@ pub fn build_isolated_env_opts(
 ) -> IsolatedEnv {
     let mut vars = BTreeMap::new();
     let mut scrubbed = Vec::new();
+    let mut parent = BTreeMap::new();
     // Positive construction: unknown parent keys never reach the child.
     for (k, v) in std::env::vars() {
         if !is_runtime_env_key(&k) {
-            scrubbed.push(k);
+            scrubbed.push(k.clone());
+            parent.insert(k, v);
             continue;
         }
         vars.insert(k, v);
@@ -157,28 +159,86 @@ pub fn build_isolated_env_opts(
     let mut secrets_resolved = 0usize;
     let mut secrets_failed = Vec::new();
 
+    // Opt-in `[gateway]`: the URL comes from config only, never the parent env.
+    // Off (the default) changes nothing. An opted-in but invalid block fails
+    // closed: no credential is resolved, so a key never reaches a child that
+    // would talk to the provider directly instead of the configured gateway.
+    let mut resolve_secrets = resolve_secrets;
+    match crate::gateway::resolve_from_home() {
+        crate::gateway::GatewayChild::Off => {}
+        crate::gateway::GatewayChild::Set {
+            target,
+            vars: names,
+        } => {
+            for name in names {
+                vars.entry(name).or_insert_with(|| target.base_url.clone());
+            }
+        }
+        crate::gateway::GatewayChild::Refused(code) => {
+            resolve_secrets = false;
+            secrets_failed.push(CredentialResolutionIssue {
+                provider: "gateway".into(),
+                source: "gateway".into(),
+                code: code.into(),
+            });
+        }
+    }
+
     if resolve_secrets {
         let outcome = resolve_binding_secrets(binding);
         let allowed_secret_keys = binding
             .providers
             .iter()
-            .flat_map(|provider| crate::credential::inject_keys_for_provider(&provider.provider))
-            .copied()
+            .flat_map(|provider| {
+                crate::credential::inject_keys_for_binding_provider(provider).unwrap_or_default()
+            })
             .collect::<std::collections::BTreeSet<_>>();
+        let mut injected = std::collections::BTreeSet::new();
         for (k, v) in outcome.env {
             if allowed_secret_keys.contains(k.as_str()) {
+                injected.insert(k.clone());
                 vars.insert(k, v.as_str().to_string());
                 secrets_resolved += 1;
             }
         }
-        secrets_failed = outcome.issues;
+        secrets_failed.extend(outcome.issues);
+        // Opt-in signed, value-free audit (`[credential_audit]`); no-op when off.
+        let audit_issues = crate::credential_audit::audit_injected(
+            session,
+            binding,
+            &mut vars,
+            &injected,
+            "child-env",
+        );
+        if !audit_issues.is_empty() {
+            secrets_resolved = injected.iter().filter(|k| vars.contains_key(*k)).count();
+            secrets_failed.extend(audit_issues);
+        }
         for p in &binding.providers {
             let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());
-            let keys = crate::credential::inject_keys_for_provider(&p.provider);
-            let ok = keys.iter().any(|k| vars.contains_key(*k));
+            let keys = crate::credential::inject_keys_for_binding_provider(p).unwrap_or_default();
+            let ok = keys.iter().any(|k| vars.contains_key(k));
             vars.insert(flag, if ok { "1".into() } else { "0".into() });
         }
     }
+
+    // Opt-in `[exec] inherit_env`: exact names only, applied last so Locus's
+    // own variables, the gateway URL and injected credentials always win.
+    // Empty (the default) changes nothing. Key-shaped names cross only as
+    // `phm_` placeholders; see `inherit_env.rs`.
+    if let Ok(home) = crate::store::locus_home() {
+        let cfg = crate::config::load_config(&home);
+        if !cfg.exec.inherit_env.is_empty() {
+            secrets_failed.extend(crate::inherit_env::apply(
+                &cfg.exec.inherit_env,
+                &cfg.gateway.allowed_hosts,
+                &parent,
+                &mut vars,
+                &mut scrubbed,
+            ));
+        }
+    }
+    drop(parent);
 
     IsolatedEnv {
         vars,
@@ -315,13 +375,23 @@ pub fn build_ci_env_map(
 
     if allow_secrets {
         let outcome = resolve_binding_secrets(binding);
+        let mut injected = std::collections::BTreeSet::new();
         for (k, v) in outcome.env {
+            injected.insert(k.clone());
             vars.insert(k, v.as_str().to_string());
         }
+        // Opt-in signed, value-free audit; withheld on write failure.
+        let _ = crate::credential_audit::audit_injected(
+            session,
+            binding,
+            &mut vars,
+            &injected,
+            "ci-export",
+        );
         for p in &binding.providers {
             let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());
-            let keys = crate::credential::inject_keys_for_provider(&p.provider);
-            let ok = keys.iter().any(|k| vars.contains_key(*k));
+            let keys = crate::credential::inject_keys_for_binding_provider(p).unwrap_or_default();
+            let ok = keys.iter().any(|k| vars.contains_key(k));
             vars.insert(flag, if ok { "1".into() } else { "0".into() });
         }
     }

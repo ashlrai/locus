@@ -246,6 +246,44 @@ pub fn inject_keys_for_provider(provider: &str) -> &'static [&'static str] {
     }
 }
 
+/// Custom keys come only from a verified community contract and supported env refs.
+pub fn inject_keys_for_binding_provider(
+    provider: &crate::binding::ProviderBinding,
+) -> Result<Vec<String>> {
+    let Some(manifest) = provider.verified_community_adapter()? else {
+        return Ok(inject_keys_for_provider(&provider.provider)
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect());
+    };
+    let Some(key) = manifest.credential_env.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let prefix = format!(
+        "{}_",
+        provider.provider.to_ascii_uppercase().replace('-', "_")
+    );
+    let suffix = key.strip_prefix(&prefix).unwrap_or("");
+    let source = CredentialRef::validate(&provider.credential_ref)?;
+    let supported_source = matches!(&source, CredentialRef::Env { var }
+        if ![
+            crate::authority_anchor::CONTROL_CAPABILITY_ENV,
+            crate::authority_anchor::EXECUTOR_CAPABILITY_ENV,
+            "LOCUS_SEAL",
+            crate::adapter_registry::LOCUS_ADAPTER_TRUST_KEYS_ENV,
+            "LOCUS_REGISTRY_SIGNING_KEY",
+        ].iter().any(|reserved| var.eq_ignore_ascii_case(reserved)));
+    if !valid_env_name(key)
+        || key != key.to_ascii_uppercase()
+        || !matches!(suffix, "API_KEY" | "TOKEN" | "ACCESS_TOKEN" | "SECRET_KEY")
+        || key.starts_with("LOCUS_")
+        || !supported_source
+    {
+        return Err(LocusError::msg("community credential mapping requires a provider-local key and supported env reference"));
+    }
+    Ok(vec![key.to_string()])
+}
+
 /// Report unsupported Phantom credential references without invoking the
 /// binary or opening a vault. Installation/name presence cannot prove that
 /// a scoped credential bridge is available.
@@ -430,6 +468,25 @@ pub fn resolve_binding_secrets(binding: &crate::binding::Binding) -> ResolvedBin
     let mut issues = Vec::new();
     for p in &binding.providers {
         let cred = CredentialRef::parse(&p.credential_ref);
+        let keys = match inject_keys_for_binding_provider(p) {
+            Ok(keys) if !keys.is_empty() => keys,
+            Ok(_) => {
+                issues.push(CredentialResolutionIssue {
+                    provider: safe_provider_label(&p.provider),
+                    source: cred.source().into(),
+                    code: "unsupported-mapping".into(),
+                });
+                continue;
+            }
+            Err(_) => {
+                issues.push(CredentialResolutionIssue {
+                    provider: safe_provider_label(&p.provider),
+                    source: cred.source().into(),
+                    code: "invalid-adapter-contract".into(),
+                });
+                continue;
+            }
+        };
         let value = match resolve(&cred) {
             Ok(v) => v,
             Err(error) => {
@@ -446,11 +503,20 @@ pub fn resolve_binding_secrets(binding: &crate::binding::Binding) -> ResolvedBin
                 continue;
             }
         };
-        for key in inject_keys_for_provider(&p.provider) {
-            out.insert(
-                (*key).to_string(),
-                Zeroizing::new(value.as_str().to_string()),
-            );
+        if value.is_empty()
+            && p.upstream
+                .as_ref()
+                .is_some_and(|upstream| upstream.community_adapter.is_some())
+        {
+            issues.push(CredentialResolutionIssue {
+                provider: safe_provider_label(&p.provider),
+                source: cred.source().into(),
+                code: "unavailable".into(),
+            });
+            continue;
+        }
+        for key in keys {
+            out.insert(key, Zeroizing::new(value.as_str().to_string()));
         }
         // Also set LOCUS_<PROVIDER>_RESOLVED=1 (not the secret) for debugging
         let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());

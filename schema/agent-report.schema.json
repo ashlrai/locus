@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ashlrai/locus/schema/agent-report.schema.json",
   "title": "Locus AgentReport",
-  "description": "Machine contract for `locus agent report --json` (and `locus agent doctor --json`). Never contains resolved secret values — only aliases, CredentialRef names, scopes, and issue codes. Consumed by ashlr-hub and similar orchestrators.",
+  "description": "Machine contract for `locus agent report --json` (and `locus agent doctor --json`). Never contains resolved secret values — only aliases, CredentialRef names, scopes, and issue codes. Consumed by Phantom and similar orchestrators.",
   "type": "object",
   "additionalProperties": true,
   "required": [
@@ -114,7 +114,9 @@
       "properties": {
         "claude": { "type": "boolean" },
         "cursor": { "type": "boolean" },
-        "codex": { "type": "boolean" }
+        "codex": { "type": "boolean" },
+        "grok": { "type": "boolean" },
+        "gemini": { "type": "boolean" }
       }
     },
     "commands": {

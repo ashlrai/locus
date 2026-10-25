@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+  # Dry run: a PR that changes this workflow builds, packages and checksums
+  # the Linux archive and verifies the assets, but never publishes a release.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: write
@@ -13,67 +18,100 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    # The PR dry run builds Linux only: the macOS job becomes a no-op on
+    # ubuntu so it never queues behind the shared macOS runners.
+    name: Build ${{ matrix.name }}${{ github.event_name == 'pull_request' && matrix.release_only && ' (release only)' || '' }}
+    runs-on: ${{ github.event_name == 'pull_request' && matrix.release_only && 'ubuntu-latest' || matrix.os }}
+    env:
+      SKIP_BUILD: ${{ github.event_name == 'pull_request' && matrix.release_only }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: aarch64-apple-darwin
+          # Both macOS targets build in one job: Apple Silicon natively and
+          # Intel cross-compiled (macos-13 is scarce), in one cargo
+          # invocation. Two jobs meant two waits for the shared macOS slots,
+          # which other repositories' CI keeps busy for hours at a time.
+          - name: apple-darwin
+            targets: aarch64-apple-darwin x86_64-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
             os: macos-latest
-          # Cross-compile Intel mac from Apple Silicon runners (macos-13 is scarce)
-          - target: x86_64-apple-darwin
-            os: macos-latest
-          - target: x86_64-unknown-linux-gnu
+            release_only: true
+          # Same steps and the same loops as the macOS job, so the PR dry run
+          # exercises the code path a tag release takes.
+          - name: x86_64-unknown-linux-gnu
+            targets: x86_64-unknown-linux-gnu
+            rust_targets: x86_64-unknown-linux-gnu
             os: ubuntu-latest
 
     steps:
       - name: Checkout
+        if: env.SKIP_BUILD != 'true'
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
+        if: env.SKIP_BUILD != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust_targets }}
 
       - name: Cache cargo
+        if: env.SKIP_BUILD != 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.name }}
 
       - name: Build release binaries
-        run: |
-          cargo build --release --target ${{ matrix.target }} -p locus-cli -p locus-mcp
-
-      - name: Package artifacts
+        if: env.SKIP_BUILD != 'true'
         shell: bash
+        env:
+          TARGETS: ${{ matrix.targets }}
         run: |
           set -euo pipefail
-          TARGET="${{ matrix.target }}"
+          args=()
+          for t in $TARGETS; do args+=(--target "$t"); done
+          cargo build --release "${args[@]}" -p locus-cli -p locus-mcp
+
+      - name: Package artifacts
+        if: env.SKIP_BUILD != 'true'
+        shell: bash
+        env:
+          TARGETS: ${{ matrix.targets }}
+        run: |
+          set -euo pipefail
           OUT="dist"
           mkdir -p "$OUT"
-          BIN_DIR="target/${TARGET}/release"
-          # Strip where available (macOS/Linux)
-          if command -v strip >/dev/null 2>&1; then
-            strip "${BIN_DIR}/locus" || true
-            strip "${BIN_DIR}/locus-mcp" || true
-          fi
-          STAGE="locus-${TARGET}"
-          mkdir -p "${OUT}/${STAGE}"
-          cp "${BIN_DIR}/locus" "${OUT}/${STAGE}/"
-          cp "${BIN_DIR}/locus-mcp" "${OUT}/${STAGE}/"
-          cp README.md LICENSE "${OUT}/${STAGE}/" 2>/dev/null || true
-          (
-            cd "$OUT"
-            tar -czf "locus-${TARGET}.tar.gz" "${STAGE}"
-          )
-          echo "Packed locus-${TARGET}.tar.gz"
+          for TARGET in $TARGETS; do
+            BIN_DIR="target/${TARGET}/release"
+            # Strip where available (macOS/Linux)
+            if command -v strip >/dev/null 2>&1; then
+              strip "${BIN_DIR}/locus" || true
+              strip "${BIN_DIR}/locus-mcp" || true
+            fi
+            STAGE="locus-${TARGET}"
+            mkdir -p "${OUT}/${STAGE}"
+            cp "${BIN_DIR}/locus" "${OUT}/${STAGE}/"
+            cp "${BIN_DIR}/locus-mcp" "${OUT}/${STAGE}/"
+            cp README.md LICENSE "${OUT}/${STAGE}/" 2>/dev/null || true
+            (
+              cd "$OUT"
+              tar -czf "locus-${TARGET}.tar.gz" "${STAGE}"
+              # Checksum of the final archive bytes, in `sha256sum -c` format.
+              # Integrity metadata only: not a signature or publisher attestation.
+              shasum -a 256 "locus-${TARGET}.tar.gz" > "locus-${TARGET}.tar.gz.sha256"
+              shasum -a 256 -c "locus-${TARGET}.tar.gz.sha256"
+            )
+            echo "Packed locus-${TARGET}.tar.gz"
+          done
 
       - name: Upload artifact
+        if: env.SKIP_BUILD != 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: locus-${{ matrix.target }}
-          path: dist/locus-${{ matrix.target }}.tar.gz
+          name: locus-${{ matrix.name }}
+          path: |
+            dist/locus-*.tar.gz
+            dist/locus-*.tar.gz.sha256
           if-no-files-found: error
 
   release:
@@ -95,8 +133,27 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          find artifacts -type f -name 'locus-*.tar.gz' -exec cp {} release-assets/ \;
+          find artifacts -type f \( -name 'locus-*.tar.gz' -o -name 'locus-*.tar.gz.sha256' \) \
+            -exec cp {} release-assets/ \;
           ls -la release-assets/
+
+      # Every archive ships with a sidecar that names exactly that archive and
+      # matches its bytes; a missing, stray or foreign sidecar fails the release.
+      - name: Verify release checksums
+        shell: bash
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(locus-*.tar.gz)
+          sidecars=(locus-*.tar.gz.sha256)
+          [ "${#archives[@]}" -gt 0 ] || { echo "no release archives" >&2; exit 1; }
+          [ "${#archives[@]}" -eq "${#sidecars[@]}" ] || { echo "archive/sidecar count mismatch" >&2; exit 1; }
+          for asset in "${archives[@]}"; do
+            [ -f "${asset}.sha256" ] || { echo "missing ${asset}.sha256" >&2; exit 1; }
+            sha256sum "$asset" | cmp -s - "${asset}.sha256" || { echo "${asset}.sha256 does not describe ${asset}" >&2; exit 1; }
+          done
+          sha256sum -c "${sidecars[@]}"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -118,8 +175,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # A tag push names it after the tag; the PR dry run's ref (`79/merge`)
+          # has a slash, so slashes become dashes.
           cargo run --release --locked -p locus-cli -- adapter registry export \
-            --out "release-assets/locus-adapters-${GITHUB_REF_NAME}.json"
+            --out "release-assets/locus-adapters-${GITHUB_REF_NAME//\//-}.json"
 
       # TODO(registry-signing): once a LOCUS_REGISTRY_SIGNING_KEY repo secret
       # exists (base64 or 64-hex ed25519 seed; NOT yet provisioned — do not
@@ -139,9 +198,63 @@ jobs:
       # --ed25519-pub <b64>) in the release notes / docs/registry-trust.md.
 
       - name: Create release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # npm publish through trusted publishing (OIDC): no NPM_TOKEN. Runs only on a
+  # v* tag push, after the GitHub Release exists, because the npm wrappers
+  # download that release's assets on first run. Never on a PR (the dry run).
+  # Register on npmjs.com for each package: owner ashlrai, repo locus,
+  # workflow release.yml, no environment.
+  npm-publish:
+    name: Publish npm packages (${{ matrix.dir }})
+    needs: release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        dir: [npm, npm-mcp]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1 or newer.
+      - name: Upgrade npm
+        run: npm install -g npm@latest && npm --version
+
+      - name: Check the tag matches the package version
+        shell: bash
+        working-directory: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          [ "v${version}" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} does not match ${name}@${version}" >&2; exit 1; }
+          echo "NPM_PKG=${name}@${version}" >> "$GITHUB_ENV"
+
+      - name: Publish
+        shell: bash
+        working-directory: ${{ matrix.dir }}
+        run: |
+          set -euo pipefail
+          if npm view "${NPM_PKG}" version >/dev/null 2>&1; then
+            echo "${NPM_PKG} is already on npm; nothing to publish."
+            exit 0
+          fi
+          npm publish --provenance --access public

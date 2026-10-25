@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hub-smoke.sh — validate ashlr-hub CLI contracts against a throwaway LOCUS_HOME.
+# hub-smoke.sh — validate Phantom CLI contracts against a throwaway LOCUS_HOME.
 #
 # Requires: locus (or cargo build), jq
 # Safe: never touches ~/.locus; never prints secret values.
@@ -228,7 +228,7 @@ for f in agent-report.schema.json doctor.schema.json hub-gate.schema.json mcp-gr
 done
 
 # Docs present
-for f in docs/hub-integration.md integrations/ashlr-hub/README.md integrations/ashlr-hub/fleet-preflight.md; do
+for f in docs/hub-integration.md integrations/phantom/README.md integrations/phantom/fleet-preflight.md; do
   if [[ -f "$ROOT/$f" ]]; then
     echo "ok    $f present"
   else

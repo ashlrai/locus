@@ -16,19 +16,27 @@ pub mod approval;
 mod authority_anchor;
 pub mod autopin;
 pub mod binding;
+pub mod budget;
 pub mod config;
 pub mod credential;
+pub mod credential_audit;
 mod credential_migration;
 pub mod doctor;
+pub mod doctor_fix;
 pub mod engagement;
 pub mod error;
 pub mod events;
 pub mod forensics;
+pub mod gateway;
 pub mod graph;
 pub mod http_sessions;
+pub mod inherit_env;
 pub mod isolation;
+pub mod marketplace;
+pub mod onboard;
 pub mod policy;
 pub mod recipes;
+pub mod recovery;
 pub mod seal;
 pub mod session;
 pub mod store;
@@ -36,6 +44,9 @@ pub mod ticket;
 pub mod verify;
 pub mod workers;
 pub mod workspace;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use adapter_registry::{
     build_release_manifest, build_release_manifest_from, builtin_manifest,
@@ -60,7 +71,7 @@ pub use adapter_trust::{
 };
 pub use adapters::{
     call_tool, call_tool_gated, control_tools, enforce_policy, known_providers, tools_for_binding,
-    AdapterTool, ApprovalGate, ToolCallResult,
+    validate_control_args, AdapterTool, ApprovalGate, ToolCallResult,
 };
 pub use agent_report::{
     agent_md_content, agent_md_path, agent_md_present, agent_report_from_doctor,
@@ -87,8 +98,8 @@ pub use authority_anchor::{
 };
 pub use autopin::{match_remote_binding, resolve_auto_pin, AutoPinTarget};
 pub use binding::{
-    validate_name_component, Binding, BindingBody, BindingSummary, Policy, PolicyRule,
-    ProviderBinding, Scope, UpstreamSpec,
+    edit_distance, nearest_alias, validate_name_component, Binding, BindingBody, BindingSummary,
+    Policy, PolicyRule, ProviderBinding, Scope, UpstreamSpec,
 };
 pub use config::{
     load_config, AutopinConfig, AutopinRemote, AutopinStatus, LocusConfig, NotifyConfig,
@@ -129,6 +140,18 @@ pub use isolation::{
     build_ci_env_map, build_isolated_env, build_isolated_env_for_provider_opts,
     build_isolated_env_opts, build_isolated_env_strict, ci_secrets_allowed, IsolatedEnv,
 };
+pub use marketplace::{
+    fetch_index, fetch_manifest, fetch_url, install_adapter, installed_manifests,
+    load_index_sources, load_installed, load_installed_manifest, save_index_sources,
+    search_indexes, uninstall_adapter, validate_index_entry, CommunityAdapterManifest,
+    CommunityIndex, CommunityIndexEntry, IndexSource, InstallReport, InstalledAdapter, SearchHit,
+    ADAPTERS_DIR,
+};
+pub use onboard::steps;
+pub use onboard::{
+    detect_ambient_candidates, scope_fields_for_provider, suggest_alias, suggest_credential_ref,
+    DetectedCandidate, OnboardPlan, PlannedBinding, ONBOARD_PLAN_FILE,
+};
 pub use policy::{evaluate as evaluate_policy, glob_match, Decision, PolicyVerdict};
 pub use recipes::{
     all_recipes, get_recipe, recipe_toml_snippet, suggest_for_provider, RecipeReadiness,
@@ -163,7 +186,9 @@ pub use workers::{
     WorkerState, WorkerToolResult, ENV_WORKER_IDLE_SECS, ENV_WORKER_SANDBOX, ENV_WORKER_SANDBOXED,
     ENV_WORKER_SANDBOX_BACKEND, ENV_WORKER_SANDBOX_NO_NETWORK,
 };
-pub use workspace::{find_workspace, WorkspaceConfig};
+pub use workspace::{
+    find_workspace, path_entry_exists, stage_file_replace, StagedFile, WorkspaceConfig,
+};
 
 /// Crate version for `locus --version` / doctor.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

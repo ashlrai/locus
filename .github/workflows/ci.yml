@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main, master]
 
+# Cancel superseded PR runs; never cancel main/master.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -17,6 +22,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -36,6 +43,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -45,17 +57,48 @@ jobs:
           node --check npm/bin/locus.js
           node --check npm-mcp/install.js
           node --check npm-mcp/bin/locus-mcp.js
-          node --test npm/test/*.test.js
+          node --test npm/test
+          node --test scripts/check-crypto.test.mjs
+          node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # nextest: every test in its own process, parallel across binaries.
+      # Doctests are not run by nextest, so they stay on cargo test --doc.
+      # PRs: only crates the diff touches plus their reverse deps (nextest
+      # rdeps filterset); manifest/lockfile/toolchain/CI changes select all().
+      # Pushes to main always run the complete suite.
+      - name: Select affected tests
+        id: affected
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            fs="$(bash scripts/ci/affected-filterset.sh "$BASE" "$HEAD" || echo 'all()')"
+          else
+            fs='all()'
+          fi
+          echo "filterset=$fs" >> "$GITHUB_OUTPUT"
+          echo "nextest filterset: $fs"
+
       - name: Test
-        run: cargo test --workspace
+        if: steps.affected.outputs.filterset != 'none()'
+        run: cargo nextest run --workspace --no-fail-fast -E "${{ steps.affected.outputs.filterset }}"
+
+      - name: Doctests
+        run: cargo test --workspace --doc
 
       - name: Release build
         run: cargo build --workspace --release
+
+      # npm wrappers at the Cargo version and packable; release locus-mcp keeps
+      # the MCP surface Phantom's companion smoke drives. About 1s.
+      - name: Release and Phantom contract
+        run: node scripts/ci/phantom-contract.mjs
 
       - name: Recipes (examples/recipes against the release build)
         run: node --test examples/recipes

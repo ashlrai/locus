@@ -95,6 +95,9 @@ pub struct UpstreamSpec {
     /// sandbox is on; the Linux `path` backend fails closed if this is set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sandbox_no_network: bool,
+    /// Full publisher-signed community contract, captured in the sealed binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub community_adapter: Option<Box<crate::marketplace::CommunityAdapterManifest>>,
 }
 
 impl UpstreamSpec {
@@ -106,6 +109,7 @@ impl UpstreamSpec {
             resolve_secrets: false,
             sandbox: None,
             sandbox_no_network: false,
+            community_adapter: None,
         }
     }
 
@@ -118,6 +122,7 @@ impl UpstreamSpec {
             resolve_secrets: false,
             sandbox: None,
             sandbox_no_network: false,
+            community_adapter: None,
         }
     }
 
@@ -218,6 +223,7 @@ impl UpstreamSpec {
             resolve_secrets,
             sandbox,
             sandbox_no_network: self.sandbox_no_network,
+            community_adapter: self.community_adapter.clone(),
         })
     }
 
@@ -271,6 +277,160 @@ impl ProviderBinding {
     pub fn with_upstream(mut self, upstream: UpstreamSpec) -> Self {
         self.upstream = Some(upstream);
         self
+    }
+
+    /// Capture the full signed executable contract; scopes are still supplied by the operator.
+    pub fn with_community_adapter(
+        mut self,
+        manifest: crate::marketplace::CommunityAdapterManifest,
+    ) -> crate::error::Result<Self> {
+        let mut upstream = manifest.upstream.clone().ok_or_else(|| {
+            crate::error::LocusError::msg("community adapter has no executable upstream")
+        })?;
+        if upstream.community_adapter.is_some() {
+            return Err(crate::error::LocusError::msg(
+                "nested community adapter contracts are refused",
+            ));
+        }
+        upstream.community_adapter = Some(Box::new(manifest));
+        self.upstream = Some(upstream);
+        self.verified_community_adapter()?;
+        Ok(self)
+    }
+
+    /// Recheck current publisher trust and executable equality before any worker effect.
+    pub fn verified_community_adapter(
+        &self,
+    ) -> crate::error::Result<Option<&crate::marketplace::CommunityAdapterManifest>> {
+        let Some(upstream) = self.upstream.as_ref() else {
+            return Ok(None);
+        };
+        let Some(manifest) = upstream.community_adapter.as_deref() else {
+            return Ok(None);
+        };
+        crate::marketplace::verify_community_manifest_with_keys(
+            manifest,
+            &crate::adapter_trust::load_merged_trust_keys_default(),
+        )?;
+        if crate::adapter_registry::builtin_manifest()?
+            .providers
+            .iter()
+            .any(|provider| provider.id.eq_ignore_ascii_case(&self.provider))
+        {
+            return Err(crate::error::LocusError::msg(
+                "community adapters cannot replace a built-in provider",
+            ));
+        }
+        let expected = manifest.upstream.as_ref().ok_or_else(|| {
+            crate::error::LocusError::msg("community adapter lacks signed upstream")
+        })?;
+        let mut actual = upstream.clone();
+        actual.community_adapter = None;
+        if expected.community_adapter.is_some()
+            || actual != *expected
+            || self.provider != manifest.entry.id
+        {
+            return Err(crate::error::LocusError::msg(
+                "community adapter executable or provider differs from signed contract",
+            ));
+        }
+        Ok(Some(manifest))
+    }
+
+    /// Only concrete scalar selectors have a qualified upstream freeze contract.
+    pub fn community_frozen_values(
+        &self,
+    ) -> crate::error::Result<BTreeMap<String, serde_json::Value>> {
+        let Some(manifest) = self.verified_community_adapter()? else {
+            return Ok(BTreeMap::new());
+        };
+        let scope = serde_json::to_value(&self.scope)?;
+        let mut values = BTreeMap::new();
+        for key in &manifest.entry.frozen_selectors {
+            let value = scope
+                .get(key)
+                .filter(|v| v.is_string() || v.is_boolean() || v.is_number())
+                .ok_or_else(|| {
+                    crate::error::LocusError::msg(
+                        "community adapter frozen selector needs a concrete scalar binding scope",
+                    )
+                })?;
+            values.insert(key.clone(), value.clone());
+        }
+        Ok(values)
+    }
+
+    /// Enforce the signed surface, local policy and frozen arguments at actual dispatch.
+    pub fn community_tool_args(
+        &self,
+        policy: &Policy,
+        tool: &str,
+        args: &serde_json::Value,
+    ) -> crate::error::Result<serde_json::Value> {
+        let Some(manifest) = self.verified_community_adapter()? else {
+            return Ok(args.clone());
+        };
+        if !manifest.entry.tools.iter().any(|name| name == tool) {
+            return Err(crate::error::LocusError::msg(
+                "tool is outside the signed community adapter surface",
+            ));
+        }
+        if self.scope.read_only == Some(true)
+            && manifest
+                .entry
+                .destructive_tools
+                .iter()
+                .any(|name| name == tool)
+        {
+            return Err(crate::error::LocusError::msg(
+                "community adapter destructive tool denied by read_only scope",
+            ));
+        }
+        if crate::policy::evaluate(policy, tool).decision != crate::policy::Decision::Allow {
+            return Err(crate::error::LocusError::msg(
+                "community adapter tool requires closed policy authorization",
+            ));
+        }
+        let frozen = self.community_frozen_values()?;
+        fn scan(
+            value: &serde_json::Value,
+            frozen: &BTreeMap<String, serde_json::Value>,
+            depth: usize,
+        ) -> crate::error::Result<()> {
+            if depth > 32 {
+                return Err(crate::error::LocusError::msg(
+                    "community adapter arguments exceed bounded freeze depth",
+                ));
+            }
+            match value {
+                serde_json::Value::Object(object) => {
+                    for (key, value) in object {
+                        if frozen.get(key).is_some_and(|expected| expected != value) {
+                            return Err(crate::error::LocusError::msg(
+                                "community adapter frozen selector override refused",
+                            ));
+                        }
+                        scan(value, frozen, depth + 1)?;
+                    }
+                }
+                serde_json::Value::Array(array) => {
+                    for value in array {
+                        scan(value, frozen, depth + 1)?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        scan(args, &frozen, 0)?;
+        let mut result = args.clone();
+        let object = result.as_object_mut().ok_or_else(|| {
+            crate::error::LocusError::msg("community adapter arguments must be an object")
+        })?;
+        for (key, value) in frozen {
+            object.entry(key).or_insert(value);
+        }
+        Ok(result)
     }
 
     /// True when this provider should spawn an MCP stdio worker.
@@ -601,6 +761,39 @@ impl From<&Binding> for BindingSummary {
     }
 }
 
+/// Levenshtein distance over chars (small alias strings only).
+pub fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// Closest known alias to a typo, if plausibly close: at most one edit per
+/// three characters (minimum one, maximum three), so `persnal` suggests
+/// `personal` but `nope` does not suggest `acme`. A wrong suggestion names
+/// another tenant, so this errs toward none.
+pub fn nearest_alias<'a>(missing: &str, aliases: &'a [String]) -> Option<&'a str> {
+    let needle = missing.to_lowercase();
+    aliases
+        .iter()
+        .map(|c| (edit_distance(&needle, &c.to_lowercase()), c))
+        .filter(|(d, c)| {
+            let longest = c.chars().count().max(needle.chars().count());
+            *d <= (longest / 3).clamp(1, 3)
+        })
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, c)| c.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,6 +980,7 @@ upstream = { recipe = "github-mcp" }
             resolve_secrets: false,
             sandbox: None,
             sandbox_no_network: false,
+            community_adapter: None,
         };
         let expanded = command_only.expand().unwrap();
         assert_eq!(expanded.command, "custom-mcp");
@@ -812,6 +1006,7 @@ upstream = { recipe = "github-mcp" }
             resolve_secrets: false,
             sandbox: None,
             sandbox_no_network: false,
+            community_adapter: None,
         };
         let expanded = args_only.expand().unwrap();
         assert_eq!(expanded.command, "npx");
@@ -855,6 +1050,7 @@ upstream = { recipe = "github-mcp" }
                 resolve_secrets: false,
                 sandbox: None,
                 sandbox_no_network: false,
+                community_adapter: None,
             };
             assert!(command_override.expand().is_err());
             assert_eq!(
@@ -1077,5 +1273,28 @@ credential_ref = "phm:X"
         assert!(validate_name_component("alias", "../x").is_err());
         assert!(validate_name_component("alias", "a/b").is_err());
         assert!(validate_name_component("principal", "").is_err());
+    }
+
+    #[test]
+    fn edit_distance_and_nearest_alias() {
+        assert_eq!(edit_distance("personal", "personal"), 0);
+        assert_eq!(edit_distance("personol", "personal"), 1);
+        assert_eq!(edit_distance("", "abc"), 3);
+
+        let aliases = vec![
+            "personal".to_string(),
+            "ashlrai".to_string(),
+            "cash-margin-partners".to_string(),
+        ];
+        assert_eq!(nearest_alias("personol", &aliases), Some("personal"));
+        assert_eq!(nearest_alias("ashlari", &aliases), Some("ashlrai"));
+        // Case-insensitive.
+        assert_eq!(nearest_alias("Personal", &aliases), Some("personal"));
+        // A completely different word gets no suggestion.
+        assert_eq!(nearest_alias("zzzzzzzzzz", &aliases), None);
+        // Every letter different in a short word is not a typo.
+        let short = vec!["acme".to_string(), "personal".to_string()];
+        assert_eq!(nearest_alias("nope", &short), None);
+        assert_eq!(nearest_alias("acmee", &short), Some("acme"));
     }
 }

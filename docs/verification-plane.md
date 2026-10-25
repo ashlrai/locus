@@ -4,7 +4,7 @@
 
 Milestone **M5** seeds a lightweight plane so agents and hub can ask: *should this claim be grounded with a tool before we act?*
 
-No ML models. Pure heuristics + a stable JSON shape for ashlr-hub (and peers) to re-score or enforce later.
+No ML models. Pure heuristics + a stable JSON shape for Phantom (and peers) to re-score or enforce later.
 
 Related: [architecture.md](./architecture.md) · [GOALS.md](../GOALS.md) · [hub-integration.md](./hub-integration.md)
 
@@ -152,19 +152,18 @@ locus watch --json --require-ok --interval 30s
 | `--once` | Single tick then exit |
 | `--require-ok` | Fail closed: non-zero exit whenever `session_ok` is false (including unpinned) |
 | `--once` only | Non-zero when pin was present/expected **and** `session_ok` is false; unpinned soft-exits 0 |
-| `--interval` | Poll period (`5s`, `30s`, `1m`; default `5s`) |
+| `--interval` | Poll period (`5s`, `30s`, `1m`; default `5s`; minimum `1s`) |
 
 Binding drift still freezes the pin (same as doctor / `verify_session`). Never includes secrets. Prefer `locus verify session --json` when hub needs the full doctor + whoami objects; use `watch` for continuous compact ticks.
 
 ### MCP
 
-Control tool (available unpinned and pinned):
+Control tools (available unpinned and pinned):
 
 | Tool | Args | Result |
 |------|------|--------|
 | `locus_verify_claim` | `text` or `claim` (string) | Same JSON shape as CLI claim |
-
-Session pack is CLI/hub today (`locus verify session --json`); agents can compose `locus_whoami` + doctor resource + `locus_safe_next` equivalently.
+| `locus_verify_session` | none | Same JSON as `locus verify session --json` (`whoami?`, `doctor`, `safe_next`, `session_ok`); runs real external probes |
 
 Audit op: `mcp.verify_claim` / `verify.claim` / `verify.session` — confidence, signals, truncated claim preview / verdict flags only (no secrets).
 

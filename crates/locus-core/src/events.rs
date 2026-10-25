@@ -252,7 +252,7 @@ pub fn post_audit_webhook(
         .set("Content-Type", content_type)
         .set("X-Locus-Export", "audit")
         .send_string(body)
-        .map_err(|e| crate::LocusError::msg(format!("webhook post to {host} failed: {e}")))?;
+        .map_err(|e| webhook_error(&host, e))?;
 
     let status = resp.status();
     if !(200..300).contains(&status) {
@@ -266,6 +266,21 @@ pub fn post_audit_webhook(
         bytes: body.len(),
         host,
     })
+}
+
+/// A webhook failure named by host and status or transport kind only.
+///
+/// `ureq::Error`'s Display starts with the full request URL, including any
+/// user name, password, path token or query token, so it is never used here.
+fn webhook_error(host: &str, e: ureq::Error) -> crate::LocusError {
+    match e {
+        ureq::Error::Status(status, _) => {
+            crate::LocusError::msg(format!("webhook post to {host} returned HTTP {status}"))
+        }
+        ureq::Error::Transport(t) => {
+            crate::LocusError::msg(format!("webhook post to {host} failed: {}", t.kind()))
+        }
+    }
 }
 
 fn to_json_lines(events: &[AuditEvent], exported_at: &str) -> String {
@@ -386,6 +401,80 @@ fn rfc3339_to_unix_nano(ts: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One-shot local HTTP stub: each connection gets `reply` after the request
+    /// head is read. Returns `http://127.0.0.1:<port>`.
+    fn webhook_stub(reply: &'static str) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 && line != "\r\n" {
+                    line.clear();
+                }
+                let mut stream = stream;
+                let _ = stream.write_all(reply.as_bytes());
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// Every 8-character window of `secret` found in `text`.
+    fn leaked_windows(text: &str, secret: &str) -> usize {
+        let c: Vec<char> = secret.chars().collect();
+        c.windows(8)
+            .filter(|w| text.contains(&w.iter().collect::<String>()))
+            .count()
+    }
+
+    #[test]
+    fn webhook_errors_never_carry_the_url_path_query_or_credentials() {
+        const PATH_TOKEN: &str = "T0CANARYq7X2w9Z4k3M8vB";
+        const QUERY_TOKEN: &str = "qtCANARYr5T1y8U2i6P0aS";
+        const PASSWORD: &str = "pwCANARYd3F7g1H9j5K2lQ";
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let p = l.local_addr().unwrap().port();
+            drop(l);
+            format!("http://127.0.0.1:{p}")
+        };
+        let cases = [
+            (
+                "401",
+                webhook_stub("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"),
+            ),
+            (
+                "500",
+                webhook_stub("HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"),
+            ),
+            ("closed port", closed),
+        ];
+        let mut found = Vec::new();
+        for (label, root) in cases {
+            let url = format!(
+                "{}/services/{PATH_TOKEN}?token={QUERY_TOKEN}",
+                root.replace("http://", &format!("http://hook:{PASSWORD}@"))
+            );
+            let err = post_audit_webhook(&url, "{}", "application/json")
+                .expect_err(label)
+                .to_string();
+            assert!(err.contains("127.0.0.1"), "{label}: names the host");
+            for (name, s) in [
+                ("path", PATH_TOKEN),
+                ("query", QUERY_TOKEN),
+                ("password", PASSWORD),
+            ] {
+                let n = leaked_windows(&err, s);
+                if n > 0 {
+                    found.push(format!("{label}: {name} ({n} windows)"));
+                }
+            }
+        }
+        assert!(found.is_empty(), "{found:#?}");
+    }
 
     fn sample_events() -> Vec<AuditEvent> {
         vec![

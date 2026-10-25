@@ -16,16 +16,26 @@ cargo run -p locus-cli -- --help
 cargo run -p locus-mcp --   # stdio MCP; do not print logs on stdout
 ```
 
+A client-launched `locus-mcp` serves control tools only. Provider tools for the
+pinned binding need `locus mcp --supervised` (see [docs/mcp.md](./docs/mcp.md)).
+
 Release binaries: `./target/release/locus`, `./target/release/locus-mcp`.
 
-Smoke without touching `~/.locus`:
+Smoke without touching `~/.locus`. Run it as one shell script (one Bash call):
+the pin's authority broker is supervised by the process that pinned, so it
+dies with that shell, and with `cargo run` it dies as soon as cargo exits.
 
 ```bash
-export LOCUS_HOME=/tmp/locus-dev
-cargo run -p locus-cli -- quickstart   # or: init --with-samples && enter personal
-cargo run -p locus-cli -- whoami
-cargo run -p locus-cli -- doctor
+cargo build --workspace
+export LOCUS_HOME=/tmp/locus-dev PATH="$PWD/target/debug:$PATH"
+locus quickstart                 # or: init --with-samples, then the hook line, then enter personal
+eval "$(locus hook bash)"        # exports LOCUS_CONTROL_CAPABILITY for whoami/pin/leave
+locus whoami
+locus doctor                     # exits 1 on WARN, e.g. when phantom is not installed
 ```
+
+A later shell sees `no current broker endpoint ... human re-pin required`.
+Recover with `eval "$(locus hook bash)"; locus leave --force; locus enter personal`.
 
 ## Architecture
 
@@ -34,7 +44,7 @@ cargo run -p locus-cli -- doctor
 | Crate | Role |
 |-------|------|
 | **locus-core** | Binding, Session, Seal (HMAC), Policy, Store (`~/.locus`), isolation env, CredentialRef resolve, adapters, workers |
-| **locus-cli** | Human control plane: `init`, `pin`, `leave`, `whoami`, `exec`, `binding`, `workspace`, `setup`, `doctor`, `hook` |
+| **locus-cli** | Human control plane. Daily use: `enter`, `switch`, `pin`, `leave`, `whoami`, `status`, `exec`, `run`, `binding`. Setup: `init`, `quickstart`, `onboard`, `setup`, `agent`, `doctor`, `hook`, `mcp`, `workspace`, and more. `locus --help` is the full grouped list |
 | **locus-mcp** | Stdio MCP multiplexor — tools = control + **pinned binding only** |
 
 Planes (see [docs/architecture.md](./docs/architecture.md)):
@@ -81,7 +91,8 @@ Clients → data plane (locus-mcp / exec)
 | [docs/policy.md](./docs/policy.md) | Policy rules + approval CLI |
 | [docs/firm-mode.md](./docs/firm-mode.md) | Multi-client / dual-control ops |
 | [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
-| [docs/mcp.md](./docs/mcp.md) | Client wiring |
+| [docs/mcp.md](./docs/mcp.md) | Client wiring (Claude Code, Cursor, Codex, Gemini CLI, Grok Build) |
+| [docs/onboarding.md](./docs/onboarding.md) | `locus onboard` + clients × tenants walkthrough |
 | [docs/workers.md](./docs/workers.md) | Worker backends |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | PR + adapter checklist |
 | [SECURITY.md](./SECURITY.md) | Reporting |

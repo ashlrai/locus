@@ -5,18 +5,11 @@
  *
  * 1. Prefer a cached download under ~/.locus/bin
  * 2. Else download the matching GitHub release asset (locus-<target>.tar.gz)
- * 3. Stop on failure; source installation is an explicit, version-pinned choice
+ * 3. Else fall back to `cargo install --git` and use ~/.cargo/bin/locus
  */
 
-const { execFileSync } = require("child_process");
+const { execFileSync, spawnSync } = require("child_process");
 const {
-  accessSync,
-  constants,
-  closeSync,
-  openSync,
-  readSync,
-  realpathSync,
-  renameSync,
   chmodSync,
   copyFileSync,
   existsSync,
@@ -26,18 +19,19 @@ const {
   readFileSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } = require("fs");
-const { delimiter, extname, isAbsolute, join, resolve } = require("path");
+const { dirname, join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
-const VERSION = "0.5.0";
+const VERSION = "0.5.1";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus";
 const CARGO_PACKAGE = "locus-cli";
 // `cargo install` takes the crate as a positional argument; it has no --package flag.
-const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} --tag v${VERSION} ${CARGO_PACKAGE} --locked`;
+const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} ${CARGO_PACKAGE} --locked`;
 const CACHE_DIR = join(
   process.env.HOME || process.env.USERPROFILE || "/tmp",
   ".locus",
@@ -53,16 +47,14 @@ const SUPPORTED_TARGETS = Object.freeze({
   "win32-x64": "x86_64-pc-windows-msvc",
 });
 
-// Verified against the official live Homebrew tap and all three published
-// v0.5.0 release archives. These are asset hashes, not the source tarball hash.
-// Update together with VERSION and the release matrix; never trust a checksum
-// downloaded beside an archive as a replacement for these package-owned pins.
-const RELEASE_SHA256 = Object.freeze({
-  "aarch64-apple-darwin": "fd45ec7431a730f309a4532f91356f64d6387143a7ac482fde4440d6ea5b4a79",
-  "x86_64-apple-darwin": "5fcb2cf1b229dbcd57bee331df960fade17af5da528fec89913316502f2a9b6a",
-  "x86_64-unknown-linux-gnu": "1ce1994a49ad8edd8c30b0e56173c7e45edf2e123002dddc279390a720e361f0",
-});
-const PREBUILT_TARGETS = Object.freeze(Object.keys(RELEASE_SHA256));
+// Targets release.yml actually builds and uploads. The other SUPPORTED_TARGETS
+// have no prebuilt asset yet, so they go straight to the cargo fallback.
+// Keep in sync with the matrix in .github/workflows/release.yml.
+const PREBUILT_TARGETS = Object.freeze([
+  "aarch64-apple-darwin",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+]);
 
 function hasPrebuiltBinary(target) {
   return PREBUILT_TARGETS.includes(target);
@@ -75,8 +67,8 @@ function cargoFallbackMessage(runtime = process, reason = "no-prebuilt") {
       ? `No prebuilt locus binary for ${platform} in v${VERSION}`
       : `Could not download the prebuilt locus v${VERSION} binary for ${platform}`;
   return (
-    `${why}. No automatic source install was attempted. ` +
-    `To install this release explicitly with Rust (https://rustup.rs), run:\n  ${INSTALL_FROM_SOURCE}`
+    `${why}; building from source with cargo instead. ` +
+    `This can take several minutes and needs Rust (https://rustup.rs).`
   );
 }
 
@@ -104,43 +96,26 @@ function getVersionSidecarPath(binaryPath) {
   return `${binaryPath}.version`;
 }
 
-function download(url, redirects = 0) {
-  return new Promise((resolveDownload, reject) => {
-    if (redirects > 5 || !url.startsWith("https://")) {
-      reject(new Error("Invalid release download redirect"));
-      return;
-    }
-    const request = https.get(url, (res) => {
-      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume();
-        try {
-          return download(new URL(res.headers.location, url).href, redirects + 1)
-            .then(resolveDownload, reject);
-        } catch {
-          reject(new Error("Invalid release download redirect"));
-          return;
+function download(url) {
+  return new Promise((resolve, reject) => {
+    https
+      .get(url, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          // Drain every response we do not read, or its socket keeps the
+          // process alive after the download finishes.
+          res.resume();
+          return download(res.headers.location).then(resolve).catch(reject);
         }
-      }
-      if (res.statusCode !== 200) {
-        res.resume();
-        reject(new Error(`HTTP ${res.statusCode} for release download`));
-        return;
-      }
-      const chunks = [];
-      let size = 0;
-      res.on("data", (chunk) => {
-        size += chunk.length;
-        if (size > 100 * 1024 * 1024) {
-          request.destroy(new Error("Release archive exceeds 100 MiB"));
-          return;
+        if (res.statusCode !== 200) {
+          res.resume();
+          return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
         }
-        chunks.push(chunk);
-      });
-      res.on("end", () => resolveDownload(Buffer.concat(chunks)));
-      res.on("error", reject);
-    });
-    request.setTimeout(30_000, () => request.destroy(new Error("Release download timed out")));
-    request.on("error", reject);
+        const chunks = [];
+        res.on("data", (chunk) => chunks.push(chunk));
+        res.on("end", () => resolve(Buffer.concat(chunks)));
+        res.on("error", reject);
+      })
+      .on("error", reject);
   });
 }
 
@@ -157,35 +132,32 @@ function parseSha256File(buf, expectedFilename) {
   return null;
 }
 
-function sha256(data) {
-  return crypto.createHash("sha256").update(data).digest("hex");
-}
-
 function isCachedBinaryStale(binaryPath) {
-  // Old version-only sidecars cannot prove a verified install. Do not execute
-  // an unknown cached binary (especially an MCP server) to inspect its version.
+  // Prefer sidecar (locus-mcp has no --version CLI; keep locus consistent)
+  const sidecar = getVersionSidecarPath(binaryPath);
+  if (existsSync(sidecar)) {
+    try {
+      return readFileSync(sidecar, "utf8").trim() !== VERSION;
+    } catch {
+      return true;
+    }
+  }
   try {
-    const receipt = JSON.parse(readFileSync(`${binaryPath}.integrity.json`, "utf8"));
-    const target = getPlatformTarget();
-    return receipt.version !== VERSION || receipt.target !== target ||
-      !RELEASE_SHA256[target] || receipt.archiveSha256 !== RELEASE_SHA256[target] ||
-      receipt.binarySha256 !== sha256(readFileSync(binaryPath));
+    const out = execFileSync(binaryPath, ["--version"], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return !out.toString().includes(VERSION);
   } catch {
     return true;
   }
 }
 
-function writeCacheReceipt(binaryPath, target, stagingDir) {
-  const receipt = {
-    version: VERSION,
-    target,
-    archiveSha256: RELEASE_SHA256[target],
-    binarySha256: sha256(readFileSync(binaryPath)),
-  };
-  const stagedReceipt = join(stagingDir, "integrity.json");
-  writeFileSync(stagedReceipt, `${JSON.stringify(receipt)}\n`, "utf8");
-  renameSync(stagedReceipt, `${binaryPath}.integrity.json`);
-  writeFileSync(getVersionSidecarPath(binaryPath), `${VERSION}\n`, "utf8");
+function writeVersionSidecar(binaryPath) {
+  try {
+    writeFileSync(getVersionSidecarPath(binaryPath), `${VERSION}\n`, "utf8");
+  } catch {
+    // best-effort
+  }
 }
 
 function findBinaryInDir(dir, binaryFilename) {
@@ -215,7 +187,7 @@ function findBinaryInDir(dir, binaryFilename) {
   return null;
 }
 
-function extractBinaryFromArchive(archivePath, binaryPath, target) {
+function extractBinaryFromArchive(archivePath, binaryPath) {
   const stagingDir = mkdtempSync(join(CACHE_DIR, ".extract-"));
   const binaryFilename = getBinaryFilename();
 
@@ -242,14 +214,47 @@ function extractBinaryFromArchive(archivePath, binaryPath, target) {
       throw new Error(`${binaryFilename} not found in ${archivePath}`);
     }
 
-    const stagedBinary = join(stagingDir, ".installed-binary");
-    copyFileSync(extractedBinaryPath, stagedBinary);
-    if (process.platform !== "win32") chmodSync(stagedBinary, 0o755);
-    // Atomic replacement keeps an older cache intact until extraction succeeds.
-    renameSync(stagedBinary, binaryPath);
-    writeCacheReceipt(binaryPath, target, stagingDir);
+    copyFileSync(extractedBinaryPath, binaryPath);
+    if (process.platform !== "win32") {
+      chmodSync(binaryPath, 0o755);
+    }
+    writeVersionSidecar(binaryPath);
+    installCompanionBinaries(stagingDir, binaryPath);
   } finally {
     rmSync(stagingDir, { recursive: true, force: true });
+  }
+}
+
+// The release archive ships locus-mcp beside locus. Install it next to the
+// cached locus so `locus setup` finds the sibling MCP server; without it npm
+// users have no locus-mcp at all. Best-effort: never fails the locus install.
+const COMPANION_BINARIES = Object.freeze(["locus-mcp"]);
+
+function installCompanionBinaries(stagingDir, binaryPath, platform = process.platform) {
+  const installed = [];
+  const destDir = dirname(binaryPath);
+  for (const name of COMPANION_BINARIES) {
+    const filename = platform === "win32" ? `${name}.exe` : name;
+    try {
+      const src = findBinaryInDir(stagingDir, filename);
+      if (!src) continue;
+      const dest = join(destDir, filename);
+      copyFileSync(src, dest);
+      if (platform !== "win32") chmodSync(dest, 0o755);
+      writeVersionSidecar(dest);
+      installed.push(dest);
+    } catch {
+      // best-effort
+    }
+  }
+  return installed;
+}
+
+function removeIfExists(path) {
+  try {
+    unlinkSync(path);
+  } catch {
+    // best-effort cleanup only
   }
 }
 
@@ -259,127 +264,260 @@ function cargoBinPath() {
   return join(home, ".cargo", "bin", name);
 }
 
-function isNativeCandidate(candidate) {
-  let fd;
+function isNodeShim(path) {
   try {
-    if (!isAbsolute(candidate)) return false;
-    const actual = realpathSync(candidate);
-    if (actual === realpathSync(__filename) || resolve(candidate) === resolve(getBinaryPath())) return false;
-    if (!statSync(actual).isFile()) return false;
-    // Windows npm .cmd/.ps1 launchers and JavaScript copies are never native.
-    if ([".js", ".cmd", ".ps1"].includes(extname(actual).toLowerCase())) return false;
-    if (process.platform !== "win32") accessSync(actual, constants.X_OK);
-    fd = openSync(actual, "r");
-    // Recognize native file formats, never scripts or shell trampolines.
-    // File headers establish the format only, not product authenticity.
-    const header = Buffer.alloc(64);
-    const size = readSync(fd, header, 0, header.length, 0);
-    if (process.platform === "linux") {
-      return size >= 16 && header.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])) &&
-        [1, 2].includes(header[4]) && [1, 2].includes(header[5]) && header[6] === 1;
-    }
-    if (process.platform === "darwin") {
-      return size >= 32 && [0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe,
-        0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca].includes(header.readUInt32BE(0));
-    }
-    if (process.platform === "win32") {
-      if (size < 64 || header[0] !== 0x4d || header[1] !== 0x5a) return false;
-      const peOffset = header.readUInt32LE(0x3c);
-      if (peOffset < 64 || peOffset > 1024 * 1024 || peOffset + 4 > statSync(actual).size) return false;
-      const signature = Buffer.alloc(4);
-      return readSync(fd, signature, 0, 4, peOffset) === 4 &&
-        signature.equals(Buffer.from([0x50, 0x45, 0, 0]));
-    }
-    return false;
+    const real = require("fs").realpathSync(path);
+    if (real === require("fs").realpathSync(__filename)) return true;
+    const head = readFileSync(real).subarray(0, 64).toString("utf8");
+    return head.startsWith("#!") && head.includes("node");
   } catch {
     return false;
-  } finally {
-    if (fd !== undefined) closeSync(fd);
   }
 }
 
 function tryExistingOnPath() {
-  // Search every entry rather than accepting the first `which` result (often
-  // our own global npm shim). Paths are passed directly, including spaces.
-  const filename = getBinaryFilename();
-  const candidates = (process.env.PATH || "").split(delimiter)
-    .filter((dir) => isAbsolute(dir)).map((dir) => join(dir, filename));
-  candidates.push(cargoBinPath());
-  for (const candidate of candidates) {
-    if (!isNativeCandidate(candidate)) continue;
-    try {
-      const version = execFileSync(candidate, ["--version"], {
-        stdio: ["ignore", "pipe", "ignore"], timeout: 5_000, maxBuffer: 4096,
-      }).toString().trim();
-      if (version !== `locus ${VERSION}`) continue;
-    } catch {
-      continue;
+  const which = process.platform === "win32" ? "where" : "which";
+  const result = spawnSync(which, [BINARY_NAME], { encoding: "utf8" });
+  if (result.status === 0) {
+    // Skip this npm shim itself (and any other node wrapper): `which` finds
+    // the npm-installed bin first, and executing it recurses forever.
+    const candidates = (result.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    for (const path of candidates) {
+      if (path && existsSync(path) && !isNodeShim(path)) {
+        return path;
+      }
     }
-    return candidate;
+  }
+  const cargoPath = cargoBinPath();
+  if (existsSync(cargoPath)) {
+    return cargoPath;
   }
   return null;
 }
 
+function installViaCargo() {
+  console.error(`Falling back to: ${INSTALL_FROM_SOURCE}`);
+  const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
+  const result = spawnSync(
+    cargo,
+    [
+      "install",
+      "--git",
+      `https://github.com/${REPO}`,
+      CARGO_PACKAGE,
+      "--locked",
+      "--force",
+    ],
+    { stdio: "inherit", env: process.env }
+  );
+  if (result.status !== 0) {
+    throw new Error(
+      `cargo install failed (exit ${result.status}). Install Rust from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
+    );
+  }
+  const path = cargoBinPath();
+  if (!existsSync(path)) {
+    throw new Error(`cargo install succeeded but ${path} not found`);
+  }
+  return path;
+}
+
 async function downloadReleaseBinary(binaryPath) {
   const target = getPlatformTarget();
-  const expected = RELEASE_SHA256[target];
-  if (!expected) throw new Error(cargoFallbackMessage(process, "no-prebuilt"));
-  const archiveName = `locus-${target}.tar.gz`;
+  const isWindows = process.platform === "win32";
+  const archiveExt = isWindows ? "zip" : "tar.gz";
+  // Matches .github/workflows/release.yml: locus-<target>.tar.gz
+  const archiveName = `locus-${target}.${archiveExt}`;
   const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${archiveName}`;
+  const sha256Url = `${url}.sha256`;
+
   console.error(`Downloading locus v${VERSION} for ${target}...`);
-  const data = await download(url);
-  if (sha256(data) !== expected) {
-    throw new Error(`SHA-256 mismatch for ${archiveName}; installation refused`);
-  }
   mkdirSync(CACHE_DIR, { recursive: true });
-  // Each invocation owns its archive, so CLI and MCP installs can run together.
-  const downloadDir = mkdtempSync(join(CACHE_DIR, ".download-"));
+
+  const archivePath = join(CACHE_DIR, archiveName);
+
   try {
-    const archivePath = join(downloadDir, archiveName);
+    // Checksum is optional until release.yml publishes .sha256 sidecars
+    let expected = null;
+    try {
+      const sumBuf = await download(sha256Url);
+      expected = parseSha256File(sumBuf, archiveName);
+    } catch {
+      expected = null;
+    }
+
+    const data = await download(url);
+
+    if (expected) {
+      const actual = crypto.createHash("sha256").update(data).digest("hex");
+      const expectedBuf = Buffer.from(expected, "hex");
+      const actualBuf = Buffer.from(actual, "hex");
+      if (
+        expectedBuf.length !== actualBuf.length ||
+        !crypto.timingSafeEqual(expectedBuf, actualBuf)
+      ) {
+        throw new Error(
+          `SHA-256 mismatch for ${archiveName}: expected ${expected}, got ${actual}`
+        );
+      }
+    } else {
+      console.error(
+        `Warning: no checksum at ${sha256Url} — installing without verification`
+      );
+    }
+
     writeFileSync(archivePath, data);
-    extractBinaryFromArchive(archivePath, binaryPath, target);
+    extractBinaryFromArchive(archivePath, binaryPath);
+    removeIfExists(archivePath);
     console.error(`Installed locus to ${binaryPath}`);
     return binaryPath;
-  } finally {
-    rmSync(downloadDir, { recursive: true, force: true });
+  } catch (err) {
+    removeIfExists(archivePath);
+    throw err;
   }
 }
 
 async function ensureBinary() {
   const binaryPath = getBinaryPath();
-  if (existsSync(binaryPath) && !isCachedBinaryStale(binaryPath)) return binaryPath;
+
+  if (existsSync(binaryPath) && !isCachedBinaryStale(binaryPath)) {
+    return binaryPath;
+  }
+  if (existsSync(binaryPath) && isCachedBinaryStale(binaryPath)) {
+    console.error(`Cached locus is out of date — refreshing to v${VERSION}...`);
+    removeIfExists(binaryPath);
+    removeIfExists(getVersionSidecarPath(binaryPath));
+  }
+
+  // Prefer already-installed binary (brew / prior cargo install)
   const existing = tryExistingOnPath();
-  if (existing) return existing;
-  // Fail closed: a download, integrity, or platform failure never installs
-  // arbitrary repository HEAD through an automatic Cargo fallback.
+  if (existing) {
+    // If PATH binary is current enough, use it; otherwise still try download
+    try {
+      if (!isCachedBinaryStale(existing)) {
+        return existing;
+      }
+    } catch {
+      // use it anyway if we can't tell
+      return existing;
+    }
+  }
+
+  let target = null;
+  try {
+    target = getPlatformTarget();
+  } catch {
+    // Unsupported platform: downloadReleaseBinary reports it, then cargo runs.
+  }
+  if (target && !hasPrebuiltBinary(target)) {
+    console.error(cargoFallbackMessage(process, "no-prebuilt"));
+    try {
+      return installViaCargo();
+    } catch (cargoErr) {
+      console.error(cargoErr.message);
+      process.exit(1);
+    }
+  }
+
   try {
     return await downloadReleaseBinary(binaryPath);
   } catch (err) {
-    throw new Error(`${err.message}\nManual source install: ${INSTALL_FROM_SOURCE}`);
+    console.error(`Failed to download locus: ${err.message}`);
+    console.error(cargoFallbackMessage(process, "download-failed"));
+    try {
+      return installViaCargo();
+    } catch (cargoErr) {
+      console.error(cargoErr.message);
+      process.exit(1);
+    }
+  }
+}
+
+// Session authority is anchored to the *parent* process of `locus` (the user's
+// shell). When this Node wrapper sits in between, the anchor binds to a
+// short-lived node process, so `locus quickstart` then `locus enter <alias>`
+// fails with "session authority generation is stale". On POSIX we therefore
+// replace this wrapper with a symlink to the native binary, so the shell runs
+// locus directly. Best-effort: on any failure the wrapper keeps working.
+const AUTHORITY_COMMANDS = new Set(["quickstart", "pin", "enter", "init", "leave"]);
+
+// True when a user other than the owner (no shared group assumed) can reach
+// `path`: it and every ancestor directory are world-traversable (for a file:
+// world-executable).
+function reachableByOthers(path) {
+  const fs = require("fs");
+  try {
+    let current = fs.realpathSync(path);
+    if ((fs.statSync(current).mode & 0o001) === 0) return false;
+    for (;;) {
+      const parent = dirname(current);
+      if (parent === current) return true;
+      if ((fs.statSync(parent).mode & 0o001) === 0) return false;
+      current = parent;
+    }
+  } catch {
+    return false;
+  }
+}
+
+function linkNativeBin(
+  binary,
+  target = __filename,
+  uid = typeof process.getuid === "function" ? process.getuid() : -1
+) {
+  if (process.platform === "win32" || process.env.LOCUS_NPM_NO_LINK) return false;
+  const fs = require("fs");
+  try {
+    if (fs.lstatSync(target).isSymbolicLink()) return false;
+    // A root install into a shared prefix (e.g. `sudo npm install -g` into
+    // /usr/lib/node_modules) must not point its bin into root's private HOME
+    // (/root is 0700): other users would get "Permission denied". Keep the
+    // wrapper there; each user's run then resolves a binary under their own
+    // HOME. Non-root installs still link (e.g. Homebrew node on macOS, whose
+    // prefix is world-readable while HOME is 0750), as they are the user's own.
+    if (uid === 0 && reachableByOthers(dirname(target)) && !reachableByOthers(binary)) {
+      return false;
+    }
+    const tmp = `${target}.${process.pid}.tmp`;
+    removeIfExists(tmp);
+    fs.symlinkSync(binary, tmp);
+    fs.renameSync(tmp, target);
+    return true;
+  } catch {
+    return false;
   }
 }
 
 async function main() {
   const binary = await ensureBinary();
   const args = process.argv.slice(2);
+  if (linkNativeBin(binary) && AUTHORITY_COMMANDS.has(args[0])) {
+    console.error(
+      "locus: linked the native binary for future runs. This first run went through the npm wrapper; if a later command reports a stale session authority, re-run `locus " + args.join(" ") + "`."
+    );
+  }
 
   try {
     execFileSync(binary, args, { stdio: "inherit" });
   } catch (err) {
     process.exit(err.status || 1);
   }
+  // Exit explicitly: a lingering download socket must never hold the shell.
+  process.exit(0);
 }
 
 if (require.main === module) {
-  main().catch((err) => {
-    console.error(err.message);
-    process.exit(1);
-  });
+  main();
 }
 
 module.exports = {
+  getBinaryPath,
+  isCachedBinaryStale,
+  downloadReleaseBinary,
+  ensureBinary,
+  linkNativeBin,
+  reachableByOthers,
   INSTALL_FROM_SOURCE,
-  RELEASE_SHA256,
   PREBUILT_TARGETS,
   SUPPORTED_TARGETS,
   cargoFallbackMessage,
@@ -387,7 +525,5 @@ module.exports = {
   getPlatformTarget,
   parseSha256File,
   findBinaryInDir,
-  tryExistingOnPath,
-  ensureBinary,
-  isCachedBinaryStale,
+  installCompanionBinaries,
 };

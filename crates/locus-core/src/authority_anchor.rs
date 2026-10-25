@@ -389,6 +389,17 @@ fn authorize_control_teardown_with(
     }
 }
 
+/// Wrap a `read_endpoint` failure without nesting: an inner
+/// `AuthorityAnchorUnavailable` contributes only its detail, so the message
+/// reads "...: no current broker endpoint: <why>; human re-pin required" once.
+fn no_current_endpoint(error: LocusError) -> LocusError {
+    let detail = match error {
+        LocusError::AuthorityAnchorUnavailable(detail) => detail,
+        other => other.to_string(),
+    };
+    LocusError::AuthorityAnchorUnavailable(format!("no current broker endpoint: {detail}"))
+}
+
 pub(crate) fn validate(
     home: &Path,
     lease: &SessionAuthorityAnchor,
@@ -397,9 +408,7 @@ pub(crate) fn validate(
     subject_digest: &str,
 ) -> Result<ValidationMode> {
     let (auth, mode) = validation_auth()?;
-    let endpoint = read_endpoint(home).map_err(|error| {
-        LocusError::AuthorityAnchorUnavailable(format!("no current broker endpoint: {error}"))
-    })?;
+    let endpoint = read_endpoint(home).map_err(no_current_endpoint)?;
     validate_endpoint_shape(home, &endpoint)?;
     if lease.version != AUTHORITY_ANCHOR_VERSION || lease.epoch != endpoint.epoch {
         return Err(LocusError::AuthorityAnchorMismatch);
@@ -547,14 +556,14 @@ fn control_auth() -> Result<RequestAuth> {
         Some(capability) => capability,
         None if is_test_harness() => test_control_capability(),
         None => {
-            return Err(LocusError::ExecutorAuthorityUnavailable(
+            return Err(LocusError::ExecutorAuthorityUnavailable(format!(
                 "LOCUS_CONTROL_CAPABILITY is required for control-plane authority.\n  \
                  fix (fresh setup): locus quickstart   # mints + persists an operator capability (0600), then adopts it\n  \
                  fix (manual):      export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"\n  \
-                 fix (persisted):   eval \"$(locus hook zsh)\"   # exports $LOCUS_HOME/control_capability if present\n  \
-                 check:             locus doctor"
-                    .into(),
-            ))
+                 fix (persisted):   {}   # exports $LOCUS_HOME/control_capability if present\n  \
+                 check:             locus doctor",
+                crate::recovery::user_hook_eval_command()
+            )))
         }
     };
     Ok(RequestAuth {
@@ -643,8 +652,9 @@ pub fn mint_persisted_control_capability(home: &Path) -> Result<String> {
     if path.exists() {
         return Err(LocusError::msg(format!(
             "refusing to overwrite existing control capability at {} — export it instead \
-             (eval \"$(locus hook zsh)\") or delete the file deliberately before re-minting",
-            path.display()
+             ({}) or delete the file deliberately before re-minting",
+            path.display(),
+            crate::recovery::user_hook_eval_command()
         )));
     }
     let value = random_hex(32);
@@ -827,7 +837,7 @@ fn ensure_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpo
             return Ok(endpoint);
         }
     }
-    start_broker(home, auth)
+    start_broker(home, auth, true)
 }
 
 fn ping(home: &Path, endpoint: &AuthorityAnchorEndpoint, auth: &RequestAuth) -> Result<()> {
@@ -842,7 +852,14 @@ fn ping(home: &Path, endpoint: &AuthorityAnchorEndpoint, auth: &RequestAuth) -> 
     }
 }
 
-fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoint> {
+/// `may_restart`: when the broker that refused this start exits without a
+/// successor, start once more instead of waiting for an endpoint that cannot
+/// appear (see [`retry_current_endpoint`]).
+fn start_broker(
+    home: &Path,
+    auth: &RequestAuth,
+    may_restart: bool,
+) -> Result<AuthorityAnchorEndpoint> {
     if auth.credential != RequestCredential::Control {
         return Err(LocusError::ExecutorAuthorityUnavailable(
             "only a control capability can start the authority broker".into(),
@@ -862,7 +879,8 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
         control_capability: hex::encode(auth.key),
     };
     if should_host_in_process() {
-        return start_in_process(startup).or_else(|_| retry_current_endpoint(home, auth));
+        return start_in_process(startup)
+            .or_else(|_| retry_current_endpoint(home, auth, may_restart));
     }
 
     let mut child = Command::new(&executable)
@@ -918,7 +936,8 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
             let _ = child.kill();
             let _ = child.wait();
             let detail = drain_broker_stderr(&err_receiver);
-            return retry_current_endpoint(home, auth).map_err(|_| {
+            // No restart after a timeout: that would double the worst-case wait.
+            return retry_current_endpoint(home, auth, false).map_err(|_| {
                 LocusError::AuthorityAnchorUnavailable(format!("broker startup timed out{detail}"))
             });
         }
@@ -928,11 +947,22 @@ fn start_broker(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoi
             ping(home, &endpoint, auth)?;
             Ok(endpoint)
         }
-        Err(_) => retry_current_endpoint(home, auth),
+        Err(_) => retry_current_endpoint(home, auth, may_restart),
     }
 }
 
-fn retry_current_endpoint(home: &Path, auth: &RequestAuth) -> Result<AuthorityAnchorEndpoint> {
+/// Wait for the broker that owns this home to publish a current endpoint.
+///
+/// A start that lost the singleton lock lands here. When the lock holder was a
+/// broker on its way out (its supervisor just exited), the lock frees up and
+/// no endpoint will ever appear, so with `may_restart` this starts a broker
+/// once more rather than waiting out the whole start timeout. Every check
+/// still runs on the new broker; only the dead wait is skipped.
+fn retry_current_endpoint(
+    home: &Path,
+    auth: &RequestAuth,
+    may_restart: bool,
+) -> Result<AuthorityAnchorEndpoint> {
     let deadline = Instant::now() + broker_start_timeout();
     while Instant::now() < deadline {
         if let Ok(endpoint) = read_endpoint(home) {
@@ -940,11 +970,20 @@ fn retry_current_endpoint(home: &Path, auth: &RequestAuth) -> Result<AuthorityAn
                 return Ok(endpoint);
             }
         }
+        if may_restart && broker_lock_is_free(home) {
+            return start_broker(home, auth, false);
+        }
         thread::sleep(Duration::from_millis(25));
     }
     Err(LocusError::AuthorityAnchorUnavailable(
         "no supervised broker owns this Locus home".into(),
     ))
+}
+
+/// True only when the singleton lock opens cleanly and nobody holds it: no
+/// broker owns this home. Any doubt (unsafe lock file, I/O error) is `false`.
+fn broker_lock_is_free(home: &Path) -> bool {
+    open_singleton_lock(&broker_lock_path(home)).is_ok_and(|lock| lock.try_lock_exclusive().is_ok())
 }
 
 fn start_in_process(startup: ServerStartup) -> Result<AuthorityAnchorEndpoint> {
@@ -1051,7 +1090,11 @@ fn run_server(
             break;
         }
         if Instant::now() >= next_supervisor_check {
-            if !platform::supervisor_is_current(&startup.supervisor)? {
+            // Never `?` here: a supervisor that exited makes the probe error,
+            // and an early return would skip endpoint/socket retirement and
+            // leave a stale authority.json behind.
+            if let Some(reason) = platform::supervisor_loss_reason(&startup.supervisor) {
+                record_broker_retirement(&home, &endpoint.epoch, &reason);
                 break;
             }
             next_supervisor_check = Instant::now() + SUPERVISOR_POLL;
@@ -1705,6 +1748,15 @@ fn write_endpoint_atomic(home: &Path, endpoint: &AuthorityAnchorEndpoint) -> Res
 }
 
 fn read_endpoint(home: &Path) -> Result<AuthorityAnchorEndpoint> {
+    let endpoint = read_endpoint_file(home)?;
+    validate_endpoint_shape(home, &endpoint)?;
+    Ok(endpoint)
+}
+
+/// The recorded endpoint with the store-entry safety checks but without the
+/// liveness/shape validation, for retirement bookkeeping and diagnostics only
+/// (never for connecting or authorizing).
+fn read_endpoint_file(home: &Path) -> Result<AuthorityAnchorEndpoint> {
     let path = endpoint_path(home);
     let link_metadata = fs::symlink_metadata(&path)?;
     if !link_metadata.is_file() || link_metadata.file_type().is_symlink() {
@@ -1760,9 +1812,7 @@ fn read_endpoint(home: &Path) -> Result<AuthorityAnchorEndpoint> {
     }
     let mut raw = Vec::new();
     file.take(MAX_MESSAGE_BYTES as u64).read_to_end(&mut raw)?;
-    let endpoint: AuthorityAnchorEndpoint = serde_json::from_slice(&raw)?;
-    validate_endpoint_shape(home, &endpoint)?;
-    Ok(endpoint)
+    Ok(serde_json::from_slice(&raw)?)
 }
 
 fn validate_endpoint_shape(home: &Path, endpoint: &AuthorityAnchorEndpoint) -> Result<()> {
@@ -1789,16 +1839,19 @@ fn validate_endpoint_shape(home: &Path, endpoint: &AuthorityAnchorEndpoint) -> R
         ));
     }
     platform::validate_address(&home, &endpoint.address)?;
-    if !platform::supervisor_is_current(&endpoint.supervisor)? {
-        return Err(LocusError::AuthorityAnchorUnavailable(
-            "authority supervisor is no longer current".into(),
-        ));
+    if let Some(reason) = platform::supervisor_loss_reason(&endpoint.supervisor) {
+        return Err(LocusError::AuthorityAnchorUnavailable(format!(
+            "authority supervisor is no longer current: {reason}"
+        )));
     }
     Ok(())
 }
 
 fn retire_endpoint_if_current(home: &Path, endpoint: &AuthorityAnchorEndpoint) {
-    if read_endpoint(home).ok().as_ref() == Some(endpoint) {
+    // Compare the raw record: full validation would already reject it once
+    // the supervisor is gone (the usual reason to retire), leaving a stale
+    // authority.json behind.
+    if read_endpoint_file(home).ok().as_ref() == Some(endpoint) {
         let _ = fs::remove_file(endpoint_path(home));
     }
 }
@@ -2001,6 +2054,71 @@ fn record_broker_error(home: &Path, error: &LocusError) {
     let _ = writeln!(file, "{message}");
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct BrokerRetirement {
+    epoch: String,
+    reason: String,
+}
+
+fn retirement_path(home: &Path) -> PathBuf {
+    runtime_dir(home).join("authority-retired.json")
+}
+
+/// Best-effort note of why a broker generation stopped serving, keyed by its
+/// epoch so a reader can explain a dead pin instead of guessing "tampered".
+/// Diagnostic only: nothing authorizes from this file.
+pub(crate) fn record_broker_retirement(home: &Path, epoch: &str, reason: &str) {
+    let record = BrokerRetirement {
+        epoch: epoch.to_string(),
+        reason: reason.chars().take(512).collect(),
+    };
+    let Ok(bytes) = serde_json::to_vec(&record) else {
+        return;
+    };
+    let temp = runtime_dir(home).join(format!(".authority-retired.{}.tmp", random_hex(8)));
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .mode(0o600);
+    }
+    let Ok(mut file) = options.open(&temp) else {
+        return;
+    };
+    if file.write_all(&bytes).is_err() || fs::rename(&temp, retirement_path(home)).is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+}
+
+/// Why the authority anchor for broker generation `epoch` is gone, when Locus
+/// can tell: the retired broker's own record, or (before the broker's next
+/// supervisor poll) a live check of the recorded supervisor. Diagnostic text
+/// only; never used for an authorization decision.
+pub(crate) fn anchor_loss_reason(home: &Path, epoch: &str) -> Option<String> {
+    let read_small = |path: PathBuf| -> Option<Vec<u8>> {
+        let metadata = fs::symlink_metadata(&path).ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_MESSAGE_BYTES as u64 {
+            return None;
+        }
+        fs::read(path).ok()
+    };
+    if let Some(raw) = read_small(retirement_path(home)) {
+        if let Ok(record) = serde_json::from_slice::<BrokerRetirement>(&raw) {
+            if record.epoch == epoch {
+                return Some(record.reason);
+            }
+        }
+    }
+    let endpoint = read_endpoint_file(home).ok()?;
+    if endpoint.epoch != epoch {
+        return None;
+    }
+    platform::supervisor_loss_reason(&endpoint.supervisor)
+}
+
 fn hash_capability(value: &str) -> String {
     hex::encode(Sha256::digest(value.as_bytes()))
 }
@@ -2028,6 +2146,22 @@ mod tests {
 
     fn auth() -> RequestAuth {
         control_auth().unwrap()
+    }
+
+    #[test]
+    fn no_current_endpoint_does_not_nest_the_unavailable_message() {
+        let inner = LocusError::AuthorityAnchorUnavailable(
+            "authority supervisor is no longer current".into(),
+        );
+        let msg = no_current_endpoint(inner).to_string();
+        assert_eq!(
+            msg,
+            "session authority anchor unavailable: no current broker endpoint: \
+             authority supervisor is no longer current; human re-pin required"
+        );
+        assert_eq!(msg.matches("human re-pin required").count(), 1);
+        let io = no_current_endpoint(LocusError::Io(std::io::ErrorKind::NotFound.into()));
+        assert!(io.to_string().contains("no current broker endpoint: io: "));
     }
 
     fn broker(home: &Path) -> AuthorityAnchorEndpoint {
@@ -2218,7 +2352,7 @@ mod tests {
                 Ok(current) => {
                     if previous.as_ref() == Some(&current)
                         && platform::supervisor_matches_identity(&current).unwrap_or(false)
-                        && platform::supervisor_is_current(&current).unwrap_or(false)
+                        && platform::supervisor_loss_reason(&current).is_none()
                     {
                         return current;
                     }
@@ -2459,8 +2593,46 @@ mod tests {
         retire(dir.path());
     }
 
+    /// Regression: a start that loses the lock to a broker on its way out
+    /// (its supervising shell just exited) used to wait the whole start
+    /// timeout for an endpoint nobody would publish. Once the lock frees up it
+    /// now starts a broker, which runs every usual check.
+    #[test]
+    fn start_after_exiting_lock_holder_does_not_wait_out_the_timeout() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(runtime_dir(dir.path())).unwrap();
+        let held = open_singleton_lock(&broker_lock_path(dir.path())).unwrap();
+        held.try_lock_exclusive().unwrap();
+        assert!(!broker_lock_is_free(dir.path()));
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let started = Instant::now();
+        let endpoint = ensure_broker(dir.path(), &auth());
+        let elapsed = started.elapsed();
+        release.join().unwrap();
+        let endpoint = endpoint.expect("broker must start once the lock frees up");
+        ping(dir.path(), &endpoint, &auth()).unwrap();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "start waited {elapsed:?} for an endpoint that could not appear"
+        );
+        retire(dir.path());
+    }
+
     #[test]
     fn linked_singleton_lock_is_rejected_before_broker_start() {
+        // After the rejected start, ensure_broker polls for another current
+        // broker until the start timeout (15s under test) before failing.
+        // Bound that wait in a child process instead of mutating shared env.
+        if !crate::test_support::run_in_isolated_process_with_env(
+            module_path!(),
+            "linked_singleton_lock_is_rejected_before_broker_start",
+            &[(BROKER_START_TIMEOUT_ENV, "500")],
+        ) {
+            return;
+        }
         let dir = tempdir().unwrap();
         fs::create_dir_all(runtime_dir(dir.path())).unwrap();
         let lock = broker_lock_path(dir.path());
@@ -2542,13 +2714,104 @@ mod tests {
         retire(dir.path());
     }
 
+    /// Regression: a pinning shell whose last command is a program
+    /// (`bash -c '...; node reader.mjs'`) execs into it. Same PID and start
+    /// time, different image: the authority must end (fail closed) and say
+    /// why, instead of surfacing later as "seal invalid / tampered".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn supervisor_exec_into_another_program_is_named_as_the_loss_reason() {
+        let mut child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 1; exec /bin/sleep 30")
+            .spawn()
+            .unwrap();
+        let identity = wait_stable_process_identity(child.id());
+        assert!(platform::supervisor_loss_reason(&identity).is_none());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let reason = loop {
+            if let Some(reason) = platform::supervisor_loss_reason(&identity) {
+                break reason;
+            }
+            assert!(Instant::now() < deadline, "exec was never detected");
+            thread::sleep(Duration::from_millis(20));
+        };
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(reason.contains("replaced itself (exec)"), "reason={reason}");
+        assert!(reason.contains("sleep"), "reason={reason}");
+        assert!(reason.contains("exit $?"), "reason={reason}");
+    }
+
+    /// Regression: retiring after the supervisor exited must remove the
+    /// endpoint record even though full validation already rejects it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retire_removes_endpoint_whose_supervisor_is_gone() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(runtime_dir(dir.path())).unwrap();
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let supervisor = wait_stable_process_identity(child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let home = canonical_home(dir.path()).unwrap();
+        let epoch = random_hex(16);
+        let endpoint = AuthorityAnchorEndpoint {
+            version: AUTHORITY_ENDPOINT_VERSION,
+            transport: platform::TRANSPORT.into(),
+            address: platform::endpoint_address(&home, &epoch),
+            epoch,
+            endpoint_generation: 1,
+            owner_pid: std::process::id(),
+            owner_executable: supervisor.executable.clone(),
+            owner_executable_identity: supervisor.executable_identity.clone(),
+            supervisor,
+        };
+        write_endpoint_atomic(&home, &endpoint).unwrap();
+        assert!(
+            read_endpoint(&home).is_err(),
+            "dead supervisor must not validate"
+        );
+        assert!(anchor_loss_reason(&home, &endpoint.epoch)
+            .is_some_and(|reason| reason.contains("exited")));
+        retire_endpoint_if_current(&home, &endpoint);
+        assert!(
+            !endpoint_path(&home).exists(),
+            "stale authority.json left behind"
+        );
+    }
+
+    #[test]
+    fn retirement_record_explains_only_its_own_epoch() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(runtime_dir(dir.path())).unwrap();
+        let epoch = random_hex(16);
+        assert_eq!(anchor_loss_reason(dir.path(), &epoch), None);
+        record_broker_retirement(dir.path(), &epoch, "supervising process (pid 7) exited");
+        assert_eq!(
+            anchor_loss_reason(dir.path(), &epoch).as_deref(),
+            Some("supervising process (pid 7) exited")
+        );
+        // A different broker generation's pin gets no borrowed explanation.
+        assert_eq!(anchor_loss_reason(dir.path(), &random_hex(16)), None);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(retirement_path(dir.path()))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
     #[test]
     fn supervisor_start_identity_rejects_pid_reuse_shape() {
         // Long enough that CI scheduling delay cannot exit before we sample.
         let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
         let identity = wait_stable_process_identity(child.id());
         assert!(platform::supervisor_matches_identity(&identity).unwrap());
-        assert!(platform::supervisor_is_current(&identity).unwrap());
+        assert!(platform::supervisor_loss_reason(&identity).is_none());
         child.kill().unwrap();
         child.wait().unwrap();
         // Reaped PIDs (and later PID-reuse of the same number) must not match
@@ -2557,7 +2820,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(2);
         let mut stale = false;
         while Instant::now() < deadline {
-            if !platform::supervisor_is_current(&identity).unwrap_or(false) {
+            if platform::supervisor_loss_reason(&identity).is_some() {
                 stale = true;
                 break;
             }
@@ -2972,20 +3235,55 @@ mod platform {
         Ok(process_identity(expected.pid)? == *expected)
     }
 
-    pub fn supervisor_is_current(expected: &SupervisorIdentity) -> Result<bool> {
-        if process_start_token(expected.pid)? != expected.start_token {
-            return Ok(false);
+    /// `None` while the supervising process is exactly the one captured at
+    /// broker start; otherwise a human-readable reason the authority ended.
+    /// Any probe failure (process gone, /proc unreadable) is a loss — fail
+    /// closed, never "unknown, keep serving".
+    pub fn supervisor_loss_reason(expected: &SupervisorIdentity) -> Option<String> {
+        let pid = expected.pid;
+        let exited = || {
+            format!(
+                "supervising process (pid {pid}, {}) exited",
+                expected.executable
+            )
+        };
+        match process_start_token(pid) {
+            Ok(token) if token == expected.start_token => {}
+            _ => return Some(exited()),
         }
-        let executable = fs::canonicalize(peer_executable(expected.pid)?)?;
-        if executable.display().to_string() != expected.executable {
-            return Ok(false);
+        let Ok(executable) = peer_executable(pid).and_then(|path| Ok(fs::canonicalize(path)?))
+        else {
+            return Some(exited());
+        };
+        let executable = executable.display().to_string();
+        if executable != expected.executable {
+            // Same process (start time matches) running a different image:
+            // it called exec. Most often a shell running `bash -c '...; cmd'`
+            // replaces itself with its final command (tail exec).
+            return Some(format!(
+                "supervising process (pid {pid}) replaced itself (exec) from {} with {executable}; \
+                 the pin lives only as long as the shell that pinned. A `bash -c` script whose \
+                 last command is a program execs into it: end the script with a builtin \
+                 (e.g. `; exit $?`) or pin from a long-lived shell",
+                expected.executable
+            ));
         }
-        let metadata = fs::metadata(&executable)?;
-        Ok(expected.uid == current_user_identity()?
-            && metadata.len() == expected.executable_identity.length
-            && metadata_modified_token(&metadata)? == expected.executable_identity.modified_token
-            && expected.executable_identity.device == Some(metadata.dev())
-            && expected.executable_identity.inode == Some(metadata.ino()))
+        let unchanged = fs::metadata(&executable).ok().is_some_and(|metadata| {
+            metadata.len() == expected.executable_identity.length
+                && metadata_modified_token(&metadata).ok().as_deref()
+                    == Some(expected.executable_identity.modified_token.as_str())
+                && expected.executable_identity.device == Some(metadata.dev())
+                && expected.executable_identity.inode == Some(metadata.ino())
+        });
+        if !unchanged {
+            return Some(format!(
+                "supervising executable {executable} changed on disk since the pin"
+            ));
+        }
+        if current_user_identity().ok().as_deref() != Some(expected.uid.as_str()) {
+            return Some("supervising process user identity changed".into());
+        }
+        None
     }
 
     fn process_identity(pid: u32) -> Result<SupervisorIdentity> {
@@ -3183,10 +3481,8 @@ mod platform {
             "Windows supervisor identity unavailable".into(),
         ))
     }
-    pub fn supervisor_is_current(_expected: &SupervisorIdentity) -> Result<bool> {
-        Err(LocusError::AuthorityAnchorUnavailable(
-            "Windows supervisor identity unavailable".into(),
-        ))
+    pub fn supervisor_loss_reason(_expected: &SupervisorIdentity) -> Option<String> {
+        Some("Windows supervisor identity unavailable".into())
     }
     pub fn retire(_endpoint: &AuthorityAnchorEndpoint) {}
 }
@@ -3244,8 +3540,8 @@ mod platform {
     pub fn supervisor_matches_identity(_expected: &SupervisorIdentity) -> Result<bool> {
         Ok(false)
     }
-    pub fn supervisor_is_current(_expected: &SupervisorIdentity) -> Result<bool> {
-        Ok(false)
+    pub fn supervisor_loss_reason(_expected: &SupervisorIdentity) -> Option<String> {
+        Some("authority supervisor identity unsupported on this platform".into())
     }
     pub fn retire(_endpoint: &AuthorityAnchorEndpoint) {}
     fn unavailable<T>() -> Result<T> {

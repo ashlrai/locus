@@ -7,14 +7,369 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-24
+
+### Documentation
+
+- **Using Locus with Phantom** ([docs/PHANTOM-USAGE.md](docs/PHANTOM-USAGE.md)): `phantom exec` and the `locus exec` allowlist, the `[gateway]` block, `phm:` reference status, and LiteLLM 1.83.0 or newer (prefer a current release).
+
+### Security
+
+- **Audit webhook errors no longer carry the webhook URL.** A failed `locus events export --sink webhook` post (URL from `--url` or `LOCUS_AUDIT_WEBHOOK_URL`) (a non-2xx status or a connection error) put ureq's error text in the message, and that text starts with the full URL: user name, password, path token and query token included. The error now names only `scheme://host` and the status or transport kind. A new test posts to a 401, a 500 and a closed port with canary tokens in the path, query and password and fails on any 8-character run of them.
+
+- **`locus dashboard` / `locus serve --open` no longer put `LOCUS_DASHBOARD_TOKEN` in the opened URL.** The browser opener (`open`, `xdg-open`, `gio`, `cmd /C start`) received `http://127.0.0.1:<port>/?token=<token>` as an argument, visible to other local users in `ps`, and the browser kept it in history. The plain URL is opened; with a token set the page's token gate asks for it once. `?token=` is still accepted by the API.
+
+### Added
+
+- **Opt-in `[exec] inherit_env`** lets the isolated `locus exec` child inherit exact, named parent variables. It is empty by default, which leaves the child environment unchanged. Key-shaped names cross only as `phm_` placeholders from `phantom exec`. Values that look like well-known keys, and URLs with userinfo, are refused. `*_BASE_URL` values must pass the `[gateway]` rules. Locus's own variables, the gateway URL and injected credentials always win. Refusals use closed codes without names or values. See [docs/PHANTOM-USAGE.md](docs/PHANTOM-USAGE.md).
+- **`doctor --fix` core module (not wired to the CLI yet).** `locus_core::doctor_fix`
+  plans repairs as a dry run by default: stale `allowed_bindings` entries, a stale
+  `default_binding`, and legacy bare Phantom names (rewritten to `phm:NAME` through the
+  existing journaled migration). Applying needs an explicit `apply_fixes` call, which
+  backs up each file first (`<file>.bak-<UTC ts>`, mode 0600, or
+  `<home>/backups/doctor-fix-<ts>/` for bindings). It refuses to remove the last
+  allowlist entry, since an empty list allows every binding. Malformed and dangling refs
+  are report only. It never resolves or reveals values and never runs Phantom; dangling
+  checks use a name list the caller supplies. See `docs/doctor-fix.md`.
+- **Opt-in gateway base URL for `locus exec`.** `[gateway] enabled = true` with
+  `base_url` and `child_env` sets the listed `*_BASE_URL` variables in the isolated
+  child to the configured URL. Same rules as phantom's gateway validator: `https`, or
+  `http` only for `127.0.0.1` and `[::1]`; any other host needs an exact `host:port`
+  in `allowed_hosts`. Only the URL is passed, never a key. A refused block fails
+  closed (no credentials resolved, closed reason code). Off by default with no change
+  when unset; parent shell base URLs are still dropped. See `docs/gateway-base-url.md`.
+- **Opt-in signed credential injection audit.** `[credential_audit] enabled = true`
+  appends one value-free line per injected provider to
+  `audit/credential-injections.jsonl` (provider, reference, env var names, target,
+  binding, session, time), HMAC-SHA256 signed and chained under a local `0600` key.
+  Never records values or hashes of values. Fails closed (credential withheld) if
+  a record cannot be written. Off by default. See `docs/credential-audit.md`.
+
+- **Opt-in session budget caps.** `[budget] max_actions` / `max_minutes` in
+  `config.toml` refuse further MCP tool calls once a session has used N calls or
+  N minutes (from its first counted call). Off by default: with no `[budget]`
+  nothing is read or written. The stop is sticky per session, audited once as
+  `budget.exhausted`, and applies or undoes nothing on its own. See
+  `docs/session-budget.md`.
+
+
+### Added
+
+- **Gemini CLI support.** `locus setup --client gemini` and
+  `locus agent setup --apply --client gemini` (also part of `--client all`)
+  register `locus-mcp` in `.gemini/settings.json` under `mcpServers`, merging
+  into the user file only when it exists. Other keys and servers are preserved
+  and malformed JSON is refused untouched. `agent doctor` and the agent report
+  gain `mcp_registered.gemini` (additive, defaults to false).
+
+- **`locus onboard` wizard and community adapter marketplace** (#85, ported from the
+  closed #56). Community adapters are publisher-supplied executable code: a trusted
+  signature binds the installable envelope to a configured verification key but does
+  not establish that a command is safe, and installation always needs explicit consent.
+  Community credential sources are limited to `env:` references. Read
+  `docs/adapters.md` before installing any community adapter.
+
+- **`INTEGRATION.md`** — sketch of how Phantom plugs into Locus (opt-in/out):
+  the account-separation guarantees, per-job `ci mint` flow, pre-mutate gate,
+  and failure modes.
+- **`DESIGN-onboarding-wizard.md`, `DESIGN-adapter-marketplace.md`** —
+  design proposals for guided setup and adapter discovery. The shipped
+  behavior is described under `locus onboard` above and in `docs/adapters.md`.
+
+### Changed
+
+- **ashlr-hub to Phantom rename** — the hub was renamed to Phantom (same repo).
+  `integrations/phantom/` is added alongside the existing compatibility directory
+  `integrations/ashlr-hub/`; docs and scripts use the new path. Historical changelog
+  entries, quoted PR URLs, and the runtime `LOCUS_CLIENT="ashlr-hub"`
+  identifier are intentionally unchanged.
+
 ### Fixed
 
+- **`--json` usage errors are JSON.** `locus --json whoami --jsn` or
+  `locus --json approvals` printed clap's multi-line prose, so an agent that
+  asked for JSON got text it could not parse. A usage error now prints the
+  same one-line `{"ok":false,"error":...}` on stderr as every other `--json`
+  failure, keeping clap's tip ("a similar argument exists: '--json'") and
+  exit code 2. A `--json` after `--` still belongs to the child command.
+- **`locus events --limit N`** is accepted as `--last N` (also on
+  `events export`); it was refused as an unknown argument.
+- **MCP: a mistyped control tool or argument names the nearest match.**
+  `locus_whoam` answered only "unknown tool ... control tools are listed by
+  tools/list", and an undeclared key listed the allowed ones without saying
+  which was meant. Both -32602 errors now end with "Did you mean
+  `locus_whoami`?" / "Did you mean `aliass` -> `alias`?" when one name is
+  close (the same match `locus_request_pin` uses for aliases).
+- **The unpinned error says `locus enter`.** `no active pin` told people to
+  run `locus pin <alias>`, while `status` and `leave` said `locus enter
+  <alias>`; it now says `locus enter <alias>` and that `locus binding list`
+  shows the aliases.
+- **`locus events --op/--binding` with no match names what the log holds.**
+  A mistyped filter (`--op pinn`, `--binding acmee`) printed only "no audit
+  events matching op=pinn", so the next query was a guess. The human output now
+  adds the distinct ops (and, for `--binding`, the bindings) present in the
+  log. `--json` still prints `[]`.
+- **`locus exec` / `run` / `ci run` refuse an option in the command
+  position.** clap passes everything from the first unknown option onward to
+  the child command, so `locus exec --binding acme -- cmd` (exec has no
+  `--binding`) and `locus run -b x --strict-cred -- cmd` minted a session,
+  wrote an audit event and then failed to spawn `--binding` with exit 127, and
+  the exec ran as the pinned binding rather than `acme`. A command starting with
+  `-` now exits 1 before anything runs, naming the option; for exec's
+  `--binding` it points to `locus run --binding <alias> -- <command>`.
+- **`locus run` / `ci run --binding <typo>` name the known aliases.** They said
+  only `binding not found: acmee`; they now list the aliases and suggest the
+  nearest one, as `switch` and `binding show` already did.
+- **MCP `locus_request_pin` / `locus_enter_hint` name the alias an agent
+  mistyped.** `{"alias": "acmee"}` said only that no such binding exists, so the
+  agent had to list bindings and guess. The result now carries
+  `did_you_mean: "acme"` and the message says so, using the same match as the
+  CLI's `did you mean`.
+- **Alias suggestions no longer name an unrelated tenant.** Up to three edits
+  counted as a typo, so `locus switch nope` suggested `acme`. A suggestion now
+  needs at most one edit per three characters (`persnal` still suggests
+  `personal`).
+- **`locus exec` / `run` / `ci run` exit codes say whether the child ran.**
+  A command that could not be started exited 1, the same as a child that ran
+  and failed, so an agent could not tell "tests failed" from "command not
+  found". Not found now exits 127 and not executable 126 (shell convention),
+  with an error naming the next step (absolute path, `sh -c` for builtins);
+  `--json` keeps the JSON error line. A child killed by a signal exits
+  `128 + signal` instead of 1. `locus mcp --supervised` follows the same rules.
+- **A child that cannot start is still audited and cleaned up.** On a spawn
+  failure `exec`, `run`, `ci run` and `mcp --supervised` returned before their
+  audit event, and `run` / `ci run` also skipped removing their temporary
+  session. The event now records `exit` (127/126) and a `spawn_error`, and the
+  temporary session is removed.
+- **MCP control tools check argument types.** With undeclared keys refused
+  before dispatch (below), a declared argument of the wrong type still reached
+  the tool: `locus_verify_claim {"claim": 42}` answered only "text (or claim)
+  required" and `locus_request_pin {"alias": 42}` "alias required". They are
+  now an `isError` result such as `` `claim` must be a string, got number ``.
+  A missing `locus_request_pin` alias points at `locus_list_bindings`.
+- **`locus binding add` no longer silently replaces an existing binding.**
+  Re-adding an alias overwrote its tenant, account, scope and credential ref
+  with no warning, under every workspace that names it. It now refuses with
+  `binding 'x' already exists; nothing written`, pointing at
+  `locus binding show x`. Pass `--force` to replace it. A guided add asks
+  before replacing, defaulting to no, and `--dry-run` still previews.
+- **`locus binding show` and `binding rm` suggest the alias you meant.** A typo
+  listed nothing; they now give the same known-aliases list and nearest match
+  as `locus enter`.
+- **Stale-pin recovery never names a binding that does not exist.** On a stale
+  pin, `locus pin nosuch` / `enter nosuch` / `switch nosuch` ended the recovery
+  recipe with `locus enter nosuch`, which would fail at its last step. The
+  requested alias is named only when that binding exists; otherwise the recipe
+  names the stale pin's own binding (as `whoami` does). `locus leave` on a stale
+  pin now names that binding too instead of `<alias>`.
+- **Control-capability hints follow `$SHELL`.** `init` / `quickstart` notes,
+  `capability persist`, the quickstart "daily path" line, the missing-capability
+  error and the `doctor` capability findings always said
+  `eval "$(locus hook zsh)"`. They now name the user's shell (zsh, fish as
+  `locus hook fish | source`, else bash), like the stale-pin recovery already did.
+- **`locus approve grant --ttl` is bounded.** It still used the lenient parser:
+  `--ttl 0s`, `--ttl=-5m` and `--ttl=` were accepted. It now takes 1s to 24h
+  like `ci mint` / `mcp mint` and fails before the approval record is read.
+- **`locus watch` says why a tick is not ok.** A present but unverifiable pin
+  was labelled `unpinned` next to `pinned=true`; it is now `invalid` (the
+  `status --oneline` token). When the pin is ready but doctor is WARN/UNSAFE the
+  tick printed only "next ready — Proceed" before exiting 1; it now adds a
+  `why` line with the doctor verdict and finding codes. `--json` is unchanged.
+
+- **MCP control tools enforce their closed schemas.** The `locus_*` tools
+  publish `additionalProperties: false` but ignored undeclared keys
+  (`locus_whoami {"binding": "acme"}`) and non-object `arguments` (`"acme"`),
+  and an unknown `locus_nosuch` came back as an `isError` tool result while an
+  unknown provider tool got `-32602`. All three are now JSON-RPC `-32602`
+  before dispatch, naming the allowed keys (the earlier check, #99, covered
+  synthetic provider tools only). Omitted or `null` `arguments` still mean `{}`.
+  `locus_request_pin` trims the alias, so a whitespace-only alias is "alias
+  required" instead of a message about a binding named `   `.
+- **Mint `--ttl` is bounded.** `locus ci mint|env|run` and `locus mcp mint`
+  accepted any TTL: `--ttl 0s` or `--ttl=-5m` printed an already-expired
+  session or grant token and exited 0 (`ci run --ttl 0s` still ran the child),
+  and `--ttl 48h` was capped silently while `locus enter --ttl 48h` is refused.
+  They now take 1s to 24h (still capped by `policy.max_ttl`) and fail before
+  anything is minted, with the `locus enter` wording. Second-scale TTLs stay
+  allowed for expiry probes.
+- **`locus binding add --provider` names a provider with no adapter.** Only the
+  interactive prompt warned; the flags path that agents and scripts use wrote
+  `--provider githb` silently. It is still written (custom providers use
+  upstream MCP recipes), with a stderr warning listing the built-in providers;
+  `--json` stdout is unchanged.
+- **`locus --json setup` prints JSON.** The global flag was ignored and setup
+  printed human text. It now prints `{"ok", "client", "written",
+  "supervised_command"}` after a write, or `entry` / `entry_toml` for `--print`
+  and `generic`. `setup --client codex --print` now uses the same escaped TOML
+  as the file it writes (it was hand-built and omitted `args = []`).
+
+- **`engagement init --workspace` and `locus workspace` never write through a
+  `.locus.toml` symlink.** The existence check followed the link, so a
+  dangling `.locus.toml` read as absent and the TOML was written to the link's
+  target, outside the project, while the command reported writing
+  `.locus.toml`. Any entry at that path (a broken link included) now needs
+  `--force`, and the file is staged next to it and renamed into place, which
+  replaces the link itself. `engagement init` also stages the workspace file
+  and checks `.locus/` before saving the binding, so a `.locus` file, a
+  `.locus.toml` directory or an unwritable project creates nothing instead of
+  leaving a binding whose retry fails on "binding already exists".
+- **`locus approve wait --timeout` with an overflowing value is a usage error,
+  not a panic.** `99999999999999999h` saturated to `u64::MAX` and the deadline
+  arithmetic panicked (exit 101); unit values that overflow are now rejected
+  by the parser and a huge bare number reports `--timeout ... is too large`.
+- **MCP `locus://doctor` reports a malformed binding file instead of erroring.**
+  The 0.5.1 doctor fix covered `locus doctor` only; the MCP resource still failed
+  the read with `binding 'x' is malformed` (-32000). It now returns the same
+  UNSAFE report with a `binding_invalid` finding.
+- **A pending approval on one binding no longer blocks every other pin.**
+  `locus_safe_next`, `locus verify session`, `locus watch` and the agent
+  report returned `external_authorization` (not ready) for any pending
+  approval, so one `require_approval` hit on `acme` kept `personal` unready
+  until it was denied. Only the pinned binding's requests count now, and the
+  message names `locus approve deny <id>` to dismiss one.
+- **Unresolvable `phm:` credentials are no longer silent.** `locus doctor`
+  only checked `phantom list`, so a ref whose locator exists but which
+  `phantom reveal` refuses (current Phantom Secrets refuses the
+  non-interactive reveal Locus uses) reported "credentials ok". Doctor (and
+  `doctor --json`, `verify session`, `watch`, `agent report`) now probes the
+  real resolve path for listed `phm:` refs and flags failures in
+  `unresolved_phm` as `code=reveal-failed` / `reveal-timeout`, with a human
+  cause line. `locus exec` / `run` / `ci run` warn once per unresolved ref
+  naming the binding, provider, env vars left unset and the cause;
+  `--strict-creds` still fails before the child runs, now with the same
+  detail. Values and locator names are never printed. The MCP doctor surface
+  is unchanged.
+- **`--json` failures are JSON.** With the global `--json`, a failing command
+  (e.g. `locus --json whoami` while unpinned) printed a human `error:` line, so
+  agents got non-JSON. The error line on stderr is now `{"ok": false,
+  "error": "..."}` (same message, recovery hints included); stdout keeps its
+  one-document contract and the exit code stays 1.
+- **`locus-mcp` answers unparseable stdio frames.** A non-JSON NDJSON line or
+  Content-Length body was only logged to stderr and never answered. It now
+  gets a JSON-RPC Parse error (`-32700`, `"id": null`) and the server keeps
+  serving. Framing/size violations still fail closed.
+- **`locus workspace` warns about aliases with no binding.** `--default` /
+  `--allow` naming an alias that is not in the store still writes
+  `.locus.toml` (exit 0), but now warns on stderr with the missing alias and
+  the `locus binding add` command, instead of failing later at `locus enter`.
+
+- **Control commands name the stale-pin recovery.** After the pinning shell
+  exits, `locus workspace`, `binding add`, `notify`, `init` and other control
+  commands failed closed with only "human re-pin required". They now print the
+  same `eval "$(locus hook bash)"; locus leave --force; locus enter <alias>`
+  recovery that `enter`, `leave` and `status` already did. Still fails closed.
+- **`locus doctor` reports a malformed binding file instead of aborting.** One
+  unparseable `bindings/*.toml` made `doctor` (and `doctor --json`) exit 1 with
+  a bare error and no report. It now completes, flags an UNSAFE
+  `binding_invalid` finding naming the bindings directory, and exits 2.
+- **npm: a root global install no longer breaks `locus` for other users.** The
+  postinstall replaced the shared bin with a symlink into the installer's HOME
+  (e.g. `/root/.locus/bin`, behind a 0700 `/root`), so other users got
+  "Permission denied". A root install now keeps the wrapper when it is
+  reachable by other users and the native binary is not.
+- **`locus-mcp --version` / `-V`** print `locus-mcp <version>` and exit 0
+  (was "unknown argument", exit 1).
+- **Docs:** the npm README quick start adds the `eval "$(locus hook bash)"`
+  step `pin` needs and links `@ashlrai/locus-mcp` (not an unrelated package);
+  the main README registers `locus mcp --supervised` for provider tools and says
+  plain `locus-mcp` serves control tools only.
+
+- **`locus hook bash` emits a bash prompt** — the prompt helper now prints ANSI
+  colors wrapped in readline's non-printing markers (what `\[`/`\]` stand for)
+  and the hint shows `PS1=`; it previously printed zsh `%F{...}` escapes and a
+  `PROMPT=` hint. `locus hook zsh` output is unchanged.
+- **`locus watch --interval`** rejects `0` (minimum 1s), and every parse error
+  (e.g. `30sec`) carries the `use e.g. 5s, 30s, 1m` hint.
+- **`locus --help` groups** list `capability` and `client` under Setup; a test
+  now checks that every visible subcommand appears in the groups.
+- **`locus_request_pin` / `locus_enter_hint` with an unknown alias** return an
+  error that says the binding does not exist and points at `locus binding list`
+  / `locus binding add <alias>`, instead of "Pin request recorded ... run
+  `locus enter <alias>`". The attempt is still audited.
+- **Docs:** `docs/verification-plane.md` lists the `locus_verify_session` MCP
+  tool and drops the stale "session pack is CLI/hub today" note.
+
+### Added
+
+- **`locus mcp --supervised`** — grants the active pin's executor capability to
+  locus-mcp (the grant `locus exec` makes, with no credential values or control
+  capability in the server env), so MCP clients get the pinned provider tools
+  without wrapping the whole client in `locus exec`. Falls back to control
+  tools only, with a stderr reason, when there is no pin or
+  `LOCUS_CONTROL_CAPABILITY` (#71).
+- **MCP protocol negotiation** — locus-mcp answers with the client's requested
+  protocol version when it supports it (#73).
+- **Release checksums** — every release archive ships with a
+  `locus-<target>.tar.gz.sha256` sidecar (`sha256sum -c` format), and the
+  release workflow refuses to publish when an archive's sidecar is missing or
+  does not match (#49). Integrity metadata only, not a signature.
+
+### Fixed
+
+- **`locus setup` points at provider tools** — `locus setup` and
+  `locus agent setup` register plain `locus-mcp`, which serves control tools
+  only. Both now say so and print the `locus mcp --supervised` command to
+  register instead for the pinned binding's provider tools. The written config
+  is unchanged.
+- **npm install no longer hangs** — after `npm i -g locus-cli`, the
+  `locus` / `locus-mcp` wrappers found themselves on `PATH` and re-executed
+  forever. They now skip Node shims when looking for an installed binary (#64).
+- **`locus enter` right after `quickstart` (npm installs)** — session authority
+  is anchored to the parent process; with the Node wrapper in between, it bound
+  to a short-lived `node` process and the next `enter` failed with "session
+  authority generation is stale". On macOS/Linux the npm package now links the
+  native binary in place of the wrapper at install (and on first run), so the
+  shell runs `locus` directly. New e2e test: quickstart → enter → whoami (#66).
+- **npm install and first run no longer hang** — unread redirect and 404
+  responses (the optional `.sha256` sidecar) kept a socket open, so
+  `npm i -g locus-cli` stalled in postinstall and wrappers never exited. Both
+  wrappers now drain those responses and exit explicitly.
+- **npm users get `locus-mcp`** — `locus-cli` installs `locus-mcp` from the same
+  release archive next to the cached `locus`, where `locus setup` looks for it.
+- **Stale pins name their recovery** — `enter`, `status` and `agent report`
+  say how to recover a stale pin; `status` reports `invalid` (exit 2) whenever
+  `whoami` fails; the shell prompt shows invalid and frozen pins; commands
+  whose stdout closes early exit 141 instead of panicking (#76).
+- **Cargo fallback** — explains the slow from-source build and fixes the
+  invalid `cargo install --package` command (#51).
+- **Shell hook under `set -u`** — guards `ZSH_VERSION` / `BASH_VERSION` /
+  `_LOCUS_PROMPT_CMD` (#46).
+
+- **Doctor JSON validates against its schema** — `schema/doctor.schema.json`
+  now allows finding severity `info` (emitted as `control_capability_persisted`
+  on the default quickstart posture); real `locus doctor --json` output failed
+  the published schema before.
+- **Agent report readiness without an exported capability** — the report said
+  `ready: true` with `status_oneline: invalid` while `locus status --oneline`
+  said `alias:tenant`. Readiness now requires a verified authority anchor, and
+  the oneline token keeps the pin for the capability-absent gap only.
+- **`locus_whoami` on a plain (unsupervised) locus-mcp** no longer reports
+  `pinned: false` with a re-pin hint; it returns
+  `status: executor_authority_unavailable` and points at `locus mcp --supervised`.
 - **Adapter registry catalog covers anthropic/openai** — the built-in catalog
   (`adapters/manifest.toml`, surfaced by `locus adapter list` and
   `locus adapter registry export`) now includes the `anthropic` and `openai`
   adapters (9 providers total). A drift-guard test asserts the registry id set
   equals the dispatchable provider set so future adapters cannot miss either
   surface.
+
+### Changed
+
+- CI: optimized crypto deps in the test profile (~6× faster `locus-core`
+  tests), cancel superseded PR runs, cargo-nextest (#58, #59).
+- Docs: 10-second README with a demo GIF, MCP snippets for Claude Code / Codex /
+  Cursor, executable multi-client recipes, Phantom-enrolled repo guide, issue
+  and PR templates (#48, #52, #53, #57, #60, #65).
+- License holder standardized to AshlrAI, Inc. (#47).
+
+### Docs
+
+- **Shell completions** — [docs/shell-completions.md](docs/shell-completions.md)
+  covers zsh, bash, fish, PowerShell and elvish, `locus completion --help`
+  prints the install lines, and the Homebrew formula installs bash/zsh/fish
+  completions (#63).
+- **Codex** — docs/mcp.md shows the `~/.codex/config.toml` entry that
+  `locus setup --client codex` writes, for wiring it by hand (#62).
 
 ## [0.5.0] — 2026-08-16
 
@@ -678,7 +1033,8 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 - Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
 - Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
 
-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ashlrai/locus/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/ashlrai/locus/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ashlrai/locus/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ashlrai/locus/releases/tag/v0.4.0
 [0.3.0]: https://github.com/ashlrai/locus/releases/tag/v0.3.0

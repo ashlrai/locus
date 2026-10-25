@@ -272,7 +272,14 @@ pub fn gather_doctor_external(
     cwd: std::path::PathBuf,
 ) -> crate::Result<DoctorExternal> {
     let phantom = crate::credential::phantom_on_path();
-    let unresolved_phm = crate::credential::collect_unresolved_phm_refs(store, phantom)?;
+    // An invalid binding file is reported by build_doctor_report as an UNSAFE
+    // `binding_invalid` finding; do not abort the diagnostic here (the MCP
+    // `locus_doctor` tool reaches doctor through this helper).
+    let unresolved_phm = if store.list_bindings().is_ok() {
+        crate::credential::collect_unresolved_phm_refs(store, phantom)?
+    } else {
+        Vec::new()
+    };
     Ok(DoctorExternal {
         phantom_on_path: phantom,
         unresolved_phm,
@@ -335,20 +342,23 @@ pub fn control_capability_findings(
                 "control_capability_not_exported",
                 format!(
                     "control capability persisted at {} but LOCUS_CONTROL_CAPABILITY is not \
-                     exported — run: eval \"$(locus hook zsh)\"  (or export \
+                     exported — run: {}  (or export \
                      LOCUS_CONTROL_CAPABILITY=\"$(cat {})\")",
                     file.display(),
+                    crate::recovery::user_hook_eval_command(),
                     file.display()
                 ),
             );
         } else {
             push(
                 "control_capability_missing",
-                "LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) \
-                 will fail. Fix: locus quickstart (mints + persists one), or: export \
-                 LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new \
-                 shells with eval \"$(locus hook zsh)\""
-                    .into(),
+                format!(
+                    "LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) \
+                     will fail. Fix: locus quickstart (mints + persists one), or: export \
+                     LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new \
+                     shells with {}",
+                    crate::recovery::user_hook_eval_command()
+                ),
             );
         }
     }
@@ -379,9 +389,9 @@ pub fn control_capability_findings(
             format!(
                 "LOCUS_CONTROL_CAPABILITY does not match the persisted capability at {} — control \
                  operations may be refused. Locus never silently replaces a capability: export \
-                 the persisted value (eval \"$(locus hook zsh)\") or deliberately remove the \
-                 stale side",
-                file.display()
+                 the persisted value ({}) or deliberately remove the stale side",
+                file.display(),
+                crate::recovery::user_hook_eval_command()
             ),
         );
     }
@@ -435,7 +445,13 @@ fn anchor_unverified_due_to_absent_capability(
 pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Result<DoctorReport> {
     let home = store.home().display().to_string();
     let seal_ok = store.seal_key().is_ok();
-    let binding_summaries = store.list_bindings()?;
+    // A malformed or unreadable binding file makes `list_bindings` fail
+    // closed. Doctor is the tool an operator reaches for in exactly that
+    // state, so report it as an UNSAFE finding instead of aborting.
+    let (binding_summaries, binding_store_error) = match store.list_bindings() {
+        Ok(list) => (list, None),
+        Err(err) => (Vec::new(), Some(err)),
+    };
     let bindings = binding_summaries.len();
     // Freeze on drift first so findings reflect the frozen session state.
     //
@@ -534,6 +550,17 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     }
 
     // ── Unsafe ────────────────────────────────────────────────────────────
+    if let Some(ref err) = binding_store_error {
+        findings.push(issue(
+            IssueSeverity::Unsafe,
+            "binding_invalid",
+            format!(
+                "{err} — fix or remove the file in {}; `locus binding list` \
+                 fails closed until then",
+                store.bindings_dir().display()
+            ),
+        ));
+    }
     let migration_readiness = crate::credential_migration::migration_readiness(store);
     if !migration_readiness.ready() {
         findings.push(issue(
@@ -554,13 +581,31 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
             "seal key missing or unreadable",
         ));
     }
+    // Why the pin's authority anchor is gone, when Locus can tell (e.g. the
+    // pinning shell exited or exec'd into another program). Diagnostic only.
+    let anchor_loss = if runtime.authority_anchor_ok {
+        None
+    } else {
+        active
+            .as_ref()
+            .and_then(|sess| sess.authority_anchor.as_ref())
+            .and_then(|lease| {
+                crate::authority_anchor::anchor_loss_reason(store.home(), &lease.epoch)
+            })
+    };
     if let Some(false) = pin_seal_ok {
-        findings.push(issue(
-            IssueSeverity::Unsafe,
-            "invalid_seal",
+        // Same stable code and UNSAFE severity either way; only the wording
+        // distinguishes a failed seal HMAC (possible tamper) from an intact
+        // seal whose authority anchor, backing, or expiry failed.
+        let message = if runtime.seal_ok {
+            "active pin unverified: session seal is intact but its authority anchor, backing, \
+             or expiry check failed (see the accompanying finding) — re-pin from the operator \
+             shell; clear a wedged pin with `locus leave --force`"
+        } else {
             "active pin seal invalid (session file may be tampered) — \
-             clear it with `locus leave --force`, then re-pin",
-        ));
+             clear it with `locus leave --force`, then re-pin"
+        };
+        findings.push(issue(IssueSeverity::Unsafe, "invalid_seal", message));
     }
     for tag in &runtime.issues {
         match tag.as_str() {
@@ -600,21 +645,30 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                 findings.push(issue(
                     IssueSeverity::Warn,
                     "executor_authority_unavailable",
-                    "authority anchor unverified: no control capability in this environment \
-                     (read-only check; pin left intact) — eval \"$(locus hook zsh)\" and re-run \
-                     doctor to verify the anchor",
+                    format!(
+                        "authority anchor unverified: no control capability in this environment \
+                         (read-only check; pin left intact) — {} and re-run doctor to verify the \
+                         anchor",
+                        crate::recovery::user_hook_eval_command()
+                    ),
                 ));
             }
             // Supervisor-anchor wedge: the session's authority anchor cannot
             // be reached (supervisor/broker gone). Name the teardown hatch —
             // normal leave also fails closed in this state.
             "authority_anchor_unavailable" => {
+                let cause = anchor_loss
+                    .as_deref()
+                    .map(|reason| format!("authority broker retired: {reason}"))
+                    .unwrap_or_else(|| "supervisor/broker gone?".into());
                 findings.push(issue(
                     IssueSeverity::Warn,
                     "anchor_unavailable",
-                    "session authority anchor unavailable (supervisor/broker gone?) — human \
-                     re-pin required; if `locus leave` also fails, clear the wedged pin with \
-                     `locus leave --force`",
+                    format!(
+                        "session authority anchor unavailable ({cause}) — human re-pin \
+                         required; if `locus leave` also fails, clear the wedged pin with \
+                         `locus leave --force`"
+                    ),
                 ));
             }
             // Already covered by the dedicated stale_session finding above.
@@ -664,7 +718,7 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     }
 
     // ── Warn ──────────────────────────────────────────────────────────────
-    if bindings == 0 {
+    if bindings == 0 && binding_store_error.is_none() {
         findings.push(issue(
             IssueSeverity::Warn,
             "no_bindings",
@@ -1586,6 +1640,65 @@ mod tests {
         assert_ne!(report.verdict, DoctorVerdict::Safe);
     }
 
+    /// Regression: a pin whose broker retired because the pinning shell
+    /// exec'd into the reader (`bash -c '...; node reader.mjs'`) must be named
+    /// as such — not reported as "session file may be tampered".
+    #[test]
+    fn doctor_names_broker_retirement_cause_without_claiming_tamper() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let epoch = store
+            .active_session()
+            .unwrap()
+            .unwrap()
+            .authority_anchor
+            .unwrap()
+            .epoch;
+        std::fs::remove_dir_all(dir.path().join("runtime")).unwrap();
+        std::fs::create_dir_all(dir.path().join("runtime")).unwrap();
+        crate::authority_anchor::record_broker_retirement(
+            dir.path(),
+            &epoch,
+            "supervising process (pid 42) replaced itself (exec) from /usr/bin/bash with /usr/bin/node",
+        );
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        let anchor = report
+            .findings
+            .iter()
+            .find(|f| f.code == "anchor_unavailable")
+            .expect("anchor_unavailable finding");
+        assert!(
+            anchor.message.contains("replaced itself (exec)"),
+            "cause missing: {}",
+            anchor.message
+        );
+        // Still fail closed with the stable code, but honest wording: the
+        // seal HMAC itself verified.
+        assert!(report.runtime.seal_ok);
+        let pin = report
+            .findings
+            .iter()
+            .find(|f| f.code == "invalid_seal")
+            .expect("unverified pin stays an UNSAFE invalid_seal finding");
+        assert_eq!(pin.severity, IssueSeverity::Unsafe);
+        assert!(!pin.message.contains("tampered"), "{}", pin.message);
+        assert_eq!(report.pin_seal_ok, Some(false));
+        assert_eq!(report.verdict, DoctorVerdict::Unsafe);
+    }
+
     #[test]
     fn doctor_unsafe_on_seal_tamper() {
         let dir = tempdir().unwrap();
@@ -1649,6 +1762,62 @@ require_pin = true
         assert!(report.workspace.require_pin);
         assert!(report.findings.iter().any(|f| f.code == "require_pin"));
         assert_eq!(report.verdict, DoctorVerdict::Warn);
+    }
+
+    /// The shared external-facts helper (used by the MCP `locus_doctor` tool)
+    /// must not abort on a malformed binding either, or the report below is
+    /// unreachable from MCP.
+    #[test]
+    fn gather_doctor_external_tolerates_malformed_binding_file() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        std::fs::write(store.bindings_dir().join("broken.toml"), "garbage [[").unwrap();
+
+        let external = gather_doctor_external(&store, dir.path().to_path_buf())
+            .expect("gathering external facts must not abort on a malformed binding");
+        let report = build_doctor_report(&store, external).unwrap();
+        assert_eq!(report.verdict, DoctorVerdict::Unsafe);
+        assert!(report.findings.iter().any(|f| f.code == "binding_invalid"));
+    }
+
+    #[test]
+    fn doctor_reports_malformed_binding_file_instead_of_aborting() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        std::fs::write(store.bindings_dir().join("broken.toml"), "garbage [[").unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .expect("doctor must report, not abort, on a malformed binding file");
+        assert_eq!(report.verdict, DoctorVerdict::Unsafe);
+        assert_eq!(report.verdict.exit_code(), 2);
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.code == "binding_invalid")
+            .expect("binding_invalid finding");
+        assert!(finding.message.contains("'broken'"), "{}", finding.message);
+        assert!(
+            finding
+                .message
+                .contains(&store.bindings_dir().display().to_string()),
+            "{}",
+            finding.message
+        );
+        // Not misreported as an empty store.
+        assert!(!report.findings.iter().any(|f| f.code == "no_bindings"));
     }
 
     #[test]
@@ -1906,6 +2075,58 @@ require_pin = true
             "local_advisory"
         );
         assert_eq!(instance["approvals"]["authoritative_path_enabled"], false);
+    }
+
+    #[test]
+    fn doctor_report_with_every_control_capability_finding_validates_against_schema() {
+        // Regression: the CLI attaches `control_capability_persisted` with
+        // severity `info` (the default quickstart posture), which the
+        // published schema used to reject (it allowed only warn|unsafe).
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        // Persisted but not exported: one warn finding plus the info note.
+        let status = crate::authority_anchor::ControlCapabilityStatus {
+            env_present: false,
+            env_valid: false,
+            persisted: true,
+            persisted_valid: true,
+            persisted_permissions_ok: true,
+            matches_persisted: None,
+            test_fallback: false,
+        };
+        for f in control_capability_findings(&status, dir.path()) {
+            report.push_finding(f.severity, &f.code, f.message);
+        }
+        let instance = serde_json::to_value(&report).unwrap();
+        let severities: Vec<&str> = instance["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f["severity"].as_str())
+            .collect();
+        assert!(severities.contains(&"info"), "{severities:?}");
+        assert!(severities.contains(&"warn"), "{severities:?}");
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schema/doctor.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<String> = validator
+            .iter_errors(&instance)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "doctor JSON with an info finding violated schema: {}",
+            errors.join("\n")
+        );
     }
 
     #[test]

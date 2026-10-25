@@ -1,6 +1,6 @@
-# Ashlr Hub ↔ Locus integration contract
+# Phantom ↔ Locus integration contract
 
-Machine contract for **ashlr-hub** (and similar orchestrators) to shell out to Locus cleanly.
+Machine contract for **Phantom** (and similar orchestrators) to shell out to Locus cleanly.
 
 **Sibling:** [Phantom](https://phm.dev) answers *can this secret enter the model?*  
 **Locus** answers *as whom, against which tenant, right now?*
@@ -11,10 +11,10 @@ Machine contract for **ashlr-hub** (and similar orchestrators) to shell out to L
 | Doctor schema | [`schema/doctor.schema.json`](../schema/doctor.schema.json) |
 | Fleet gate schema | [`schema/hub-gate.schema.json`](../schema/hub-gate.schema.json) |
 | MCP grant schema | [`schema/mcp-grant.schema.json`](../schema/mcp-grant.schema.json) |
-| Hub drop-in + TS types | [`integrations/ashlr-hub/locus.ts`](../integrations/ashlr-hub/locus.ts) |
-| Fleet preflight | [`integrations/ashlr-hub/fleet-preflight.md`](../integrations/ashlr-hub/fleet-preflight.md) |
-| MCP gateway patch | [`integrations/ashlr-hub/mcp-gateway-snippet.md`](../integrations/ashlr-hub/mcp-gateway-snippet.md) |
-| Doctor `checkLocus` | [`integrations/ashlr-hub/doctor-check.md`](../integrations/ashlr-hub/doctor-check.md) |
+| Hub drop-in + TS types | [`integrations/phantom/locus.ts`](../integrations/phantom/locus.ts) |
+| Fleet preflight | [`integrations/phantom/fleet-preflight.md`](../integrations/phantom/fleet-preflight.md) |
+| MCP gateway patch | [`integrations/phantom/mcp-gateway-snippet.md`](../integrations/phantom/mcp-gateway-snippet.md) |
+| Doctor `checkLocus` | [`integrations/phantom/doctor-check.md`](../integrations/phantom/doctor-check.md) |
 | Northstar | [`GOALS.md`](../GOALS.md) · `locus goal status` |
 | Smoke | [`scripts/hub-smoke.sh`](../scripts/hub-smoke.sh), [`scripts/hub-integration-test.sh`](../scripts/hub-integration-test.sh) |
 
@@ -95,7 +95,7 @@ import {
   extractLocusConfigEnforce,
   extractLocusConfigFirm,
   parseLocusEnforceToken,
-} from "../integrations/ashlr-hub/locus";
+} from "../integrations/phantom/locus";
 
 // Preferred at spawn sites: logs warn/block to stderr
 // (loads ~/.ashlr locus.enforce / locus.firm when LOCUS_ENFORCE is unset)
@@ -136,7 +136,7 @@ Production fleets that have enrolled repos but have **not** set `locus.firm: tru
 | Degraded enrollment probe | firm check skipped |
 | Mutating job preflight | **unchanged** — soft-warn does not gate dispatch |
 
-Firm remains **opt-in** (`locus.firm` / `locus.enforce` / `LOCUS_ENFORCE`). Monorepo default stays off. Production checklist lives on the hub as `docs/LOCUS-FIRM-FLEET.md` (hub [PR #277](https://github.com/ashlrai/ashlr-hub/pull/277)).
+Firm remains **opt-in** (`locus.firm` / `locus.enforce` / `LOCUS_ENFORCE`). Monorepo default stays off. Production checklist lives on the hub as `docs/LOCUS-FIRM-FLEET.md` (hub [PR #277](https://github.com/ashlrai/phantom/pull/277)).
 
 ### Scrubbed mint env (`withLocusSession`)
 
@@ -153,6 +153,11 @@ Do not merge `process.env` wholesale into job children.
 ## CLI contracts (shell these out)
 
 Global flag: `--json` is available on most commands and is **required** for hub machine consumers.
+When a command run with the global `--json` fails, stderr carries one JSON line
+`{"ok": false, "error": "<message>"}` instead of the human `error:` line (same
+text, never secret values); stdout is unchanged and the exit code stays
+non-zero. Usage errors (unknown flag or subcommand, missing argument) take the
+same shape when `--json` appears before any `--`, and keep exit code 2.
 
 ### Exit codes
 
@@ -362,7 +367,7 @@ Details: [docs/mcp.md](./mcp.md#multi-tenant-http---multi-tenant).
 
 ### Hub drop-in: `withLocusMcpTenant` (grant scope + auto-revoke)
 
-The drop-in ([`integrations/ashlr-hub/locus.ts`](../integrations/ashlr-hub/locus.ts))
+The drop-in ([`integrations/phantom/locus.ts`](../integrations/phantom/locus.ts))
 drives the full lifecycle for you — mint via CLI JSON, hand the callback an
 auth-header handle for HTTP `/mcp` dispatch, and **always revoke in a
 `finally`** (a revoke failure after a successful job throws — a leaked live
@@ -377,7 +382,7 @@ import {
   parseMcpListOutput,
   locusMcpList,
   TENANT_TOKEN_HEADER,
-} from "../integrations/ashlr-hub/locus";
+} from "../integrations/phantom/locus";
 
 // Reachability + mode detection before dispatch (GET /health + GET /mcp)
 const pre = await locusMtPreflight({
@@ -497,7 +502,7 @@ import {
   locusSoftWatchHeartbeat,
   parseWatchHeartbeat,
   parseSessionVerificationPack,
-} from "../integrations/ashlr-hub/locus";
+} from "../integrations/phantom/locus";
 
 // Strict preflight (always probes CLI)
 const gate = locusFleetGate(); // { allowDispatch, blockers[], report }
@@ -522,7 +527,7 @@ await withLocusSession("acme", async ({ env }) => {
 
 Hub fleets can consume the verification plane as a **values-free** session heartbeat
 (aliases + verdicts only — never secrets). Drop-in helpers mirror hub PR
-[#273](https://github.com/ashlrai/ashlr-hub/pull/273):
+[#273](https://github.com/ashlrai/phantom/pull/273):
 
 | Helper | CLI | Shape |
 |--------|-----|-------|
@@ -555,7 +560,7 @@ PATH, unresolved `phm:` refs), so `session_ok` matches `locus verify session --j
 See [docs/mcp.md](./mcp.md).
 
 Schema: [`schema/hub-gate.schema.json`](../schema/hub-gate.schema.json).  
-Exact steps: [`integrations/ashlr-hub/fleet-preflight.md`](../integrations/ashlr-hub/fleet-preflight.md).
+Exact steps: [`integrations/phantom/fleet-preflight.md`](../integrations/phantom/fleet-preflight.md).
 
 ---
 

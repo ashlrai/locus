@@ -471,21 +471,28 @@ pub fn parse_ttl(s: &str) -> Result<Duration> {
     if s.is_empty() {
         return Ok(Duration::hours(8));
     }
+    // The suffix split is byte-based; reject non-ASCII content before indexing UTF-8.
+    if !s.is_ascii() {
+        return Err(LocusError::msg(format!("invalid ttl: {s}")));
+    }
     let (num, unit) = s.split_at(s.len().saturating_sub(1));
     let n: i64 = num
         .parse()
         .map_err(|_| LocusError::msg(format!("invalid ttl: {s}")))?;
+    // `Duration::{seconds,minutes,hours,days}` panic out of range; a typed
+    // `--ttl 9999999999999999d` must be an error, not a crash.
+    let out_of_range = || LocusError::msg(format!("invalid ttl: {s} (out of range)"));
     match unit {
-        "s" => Ok(Duration::seconds(n)),
-        "m" => Ok(Duration::minutes(n)),
-        "h" => Ok(Duration::hours(n)),
-        "d" => Ok(Duration::days(n)),
+        "s" => Duration::try_seconds(n).ok_or_else(out_of_range),
+        "m" => Duration::try_minutes(n).ok_or_else(out_of_range),
+        "h" => Duration::try_hours(n).ok_or_else(out_of_range),
+        "d" => Duration::try_days(n).ok_or_else(out_of_range),
         _ => {
             // bare number = hours
             let n: i64 = s
                 .parse()
                 .map_err(|_| LocusError::msg(format!("invalid ttl: {s}")))?;
-            Ok(Duration::hours(n))
+            Duration::try_hours(n).ok_or_else(out_of_range)
         }
     }
 }
@@ -596,6 +603,48 @@ mod tests {
         assert_eq!(parse_ttl("8h").unwrap(), Duration::hours(8));
         assert_eq!(parse_ttl("90m").unwrap(), Duration::minutes(90));
         assert_eq!(parse_ttl("30s").unwrap(), Duration::seconds(30));
+    }
+
+    #[test]
+    fn parse_ttl_refuses_out_of_range_values_without_panicking() {
+        for raw in [
+            "9999999999999999d",
+            "9223372036854775807s",
+            "-9223372036854775807m",
+            "9999999999999999h",
+            "9999999999999999",
+        ] {
+            let err = parse_ttl(raw).unwrap_err().to_string();
+            assert!(err.contains("out of range"), "{raw}: {err}");
+        }
+        assert_eq!(parse_ttl("1d").unwrap(), Duration::days(1));
+    }
+
+    #[test]
+    fn parse_ttl_refuses_non_ascii_content_without_panicking() {
+        for raw in ["é", "1é", "1🚀", "2小时", "１２h", "٢h", "\u{2003}1é\u{a0}"] {
+            assert_eq!(
+                parse_ttl(raw).unwrap_err().to_string(),
+                format!("invalid ttl: {}", raw.trim())
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ttl_preserves_trimmed_defaults_and_ascii_edge_behavior() {
+        for raw in ["", " ", "\u{2003}\u{a0}"] {
+            assert_eq!(parse_ttl(raw).unwrap(), Duration::hours(8));
+        }
+        assert_eq!(parse_ttl("\u{2003}2h\u{a0}").unwrap(), Duration::hours(2));
+        assert_eq!(parse_ttl("0s").unwrap(), Duration::seconds(0));
+        assert_eq!(parse_ttl("-1h").unwrap(), Duration::hours(-1));
+        assert_eq!(parse_ttl("12").unwrap(), Duration::hours(12));
+        for raw in ["8", "2x", "2H", "1.5h", "9223372036854775808h"] {
+            assert_eq!(
+                parse_ttl(raw).unwrap_err().to_string(),
+                format!("invalid ttl: {raw}")
+            );
+        }
     }
 
     #[test]

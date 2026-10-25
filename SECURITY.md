@@ -8,8 +8,8 @@ Full design detail lives in **[DESIGN.md §9](./DESIGN.md)** (assets, adversarie
 
 | Version | Supported |
 |---------|-----------|
-| `0.1.x` (main) | Yes — active development |
-| pre-0.1 tags / unreleased spikes | Best effort |
+| `0.5.x` (main) | Yes — active development |
+| older tags / unreleased spikes | Best effort |
 
 ## Reporting a vulnerability
 

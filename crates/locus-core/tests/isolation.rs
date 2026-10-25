@@ -298,3 +298,53 @@ fn call_tool_github_and_vercel_scope_under_pin() {
         "unexpected: {msg}"
     );
 }
+
+#[test]
+fn gateway_and_proxy_variables_from_the_parent_never_reach_the_child() {
+    // docs/gateway-base-urls.md says `locus exec` rebuilds the child env from an
+    // allowlist, so a gateway URL or proxy exported in the parent shell is dropped.
+    // This pins that behaviour: loosening the allowlist must be a deliberate change.
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let binding = binding(
+        "gateway-probe",
+        "gateway-probe",
+        "env:LOCUS_GATEWAY_PROBE_UNSET",
+        "phm:VERCEL_GATEWAY",
+        "phm:SUPABASE_GATEWAY",
+        "proj_gateway",
+        "team_gateway",
+    );
+    store.save_binding(&binding).unwrap();
+    let session = store.pin("gateway-probe", dir.path(), None, false).unwrap();
+
+    let dropped = [
+        ("OPENAI_BASE_URL", "http://127.0.0.1:4000/v1"),
+        ("ANTHROPIC_BASE_URL", "http://127.0.0.1:4000"),
+        ("OLLAMA_HOST", "gpu-box:11434"),
+        ("HTTPS_PROXY", "http://127.0.0.1:8888"),
+        ("HTTP_PROXY", "http://127.0.0.1:8888"),
+        ("NO_PROXY", "localhost"),
+    ];
+    for (k, v) in dropped {
+        std::env::set_var(k, v);
+    }
+
+    let env = build_isolated_env(&session, &binding);
+
+    for (k, _) in dropped {
+        assert!(!env.vars.contains_key(k), "{k} must not reach the child");
+        assert!(
+            env.scrubbed.iter().any(|s| s == k),
+            "{k} should be reported as scrubbed"
+        );
+    }
+    // The allowlist still passes what a command needs to run.
+    if std::env::var_os("PATH").is_some() {
+        assert!(env.vars.contains_key("PATH"));
+    }
+
+    for (k, _) in dropped {
+        std::env::remove_var(k);
+    }
+}

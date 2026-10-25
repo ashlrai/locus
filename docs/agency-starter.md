@@ -52,7 +52,9 @@ Onboarding a new client without hand-editing TOML: `locus client add <alias>`
 walks alias → tenant → provider → scope → credential *pointer* (`phm:NAME` /
 `env:VAR` — raw secrets are rejected) and writes the binding via the same
 validated path as `locus binding add`. Every prompt has a flag for scripting
-(`--non-interactive`, `--dry-run`). Then `locus enter <alias> --ttl 2h` pins
+(`--non-interactive`, `--dry-run`); a `--provider` with no built-in adapter
+(e.g. a typo like `githb`) is still written but warned about on stderr. Then
+`locus enter <alias> --ttl 2h` pins
 with an auto-leave TTL (see [policy.md](./policy.md#session-ttl-auto-leave)).
 
 ## Binding graph

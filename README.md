@@ -1,21 +1,39 @@
 # Locus
 
 [![CI](https://github.com/ashlrai/locus/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
+[![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?label=npm%20locus-cli)](https://www.npmjs.com/package/locus-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](./rust-toolchain.toml)
-[![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?label=npm%20locus-cli)](https://www.npmjs.com/package/locus-cli)
 
-**AI-native identity plane for coding agents.**  
-**Wrong account, impossible.**
+**Your coding agent can't act as the wrong account.** Pin a client, and every CLI command, MCP tool and agent session is sealed to that identity until you re-pin. No more ambient `gh auth`, a shared Supabase token or "whichever Vercel team was last".
 
-Pin a client — every CLI command, MCP tool, and the **local dashboard** is hard-scoped to that binding until you re-pin. Agents inherit a sealed session, not ambient `gh auth` / last Vercel team.
+![locus quickstart pins a sample binding; locus whoami shows the sealed session and its scoped providers](docs/assets/locus-demo.gif)
 
-| Product | Question it answers |
-|---------|---------------------|
-| **[Phantom](https://phm.dev)** | Can this secret enter the model? |
-| **Locus** | As whom, against which tenant, right now? |
+## 30-second start
 
-> Agents inherit ambient identity: global `gh auth`, one Supabase MCP token, last Vercel team. Contract work makes that lethal. Locus makes wrong-account action **mechanically impossible** — not merely discouraged. AI-native (`locus agent`, MCP resources/prompts), hub-native (`agent report` · `REQUIRED_SERVERS`), and operator-visible (`locus dashboard` · `forensics` · `goal status`).
+```bash
+brew install ashlrai/tap/locus          # or cargo; see Install options (npm 0.5.0 is broken)
+locus quickstart                        # sample bindings, pin, whoami, doctor
+eval "$(locus hook zsh)"                # or bash; exports the control capability
+locus whoami                            # who your agents are acting as, right now
+```
+
+## Connect your agent (MCP)
+
+`locus agent setup --apply` writes the configs for every client it finds. By hand:
+
+```bash
+claude mcp add locus -- locus mcp --supervised    # Claude Code
+codex mcp add locus -- locus mcp --supervised     # Codex
+```
+
+Cursor (`~/.cursor/mcp.json`):
+
+```json
+{ "mcpServers": { "locus": { "command": "locus", "args": ["mcp", "--supervised"] } } }
+```
+
+`locus mcp --supervised` serves the pinned binding's provider tools; launch the client from the shell that ran `locus hook` and `locus pin`, and restart it after a re-pin. Registered as plain `locus-mcp` (what `locus setup` writes), the server serves control tools only (pin status, verification, `locus_request_pin`). Neither returns credential values. See [docs/mcp.md](./docs/mcp.md#supervised-launch-provider-tools).
 
 ### How it compares
 
@@ -24,23 +42,25 @@ Pin a client — every CLI command, MCP tool, and the **local dashboard** is har
 | `gh auth switch` | gh's shared config (`hosts.yml`) | Every process that reads that config, until the next switch |
 | direnv `.envrc` | Variables exported into your shell on `cd` | Only the variables in `.envrc`; the rest of the shell's environment stays |
 | 1Password `op run` | Secret references resolved for one command | That command |
-| **Locus** `run` / `exec` / `pin` | A sealed session bound to one binding | That command or session. Ambient `GH_TOKEN`, `AWS_*`, `SUPABASE_*`… are scrubbed, a directory's `.locus.toml` can refuse other bindings, and `locus-mcp` exposes only the pinned binding's tools |
+| **Locus** `run` / `exec` / `pin` | A sealed session bound to one binding | That command or session. Ambient `GH_TOKEN`, `AWS_*`, `SUPABASE_*`… are scrubbed, a directory's `.locus.toml` can refuse other bindings, and MCP provider tools (`locus mcp --supervised`) are only the pinned binding's |
 
 Use explicit environment (`env:`) references for supported credential resolution. Phantom (`phm:`) references remain readable for metadata and migration, but require a scoped bridge that is not available in this source checkout. Try it in a minute with the executable [recipes](./examples/recipes/) (two clients, a directory allowlist, a CI session).
 
 ---
 
-## Install
+## Install options
 
 ```bash
 # Homebrew (tap live) — installs locus + locus-mcp
 brew install ashlrai/tap/locus
 
-# npm — locus-cli and @ashlrai/locus-mcp published at 0.5.0
+# npm: wait for 0.5.1. The 0.5.0 on npm is the latest published version, and
+# its `locus --version` loops until killed (fixed in source, ships in 0.5.1).
+# Once `npm view locus-cli version` prints 0.5.1:
 # (downloads a release binary, or falls back to cargo install)
-npm install -g locus-cli @ashlrai/locus-mcp
-npx locus-cli --help
-npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
+npm install -g locus-cli@0.5.1 @ashlrai/locus-mcp@0.5.1
+npx locus-cli@0.5.1 --help
+npx @ashlrai/locus-mcp@0.5.1   # MCP server for Claude Code / Cursor
 
 # cargo
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -59,7 +79,7 @@ Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
 
 ---
 
-## Quick start
+## More of the CLI
 
 ```bash
 # First 60 seconds
@@ -102,6 +122,19 @@ eval "$(locus hook zsh)"
 ```
 
 ---
+
+## Measured: wrong-client credential reachability
+
+Scenario: your shell still holds another client's ambient credentials (the `gh auth switch` or direnv leftover) and you launch a child process. Which of those can it still reach? Reproduce with `python3 eval/env-reachability/redteam.py` (needs `locus` 0.5.0 on PATH; fake canary credentials, throwaway `HOME` and `LOCUS_HOME`).
+
+| launch | env credentials reachable (16 variables x 3 trials) |
+| --- | --- |
+| plain launch | 48 of 48 |
+| `locus run -b acme -- <cmd>` | **0 of 48** |
+
+Also measured: with locus, credential files read through `$HOME` (`~/.config/gh/hosts.yml`, `~/.aws/credentials`, `~/.netrc`, `~/.git-credentials`, `~/.npmrc`) were not reachable (0 of 15), and an agent attempt to pin a binding was refused (3 of 3).
+
+**This is not a sandbox.** The same files read by their absolute real path stayed reachable under locus (15 of 15, same as a plain launch). Locus scrubs the environment and redirects `HOME`; it does not stop a process from opening files it already has OS permission to open. Scripted adversary, one machine, locus 0.5.0, 3 trials, no external audit.
 
 ## How isolation works
 
@@ -199,6 +232,7 @@ scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 
 ```
 locus init [--with-samples] · quickstart
+locus onboard [--detect-only] [--yes] [--reset]  # guided refs-only tenant setup
 locus pin [alias] [--force] [--client claude] [--ns a,b]
 locus enter <alias>                   # firm workflow pin
 locus leave
@@ -221,9 +255,10 @@ locus ci mint|env|run                 # short-lived sealed sessions for pipeline
 locus engagement init|close           # client engagement lifecycle (binding + workspace)
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
+locus adapter search|install|uninstall  # community adapters (executable code; see docs/adapters.md)
 locus hook zsh|bash|fish
-locus setup --client claude|cursor|codex|grok
-locus mcp                             # run the stdio MCP server (same as locus-mcp)
+locus setup --client claude|cursor|codex|grok|gemini
+locus mcp [--supervised]              # run the stdio MCP server; --supervised serves pinned provider tools
 locus agent report|setup|doctor       # AI-native readiness (hub JSON)
 locus goal status                     # northstar progress from GOALS.md
 locus completion zsh|bash|fish        # shell completions
@@ -232,7 +267,7 @@ locus topic <name>                    # dashboard · forensics · serve · goal 
 
 **Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
 
-**Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/ashlr-hub/](./integrations/ashlr-hub/)
+**Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/phantom/](./integrations/phantom/)
 
 Approvals:
 
@@ -274,7 +309,7 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | **0** Daemon-less control plane, pin/whoami/exec, isolation tests | done |
 | **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | done |
 | **2** Firm UX, doctor pane, run/ns, notify, local `locus graph`, `locus ci` | done (0.1.1) |
-| **2.x / 0.2–0.5** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch`; 0.5 signed registry manifests, hub MT drop-in | **you are here (0.5.0)** |
+| **2.x / 0.2–0.5** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch`; 0.5 signed registry manifests, hub MT drop-in | **you are here (0.5.1)** |
 | **3** Remote binding graph sync, dual-control packs, offboard, SIEM export | next |
 | **4** Adapter SDK, broader prebuilt platforms | later |
 
@@ -327,6 +362,9 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [docs/firm-mode.md](./docs/firm-mode.md) | Agencies: bindings, dual-control, workspaces |
 | [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
 | [examples/agency-starter/](./examples/agency-starter/) | Bindings, workspaces, dual-control, offboarding |
+| [docs/phantom-enrolled-repos.md](./docs/phantom-enrolled-repos.md) | Phantom workbench: personal / company / client scope bindings per enrolled repo |
+| [docs/gateway-base-urls.md](./docs/gateway-base-urls.md) | Model gateways (for example a LiteLLM proxy): Locus makes no provider calls, `locus exec` drops unknown env vars, and how to set a gateway URL inside it |
+| [docs/PQ-READINESS.md](./docs/PQ-READINESS.md) | Post-quantum readiness note: what Locus uses today (Ed25519 for adapter manifests, classical only) and what a migration would touch. No quantum-safety claim |
 | [docs/mcp.md](./docs/mcp.md) | `locus-mcp` with Claude Code / Cursor |
 | [docs/onboarding.md](./docs/onboarding.md) | Agency onboarding: 3 agent clients × 3 tenants end-to-end |
 | [docs/adapters.md](./docs/adapters.md) | Writing a provider adapter |
@@ -379,6 +417,14 @@ approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
 Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md §9](./DESIGN.md).
 
 ---
+
+## Part of the Ashlr ecosystem
+
+Locus is one of the open-source tools from [Ashlr](https://ashlr.ai), a forward-deployed engineering company. Its siblings: [Lexicon](https://github.com/ashlrai/lexicon), [Phantom Secrets](https://github.com/ashlrai/phantom-secrets), [Ashlr Stack](https://github.com/ashlrai/ashlr-stack), [Ashlr Markdown](https://github.com/ashlrai/ashlr-md), [Ashlr plugin](https://github.com/ashlrai/ashlr-plugin).
+
+## Contributing
+
+Issues and PRs are welcome. Look for [`good first issue`](https://github.com/ashlrai/locus/labels/good%20first%20issue) to get started, and read [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately per [SECURITY.md](SECURITY.md).
 
 ## License
 

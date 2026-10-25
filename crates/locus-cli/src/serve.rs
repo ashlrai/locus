@@ -60,10 +60,6 @@ pub async fn run_serve(port: u16, token: Option<String>, open_browser: bool) -> 
     let bound = listener.local_addr().unwrap_or(addr);
 
     let url = format!("http://127.0.0.1:{}", bound.port());
-    let url_with_token = match state.token.as_ref() {
-        Some(t) => format!("{url}/?token={t}"),
-        None => url.clone(),
-    };
 
     eprintln!("locus serve  {url}  (loopback only)");
     if state.token.is_some() {
@@ -76,15 +72,14 @@ pub async fn run_serve(port: u16, token: Option<String>, open_browser: bool) -> 
     eprintln!("  stop      Ctrl-C");
 
     if open_browser {
-        let open_url = if state.token.is_some() {
-            url_with_token.as_str()
-        } else {
-            url.as_str()
-        };
-        if let Err(e) = try_open_browser(open_url) {
+        let open_url = browser_open_url(&url);
+        if let Err(e) = try_open_browser(&open_url) {
             eprintln!("  browser   open failed: {e:#} — visit {url} manually");
         } else {
             eprintln!("  browser   opened {url}");
+        }
+        if state.token.is_some() {
+            eprintln!("  browser   enter LOCUS_DASHBOARD_TOKEN in the page once (it is kept in that browser)");
         }
     }
 
@@ -547,6 +542,15 @@ fn json_err(status: StatusCode, msg: &str) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
+/// The URL handed to the OS browser opener. Never carries the dashboard
+/// token: the opener (`open` / `xdg-open` / `gio` / `cmd /C start`) receives
+/// it as an argv value, visible to other local users in `ps`, and a `?token=`
+/// URL is also kept in browser history. The page's token gate asks for the
+/// token once and stores it in that browser.
+fn browser_open_url(base: &str) -> String {
+    format!("{base}/")
+}
+
 fn try_open_browser(url: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -600,6 +604,32 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browser_open_url_never_carries_the_token() {
+        let base = "http://127.0.0.1:8750";
+        let opened = super::browser_open_url(base);
+        assert_eq!(opened, "http://127.0.0.1:8750/");
+        assert!(!opened.contains("token"), "{opened}");
+        assert!(!opened.contains('?'), "{opened}");
+    }
+
+    #[test]
+    fn run_serve_source_never_puts_the_token_in_the_opened_url() {
+        // Guards the call site, not only the helper: the token must not be
+        // formatted into any URL in run_serve.
+        let src = include_str!("serve.rs");
+        let run_serve = src
+            .split("pub async fn run_serve")
+            .nth(1)
+            .and_then(|rest| rest.split("\nfn build_router").next())
+            .expect("run_serve body");
+        assert!(
+            !run_serve.contains("token={"),
+            "run_serve formats the token into a URL"
+        );
+        assert!(run_serve.contains("browser_open_url(&url)"));
+    }
+
     use super::*;
     use axum::body::Body;
     use axum::http::Request;

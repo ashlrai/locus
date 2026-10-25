@@ -92,11 +92,16 @@ pub struct McpRegistered {
     /// `probe_mcp_registered`.
     #[serde(default)]
     pub grok: bool,
+    /// Gemini CLI. Probed at project `.gemini/settings.json` or user
+    /// `~/.gemini/settings.json` (`mcpServers.locus`, JSON). Additive:
+    /// absent in reports from older binaries.
+    #[serde(default)]
+    pub gemini: bool,
 }
 
 impl McpRegistered {
     pub fn any(&self) -> bool {
-        self.claude || self.cursor || self.codex || self.grok
+        self.claude || self.cursor || self.codex || self.grok || self.gemini
     }
 }
 
@@ -133,6 +138,12 @@ pub struct AgentReport {
     /// Human next-step bullets.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_steps: Vec<String>,
+    /// Human-only recovery when a pin exists but can no longer be verified
+    /// (its broker died with the pinning shell, stale generation, bad seal,
+    /// expiry): `eval "$(locus hook bash)"; locus leave --force; locus enter
+    /// <alias>`. Agents cannot run it; they surface it to the human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<String>,
     /// Exit code for `locus agent doctor` / `report`.
     pub exit_code: i32,
     /// Same tokens as `locus status --oneline` (hub convenience).
@@ -209,6 +220,40 @@ pub struct AgentReportOptions {
     pub workspace_error: bool,
 }
 
+/// Runtime health for `status_oneline`, matching `locus status --oneline`.
+///
+/// A pin whose runtime check failed *only* because this process has no
+/// control capability to authenticate the authority-anchor check
+/// (`executor_authority_unavailable`) is not an invalid pin: doctor already
+/// folds that environment gap into `pin.seal_ok` (true only when the
+/// capability is absent rather than present-but-wrong). Any other runtime
+/// issue, or any structural mismatch, still reads as invalid. Readiness stays
+/// fail closed separately: `compute_status` never reports ready while the
+/// anchor is unverified (`authority_anchor_verified == Some(false)`).
+fn runtime_ok_or_capability_gap(doctor: &DoctorReport) -> bool {
+    let rt = &doctor.runtime;
+    if rt.ok {
+        return true;
+    }
+    let pin_verified = doctor.pin.as_ref().is_some_and(|p| p.seal_ok);
+    pin_verified
+        && !rt.issues.is_empty()
+        && rt
+            .issues
+            .iter()
+            .all(|issue| issue == "executor_authority_unavailable")
+        && rt.pinned
+        && rt.seal_ok
+        && !rt.authority_anchor_ok
+        && rt.backing_ok
+        && rt.binding_present
+        && rt.binding_id_match
+        && rt.tenant_match
+        && rt.providers_match
+        && !rt.expired
+        && !rt.frozen
+}
+
 /// Build the hub agent report from a doctor report + MCP probe.
 pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) -> AgentReport {
     let workspace_error = opts.workspace_error;
@@ -216,6 +261,17 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
     let pin = doctor.pin.clone();
 
     let mut findings: Vec<String> = Vec::new();
+
+    // A pin that exists but no longer verifies (not frozen: that has its own
+    // re-pin flow) needs the human force-leave + re-enter recovery, since a
+    // plain re-pin fails closed on the wedged session.
+    let recovery = pin
+        .as_ref()
+        .filter(|p| {
+            !doctor.runtime.frozen
+                && (!p.seal_ok || p.expired || !runtime_ok_or_capability_gap(&doctor))
+        })
+        .map(|p| crate::recovery::stale_pin_recovery(Some(&p.alias)));
 
     if !opts.home_ready || !doctor.seal_ok {
         findings.push("locus home / seal key not ready — run `locus init`".into());
@@ -227,10 +283,13 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
     if pin.is_none() {
         findings
             .push("not pinned — run `locus enter` or `locus pin <alias>` before agent work".into());
-    } else if pin.as_ref().is_some_and(|p| !p.seal_ok) {
-        findings.push("pin seal invalid — re-pin with `locus pin <alias>`".into());
-    } else if pin.as_ref().is_some_and(|p| p.expired) {
+    } else if pin.as_ref().is_some_and(|p| p.seal_ok && p.expired) {
         findings.push("pin expired — re-pin with `locus pin <alias>`".into());
+    } else if let Some(recovery) = &recovery {
+        findings.push(format!(
+            "pin cannot be verified (authority broker gone, stale session or bad seal) — \
+             human recovery: `{recovery}`"
+        ));
     }
     if !mcp.any() {
         findings.push(
@@ -275,6 +334,9 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
     let commands = build_commands(opts.project_dir.as_deref(), pin.as_ref());
 
     let mut next_steps: Vec<String> = Vec::new();
+    if let Some(recovery) = &recovery {
+        next_steps.push(recovery.clone());
+    }
     if !doctor.seal_ok || doctor.bindings == 0 {
         next_steps.push("locus init --with-samples".into());
     }
@@ -293,7 +355,9 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
     let status_oneline = match &pin {
         None => "unpinned".to_string(),
         Some(_) if doctor.runtime.frozen => "frozen".to_string(),
-        Some(p) if !p.seal_ok || p.expired || !doctor.runtime.ok => "invalid".to_string(),
+        Some(p) if !p.seal_ok || p.expired || !runtime_ok_or_capability_gap(&doctor) => {
+            "invalid".to_string()
+        }
         Some(p) => format!("{}:{}", p.alias, p.tenant),
     };
     let env_session_id = std::env::var("LOCUS_SESSION_ID")
@@ -311,6 +375,7 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
         commands,
         findings,
         next_steps,
+        recovery,
         exit_code: status.exit_code(),
         status_oneline,
         home,
@@ -344,7 +409,11 @@ fn compute_status(
         }
     }
 
-    let pin_ok = pin.as_ref().is_some_and(|p| p.seal_ok && !p.expired);
+    // Never ready on an authority anchor whose check was skipped for lack of
+    // a capability: the pin is intact (not unsafe) but unverified here.
+    let pin_ok = pin
+        .as_ref()
+        .is_some_and(|p| p.seal_ok && !p.expired && p.authority_anchor_verified != Some(false));
     if pin_ok && doctor.bindings > 0 && mcp.any() {
         AgentStatus::Ready
     } else {
@@ -395,6 +464,8 @@ fn build_commands(project_dir: Option<&Path>, pin: Option<&DoctorPin>) -> AgentC
 ///   scope matched (`both` when more than one).
 /// - Cursor: project `.cursor/mcp.json` or `~/.cursor/mcp.json`
 /// - Codex: `~/.codex/config.toml` → `[mcp_servers.locus]`
+/// - Gemini CLI: project `.gemini/settings.json` or `~/.gemini/settings.json`
+///   → `mcpServers.locus`
 /// - Grok Build: `~/.grok/config.toml` → `[mcp_servers.locus]` (documented
 ///   Codex-style TOML path); `LOCUS_GROK_MCP_CONFIG=<path>` overrides the
 ///   location and accepts either the JSON `mcpServers` shape (Grok's
@@ -456,12 +527,20 @@ pub fn probe_mcp_registered_with_grok(
             .unwrap_or(false),
     };
 
+    // Gemini CLI: project `.gemini/settings.json` or user
+    // `~/.gemini/settings.json`, same `mcpServers` JSON shape as Claude/Cursor.
+    let gemini = mcp_json_has_locus(&project_dir.join(".gemini").join("settings.json"))
+        || user_home
+            .map(|h| mcp_json_has_locus(&h.join(".gemini").join("settings.json")))
+            .unwrap_or(false);
+
     McpRegistered {
         claude,
         claude_scope,
         cursor,
         codex,
         grok,
+        gemini,
     }
 }
 
@@ -571,7 +650,7 @@ locus leave                 # clear pin
 | Var | Value | Notes |
 |-----|--------|--------|
 | `LOCUS_AUTO_PIN` | `cwd` | Advisory only — parsed, but the server never pins itself |
-| `LOCUS_CLIENT` | claude\|cursor\|codex\|grok | Session label |
+| `LOCUS_CLIENT` | claude\|cursor\|codex\|grok\|gemini | Session label |
 | `LOCUS_NOTIFY` | **unset** | Desktop banners stay opt-in (`locus notify on`) |
 
 ### MCP auto-pin knobs (advisory only)
@@ -850,8 +929,13 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
 
     // Pending approvals require authority from outside the caller-controlled
     // CLI/dashboard plane. Never turn local advisory labels into a retry loop.
+    // Only the pinned binding's requests gate this pin: another binding's
+    // pending record authorizes nothing here and must not wedge it.
     let pending = store.pending_approvals()?;
-    if let Some(rec) = pending.first() {
+    if let Some(rec) = pending
+        .iter()
+        .find(|r| binding.as_deref() == Some(r.binding.as_str()))
+    {
         let dual = store.tool_requires_dual_control(&rec.binding, &rec.tool);
         let required = crate::approval::required_grant_count(dual);
         let mode = if dual {
@@ -864,8 +948,8 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
             command: None,
             agent_tool: None,
             message: format!(
-                "Provider execution for `{}` on binding `{}` is blocked pending a closed, independently authenticated external authorization envelope ({mode}, {required} authoritative approver(s)). This release has no external verifier. Local CLI/dashboard labels are advisory only; do not retry the tool after recording one.",
-                rec.tool, rec.binding
+                "Provider execution for `{}` on binding `{}` is blocked pending a closed, independently authenticated external authorization envelope ({mode}, {required} authoritative approver(s)). This release has no external verifier. Local CLI/dashboard labels are advisory only; do not retry the tool after recording one. Human: `locus approve deny {}` dismisses the request.",
+                rec.tool, rec.binding, rec.id
             ),
             ready: false,
             approval_id: Some(rec.id.clone()),
@@ -1062,6 +1146,141 @@ mod tests {
     }
 
     #[test]
+    fn status_oneline_keeps_pin_when_only_capability_is_absent() {
+        // Regression: without LOCUS_CONTROL_CAPABILITY exported the report said
+        // `invalid` while `locus status --oneline` said `alias:tenant`. Doctor
+        // treats an unauthenticated anchor check as an environment gap, not
+        // tamper, so the oneline token must keep the pin (readiness stays off).
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let healthy = doctor_for(&store, dir.path());
+        let opts = || AgentReportOptions {
+            mcp: McpRegistered {
+                claude: true,
+                ..Default::default()
+            },
+            project_dir: Some(dir.path().to_path_buf()),
+            home_ready: true,
+            agent_md_present: true,
+            workspace_present: true,
+            workspace_error: false,
+        };
+
+        let mut gap = healthy.clone();
+        gap.runtime.ok = false;
+        gap.runtime.authority_anchor_ok = false;
+        gap.runtime.issues = vec!["executor_authority_unavailable".into()];
+        gap.push_finding(
+            IssueSeverity::Warn,
+            "executor_authority_unavailable",
+            "capability not exported".into(),
+        );
+        if let Some(p) = gap.pin.as_mut() {
+            p.authority_anchor_verified = Some(false);
+        }
+        let report = agent_report_from_doctor(gap.clone(), opts());
+        assert_eq!(report.status_oneline, "acme:acme-corp");
+        assert!(!report.ready, "a capability gap must never read as ready");
+        assert_eq!(report.status, AgentStatus::Protected);
+
+        // Present-but-wrong capability: doctor clears pin.seal_ok → invalid.
+        let mut wrong = gap.clone();
+        if let Some(p) = wrong.pin.as_mut() {
+            p.seal_ok = false;
+        }
+        assert_eq!(
+            agent_report_from_doctor(wrong, opts()).status_oneline,
+            "invalid"
+        );
+
+        // Any other runtime issue alongside the gap stays invalid.
+        let mut drift = gap.clone();
+        drift.runtime.providers_match = false;
+        drift.runtime.issues.push("providers_drift".into());
+        assert_eq!(
+            agent_report_from_doctor(drift, opts()).status_oneline,
+            "invalid"
+        );
+        let mut anchor = gap;
+        anchor
+            .runtime
+            .issues
+            .push("authority_anchor_mismatch".into());
+        assert_eq!(
+            agent_report_from_doctor(anchor, opts()).status_oneline,
+            "invalid"
+        );
+    }
+
+    #[test]
+    fn stale_pin_report_names_force_leave_recovery() {
+        // Regression: when the pinning shell exits, the broker dies and the
+        // pin can no longer be verified. The report said only "re-pin with
+        // `locus pin <alias>`", which fails closed on the wedged session.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let healthy = doctor_for(&store, dir.path());
+        let opts = || AgentReportOptions {
+            mcp: McpRegistered {
+                claude: true,
+                ..Default::default()
+            },
+            project_dir: Some(dir.path().to_path_buf()),
+            home_ready: true,
+            agent_md_present: true,
+            workspace_present: true,
+            workspace_error: false,
+        };
+
+        let report = agent_report_from_doctor(healthy.clone(), opts());
+        assert!(report.recovery.is_none());
+        let v = serde_json::to_value(&report).unwrap();
+        assert!(v.get("recovery").is_none(), "healthy pin: no recovery key");
+
+        // Broker gone: doctor reports the anchor unavailable and the pin unverified.
+        let mut stale = healthy;
+        stale.runtime.ok = false;
+        stale.runtime.authority_anchor_ok = false;
+        stale.runtime.issues = vec!["authority_anchor_unavailable".into()];
+        if let Some(p) = stale.pin.as_mut() {
+            p.seal_ok = false;
+            p.authority_anchor_verified = Some(false);
+        }
+        let report = agent_report_from_doctor(stale.clone(), opts());
+        assert_eq!(report.status_oneline, "invalid");
+        assert!(!report.ready);
+        let recovery = report.recovery.clone().expect("stale pin has a recovery");
+        assert!(
+            recovery.ends_with("; locus leave --force; locus enter acme"),
+            "{recovery}"
+        );
+        assert!(recovery.contains("locus hook"), "{recovery}");
+        assert_eq!(report.next_steps.first(), Some(&recovery));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.contains("pin cannot be verified") && f.contains(&recovery)));
+        assert!(!report
+            .findings
+            .iter()
+            .any(|f| f.contains("pin seal invalid")));
+        let v = serde_json::to_value(&report).unwrap();
+        assert_eq!(v["recovery"], recovery.as_str());
+
+        // Frozen pins keep their own re-pin flow.
+        stale.runtime.frozen = true;
+        assert!(agent_report_from_doctor(stale, opts()).recovery.is_none());
+    }
+
+    #[test]
     fn agent_unsafe_on_doctor_unsafe() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -1126,6 +1345,10 @@ mod tests {
         assert!(m.cursor);
         assert!(m.codex);
         assert!(
+            !m.gemini,
+            "gemini stays false without a settings.json entry"
+        );
+        assert!(
             !m.grok,
             "grok stays false without ~/.grok/config.toml or an override"
         );
@@ -1162,6 +1385,48 @@ mod tests {
         let m =
             probe_mcp_registered_with_grok(&project, Some(&home), Some(&home.join("missing.json")));
         assert!(!m.grok);
+    }
+
+    #[test]
+    fn probe_gemini_project_and_user_settings() {
+        let dir = tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("proj");
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(&project).unwrap();
+        assert!(!probe_mcp_registered_with_grok(&project, Some(&home), None).gemini);
+
+        // A settings.json without our entry (other servers only) is not a hit.
+        fs::create_dir_all(home.join(".gemini")).unwrap();
+        fs::write(
+            home.join(".gemini").join("settings.json"),
+            r#"{"theme":"x","mcpServers":{"other":{"command":"o"}}}"#,
+        )
+        .unwrap();
+        assert!(!probe_mcp_registered_with_grok(&project, Some(&home), None).gemini);
+
+        // User scope.
+        fs::write(
+            home.join(".gemini").join("settings.json"),
+            r#"{"mcpServers":{"locus":{"command":"locus-mcp"}}}"#,
+        )
+        .unwrap();
+        assert!(probe_mcp_registered_with_grok(&project, Some(&home), None).gemini);
+        fs::remove_file(home.join(".gemini").join("settings.json")).unwrap();
+
+        // Project scope.
+        fs::create_dir_all(project.join(".gemini")).unwrap();
+        fs::write(
+            project.join(".gemini").join("settings.json"),
+            r#"{"mcpServers":{"locus":{"command":"locus-mcp"}}}"#,
+        )
+        .unwrap();
+        let m = probe_mcp_registered_with_grok(&project, Some(&home), None);
+        assert!(m.gemini && m.any());
+
+        // Malformed JSON fails closed.
+        fs::write(project.join(".gemini").join("settings.json"), "{not json").unwrap();
+        assert!(!probe_mcp_registered_with_grok(&project, Some(&home), None).gemini);
     }
 
     #[test]
@@ -1584,6 +1849,65 @@ require_pin = true
         assert!(next.message.contains("do not retry"));
         assert!(!next.message.contains("dual-control"));
         assert!(!next.message.contains("need second principal"));
+    }
+
+    #[test]
+    fn safe_next_ignores_pending_approval_of_another_binding() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        store
+            .create_pending_approval(
+                "github.some_tool",
+                "acme",
+                &serde_json::json!({}),
+                "sess_test",
+                "agent",
+            )
+            .unwrap();
+        store.leave().unwrap();
+        store.pin("personal", dir.path(), None, false).unwrap();
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "ready", "{}", next.message);
+        assert!(next.ready);
+        assert_eq!(next.binding.as_deref(), Some("personal"));
+        assert!(next.approval_id.is_none());
+    }
+
+    #[test]
+    fn safe_next_external_authorization_names_how_to_dismiss() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let rec = store
+            .create_pending_approval(
+                "github.some_tool",
+                "acme",
+                &serde_json::json!({}),
+                "sess_test",
+                "agent",
+            )
+            .unwrap();
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "external_authorization");
+        assert!(
+            next.message
+                .contains(&format!("`locus approve deny {}`", rec.id)),
+            "message should name the human dismissal: {}",
+            next.message
+        );
+        assert!(next.message.contains("do not retry"));
     }
 
     #[test]
