@@ -15,8 +15,17 @@
 brew install ashlrai/tap/locus          # or cargo; see Install options (npm 0.5.0 is broken)
 locus quickstart                        # sample bindings, pin, whoami, doctor
 eval "$(locus hook zsh)"                # or bash; exports the control capability
+locus enter personal                    # pin from this shell (it supervises the pin)
 locus whoami                            # who your agents are acting as, right now
+locus exec --expect personal -- echo ok # runs: personal is pinned
+locus exec --expect acme -- echo ok     # refused, exit 1, child never starts (pin_mismatch)
 ```
+
+What the two extra steps are for:
+
+- **Control capability.** Control commands (`enter`, `pin`, `leave`, `exec`) need `LOCUS_CONTROL_CAPABILITY` in the shell. `locus quickstart` mints it and saves it at `~/.locus/control_capability` (0600, respects `LOCUS_HOME`); `eval "$(locus hook zsh)"` exports it without printing it. Without it, `locus exec` stops with `LOCUS_CONTROL_CAPABILITY is required for control-plane authority`. `locus capability status` shows the posture without the value.
+- **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. Right after `quickstart`, `locus exec` reports `human re-pin required`, so run `locus enter personal` in the shell you work and launch agents from first.
+- **Recovery.** If a command says `human re-pin required` (for example `no current broker endpoint` after the pinning shell exited), run `locus leave --force`, then `locus enter personal`. `--force` deletes session state only and never mints anything.
 
 ## Connect your agent (MCP)
 
