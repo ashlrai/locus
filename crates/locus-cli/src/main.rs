@@ -344,6 +344,9 @@ enum Commands {
         /// Fail if any credential_ref cannot be resolved
         #[arg(long)]
         strict_creds: bool,
+        /// Refuse (exit 1, child never starts) unless the pinned binding is this alias
+        #[arg(long, value_name = "ALIAS")]
+        expect: Option<String>,
         /// Command and args (after `--`)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true)]
         cmd: Vec<String>,
@@ -1305,8 +1308,9 @@ fn run() -> Result<()> {
         Commands::Exec {
             no_resolve,
             strict_creds,
+            expect,
             cmd,
-        } => cmd_exec(cmd, !no_resolve, strict_creds),
+        } => cmd_exec(cmd, !no_resolve, strict_creds, expect.as_deref()),
         Commands::Run {
             binding,
             share_pin,
@@ -3513,7 +3517,59 @@ fn reject_option_as_command(command: &str, args: &[String]) -> Result<()> {
     bail!("`{first}` is not a `locus {command}` option, and a command cannot start with `-`; nothing ran.{hint}");
 }
 
-fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Result<()> {
+/// Alias as shown in an `--expect` refusal: binding-alias characters only.
+fn expect_label(alias: &str) -> String {
+    if !alias.is_empty()
+        && alias.len() <= 64
+        && alias
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    {
+        alias.to_string()
+    } else {
+        "<invalid alias>".to_string()
+    }
+}
+
+/// `locus exec --expect <alias>`: refuse unless the pinned binding is
+/// `expected`. Runs after pin resolution and before any spawn, so the child
+/// never starts on refusal. Only refuses, never widens access, and the text
+/// names aliases only (never credential references).
+fn check_expected_alias(s: &Store, pinned: Option<&str>, expected: &str) -> Result<()> {
+    if pinned == Some(expected) {
+        return Ok(());
+    }
+    let want = expect_label(expected);
+    let mut msg = match pinned {
+        Some(p) => format!(
+            "pin_mismatch: expected binding '{want}' but '{}' is pinned; nothing was run. Run: locus enter {want}",
+            expect_label(p)
+        ),
+        None => format!(
+            "pin_mismatch: expected binding '{want}' but no binding is pinned; nothing was run. Run: locus enter {want}"
+        ),
+    };
+    if let Ok(list) = s.list_bindings() {
+        let aliases: Vec<String> = list.into_iter().map(|b| b.alias).collect();
+        if !aliases.iter().any(|a| a == expected) {
+            msg.push_str(&format!(
+                " ('{want}' is not a known binding; known aliases: {})",
+                aliases.join(", ")
+            ));
+            if let Some(best) = locus_core::nearest_alias(expected, &aliases) {
+                msg.push_str(&format!("; did you mean `{best}`?"));
+            }
+        }
+    }
+    bail!(msg)
+}
+
+fn cmd_exec(
+    cmd: Vec<String>,
+    resolve_secrets: bool,
+    strict_creds: bool,
+    expect: Option<&str>,
+) -> Result<()> {
     if cmd.is_empty() {
         bail!("usage: locus exec -- <command> [args...]");
     }
@@ -3529,6 +3585,9 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
 
     let s = store()?;
     if let Some(session) = delegated_child_session(&s)? {
+        if let Some(want) = expect {
+            check_expected_alias(&s, Some(&session.binding_alias), want)?;
+        }
         if resolve_secrets {
             bail!(
                 "locus exec cannot resolve credentials inside a delegated session; use --no-resolve"
@@ -3544,10 +3603,19 @@ fn cmd_exec(cmd: Vec<String>, resolve_secrets: bool, strict_creds: bool) -> Resu
             "session.exec.delegated",
         );
     }
-    let session = s
-        .require_active()
-        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))
-        .context("need active pin for exec")?;
+    let session = match s.require_active() {
+        Ok(session) => session,
+        Err(e) => {
+            if let Some(want) = expect {
+                check_expected_alias(&s, None, want)?;
+            }
+            return Err(wedged_session_recovery(anyhow::Error::new(e)))
+                .context("need active pin for exec");
+        }
+    };
+    if let Some(want) = expect {
+        check_expected_alias(&s, Some(&session.binding_alias), want)?;
+    }
     let binding = s.load_binding(&session.binding_alias)?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Exec)?;
 

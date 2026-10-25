@@ -239,6 +239,7 @@ locus leave
 locus whoami [--json]
 locus status [--oneline] [--json]
 locus exec -- <command> [args...]
+locus exec --expect <alias> -- <cmd>  # refuse (exit 1, child never starts) unless <alias> is pinned
 locus run -b <alias> -- <command>     # one-shot; global pin unchanged
 locus binding list|show|add|rm
 locus workspace --default <alias> [--allow a,b] [--require-pin]
