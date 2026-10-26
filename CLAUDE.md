@@ -1,6 +1,6 @@
-# Locus — Development Guide
+# Locus: Development Guide
 
-**Prefer `locus enter` (or `locus pin`) before tool use** — identity is resolved at the gate, not in the prompt.
+**Prefer `locus enter` (or `locus pin`) before tool use**: identity is resolved at the gate, not in the prompt.
 
 ## Quick reference
 
@@ -9,6 +9,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 cargo build --workspace
 cargo test --workspace
+cargo test -p locus-cli --test doc_facts # CLI/MCP catalog and example freshness
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 
@@ -27,16 +28,17 @@ dies with that shell, and with `cargo run` it dies as soon as cargo exits.
 
 ```bash
 cargo build --workspace
-export LOCUS_HOME=/tmp/locus-dev PATH="$PWD/target/debug:$PATH"
+export LOCUS_HOME="$(mktemp -d)" PATH="$PWD/target/debug:$PATH"
 locus quickstart                 # or: init --with-samples, then the hook line, then enter personal
 eval "$(locus hook bash)"        # exports LOCUS_CONTROL_CAPABILITY for whoami/pin/leave
+locus enter personal            # establish this shell's broker-backed pin
 locus whoami
-locus doctor                     # exits 1 on WARN, e.g. when phantom is not installed
+locus doctor                     # setup advisories exit 0; actionable WARN 1; UNSAFE 2
 ```
 
 A later shell sees `no current broker endpoint ... human re-pin required`.
-In the new shell, recover with
-`export LOCUS_HOME=/tmp/locus-dev PATH="$PWD/target/debug:$PATH"; eval "$(locus hook bash)"; locus enter personal`.
+In the new shell, restore the same scratch `LOCUS_HOME`, add `target/debug` to `PATH`, load
+`eval "$(locus hook bash)"`, then run `locus enter personal`.
 Only if enter is refused (expired pin, bad seal), run `locus leave --force` first.
 
 ## Architecture
@@ -47,7 +49,7 @@ Only if enter is refused (expired pin, bad seal), run `locus leave --force` firs
 |-------|------|
 | **locus-core** | Binding, Session, Seal (HMAC), Policy, Store (`~/.locus`), isolation env, CredentialRef resolve, adapters, workers |
 | **locus-cli** | Human control plane. Daily use: `enter`, `switch`, `pin`, `leave`, `renew`, `whoami`, `status`, `exec`, `run`, `binding`. Setup: `init`, `quickstart`, `onboard`, `setup`, `agent`, `doctor`, `hook`, `mcp`, `workspace`, and more. `locus --help` is the full grouped list |
-| **locus-mcp** | Stdio MCP multiplexor — tools = control + **pinned binding only** |
+| **locus-mcp** | Stdio MCP multiplexor: tools = control + **pinned binding only** |
 
 Planes (see [docs/architecture.md](./docs/architecture.md)):
 
@@ -64,7 +66,7 @@ Clients → data plane (locus-mcp / exec)
 ## Conventions
 
 - Fail closed: bad seal, scope mismatch, unknown provider path → deny/error
-- CredentialRefs in bindings — never raw secrets in TOML or git
+- CredentialRefs in bindings: never raw secrets in TOML or git
 - Scope freeze on every account selector (`freeze_string_arg`)
 - MCP stdout is protocol-only (no logging)
 - `LOCUS_HOME` for tests; production binaries reject `test:` refs regardless of environment

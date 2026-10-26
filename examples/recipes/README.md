@@ -9,7 +9,7 @@ cargo build --bins                                   # or install a release
 node examples/recipes/run.mjs --locus "$PWD/target/debug/locus"
 ```
 
-Output from a real run (Sep 29, 2026, main and the v0.5.0 release):
+Example output (synthetic fixtures; no live provider calls):
 
 ```text
      child saw GH_TOKEN=fake-acme-token LOCUS_TENANT=acme-corp AWS_PROFILE=null
@@ -36,7 +36,7 @@ tenant = "acme-corp"
 [[binding.providers]]
 provider = "github"
 account = "acme-corp"
-credential_ref = "phm:GH_TOKEN_ACME"      # recipe uses env:ACME_GH_TOKEN
+credential_ref = "env:ACME_GH_TOKEN"      # supplied outside agent context
 scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 ```
 
@@ -72,7 +72,9 @@ Commit `.locus.toml` so everyone working in the repo gets the same allowlist.
 `locus ci run` mints a sealed session with a TTL, applies the same scrubbing,
 runs the command, and cleans up. It never writes the global `active.json` pin.
 Provide the control capability and credentials as CI secrets
-(`LOCUS_CONTROL_CAPABILITY`, plus `env:` refs or Phantom).
+(`LOCUS_CONTROL_CAPABILITY`, plus variables named by explicit `env:` refs).
+`phm:` resolution fails closed until a supported scoped bridge exists; see
+[credential compatibility](../../docs/credential-compatibility.md).
 
 ## Not covered here
 
