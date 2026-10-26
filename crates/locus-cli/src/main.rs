@@ -1336,9 +1336,9 @@ fn argv_targets_unplannable(args: &[std::ffi::OsString]) -> bool {
         Some("mcp") => {
             use clap::CommandFactory;
             let next = words.next();
-            !Cli::command()
+            Cli::command()
                 .find_subcommand("mcp")
-                .is_some_and(|m| next.is_some_and(|w| m.find_subcommand(w).is_some()))
+                .is_none_or(|m| next.is_none_or(|w| m.find_subcommand(w).is_none()))
         }
         Some("ci") => words.next() == Some("run"),
         _ => false,
@@ -1984,7 +1984,12 @@ fn delegated_child_session(s: &Store) -> Result<Option<Session>> {
     let session = match s.require_active() {
         Ok(session) => session,
         Err(_) if !selected && s.active_session()?.is_none() => return Ok(None),
-        Err(error) => return Err(error).context("verify selected session authority"),
+        // Name the recovery here: `locus mcp --supervised` prints this error
+        // on its own fallback line, which never reaches the top-level hatch.
+        Err(error) => {
+            return Err(wedged_session_recovery(anyhow::Error::new(error)))
+                .context("verify selected session authority");
+        }
     };
     if selected || session.is_delegated() {
         Ok(Some(session))
@@ -3227,15 +3232,10 @@ fn wedged_session_recovery(err: anyhow::Error) -> anyhow::Error {
 fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyhow::Error {
     let wedged = err
         .downcast_ref::<locus_core::LocusError>()
-        .filter(|e| locus_core::recovery::is_stale_pin_error(e))
-        .map(locus_core::recovery::enter_replaces_stale_pin);
-    if let Some(enter_first) = wedged {
+        .filter(|e| locus_core::recovery::is_stale_pin_error(e));
+    if let Some(stale_err) = wedged {
         let alias = recovery_alias(alias);
-        let recipe = if enter_first {
-            locus_core::recovery::dead_broker_recovery(alias.as_deref())
-        } else {
-            locus_core::recovery::stale_pin_recovery(alias.as_deref())
-        };
+        let recipe = locus_core::recovery::recovery_for_error(stale_err, alias.as_deref());
         anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
     } else {
         err
@@ -3265,15 +3265,12 @@ fn recovery_alias(requested: Option<&str>) -> Option<String> {
 /// Message only: the error itself still fails closed.
 fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
     let stale = err.chain().find_map(|cause| {
-        cause
-            .downcast_ref::<locus_core::LocusError>()
-            .filter(|e| {
-                locus_core::recovery::is_stale_pin_error(e)
-                    && !matches!(e, locus_core::LocusError::Json(_))
-            })
-            .map(locus_core::recovery::enter_replaces_stale_pin)
+        cause.downcast_ref::<locus_core::LocusError>().filter(|e| {
+            locus_core::recovery::is_stale_pin_error(e)
+                && !matches!(e, locus_core::LocusError::Json(_))
+        })
     });
-    let Some(enter_first) = stale else {
+    let Some(stale_err) = stale else {
         return err;
     };
     if format!("{err:#}").contains("locus leave --force") {
@@ -3282,11 +3279,7 @@ fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
     let Some(alias) = store().ok().and_then(|s| active_alias_hint(&s)) else {
         return err;
     };
-    let recipe = if enter_first {
-        locus_core::recovery::dead_broker_recovery(Some(&alias))
-    } else {
-        locus_core::recovery::stale_pin_recovery(Some(&alias))
-    };
+    let recipe = locus_core::recovery::recovery_for_error(stale_err, Some(&alias));
     anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
 }
 
