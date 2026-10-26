@@ -1955,7 +1955,7 @@ mod tests {
                 Some("acme-corp")
             );
             assert!(r.content.get("credential_ref").is_none());
-            assert_eq!(r.content["credential"]["present"], true);
+            assert_eq!(r.content["credential"]["present"], false);
             assert_eq!(r.content["credential"]["source"], "phantom");
         }
         let a = call_tool(&b, "anthropic.whoami", &json!({})).unwrap();
@@ -1989,7 +1989,7 @@ mod tests {
                 Some("acme-corp")
             );
             assert!(r.content.get("credential_ref").is_none());
-            assert_eq!(r.content["credential"]["present"], true);
+            assert_eq!(r.content["credential"]["present"], false);
             assert_eq!(r.content["credential"]["source"], "phantom");
         }
 
@@ -2150,7 +2150,7 @@ mod tests {
                 result.content.get("credential_ref").is_none(),
                 "{tool} retained credential_ref field"
             );
-            assert_eq!(result.content["credential"]["present"], true);
+            assert_eq!(result.content["credential"]["present"], false);
             assert_eq!(result.content["credential"]["source"], "phantom");
         }
     }

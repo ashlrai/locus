@@ -4041,9 +4041,11 @@ mod tests {
                 .as_deref(),
             Some("proj_acme")
         );
-        // Agent-facing view reports source metadata, never credential refs.
+        // Agent-facing view reports resolved availability and source metadata,
+        // never credential refs. Phantom refs are unavailable until a scoped
+        // credential bridge exists.
         for p in &w1.providers {
-            assert!(p.credential.present);
+            assert!(!p.credential.present);
             assert_eq!(p.credential.source, "phantom");
         }
         assert!(!serde_json::to_string(&w1)
@@ -4057,7 +4059,7 @@ mod tests {
         let w2 = store.whoami().unwrap();
         assert_eq!(w2.binding_alias, "personal");
         for p in &w2.providers {
-            assert!(p.credential.present);
+            assert!(!p.credential.present);
             assert_eq!(p.credential.source, "phantom");
         }
         let w2_json = serde_json::to_string(&w2).unwrap();
@@ -4068,6 +4070,34 @@ mod tests {
             .providers
             .iter()
             .all(|p| p.project_ref.as_deref() != Some("proj_acme")));
+    }
+
+    #[test]
+    fn whoami_credential_presence_tracks_environment_resolution() {
+        let _env_guard = lock_session_env();
+        const VAR: &str = "LOCUS_TEST_WHOAMI_CREDENTIAL";
+        std::env::remove_var(VAR);
+
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut binding = sample_binding("whoami-env", "tenant", "project");
+        binding.providers[0].credential_ref = format!("env:{VAR}");
+        store.save_binding(&binding).unwrap();
+        store
+            .pin("whoami-env", dir.path(), Some("test".into()), false)
+            .unwrap();
+
+        let unavailable = store.whoami().unwrap();
+        assert!(!unavailable.providers[0].credential.present);
+        assert_eq!(unavailable.providers[0].credential.source, "environment");
+
+        std::env::set_var(VAR, "whoami-test-value");
+        let available = store.whoami().unwrap();
+        std::env::remove_var(VAR);
+        assert!(available.providers[0].credential.present);
+        assert!(!serde_json::to_string(&available)
+            .unwrap()
+            .contains("whoami-test-value"));
     }
 
     #[test]
@@ -5470,7 +5500,10 @@ credential_ref = "ghp_UNSAFE/CANARY"
         assert!(init.binding_path.exists());
         assert!(init.workspace_path.as_ref().unwrap().exists());
         assert!(init.readme_path.as_ref().unwrap().exists());
-        assert!(init.credentials.iter().all(|credential| credential.present));
+        assert!(init
+            .credentials
+            .iter()
+            .all(|credential| !credential.present));
         assert!(init
             .credentials
             .iter()
@@ -6680,7 +6713,7 @@ allowed_bindings = ["acme"]
             .iter()
             .find(|e| e.name == "acme" && e.kind == "binding");
         let credentials = &acme.unwrap().credentials;
-        assert!(credentials.iter().all(|credential| credential.present));
+        assert!(credentials.iter().all(|credential| !credential.present));
         assert!(credentials
             .iter()
             .all(|credential| credential.source == "phantom"));
