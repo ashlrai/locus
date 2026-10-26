@@ -50,6 +50,7 @@ whose first key is `schema`. Key on it:
 | any mutating command with `--dry-run` | `locus.plan.v1` |
 | any command failing under `--json` (stderr) | `locus.error.v1` |
 | `locus topic agent-contract` | `locus.contract.v1` |
+| `locus --ashlr-handshake` | `locus.ashlr.handshake.v1` |
 
 List commands (`binding list`, `events`, `approve list`, `mcp list`,
 `graph list`, `upstream list`) print a bare JSON array, unchanged, and are not
