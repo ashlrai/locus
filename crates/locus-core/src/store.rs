@@ -31,6 +31,13 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Home directory permissions (unix): [`Store::open`] creates a missing
+/// `$LOCUS_HOME` with mode 0700. An existing home that is a real directory
+/// owned by the current user has its group and other bits cleared (0700).
+/// A home owned by another user is left as is. If `$LOCUS_HOME` is a
+/// symlink, it is not chmod'ed through; the target's mode is the user's
+/// choice. Files with secrets are additionally created 0600.
+///
 /// Layout:
 /// ```text
 /// $LOCUS_HOME/
@@ -46,6 +53,43 @@ use std::path::{Path, PathBuf};
 ///   archives/<alias>-<date>.jsonl
 ///   trust/adapter-keys.toml  # adapter registry trust pins (0600; lazy)
 /// ```
+/// Create `home` as 0700 if missing, and tighten an existing home owned by the
+/// current user to 0700. Never chmods through a symlink. See [`Store`].
+fn ensure_private_home(home: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+        if fs::symlink_metadata(home).is_err() {
+            match fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(home)
+            {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let meta = fs::symlink_metadata(home)?;
+        if meta.file_type().is_symlink() {
+            // Do not chmod through a symlink; it must still resolve to a dir.
+            fs::create_dir_all(home)?;
+            return Ok(());
+        }
+        // SAFETY: geteuid has no preconditions.
+        let uid = unsafe { libc::geteuid() };
+        if meta.is_dir() && meta.uid() == uid && meta.mode() & 0o077 != 0 {
+            fs::set_permissions(home, fs::Permissions::from_mode(0o700))?;
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(home)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     home: PathBuf,
@@ -66,7 +110,7 @@ impl Store {
 
     pub fn open(home: impl Into<PathBuf>) -> Result<Self> {
         let home = home.into();
-        fs::create_dir_all(&home)?;
+        ensure_private_home(&home)?;
         let home = fs::canonicalize(home)?;
         fs::create_dir_all(home.join("bindings"))?;
         fs::create_dir_all(home.join("workspaces"))?;
@@ -3267,6 +3311,52 @@ fn write_secret_file_new(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn open_creates_fresh_home_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("fresh").join("home");
+        Store::open(&home).unwrap();
+        let mode = fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "fresh home must be 0700, got {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_tightens_existing_0755_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+        Store::open(&home).unwrap();
+        let mode = fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "existing home must be tightened, got {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_does_not_chmod_through_symlinked_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        Store::open(&link).unwrap();
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "symlink target must not be chmod'ed, got {mode:o}"
+        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
     use super::*;
     use crate::binding::{BindingBody, Policy, ProviderBinding, Scope};
     use std::sync::{Mutex, MutexGuard};
