@@ -1,0 +1,38 @@
+# Warm the Linux release build cache on main so v* tag runs restore it.
+# Tag refs can only restore caches saved on the default branch; release run
+# 40323390337 (v0.5.2) missed the cache in 3 of 3 jobs. rust-cache keys on
+# Cargo.lock and the toolchain, so the cache only goes stale when those
+# change: this runs only then, not on every main push.
+name: Release cache warm
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/release-cache-warm.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-cache-warm
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  warm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          shared-key: release-x86_64-unknown-linux-gnu
+      - run: cargo build --release --target x86_64-unknown-linux-gnu -p locus-cli -p locus-mcp

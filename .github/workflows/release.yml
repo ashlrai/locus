@@ -59,7 +59,10 @@ jobs:
         if: env.SKIP_BUILD != 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
-          key: ${{ matrix.name }}
+          # shared-key (not job-scoped) so release-cache-warm.yml on main can
+          # save a cache that tag runs restore; tags cannot see PR caches.
+          shared-key: release-${{ matrix.name }}
+          save-if: false
 
       - name: Build release binaries
         if: env.SKIP_BUILD != 'true'
