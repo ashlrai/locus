@@ -1095,6 +1095,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "hex",
+ "libc",
  "locus-core",
  "rand 0.8.7",
  "serde",

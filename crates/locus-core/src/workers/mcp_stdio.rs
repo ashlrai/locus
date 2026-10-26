@@ -222,6 +222,9 @@ impl McpStdioBackend {
         for (k, v) in &iso.vars {
             cmd.env(k, v);
         }
+        // Always mark the isolated child, including npx/shell launchers. A
+        // self-referential upstream must fail before it can spawn recursively.
+        cmd.env(super::MCP_UPSTREAM_CHILD_ENV, "1");
         cmd.env("LOCUS_WORKER_PROVIDER", &provider.provider);
         cmd.env("LOCUS_WORKER_ACCOUNT", &provider.account);
         cmd.env("LOCUS_WORKER_DIR", work_dir);

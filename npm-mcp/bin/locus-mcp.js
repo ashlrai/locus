@@ -7,13 +7,16 @@
  * 2. Else download the matching GitHub release asset (locus-<target>.tar.gz)
  * 3. Else fall back to `cargo install --git` and use ~/.cargo/bin/locus-mcp
  *
- * Note: locus-mcp is a long-running stdio MCP server — do not call it with
- * --version for health checks (it has no CLI version flag).
+ * The wrapper owns the child lifetime for stdio clients; HTTP is daemon mode.
  */
 
-const { execFileSync, spawnSync } = require("child_process");
+const { execFileSync, spawn, spawnSync } = require("child_process");
 const {
   chmodSync,
+  closeSync,
+  openSync,
+  readSync,
+  realpathSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -33,6 +36,9 @@ const VERSION = "0.5.1";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus-mcp";
 const CARGO_PACKAGE = "locus-mcp";
+// Inherited by every launch, including shell shims that hide their target.
+const RECURSION_MARKER = "LOCUS_MCP_WRAPPER_ACTIVE";
+const INITIAL_PARENT = process.ppid;
 // `cargo install` takes the crate as a positional argument; it has no --package flag.
 const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} ${CARGO_PACKAGE} --locked`;
 const CACHE_DIR = join(
@@ -233,13 +239,20 @@ function cargoBinPath() {
 }
 
 function isNodeShim(path) {
+  let fd;
   try {
-    const real = require("fs").realpathSync(path);
-    if (real === require("fs").realpathSync(__filename)) return true;
-    const head = readFileSync(real).subarray(0, 64).toString("utf8");
-    return head.startsWith("#!") && head.includes("node");
+    const real = realpathSync(path);
+    if (real === realpathSync(__filename)) return true;
+    // Read a bounded prefix: native binaries can be tens of megabytes.
+    fd = openSync(real, "r");
+    const prefix = Buffer.alloc(256);
+    const head = prefix.subarray(0, readSync(fd, prefix, 0, prefix.length, 0)).toString("utf8");
+    return head.startsWith("#!") && /\bnode(?:js)?\b/.test(head.split(/\r?\n/, 1)[0]);
   } catch {
-    return false;
+    // An unreadable candidate cannot be established as a native executable.
+    return true;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -257,7 +270,7 @@ function tryExistingOnPath() {
     }
   }
   const cargoPath = cargoBinPath();
-  if (existsSync(cargoPath)) {
+  if (existsSync(cargoPath) && !isNodeShim(cargoPath)) {
     return cargoPath;
   }
   return null;
@@ -284,8 +297,8 @@ function installViaCargo() {
     );
   }
   const path = cargoBinPath();
-  if (!existsSync(path)) {
-    throw new Error(`cargo install succeeded but ${path} not found`);
+  if (!existsSync(path) || isNodeShim(path)) {
+    throw new Error("cargo install did not produce a native locus-mcp executable");
   }
   return path;
 }
@@ -346,7 +359,7 @@ async function downloadReleaseBinary(binaryPath) {
 async function ensureBinary() {
   const binaryPath = getBinaryPath();
 
-  if (existsSync(binaryPath) && !isCachedBinaryStale(binaryPath)) {
+  if (existsSync(binaryPath) && !isNodeShim(binaryPath) && !isCachedBinaryStale(binaryPath)) {
     return binaryPath;
   }
   if (existsSync(binaryPath) && isCachedBinaryStale(binaryPath)) {
@@ -390,17 +403,116 @@ async function ensureBinary() {
   }
 }
 
-async function main() {
-  const binary = await ensureBinary();
-  const args = process.argv.slice(2);
+function isHttpMode(args, env = process.env) {
+  return args.some((arg) => arg === "--http" || arg === "-H" || arg.startsWith("--http=")) || /^(1|true|on|yes)$/i.test((env.LOCUS_MCP_HTTP || "").trim());
+}
 
-  try {
-    execFileSync(binary, args, { stdio: "inherit" });
-  } catch (err) {
-    process.exit(err.status || 1);
+function launch(binary, args, httpMode) {
+  return new Promise((resolve, reject) => {
+    const initialParent = INITIAL_PARENT;
+    const grouped = process.platform !== "win32";
+    const child = spawn(binary, args, {
+      env: { ...process.env, [RECURSION_MARKER]: "1" },
+      // A separate group lets cancellation collect shell-shim descendants too.
+      detached: grouped,
+      stdio: [httpMode ? "inherit" : "pipe", "inherit", "inherit"],
+    });
+    let stopping = false;
+    let timer;
+    let watchdog;
+    let requestedStatus;
+    const signals = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
+    const handlers = new Map();
+    const kill = (signal) => {
+      try {
+        if (grouped && child.pid) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch (err) {
+        if (err.code !== "ESRCH") throw err;
+      }
+    };
+    const stop = (status = 0, signal = "SIGTERM", graceful = false) => {
+      if (stopping) return;
+      stopping = true;
+      requestedStatus = graceful ? undefined : status;
+      process.stdin.unpipe(child.stdin);
+      if (child.stdin) child.stdin.end();
+      const terminate = () => {
+        requestedStatus = status;
+        kill(signal);
+        // A server ignoring termination must not keep an ended session alive.
+        timer = setTimeout(() => kill("SIGKILL"), 1000);
+      };
+      // Let the server drain its final request and answer after EOF; bound the
+      // grace so a server ignoring EOF still cannot outlive an ended session.
+      if (graceful) timer = setTimeout(terminate, 1000);
+      else terminate();
+    };
+    const eof = () => stop(0, "SIGTERM", true);
+    const inputError = () => stop(1);
+    const cleanup = () => {
+      clearInterval(watchdog);
+      clearTimeout(timer);
+      process.stdin.removeListener("end", eof);
+      process.stdin.removeListener("close", eof);
+      process.stdin.removeListener("error", inputError);
+      if (!httpMode) {
+        process.stdin.unpipe(child.stdin);
+        process.stdin.pause();
+      }
+      for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+    };
+    for (const [signal, status] of Object.entries(signals)) {
+      const handler = () => stop(status, signal);
+      handlers.set(signal, handler);
+      process.on(signal, handler);
+    }
+    child.once("error", (err) => { cleanup(); reject(err); });
+    child.once("close", (code, signal) => {
+      // The immediate child may have exited while descendants retained pipes.
+      kill("SIGKILL");
+      cleanup();
+      resolve(requestedStatus ?? code ?? signals[signal] ?? 1);
+    });
+    if (!httpMode) {
+      // A child that fails early can close its input before its exit event.
+      // Preserve that child exit code instead of converting EPIPE to success.
+      child.stdin.on("error", (err) => { if (err.code !== "EPIPE") stop(1); });
+      process.stdin.once("end", eof);
+      process.stdin.once("close", eof);
+      process.stdin.once("error", inputError);
+      process.stdin.pipe(child.stdin);
+      if (process.stdin.readableEnded) eof();
+      // stdin can remain open in another process after the original client dies.
+      watchdog = setInterval(() => {
+        if (initialParent <= 1 || process.ppid !== initialParent) stop();
+        else {
+          try { process.kill(initialParent, 0); }
+          catch (err) { if (err.code === "ESRCH") stop(); }
+        }
+      }, 100);
+    }
+  });
+}
+
+async function main() {
+  // Check before resolution/probing: even a copied or shell-disguised shim
+  // must never reach a second download, cargo build, or child launch.
+  if ([RECURSION_MARKER, "LOCUS_MCP_UPSTREAM_CHILD"].some((key) => Object.prototype.hasOwnProperty.call(process.env, key))) {
+    console.error("locus-mcp: refusing recursive npm wrapper launch");
+    process.exit(1);
   }
-  // Exit explicitly: a lingering download socket must never hold the client.
-  process.exit(0);
+  try {
+    const binary = await ensureBinary();
+    if (isNodeShim(binary)) throw new Error("refusing to launch a locus-mcp Node shim as a native binary");
+    const args = process.argv.slice(2);
+    // One-shot CLI queries must print their answer even when stdin is /dev/null.
+    const standalone = isHttpMode(args) || args.some((arg) => ["--version", "-V", "--help", "-h"].includes(arg));
+    process.exit(await launch(binary, args, standalone));
+  } catch (err) {
+    console.error(`locus-mcp: ${err.message}`);
+    process.exit(1);
+  }
 }
 
 if (require.main === module) {

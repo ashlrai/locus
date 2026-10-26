@@ -1336,9 +1336,9 @@ fn argv_targets_unplannable(args: &[std::ffi::OsString]) -> bool {
         Some("mcp") => {
             use clap::CommandFactory;
             let next = words.next();
-            !Cli::command()
+            Cli::command()
                 .find_subcommand("mcp")
-                .is_some_and(|m| next.is_some_and(|w| m.find_subcommand(w).is_some()))
+                .is_none_or(|m| next.is_none_or(|w| m.find_subcommand(w).is_none()))
         }
         Some("ci") => words.next() == Some("run"),
         _ => false,
