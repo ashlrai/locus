@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Local pin history (`$LOCUS_HOME/pin-history.jsonl`, mode 0600): `pin`, `leave` and `pin_mismatch` refusals are recorded with the alias and keyed hashes (HMAC-SHA256 under a random per-install key in `$LOCUS_HOME/history.key`, 0600) of the workspace root and of the normalized git remotes (userinfo such as `user:token@` is dropped before hashing). `leave` hashes the session's workspace, not the caller's cwd. Writes are locked, use a fresh `O_NOFOLLOW` 0600 temp file and never follow a symlinked log. The remote URL and path are never stored in plaintext, nor any token, credential reference or capability. On by default and local only; turn off with `[history] enabled = false` in config.toml or `LOCUS_PIN_HISTORY=0`. Capped at `[history] max_entries` (default 2000), oldest dropped first. Recording is best-effort and never fails a pin. Groundwork for `locus autopin suggest`.
 - `locus doctor --json` carries the shared `ashlr.doctor` v1 wrapper (`kind`, `schema_version`, `tool`, `status`, `native_status`, `checks`): verdict SAFE is ok, WARN warn, UNSAFE fail, a refused Phantom preflight fail; `checks` mirror `findings`. Additive: every existing field and the exit codes (0/1/2) are unchanged. The vendored handshake contract is re-pinned to the ashlr-stack version with the `doctor` section, and the conformance test validates the doctor output in a fresh home.
 - Handshake conformance test (`tests/handshake_conformance.rs`): validates `locus --ashlr-handshake --json` against the Ashlr handshake v1 contract vendored from ashlr-stack (`tests/contract/`, pinned by sha256) and runs `doctor --fix --json` for the advertised `doctor-fix` capability.
 - Fixed: `locus doctor --fix` (the preview) no longer initializes a missing LOCUS_HOME (it created the store directories and `daemon.key`). It now reports an empty plan and writes nothing, as documented. Found by the conformance test.
@@ -96,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `locus enter <alias>` (and `locus pin`) right after `locus quickstart` no longer fails with "session authority generation is stale or unknown" when quickstart ran in another shell (or through the npm wrapper). A pin whose broker generation died with its shell no longer blocks its own replacement, so `locus leave --force` is not needed first. The gate is unchanged otherwise: the capability must pass the same verifier as `locus leave --force` (no `--no-verifier` escape) before a new broker starts, then authenticate against the live broker; the old pin's seal must verify and be local control; an explicit `LOCUS_SESSION_ID` keeps the strict check; only an anchor mismatch or unavailable anchor is tolerated. The replacement is audited as `session.replace_stale` with both session ids.
 - **`--json` usage errors are JSON.** `locus --json whoami --jsn` or
   `locus --json approvals` printed clap's multi-line prose, so an agent that
   asked for JSON got text it could not parse. A usage error now prints the

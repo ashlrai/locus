@@ -1657,6 +1657,16 @@ fn delegated_child_session(s: &Store) -> Result<Option<Session>> {
     }
 }
 
+/// Control boundary for commands that overwrite `active.json` (`enter`,
+/// `pin`): a pin whose broker generation died with its shell does not block
+/// its own replacement (see `Store::require_local_control_to_replace_active`).
+fn require_local_control_to_replace_pin(operation: &str) -> Result<()> {
+    store()?
+        .require_local_control_to_replace_active(operation)
+        .map(|_| ())
+        .map_err(Into::into)
+}
+
 fn require_local_control_boundary(operation: &str) -> Result<()> {
     store()?
         .require_local_control(operation)
@@ -2403,7 +2413,7 @@ fn cmd_enter(
     ttl: Option<String>,
     json: bool,
 ) -> Result<()> {
-    require_local_control_boundary("locus enter")
+    require_local_control_to_replace_pin("locus enter")
         .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
@@ -2659,7 +2669,7 @@ fn cmd_pin(
     ttl: Option<String>,
     json: bool,
 ) -> Result<()> {
-    require_local_control_boundary("locus pin")
+    require_local_control_to_replace_pin("locus pin")
         .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
@@ -3540,6 +3550,16 @@ fn check_expected_alias(s: &Store, pinned: Option<&str>, expected: &str) -> Resu
         return Ok(());
     }
     let want = expect_label(expected);
+    if let Ok(cwd) = std::env::current_dir() {
+        let pinned_label = pinned.map(expect_label);
+        locus_core::pin_history::record(
+            s.home(),
+            "pin_mismatch",
+            pinned_label.as_deref(),
+            Some(&want),
+            &cwd,
+        );
+    }
     let mut msg = match pinned {
         Some(p) => format!(
             "pin_mismatch: expected binding '{want}' but '{}' is pinned; nothing was run. Run: locus enter {want}",
