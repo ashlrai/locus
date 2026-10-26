@@ -1315,6 +1315,72 @@ fn exit_on_parse_error<I: IntoIterator<Item = String>>(e: clap::Error, args: I) 
     e.exit()
 }
 
+/// Commands that run a child or a server never had a `--dry-run` flag.
+/// Before the global flag existed, `locus exec --dry-run -- cmd` reached
+/// exec's own argument check (exit 1) and every other placement was clap's
+/// "unexpected argument" (exit 2). Keep those exact results: for these
+/// commands the flag is parsed as top-level only, and a top-level use is
+/// reported the way clap reported it before.
+fn argv_targets_unplannable(args: &[std::ffi::OsString]) -> bool {
+    let mut words = args
+        .iter()
+        .skip(1)
+        .filter_map(|a| a.to_str())
+        .filter(|a| !a.starts_with('-'));
+    match words.next() {
+        Some("exec" | "run" | "serve" | "dashboard") => true,
+        // `mcp` alone is the server; `mcp mint/list/revoke` plan normally.
+        Some("mcp") => {
+            use clap::CommandFactory;
+            let next = words.next();
+            !Cli::command()
+                .find_subcommand("mcp")
+                .is_some_and(|m| next.is_some_and(|w| m.find_subcommand(w).is_some()))
+        }
+        Some("ci") => words.next() == Some("run"),
+        _ => false,
+    }
+}
+
+fn parse_cli(args: Vec<std::ffi::OsString>) -> Result<Cli, clap::Error> {
+    use clap::{CommandFactory, FromArgMatches};
+    if !argv_targets_unplannable(&args) {
+        return Cli::try_parse_from(args);
+    }
+    let bin = args
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("locus")
+        .to_string();
+    let mut cmd = Cli::command()
+        .bin_name(bin)
+        .mut_arg("dry_run", |a| a.global(false).hide(true));
+    // Before the subcommand, clap rejected the unknown flag first, ahead
+    // of any later error (such as a missing `--binding`).
+    let top_level_dry_run = args
+        .iter()
+        .skip(1)
+        .filter_map(|a| a.to_str())
+        .take_while(|a| a.starts_with('-'))
+        .any(|a| a == "--dry-run");
+    if top_level_dry_run {
+        return Err(cmd.error(
+            clap::error::ErrorKind::UnknownArgument,
+            "unexpected argument '--dry-run' found",
+        ));
+    }
+    let matches = cmd.try_get_matches_from_mut(args)?;
+    let cli = Cli::from_arg_matches(&matches)?;
+    if cli.dry_run {
+        return Err(cmd.error(
+            clap::error::ErrorKind::UnknownArgument,
+            "unexpected argument '--dry-run' found",
+        ));
+    }
+    Ok(cli)
+}
+
 fn run() -> Result<()> {
     // Support `locus help topic <name>` without fighting clap's built-in help.
     {
@@ -1326,7 +1392,7 @@ fn run() -> Result<()> {
         }
     }
 
-    let cli = match Cli::try_parse() {
+    let cli = match parse_cli(env::args_os().collect()) {
         Ok(cli) => cli,
         Err(e) => exit_on_parse_error(e, env::args().skip(1)),
     };
@@ -1663,9 +1729,10 @@ fn agent_contract_topic(json: bool) -> Result<()> {
         json_out::PLAN
     );
     println!("read-only commands accept it and change nothing; exec, run, ci run, mcp,");
-    println!("serve and dashboard refuse it (exit 2).");
+    println!("serve and dashboard do not take it: they fail as before the flag existed");
+    println!("(exec: exit 1, its own argument check; the others: clap usage error, exit 2).");
     println!();
-    println!("Non-interactive: prompts only when stdin AND stdout are terminals, --json is off,");
+    println!("Non-interactive: prompts only when stdin is a terminal, --json is off,");
     println!(
         "and {} is unset. Otherwise missing input fails closed.",
         dry_run::NON_INTERACTIVE_ENV
@@ -3350,7 +3417,8 @@ fn cmd_leave_force(no_verifier: bool, json: bool) -> Result<()> {
 }
 
 /// Graph passphrase: `LOCUS_GRAPH_PASSPHRASE`, else a prompt only when interactive.
-/// Never prompts when stdout is not a terminal (agents, CI, pipes).
+/// Never prompts when stdin is not a terminal, under `--json`, or with
+/// `LOCUS_NON_INTERACTIVE` set.
 fn graph_passphrase(json: bool) -> Result<impl std::ops::Deref<Target = String>> {
     let in_env = env::var_os(locus_core::GRAPH_PASSPHRASE_ENV).is_some_and(|v| !v.is_empty());
     if !in_env && !dry_run::interactive(json) {
@@ -7901,7 +7969,8 @@ fn cmd_agent_setup(
         bail!("pass --apply or --dry-run (refusing to mutate without intent)");
     }
     if apply && dry_run {
-        return Err(UsageError("pass only one of --apply or --dry-run".into()).into());
+        // Exit 1, as before the global `--dry-run`: callers match on it.
+        bail!("pass only one of --apply or --dry-run");
     }
     if apply {
         require_local_control_boundary("locus agent setup --apply")?;

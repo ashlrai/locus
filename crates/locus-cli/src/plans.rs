@@ -596,15 +596,26 @@ pub(super) fn plan_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
             let mut plan = dry_run::Plan::new("locus adapter registry index");
             match sub {
                 AdapterIndexCmd::Add { url, name } => {
-                    let index = locus_core::marketplace::fetch_index(&url)?;
-                    let name = name.unwrap_or(index.name);
-                    validate_name_component("index name", &name)?;
-                    if sources.iter().any(|src| src.name == name || src.url == url) {
+                    // A plan makes no network call: the real run fetches the
+                    // index (and takes its name from it when --name is absent).
+                    locus_core::marketplace::check_marketplace_url(&url)?;
+                    if let Some(name) = name.as_deref() {
+                        validate_name_component("index name", name)?;
+                    }
+                    if sources
+                        .iter()
+                        .any(|src| src.url == url || name.as_deref() == Some(src.name.as_str()))
+                    {
                         bail!("index name or URL is already registered");
                     }
-                    plan.write_file(&file, Some(format!("add index source {name}")))
+                    let detail = match name.as_deref() {
+                        Some(n) => format!("add index source {n}"),
+                        None => "add index source (name from the fetched index)".to_string(),
+                    };
+                    plan.write_file(&file, Some(detail))
                         .with("name", name)
-                        .with("url", url);
+                        .with("url", redact_url(&url))
+                        .note("--dry-run does not fetch the index; the real run fetches and verifies it");
                 }
                 AdapterIndexCmd::Remove { name } => {
                     if sources.iter().any(|src| src.name == name) {
@@ -697,8 +708,69 @@ pub(super) fn binding_add_plan(
 
 /// Human output keeps the TOML preview above the plan.
 pub(super) fn emit_binding_add_plan(plan: &dry_run::Plan, json: bool, toml: &str) -> Result<()> {
-    if !json {
-        println!("{toml}");
+    if json {
+        return plan.emit(true);
     }
-    plan.emit(json)
+    println!("{toml}");
+    plan.emit(false)?;
+    // Last line kept from before `locus.plan.v1`: scripts match on it.
+    println!("{} dry run — nothing written", "ok".green().bold());
+    Ok(())
+}
+
+/// A URL safe to print in a plan: scheme, host, port and path only.
+/// Userinfo (`user:token@`), the query and the fragment can carry
+/// credentials, so they are dropped and marked.
+pub(super) fn redact_url(raw: &str) -> String {
+    let mut rest = raw;
+    let mut marked = false;
+    if let Some(i) = rest.find('#') {
+        rest = &rest[..i];
+        marked = true;
+    }
+    if let Some(i) = rest.find('?') {
+        rest = &rest[..i];
+        marked = true;
+    }
+    let (scheme, after) = match rest.find("://") {
+        Some(i) => (&rest[..i + 3], &rest[i + 3..]),
+        None => ("", rest),
+    };
+    let auth_end = after.find('/').unwrap_or(after.len());
+    let (authority, path) = after.split_at(auth_end);
+    let host = match authority.rfind('@') {
+        Some(i) => {
+            marked = true;
+            &authority[i + 1..]
+        }
+        None => authority,
+    };
+    let mut out = format!("{scheme}{host}{path}");
+    if marked {
+        out.push_str(" (redacted)");
+    }
+    out
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_url;
+
+    #[test]
+    fn redact_url_strips_userinfo_query_and_fragment() {
+        assert_eq!(
+            redact_url("https://user:s3cret@idx.example.com:8443/a/index.json?token=t0k#frag"),
+            "https://idx.example.com:8443/a/index.json (redacted)"
+        );
+        assert_eq!(
+            redact_url("https://tok@idx.example.com/index.json"),
+            "https://idx.example.com/index.json (redacted)"
+        );
+        assert_eq!(
+            redact_url("https://idx.example.com/index.json"),
+            "https://idx.example.com/index.json"
+        );
+        let r = redact_url("https://a:b@h/p?q=s3cret#s3cret");
+        assert!(!r.contains("s3cret") && !r.contains("a:b"), "{r}");
+    }
 }

@@ -108,7 +108,7 @@ Per command:
 | `watch --once` / `--require-ok` | ok | not ok (see `locus watch --help`) | usage |
 | `quickstart` | SAFE or WARN | error | UNSAFE |
 | `doctor --fix --apply` | all fixes applied (or none needed) | a fix was refused or skipped | usage |
-| any `--dry-run` | the plan's read-only preconditions hold | a precondition fails (unknown alias, allowlist, existing file) | `--dry-run` not supported, or combined with `--apply` |
+| any `--dry-run` | the plan's read-only preconditions hold | a precondition fails (unknown alias, allowlist, existing file) | `--dry-run` not accepted by the command (see Unsupported), or combined with `--apply` on `doctor --fix` |
 
 ## `--dry-run`
 
@@ -120,7 +120,7 @@ a new command does not compile until it picks one.
 | --- | --- | --- |
 | Plans | Runs the read-only validation of the real command, prints a `locus.plan.v1` plan, writes nothing | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `engagement init/close`, `graph export/import`, `binding add/rm/migrate-credential-refs`, `client add`, `autopin suggest --apply`, `capability persist/unpersist`, `ci mint/env`, `mcp mint/revoke`, `agent setup`, `doctor --fix`, `adapter install/uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add/remove`, `approve grant/deny`, `notify on/off`, `events export`, `forensics export` |
 | Read-only | Accepted and ignored: the command runs exactly as without the flag (see below) | `whoami`, `status`, `doctor`, `watch`, `hook`, `goal`, `verify`, `upstream`, `completion`, `topic`, `version`, `events`, `agent doctor/report`, `binding list/show`, `graph list`, `capability status`, `notify status`, `approve list/status/wait`, `mcp list`, `autopin suggest`, `adapter search/list/verify/verify-manifest`, `adapter trust list`, `adapter registry index list` |
-| Unsupported | Exit 2 (usage): these run a child or a server | `exec`, `run`, `ci run`, `mcp` (server), `serve`, `dashboard` |
+| Unsupported | Not accepted, exactly as before the global flag: `exec --dry-run -- …` fails exec's own argument check (exit 1); every other placement, and the other commands, are a clap usage error (exit 2, `unexpected argument '--dry-run' found`) | `exec`, `run`, `ci run`, `mcp` (server), `serve`, `dashboard` |
 
 Read-only commands make no requested change, but they keep two side effects
 of a normal run under `--dry-run`: opening the store creates `LOCUS_HOME` on
@@ -149,8 +149,9 @@ What a plan does and does not check:
 - It never prints a secret: no capability, bearer token, MCP grant token or
   resolved credential. `events export --sink webhook` names only the
   webhook's scheme and host.
-- `--apply` with `--dry-run` (on `doctor --fix` and `agent setup`) is a usage
-  error.
+- `--apply` with `--dry-run` is a usage error (exit 2) on `doctor --fix`. On
+  `agent setup` it keeps its original exit 1 (`pass only one of --apply or
+  --dry-run`).
 
 Plan shape:
 
@@ -184,8 +185,9 @@ then "nothing to do", still exit 0.
 
 `locus` prompts only when all of these hold:
 
-- stdin **and** stdout are terminals (piped or captured stdout, as in an
-  agent, CI or `| jq`, is non-interactive);
+- stdin is a terminal (stdout does not matter: `locus binding add | tee log`
+  still prompts; agents and CI have no terminal on stdin, or pass `--json`
+  or `LOCUS_NON_INTERACTIVE=1`);
 - `--json` is not set;
 - `LOCUS_NON_INTERACTIVE` is unset (or `0`).
 

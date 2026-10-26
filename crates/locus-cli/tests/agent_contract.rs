@@ -817,27 +817,193 @@ fn read_only_commands_accept_dry_run_and_unplannable_ones_refuse() {
     assert_plan(&out, "locus doctor --fix");
     assert_eq!(std::fs::read_dir(empty.home()).unwrap().count(), 0);
 
-    for args in [
-        &["exec", "--", "true"][..],
-        &["run", "-b", "personal", "--", "true"][..],
-        &["ci", "run", "-b", "personal", "--", "true"][..],
-        &["serve"][..],
-        &["dashboard", "--no-open"][..],
-        &["mcp"][..],
-    ] {
-        let mut full = vec!["--json", "--dry-run"];
-        full.extend_from_slice(args);
-        let out = env.run(&full);
-        assert!(out.stdout.is_empty(), "{args:?}: {}", stdout(&out));
-        let e = error_doc(&out, 2, "usage");
-        assert!(e["error"].as_str().unwrap().contains("--dry-run"), "{e}");
-    }
-
-    // --apply and --dry-run together are a usage error.
+    // --apply and --dry-run together: a usage error on doctor --fix (new).
     let out = env.run(&["--json", "--dry-run", "doctor", "--fix", "--apply"]);
     error_doc(&out, 2, "usage");
-    let out = env.run(&["--dry-run", "agent", "setup", "--apply"]);
+}
+
+// ── 0.5.1 contract pins (RQ-CLI-1-FIX) ───────────────────────────────────
+// Each test below pins behaviour that shipped before the global --dry-run.
+
+#[test]
+fn legacy_agent_setup_dry_run_json_keeps_every_field() {
+    let env = Env::new();
+    let out = env.run(&["--json", "agent", "setup", "--dry-run"]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let v: Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    for key in [
+        "ok",
+        "apply",
+        "dry_run",
+        "clients",
+        "home",
+        "mcp_bin",
+        "mcp_bin_fallback",
+        "actions",
+        "verified",
+        "verify_failures",
+        "paste_server_entry",
+        "paste_server_toml",
+        "env",
+    ] {
+        assert!(v.get(key).is_some(), "missing legacy field {key}: {v}");
+    }
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["apply"], false);
+    assert_eq!(v["dry_run"], true);
+    assert!(v["clients"].is_array() && v["actions"].is_array(), "{v}");
+    assert!(v["home"].is_string() && v["mcp_bin"].is_string(), "{v}");
+    assert!(v["mcp_bin_fallback"].is_boolean(), "{v}");
+    assert!(v["verified"].is_null(), "{v}");
+    assert_eq!(v["verify_failures"], serde_json::json!([]));
+    assert_eq!(v["env"]["LOCUS_AUTO_PIN"], "cwd");
+    assert_eq!(v["env"]["LOCUS_CLIENT"], "<client>");
+    assert!(v["env"]["LOCUS_NOTIFY"].is_null(), "{v}");
+}
+
+#[test]
+fn legacy_agent_setup_apply_with_dry_run_exits_one() {
+    let env = Env::new();
+    for args in [
+        &["agent", "setup", "--apply", "--dry-run"][..],
+        &["--dry-run", "agent", "setup", "--apply"][..],
+    ] {
+        let out = env.run(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}: {}", stderr(&out));
+        assert!(
+            stderr(&out).contains("pass only one of --apply or --dry-run"),
+            "{}",
+            stderr(&out)
+        );
+    }
+    let out = env.run(&["--json", "agent", "setup", "--apply", "--dry-run"]);
+    let e = error_doc(&out, 1, "failure");
+    assert_eq!(e["error"], "pass only one of --apply or --dry-run");
+}
+
+#[test]
+fn legacy_exec_dry_run_is_execs_own_argument_error() {
+    let env = Env::new();
+    let out = env.run(&["exec", "--dry-run", "--", "true"]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(out.stdout.is_empty(), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains(
+            "`--dry-run` is not a `locus exec` option, and a command cannot start with `-`; nothing ran."
+        ),
+        "{}",
+        stderr(&out)
+    );
+    let out = env.run(&["--json", "exec", "--dry-run", "--", "true"]);
+    error_doc(&out, 1, "failure");
+}
+
+#[test]
+fn legacy_unplannable_commands_reject_dry_run_like_clap_did() {
+    let env = Env::new();
+    for args in [
+        &["--dry-run", "exec", "--", "true"][..],
+        &["--dry-run", "run", "-b", "personal", "--", "true"][..],
+        &["--dry-run", "ci", "run", "-b", "personal", "--", "true"][..],
+        &["--dry-run", "mcp"][..],
+        &["mcp", "--dry-run"][..],
+        &["--dry-run", "serve"][..],
+        &["serve", "--dry-run"][..],
+        &["--dry-run", "dashboard", "--no-open"][..],
+        &["dashboard", "--no-open", "--dry-run"][..],
+    ] {
+        let out = env.run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {}", stderr(&out));
+        assert!(out.stdout.is_empty(), "{args:?}: {}", stdout(&out));
+        assert!(
+            stderr(&out).contains("unexpected argument '--dry-run' found"),
+            "{args:?}: {}",
+            stderr(&out)
+        );
+    }
+    // `mcp mint/list/revoke` still take the global flag (they plan or read).
+    let out = env.run(&["mcp", "list", "--dry-run"]);
+    assert!(
+        !stderr(&out).contains("unexpected argument"),
+        "{}",
+        stderr(&out)
+    );
+    // `run`/`ci run` usage text never advertises the flag.
+    let out = env.run(&["run", "--dry-run", "--", "true"]);
     assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(
+        !stderr(&out).contains("--dry-run <CMD>"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn legacy_binding_add_dry_run_text_ends_with_ok_line() {
+    let env = Env::new();
+    env.quickstart();
+    let out = env.run(&[
+        "binding",
+        "add",
+        "dryx",
+        "--tenant",
+        "t",
+        "--provider",
+        "github",
+        "--account",
+        "a",
+        "--credential-ref",
+        "env:LOCUS_TEST_UNUSED",
+        "--dry-run",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.starts_with("[binding]"), "{text}");
+    assert_eq!(
+        text.trim_end().lines().last().unwrap(),
+        "ok dry run — nothing written",
+        "{text}"
+    );
+}
+
+#[test]
+fn registry_index_add_dry_run_does_not_fetch_and_redacts_the_url() {
+    let env = Env::new();
+    env.quickstart();
+    let before = env.snapshot();
+    // Port 9 on loopback refuses connections: a fetch would fail the plan.
+    let out = env.run(&[
+        "--json",
+        "--dry-run",
+        "adapter",
+        "registry",
+        "index",
+        "add",
+        "https://127.0.0.1:9/index.json?token=PLANSECRET",
+        "--name",
+        "probe",
+    ]);
+    let v = assert_plan(&out, "locus adapter registry index");
+    let text = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        !text.contains("PLANSECRET") && !text.contains("PLANFRAG"),
+        "{text}"
+    );
+    assert_eq!(v["url"], "https://127.0.0.1:9/index.json (redacted)", "{v}");
+    assert_eq!(v["name"], "probe");
+    assert_eq!(env.snapshot(), before, "a plan wrote something");
+    // Credentials or a fragment in the URL are refused before planning
+    // (the real run's own URL check), and never echoed.
+    let out = env.run(&[
+        "--dry-run",
+        "adapter",
+        "registry",
+        "index",
+        "add",
+        "https://user:PLANSECRET@127.0.0.1:9/index.json",
+    ]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(!stderr(&out).contains("PLANSECRET"), "{}", stderr(&out));
 }
 
 // ── Non-interactive default ──────────────────────────────────────────────

@@ -21,14 +21,17 @@ use std::path::Path;
 /// Set `LOCUS_NON_INTERACTIVE=1` to refuse prompts even on a TTY.
 pub(crate) const NON_INTERACTIVE_ENV: &str = "LOCUS_NON_INTERACTIVE";
 
-/// Whether a command may prompt: not `--json`, both stdin and stdout are
-/// terminals, and `LOCUS_NON_INTERACTIVE` is unset. Piped or captured stdout
-/// (an agent, CI, `| jq`) is non-interactive by default.
+/// Whether a command may prompt: not `--json`, `LOCUS_NON_INTERACTIVE` is
+/// unset, and stdin is a terminal. Only stdin decides, as before the agent
+/// contract: `locus binding add | tee log` on a terminal still prompts.
 pub(crate) fn interactive(json: bool) -> bool {
-    !json
-        && !non_interactive_env()
-        && std::io::stdin().is_terminal()
-        && std::io::stdout().is_terminal()
+    may_prompt(json, non_interactive_env(), std::io::stdin().is_terminal())
+}
+
+/// The prompt rule with its inputs made explicit. stdout is deliberately
+/// not an input: piping or capturing output must not disable prompts.
+pub(crate) fn may_prompt(json: bool, non_interactive_env: bool, stdin_is_tty: bool) -> bool {
+    !json && !non_interactive_env && stdin_is_tty
 }
 
 fn non_interactive_env() -> bool {
@@ -230,6 +233,16 @@ pub(crate) fn existing_store() -> Result<Store> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 0.5.1 contract: only stdin decides whether a prompt may appear, so
+    /// `locus binding add | tee log` on a terminal still prompts.
+    #[test]
+    fn legacy_prompt_rule_is_stdin_only() {
+        assert!(may_prompt(false, false, true));
+        assert!(!may_prompt(false, false, false));
+        assert!(!may_prompt(true, false, true));
+        assert!(!may_prompt(false, true, true));
+    }
 
     #[test]
     fn plan_json_is_stamped_and_value_free() {
