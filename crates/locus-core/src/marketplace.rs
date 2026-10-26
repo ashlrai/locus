@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use url::{Host, Url};
+use url::Url;
 
 /// Index sources file under `$LOCUS_HOME`.
 pub const INDEXES_FILE: &str = "adapter-indexes.toml";
@@ -355,12 +355,10 @@ fn marketplace_url(raw: &str) -> Result<Url> {
             "marketplace URLs cannot contain credentials or fragments",
         ));
     }
-    let loopback = match parsed.host() {
-        Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
-        Some(Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    };
+    // Exact 127.0.0.1 / ::1 only; `localhost` and the rest of 127/8 are refused.
+    let loopback = parsed
+        .host()
+        .is_some_and(|host| crate::loopback::is_exact_loopback_host(&host));
     if parsed.host().is_none()
         || !(parsed.scheme() == "https" || parsed.scheme() == "http" && loopback)
     {
@@ -372,6 +370,12 @@ fn marketplace_url(raw: &str) -> Result<Url> {
 }
 
 /// No redirects: even an HTTPS/loopback index cannot redirect to another host.
+/// The URL checks `fetch_url` applies, without any network I/O (used by
+/// `--dry-run` plans).
+pub fn check_marketplace_url(raw: &str) -> Result<()> {
+    marketplace_url(raw).map(|_| ())
+}
+
 pub fn fetch_url(raw: &str) -> Result<String> {
     let parsed = marketplace_url(raw)?;
     let agent = ureq::AgentBuilder::new()
@@ -1098,14 +1102,19 @@ mod tests {
             "https://user:pass@example.com/index",
             "file:///tmp/index",
             "https://example.com/index#fragment",
+            "http://localhost:1234/index",
+            "http://LOCALHOST:1234/index",
+            "http://127.0.0.2:1234/index",
+            "http://127.1.2.3/index",
+            "http://example.com/index",
         ] {
             assert!(marketplace_url(url).is_err(), "{url}");
         }
         for url in [
-            "http://localhost:1234/index",
             "http://127.0.0.1:1234/index",
             "http://[::1]:1234/index",
             "https://example.com/index",
+            "https://localhost/index",
         ] {
             assert!(marketplace_url(url).is_ok());
         }

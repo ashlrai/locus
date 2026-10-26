@@ -19,6 +19,10 @@
     "mcp_command"
   ],
   "properties": {
+    "schema": {
+      "enum": ["locus.agent.report.v1", "locus.agent.doctor.v1"],
+      "description": "CLI envelope id, first key of `locus agent report --json` / `locus agent doctor --json` (docs/agent-contract.md). Additive; absent from MCP payloads."
+    },
     "version": {
       "type": "string",
       "description": "Locus crate/CLI version (semver)."

@@ -33,6 +33,7 @@ pub mod graph;
 pub mod http_sessions;
 pub mod inherit_env;
 pub mod isolation;
+pub mod loopback;
 pub mod marketplace;
 pub mod onboard;
 pub mod pin_history;
@@ -167,8 +168,8 @@ pub use session::{
 };
 pub use store::{
     is_safe_mcp_grant_id, locus_home, parse_mcp_grant_token, ApprovalsHealth, AuditEvent,
-    CredentialRefMigration, EngagementInitResult, ForceLeaveOutcome, McpGrant, McpGrantAuthError,
-    ProviderView, ResolvedSession, RuntimeDrift, Store, Whoami,
+    CredentialRefMigration, EngagementInitPlan, EngagementInitResult, ForceLeaveOutcome, McpGrant,
+    McpGrantAuthError, PinResolution, ProviderView, ResolvedSession, RuntimeDrift, Store, Whoami,
 };
 pub use ticket::{
     mint_ticket, verify_ticket, verify_ticket_parts, CapabilityTicket, DEFAULT_TICKET_TTL_SECS,
