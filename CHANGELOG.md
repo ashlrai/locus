@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `locus enter <alias>` (and `locus pin`) right after `locus quickstart` no longer fails with "session authority generation is stale or unknown" when quickstart ran in another shell (or through the npm wrapper). A pin whose broker generation died with its shell no longer blocks its own replacement, so `locus leave --force` is not needed first. The gate is unchanged otherwise: the capability must pass the same verifier as `locus leave --force` (no `--no-verifier` escape) before a new broker starts, then authenticate against the live broker; the old pin's seal must verify and be local control; an explicit `LOCUS_SESSION_ID` keeps the strict check; only an anchor mismatch or unavailable anchor is tolerated. The replacement is audited as `session.replace_stale` with both session ids.
+
 ### Added
 
 - Local pin history (`$LOCUS_HOME/pin-history.jsonl`, mode 0600): `pin`, `leave` and `pin_mismatch` refusals are recorded with the alias and keyed hashes (HMAC-SHA256 under a random per-install key in `$LOCUS_HOME/history.key`, 0600) of the workspace root and of the normalized git remotes (userinfo such as `user:token@` is dropped before hashing). `leave` hashes the session's workspace, not the caller's cwd. Writes are locked, use a fresh `O_NOFOLLOW` 0600 temp file and never follow a symlinked log. The remote URL and path are never stored in plaintext, nor any token, credential reference or capability. On by default and local only; turn off with `[history] enabled = false` in config.toml or `LOCUS_PIN_HISTORY=0`. Capped at `[history] max_entries` (default 2000), oldest dropped first. Recording is best-effort and never fails a pin. Groundwork for `locus autopin suggest`.

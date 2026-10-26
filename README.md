@@ -15,6 +15,7 @@
 brew install ashlrai/tap/locus          # or cargo; see Install options (npm 0.5.0 is broken)
 locus quickstart                        # sample bindings, pin, whoami, doctor
 eval "$(locus hook zsh)"                # or bash; exports the control capability
+locus leave --force                     # needed for now right after quickstart (see Broker pin)
 locus enter personal                    # pin from this shell (it supervises the pin)
 locus whoami                            # who your agents are acting as, right now
 locus exec --expect personal -- echo ok # runs: personal is pinned
@@ -24,7 +25,7 @@ locus exec --expect acme -- echo ok     # refused, exit 1, child never starts (p
 What the two extra steps are for:
 
 - **Control capability.** Control commands (`enter`, `pin`, `leave`, `exec`) need `LOCUS_CONTROL_CAPABILITY` in the shell. `locus quickstart` mints it and saves it at `~/.locus/control_capability` (0600, respects `LOCUS_HOME`); `eval "$(locus hook zsh)"` exports it without printing it. Without it, `locus exec` stops with `LOCUS_CONTROL_CAPABILITY is required for control-plane authority`. `locus capability status` shows the posture without the value.
-- **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. Right after `quickstart`, `locus exec` reports `human re-pin required`, so run `locus enter personal` in the shell you work and launch agents from first.
+- **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. Right after `quickstart`, `locus enter personal` and `locus exec` report `session authority generation is stale or unknown; human re-pin required`. Until that bug is fixed, run `locus leave --force` and then `locus enter personal` in the shell you work and launch agents from (measured on 0.5.1 from source, fresh `HOME`, Oct 25, 2026).
 - **Recovery.** If a command says `human re-pin required` (for example `no current broker endpoint` after the pinning shell exited), run `locus leave --force`, then `locus enter personal`. `--force` deletes session state only and never mints anything.
 
 ## Connect your agent (MCP)
@@ -71,7 +72,8 @@ npm install -g locus-cli@0.5.1 @ashlrai/locus-mcp@0.5.1
 npx locus-cli@0.5.1 --help
 npx @ashlrai/locus-mcp@0.5.1   # MCP server for Claude Code / Cursor
 
-# cargo
+# cargo (Linux without Homebrew, or any source install): needs a Rust
+# toolchain (rustup, stable). Measured on one Linux box: 179 s for both binaries.
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
 ```

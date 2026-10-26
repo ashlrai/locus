@@ -1657,6 +1657,16 @@ fn delegated_child_session(s: &Store) -> Result<Option<Session>> {
     }
 }
 
+/// Control boundary for commands that overwrite `active.json` (`enter`,
+/// `pin`): a pin whose broker generation died with its shell does not block
+/// its own replacement (see `Store::require_local_control_to_replace_active`).
+fn require_local_control_to_replace_pin(operation: &str) -> Result<()> {
+    store()?
+        .require_local_control_to_replace_active(operation)
+        .map(|_| ())
+        .map_err(Into::into)
+}
+
 fn require_local_control_boundary(operation: &str) -> Result<()> {
     store()?
         .require_local_control(operation)
@@ -2403,7 +2413,7 @@ fn cmd_enter(
     ttl: Option<String>,
     json: bool,
 ) -> Result<()> {
-    require_local_control_boundary("locus enter")
+    require_local_control_to_replace_pin("locus enter")
         .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
@@ -2659,7 +2669,7 @@ fn cmd_pin(
     ttl: Option<String>,
     json: bool,
 ) -> Result<()> {
-    require_local_control_boundary("locus pin")
+    require_local_control_to_replace_pin("locus pin")
         .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
