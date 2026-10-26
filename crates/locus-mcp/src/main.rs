@@ -23,6 +23,7 @@
 mod anchor;
 mod grant;
 mod http_session;
+mod route;
 
 use anchor::{AnchorDecision, SessionAnchor};
 use anyhow::{bail, Context, Result};
@@ -62,6 +63,13 @@ static AUTO_PIN_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 /// Process-wide multi-tenant flag (`--multi-tenant` / `LOCUS_MCP_MULTI_TENANT=1`,
 /// HTTP only). Set once at startup before any request thread exists.
 static MULTI_TENANT: AtomicBool = AtomicBool::new(false);
+
+/// Immutable launch configuration; never supplied through model tool arguments.
+static ROUTES: OnceLock<route::Routes> = OnceLock::new();
+
+fn routes() -> &'static route::Routes {
+    ROUTES.get_or_init(route::Routes::default)
+}
 
 fn multi_tenant() -> bool {
     MULTI_TENANT.load(Ordering::SeqCst)
@@ -358,9 +366,14 @@ struct RunMode {
     http_addr: Option<SocketAddr>,
     /// Explicit multi-tenant opt-in (HTTP only; stdio + MT is a parse error).
     multi_tenant: bool,
+    routes: route::Routes,
 }
 
 fn main() {
+    if route::is_upstream_child() {
+        eprintln!("locus-mcp: refusing recursive multiplexor launch from an upstream worker");
+        std::process::exit(1);
+    }
     if let Some(result) = locus_core::run_authority_anchor_server_if_requested() {
         if let Err(error) = result {
             eprintln!("authority anchor error: {error}");
@@ -377,6 +390,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let mode = parse_run_mode(std::env::args().skip(1))?;
+    ROUTES
+        .set(mode.routes)
+        .map_err(|_| anyhow::anyhow!("MCP routes were already configured"))?;
     if mode.multi_tenant {
         // Multi-tenant validation authenticates EVERY tenant's sealed session
         // per request; executor capabilities are single-session, so the
@@ -426,10 +442,16 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
     let mut http_flag = false;
     let mut http_arg: Option<String> = None;
     let mut multi_tenant_flag = false;
+    let mut routes = route::Routes::default();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
+            "--route" => {
+                i += 1;
+                let provider = args.get(i).context("--route requires a provider name")?;
+                routes.insert(provider)?;
+            }
             "--multi-tenant" => {
                 multi_tenant_flag = true;
             }
@@ -455,6 +477,9 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
                 http_flag = true;
                 http_arg = Some(other.trim_start_matches("--http=").to_string());
             }
+            other if other.starts_with("--route=") => {
+                routes.insert(&other["--route=".len()..])?;
+            }
             other => {
                 bail!("unknown argument: {other} (try --help)");
             }
@@ -464,6 +489,9 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
 
     let env_http = env_truthy("LOCUS_MCP_HTTP");
     let multi_tenant = multi_tenant_flag || env_truthy("LOCUS_MCP_MULTI_TENANT");
+    if multi_tenant && routes.is_enabled() {
+        bail!("--route selects providers from one pinned binding and cannot be combined with --multi-tenant");
+    }
     if !http_flag && !env_http {
         if multi_tenant {
             // Fail closed: multi-tenant is meaningless without per-request
@@ -473,6 +501,7 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
         return Ok(RunMode {
             http_addr: None,
             multi_tenant: false,
+            routes,
         });
     }
 
@@ -485,6 +514,7 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
     Ok(RunMode {
         http_addr: Some(addr),
         multi_tenant,
+        routes,
     })
 }
 
@@ -493,6 +523,7 @@ fn print_help() {
         "locus-mcp {VERSION} — MCP multiplexor (pin-scoped tools)\n\n\
          Usage:\n\
            locus-mcp                 stdio MCP (Claude Code / Cursor default)\n\
+           locus-mcp --route PROVIDER  only selected pinned upstreams (repeatable; needs supervision)\n\
            locus-mcp --http [ADDR]   Streamable-HTTP-lite on ADDR (default {DEFAULT_HTTP_ADDR})\n\
            locus-mcp --http --multi-tenant   per-request tenant routing via\n\
                                      X-Locus-Tenant-Token (mint: `locus mcp mint`)\n\
@@ -3463,11 +3494,17 @@ fn handle_tools_list(scope: &RequestScope) -> std::result::Result<Value, Value> 
         let mgr = worker_manager()
             .lock()
             .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
+        routes()
+            .validate(session, bindings)
+            .map_err(|e| rpc_error(-32000, format!("invalid_route: {e}")))?;
         // Discovery is side-effect free: merge synthetic tools and schemas from
         // workers that were already started by an authorized call. Never spawn
         // a credential-bearing child from tools/list.
         tools.extend(shape_provider_catalog(
-            mgr.tools_for_session(session, bindings),
+            mgr.tools_for_session(session, bindings)
+                .into_iter()
+                .filter(|tool| routes().allows_tool(&tool.name))
+                .collect(),
             session,
             bindings,
         ));
@@ -3774,6 +3811,22 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
         (b, name)
     };
 
+    // Routing is an additional restriction, applied before policy admission,
+    // approval records, credentials, adapters, or workers can have effects.
+    if let Err(error) = routes().validate(&session, &bindings) {
+        return Ok(tool_text(
+            json!({"error": "invalid_route", "detail": error.to_string()}),
+            true,
+        ));
+    }
+    if !routes().allows_tool(tool_name) {
+        return Ok(tool_text(
+            json!({"error": "route_not_enabled", "tool": name,
+                "hint": "This provider is not selected by the server's launch configuration."}),
+            true,
+        ));
+    }
+
     let principal_owned = session.principal.clone();
     let gate = ApprovalGate {
         store: &s,
@@ -3844,6 +3897,12 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
                         true,
                     ));
                 };
+                if let Err(error) = route::check_upstream(binding, provider) {
+                    return Ok(tool_text(
+                        json!({"error": "worker_ensure_failed", "detail": error.to_string(), "tool": name}),
+                        true,
+                    ));
+                }
                 let mut mgr = worker_manager()
                     .lock()
                     .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
