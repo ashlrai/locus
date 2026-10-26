@@ -252,6 +252,32 @@ pub(super) fn plan_leave(force: bool, json: bool) -> Result<()> {
     plan.needs_control().emit(json)
 }
 
+/// `--dry-run` for `locus renew`.
+pub(super) fn plan_renew(json: bool) -> Result<()> {
+    let s = dry_run::existing_store()?;
+    let path = s.active_session_path();
+    let mut plan = dry_run::Plan::new("locus renew");
+    match s.active_pin_session() {
+        Ok(Some(cur)) => {
+            plan.change(
+                "renew",
+                cur.binding_alias.clone(),
+                Some(format!(
+                    "session {} expiry extended within policy.max_ttl and policy.max_session_lifetime",
+                    cur.session_id
+                )),
+            );
+            plan.with("binding", cur.binding_alias.clone());
+            plan.write_file(&path, Some("active session (new expiry)".into()));
+        }
+        Ok(None) => {
+            plan.note("no active pin to renew");
+        }
+        Err(e) => return Err(wedged_session_recovery(anyhow::Error::new(e))),
+    }
+    plan.needs_control().emit(json)
+}
+
 /// `--dry-run` for `graph export` / `graph import`.
 pub(super) fn plan_graph(sub: GraphCmd, json: bool) -> Result<()> {
     let s = dry_run::existing_store()?;
