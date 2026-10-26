@@ -27,6 +27,10 @@
     "ok"
   ],
   "properties": {
+    "schema": {
+      "const": "locus.doctor.v1",
+      "description": "CLI envelope id, first key of `locus doctor --json` (docs/agent-contract.md). Additive; absent from MCP and dashboard payloads."
+    },
     "version": {
       "type": "string",
       "description": "Locus crate/CLI version."

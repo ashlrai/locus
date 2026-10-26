@@ -57,6 +57,7 @@ const ALLOW = {
   'crates/locus-core/src/lib.rs': 're-exports of the Ed25519 helpers',
   'crates/locus-core/Cargo.toml': 'ed25519-dalek dependency',
   'crates/locus-cli/src/main.rs': 'CLI flags for Ed25519 registry signing and trust pins',
+  'crates/locus-cli/src/plans.rs': 'dry-run plan that describes the Ed25519 trust-key step of adapter trust add; does no crypto itself (key parsing goes through locus_core::RegistryTrustKey)',
   'Cargo.toml': 'ed25519-dalek workspace dependency',
   'adapters/manifest.toml': 'comments documenting the Ed25519 signature field',
   'crates/locus-core/src/approval.rs': 'approval receipts carry a signature_algorithm field; ed25519 appears only in its unit tests',
