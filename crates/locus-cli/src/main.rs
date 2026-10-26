@@ -13,6 +13,8 @@ mod stdout;
 
 mod cred_diag;
 mod dry_run;
+#[cfg(all(test, unix))]
+mod exec_perf;
 mod exit;
 mod handshake;
 mod json_out;
