@@ -14,6 +14,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Least privilege for every job: read the repo, nothing else. No job in this
+# workflow writes to the repo, PRs, packages or releases.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
@@ -123,11 +128,15 @@ jobs:
       PHANTOM_ASSET: phantom-x86_64-unknown-linux-gnu.tar.gz
       # sha256 of the asset, as published in the v0.7.9 release SHA256SUMS.
       PHANTOM_SHA256: d791d27389d6ebc8c9224458a30d4f708b52fa6cbc71954907ab895760b41598
+      # sha256 of the extracted `phantom` binary from that asset. Checked on
+      # every run, cache hit or miss, before the binary is used.
+      PHANTOM_BIN_SHA256: 3ca11386538a1ffde4eb4f99b2d65389bc0eebb7572fd1c67a852b55bc7d01d8
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Path filter
         id: paths
@@ -146,7 +155,7 @@ jobs:
       - name: Cache phantom binary
         if: steps.paths.outputs.run == 'true'
         id: phantom-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ~/.cache/phantom-pinned
           key: phantom-${{ env.PHANTOM_VERSION }}-${{ env.PHANTOM_SHA256 }}
@@ -164,19 +173,24 @@ jobs:
           tar xzf "$PHANTOM_ASSET" phantom
           rm -f "$PHANTOM_ASSET" SHA256SUMS
 
-      - name: Re-verify cached phantom
+      - name: Verify phantom binary sha256 (every run)
         if: steps.paths.outputs.run == 'true'
         run: |
           set -euo pipefail
-          "$HOME/.cache/phantom-pinned/phantom" --version | grep -F "${PHANTOM_VERSION#v}"
+          cd "$HOME/.cache/phantom-pinned"
+          echo "$PHANTOM_BIN_SHA256  phantom" | sha256sum -c -
+          ./phantom --version | grep -F "${PHANTOM_VERSION#v}"
 
       - name: Install Rust toolchain
         if: steps.paths.outputs.run == 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          # Required with a SHA pin: the action can no longer read it from the ref.
+          toolchain: stable
 
       - name: Cache cargo
         if: steps.paths.outputs.run == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Build test
         if: steps.paths.outputs.run == 'true'
