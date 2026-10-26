@@ -185,8 +185,8 @@ fn binding_add_never_writes_through_a_dangling_symlink() {
         args.extend_from_slice(extra);
         locus(home.path(), cwd.path(), Some(CAP), &args)
     };
-    // The link is an existing entry: refused like any existing alias.
-    assert_json_error(&add(&[]), "binding 'dang' already exists");
+    // Symlinks are refused before equality checks, even without --force.
+    assert_json_error(&add(&[]), "symlink");
     assert!(!victim.exists(), "nothing written outside LOCUS_HOME");
     // --force replaces a binding, never the file a link points at.
     assert_json_error(&add(&["--force"]), "symlink");

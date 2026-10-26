@@ -746,16 +746,22 @@ pub(super) fn binding_add_plan(
     alias: &str,
     toml: &str,
     exists: bool,
+    unchanged: bool,
 ) -> dry_run::Plan {
     let mut plan = dry_run::Plan::new(format!("locus binding add {alias}"));
-    plan.change(
-        if exists { "overwrite" } else { "create" },
-        path.display().to_string(),
-        Some(format!("binding {alias}")),
-    )
-    .needs_control()
-    .with("alias", alias)
-    .with("toml", toml);
+    if !unchanged {
+        plan.change(
+            if exists { "overwrite" } else { "create" },
+            path.display().to_string(),
+            Some(format!("binding {alias}")),
+        );
+    } else {
+        plan.note("binding already matches; nothing written");
+    }
+    plan.needs_control()
+        .with("alias", alias)
+        .with("toml", toml)
+        .with("unchanged", unchanged);
     plan
 }
 

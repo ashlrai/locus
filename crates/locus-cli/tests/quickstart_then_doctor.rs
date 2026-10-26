@@ -41,9 +41,12 @@ fn quickstart_then_doctor_succeeds_with_visible_advisories() {
     let operator = Operator::new();
     operator.quickstart();
 
+    // Repeated quickstart/diagnostics must remain a successful first-run path.
+    operator.quickstart();
     for args in [&["doctor"][..], &["doctor", "--json"][..]] {
         let out = operator.run(args);
         assert_eq!(out.status.code(), Some(0), "{out:?}");
+        assert!(out.stderr.is_empty(), "advisories belong in the report");
         if args.contains(&"--json") {
             let report: Value = serde_json::from_slice(&out.stdout).unwrap();
             assert_eq!(report["verdict"], "WARN");

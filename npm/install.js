@@ -6,7 +6,6 @@
 // bin/locus.js). Anything else stays lazy: the wrapper downloads (or
 // cargo-installs) on first run. Never fails the npm install.
 
-const { existsSync } = require("fs");
 const { join } = require("path");
 
 async function run() {
@@ -21,10 +20,8 @@ async function run() {
     target = wrapper.getPlatformTarget();
   } catch {}
   const cached = wrapper.getBinaryPath();
-  let binary = null;
-  if (existsSync(cached) && !wrapper.isCachedBinaryStale(cached)) {
-    binary = cached;
-  } else if (target && wrapper.hasPrebuiltBinary(target)) {
+  let binary = wrapper.findUsableBinary();
+  if (!binary && target && wrapper.hasPrebuiltBinary(target)) {
     binary = await wrapper.downloadReleaseBinary(cached);
   }
   if (binary && wrapper.linkNativeBin(binary, wrapperPath)) {
