@@ -103,6 +103,33 @@ impl RegistryTrustKey {
         }
     }
 
+    /// Decode file/env trust material through the same fail-closed validation.
+    pub(crate) fn from_encoded(id: &str, scheme: &str, material: &str) -> Result<Self> {
+        let material = material.trim();
+        let field = match scheme {
+            SIG_SCHEME_ED25519 => "public_key_b64",
+            SIG_SCHEME_HMAC_SHA256 => "secret_hex",
+            other => return Err(LocusError::msg(format!(
+                "trust key `{id}`: unknown scheme `{other}` (want `{SIG_SCHEME_ED25519}` or `{SIG_SCHEME_HMAC_SHA256}`)"
+            ))),
+        };
+        if material.is_empty() {
+            return Err(LocusError::msg(format!(
+                "trust key `{id}` scheme {scheme} requires {field}"
+            )));
+        }
+        let key = if scheme == SIG_SCHEME_ED25519 {
+            let key = Self::ed25519_public(id, material);
+            key.ed25519_verifying_key()?;
+            key
+        } else {
+            let key = Self::hmac_sha256(id, material);
+            key.secret_bytes()?;
+            key
+        };
+        Ok(key)
+    }
+
     /// Scheme label for this key (`hmac-sha256` or `ed25519`).
     pub fn scheme(&self) -> &'static str {
         match &self.key {
@@ -118,16 +145,13 @@ impl RegistryTrustKey {
                 let bytes = hex::decode(secret_hex.trim()).map_err(|e| {
                     LocusError::msg(format!("registry trust key `{}` hex: {e}", self.id))
                 })?;
-                if bytes.len() != 32 {
-                    return Err(LocusError::msg(format!(
+                bytes.try_into().map_err(|bytes: Vec<u8>| {
+                    LocusError::msg(format!(
                         "registry trust key `{}` must be 32 bytes (64 hex chars), got {}",
                         self.id,
                         bytes.len()
-                    )));
-                }
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Ok(arr)
+                    ))
+                })
             }
             RegistryKeyMaterial::Ed25519Public { .. } => Err(LocusError::msg(format!(
                 "registry trust key `{}` is ed25519 (no HMAC secret)",
@@ -146,15 +170,13 @@ impl RegistryTrustKey {
                         self.id
                     ))
                 })?;
-                if bytes.len() != 32 {
-                    return Err(LocusError::msg(format!(
+                let arr = bytes.try_into().map_err(|bytes: Vec<u8>| {
+                    LocusError::msg(format!(
                         "registry trust key `{}` ed25519 public must be 32 bytes, got {}",
                         self.id,
                         bytes.len()
-                    )));
-                }
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
+                    ))
+                })?;
                 let key = VerifyingKey::from_bytes(&arr).map_err(|e| {
                     LocusError::msg(format!(
                         "registry trust key `{}` invalid ed25519 public key: {e}",
@@ -179,13 +201,8 @@ impl RegistryTrustKey {
 /// Process-wide trust keys (optional; production default is empty unless file/env set).
 static TRUST_KEYS: OnceLock<Vec<RegistryTrustKey>> = OnceLock::new();
 
-/// Default production trust store: `$LOCUS_HOME/trust/adapter-keys.toml` then env overlay.
-fn default_trust_keys() -> Vec<RegistryTrustKey> {
-    crate::adapter_trust::load_merged_trust_keys_default()
-}
-
 fn trust_keys() -> &'static [RegistryTrustKey] {
-    TRUST_KEYS.get_or_init(default_trust_keys)
+    TRUST_KEYS.get_or_init(crate::adapter_trust::load_merged_trust_keys_default)
 }
 
 /// Install trust keys for the process (primarily tests / tooling).
@@ -230,25 +247,7 @@ pub fn parse_trust_keys_env(raw: &str) -> Result<Vec<RegistryTrustKey>> {
                 "trust key `{id}` has empty material"
             )));
         }
-        let key = match scheme.as_str() {
-            SIG_SCHEME_ED25519 => {
-                // Validate early so bad env fails closed at parse time.
-                let k = RegistryTrustKey::ed25519_public(id, material);
-                k.ed25519_verifying_key()?;
-                k
-            }
-            SIG_SCHEME_HMAC_SHA256 => {
-                let k = RegistryTrustKey::hmac_sha256(id, material);
-                k.secret_bytes()?;
-                k
-            }
-            other => {
-                return Err(LocusError::msg(format!(
-                    "trust key `{id}`: unknown scheme `{other}` (want `{SIG_SCHEME_ED25519}` or `{SIG_SCHEME_HMAC_SHA256}`)"
-                )));
-            }
-        };
-        out.push(key);
+        out.push(RegistryTrustKey::from_encoded(id, &scheme, material)?);
     }
     Ok(out)
 }
@@ -518,17 +517,6 @@ pub fn ed25519_public_key_b64(verifying_key: &VerifyingKey) -> String {
     B64.encode(verifying_key.as_bytes())
 }
 
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 /// Verify one entry against the process trust store.
 pub fn verify_entry(entry: &AdapterManifestEntry) -> EntryVerifyReport {
     verify_entry_with_keys(entry, trust_keys())
@@ -602,21 +590,16 @@ pub(crate) fn verify_material_signature(
 
     match (&parsed, &key.key) {
         (ParsedSignature::HmacSha256(expected), RegistryKeyMaterial::HmacSha256 { .. }) => {
-            let Ok(computed) = sign_entry_material(material, key) else {
+            let Ok(secret) = key.secret_bytes() else {
                 return (
                     EntryVerifyStatus::Malformed,
                     Some(key_id),
                     Some("failed to compute expected signature (bad trust key)".into()),
                 );
             };
-            let Ok(ParsedSignature::HmacSha256(computed_bytes)) = parse_signature(&computed) else {
-                return (
-                    EntryVerifyStatus::Malformed,
-                    Some(key_id),
-                    Some("internal signature format error".into()),
-                );
-            };
-            if ct_eq(expected, &computed_bytes) {
+            let mut mac = HmacSha256::new_from_slice(&secret).expect("HMAC accepts any key length");
+            mac.update(material.as_bytes());
+            if mac.verify_slice(expected).is_ok() {
                 (EntryVerifyStatus::Valid, Some(key_id), None)
             } else {
                 (
@@ -1382,6 +1365,20 @@ name = "Empty"
         let mut entry = sample_entry("aws");
         entry.signature = Some(sign_entry(&entry, &key).unwrap());
         entry.signed_by = Some(MOCK_KEY_ID.into());
+        let signature = entry.signature.clone().unwrap();
+        let ParsedSignature::HmacSha256(tag) = parse_signature(&signature).unwrap() else {
+            panic!("expected HMAC tag");
+        };
+        for i in 0..tag.len() {
+            let mut changed = tag;
+            changed[i] ^= 1;
+            entry.signature = Some(format!("{SIG_SCHEME_HMAC_SHA256}:{}", hex::encode(changed)));
+            assert_eq!(
+                verify_entry_with_keys(&entry, std::slice::from_ref(&key)).status,
+                EntryVerifyStatus::Invalid
+            );
+        }
+        entry.signature = Some(signature);
         // Tamper after signing.
         entry.tools.push("aws.evil".into());
 
