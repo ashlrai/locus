@@ -409,8 +409,10 @@ mod tests {
 
     #[test]
     fn plaintext_and_tokenized_remotes_and_path_never_written() {
-        let url = "https://alice:ghp_SuperSecretToken123@github.com/acme-corp/secret-app.git";
-        let repo = git_repo_with_remote(url);
+        // FAKE credential: build the URL at runtime to keep source secret scans clean.
+        let url_cred = format!("{}_{}", "ghp", "SuperSecretToken123");
+        let url = format!("https://alice:{url_cred}@github.com/acme-corp/secret-app.git");
+        let repo = git_repo_with_remote(&url);
         let home = tempfile::tempdir().unwrap();
         try_record(
             home.path(),
@@ -422,7 +424,7 @@ mod tests {
         .unwrap();
         let raw = fs::read_to_string(path(home.path())).unwrap();
         for leak in [
-            "ghp_SuperSecretToken123",
+            url_cred.as_str(),
             "alice",
             "acme-corp",
             "secret-app",
@@ -438,12 +440,12 @@ mod tests {
         let back = read(home.path());
         assert_eq!(
             back[0].remote_hashes,
-            vec![keyed_hash(&key, &normalize_remote_url(url))]
+            vec![keyed_hash(&key, &normalize_remote_url(&url))]
         );
         // Keyed, not a bare digest a guesser could reproduce.
         assert_ne!(
             back[0].remote_hashes[0],
-            keyed_hash(&[0u8; 32], &normalize_remote_url(url))
+            keyed_hash(&[0u8; 32], &normalize_remote_url(&url))
         );
         #[cfg(unix)]
         {
