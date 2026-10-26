@@ -358,6 +358,15 @@ impl Session {
         Utc::now() > self.expires_at
     }
 
+    /// True when the seal is current-version, not legacy, and its HMAC
+    /// verifies. Ignores expiry and frozen state, so an expired pin can be
+    /// recognised as authentic (and therefore safely treated as absent).
+    pub fn seal_authentic(&self, key: &SealKey) -> bool {
+        self.seal_version == CURRENT_SEAL_VERSION
+            && self.authority != SessionAuthority::LegacyUntrusted
+            && key.verify(&self.material(), &self.seal)
+    }
+
     pub fn is_frozen(&self) -> bool {
         self.frozen
     }
