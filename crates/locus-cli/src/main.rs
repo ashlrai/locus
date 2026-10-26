@@ -11,6 +11,7 @@
 #[macro_use]
 mod stdout;
 
+mod config_rewrite;
 mod cred_diag;
 mod dry_run;
 #[cfg(all(test, unix))]
@@ -291,6 +292,9 @@ enum Commands {
         /// Tools appear as `alias__tool` in locus-mcp. e.g. `--ns personal,acme`
         #[arg(long = "ns")]
         ns: Option<String>,
+        /// Replace npx Locus MCP entries in supported user configs with the native binary
+        #[arg(long)]
+        rewrite_configs: bool,
         /// Auto-expire this pin after DUR (e.g. 30m, 2h; min 1m, max 24h;
         /// capped by the binding's policy.max_ttl)
         #[arg(long, value_name = "DUR")]
@@ -1463,7 +1467,19 @@ fn run() -> Result<()> {
             client,
             ns,
             ttl,
-        } => cmd_pin(alias, force, client, ns, ttl, json, dry_run),
+            rewrite_configs,
+        } => cmd_pin(
+            alias,
+            client,
+            ns,
+            ttl,
+            PinOptions {
+                force,
+                rewrite_configs,
+                json,
+                dry_run,
+            },
+        ),
         Commands::Leave { force, no_verifier } => cmd_leave(force, no_verifier, json, dry_run),
         Commands::Renew => cmd_renew(json, dry_run),
         Commands::Engagement(sub) => cmd_engagement(sub, json, dry_run),
@@ -3090,15 +3106,29 @@ fn cmd_switch(
     Ok(())
 }
 
+struct PinOptions {
+    force: bool,
+    rewrite_configs: bool,
+    json: bool,
+    dry_run: bool,
+}
+
 fn cmd_pin(
     alias: Option<String>,
-    force: bool,
     client: Option<String>,
     ns: Option<String>,
     ttl: Option<String>,
-    json: bool,
-    dry_run: bool,
+    options: PinOptions,
 ) -> Result<()> {
+    let PinOptions {
+        force,
+        rewrite_configs,
+        json,
+        dry_run,
+    } = options;
+    if rewrite_configs && dry_run {
+        bail!("--rewrite-configs cannot be combined with --dry-run");
+    }
     let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
     let ns_aliases = ns
         .as_deref()
@@ -3126,6 +3156,11 @@ fn cmd_pin(
     }
     require_local_control_to_replace_pin("locus pin")
         .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
+    let rewrite = if rewrite_configs {
+        Some(config_rewrite::prepare()?)
+    } else {
+        None
+    };
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let session = if let Some(aliases) = ns_aliases {
@@ -3141,6 +3176,11 @@ fn cmd_pin(
                 .map_err(|e| wedged_session_recovery(with_auto_alias_suggestions(&s, &cwd(), e)))?,
         }
     };
+    if let Some(rewrite) = rewrite {
+        rewrite
+            .apply()
+            .context("pin succeeded, but config rewrite failed")?;
+    }
     // Surface a silent policy.max_ttl clamp (5s slack for pin-time skew).
     let granted = session.expires_at - session.pinned_at;
     let ttl_capped = requested_ttl.is_some_and(|req| granted + chrono::Duration::seconds(5) < req);
