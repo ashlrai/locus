@@ -26,7 +26,7 @@ const { dirname, join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
-const VERSION = "0.5.1";
+const VERSION = "0.5.2";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus";
 const CARGO_PACKAGE = "locus-cli";
