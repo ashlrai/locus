@@ -2,10 +2,11 @@ name: Integration
 
 # Shared phantom+locus integration test (tests/integration/phantom_locus.rs).
 # Merge-queue pattern from ashlr-md #186, per CI Efficiency:
-# - Triggers: pull_request, merge_group and a nightly schedule.
-# - Real work only on merge_group or the nightly run, and only once the repo
-#   variable MERGE_QUEUE is 'true'. Every other run skips the job, and a
-#   skipped job counts as success.
+# - Triggers: pull_request, merge_group, a nightly schedule and manual dispatch.
+# - Real work only on merge_group (gated on the repo variable MERGE_QUEUE ==
+#   'true'), the nightly schedule or workflow_dispatch (both ungated). Never on
+#   push or pull_request: the pull_request trigger exists only so the job
+#   reports as skipped, and a skipped job counts as success.
 # - Path filtering through a classify job (phantom #811 pattern), not
 #   workflow-level paths: (merge_group does not support on.paths).
 # Not a required check until the locus ruleset flip plus ~5 green merge_group
@@ -15,7 +16,8 @@ on:
     branches: [main, master]
   merge_group:
   schedule:
-    - cron: "41 6 * * *"
+    - cron: "23 6 * * *"
+  workflow_dispatch:
 
 concurrency:
   group: integration-${{ github.event.pull_request.number || github.ref }}
@@ -27,14 +29,14 @@ permissions:
 jobs:
   changes:
     name: Classify changes
-    if: (github.event_name == 'merge_group' || github.event_name == 'schedule') && vars.MERGE_QUEUE == 'true'
+    if: (github.event_name == 'merge_group' && vars.MERGE_QUEUE == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 3
     outputs:
       run: ${{ steps.classify.outputs.run }}
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -71,14 +73,13 @@ jobs:
       PHANTOM_BIN_SHA256: 3ca11386538a1ffde4eb4f99b2d65389bc0eebb7572fd1c67a852b55bc7d01d8
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Cache phantom binary
         id: phantom-cache
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/phantom-pinned
           key: phantom-${{ env.PHANTOM_VERSION }}-${{ env.PHANTOM_SHA256 }}
@@ -110,7 +111,7 @@ jobs:
           toolchain: stable
 
       - name: Cache cargo
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Build test
         run: cargo test -p locus-cli --test phantom_locus --no-run
