@@ -523,6 +523,15 @@ pub struct Policy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_ttl: Option<String>,
 
+    /// Opt-in upper bound on a pin's total lifetime, measured from the human
+    /// pin (`pinned_at`), that `locus renew` may extend to (e.g. "24h", "3d").
+    /// Unset (the default) disables self-renew: every pin then ends at its
+    /// TTL and needs a human `locus enter`.
+    ///
+    /// Excluded from `binding_fingerprint` like `default_ttl`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_session_lifetime: Option<String>,
+
     #[serde(default = "default_parallel")]
     pub parallel_sessions: u32,
 }
@@ -544,6 +553,7 @@ impl Default for Policy {
             dual_control_all_approvals: false,
             max_ttl: Some("8h".into()),
             default_ttl: None,
+            max_session_lifetime: None,
             parallel_sessions: default_parallel(),
         }
     }
@@ -729,6 +739,20 @@ impl Binding {
             }
             let parsed = crate::session::parse_ttl(v).map_err(|_| bad())?;
             if parsed < chrono::Duration::minutes(1) {
+                return Err(bad());
+            }
+        }
+        if let Some(ref v) = self.policy.max_session_lifetime {
+            let bad = || {
+                crate::LocusError::msg(format!(
+                    "invalid policy.max_session_lifetime '{v}': use 12h / 1d / 7d (min 1m, max 30d)"
+                ))
+            };
+            if v.trim().is_empty() {
+                return Err(bad());
+            }
+            let parsed = crate::session::parse_ttl(v).map_err(|_| bad())?;
+            if parsed < chrono::Duration::minutes(1) || parsed > chrono::Duration::days(30) {
                 return Err(bad());
             }
         }
