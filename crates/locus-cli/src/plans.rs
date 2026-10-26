@@ -166,7 +166,11 @@ pub(super) fn plan_pin(
         .resolve_pin(&alias, &cwd, force, namespaces, requested_ttl)
         .map_err(|e| with_alias_suggestions(&s, e))?;
     // Pin replaces active.json, never a LOCUS_SESSION_ID session.
-    let current = s.active_pin_session().ok().flatten();
+    // A malformed or unreadable active.json would make the real pin fail
+    // before writing; surface the same recovery guidance as `leave`.
+    let current = s
+        .active_pin_session()
+        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))?;
     let ttl_capped = requested_ttl.is_some_and(|req| r.ttl < req);
 
     let mut plan = dry_run::Plan::new(format!("{command} {}", r.binding.alias));
