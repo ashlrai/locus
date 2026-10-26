@@ -5748,6 +5748,12 @@ fn cmd_adapter(sub: AdapterCmd, json: bool, dry_run: bool) -> Result<()> {
         }
         AdapterCmd::Uninstall { id, yes } => {
             require_local_control_boundary("locus adapter uninstall")?;
+            if json && !yes {
+                return Err(UsageError(
+                    "--json never prompts; pass --yes to confirm removing the adapter".into(),
+                )
+                .into());
+            }
             if !yes && !prompt_confirm("remove this installed community adapter?", false)? {
                 bail!("removal declined");
             }
@@ -7001,7 +7007,7 @@ fn prompt_value(
     validate: &dyn Fn(&str) -> std::result::Result<(), String>,
 ) -> Result<String> {
     use std::io::Write;
-    if !dry_run::interactive(false) {
+    if !dry_run::interactive(JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed)) {
         bail!("missing {label} — pass {flag_hint} (not an interactive terminal)");
     }
     loop {
@@ -7036,7 +7042,7 @@ fn prompt_value(
 /// Optional prompt: empty input → None. Non-interactive → None (flags rule).
 fn prompt_optional(label: &str) -> Result<Option<String>> {
     use std::io::Write;
-    if !dry_run::interactive(false) {
+    if !dry_run::interactive(JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed)) {
         return Ok(None);
     }
     print!("  {label}: ");
@@ -7054,7 +7060,7 @@ fn prompt_optional(label: &str) -> Result<Option<String>> {
 /// Y/n confirm. Non-interactive returns the default (never blocks scripts).
 fn prompt_confirm(question: &str, default_yes: bool) -> Result<bool> {
     use std::io::Write;
-    if !dry_run::interactive(false) {
+    if !dry_run::interactive(JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed)) {
         return Ok(default_yes);
     }
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
@@ -10382,6 +10388,12 @@ fn cmd_approve(sub: ApproveCmd, json: bool, dry_run: bool) -> Result<()> {
             // Same bounds as minted sessions / MCP grants: zero, negative or
             // over-24h fails closed before the record is touched.
             let ttl_dur = ttl.as_deref().map(parse_mint_ttl).transpose()?;
+            if touchid && json {
+                return Err(UsageError(
+                    "--json never prompts; --touchid requires an interactive invocation".into(),
+                )
+                .into());
+            }
             if touchid {
                 // Confirm *before* mutating the approval record (fail closed).
                 let preview = s.load_approval(&id)?;
