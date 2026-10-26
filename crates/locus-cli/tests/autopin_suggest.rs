@@ -243,3 +243,100 @@ fn apply_refuses_symlinked_locus_toml() {
     assert!(text(&o).contains("symlink"), "{o:?}");
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "version = 1\n");
 }
+
+#[test]
+fn suggest_without_history_key_writes_nothing() {
+    let home = tempfile::tempdir().unwrap();
+    let repo = git_repo();
+    let elsewhere = tempfile::tempdir().unwrap();
+    let qs = locus(
+        home.path(),
+        elsewhere.path(),
+        None,
+        &[("LOCUS_PIN_HISTORY", "0")],
+        &["quickstart"],
+    );
+    assert!(qs.status.success(), "{qs:?}");
+    let key = home.path().join(pin_history::KEY_FILE);
+    let _ = std::fs::remove_file(&key);
+    let before: Vec<_> = std::fs::read_dir(home.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    let v = json(&locus(
+        home.path(),
+        repo.path(),
+        None,
+        &[],
+        &["autopin", "suggest", "--json"],
+    ));
+    assert_eq!(v["report"]["reason"], "no_history");
+    assert!(!key.exists(), "read-only suggest created history.key");
+    let after: Vec<_> = std::fs::read_dir(home.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(before, after, "suggest wrote to LOCUS_HOME");
+    assert!(!repo.path().join(".locus.toml").exists());
+}
+
+#[test]
+fn apply_refuses_parent_locus_toml_above_git_toplevel() {
+    let (home, _repo, cap) = setup(&[("acme", 5)]);
+    let parent = tempfile::tempdir().unwrap();
+    let shared = parent.path().join(".locus.toml");
+    std::fs::write(&shared, "version = 1\n").unwrap();
+    let repo = parent.path().join("child");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [&["init", "-q"][..], &["remote", "add", "origin", URL][..]] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let o = locus(
+        home.path(),
+        &repo,
+        Some(&cap),
+        &[],
+        &["autopin", "suggest", "--apply"],
+    );
+    assert!(!o.status.success(), "{o:?}");
+    assert!(text(&o).contains("outside this repo"), "{o:?}");
+    assert_eq!(std::fs::read_to_string(&shared).unwrap(), "version = 1\n");
+    assert!(!repo.join(".locus.toml").exists());
+}
+
+#[test]
+fn spoofed_non_origin_remote_does_not_match() {
+    let (home, repo, _) = setup(&[("acme", 5)]);
+    for args in [
+        &["remote", "rename", "origin", "upstream"][..],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/someone/fork.git",
+        ][..],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let v = json(&locus(
+        home.path(),
+        repo.path(),
+        None,
+        &[],
+        &["autopin", "suggest", "--json"],
+    ));
+    assert_eq!(v["report"]["reason"], "no_history");
+    assert!(v["report"]["suggestion"].is_null());
+}

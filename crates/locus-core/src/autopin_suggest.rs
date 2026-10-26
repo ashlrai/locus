@@ -12,6 +12,20 @@
 //! only when the top score is at least [`MIN_SCORE`] and strictly greater than
 //! the runner-up; thin or tied evidence suggests nothing.
 //!
+//! Entries whose alias fails binding-name validation (for example a refusal
+//! recorded as `<invalid alias>`) are dropped and never rank.
+//!
+//! Remote spoofing: a repo controls its own remotes, so a clone that adds a
+//! second remote mimicking `acme-corp/app` could borrow acme's history. When
+//! the repo has an `origin` remote, only `origin` is matched; other remotes
+//! are ignored. Without `origin`, every remote is matched. A repo whose
+//! `origin` itself mimics another repo still matches that repo's history:
+//! remotes are not authenticated. `--apply` needs the operator control
+//! capability and prints the binding and the file it wrote, so check both.
+//!
+//! Read-only: `suggest` never creates `history.key`. With no key there is no
+//! history that could match, so it reports `no_history` and writes nothing.
+//!
 //! Writing the suggestion (`--apply`) lives on [`crate::store::Store`] behind
 //! the control capability gate.
 
@@ -21,6 +35,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::autopin::{git_remote_urls, normalize_remote_url};
+use crate::binding::validate_name_component;
 use crate::pin_history::{self, HistoryEntry};
 
 /// Stable JSON schema id for `locus autopin suggest --json`.
@@ -69,9 +84,29 @@ impl SuggestReport {
     }
 }
 
-/// Keyed hashes of the live remotes of `cwd`, computed now.
+/// The URL of the `origin` remote of `cwd`, if any.
+fn git_origin_url(cwd: &Path) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["remote", "get-url", "origin"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let u = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!u.is_empty()).then_some(u)
+}
+
+/// Keyed hashes of the live remotes of `cwd` used for matching, computed now:
+/// `origin` alone when it exists, else every remote (see module docs).
 pub fn live_remote_hashes(key: &[u8], cwd: &Path) -> Vec<String> {
-    let mut r: Vec<String> = git_remote_urls(cwd)
+    let urls = match git_origin_url(cwd) {
+        Some(u) => vec![u],
+        None => git_remote_urls(cwd),
+    };
+    let mut r: Vec<String> = urls
         .iter()
         .map(|u| pin_history::keyed_hash(key, &normalize_remote_url(u)))
         .collect();
@@ -88,7 +123,9 @@ pub fn suggest(home: &Path, cwd: &Path) -> std::io::Result<SuggestReport> {
     if git_remote_urls(cwd).is_empty() {
         return Ok(SuggestReport::empty(true, false, "no_remote"));
     }
-    let key = pin_history::history_key(home)?;
+    let Some(key) = pin_history::existing_history_key(home)? else {
+        return Ok(SuggestReport::empty(true, true, "no_history"));
+    };
     let hashes = live_remote_hashes(&key, cwd);
     Ok(rank(&pin_history::read(home), &hashes))
 }
@@ -104,6 +141,9 @@ pub fn rank(entries: &[HistoryEntry], remote_hashes: &[String]) -> SuggestReport
         let Some(alias) = e.alias.as_deref() else {
             continue;
         };
+        if validate_name_component("alias", alias).is_err() {
+            continue;
+        }
         let c = by_alias
             .entry(alias.to_string())
             .or_insert_with(|| Candidate {
@@ -248,6 +288,20 @@ mod tests {
         assert_eq!(r.suggestion.as_deref(), Some("acme"));
         let p = r.candidates.iter().find(|c| c.alias == "personal").unwrap();
         assert_eq!((p.pins, p.mismatches, p.score), (4, 2, 2));
+    }
+
+    #[test]
+    fn invalid_aliases_never_rank() {
+        let mut v = Vec::new();
+        for i in 0..5 {
+            let ts = format!("2026-10-2{i}T00:00:00Z");
+            v.push(ev("pin", "<invalid alias>", &ts, "h1"));
+            v.push(ev("pin", "../etc", &ts, "h1"));
+        }
+        let r = rank(&v, &here());
+        assert_eq!(r.suggestion, None);
+        assert_eq!(r.reason, "no_history");
+        assert!(r.candidates.is_empty());
     }
 
     #[test]
