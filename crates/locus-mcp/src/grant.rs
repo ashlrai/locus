@@ -7,11 +7,77 @@
 //! revocation, expiry). All failures collapse to a uniform 401 `invalid_grant`
 //! body; only a token whose HMAC verified may learn it expired.
 
-use locus_core::{McpGrant, McpGrantAuthError, Store};
+use locus_core::{args_digest, McpGrant, McpGrantAuthError, Store, SwarmGraph};
 use serde_json::{json, Value};
 
 /// Header carrying the tenant bearer token (never a tool argument).
 pub const TENANT_TOKEN_HEADER: &str = "x-locus-tenant-token";
+
+/// Additional narrowing over an authenticated tenant grant. A graph node ID is
+/// derived from the operator's immutable graph, never from headers or tool args.
+/// This filter cannot grant authority absent from the live binding catalog.
+pub struct SwarmBroker {
+    graph: SwarmGraph,
+}
+
+impl SwarmBroker {
+    pub fn new(graph: SwarmGraph) -> Self {
+        Self { graph }
+    }
+
+    pub fn filter_catalog(
+        &self,
+        store: &Store,
+        tenant: Option<&TenantCtx>,
+        mut catalog: Value,
+    ) -> locus_core::Result<Value> {
+        let agent = tenant.and_then(|t| self.graph.agent_for_grant(&t.grant_id));
+        let tools = catalog
+            .get_mut("tools")
+            .and_then(Value::as_array_mut)
+            .ok_or_else(|| locus_core::LocusError::msg("invalid swarm catalog"))?;
+        tools.retain(|tool| {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| agent.is_some_and(|a| a.allows(name)))
+        });
+        store.audit(
+            "mcp.swarm.tools_list",
+            tenant.map_or("-", |t| t.binding_alias.as_str()),
+            Some(json!({
+                "agent_id": agent.map(|a| &a.id),
+                "grant_id": tenant.map(|t| &t.grant_id),
+                "tool_count": tools.len(),
+            })),
+        )?;
+        Ok(catalog)
+    }
+
+    /// Record authorization BEFORE execution. Denied names are hashed, since
+    /// hostile callers can put arbitrary secret-shaped strings in that field.
+    pub fn authorize_call(
+        &self,
+        store: &Store,
+        tenant: Option<&TenantCtx>,
+        name: &str,
+        healthy: bool,
+    ) -> locus_core::Result<bool> {
+        let agent = tenant.and_then(|t| self.graph.agent_for_grant(&t.grant_id));
+        let allowed = healthy && agent.is_some_and(|a| a.allows(name));
+        store.audit(
+            "mcp.swarm.tool_call",
+            tenant.map_or("-", |t| t.binding_alias.as_str()),
+            Some(json!({
+                "agent_id": agent.map(|a| &a.id),
+                "grant_id": tenant.map(|t| &t.grant_id),
+                "allowed": allowed,
+                "tool": if allowed { Some(name) } else { None },
+                "tool_digest": args_digest(&json!(name)),
+            })),
+        )?;
+        Ok(allowed)
+    }
+}
 
 /// Per-request tenant context resolved from a verified grant token.
 #[derive(Debug, Clone, PartialEq, Eq)]
