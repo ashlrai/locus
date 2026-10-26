@@ -59,6 +59,30 @@ Use explicit environment (`env:`) references for supported credential resolution
 
 ## Install options
 
+The shell installer downloads **both `locus` and `locus-mcp`**, verifies the
+archive against its required SHA-256 sidecar, and installs into `~/.local/bin`
+without sudo. It supports macOS (Apple Silicon / Intel) and Linux x86_64
+(glibc); requires Bash, curl, tar, and `sha256sum` or `shasum`.
+
+```bash
+# Download, inspect, then install the latest release
+installer_script=$(mktemp)
+curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/ashlrai/locus/main/scripts/install.sh -o "$installer_script"
+less "$installer_script"
+bash "$installer_script"
+export PATH="$HOME/.local/bin:$PATH"
+
+# Or select a release and a writable destination
+bash "$installer_script" --version v0.5.1 --bin-dir "$HOME/bin"
+```
+
+The installer never edits shell profiles; add the install directory to your
+shell's `PATH` to keep it available in new terminals. Re-run to upgrade.
+Missing or mismatched checksums stop installation before replacing binaries.
+Checksums detect corrupted downloads; they are not publisher signatures.
+For Linux ARM or other platforms, use a source install below.
+
 ```bash
 # Homebrew (tap live) — installs locus + locus-mcp
 brew install ashlrai/tap/locus
