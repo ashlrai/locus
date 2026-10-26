@@ -6466,10 +6466,9 @@ fn cmd_binding(sub: BindingCmd, json: bool, dry_run: bool) -> Result<()> {
             validate_name_component("alias", &alias)?;
             let path = s.bindings_dir().join(format!("{alias}.toml"));
             if !path.exists() {
-                return Err(with_alias_suggestions(
-                    &s,
-                    LocusError::BindingNotFound(alias),
-                ));
+                // Alias suggestions load bindings under a lock that can create
+                // a file. Even a failed preview must leave the store untouched.
+                return Err(LocusError::BindingNotFound(alias).into());
             }
             let mut plan = dry_run::Plan::new(format!("locus binding rm {alias}"));
             plan.delete_file(&path, Some(format!("binding {alias}")));
@@ -6606,10 +6605,13 @@ fn resolve_add_answers(args: &BindingAddArgs) -> Result<AddAnswers> {
 /// Guided resolution: reuse every flag that was passed, prompt for the rest.
 /// Only reachable when stdin is a TTY.
 fn resolve_add_answers_interactive(s: &Store, args: &BindingAddArgs) -> Result<AddAnswers> {
-    let known: Vec<String> = s
-        .list_bindings()
-        .map(|l| l.into_iter().map(|b| b.alias).collect())
-        .unwrap_or_default();
+    let known: Vec<String> = if args.dry_run {
+        dry_run::binding_aliases(s)?
+    } else {
+        s.list_bindings()
+            .map(|l| l.into_iter().map(|b| b.alias).collect())
+            .unwrap_or_default()
+    };
 
     let alias = match &args.alias {
         Some(a) => a.clone(),
@@ -7473,24 +7475,7 @@ mod doctor_exit_tests {
 /// `.locus.toml` write; the suggestion itself is read-only.
 fn cmd_autopin_suggest(apply: bool, json: bool, dry_run: bool) -> Result<()> {
     if apply && dry_run {
-        let s = dry_run::existing_store()?;
-        let here = cwd();
-        let report = locus_core::autopin_suggest::suggest(s.home(), &here)?;
-        let alias = report.suggestion.clone().ok_or_else(|| {
-            anyhow!(
-                "no autopin suggestion to apply ({}); --apply would refuse",
-                report.reason
-            )
-        })?;
-        let target = find_workspace(&here)?
-            .map(|(p, _)| p)
-            .unwrap_or_else(|| here.join(".locus.toml"));
-        let mut plan = dry_run::Plan::new("locus autopin suggest --apply");
-        plan.write_file(&target, Some(format!("default_binding = \"{alias}\"")))
-            .needs_control()
-            .with("suggestion", &alias)
-            .with("report", &report);
-        return plan.emit(json);
+        return plans::plan_autopin_suggest(json);
     }
     let s = store()?;
     let here = cwd();
@@ -8737,13 +8722,23 @@ fn cmd_agent_setup(
 /// structurally impossible. Fail closed: an unparseable file is left
 /// unchanged and the merge errors with a remediation hint.
 fn merge_codex_mcp(path: &std::path::Path, bin: &str, client: &str) -> Result<()> {
+    let rendered = render_codex_mcp(path, bin, client)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, rendered)?;
+    Ok(())
+}
+
+/// Validate and render in memory so setup previews share the write path's checks.
+fn render_codex_mcp(path: &Path, bin: &str, client: &str) -> Result<String> {
     use toml_edit::{value, DocumentMut, Item, Table};
 
     let mut doc: DocumentMut = if path.exists() {
         let raw = std::fs::read_to_string(path)?;
-        raw.parse().map_err(|e| {
+        raw.parse().map_err(|_| {
             anyhow::anyhow!(
-                "refusing to modify {}: not valid TOML ({e}).\n  \
+                "refusing to modify {}: not valid TOML.\n  \
                  Fix the file or move it aside, then re-run.\n  \
                  Locus never overwrites a config it cannot parse — other MCP servers \
                  registered there would be lost.",
@@ -8789,11 +8784,7 @@ fn merge_codex_mcp(path: &std::path::Path, bin: &str, client: &str) -> Result<()
     env.insert("LOCUS_AUTO_PIN", value("cwd"));
     env.insert("LOCUS_CLIENT", value(client));
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, doc.to_string())?;
-    Ok(())
+    Ok(doc.to_string())
 }
 
 /// Register the locus server at Claude Code **user scope** by shelling out to
@@ -9677,6 +9668,11 @@ fn cmd_setup(
             }
         };
         for path in &targets {
+            if toml_client {
+                render_codex_mcp(path, &bin, client)?;
+            } else {
+                render_mcp_json(path, "locus", &server_entry)?;
+            }
             plan.write_file(path, Some("merge the locus MCP server entry".into()));
         }
         plan.needs_control().with("client", client).with(
@@ -10675,6 +10671,12 @@ fn escape_applescript_dialog(s: &str) -> String {
 /// remediation hint — replacing it would silently destroy every other
 /// registered MCP server.
 fn merge_mcp_json(path: &std::path::Path, name: &str, server: &serde_json::Value) -> Result<()> {
+    std::fs::write(path, render_mcp_json(path, name, server)?)?;
+    Ok(())
+}
+
+/// Render without touching the filesystem; never print existing client config.
+fn render_mcp_json(path: &Path, name: &str, server: &serde_json::Value) -> Result<String> {
     let mut root: serde_json::Value = if path.exists() {
         let raw = std::fs::read_to_string(path)?;
         serde_json::from_str(&raw).map_err(|e| {
@@ -10713,8 +10715,7 @@ fn merge_mcp_json(path: &std::path::Path, name: &str, server: &serde_json::Value
         .as_object_mut()
         .unwrap()
         .insert(name.to_string(), server.clone());
-    std::fs::write(path, serde_json::to_string_pretty(&root)?)?;
-    Ok(())
+    Ok(serde_json::to_string_pretty(&root)?)
 }
 
 #[cfg(test)]
@@ -11592,7 +11593,8 @@ mod alias_ux_tests {
 mod ttl_and_client_add_tests {
     use super::{
         binding_from_answers, human_dur, missing_add_flags, parse_mint_ttl, parse_pin_ttl,
-        resolve_add_answers, scope_prompts, split_repos, AddAnswers, BindingAddArgs,
+        resolve_add_answers, resolve_add_answers_interactive, scope_prompts, split_repos,
+        AddAnswers, BindingAddArgs,
     };
     use locus_core::Store;
 
@@ -11744,6 +11746,29 @@ mod ttl_and_client_add_tests {
         assert_eq!(scope_prompts("aws"), &[("account_id", true)]);
         assert!(scope_prompts("resend").is_empty());
         assert!(scope_prompts("custom-x").is_empty());
+    }
+
+    #[test]
+    fn guided_dry_run_does_not_create_a_binding_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = Store::open(dir.path()).unwrap();
+        let mut args = full_args();
+        args.dry_run = true;
+        args.read_only = true;
+        args.default_ttl = Some("2h".into());
+        // All answers supplied: exercise guided resolution without needing a
+        // terminal, and without a save that would pre-create the lock.
+        let before: Vec<_> = std::fs::read_dir(s.bindings_dir())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        let answers = resolve_add_answers_interactive(&s, &args).unwrap();
+        assert_eq!(answers.alias, "cmp");
+        let after: Vec<_> = std::fs::read_dir(s.bindings_dir())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(before, after);
     }
 
     #[test]
