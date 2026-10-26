@@ -619,6 +619,15 @@ impl Store {
     }
 
     pub fn load_binding(&self, alias_or_id: &str) -> Result<Binding> {
+        self.load_binding_inner(alias_or_id, false)
+    }
+
+    /// Validate a binding for a preview without creating migration lock state.
+    fn load_binding_readonly(&self, alias_or_id: &str) -> Result<Binding> {
+        self.load_binding_inner(alias_or_id, true)
+    }
+
+    fn load_binding_inner(&self, alias_or_id: &str, readonly: bool) -> Result<Binding> {
         // Reject path traversal before any filesystem join
         if alias_or_id.contains('/')
             || alias_or_id.contains('\\')
@@ -630,7 +639,11 @@ impl Store {
             )));
         }
         // Prefer alias filename (alias charset validated on save; still constrain join)
-        let bindings_lock = crate::credential_migration::lock_bindings(self)?;
+        let bindings_lock = if readonly {
+            crate::credential_migration::lock_bindings_existing(self)?
+        } else {
+            crate::credential_migration::lock_bindings(self)?
+        };
         let by_alias = self.bindings_dir().join(format!("{alias_or_id}.toml"));
         if by_alias.exists() {
             ensure_under_dir(&self.bindings_dir(), &by_alias)?;
@@ -642,16 +655,24 @@ impl Store {
         }
         drop(bindings_lock);
         // Scan for id match
-        for b in self.list_bindings()? {
+        for b in self.list_bindings_inner(readonly)? {
             if b.id == alias_or_id || b.alias == alias_or_id {
-                return self.load_binding(&b.alias);
+                return self.load_binding_inner(&b.alias, readonly);
             }
         }
         Err(LocusError::BindingNotFound(alias_or_id.into()))
     }
 
     pub fn list_bindings(&self) -> Result<Vec<BindingSummary>> {
-        let _lock = crate::credential_migration::lock_bindings(self)?;
+        self.list_bindings_inner(false)
+    }
+
+    fn list_bindings_inner(&self, readonly: bool) -> Result<Vec<BindingSummary>> {
+        let _lock = if readonly {
+            crate::credential_migration::lock_bindings_existing(self)?
+        } else {
+            crate::credential_migration::lock_bindings(self)?
+        };
         let mut out = Vec::new();
         let dir = self.bindings_dir();
         if !dir.exists() {
@@ -2043,6 +2064,27 @@ impl Store {
         cwd: &Path,
     ) -> Result<(crate::autopin_suggest::SuggestReport, PathBuf)> {
         authority_anchor::authorize_control(&self.home)?;
+        let (report, file, text) = self.prepare_autopin_suggestion(cwd, false)?;
+        write_default_binding(&file, &text)?;
+        Ok((report, file))
+    }
+
+    /// Validate an autopin apply without authenticating control authority or
+    /// writing the workspace. Dry runs use the same preparation as real apply,
+    /// including binding existence, repo containment, symlinks and allowlists.
+    pub fn resolve_autopin_suggestion(
+        &self,
+        cwd: &Path,
+    ) -> Result<(crate::autopin_suggest::SuggestReport, PathBuf)> {
+        let (report, file, _) = self.prepare_autopin_suggestion(cwd, true)?;
+        Ok((report, file))
+    }
+
+    fn prepare_autopin_suggestion(
+        &self,
+        cwd: &Path,
+        read_only: bool,
+    ) -> Result<(crate::autopin_suggest::SuggestReport, PathBuf, String)> {
         let report = crate::autopin_suggest::suggest(&self.home, cwd)?;
         let Some(alias) = report.suggestion.clone() else {
             return Err(LocusError::msg(format!(
@@ -2051,10 +2093,14 @@ impl Store {
             )));
         };
         // Must name a real binding; never write a dangling default.
-        self.load_binding(&alias)?;
+        let binding = if read_only {
+            self.load_binding_readonly(&alias)?
+        } else {
+            self.load_binding(&alias)?
+        };
         let file = apply_target(cwd)?;
-        write_default_binding(&file, &alias)?;
-        Ok((report, file))
+        let text = default_binding_contents(&file, &alias, &binding)?;
+        Ok((report, file, text))
     }
 
     pub fn leave(&self) -> Result<Option<Session>> {
@@ -3939,12 +3985,22 @@ fn read_locus_toml_nofollow(file: &Path) -> Result<Option<String>> {
     Ok(Some(text))
 }
 
-/// Atomically set `default_binding` in a `.locus.toml`, keeping other keys.
-fn write_default_binding(file: &Path, alias: &str) -> Result<()> {
-    use std::io::Write;
+/// Prepare the proposed default from the same nofollow read as its policy.
+/// Never replace a disallowed winner with a weaker, allowed suggestion.
+fn default_binding_contents(file: &Path, alias: &str, binding: &Binding) -> Result<String> {
     let mut table = match read_locus_toml_nofollow(file)? {
-        Some(text) => toml::from_str::<toml::Table>(&text)
-            .map_err(|e| LocusError::msg(format!("{}: {e}", file.display())))?,
+        Some(text) => {
+            let cfg = WorkspaceConfig::parse(&text)?;
+            if !cfg.allows(&binding.alias) && !cfg.allows(&binding.id) {
+                return Err(LocusError::binding_not_allowed(
+                    &binding.alias,
+                    file,
+                    &cfg.allowed_bindings,
+                ));
+            }
+            toml::from_str::<toml::Table>(&text)
+                .map_err(|e| LocusError::msg(format!("{}: {e}", file.display())))?
+        }
         None => {
             let mut t = toml::Table::new();
             t.insert("version".into(), toml::Value::Integer(1));
@@ -3955,8 +4011,13 @@ fn write_default_binding(file: &Path, alias: &str) -> Result<()> {
         "default_binding".into(),
         toml::Value::String(alias.to_string()),
     );
-    let text = toml::to_string_pretty(&table)
-        .map_err(|e| LocusError::msg(format!("serialize .locus.toml: {e}")))?;
+    toml::to_string_pretty(&table)
+        .map_err(|e| LocusError::msg(format!("serialize .locus.toml: {e}")))
+}
+
+/// Atomically write a prepared `.locus.toml` in the same directory.
+fn write_default_binding(file: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
     let dir = file
         .parent()
         .ok_or_else(|| LocusError::msg("workspace file has no parent"))?;
@@ -4077,7 +4138,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink"), "{err}");
-        let err = super::write_default_binding(&link, "acme")
+        let binding = sample_binding("acme", "acme-corp", "proj_acme");
+        let err = super::default_binding_contents(&link, "acme", &binding)
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink"), "{err}");
