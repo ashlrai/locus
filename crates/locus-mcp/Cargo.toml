@@ -2,6 +2,7 @@
 name = "locus-mcp"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "MCP multiplexor for Locus — tools hard-scoped to the active pin"
 authors.workspace = true
