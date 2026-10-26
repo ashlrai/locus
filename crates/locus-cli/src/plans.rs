@@ -257,8 +257,35 @@ pub(super) fn plan_renew(json: bool) -> Result<()> {
     let s = dry_run::existing_store()?;
     let path = s.active_session_path();
     let mut plan = dry_run::Plan::new("locus renew");
+    // Mirror the real command's local refusals (no broker, no capability).
+    if std::env::var("LOCUS_SESSION_ID").is_ok_and(|v| !v.trim().is_empty()) {
+        bail!("locus renew only renews the active.json pin; unset LOCUS_SESSION_ID");
+    }
     match s.active_pin_session() {
         Ok(Some(cur)) => {
+            if cur.is_expired() {
+                bail!(
+                    "pin expired at {}; renew refused, human re-pin required (`locus enter {}`)",
+                    cur.expires_at.to_rfc3339(),
+                    cur.binding_alias
+                );
+            }
+            if cur.frozen {
+                bail!("pin is frozen; renew refused, human re-pin required");
+            }
+            if cur.authority != locus_core::SessionAuthority::LocalControl {
+                bail!("renew requires an authenticated local-control session");
+            }
+            if s.load_binding(&cur.binding_alias)?
+                .policy
+                .max_session_lifetime
+                .is_none()
+            {
+                bail!(
+                    "renew is disabled for '{}': set policy.max_session_lifetime on the binding",
+                    cur.binding_alias
+                );
+            }
             plan.change(
                 "renew",
                 cur.binding_alias.clone(),
