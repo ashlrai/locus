@@ -369,9 +369,18 @@ pub fn parse_manifest(toml_src: &str) -> Result<AdapterManifest> {
     Ok(m)
 }
 
-/// Load the built-in embedded catalog.
+/// Load the built-in embedded catalog, parsing it only on first use.
+///
+/// Only the compiled-in bytes are cached: publisher trust and community
+/// signatures must still be checked against current inputs at each gate.
+/// Callers receive an owned copy so sorting or signing cannot alter the catalog.
 pub fn builtin_manifest() -> Result<AdapterManifest> {
-    parse_manifest(MANIFEST_TOML)
+    static CATALOG: OnceLock<std::result::Result<AdapterManifest, String>> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| parse_manifest(MANIFEST_TOML).map_err(|error| error.to_string()))
+        .as_ref()
+        .cloned()
+        .map_err(|error| LocusError::msg(error.clone()))
 }
 
 /// All providers from the built-in catalog (sorted by id).
@@ -1199,6 +1208,30 @@ mod tests {
         assert!(ids.contains(&"github"));
         assert!(ids.contains(&"supabase"));
         assert!(ids.contains(&"vercel"));
+    }
+
+    #[test]
+    fn cached_builtin_catalog_preserves_embedded_data_and_caller_ownership() {
+        let embedded = parse_manifest(MANIFEST_TOML).unwrap();
+        let mut caller_copy = builtin_manifest().unwrap();
+        assert_eq!(caller_copy, embedded);
+
+        // Registry export and display callers are free to sign, reorder and
+        // mutate their copies, including nested strings and provider lists.
+        caller_copy.providers.reverse();
+        caller_copy.providers[0].id = "caller-local-provider".into();
+        caller_copy.providers[0].tools.clear();
+        caller_copy.signature = Some("caller-local-signature".into());
+        caller_copy.providers.clear();
+
+        assert_eq!(builtin_manifest().unwrap(), embedded);
+        assert_eq!(
+            std::thread::spawn(builtin_manifest)
+                .join()
+                .unwrap()
+                .unwrap(),
+            embedded
+        );
     }
 
     /// Drift guard: the built-in registry catalog (adapters/manifest.toml)
