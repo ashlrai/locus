@@ -23,23 +23,31 @@ cargo install --git https://github.com/ashlrai/locus locus-mcp --locked
 npm install -g locus-cli @ashlrai/locus-mcp
 # or: cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
 
+eval "$(locus hook bash)"      # exports LOCUS_CONTROL_CAPABILITY
 locus pin acme
 locus setup --client claude   # writes/merges .mcp.json
-# restart Claude Code
+# restart Claude Code from that shell
 ```
 
-Manual `.mcp.json` entry:
+`locus setup --client claude` writes this entry (`command` is the absolute
+`locus-mcp` path when it sits next to `locus`):
 
 ```json
 {
   "mcpServers": {
     "locus": {
+      "type": "stdio",
       "command": "locus-mcp",
-      "args": []
+      "args": [],
+      "env": { "LOCUS_AUTO_PIN": "cwd", "LOCUS_CLIENT": "claude" }
     }
   }
 }
 ```
+
+That serves control tools only. For the pinned binding's provider tools, set
+`"command": "locus"` and `"args": ["mcp", "--supervised"]`, as `setup` prints,
+and launch the client from the shell that pinned. See the repo `docs/mcp.md`.
 
 ## Related
 

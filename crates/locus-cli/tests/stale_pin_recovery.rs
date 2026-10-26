@@ -1,12 +1,15 @@
 //! E2E: after the shell that pinned exits, its authority broker is gone and
 //! the sealed pin can no longer be verified. Every surface must fail closed
-//! AND name the human recovery:
-//! `eval "$(locus hook bash)"; locus leave --force; locus enter <alias>`.
+//! AND name the human recovery. A dead broker with an intact seal is replaced
+//! by `locus enter` directly (#156), so the hint is enter first:
+//! `eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }`.
 
 use std::path::Path;
 use std::process::{Command, Output};
 
-const RECOVERY_TAIL: &str = "locus leave --force; locus enter";
+const RECOVERY_TAIL: &str = "|| { locus leave --force && locus enter";
+const DEAD_BROKER_RECOVERY: &str =
+    "eval \"$(locus hook bash)\"; locus enter personal || { locus leave --force && locus enter personal; }";
 
 fn locus(home: &Path, cwd: &Path, cap: &str, args: &[&str]) -> Output {
     locus_cmd(home, cwd, cap, args)
@@ -99,7 +102,7 @@ fn stale_pin_surfaces_name_the_recovery() {
     assert!(!whoami.status.success());
     let err = stderr(&whoami);
     assert!(
-        err.contains("eval \"$(locus hook bash)\"; locus leave --force; locus enter personal"),
+        err.contains(DEAD_BROKER_RECOVERY),
         "whoami must name the recovery: {err}"
     );
 
@@ -109,7 +112,7 @@ fn stale_pin_surfaces_name_the_recovery() {
     let out = String::from_utf8_lossy(&status.stdout);
     assert!(out.starts_with("INVALID personal"), "status: {out}");
     assert!(
-        out.contains("eval \"$(locus hook bash)\"; locus leave --force; locus enter personal"),
+        out.contains(DEAD_BROKER_RECOVERY),
         "status must name the recovery: {out}"
     );
     let oneline = locus(home.path(), cwd.path(), &cap, &["status", "--oneline"]);
@@ -127,14 +130,14 @@ fn stale_pin_surfaces_name_the_recovery() {
     assert!(v["recovery"]
         .as_str()
         .unwrap()
-        .ends_with("locus leave --force; locus enter personal"));
+        .ends_with("locus enter personal; }"));
 
     // agent report: human and JSON both carry the re-pin recovery.
     let report = locus(home.path(), cwd.path(), &cap, &["agent", "report"]);
     let out = String::from_utf8_lossy(&report.stdout);
     assert!(!report.status.success());
     assert!(
-        out.contains("eval \"$(locus hook bash)\"; locus leave --force; locus enter personal"),
+        out.contains(DEAD_BROKER_RECOVERY),
         "agent report must name the recovery: {out}"
     );
     let report = locus(
@@ -146,7 +149,7 @@ fn stale_pin_surfaces_name_the_recovery() {
     let v: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
     assert_eq!(v["ready"], false);
     let recovery = v["recovery"].as_str().expect("recovery in JSON");
-    assert!(recovery.ends_with("locus leave --force; locus enter personal"));
+    assert!(recovery.ends_with("locus enter personal; }"));
     assert_eq!(v["next_steps"][0], recovery);
 
     // The bash prompt hook shows the invalid pin instead of "unpinned".
@@ -161,7 +164,7 @@ fn stale_pin_surfaces_name_the_recovery() {
     assert!(!enter.status.success(), "enter with a wrong capability");
     assert!(stderr(&enter).contains("persisted operator capability"));
 
-    // The named recovery works.
+    // The forced fallback also works.
     let leave = locus(home.path(), cwd.path(), &cap, &["leave", "--force"]);
     assert!(leave.status.success(), "leave --force: {}", stderr(&leave));
     let enter = locus(home.path(), cwd.path(), &cap, &["enter", "acme"]);
@@ -246,7 +249,7 @@ fn stale_pin_control_commands_name_the_recovery() {
         let err = stderr(&out);
         assert!(err.contains("human re-pin required"), "{args:?}: {err}");
         assert!(
-            err.contains("eval \"$(locus hook bash)\"; locus leave --force; locus enter personal"),
+            err.contains(DEAD_BROKER_RECOVERY),
             "{args:?} must name the recovery: {err}"
         );
         assert_eq!(
@@ -289,11 +292,65 @@ fn stale_pin_recovery_never_names_a_missing_binding() {
             "{args:?} must not suggest a missing binding: {err}"
         );
         assert!(
-            err.contains("locus leave --force; locus enter personal"),
+            err.contains(
+                "locus enter personal || { locus leave --force && locus enter personal; }"
+            ),
             "{args:?} must name the stale pin's binding: {err}"
         );
     }
     assert!(!home.path().join("bindings/nosuch.toml").exists());
+}
+
+/// Follow the printed dead-broker hint verbatim in a fresh bash with no
+/// capability exported: the hook exports it, `locus enter` replaces the dead
+/// pin on its own (audited `session.replace_stale`), and the forced-leave
+/// fallback never runs.
+#[test]
+fn printed_dead_broker_hint_works_verbatim() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+    let whoami = locus(home.path(), cwd.path(), &cap, &["whoami"]);
+    assert!(!whoami.status.success());
+    let err = stderr(&whoami);
+    let hint = err
+        .lines()
+        .find_map(|l| l.split_once("recover (operator shell; control capability required): "))
+        .map(|(_, h)| h.trim().to_string())
+        .unwrap_or_else(|| panic!("no recovery line: {err}"));
+    assert_eq!(hint, DEAD_BROKER_RECOVERY);
+    let before = replace_stale_audits(home.path());
+
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_locus")).parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(format!("set -e; {hint}; locus whoami; exit $?"))
+        .env("PATH", path)
+        .env("LOCUS_HOME", home.path())
+        .env("SHELL", "/bin/bash")
+        .env_remove("LOCUS_CONTROL_CAPABILITY")
+        .env_remove("LOCUS_SESSION_ID")
+        .current_dir(cwd.path())
+        .output()
+        .expect("bash runs");
+    let all = format!("{}{}", String::from_utf8_lossy(&out.stdout), stderr(&out));
+    assert!(out.status.success(), "verbatim hint failed: {all}");
+    assert!(all.contains("personal"), "{all}");
+    assert_eq!(
+        replace_stale_audits(home.path()),
+        before + 1,
+        "enter must replace the dead pin itself: {all}"
+    );
+    let audit = std::fs::read_to_string(home.path().join("audit/events.jsonl")).unwrap_or_default();
+    assert!(
+        !audit.contains("operator forced leave"),
+        "the --force fallback must not run when enter succeeds"
+    );
 }
 
 // ── Negative tests for the replace-stale branch of `enter` (#156) ─────────

@@ -1,0 +1,44 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+reviews:
+  profile: assertive
+  high_level_summary: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+  path_filters:
+    - "!Cargo.lock"
+    - "!**/*.lock"
+    - "!**/dist/**"
+    - "!**/generated/**"
+    - "!**/target/**"
+  path_instructions:
+    - path: "crates/locus-core/src/{credential,credential_audit,credential_migration,store,approval,inherit_env}.rs"
+      instructions: |
+        High scrutiny. Secret handling. Bindings store CredentialRefs (env:VAR or phm:NAME) and never raw tokens. Do not log, return, or copy resolved credential values. Production must keep rejecting test: refs.
+    - path: "crates/locus-core/src/workers/**"
+      instructions: |
+        High scrutiny. Secret handling. The worker environment for one binding must not contain credential material for another. Private CLI config directories stay under the session worker home.
+    - path: "crates/locus-core/src/{gateway,marketplace}.rs"
+      instructions: |
+        High scrutiny. Loopback-only rules. http is allowed only for the IP literals 127.0.0.1 and [::1]. localhost and any other address are refused. A non-loopback host needs an exact host:port allowlist entry. Refusal codes must not echo the input.
+    - path: "crates/locus-mcp/src/main.rs"
+      instructions: |
+        High scrutiny. Loopback-only HTTP bind, and a Tier-1 gate. Non-loopback binds are refused unless LOCUS_MCP_HTTP_ALLOW_REMOTE is set. Tool results may show scopes and aliases, never resolved credentials. Agents cannot pin. Stdout is JSON-RPC only.
+    - path: "crates/locus-cli/src/serve.rs"
+      instructions: |
+        High scrutiny. Loopback-only. The dashboard binds 127.0.0.1 only and must not resolve or return secrets. Approval labels recorded here are advisory and must not authorize provider execution.
+    - path: "crates/locus-core/src/{seal,session,isolation,policy,workspace,authority_anchor}.rs"
+      instructions: |
+        High scrutiny. Tier-1 paths: sealed pin, ambient identity scrub, policy fail-closed, workspace allowlist, and the control capability. A bad seal, a scope mismatch, or an unknown provider path must deny.
+    - path: "crates/locus-core/src/adapters/**"
+      instructions: |
+        High scrutiny. Tier-1 scope freeze. Every account selector the model can supply goes through freeze_string_arg or the equivalent. Frozen project_ref, team_id, org, and repo values must not be overridable.
+    - path: "crates/locus-core/tests/{invariants,isolation}.rs"
+      instructions: |
+        High scrutiny. Tier-1 invariant tests. Prefer a failing test over a soft allow.
+chat:
+  auto_reply: false

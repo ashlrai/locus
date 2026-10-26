@@ -285,7 +285,9 @@ fn walk(d: &Path) -> Vec<PathBuf> {
             let p = e.path();
             if p.is_dir() {
                 out.extend(walk(&p));
-            } else {
+            } else if p.extension().and_then(|ext| ext.to_str()) != Some("profraw") {
+                // An instrumented binary writes default_*.profraw into its
+                // working directory once the child env drops LLVM_PROFILE_FILE.
                 out.push(p);
             }
         }

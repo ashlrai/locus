@@ -140,8 +140,10 @@ pub struct AgentReport {
     pub next_steps: Vec<String>,
     /// Human-only recovery when a pin exists but can no longer be verified
     /// (its broker died with the pinning shell, stale generation, bad seal,
-    /// expiry): `eval "$(locus hook bash)"; locus leave --force; locus enter
-    /// <alias>`. Agents cannot run it; they surface it to the human.
+    /// expiry). Dead broker: `eval "$(locus hook bash)"; locus enter <alias> ||
+    /// { locus leave --force && locus enter <alias>; }`. Bad seal or expiry:
+    /// `eval "$(locus hook bash)"; locus leave --force; locus enter <alias>`.
+    /// Agents cannot run it; they surface it to the human.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery: Option<String>,
     /// Exit code for `locus agent doctor` / `report`.
@@ -271,7 +273,21 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
             !doctor.runtime.frozen
                 && (!p.seal_ok || p.expired || !runtime_ok_or_capability_gap(&doctor))
         })
-        .map(|p| crate::recovery::stale_pin_recovery(Some(&p.alias)));
+        .map(|p| {
+            // HMAC seal intact, not expired, anchor gone: only the broker died, and
+            // `locus enter` replaces such a pin directly. Bad seal or expiry
+            // is still refused by enter, so force first.
+            let dead_broker = doctor.runtime.seal_ok
+                && !p.expired
+                && doctor.runtime.issues.iter().any(|i| {
+                    i == "authority_anchor_unavailable" || i == "authority_anchor_mismatch"
+                });
+            if dead_broker {
+                crate::recovery::dead_broker_recovery(Some(&p.alias))
+            } else {
+                crate::recovery::stale_pin_recovery(Some(&p.alias))
+            }
+        });
 
     if !opts.home_ready || !doctor.seal_ok {
         findings.push("locus home / seal key not ready — run `locus init`".into());
@@ -1258,11 +1274,30 @@ mod tests {
         assert_eq!(report.status_oneline, "invalid");
         assert!(!report.ready);
         let recovery = report.recovery.clone().expect("stale pin has a recovery");
+        // Dead broker with an intact HMAC seal: enter first, force only as fallback.
         assert!(
-            recovery.ends_with("; locus leave --force; locus enter acme"),
+            recovery
+                .ends_with("; locus enter acme || { locus leave --force && locus enter acme; }")
+                || recovery.ends_with(
+                    "; locus enter acme; or begin; locus leave --force; and locus enter acme; end"
+                ),
             "{recovery}"
         );
         assert!(recovery.contains("locus hook"), "{recovery}");
+        // Expired or bad seal: enter is still refused, so force first.
+        for (expired, hmac_ok) in [(true, true), (false, false)] {
+            let mut forced = stale.clone();
+            forced.runtime.seal_ok = hmac_ok;
+            if let Some(p) = forced.pin.as_mut() {
+                p.expired = expired;
+            }
+            if let Some(r) = agent_report_from_doctor(forced, opts()).recovery {
+                assert!(
+                    r.ends_with("; locus leave --force; locus enter acme"),
+                    "expired={expired} hmac_ok={hmac_ok}: {r}"
+                );
+            }
+        }
         assert_eq!(report.next_steps.first(), Some(&recovery));
         assert!(report
             .findings
