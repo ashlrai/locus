@@ -23,7 +23,8 @@
 //! can read `$LOCUS_HOME` as a whole: that reader can recompute hashes for
 //! guessed paths and remotes. Such a reader already sees `config.toml`,
 //! `.locus.toml` pins and audit logs, so moving the key elsewhere under the
-//! same home would add no real boundary. Treat `$LOCUS_HOME` (0700) as the
+//! same home would add no real boundary. Treat `$LOCUS_HOME` (created or tightened to 0700 by
+//! `Store::open` on unix, unless it is a symlink) as the
 //! secret, and delete `history.key` to unlink all past hashes from future ones.
 
 use std::fs;
