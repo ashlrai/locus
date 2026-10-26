@@ -118,6 +118,16 @@ pub fn history_key(home: &Path) -> std::io::Result<Vec<u8>> {
     }
 }
 
+/// The per-install key if it already exists; never creates it. Read-only
+/// callers (`locus autopin suggest`) use this so they write nothing.
+pub fn existing_history_key(home: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match read_key(&home.join(KEY_FILE)) {
+        Ok(k) => Ok(Some(k)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 fn read_key(p: &Path) -> std::io::Result<Vec<u8>> {
     let k = hex::decode(read_nofollow(p)?.trim()).map_err(std::io::Error::other)?;
     if k.len() != 32 {

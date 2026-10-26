@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`locus autopin suggest [--json] [--apply]` (learned bindings, L2).** Reads local pin history for the current repo, matched by the keyed hash of the live remote (userinfo such as `user:token@` stripped first), and suggests the binding you usually pin there, with evidence per alias: pins, `pin_mismatch` refusals, score and last seen. Ranking is deterministic: score = pins minus mismatches where that alias was the wrong one pinned; a suggestion needs a score of at least 3 and a strict lead, so thin or tied evidence suggests nothing. `--json` emits `locus.autopin.suggest.v1`. `--apply` writes `default_binding` to `.locus.toml` only after the control capability gate, recomputes from the live remote at apply time, refuses a symlinked `.locus.toml`, and writes atomically (temp file plus rename). With history off it says so and suggests nothing. The raw remote URL is never stored or printed.
+
 ### Security
 
 - **Session file writes no longer follow a symlink at `active.json`.** `write_session_file` writes a fresh `create_new` temp file and renames it over the target, so a symlink planted at `sessions/active.json` is replaced instead of written through (shipped with the 0.5.1 stale-pin fix, #156).
