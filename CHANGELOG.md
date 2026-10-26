@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Dead-broker recovery hint says `locus enter` first.** When a pin's broker died with the shell that pinned it (`no current broker endpoint`, anchor unavailable or mismatched, seal intact), `locus enter <alias>` has replaced the pin directly since #156, but every surface still printed `locus leave --force` first. `whoami`, `status`, control commands, `doctor`, `agent report` and the MCP hint now print `eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }`. Expired pins, invalid or legacy seals and unreadable session files, which enter still refuses, keep the `locus leave --force; locus enter <alias>` recipe. New test `printed_dead_broker_hint_works_verbatim` runs the printed line as is.
+
 ### Security
 
 - **Session file writes no longer follow a symlink at `active.json`.** `write_session_file` writes a fresh `create_new` temp file and renames it over the target, so a symlink planted at `sessions/active.json` is replaced instead of written through (shipped with the 0.5.1 stale-pin fix, #156).

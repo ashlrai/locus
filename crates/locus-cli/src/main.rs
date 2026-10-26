@@ -2812,13 +2812,16 @@ fn wedged_session_recovery(err: anyhow::Error) -> anyhow::Error {
 fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyhow::Error {
     let wedged = err
         .downcast_ref::<locus_core::LocusError>()
-        .is_some_and(locus_core::recovery::is_stale_pin_error);
-    if wedged {
+        .filter(|e| locus_core::recovery::is_stale_pin_error(e))
+        .map(locus_core::recovery::enter_replaces_stale_pin);
+    if let Some(enter_first) = wedged {
         let alias = recovery_alias(alias);
-        anyhow!(
-            "{err:#}\n  recover (operator shell; control capability required): {}",
+        let recipe = if enter_first {
+            locus_core::recovery::dead_broker_recovery(alias.as_deref())
+        } else {
             locus_core::recovery::stale_pin_recovery(alias.as_deref())
-        )
+        };
+        anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
     } else {
         err
     }
@@ -2846,24 +2849,30 @@ fn recovery_alias(requested: Option<&str>) -> Option<String> {
 /// authority error (never a bare JSON error, which can come from anywhere).
 /// Message only: the error itself still fails closed.
 fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
-    let stale = err.chain().any(|cause| {
+    let stale = err.chain().find_map(|cause| {
         cause
             .downcast_ref::<locus_core::LocusError>()
-            .is_some_and(|e| {
+            .filter(|e| {
                 locus_core::recovery::is_stale_pin_error(e)
                     && !matches!(e, locus_core::LocusError::Json(_))
             })
+            .map(locus_core::recovery::enter_replaces_stale_pin)
     });
-    if !stale || format!("{err:#}").contains("locus leave --force") {
+    let Some(enter_first) = stale else {
+        return err;
+    };
+    if format!("{err:#}").contains("locus leave --force") {
         return err;
     }
     let Some(alias) = store().ok().and_then(|s| active_alias_hint(&s)) else {
         return err;
     };
-    anyhow!(
-        "{err:#}\n  recover (operator shell; control capability required): {}",
+    let recipe = if enter_first {
+        locus_core::recovery::dead_broker_recovery(Some(&alias))
+    } else {
         locus_core::recovery::stale_pin_recovery(Some(&alias))
-    )
+    };
+    anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
 }
 
 /// Alias of the active session file, for recovery hints only (never trusted
@@ -3500,7 +3509,8 @@ fn status_pin_check(s: &Store, session: &Session, seal_ok: bool) -> StatusPinChe
             )),
         },
         Err(e) => StatusPinCheck {
-            recovery: is_stale_pin_error(&e).then(|| stale_pin_recovery(alias)),
+            recovery: is_stale_pin_error(&e)
+                .then(|| locus_core::recovery::recovery_for_error(&e, alias)),
             error: Some(e.to_string()),
             ..Default::default()
         },

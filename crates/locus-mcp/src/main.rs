@@ -4141,7 +4141,7 @@ fn call_control(
                     } else if has_executor_authority_issue(&issues) {
                         Some(EXECUTOR_AUTHORITY_HINT)
                     } else {
-                        Some("pin present but not usable — call locus_heartbeat / locus_safe_next; a human may need to re-pin (`locus leave --force`, then `locus enter <alias>`)")
+                        Some("pin present but not usable — call locus_heartbeat / locus_safe_next; a human may need to re-pin (`locus enter <alias>`; if enter is refused, `locus leave --force` first)")
                     };
                     Ok(tool_text(
                         attach_report(json!({
