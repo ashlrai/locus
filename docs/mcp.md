@@ -1,5 +1,11 @@
 # locus-mcp — Claude Code, Cursor, and friends
 
+<!-- fresh:begin install -->
+```bash
+npm install -g locus-cli@0.5.2 @ashlrai/locus-mcp@0.5.2
+```
+<!-- fresh:end -->
+
 `locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding (provider tools need a supervised launch; see [below](#provider-tools-need-a-supervised-launch)). It is the agent-facing half of the identity plane.
 
 CLI and MCP share the same store and seal under `~/.locus` (or `LOCUS_HOME`).

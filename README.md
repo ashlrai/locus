@@ -1,5 +1,15 @@
 # Locus
 
+<!-- fresh:begin badge -->
+[![Release 0.5.2](https://img.shields.io/badge/release-v0.5.2-blue)](https://github.com/ashlrai/locus/releases/tag/v0.5.2)
+<!-- fresh:end -->
+
+<!-- fresh:begin release -->
+Latest release: [v0.5.2](https://github.com/ashlrai/locus/releases/tag/v0.5.2) (2026-10-26).
+
+`locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
+<!-- fresh:end -->
+
 [![CI](https://github.com/ashlrai/locus/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
 [![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?label=npm%20locus-cli)](https://www.npmjs.com/package/locus-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
