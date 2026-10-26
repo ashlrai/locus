@@ -25,7 +25,7 @@ use crate::session::{
 };
 use crate::ticket::{self, CapabilityTicket};
 use crate::workspace::{find_workspace, WorkspaceConfig};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rand::RngCore;
 use serde_json::Value;
 use std::fs;
@@ -379,6 +379,15 @@ impl Store {
         let Some(resolved) = self.resolve_active_session()? else {
             return Ok(());
         };
+        // An authentic but expired `active.json` pin carries no authority any
+        // more: treat it exactly like an absent pin (the capability above is
+        // still required). An explicit LOCUS_SESSION_ID keeps the strict path.
+        if resolved.backing_type == SessionBackingType::Active
+            && !explicit_session_selected()
+            && self.is_expired_authentic(&resolved.session)?
+        {
+            return Ok(());
+        }
         resolved.session.verify_seal(&self.seal_key()?)?;
         self.validate_session_authority(&resolved.session)?;
         if resolved.session.authority != SessionAuthority::LocalControl {
@@ -426,6 +435,17 @@ impl Store {
             return authority_anchor::authorize_control(&self.home).map(|()| None);
         };
         let session = &resolved.session;
+        // Expired (authentic, local-control) pin: it is replaced like an
+        // absent one, after the same two capability checks. Audited as
+        // `session.replace_stale` with reason `session expired at ...`.
+        if self.is_expired_authentic(session)? {
+            authority_anchor::authorize_control_teardown(&self.home, false)?;
+            authority_anchor::authorize_control(&self.home)?;
+            return Ok(Some((
+                session.session_id.clone(),
+                format!("session expired at {}", session.expires_at.to_rfc3339()),
+            )));
+        }
         session.verify_seal(&self.seal_key()?)?;
         if session.authority != SessionAuthority::LocalControl {
             return Err(LocusError::msg(format!(
@@ -449,6 +469,96 @@ impl Store {
             ) => Ok(Some((session.session_id.clone(), e.to_string()))),
             Err(e) => Err(e),
         }
+    }
+
+    /// True only for a session whose seal verifies (current version,
+    /// local-control authority) and whose TTL has passed. Such a pin grants
+    /// nothing and may be cleared or replaced as if absent.
+    fn is_expired_authentic(&self, session: &Session) -> Result<bool> {
+        Ok(session.is_expired()
+            && session.authority == SessionAuthority::LocalControl
+            && session.seal_authentic(&self.seal_key()?))
+    }
+
+    /// Self-renew the live `active.json` pin (`locus renew`).
+    ///
+    /// Extends `expires_at` to `min(now + policy.max_ttl, pinned_at +
+    /// policy.max_session_lifetime)`. `pinned_at` is the original human pin
+    /// and is never moved, so the total lifetime is bounded. Fail closed:
+    ///
+    /// - requires the operator control capability;
+    /// - never applies to an explicit `LOCUS_SESSION_ID` (CI / run) session;
+    /// - the pin must be live: seal valid, unexpired, unfrozen, local control;
+    /// - its authority generation must be the broker's current one (a stale
+    ///   or restored record is refused with `human re-pin required`);
+    /// - the binding's id and fingerprint (and every namespace's) must still
+    ///   match, so renew never crosses an identity change;
+    /// - `policy.max_session_lifetime` must be set (renew is opt-in) and the
+    ///   new expiry must actually extend the pin.
+    ///
+    /// The renewed record keeps session id, binding, alias, principal and
+    /// pinned_at. Because the broker subject covers `expires_at`, the broker
+    /// issues the next generation for the same session (the old generation
+    /// is superseded atomically by the broker). Audit op: `session.renew`.
+    pub fn renew_active(&self) -> Result<RenewOutcome> {
+        authority_anchor::authorize_control(&self.home)?;
+        if explicit_session_selected() {
+            return Err(LocusError::msg(
+                "locus renew only renews the active.json pin; unset LOCUS_SESSION_ID \
+                 (CI and run sessions are re-minted, not renewed)",
+            ));
+        }
+        let Some(mut session) = self.read_active_session_file()? else {
+            return Err(LocusError::msg(
+                "no active pin to renew; pin with `locus enter <alias>`",
+            ));
+        };
+        let key = self.seal_key()?;
+        if self.is_expired_authentic(&session)? {
+            return Err(LocusError::msg(format!(
+                "pin expired at {}; renew only extends a live pin. Re-pin with \
+                 `locus enter {}` (human re-pin required)",
+                session.expires_at.to_rfc3339(),
+                session.binding_alias
+            )));
+        }
+        session.verify(&key)?;
+        if session.authority != SessionAuthority::LocalControl {
+            return Err(LocusError::msg(
+                "renew requires an authenticated local-control session",
+            ));
+        }
+        self.validate_session_authority(&session)?;
+
+        let binding = self.load_binding(&session.binding_alias)?;
+        renew_identity_check(self, &session, &binding)?;
+        let (new_expiry, lifetime_ends_at, capped_by) = renew_bounds(&session, &binding)?;
+        let previous_expires_at = session.expires_at;
+        let previous_generation = session.authority_anchor.as_ref().map(|a| a.generation);
+        session.expires_at = new_expiry;
+        session.authority_anchor = Some(self.issue_session_authority(&session)?);
+        session.reseal(&key);
+        let path = self.active_session_path();
+        self.write_session_file(&path, &session)?;
+        self.audit(
+            "session.renew",
+            &session.binding_alias,
+            Some(serde_json::json!({
+                "session_id": session.session_id,
+                "previous_expires_at": previous_expires_at.to_rfc3339(),
+                "expires_at": session.expires_at.to_rfc3339(),
+                "lifetime_ends_at": lifetime_ends_at.to_rfc3339(),
+                "capped_by": capped_by,
+                "previous_generation": previous_generation,
+                "generation": session.authority_anchor.as_ref().map(|a| a.generation),
+            })),
+        )?;
+        Ok(RenewOutcome {
+            session,
+            previous_expires_at,
+            lifetime_ends_at,
+            capped_by,
+        })
     }
 
     // ── Bindings ──────────────────────────────────────────────────────────
@@ -1987,6 +2097,30 @@ impl Store {
             let authentic = s.seal_version == crate::session::CURRENT_SEAL_VERSION
                 && s.authority != SessionAuthority::LegacyUntrusted
                 && key.verify(&s.material(), &s.seal);
+            if authentic && s.is_expired() {
+                // Expired pin: nothing left to authorize. Its broker
+                // generation may already be gone, so revoke best-effort and
+                // clear it like an absent pin.
+                if s.authority != SessionAuthority::LocalControl {
+                    return Err(LocusError::msg(
+                        "leave active session requires authenticated local-control authority",
+                    ));
+                }
+                let _ = self.revoke_session_authority(s);
+                self.remove_worker_home_if_safe(&s.worker_home);
+                self.audit(
+                    "session.leave",
+                    &s.binding_alias,
+                    Some(serde_json::json!({
+                        "session_id": s.session_id,
+                        "expired": true,
+                        "expires_at": s.expires_at.to_rfc3339(),
+                    })),
+                )?;
+                crate::pin_history::record_leave(&self.home, &s.binding_alias, None);
+                fs::remove_file(&path)?;
+                return Ok(session);
+            }
             if authentic {
                 self.validate_session_authority(s)?;
                 if s.authority != SessionAuthority::LocalControl {
@@ -3380,6 +3514,115 @@ pub struct EngagementInitResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub readme_path: Option<PathBuf>,
     pub credentials: Vec<CredentialMetadata>,
+}
+
+/// Result of [`Store::renew_active`].
+#[derive(Debug, Clone)]
+pub struct RenewOutcome {
+    pub session: Session,
+    pub previous_expires_at: DateTime<Utc>,
+    /// `pinned_at + policy.max_session_lifetime`: no renew goes past this.
+    pub lifetime_ends_at: DateTime<Utc>,
+    /// `max_ttl` or `max_session_lifetime`: which bound set the new expiry.
+    pub capped_by: &'static str,
+}
+
+/// Binding identity checks shared by [`Store::renew_active`] and its plan:
+/// renew never crosses a binding id or fingerprint change.
+pub fn renew_identity_check(store: &Store, session: &Session, binding: &Binding) -> Result<()> {
+    if binding.id != session.binding_id
+        || session.binding_fp.as_deref() != Some(binding_fingerprint(binding).as_str())
+    {
+        return Err(LocusError::BindingAuthorityMismatch(format!(
+            "binding '{}' changed since it was pinned; renew refused",
+            session.binding_alias
+        )));
+    }
+    for (alias, fp) in session.namespaces.iter().zip(session.namespace_fps.iter()) {
+        let b = store.load_binding(alias)?;
+        if &binding_fingerprint(&b) != fp {
+            return Err(LocusError::BindingAuthorityMismatch(format!(
+                "namespace binding '{alias}' changed since it was pinned; renew refused"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Pure renew arithmetic shared by [`Store::renew_active`] and its dry-run
+/// plan: `(new_expiry, lifetime_ends_at, capped_by)`, or the refusal when
+/// renew is disabled, the lifetime bound is reached, or the pin would not
+/// extend by at least 1m. No broker, no capability, no writes.
+pub fn renew_bounds(
+    session: &Session,
+    binding: &Binding,
+) -> Result<(DateTime<Utc>, DateTime<Utc>, &'static str)> {
+    let Some(lifetime_raw) = binding.policy.max_session_lifetime.as_deref() else {
+        return Err(LocusError::msg(format!(
+            "renew is disabled for '{}': set policy.max_session_lifetime on the binding \
+                 (e.g. \"24h\") to allow self-renew, or re-pin with `locus enter {}`",
+            binding.alias, binding.alias
+        )));
+    };
+    let lifetime = parse_ttl(lifetime_raw)?;
+    let max_ttl = binding
+        .policy
+        .max_ttl
+        .as_deref()
+        .map(parse_ttl)
+        .transpose()?
+        .unwrap_or_else(|| Duration::hours(8));
+    let now = Utc::now();
+    let lifetime_ends_at = session
+        .pinned_at
+        .checked_add_signed(lifetime)
+        .ok_or_else(|| LocusError::msg("renew expiry out of range"))?;
+    if now >= lifetime_ends_at {
+        return Err(LocusError::msg(format!(
+            "pin reached policy.max_session_lifetime ({lifetime_raw}) at {}; renew refused, \
+                 human re-pin required (`locus enter {}`)",
+            lifetime_ends_at.to_rfc3339(),
+            binding.alias
+        )));
+    }
+    let by_ttl = now
+        .checked_add_signed(max_ttl)
+        .ok_or_else(|| LocusError::msg("renew expiry out of range"))?;
+    let (new_expiry, capped_by) = if by_ttl <= lifetime_ends_at {
+        (by_ttl, "max_ttl")
+    } else {
+        (lifetime_ends_at, "max_session_lifetime")
+    };
+    // Round down to whole seconds so the rfc3339 seal tuple is stable.
+    let new_expiry = DateTime::<Utc>::from_timestamp(new_expiry.timestamp(), 0)
+        .ok_or_else(|| LocusError::msg("renew expiry out of range"))?;
+    let min_extension = session
+        .expires_at
+        .checked_add_signed(Duration::minutes(1))
+        .ok_or_else(|| LocusError::msg("renew expiry out of range"))?;
+    if new_expiry < min_extension {
+        let why = if capped_by == "max_session_lifetime" {
+            format!(
+                "pin is at policy.max_session_lifetime ({lifetime_raw}, ends {}); human re-pin \
+                     required (`locus enter {}`)",
+                lifetime_ends_at.to_rfc3339(),
+                binding.alias
+            )
+        } else {
+            "pin is already at policy.max_ttl; renew again later".to_string()
+        };
+        return Err(LocusError::msg(format!(
+            "renew would not extend the pin by at least 1m (expires {}): {why}",
+            session.expires_at.to_rfc3339()
+        )));
+    }
+    Ok((new_expiry, lifetime_ends_at, capped_by))
+}
+
+fn explicit_session_selected() -> bool {
+    std::env::var("LOCUS_SESSION_ID")
+        .map(|id| !id.trim().is_empty())
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -6287,21 +6530,199 @@ allowed_bindings = ["acme"]
         assert!(matches!(err, LocusError::SessionExpired(_)));
         // Fail closed on the store surface too.
         assert!(store.require_active().is_err());
-        // The error names the recovery, and that recovery works: a plain pin
-        // still refuses over the expired session, `locus leave --force`
-        // clears it, then `locus enter` pins again.
+        // The error names the recovery, and that recovery works.
         let msg = err.to_string();
         assert!(msg.contains("locus leave --force"), "{msg}");
         assert!(msg.contains("locus enter"), "{msg}");
-        assert!(matches!(
-            store.pin("acme", dir.path(), None, false),
-            Err(LocusError::SessionExpired(_))
-        ));
-        store
-            .force_leave("operator forced leave (locus leave --force)", false)
-            .unwrap();
+        // An expired pin is now treated as absent: a plain pin replaces it.
         store.pin("acme", dir.path(), None, false).unwrap();
         assert!(store.require_active().is_ok());
+    }
+
+    fn renewable_binding(lifetime: Option<&str>) -> Binding {
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        b.policy.max_session_lifetime = lifetime.map(Into::into);
+        b
+    }
+
+    /// Rewrite active.json as an authentic but already-expired pin.
+    fn expire_active_in_place(store: &Store) {
+        let path = store.active_session_path();
+        let mut s: Session = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        s.pinned_at = Utc::now() - Duration::hours(2);
+        s.expires_at = Utc::now() - Duration::minutes(5);
+        s.reseal(&store.seal_key().unwrap());
+        fs::write(&path, serde_json::to_vec(&s).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn leave_on_expired_session_clears_it() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(None)).unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        expire_active_in_place(&store);
+        assert!(matches!(
+            store.require_active(),
+            Err(LocusError::SessionExpired(_))
+        ));
+        // The CLI boundary gate treats the expired pin as absent.
+        store.require_local_control("locus leave").unwrap();
+        let left = store.leave().unwrap().expect("expired pin is returned");
+        assert!(left.is_expired());
+        assert!(!store.active_session_path().exists());
+        assert!(store.leave().unwrap().is_none());
+    }
+
+    #[test]
+    fn enter_over_expired_session_replaces_it() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(None)).unwrap();
+        let old = store.pin("acme", dir.path(), None, false).unwrap();
+        expire_active_in_place(&store);
+        let new = store.pin("acme", dir.path(), None, false).unwrap();
+        assert_ne!(old.session_id, new.session_id);
+        assert!(store.require_active().is_ok());
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(audit.contains("session.replace_stale"), "{audit}");
+        assert!(audit.contains("session expired at"), "{audit}");
+    }
+
+    #[test]
+    fn renew_within_cap_extends_expiry_and_keeps_identity() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(Some("3h"))).unwrap();
+        let s = store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(10)))
+            .unwrap();
+        let out = store.renew_active().unwrap();
+        assert_eq!(out.session.session_id, s.session_id);
+        assert_eq!(out.session.binding_id, s.binding_id);
+        assert_eq!(out.session.binding_alias, s.binding_alias);
+        assert_eq!(out.session.pinned_at, s.pinned_at);
+        assert_eq!(out.capped_by, "max_ttl");
+        assert!(out.session.expires_at > s.expires_at + Duration::minutes(40));
+        // max_ttl (1h) still caps each renew.
+        assert!(out.session.expires_at <= Utc::now() + Duration::hours(1));
+        assert_eq!(out.previous_expires_at, s.expires_at);
+        // The renewed pin is fully live under the broker.
+        assert_eq!(
+            store.require_active().unwrap().expires_at,
+            out.session.expires_at
+        );
+    }
+
+    #[test]
+    fn renew_past_cap_or_lifetime_is_refused() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        // Already at max_ttl: nothing to extend.
+        store.save_binding(&renewable_binding(Some("3h"))).unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let err = store.renew_active().unwrap_err().to_string();
+        assert!(err.contains("would not extend"), "{err}");
+        // Lifetime bound below the current expiry: refused.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(Some("2m"))).unwrap();
+        store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(5)))
+            .unwrap();
+        let err = store.renew_active().unwrap_err().to_string();
+        assert!(err.contains("human re-pin required"), "{err}");
+        // Renew is opt-in: no policy.max_session_lifetime, no renew.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(None)).unwrap();
+        store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(5)))
+            .unwrap();
+        let err = store.renew_active().unwrap_err().to_string();
+        assert!(err.contains("renew is disabled"), "{err}");
+    }
+
+    #[test]
+    fn renew_on_expired_session_is_refused() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(Some("1d"))).unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        expire_active_in_place(&store);
+        let err = store.renew_active().unwrap_err().to_string();
+        assert!(err.contains("expired"), "{err}");
+        assert!(err.contains("human re-pin required"), "{err}");
+    }
+
+    #[test]
+    fn renew_refused_after_binding_identity_change() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(Some("1d"))).unwrap();
+        store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(5)))
+            .unwrap();
+        let mut b = renewable_binding(Some("1d"));
+        b.tenant = "other-tenant".into();
+        store.save_binding(&b).unwrap();
+        assert!(matches!(
+            store.renew_active(),
+            Err(LocusError::BindingAuthorityMismatch(_))
+        ));
+    }
+
+    #[test]
+    fn stale_generation_refused_for_renew_and_explicit_enter() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(Some("1d"))).unwrap();
+        store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(5)))
+            .unwrap();
+        let path = store.active_session_path();
+        let replay = fs::read(&path).unwrap();
+        // Renew supersedes the old generation at the broker...
+        store.renew_active().unwrap();
+        // ...so a restored pre-renew record is stale: renew and use refuse.
+        fs::write(&path, &replay).unwrap();
+        let err = store.renew_active().unwrap_err();
+        assert!(matches!(err, LocusError::AuthorityAnchorMismatch), "{err}");
+        assert!(err.to_string().contains("human re-pin required"));
+        assert!(matches!(
+            store.require_active().unwrap_err(),
+            LocusError::AuthorityAnchorMismatch
+        ));
+        // The live-pin control gate still refuses the stale generation with
+        // `human re-pin required`: a stale live pin never takes the expired
+        // shortcut.
+        assert!(matches!(
+            store.require_local_control("locus leave"),
+            Err(LocusError::AuthorityAnchorMismatch)
+        ));
+    }
+
+    #[test]
+    fn enter_over_live_pin_still_runs_full_authority_gate() {
+        // A live, current pin is replaced only through the full gate (seal +
+        // capability + broker validation); it never takes the expired
+        // shortcut, and a tampered live pin is refused.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(None)).unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        assert!(store
+            .require_local_control_to_replace_active("locus enter")
+            .unwrap()
+            .is_none());
+        let path = store.active_session_path();
+        let mut s: Session = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        s.expires_at = Utc::now() - Duration::minutes(1); // expired but NOT resealed
+        fs::write(&path, serde_json::to_vec(&s).unwrap()).unwrap();
+        assert!(matches!(
+            store.require_local_control_to_replace_active("locus enter"),
+            Err(LocusError::InvalidSeal)
+        ));
     }
 
     #[test]
