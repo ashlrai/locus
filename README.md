@@ -12,7 +12,7 @@
 ## 30-second start
 
 ```bash
-brew install ashlrai/tap/locus          # or cargo; see Install options (npm 0.5.0 is broken)
+brew install ashlrai/tap/locus          # or npm or cargo; see Install options
 locus quickstart                        # sample bindings, pin, whoami, doctor
 eval "$(locus hook zsh)"                # or bash; exports the control capability
 locus enter personal                    # pin from this shell (it supervises the pin)
@@ -24,7 +24,7 @@ locus exec --expect acme -- echo ok     # refused, exit 1, child never starts (p
 What the two extra steps are for:
 
 - **Control capability.** Control commands (`enter`, `pin`, `leave`, `exec`) need `LOCUS_CONTROL_CAPABILITY` in the shell. `locus quickstart` mints it and saves it at `~/.locus/control_capability` (0600, respects `LOCUS_HOME`); `eval "$(locus hook zsh)"` exports it without printing it. Without it, `locus exec` stops with `LOCUS_CONTROL_CAPABILITY is required for control-plane authority`. `locus capability status` shows the posture without the value.
-- **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. From a source build of main, `locus enter personal` works straight after `quickstart` (fixed in #156, regression test `crates/locus-cli/tests/quickstart_then_enter.rs`). The npm 0.5.0 package predates that fix.
+- **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. From a source build of main, `locus enter personal` works straight after `quickstart` (fixed in #156, regression test `crates/locus-cli/tests/quickstart_then_enter.rs`).
 - **Recovery.** If a command says `human re-pin required` (for example `no current broker endpoint` after the pinning shell exited), run `locus leave --force`, then `locus enter personal`. `--force` deletes session state only and never mints anything.
 
 ## Connect your agent (MCP)
@@ -63,9 +63,7 @@ Use explicit environment (`env:`) references for supported credential resolution
 # Homebrew (tap live) — installs locus + locus-mcp
 brew install ashlrai/tap/locus
 
-# npm: wait for 0.5.1. The 0.5.0 on npm is the latest published version, and
-# its `locus --version` loops until killed (fixed in source, ships in 0.5.1).
-# Once `npm view locus-cli version` prints 0.5.1:
+# npm
 # (downloads a release binary, or falls back to cargo install)
 npm install -g locus-cli@0.5.1 @ashlrai/locus-mcp@0.5.1
 npx locus-cli@0.5.1 --help
