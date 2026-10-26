@@ -14,3 +14,7 @@ approvals/
 
 # machine-local workspace advisory (operator-specific)
 /.locus.toml
+
+# Coverage report
+lcov.info
+*.profraw

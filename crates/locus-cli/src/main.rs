@@ -55,7 +55,7 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · quickstart · setup · agent · capability · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard\n  \
+  Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard\n  \
   Daily use     enter · switch · pin · leave · whoami · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
@@ -114,6 +114,10 @@ enum Commands {
     /// Operator control-capability posture: status / persist / unpersist
     #[command(next_help_heading = "Setup", subcommand)]
     Capability(CapabilityCmd),
+
+    /// Learned bindings from local pin history (suggest; --apply needs the control capability)
+    #[command(next_help_heading = "Setup", subcommand)]
+    Autopin(AutopinCmd),
 
     /// Register locus-mcp with an AI client config
     #[command(next_help_heading = "Setup")]
@@ -504,6 +508,20 @@ enum Commands {
     /// Print version (also available as `locus --version`)
     #[command(next_help_heading = "Maintenance")]
     Version,
+}
+
+#[derive(Subcommand, Debug)]
+enum AutopinCmd {
+    /// Suggest this repo's usual binding from local pin history (matched by keyed remote hash)
+    ///
+    /// Deterministic: score = pins minus pin_mismatch refusals per alias; a
+    /// suggestion needs a score of at least 3 and a strict lead. Prints
+    /// evidence only (aliases, counts, last seen), never the remote URL.
+    Suggest {
+        /// Write the suggestion as default_binding in .locus.toml (requires LOCUS_CONTROL_CAPABILITY)
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1304,6 +1322,7 @@ fn run() -> Result<()> {
         Commands::Engagement(sub) => cmd_engagement(sub, cli.json),
         Commands::Graph(sub) => cmd_graph(sub, cli.json),
         Commands::Whoami => cmd_whoami(cli.json),
+        Commands::Autopin(AutopinCmd::Suggest { apply }) => cmd_autopin_suggest(apply, cli.json),
         Commands::Status { oneline } => cmd_status(oneline, cli.json),
         Commands::Agent(sub) => cmd_agent(sub, cli.json),
         Commands::Goal(sub) => cmd_goal(sub, cli.json),
@@ -2815,13 +2834,16 @@ fn wedged_session_recovery(err: anyhow::Error) -> anyhow::Error {
 fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyhow::Error {
     let wedged = err
         .downcast_ref::<locus_core::LocusError>()
-        .is_some_and(locus_core::recovery::is_stale_pin_error);
-    if wedged {
+        .filter(|e| locus_core::recovery::is_stale_pin_error(e))
+        .map(locus_core::recovery::enter_replaces_stale_pin);
+    if let Some(enter_first) = wedged {
         let alias = recovery_alias(alias);
-        anyhow!(
-            "{err:#}\n  recover (operator shell; control capability required): {}",
+        let recipe = if enter_first {
+            locus_core::recovery::dead_broker_recovery(alias.as_deref())
+        } else {
             locus_core::recovery::stale_pin_recovery(alias.as_deref())
-        )
+        };
+        anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
     } else {
         err
     }
@@ -2849,24 +2871,30 @@ fn recovery_alias(requested: Option<&str>) -> Option<String> {
 /// authority error (never a bare JSON error, which can come from anywhere).
 /// Message only: the error itself still fails closed.
 fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
-    let stale = err.chain().any(|cause| {
+    let stale = err.chain().find_map(|cause| {
         cause
             .downcast_ref::<locus_core::LocusError>()
-            .is_some_and(|e| {
+            .filter(|e| {
                 locus_core::recovery::is_stale_pin_error(e)
                     && !matches!(e, locus_core::LocusError::Json(_))
             })
+            .map(locus_core::recovery::enter_replaces_stale_pin)
     });
-    if !stale || format!("{err:#}").contains("locus leave --force") {
+    let Some(enter_first) = stale else {
+        return err;
+    };
+    if format!("{err:#}").contains("locus leave --force") {
         return err;
     }
     let Some(alias) = store().ok().and_then(|s| active_alias_hint(&s)) else {
         return err;
     };
-    anyhow!(
-        "{err:#}\n  recover (operator shell; control capability required): {}",
+    let recipe = if enter_first {
+        locus_core::recovery::dead_broker_recovery(Some(&alias))
+    } else {
         locus_core::recovery::stale_pin_recovery(Some(&alias))
-    )
+    };
+    anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
 }
 
 /// Alias of the active session file, for recovery hints only (never trusted
@@ -3503,7 +3531,8 @@ fn status_pin_check(s: &Store, session: &Session, seal_ok: bool) -> StatusPinChe
             )),
         },
         Err(e) => StatusPinCheck {
-            recovery: is_stale_pin_error(&e).then(|| stale_pin_recovery(alias)),
+            recovery: is_stale_pin_error(&e)
+                .then(|| locus_core::recovery::recovery_for_error(&e, alias)),
             error: Some(e.to_string()),
             ..Default::default()
         },
@@ -6617,6 +6646,59 @@ fn cmd_doctor(json: bool) -> Result<()> {
 ///
 /// Exit codes: 0 when there is nothing to fix, the preview listed fixes, or
 /// every fix applied; 1 when an applied fix was refused or skipped.
+fn cmd_autopin_suggest(apply: bool, json: bool) -> Result<()> {
+    let s = store()?;
+    let here = cwd();
+    let (report, written) = if apply {
+        let (r, f) = s.autopin_apply_suggestion(&here)?;
+        (r, Some(f))
+    } else {
+        (locus_core::autopin_suggest::suggest(s.home(), &here)?, None)
+    };
+    if json {
+        let value = serde_json::json!({
+            "report": report,
+            "applied": written.is_some(),
+            "written": written.as_ref().map(|p| p.display().to_string()),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+    match report.reason {
+        "history_disabled" => println!(
+            "pin history is disabled ([history] enabled = false or LOCUS_PIN_HISTORY=0); nothing to suggest"
+        ),
+        "no_remote" => println!("no git remote in this directory; nothing to suggest"),
+        "no_history" => println!("no pin history for this repo yet; nothing to suggest"),
+        _ => {}
+    }
+    for c in &report.candidates {
+        println!(
+            "  {:<20} pins {:>3}  mismatches {:>3}  score {:>3}  last seen {}",
+            c.alias,
+            c.pins,
+            c.mismatches,
+            c.score,
+            c.last_seen.as_deref().unwrap_or("-")
+        );
+    }
+    match (&report.suggestion, report.reason) {
+        (Some(a), _) => match &written {
+            Some(f) => println!("applied: default_binding = \"{a}\" in {}", f.display()),
+            None => println!(
+                "suggested binding: {a}\n  apply: locus autopin suggest --apply   # needs LOCUS_CONTROL_CAPABILITY"
+            ),
+        },
+        (None, "thin_evidence") => println!(
+            "not enough evidence yet (need a score of at least {}); no suggestion",
+            report.min_score
+        ),
+        (None, "tied") => println!("top aliases are tied; no suggestion"),
+        _ => {}
+    }
+    Ok(())
+}
+
 fn cmd_doctor_fix(json: bool, apply: bool) -> Result<()> {
     // The preview is documented as writing nothing. Opening the store would
     // initialize a fresh LOCUS_HOME (directories and daemon.key), so a dry run
