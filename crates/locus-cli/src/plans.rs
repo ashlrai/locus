@@ -277,6 +277,7 @@ pub(super) fn plan_renew(json: bool) -> Result<()> {
                 bail!("renew requires an authenticated local-control session");
             }
             let binding = s.load_binding(&cur.binding_alias)?;
+            locus_core::renew_identity_check(&s, &cur, &binding)?;
             let (new_expiry, _, capped_by) = locus_core::renew_bounds(&cur, &binding)?;
             plan.with("expires_at", new_expiry.to_rfc3339());
             plan.with("capped_by", capped_by.to_string());

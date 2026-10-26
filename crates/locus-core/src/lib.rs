@@ -167,8 +167,8 @@ pub use session::{
     SessionMode, CURRENT_SEAL_VERSION,
 };
 pub use store::{
-    is_safe_mcp_grant_id, locus_home, parse_mcp_grant_token, renew_bounds, ApprovalsHealth,
-    AuditEvent, CredentialRefMigration, EngagementInitPlan, EngagementInitResult,
+    is_safe_mcp_grant_id, locus_home, parse_mcp_grant_token, renew_bounds, renew_identity_check,
+    ApprovalsHealth, AuditEvent, CredentialRefMigration, EngagementInitPlan, EngagementInitResult,
     ForceLeaveOutcome, McpGrant, McpGrantAuthError, PinResolution, ProviderView, RenewOutcome,
     ResolvedSession, RuntimeDrift, Store, Whoami,
 };

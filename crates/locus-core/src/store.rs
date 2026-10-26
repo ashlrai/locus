@@ -531,23 +531,7 @@ impl Store {
         self.validate_session_authority(&session)?;
 
         let binding = self.load_binding(&session.binding_alias)?;
-        if binding.id != session.binding_id
-            || session.binding_fp.as_deref() != Some(binding_fingerprint(&binding).as_str())
-        {
-            return Err(LocusError::BindingAuthorityMismatch(format!(
-                "binding '{}' changed since it was pinned; renew refused",
-                session.binding_alias
-            )));
-        }
-        for (alias, fp) in session.namespaces.iter().zip(session.namespace_fps.iter()) {
-            let b = self.load_binding(alias)?;
-            if &binding_fingerprint(&b) != fp {
-                return Err(LocusError::BindingAuthorityMismatch(format!(
-                    "namespace binding '{alias}' changed since it was pinned; renew refused"
-                )));
-            }
-        }
-
+        renew_identity_check(self, &session, &binding)?;
         let (new_expiry, lifetime_ends_at, capped_by) = renew_bounds(&session, &binding)?;
         let previous_expires_at = session.expires_at;
         let previous_generation = session.authority_anchor.as_ref().map(|a| a.generation);
@@ -3516,6 +3500,28 @@ pub struct RenewOutcome {
     pub capped_by: &'static str,
 }
 
+/// Binding identity checks shared by [`Store::renew_active`] and its plan:
+/// renew never crosses a binding id or fingerprint change.
+pub fn renew_identity_check(store: &Store, session: &Session, binding: &Binding) -> Result<()> {
+    if binding.id != session.binding_id
+        || session.binding_fp.as_deref() != Some(binding_fingerprint(binding).as_str())
+    {
+        return Err(LocusError::BindingAuthorityMismatch(format!(
+            "binding '{}' changed since it was pinned; renew refused",
+            session.binding_alias
+        )));
+    }
+    for (alias, fp) in session.namespaces.iter().zip(session.namespace_fps.iter()) {
+        let b = store.load_binding(alias)?;
+        if &binding_fingerprint(&b) != fp {
+            return Err(LocusError::BindingAuthorityMismatch(format!(
+                "namespace binding '{alias}' changed since it was pinned; renew refused"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Pure renew arithmetic shared by [`Store::renew_active`] and its dry-run
 /// plan: `(new_expiry, lifetime_ends_at, capped_by)`, or the refusal when
 /// renew is disabled, the lifetime bound is reached, or the pin would not
@@ -3540,7 +3546,10 @@ pub fn renew_bounds(
         .transpose()?
         .unwrap_or_else(|| Duration::hours(8));
     let now = Utc::now();
-    let lifetime_ends_at = session.pinned_at + lifetime;
+    let lifetime_ends_at = session
+        .pinned_at
+        .checked_add_signed(lifetime)
+        .ok_or_else(|| LocusError::msg("renew expiry out of range"))?;
     if now >= lifetime_ends_at {
         return Err(LocusError::msg(format!(
             "pin reached policy.max_session_lifetime ({lifetime_raw}) at {}; renew refused, \
@@ -3549,7 +3558,9 @@ pub fn renew_bounds(
             binding.alias
         )));
     }
-    let by_ttl = now + max_ttl;
+    let by_ttl = now
+        .checked_add_signed(max_ttl)
+        .ok_or_else(|| LocusError::msg("renew expiry out of range"))?;
     let (new_expiry, capped_by) = if by_ttl <= lifetime_ends_at {
         (by_ttl, "max_ttl")
     } else {
@@ -3558,7 +3569,11 @@ pub fn renew_bounds(
     // Round down to whole seconds so the rfc3339 seal tuple is stable.
     let new_expiry = DateTime::<Utc>::from_timestamp(new_expiry.timestamp(), 0)
         .ok_or_else(|| LocusError::msg("renew expiry out of range"))?;
-    if new_expiry < session.expires_at + Duration::minutes(1) {
+    let min_extension = session
+        .expires_at
+        .checked_add_signed(Duration::minutes(1))
+        .ok_or_else(|| LocusError::msg("renew expiry out of range"))?;
+    if new_expiry < min_extension {
         let why = if capped_by == "max_session_lifetime" {
             format!(
                 "pin is at policy.max_session_lifetime ({lifetime_raw}, ends {}); human re-pin \
