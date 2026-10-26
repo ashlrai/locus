@@ -26,7 +26,7 @@ mod http_session;
 
 use anchor::{AnchorDecision, SessionAnchor};
 use anyhow::{bail, Context, Result};
-use grant::{resolve_tenant_grant, GrantAuthError, TenantCtx};
+use grant::{resolve_tenant_grant, GrantAuthError, SwarmBroker, TenantCtx};
 use http_session::{
     resolve_http_session_dir, resolve_http_session_dir_mt, HttpSessionError, HttpSessionMap,
     HttpSessionPinSummary, HttpSessionTenant,
@@ -62,6 +62,10 @@ static AUTO_PIN_ATTEMPTED: AtomicBool = AtomicBool::new(false);
 /// Process-wide multi-tenant flag (`--multi-tenant` / `LOCUS_MCP_MULTI_TENANT=1`,
 /// HTTP only). Set once at startup before any request thread exists.
 static MULTI_TENANT: AtomicBool = AtomicBool::new(false);
+
+/// Loaded once by the operator before serving. Client requests cannot replace
+/// the graph or select another node's identity.
+static SWARM_BROKER: OnceLock<SwarmBroker> = OnceLock::new();
 
 fn multi_tenant() -> bool {
     MULTI_TENANT.load(Ordering::SeqCst)
@@ -358,6 +362,7 @@ struct RunMode {
     http_addr: Option<SocketAddr>,
     /// Explicit multi-tenant opt-in (HTTP only; stdio + MT is a parse error).
     multi_tenant: bool,
+    swarm: Option<PathBuf>,
 }
 
 fn main() {
@@ -377,6 +382,13 @@ fn main() {
 
 fn run() -> Result<()> {
     let mode = parse_run_mode(std::env::args().skip(1))?;
+    if let Some(path) = &mode.swarm {
+        let graph = locus_core::SwarmGraph::load(path)?;
+        store()?.require_local_control("serve swarm")?;
+        SWARM_BROKER
+            .set(SwarmBroker::new(graph))
+            .map_err(|_| anyhow::anyhow!("swarm broker already initialized"))?;
+    }
     if mode.multi_tenant {
         // Multi-tenant validation authenticates EVERY tenant's sealed session
         // per request; executor capabilities are single-session, so the
@@ -426,10 +438,22 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
     let mut http_flag = false;
     let mut http_arg: Option<String> = None;
     let mut multi_tenant_flag = false;
+    let mut swarm = None;
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
+            "--swarm" => {
+                if swarm.is_some() {
+                    bail!("--swarm may only be supplied once");
+                }
+                let path = args
+                    .get(i + 1)
+                    .filter(|p| !p.starts_with('-'))
+                    .context("--swarm requires a graph manifest path")?;
+                swarm = Some(PathBuf::from(path));
+                i += 1;
+            }
             "--multi-tenant" => {
                 multi_tenant_flag = true;
             }
@@ -464,6 +488,9 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
 
     let env_http = env_truthy("LOCUS_MCP_HTTP");
     let multi_tenant = multi_tenant_flag || env_truthy("LOCUS_MCP_MULTI_TENANT");
+    if swarm.is_some() && (!multi_tenant || (!http_flag && !env_http)) {
+        bail!("--swarm requires --http and --multi-tenant");
+    }
     if !http_flag && !env_http {
         if multi_tenant {
             // Fail closed: multi-tenant is meaningless without per-request
@@ -473,6 +500,7 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
         return Ok(RunMode {
             http_addr: None,
             multi_tenant: false,
+            swarm: None,
         });
     }
 
@@ -485,6 +513,7 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
     Ok(RunMode {
         http_addr: Some(addr),
         multi_tenant,
+        swarm,
     })
 }
 
@@ -496,6 +525,7 @@ fn print_help() {
            locus-mcp --http [ADDR]   Streamable-HTTP-lite on ADDR (default {DEFAULT_HTTP_ADDR})\n\
            locus-mcp --http --multi-tenant   per-request tenant routing via\n\
                                      X-Locus-Tenant-Token (mint: `locus mcp mint`)\n\
+           locus-mcp --http --multi-tenant --swarm GRAPH.json   graph-node tool grants\n\
            locus-mcp --version       print the version and exit\n\n\
          HTTP endpoints:\n\
            GET  /health              unauthenticated liveness\n\
@@ -606,11 +636,19 @@ fn dispatch_rpc(msg: &Value, scope: &RequestScope) -> Option<Value> {
         return None;
     }
 
+    let swarm = SWARM_BROKER.get().is_some();
     let result = match method {
         "initialize" => Ok(handle_initialize(&params, scope)),
         "ping" => Ok(json!({})),
         "tools/list" => handle_tools_list(scope),
         "tools/call" => handle_tools_call(&params, scope),
+        // Swarm grants name tools only. Do not expose alternate context
+        // surfaces that bypass those explicit per-agent grants.
+        "resources/list" if swarm => Ok(json!({"resources": []})),
+        "prompts/list" if swarm => Ok(json!({"prompts": []})),
+        "resources/read" | "prompts/get" if swarm => {
+            Err(rpc_error(-32601, "method unavailable in swarm mode".into()))
+        }
         "resources/list" => handle_resources_list(scope),
         "resources/read" => handle_resources_read(&params, scope),
         "prompts/list" => handle_prompts_list(scope),
@@ -1386,19 +1424,24 @@ fn http_mcp_capabilities_tenant(scope: &RequestScope, t: &TenantCtx) -> Value {
                     .collect()
             })
             .unwrap_or_default(),
+        Err(_) if SWARM_BROKER.get().is_some() => Vec::new(),
         Err(_) => control_tools(false).into_iter().map(|t| t.name).collect(),
     };
     json!({
         "ok": true,
         "service": "locus-mcp",
         "version": VERSION,
-        "mode": "multi_tenant",
+        "mode": if SWARM_BROKER.get().is_some() { "swarm" } else { "multi_tenant" },
         "transport": "streamable-http-lite",
         "protocolVersion": "2024-11-05",
-        "capabilities": {
-            "tools": { "listChanged": true },
-            "resources": { "subscribe": false, "listChanged": true },
-            "prompts": { "listChanged": true }
+        "capabilities": if SWARM_BROKER.get().is_some() {
+            json!({"tools": {"listChanged": true}})
+        } else {
+            json!({
+                "tools": { "listChanged": true },
+                "resources": { "subscribe": false, "listChanged": true },
+                "prompts": { "listChanged": true }
+            })
         },
         "grant_id": t.grant_id,
         "pin": pin,
@@ -2460,6 +2503,14 @@ fn negotiate_protocol_version(params: &Value) -> &'static str {
 
 fn handle_initialize(params: &Value, scope: &RequestScope) -> Value {
     let protocol_version = negotiate_protocol_version(params);
+    if SWARM_BROKER.get().is_some() {
+        return json!({
+            "protocolVersion": protocol_version,
+            "serverInfo": { "name": "locus-mcp", "version": VERSION },
+            "capabilities": { "tools": { "listChanged": true } },
+            "instructions": "Locus swarm broker: your authenticated tenant grant maps to one operator-configured graph node. Only tools listed for that node may be called. Unmapped grants have zero tools. Tool arguments and headers cannot select another agent or tenant. All normal session, policy, scope and approval gates still apply.",
+        });
+    }
     if let Some(t) = &scope.tenant {
         // Tenant sessions: the anchor was pre-set at session mint from the
         // grant session's observation and is write-once — re-initialize never
@@ -3377,6 +3428,35 @@ fn shape_provider_catalog(
 /// Healthy pin ⇒ control + provider tools (synthetic + upstream MCP when declared).
 /// Namespaced multi-bind prefixes tools as `alias__tool`.
 fn handle_tools_list(scope: &RequestScope) -> std::result::Result<Value, Value> {
+    if let Some(broker) = SWARM_BROKER.get() {
+        let s = store().map_err(|_| rpc_error(-32000, "swarm store unavailable".into()))?;
+        // Even control tools disappear when the grant/session is unhealthy.
+        // The existing catalog builder still enforces every binding policy and
+        // anchor check; the graph is an additional intersection, never a union.
+        let catalog = if swarm_scope_healthy(&s, scope) {
+            handle_binding_tools_list(scope)?
+        } else {
+            json!({"tools": []})
+        };
+        return broker
+            .filter_catalog(&s, scope.tenant.as_ref(), catalog)
+            .map_err(|_| rpc_error(-32000, "swarm audit unavailable".into()));
+    }
+    handle_binding_tools_list(scope)
+}
+
+fn swarm_scope_healthy(s: &Store, scope: &RequestScope) -> bool {
+    scope
+        .tenant
+        .as_ref()
+        .is_some_and(|t| tenant_grant_recheck(s, t).is_ok())
+        && scope_drift(s, scope).is_ok_and(|drift| drift.ok)
+        && scope.anchor.get().is_none_or(|a| {
+            anchor_matches_current(&a, scope_identity_observation(s, scope).as_ref())
+        })
+}
+
+fn handle_binding_tools_list(scope: &RequestScope) -> std::result::Result<Value, Value> {
     // Advisory auto-pin probe when still unpinned (once per process; never
     // grants authority). Tenant scopes never touch the global pin.
     if scope.tenant.is_none() {
@@ -3548,6 +3628,19 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
         .get("name")
         .and_then(|n| n.as_str())
         .ok_or_else(|| rpc_error(-32602, "missing tool name".into()))?;
+    if let Some(broker) = SWARM_BROKER.get() {
+        let s = store().map_err(|_| rpc_error(-32000, "swarm store unavailable".into()))?;
+        let healthy = swarm_scope_healthy(&s, scope);
+        let allowed = broker
+            .authorize_call(&s, scope.tenant.as_ref(), name, healthy)
+            .map_err(|_| rpc_error(-32000, "swarm audit unavailable".into()))?;
+        if !allowed {
+            return Err(rpc_error(
+                -32003,
+                "tool unavailable for this swarm agent".into(),
+            ));
+        }
+    }
     let args = match params.get("arguments") {
         None | Some(Value::Null) => json!({}),
         Some(v) => v.clone(),
@@ -4509,6 +4602,34 @@ mod multi_tenant_tests {
         let stdio = parse(&[]).unwrap();
         assert!(!stdio.multi_tenant);
         assert!(stdio.http_addr.is_none());
+    }
+
+    #[test]
+    fn swarm_transport_requires_http_multi_tenant_and_one_manifest() {
+        for args in [
+            vec!["--swarm", "graph.json"],
+            vec!["--http", "--swarm", "graph.json"],
+            vec!["--http", "--multi-tenant", "--swarm"],
+            vec![
+                "--http",
+                "--multi-tenant",
+                "--swarm",
+                "a.json",
+                "--swarm",
+                "b.json",
+            ],
+        ] {
+            assert!(parse(&args).is_err());
+        }
+        let mode = parse(&[
+            "--http",
+            "127.0.0.1:9123",
+            "--multi-tenant",
+            "--swarm",
+            "graph.json",
+        ])
+        .unwrap();
+        assert_eq!(mode.swarm.as_deref(), Some(Path::new("graph.json")));
     }
 
     /// Call-site completeness guard: every direct global-identity read in this
