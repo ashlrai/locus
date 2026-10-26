@@ -30,12 +30,17 @@ fn fixture() -> Fixture {
 
 impl Fixture {
     fn locus(&self, args: &[&str]) -> Output {
+        self.locus_env(args, &[])
+    }
+    fn locus_env(&self, args: &[&str], env: &[(&str, &str)]) -> Output {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
         cmd.args(args)
             .env("LOCUS_HOME", self.home.path())
             .env("NO_COLOR", "1")
             .env_remove("LOCUS_PHANTOM_PROJECT")
             .env_remove("LOCUS_CONTROL_CAPABILITY")
+            .env_remove("LOCUS_PIN_HISTORY")
+            .envs(env.iter().copied())
             .current_dir(self.cwd.path());
         if !self.cap.is_empty() {
             cmd.env("LOCUS_CONTROL_CAPABILITY", &self.cap);
@@ -176,4 +181,61 @@ fn frozen_pin_refuses_even_when_the_alias_matches() {
     assert_eq!(out.status.code(), Some(1), "{t}");
     assert!(!f.marker().exists(), "child ran under a frozen pin");
     no_refs(&t);
+}
+
+fn history(f: &Fixture) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(f.home.path().join("pin-history.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn pin_and_refusal_land_in_local_history_and_env_switch_stops_writes() {
+    let f = fixture();
+    let alias = f.pinned().split(':').next().unwrap().to_string();
+    let other = if alias == "acme" { "personal" } else { "acme" };
+    let before = history(&f);
+    assert!(before.iter().any(|e| e["event"] == "pin"), "{before:?}");
+    assert_eq!(f.exec_expect(other, false).status.code(), Some(1));
+    let after = history(&f);
+    let last = after.last().unwrap();
+    assert_eq!(last["event"], "pin_mismatch");
+    assert_eq!(last["alias"], alias.as_str());
+    assert_eq!(last["expected"], other);
+    let raw = std::fs::read_to_string(f.home.path().join("pin-history.jsonl")).unwrap();
+    assert!(!raw.contains(&f.cap), "capability must never be recorded");
+
+    let n = after.len();
+    let touch = format!("touch '{}'", f.marker().display());
+    let off = f.locus_env(
+        &["exec", "--expect", other, "--", "sh", "-c", touch.as_str()],
+        &[("LOCUS_PIN_HISTORY", "0")],
+    );
+    assert_eq!(off.status.code(), Some(1));
+    assert_eq!(history(&f).len(), n, "LOCUS_PIN_HISTORY=0 must stop writes");
+}
+
+#[test]
+fn failed_history_write_never_blocks_pin_leave_or_refusal() {
+    let f = fixture();
+    let alias = f.pinned().split(':').next().unwrap().to_string();
+    let other = if alias == "acme" { "personal" } else { "acme" };
+    // A directory where the log should be makes every history write fail.
+    let log = f.home.path().join("pin-history.jsonl");
+    std::fs::remove_file(&log).unwrap();
+    std::fs::create_dir(&log).unwrap();
+    assert_eq!(
+        f.exec_expect(other, false).status.code(),
+        Some(1),
+        "refusal unchanged"
+    );
+    let ok = f.exec_expect(&alias, false);
+    assert!(ok.status.success() && f.marker().exists(), "{ok:?}");
+    let leave = f.locus(&["leave"]);
+    assert!(leave.status.success(), "{leave:?}");
+    let pin = f.locus(&["pin", &alias]);
+    assert!(pin.status.success(), "{pin:?}");
+    assert!(log.is_dir());
 }

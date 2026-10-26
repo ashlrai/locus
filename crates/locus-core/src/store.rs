@@ -1436,6 +1436,7 @@ impl Store {
                     "ttl_source": ttl_source,
                 })),
             )?;
+            crate::pin_history::record(&self.home, "pin", Some(&binding.alias), None, cwd);
         }
         Ok(session)
     }
@@ -1702,6 +1703,11 @@ impl Store {
                 &s.binding_alias,
                 Some(serde_json::json!({ "session_id": s.session_id })),
             )?;
+            let session_dir = match &s.source {
+                PinSource::Dir { path } => Some(PathBuf::from(path)),
+                _ => None,
+            };
+            crate::pin_history::record_leave(&self.home, &s.binding_alias, session_dir.as_deref());
         }
         fs::remove_file(path)?;
         Ok(session)
