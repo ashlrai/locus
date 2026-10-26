@@ -6268,6 +6268,7 @@ allowed_bindings = ["acme"]
     }
 
     #[test]
+    #[cfg(unix)]
     fn fresh_freeze_does_not_write_when_broker_recheck_fails() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
