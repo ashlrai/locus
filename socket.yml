@@ -1,0 +1,16 @@
+version: 2
+
+# Socket's default issue rules. This repo has no dependency fixture tree,
+# so projectIgnorePaths is unset.
+issueRules:
+  didYouMean: true
+  installScripts: true
+  telemetry: true
+  troll: true
+  malware: true
+  hasNativeCode: true
+  shellScriptOverride: true
+  gitDependency: true
+  httpDependency: true
+  invalidPackageJSON: true
+  unresolvedRequire: true

@@ -1,0 +1,101 @@
+name: Coverage
+
+# This repo's ruleset has no merge queue, so merge_group alone never runs.
+# Push to main collects coverage. There is no pull_request trigger, and
+# ci.yml is unchanged. The upload job is the only job here with id-token: write.
+on:
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      # show-env only sets the coverage environment. The test runner is
+      # cargo nextest itself. Fail if lcov.info was not written.
+      - name: Test with coverage
+        env:
+          CARGO_TERM_COLOR: always
+          RUSTFLAGS: -D warnings
+        run: |
+          set -euo pipefail
+          source <(cargo llvm-cov show-env --sh)
+          cargo llvm-cov clean --workspace
+          set +e
+          cargo nextest run --workspace --no-fail-fast -E 'all()'
+          status=$?
+          set -e
+          cargo llvm-cov report --lcov --output-path lcov.info
+          if [ ! -s lcov.info ]; then
+            echo "lcov.info is missing or empty" >&2
+            exit 1
+          fi
+          exit "$status"
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-lcov
+          path: lcov.info
+          if-no-files-found: error
+          retention-days: 1
+
+  upload:
+    name: Upload coverage
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    # No checkout: this job runs no repo code. It only uploads the artifact.
+    steps:
+      - name: Download coverage artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: coverage-lcov
+          path: coverage
+
+      - name: Require coverage file
+        run: test -s coverage/lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          use_oidc: true
+          fail_ci_if_error: false
+          files: coverage/lcov.info
+          disable_search: true
