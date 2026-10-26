@@ -144,6 +144,9 @@ enum Commands {
 
     /// Health check for the local control plane
     ///
+    /// Exits 0 for SAFE or setup advisories only, 1 for actionable warnings or
+    /// a refused Phantom preflight, and 2 for UNSAFE. Findings stay visible.
+    ///
     /// `--fix` previews safe repairs (stale workspace allowlist entries, a
     /// stale `default_binding`, legacy bare Phantom names) and writes nothing.
     /// Add `--apply` to make them; every changed file is backed up first.
@@ -1814,7 +1817,7 @@ fn cmd_topic(name: Option<&str>, json: bool) -> Result<()> {
                whoami?, doctor_verdict, safe_next, … }. --require-ok fails closed.\n\n\
              Identity gate checks:\n\
                locus whoami [--json]           # active pin + seal\n\
-               locus doctor [--json]           # SAFE|WARN|UNSAFE (exit 0/1/2)\n\
+               locus doctor [--json]           # SAFE|WARN|UNSAFE (advisory-only WARN exits 0)\n\
                locus agent report --json       # hub contract (ready|protected|unsafe)\n\
                locus status --oneline          # unpinned | alias:tenant | frozen\n\n\
              Doctor may WARN (ungrounded_claims) when recent audit details look\n\
@@ -7149,7 +7152,7 @@ fn missing_workspace_aliases<'a>(aliases: &'a [String], known: &[&str]) -> Vec<&
 
 /// Adds the shared `ashlr.doctor` v1 wrapper (ashlr-stack
 /// docs/ashlr-handshake.md, "Doctor JSON") to `locus doctor --json`.
-/// Additive: every existing field stays and exit codes do not change.
+/// Additive: every existing report field stays.
 /// Mapping: verdict SAFE ok, WARN warn, UNSAFE fail; a refused Phantom
 /// preflight is fail; findings map info/warn/unsafe to info/warn/fail.
 fn add_doctor_envelope(value: &mut serde_json::Value, preflight_refused: bool) {
@@ -7257,11 +7260,81 @@ fn cmd_doctor(json: bool) -> Result<()> {
     }
 
     let refused = preflight.as_ref().is_some_and(|p| p.refuse);
-    match report.verdict {
-        DoctorVerdict::Safe if refused => exit::ExitCode::Failure.exit(),
-        verdict => exit::ExitCode::from_doctor(verdict).exit_unless_success(),
-    }
+    doctor_exit_code(&report, refused).exit_unless_success();
     Ok(())
+}
+
+/// First-run setup advice stays visible without failing a diagnostic command.
+/// Keep an explicit allowlist: new or unknown warnings remain failures, and
+/// neither this exit status nor an advisory finding grants provider access.
+fn doctor_exit_code(report: &locus_core::DoctorReport, refused: bool) -> exit::ExitCode {
+    if report.verdict == DoctorVerdict::Unsafe {
+        return exit::ExitCode::Unsafe;
+    }
+    if refused {
+        return exit::ExitCode::Failure;
+    }
+    if report.verdict == DoctorVerdict::Warn
+        && !report.findings.is_empty()
+        && report.findings.iter().all(|finding| {
+            finding.severity == locus_core::IssueSeverity::Info
+                || (finding.severity == locus_core::IssueSeverity::Warn
+                    && matches!(
+                        finding.code.as_str(),
+                        "approvals_missing"
+                            | "phantom_missing"
+                            | "control_capability_not_exported"
+                            | "executor_authority_unavailable"
+                    ))
+        })
+    {
+        return exit::ExitCode::Success;
+    }
+    exit::ExitCode::from_doctor(report.verdict)
+}
+
+#[cfg(test)]
+mod doctor_exit_tests {
+    use super::{doctor_exit_code, exit};
+    use locus_core::{build_doctor_report, DoctorExternal, DoctorVerdict, Store};
+    use tempfile::tempdir;
+
+    #[test]
+    fn doctor_advisories_do_not_hide_preflight_refusals_or_unknown_findings() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        let mut report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                cwd: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        report.findings.clear();
+        report.issues.clear();
+        report.verdict = DoctorVerdict::Safe;
+        report.push_finding(
+            locus_core::IssueSeverity::Warn,
+            "phantom_missing",
+            "optional installation".into(),
+        );
+        assert_eq!(doctor_exit_code(&report, false), exit::ExitCode::Success);
+        assert_eq!(doctor_exit_code(&report, true), exit::ExitCode::Failure);
+        report.push_finding(
+            locus_core::IssueSeverity::Warn,
+            "future_unknown_warning",
+            "requires operator attention".into(),
+        );
+        assert_eq!(doctor_exit_code(&report, false), exit::ExitCode::Failure);
+        report.push_finding(
+            locus_core::IssueSeverity::Unsafe,
+            "invalid_seal",
+            "invalid seal".into(),
+        );
+        assert_eq!(doctor_exit_code(&report, false), exit::ExitCode::Unsafe);
+        assert_eq!(doctor_exit_code(&report, true), exit::ExitCode::Unsafe);
+    }
 }
 
 /// `locus autopin suggest [--apply]`. `--apply --dry-run` plans the
