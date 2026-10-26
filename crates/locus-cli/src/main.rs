@@ -1336,9 +1336,9 @@ fn argv_targets_unplannable(args: &[std::ffi::OsString]) -> bool {
         Some("mcp") => {
             use clap::CommandFactory;
             let next = words.next();
-            !Cli::command()
+            Cli::command()
                 .find_subcommand("mcp")
-                .is_some_and(|m| next.is_some_and(|w| m.find_subcommand(w).is_some()))
+                .is_none_or(|m| next.is_none_or(|w| m.find_subcommand(w).is_none()))
         }
         Some("ci") => words.next() == Some("run"),
         _ => false,
@@ -6799,6 +6799,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
     // symlink_metadata: a dangling symlink is an existing entry too.
     let target = s.bindings_dir().join(format!("{}.toml", answers.alias));
     let exists = target.symlink_metadata().is_ok();
+    let identical = exists && !args.force && s.binding_matches(&b)?;
 
     if args.dry_run {
         let mut plan = plans::binding_add_plan(&target, &answers.alias, &toml, exists);
@@ -6807,7 +6808,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
         }
         return plans::emit_binding_add_plan(&plan, json, &toml);
     }
-    if exists && !args.force && !(can_prompt && guided) {
+    if exists && !(args.force || identical || (can_prompt && guided)) {
         bail!(
             "binding '{alias}' already exists; nothing written. \
              Review it with `locus binding show {alias}`, rerun with --force to replace it, \
@@ -6816,7 +6817,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
         );
     }
 
-    if can_prompt && guided {
+    if can_prompt && guided && !identical {
         println!();
         println!("{toml}");
         let question = if exists && !args.force {
@@ -6831,11 +6832,19 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
 
     // Re-checked under the bindings lock: another writer may have created
     // the alias since `exists` was read (or while the prompt waited).
-    let path = s.create_binding(&b, exists || args.force)?;
+    let path = s.create_binding(&b, exists && !identical || args.force)?;
     if json {
         println!(
             "{}",
-            serde_json::json!({ "ok": true, "path": path.display().to_string() })
+            serde_json::json!({ "ok": true, "path": path.display().to_string(), "changed": !identical })
+        );
+        return Ok(());
+    }
+    if identical {
+        println!(
+            "{} binding '{}' already matches; nothing written",
+            "ok".green().bold(),
+            answers.alias
         );
         return Ok(());
     }
