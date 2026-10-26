@@ -1,0 +1,95 @@
+# `locus exec` latency
+
+Measured on 2026-10-25 ET (2026-10-26 UTC) on one x86_64 Linux machine (kernel 6.12.94+, rustc
+1.99.1, release build). 21 runs, first dropped. Wall clock is
+`time.perf_counter` around the process. `ru_maxrss` comes from `os.wait4`
+and is kilobytes on this Linux. stdin is `/dev/null`. stdout and stderr are
+inherited, so the human banner is included. The pin is live in the same
+shell (`locus quickstart` on a fresh `LOCUS_HOME`, sample bindings only, no
+real credentials). Harness: [scripts/bench_exec.py](../scripts/bench_exec.py).
+
+The before binary is parent commit `96c4a67`. The after binary is this
+change. Both were measured in that harness on this machine, in separate
+fresh homes.
+
+`LOCUS_EXEC_TRACE=1` prints phase timings on stderr (`locus_exec_phase`).
+It is off by default. Those runs are not the harness median: piping stderr
+drops the cost of writing the human banner to a terminal.
+
+## Harness medians
+
+| Command | Before min / median / max (s) | After min / median / max (s) | After `ru_maxrss` median (KiB) |
+|---|---|---|---|
+| `locus whoami` | 0.019870 / 0.020237 / 0.020765 | 0.002419 / 0.003121 / 0.003877 | 8646 |
+| `locus exec -- true` | 0.048890 / 0.050704 / 0.051874 | 0.003255 / 0.004206 / 0.005101 | 9106 |
+| `locus status --oneline` | 0.020038 / 0.020251 / 0.020469 | 0.002373 / 0.002659 / 0.003342 | 8578 |
+
+Before `ru_maxrss` medians were 8760 KiB (`whoami`), 9182 KiB (`exec`), and
+8688 KiB (`status`). Every run exited 0. The after column is the final
+binary, including the 10 ms idle accept slice.
+
+Peer medians recorded in PR #165 on a similar host, not re-run here:
+`direnv exec` 0.016 s, `sops exec-env` 0.011 s. `locus exec -- true` on this
+change is 0.004 s (median 0.004206 s).
+
+## What the time was
+
+One `strace -tt -T` of `locus exec -- true` on the before binary, pin live.
+The client opened five Unix connections to the authority broker. `connect`
+itself was about 0.01 ms. Attaching `strace` to the broker showed
+`clock_nanosleep` of 10.1 to 10.4 ms after every `accept` that returned
+`EAGAIN`. Each new connection waited out that sleep. Times below are from
+the client's `execve` of `locus` to the named syscall. strace inflates the
+total (about 62 ms to the `fsync` return) relative to the harness median of
+0.051 s. The shape is the same: five broker waits.
+
+| Phase (before, one traced run) | Time from start | Delta |
+|---|---|---|
+| Args, store open, seal key, read `active.json`, first broker connect | 5.8 ms | 5.8 ms |
+| Second broker validate (`require_active` after the delegated check) | 16.3 ms | 10.5 ms |
+| Load binding, re-read the session, third broker validate (drift) | 26.9 ms | 10.6 ms |
+| Reload binding, read `config.toml` twice, `BeginControl` | 36.0 ms | 9.1 ms |
+| `GrantExecutor` | 44.5 ms | 8.5 ms |
+| Scrub, secret resolution, `execve` of `true` | 56.0 ms | 11.5 ms |
+| Audit append and `fsync` (the `fsync` call itself was 1.38 ms) | 61.8 ms | 5.8 ms |
+
+## What changed
+
+The broker waits on `poll` until a client connects, the supervisor check
+is due (still 250 ms), or 10 ms have passed so retirement and home deletion
+are noticed. A client wakes `poll` immediately, so the idle slice is not
+added to a request. A traced after broker showed `poll` waking in about
+1 ms, three successful accepts, and no `clock_nanosleep`. The seal, the
+broker generation check, and the executor grant stay. On the healthy
+operator path the seal and one broker validate happen once, then the grant
+(two more broker round trips, same challenge protocol): three connections,
+confirmed with `strace`. Drift compares the binding just loaded for this
+exec to the pin fingerprint. A file edit after that load is caught on the
+next exec. A drift that would freeze asks the broker again before it
+writes. `--expect` still refuses before the child starts. The audit `fsync`
+stays on this write.
+
+`cargo bench -p locus-core --bench exec_authority` prints the median of
+`Store::require_active` in process. It does not fail CI. On this machine
+that median was 0.099 ms (n=20, min 0.090 ms, max 0.403 ms).
+
+## After phases
+
+`LOCUS_EXEC_TRACE=1`, 21 runs, first dropped, stderr piped, exits 0.
+Medians in milliseconds. The sum of the phase medians is 2.43 ms. The
+traced total median is 2.542 ms. The harness median is 4.206 ms because it
+inherits the terminal and pays for the banner. Audit `fsync` moves around
+on this disk (0.251 ms to 1.321 ms in this sample).
+
+| Phase | Median (ms) | Min / max (ms) | What it includes |
+|---|---|---|---|
+| `args` | 0.326 | 0.279 / 0.422 | Process start through argument checks |
+| `store_open` | 0.066 | 0.055 / 0.119 | `Store::open` (home, directories, seal key) |
+| `pin_seal_broker` | 0.323 | 0.226 / 0.697 | Seal HMAC and one broker validate |
+| `binding_preflight` | 0.096 | 0.071 / 0.144 | Load the binding and the credential preflight |
+| `drift` | 0.028 | 0.021 / 0.043 | Fingerprint compare. No broker call when nothing drifted |
+| `scrub_resolve` | 0.056 | 0.047 / 0.086 | Ambient scrub and secret resolution |
+| `executor_grant` | 0.209 | 0.179 / 0.614 | Broker `BeginControl` and `GrantExecutor` |
+| `spawn_wait` | 0.525 | 0.491 / 0.744 | Spawn and wait, including the stderr banner write into the pipe |
+| `audit` | 0.798 | 0.251 / 1.321 | Append the audit line and `fsync` |
+| `total` | 2.542 | 1.747 / 3.423 | Process start through the audit mark |
