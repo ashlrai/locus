@@ -1,0 +1,11 @@
+# Growth-only CODEOWNERS (Security Hardening Engineer, approved by the Engineering Orchestrator 2026-10-25).
+# Covers CI workflows and the files that make keyed, network or loopback requests.
+# Only add owners here; never remove or narrow an entry.
+/.github/workflows/ @masonwyatt23
+/.github/CODEOWNERS @masonwyatt23
+/crates/locus-cli/src/serve.rs @masonwyatt23
+/crates/locus-core/src/gateway.rs @masonwyatt23
+/crates/locus-core/src/adapters/openai.rs @masonwyatt23
+/crates/locus-core/src/http_sessions.rs @masonwyatt23
+/crates/locus-mcp/src/http_session.rs @masonwyatt23
+/crates/locus-core/src/authority_anchor.rs @masonwyatt23
