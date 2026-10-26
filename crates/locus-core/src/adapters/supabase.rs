@@ -6,6 +6,10 @@ use serde_json::{json, Value};
 pub struct SupabaseAdapter;
 
 impl ProviderAdapter for SupabaseAdapter {
+    fn cli_name(&self) -> Option<&'static str> {
+        Some("supabase")
+    }
+
     fn name(&self) -> &'static str {
         "supabase"
     }

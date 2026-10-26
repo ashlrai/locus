@@ -366,6 +366,9 @@ enum Commands {
     /// Run a command with only the pinned binding's identity surface
     #[command(next_help_heading = "Daily use")]
     Exec {
+        /// Route gh, vercel, supabase, or aws using only its pinned provider credential
+        #[arg(long = "for", value_name = "CLI", conflicts_with = "no_resolve")]
+        for_cli: Option<String>,
         /// Do not resolve credentials; fail before effects if an upstream can resolve them
         #[arg(long)]
         no_resolve: bool,
@@ -1479,11 +1482,18 @@ fn run() -> Result<()> {
         Commands::Goal(sub) => cmd_goal(sub, json),
         Commands::Verify(sub) => cmd_verify(sub, json),
         Commands::Exec {
+            for_cli,
             no_resolve,
             strict_creds,
             expect,
             cmd,
-        } => cmd_exec(cmd, !no_resolve, strict_creds, expect.as_deref()),
+        } => cmd_exec(
+            cmd,
+            !no_resolve,
+            strict_creds,
+            expect.as_deref(),
+            for_cli.as_deref(),
+        ),
         Commands::Run {
             binding,
             share_pin,
@@ -4237,6 +4247,7 @@ fn cmd_exec(
     resolve_secrets: bool,
     strict_creds: bool,
     expect: Option<&str>,
+    for_cli: Option<&str>,
 ) -> Result<()> {
     if cmd.is_empty() {
         bail!("usage: locus exec -- <command> [args...]");
@@ -4289,7 +4300,11 @@ fn cmd_exec(
         check_expected_alias(&s, Some(&resolved.session.binding_alias), want)?;
     }
     let binding = s.load_binding(&resolved.session.binding_alias)?;
-    preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Exec)?;
+    let route = for_cli
+        .map(|cli| locus_core::adapters::CliRoute::resolve(&binding, cli, &args[0]))
+        .transpose()?;
+    let child_binding = route.as_ref().map_or(&binding, |route| route.binding());
+    preflight_child_launch(child_binding, resolve_secrets, ChildLaunchSurface::Exec)?;
     trace.mark("binding_preflight");
 
     // Local drift against the binding just loaded. The seal and the broker
@@ -4304,9 +4319,33 @@ fn cmd_exec(
     refuse_exec_drift(&drift)?;
     trace.mark("drift");
     let session = &resolved.session;
-    let iso = isolated_child_env(&s, session, &binding, resolve_secrets);
+    // Per-launch config roots prevent a previous CLI login or config file in
+    // this session from contributing a second identity to a selected route.
+    let route_home = route
+        .as_ref()
+        .map(|_| {
+            tempfile::Builder::new()
+                .prefix("cli-")
+                .tempdir_in(&session.worker_home)
+        })
+        .transpose()
+        .context("create private routed CLI home")?;
+    let mut iso = if let Some(home) = &route_home {
+        let mut child_session = session.clone();
+        child_session.worker_home = home.path().display().to_string();
+        locus_core::isolation::build_routed_cli_env(
+            &child_session,
+            &binding,
+            &child_binding.providers[0],
+        )
+    } else {
+        isolated_child_env(&s, session, child_binding, resolve_secrets)
+    };
+    if let Some(route) = &route {
+        route.prepare_env(&mut iso)?;
+    }
     let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
-    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
+    let cred_lines = cred_diag::describe_unresolved(child_binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
         bail!(
             "credential resolve failed (--strict-creds): {}",
@@ -4330,7 +4369,11 @@ fn cmd_exec(
     for (k, v) in &iso.vars {
         child.env(k, v);
     }
-    child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
+    // Verify operator launch authority above, but do not let a single-provider
+    // CLI use that authority to start workers for sibling providers.
+    if route.is_none() {
+        child.env(locus_core::EXECUTOR_CAPABILITY_ENV, executor_capability);
+    }
 
     eprintln!(
         "{} exec as {} ({}) — scrubbed {} ambient · resolved {} secret(s)",
@@ -4361,9 +4404,12 @@ fn cmd_exec(
             "secrets_resolved": iso.secrets_resolved,
             // names only — never values
             "secrets_failed": iso.secrets_failed,
+            "routed_provider": route.as_ref().map(|route| route.provider_name()),
         })),
     )?;
     trace.mark("audit");
+    // process::exit below does not run destructors.
+    drop(route_home);
     let status = spawned?;
     if !status.success() {
         std::process::exit(child_exit_code(&status));

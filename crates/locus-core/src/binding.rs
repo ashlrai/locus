@@ -239,7 +239,11 @@ impl UpstreamSpec {
 }
 
 /// One provider account inside a Binding.
+///
+/// Unknown keys are rejected: `scope` and `upstream` are optional, so a
+/// typo'd key would silently drop a scope freeze — a fail-open.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderBinding {
     pub provider: String,
     pub account: String,
@@ -454,7 +458,11 @@ impl ProviderBinding {
 /// match = "vercel.deploy.prod"
 /// action = "dual_control"
 /// ```
+///
+/// Unknown keys are rejected: every field is required, so a stray key is
+/// always a typo — and a silently-dropped gate is a fail-open.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyRule {
     /// Tool-name glob (`*` greedy). Field name in TOML/JSON is `match`.
     #[serde(rename = "match")]
@@ -473,7 +481,13 @@ impl PolicyRule {
 }
 
 /// Session / tool-call policy for a Binding.
+///
+/// Unknown keys are rejected: every field is optional, so a typo'd gate key
+/// (`require_approvals`, `dual_controll`) would otherwise deserialize to an
+/// empty list and silently disable the gate — a fail-open. Rejecting the
+/// file keeps policy edits honest.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Policy {
     #[serde(default = "default_allow")]
     pub default: String, // "allow" | "deny"
@@ -546,6 +560,20 @@ impl Default for Policy {
 }
 
 impl Policy {
+    /// `Some("allow" | "deny")` when `default` is a recognized keyword —
+    /// compared trimmed and case-insensitively, like rule actions.
+    ///
+    /// `None` means the value is malformed; callers must fail closed rather
+    /// than guess at intent (a typo such as `default = "denny"` must never
+    /// silently allow).
+    pub fn normalized_default(&self) -> Option<&'static str> {
+        match self.default.trim().to_ascii_lowercase().as_str() {
+            "allow" => Some("allow"),
+            "deny" => Some("deny"),
+            _ => None,
+        }
+    }
+
     /// Whether this tool needs two distinct principal grants.
     ///
     /// True when:
@@ -590,7 +618,12 @@ impl Policy {
 }
 
 /// Human-editable binding body (inside `[binding]` or file root).
+///
+/// Unknown keys are rejected: `policy` and `providers` are optional, so a
+/// typo'd `[binding.policyy]` section would silently default policy to
+/// allow-all — a fail-open.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct BindingBody {
     pub id: String,
     pub alias: String,
@@ -633,6 +666,7 @@ impl Binding {
     pub fn parse_toml(s: &str) -> crate::Result<Self> {
         // Prefer structured [binding] form
         #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct Wrapped {
             binding: BindingBody,
         }
@@ -683,6 +717,14 @@ impl Binding {
         validate_name_component("id", &self.id)?;
         if let Some(ref p) = self.principal {
             validate_name_component("principal", p)?;
+        }
+        // Fail closed at save/load, not at tool-call time: an unrecognized
+        // policy.default must never read as allow.
+        if self.policy.normalized_default().is_none() {
+            return Err(crate::LocusError::msg(format!(
+                "invalid policy.default '{}': use \"allow\" or \"deny\"",
+                self.policy.default
+            )));
         }
         if let Some(ref v) = self.policy.default_ttl {
             // Fail closed at save/load, not at pin: a bad default_ttl must never
@@ -857,6 +899,23 @@ scope = { orgs = ["acme-corp"] }
         let mut b = Binding::parse_toml(SAMPLE).unwrap();
         b.policy.default_ttl = Some("30m".into());
         b.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_unrecognized_policy_default() {
+        // Fail closed at load: a typo'd default must never read as allow.
+        for bad in ["denny", "", "permit", "deny-all"] {
+            let mut b = Binding::parse_toml(SAMPLE).unwrap();
+            b.policy.default = bad.into();
+            let err = b.validate().unwrap_err().to_string();
+            assert!(err.contains("policy.default"), "{bad}: {err}");
+        }
+        // Same normalization the evaluator applies: case/space-insensitive.
+        for ok in ["allow", "deny", "Allow", " deny "] {
+            let mut b = Binding::parse_toml(SAMPLE).unwrap();
+            b.policy.default = ok.into();
+            b.validate().unwrap();
+        }
     }
 
     #[test]
