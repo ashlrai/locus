@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - **Pin history threat model.** Module docs state what `history.key` protects (a log shared on its own) and what it does not (a reader of all of `$LOCUS_HOME`, who can already see pins and config). The key stays next to the log.
+- **First-run measurements.** [docs/BENCHMARKS.md](docs/BENCHMARKS.md) records install and core-op timings against direnv and sops; [docs/FIRST-RUN.md](docs/FIRST-RUN.md) records the first-run log and agent-use audit, with follow-ups filed as #166 to #175. The README 30-second block leads with the unpinned npm install (the measured path), the cargo note states the rustc 1.89 requirement, and the README, `CLAUDE.md`, `AGENTS.md` and `docs/mcp.md` say `locus enter` recovers a dead broker (`leave --force` only if enter is refused). The npm-mcp README shows the entry `locus setup --client claude` writes and the supervised variant for provider tools.
 
 ### Changed
 
