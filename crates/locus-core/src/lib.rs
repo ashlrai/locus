@@ -33,6 +33,7 @@ pub mod graph;
 pub mod http_sessions;
 pub mod inherit_env;
 pub mod isolation;
+pub mod loopback;
 pub mod marketplace;
 pub mod onboard;
 pub mod pin_history;

@@ -741,9 +741,11 @@ fn session_error_body(err: &HttpSessionError) -> (u16, Value) {
 }
 
 fn run_http(addr: SocketAddr) -> Result<()> {
-    if !addr.ip().is_loopback() && !env_truthy("LOCUS_MCP_HTTP_ALLOW_REMOTE") {
+    if !locus_core::loopback::is_exact_loopback_ip(addr.ip())
+        && !env_truthy("LOCUS_MCP_HTTP_ALLOW_REMOTE")
+    {
         bail!(
-            "refusing non-loopback bind {addr} — use 127.0.0.1 or set LOCUS_MCP_HTTP_ALLOW_REMOTE=1"
+            "refusing non-loopback bind {addr} — use 127.0.0.1 or [::1], or set LOCUS_MCP_HTTP_ALLOW_REMOTE=1"
         );
     }
     // Prefer explicit loopback default even if caller passed IPv6 localhost only via env.

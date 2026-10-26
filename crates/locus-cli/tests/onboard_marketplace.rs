@@ -1,7 +1,7 @@
 //! `locus onboard` + community adapter marketplace CLI contract.
 //!
 //! Offline: the marketplace index is served by a tiny loopback HTTP server
-//! (plain HTTP is allowed for localhost only). Install's positive path is
+//! (plain HTTP is allowed for exact 127.0.0.1 and [::1] only). Install's positive path is
 //! covered by `locus-core` unit tests; here we assert the CLI contract:
 //! NDJSON detect events, index add/list/remove, search output, and the
 //! fail-closed install behavior without trust keys.
@@ -452,4 +452,22 @@ fn index_url_query_is_redacted_in_list_output() {
     // Stored config keeps the full URL so signed fetches still work.
     let stored = std::fs::read_to_string(home.path().join("adapter-indexes.toml")).unwrap();
     assert!(stored.contains("sig=SECRETSIG"));
+}
+
+#[test]
+fn index_add_refuses_non_exact_loopback_http() {
+    let (home, cwd) = init_store();
+    for url in [
+        "http://localhost:1/index.json",
+        "http://127.0.0.2:1/index.json",
+    ] {
+        let out = locus(
+            home.path(),
+            cwd.path(),
+            &["adapter", "registry", "index", "add", url],
+        );
+        assert!(!out.status.success(), "{url} must be refused");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("loopback HTTP"), "got: {stderr:?}");
+    }
 }
