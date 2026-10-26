@@ -286,20 +286,18 @@ fn status_and_identity_checks_unpinned() {
 }
 
 #[test]
-fn doctor_and_agent_reports_exit_with_their_verdict() {
+fn doctor_advisories_succeed_and_agent_reports_exit_with_their_status() {
     let env = Env::new();
     env.quickstart();
 
     let out = env.run(&["doctor", "--json"]);
     let v = doc(&out, "locus.doctor.v1");
     assert_eq!(v["schema_version"], 1, "older envelope fields stay");
-    let expected = match v["verdict"].as_str().unwrap() {
-        "SAFE" => 0,
-        "WARN" => 1,
-        "UNSAFE" => 2,
-        other => panic!("verdict {other}"),
-    };
-    assert_eq!(out.status.code(), Some(expected), "{v}");
+    assert!(
+        matches!(v["verdict"].as_str(), Some("SAFE" | "WARN")),
+        "{v}"
+    );
+    assert_eq!(out.status.code(), Some(0), "fresh setup advisories: {v}");
 
     for (sub, schema) in [
         ("doctor", "locus.agent.doctor.v1"),
