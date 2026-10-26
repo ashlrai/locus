@@ -185,6 +185,7 @@ mod tests {
             dual_control_all_approvals: false,
             max_ttl: None,
             default_ttl: None,
+            max_session_lifetime: None,
             parallel_sessions: 4,
         }
     }
