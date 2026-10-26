@@ -361,6 +361,10 @@ struct RunMode {
 }
 
 fn main() {
+    if std::env::var_os(locus_core::workers::MCP_UPSTREAM_CHILD_ENV).is_some() {
+        eprintln!("locus-mcp: refusing recursive multiplexor launch from an upstream worker");
+        std::process::exit(1);
+    }
     if let Some(result) = locus_core::run_authority_anchor_server_if_requested() {
         if let Err(error) = result {
             eprintln!("authority anchor error: {error}");
@@ -531,7 +535,29 @@ fn env_truthy(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn teardown_stdio_workers(wait: bool) {
+    let manager = if wait {
+        Some(worker_manager().lock().unwrap_or_else(|e| e.into_inner()))
+    } else {
+        worker_manager().try_lock().ok()
+    };
+    if let Some(mut manager) = manager {
+        for slot in manager.list() {
+            let _ = manager.teardown(&slot.key);
+        }
+    }
+}
+
 fn run_stdio() -> Result<()> {
+    // Static managers do not run Drop at process exit. Match the companion
+    // spawn-leak change's teardown hook for EOF and transport errors.
+    struct Teardown;
+    impl Drop for Teardown {
+        fn drop(&mut self) {
+            teardown_stdio_workers(true);
+        }
+    }
+    let _teardown = Teardown;
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = stdin.lock();

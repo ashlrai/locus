@@ -934,6 +934,215 @@ fn pinned_upstream_auto_spawn_list_and_call() {
     assert!(!text.contains("GH_TOKEN_ACME"));
 }
 
+#[cfg(unix)]
+mod upstream_lifetime {
+    use super::*;
+    use std::os::fd::OwnedFd;
+    use std::time::Instant;
+
+    const SERVER: &str = r#"
+import json, os, pathlib, subprocess, sys, time
+root = pathlib.Path(sys.argv[1])
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+(root / 'upstream-pids').write_text(str(os.getpid()) + '\n' + str(child.pid))
+for line in sys.stdin:
+    msg = json.loads(line)
+    if 'id' not in msg:
+        continue
+    if msg['method'] == 'initialize':
+        result = {'protocolVersion': '2024-11-05', 'capabilities': {},
+            'serverInfo': {'name': 'lifetime-fixture', 'version': '0'}}
+    elif msg['method'] == 'tools/list':
+        result = {'tools': [{'name': 'ping', 'description': 'ping', 'inputSchema': {'type': 'object'}}]}
+    else:
+        result = {'content': [{'type': 'text', 'text': 'pong'}], 'isError': False}
+    print(json.dumps({'jsonrpc': '2.0', 'id': msg['id'], 'result': result}), flush=True)
+(root / 'upstream-eof').write_text('stdin closed')
+time.sleep(60) # Deliberately ignore EOF after acknowledging it.
+"#;
+
+    struct TreeCleanup {
+        marker: PathBuf,
+        armed: bool,
+    }
+
+    impl TreeCleanup {
+        fn pids(&self) -> Vec<i32> {
+            std::fs::read_to_string(&self.marker)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| line.parse().unwrap())
+                .collect()
+        }
+    }
+
+    impl Drop for TreeCleanup {
+        fn drop(&mut self) {
+            if self.armed {
+                let pids = self.pids();
+                if let Some(worker) = pids.first() {
+                    unsafe { libc::kill(-*worker, libc::SIGKILL) };
+                }
+                for pid in pids {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+        }
+    }
+
+    fn running(pid: i32) -> bool {
+        if unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return false;
+        }
+        // Orphan zombies are dead, although PID 1 may not have reaped them yet.
+        #[cfg(target_os = "linux")]
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            if stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, tail)| tail.starts_with('Z'))
+            {
+                return false;
+            }
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+            let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+            if libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            ) == size
+                && info.assume_init().pbi_status == libc::SZOMB
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn wait_until(description: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(Instant::now() < deadline, "timed out: {description}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn disconnect(kill: bool) {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&Binding::from_body(BindingBody {
+                id: "bnd_lifetime".into(),
+                alias: "lifetime".into(),
+                tenant: "synthetic".into(),
+                principal: None,
+                description: None,
+                policy: Policy::default(),
+                providers: vec![ProviderBinding {
+                    provider: "github".into(),
+                    account: "synthetic".into(),
+                    credential_ref: "env:LOCUS_UNUSED_LIFETIME_FIXTURE".into(),
+                    scope: Scope {
+                        orgs: vec!["synthetic".into()],
+                        ..Scope::default()
+                    },
+                    upstream: Some(
+                        UpstreamSpec::new("python3")
+                            .with_args(["-u", "-c", SERVER, dir.path().to_str().unwrap()])
+                            .resolve_secrets(false),
+                    ),
+                }],
+            }))
+            .unwrap();
+        store
+            .pin(
+                "lifetime",
+                dir.path(),
+                Some("mcp-lifetime-test".into()),
+                false,
+            )
+            .unwrap();
+        let mut cleanup = TreeCleanup {
+            marker: dir.path().join("upstream-pids"),
+            armed: true,
+        };
+        let mut client = McpClient::spawn_opts(
+            dir.path(),
+            Framing::Ndjson,
+            None,
+            &[
+                ("HOME", dir.path().to_str().unwrap()),
+                ("LOCUS_WORKER_SANDBOX", "0"),
+            ],
+        );
+        handshake(&mut client);
+        let response = client.request(
+            "tools/call",
+            json!({"name": "github.ping", "arguments": {}}),
+        );
+        let (text, error) = McpClient::tool_text(&response);
+        assert!(
+            !error && text.contains("pong"),
+            "fixture failed to start: {text}"
+        );
+        let pids = cleanup.pids();
+        assert_eq!(
+            pids.len(),
+            2,
+            "upstream must publish worker and descendant PIDs"
+        );
+        if kill {
+            client.child.kill().unwrap(); // SIGKILL bypasses MCP teardown and Drop.
+            client.child.wait().unwrap();
+        } else {
+            // Swap in an inert owned descriptor so the original pipe closes
+            // without leaking a raw fd or changing the existing client helper.
+            let inert: OwnedFd = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .unwrap()
+                .into();
+            drop(std::mem::replace(&mut client.stdin, inert.into()));
+            wait_until("locus-mcp exits on client stdin EOF", || {
+                if let Some(status) = client.child.try_wait().unwrap() {
+                    assert!(
+                        status.success(),
+                        "locus-mcp failed during EOF shutdown: {status}"
+                    );
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        wait_until("upstream worker and descendant terminate", || {
+            pids.iter().all(|pid| !running(*pid))
+        });
+        assert!(
+            dir.path().join("upstream-eof").exists(),
+            "upstream stdin must close before forced cleanup"
+        );
+        cleanup.armed = false;
+    }
+
+    #[test]
+    fn killing_locus_mcp_leaves_no_upstream_survivors() {
+        disconnect(true);
+    }
+
+    #[test]
+    fn locus_mcp_stdin_eof_reaps_upstream_process_tree() {
+        disconnect(false);
+    }
+}
+
 #[test]
 fn require_approval_blocks_before_hostile_worker_sees_resolved_token() {
     if std::process::Command::new("python3")

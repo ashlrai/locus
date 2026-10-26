@@ -23,6 +23,10 @@ use std::time::{Duration, Instant};
 /// Env var: idle seconds before upstream workers are torn down (0 / unset = never).
 pub const ENV_WORKER_IDLE_SECS: &str = "LOCUS_WORKER_IDLE_SECS";
 
+/// Failed starts and unexpected exits share one budget for a session/provider.
+/// A successful handshake does not reset it: a crash-looping server can handshake.
+const MAX_WORKER_FAILURES: u8 = 3;
+
 /// Build MCP config from a binding's upstream spec (always spawn).
 ///
 /// Expands built-in `recipe` fields when present. Fails if the recipe is
@@ -103,6 +107,9 @@ pub fn provider_from_tool_name(tool: &str) -> Option<&str> {
 /// **Reuse:** `ensure` returns an existing Ready/Running/Pending slot for the
 /// same `WorkerKey` without respawning. Upstream MCP children stay live across
 /// `tools/list` and `tools/call` for the session until teardown or idle reap.
+/// An exited child is replaced only on a subsequent `ensure`; tool calls are
+/// never replayed. Three failed starts/exits exhaust that session/provider's
+/// restart budget, which survives teardown and successful handshakes.
 ///
 /// **Idle timeout (optional):** set `LOCUS_WORKER_IDLE_SECS` or call
 /// [`Self::with_idle_timeout`] / [`Self::reap_idle`]. Touches on ensure + call.
@@ -113,6 +120,9 @@ pub struct CompositeWorkerManager {
     slots: BTreeMap<WorkerKey, WorkerSlot>,
     /// Last use time per slot (for idle reap). Not serialized.
     last_used: BTreeMap<WorkerKey, Instant>,
+    /// Retained across idle reap, rollback and teardown so requests cannot reset
+    /// an exhausted budget. A newly sealed session gets a distinct WorkerKey.
+    failures: BTreeMap<WorkerKey, u8>,
     /// When set, `ensure*` / `call_tool` paths may reap idle workers first.
     idle_timeout: Option<Duration>,
     /// Multi-session mode (multi-tenant server): many sealed sessions are
@@ -137,6 +147,7 @@ impl CompositeWorkerManager {
             mcp: BTreeMap::new(),
             slots: BTreeMap::new(),
             last_used: BTreeMap::new(),
+            failures: BTreeMap::new(),
             idle_timeout: idle_timeout_from_env(),
             multi_session: false,
         }
@@ -180,6 +191,11 @@ impl CompositeWorkerManager {
 
     fn touch(&mut self, key: &WorkerKey) {
         self.last_used.insert(key.clone(), Instant::now());
+    }
+
+    fn record_failure(&mut self, key: &WorkerKey) {
+        let count = self.failures.entry(key.clone()).or_default();
+        *count = count.saturating_add(1);
     }
 
     /// Tear down slots whose last use exceeds `timeout` (or configured idle).
@@ -514,12 +530,21 @@ impl WorkerManager for CompositeWorkerManager {
                 {
                     backend.validate_community_worker_contract(existing, binding, pb)?;
                 }
-                let out = existing.clone();
-                self.touch(&key);
-                return Ok(out);
+                let running = self
+                    .mcp
+                    .get(&key)
+                    .map(|backend| backend.is_running(&key))
+                    .transpose()?
+                    .unwrap_or(true);
+                if running {
+                    let out = existing.clone();
+                    self.touch(&key);
+                    return Ok(out);
+                }
             }
-            // Stopped / Failed — tear down before recreating.
-            let _ = self.teardown(&key);
+            // Dead / Stopped / Failed — tear down before recreating. Teardown
+            // accounts for unexpected exits, including those found by idle reap.
+            self.teardown(&key)?;
         }
 
         let pb = binding.provider(provider).ok_or_else(|| {
@@ -542,9 +567,20 @@ impl WorkerManager for CompositeWorkerManager {
         std::fs::create_dir_all(&work_dir)?;
 
         let slot = if let Some(spec) = pb.upstream.as_ref().filter(|u| u.is_declared()) {
+            if self.failures.get(&key).copied().unwrap_or(0) >= MAX_WORKER_FAILURES {
+                return Err(LocusError::msg(
+                    "mcp worker restart budget exhausted; human re-pin required",
+                ));
+            }
             let cfg = mcp_config_from_upstream(spec)?;
             let backend = McpStdioBackend::new(cfg);
-            let slot = backend.ensure(session, binding, pb, &work_dir)?;
+            let slot = match backend.ensure(session, binding, pb, &work_dir) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    self.record_failure(&key);
+                    return Err(error);
+                }
+            };
             self.mcp.insert(key.clone(), backend);
             slot
         } else {
@@ -572,6 +608,13 @@ impl WorkerManager for CompositeWorkerManager {
     }
 
     fn teardown(&mut self, key: &WorkerKey) -> Result<()> {
+        // Deliberate cleanup of a healthy worker is not a failed restart. Check
+        // before removing it so idle reap cannot conceal a crash from the budget.
+        if let Some(backend) = self.mcp.get(key) {
+            if !backend.is_running(key)? {
+                self.record_failure(key);
+            }
+        }
         self.last_used.remove(key);
         if let Some(slot) = self.slots.remove(key) {
             if let Some(backend) = self.mcp.remove(key) {
@@ -1390,6 +1433,127 @@ for line in sys.stdin:
         assert_eq!(mgr.list().len(), 1);
         // Second ensure is reuse — same work_dir
         assert_eq!(a.work_dir, b.work_dir);
+    }
+
+    #[cfg(unix)]
+    fn lifecycle_binding(marker: &std::path::Path, fail_handshake: bool) -> Binding {
+        let mut binding = binding_mixed(true);
+        let script = format!(
+            "import pathlib\nwith pathlib.Path({:?}).open('a') as f: f.write('start\\n')\n{}",
+            marker.to_str().unwrap(),
+            if fail_handshake {
+                "raise SystemExit(1)"
+            } else {
+                mock_script()
+            }
+        );
+        binding.providers[1].upstream =
+            Some(UpstreamSpec::new("python3").with_args(["-u", "-c", &script]));
+        binding
+    }
+
+    #[cfg(unix)]
+    fn starts(marker: &std::path::Path) -> usize {
+        std::fs::read_to_string(marker).unwrap().lines().count()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_handshakes_have_a_budget_that_teardown_cannot_reset() {
+        let dir = tempdir().unwrap();
+        let session = session_at(&dir.path().join("worker").display().to_string());
+        let marker = dir.path().join("starts");
+        let binding = lifecycle_binding(&marker, true);
+        let key = CompositeWorkerManager::worker_key(&session, &binding, "github");
+        let mut manager = CompositeWorkerManager::new();
+        for attempt in 0..6 {
+            let error = manager
+                .ensure(&session, &binding, "github")
+                .unwrap_err()
+                .to_string();
+            if attempt < usize::from(MAX_WORKER_FAILURES) {
+                assert!(error.contains("handshake failed"), "{error}");
+            } else {
+                assert!(error.contains("restart budget exhausted"), "{error}");
+            }
+            manager.teardown(&key).unwrap();
+            manager.teardown_session(&session.session_id).unwrap();
+        }
+        assert_eq!(starts(&marker), usize::from(MAX_WORKER_FAILURES));
+        assert!(manager.list().is_empty());
+        // One failing provider cannot disable another provider or a new pin.
+        manager.ensure(&session, &binding, "supabase").unwrap();
+        let other_session = session_at(&dir.path().join("other-worker").display().to_string());
+        assert!(manager
+            .ensure(&other_session, &binding, "github")
+            .unwrap_err()
+            .to_string()
+            .contains("handshake failed"));
+        assert_eq!(starts(&marker), usize::from(MAX_WORKER_FAILURES) + 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crashed_workers_restart_only_within_budget_and_never_replay_calls() {
+        let dir = tempdir().unwrap();
+        let session = session_at(&dir.path().join("worker").display().to_string());
+        let marker = dir.path().join("starts");
+        let binding = lifecycle_binding(&marker, false);
+        let mut manager = CompositeWorkerManager::new();
+        for attempt in 0..MAX_WORKER_FAILURES {
+            let slot = manager.ensure(&session, &binding, "github").unwrap();
+            let reused = manager.ensure(&session, &binding, "github").unwrap();
+            assert_eq!(slot.pid, reused.pid);
+            assert_eq!(starts(&marker), usize::from(attempt) + 1);
+            // This PID belongs to the live fixture held by the manager.
+            assert_eq!(
+                unsafe { libc::kill(slot.pid.unwrap() as i32, libc::SIGKILL) },
+                0
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while manager.mcp[&slot.key].is_running(&slot.key).unwrap() {
+                assert!(Instant::now() < deadline, "fixture failed to exit");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let response = manager
+                .call_tool(&session, &binding, "github.ping", &serde_json::json!({}))
+                .unwrap();
+            assert!(!response.ok);
+            assert_eq!(starts(&marker), usize::from(attempt) + 1);
+            // Exercise idle-reap accounting on one exit, cached-ensure on others.
+            if attempt == 1 {
+                manager
+                    .last_used
+                    .insert(slot.key.clone(), Instant::now() - Duration::from_secs(60));
+                assert_eq!(manager.reap_idle(Some(Duration::from_secs(1))).unwrap(), 1);
+            }
+        }
+        let error = manager
+            .ensure(&session, &binding, "github")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("restart budget exhausted"), "{error}");
+        assert_eq!(starts(&marker), usize::from(MAX_WORKER_FAILURES));
+        assert!(manager.list().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn healthy_idle_recycling_does_not_consume_failure_budget() {
+        let dir = tempdir().unwrap();
+        let session = session_at(&dir.path().join("worker").display().to_string());
+        let marker = dir.path().join("starts");
+        let binding = lifecycle_binding(&marker, false);
+        let mut manager = CompositeWorkerManager::new();
+        for _ in 0..MAX_WORKER_FAILURES + 2 {
+            let slot = manager.ensure(&session, &binding, "github").unwrap();
+            manager
+                .last_used
+                .insert(slot.key, Instant::now() - Duration::from_secs(60));
+            assert_eq!(manager.reap_idle(Some(Duration::from_secs(1))).unwrap(), 1);
+        }
+        assert_eq!(starts(&marker), usize::from(MAX_WORKER_FAILURES) + 2);
+        assert!(manager.failures.is_empty());
     }
 
     #[test]
