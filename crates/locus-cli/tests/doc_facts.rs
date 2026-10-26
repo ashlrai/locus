@@ -27,6 +27,8 @@ const DOCS: &[&str] = &[
     "docs/agency-starter.md",
     "docs/workers.md",
     "docs/adapters.md",
+    "examples/recipes/README.md",
+    "examples/agency-starter/README.md",
 ];
 
 fn repo_root() -> PathBuf {
@@ -105,15 +107,24 @@ fn help_group(help: &str, group: &str) -> Vec<String> {
 /// Text an agent would copy: fenced code blocks and inline backtick spans,
 /// with the 1-based line number each came from.
 fn code_spans(doc: &str) -> Vec<(usize, String)> {
+    collect_code_spans(doc, true)
+}
+
+fn collect_code_spans(doc: &str, include_output: bool) -> Vec<(usize, String)> {
     let mut spans = Vec::new();
     let mut fenced = false;
+    let mut output = false;
     for (i, line) in doc.lines().enumerate() {
         let n = i + 1;
         if line.trim_start().starts_with("```") {
             fenced = !fenced;
+            output = fenced && line.trim() == "```text";
             continue;
         }
         if fenced {
+            if output && !include_output {
+                continue;
+            }
             spans.push((n, line.to_string()));
             continue;
         }
@@ -134,8 +145,29 @@ fn is_word(t: &str) -> bool {
 
 /// Every `locus <cmd> [<sub>]` invocation in a span.
 fn invocations(span: &str) -> Vec<(String, Option<String>)> {
-    let tokens: Vec<&str> = span
-        .split(|c: char| c.is_whitespace() || "\"'$()|&;`".contains(c))
+    // Expand compact alternatives before parsing so every listed command is
+    // checked, including alternatives after the first valid command.
+    if let Some(token) = span
+        .split_whitespace()
+        .find(|token| token.contains('|') && token.split('|').all(is_word))
+    {
+        return token
+            .split('|')
+            .flat_map(|alternative| invocations(&span.replacen(token, alternative, 1)))
+            .collect();
+    }
+    invocation_words(span)
+}
+
+fn invocation_words(span: &str) -> Vec<(String, Option<String>)> {
+    // Keep shell operators as tokens: the next pipeline stage is not a
+    // positional subcommand of the preceding invocation.
+    let words = span
+        .replace('|', " | ")
+        .replace('&', " & ")
+        .replace(';', " ; ");
+    let tokens: Vec<&str> = words
+        .split(|c: char| c.is_whitespace() || "\"'$()`".contains(c))
         .filter(|t| !t.is_empty())
         .collect();
     let mut found = Vec::new();
@@ -171,7 +203,7 @@ fn every_documented_locus_command_is_a_real_subcommand() {
     let mut subs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut failures = Vec::new();
     for doc in DOCS {
-        for (line, span) in code_spans(&read_doc(doc)) {
+        for (line, span) in collect_code_spans(&read_doc(doc), false) {
             for (cmd, sub) in invocations(&span) {
                 if !top.contains(&cmd) {
                     failures.push(format!(
@@ -235,7 +267,7 @@ fn claude_md_command_groups_match_help() {
         );
     }
 
-    // AGENTS.md layout row: `locus` — enter, pin, ... , …
+    // AGENTS.md layout row: `locus`: enter, pin, ... , …
     let agents = read_doc("AGENTS.md");
     let (n, row) = agents
         .lines()
@@ -243,10 +275,10 @@ fn claude_md_command_groups_match_help() {
         .find(|(_, l)| l.starts_with("| `crates/locus-cli`"))
         .expect("AGENTS.md has a crates/locus-cli layout row");
     let list = row
-        .split('—')
-        .nth(1)
+        .split_once(": ")
+        .map(|(_, list)| list)
         .and_then(|s| s.split('(').next())
-        .expect("row lists commands after an em dash");
+        .expect("row lists commands after a colon");
     for c in list.split(',').map(str::trim).filter(|c| is_word(c)) {
         assert!(
             top.contains(c),
@@ -432,4 +464,57 @@ fn docs_mcp_setup_clients_match_the_cli() {
             );
         }
     }
+}
+
+#[test]
+fn compact_alternatives_check_every_command() {
+    assert_eq!(
+        invocations("locus binding list|show|removed"),
+        vec![
+            ("binding".into(), Some("list".into())),
+            ("binding".into(), Some("show".into())),
+            ("binding".into(), Some("removed".into())),
+        ]
+    );
+    assert_eq!(
+        invocations("locus enter|removed"),
+        vec![("enter".into(), None), ("removed".into(), None)]
+    );
+    assert!(
+        collect_code_spans("```text\nCOMPLETE: locus recipes (4 checks)\n```", false).is_empty()
+    );
+    assert_eq!(
+        collect_code_spans("```bash\nlocus whoami\n```", false).len(),
+        1
+    );
+    // A shell pipeline is not a command alternative.
+    assert_eq!(
+        invocations("locus whoami | jq .tenant"),
+        vec![("whoami".into(), None)]
+    );
+}
+
+#[test]
+fn readme_catalog_matches_every_top_level_command() {
+    let readme = read_doc("README.md");
+    let catalog = readme
+        .split_once("<!-- cli-catalog:start -->")
+        .and_then(|(_, tail)| tail.split_once("<!-- cli-catalog:end -->"))
+        .expect("README has command catalog markers")
+        .0;
+    let names: Vec<String> = code_spans(catalog)
+        .into_iter()
+        .flat_map(|(_, line)| {
+            line.split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let documented: BTreeSet<String> = names.iter().cloned().collect();
+    assert_eq!(names.len(), documented.len(), "duplicate README command");
+    assert_eq!(
+        documented,
+        help_commands(&locus_output(&["--help"])),
+        "README catalog must list every command from the clap CLI in main.rs"
+    );
 }

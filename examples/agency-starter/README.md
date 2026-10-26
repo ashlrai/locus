@@ -34,7 +34,8 @@ upstream = { recipe = "filesystem-mcp", args = ["-y", "@modelcontextprotocol/ser
 ```bash
 mkdir -p /tmp/locus-demo
 locus pin personal
-# locus-mcp will spawn the filesystem MCP under this pin (tools namespaced demo.*)
+# Launch the client from this hooked shell with locus mcp --supervised.
+# Workers start on authorized calls; discovery alone does not spawn them.
 locus upstream list
 locus upstream suggest filesystem
 ```
@@ -46,9 +47,10 @@ For GitHub live tools on a pin, prefer `upstream = { recipe = "github-mcp", reso
 ```bash
 export LOCUS_HOME="${LOCUS_HOME:-$HOME/.locus}"   # or a scratch home for practice
 locus init
+eval "$(locus hook bash)"
 
 cp examples/agency-starter/bindings/*.toml "$LOCUS_HOME/bindings/"
-# edit each file: project_ref, team_id, orgs — CredentialRefs only (phm:…)
+# edit each file: project_ref, team_id, orgs: CredentialRefs only (phm:…)
 
 # Optional home config
 cp examples/agency-starter/config.example.toml "$LOCUS_HOME/config.toml"
@@ -57,7 +59,11 @@ locus binding list
 locus doctor --json | jq '{verdict,pin,workspace,pending_approvals,dual_control_waiting}'
 ```
 
-Create matching secrets in [Phantom](https://phm.dev) (names only in bindings):
+These templates retain reserved `phm:` references. They cannot resolve in this
+checkout until a supported scoped bridge exists. For executable examples, replace
+them with explicit `env:VAR` references and supply values outside agent context.
+See [credential compatibility](../../docs/credential-compatibility.md).
+The template names are:
 
 | Binding | Phantom names (examples) |
 |---------|--------------------------|
@@ -91,11 +97,11 @@ Effects:
 ## Daily loop: personal ↔ A ↔ B
 
 ```bash
-# Morning — personal
+# Morning: personal
 cd ~/src/side-project
 locus pin personal
 locus whoami
-locus doctor          # want verdict SAFE (or WARN only for missing phantom in dev)
+locus doctor          # setup advisories exit 0; unresolved refs can block execution
 
 # Client A
 cd ~/clients/client-a
@@ -108,7 +114,7 @@ locus whoami          # tenant must be client-a-corp
 locus pin client-a-ro
 locus whoami
 
-# Switch to Client B (different catalog — model cannot jump)
+# Switch to Client B (different catalog: model cannot jump)
 cd ~/clients/client-b
 locus leave
 locus pin client-b
@@ -140,8 +146,8 @@ locus approve grant appr_… --as partner   # still authority 0/2
 
 Doctor surfaces:
 
-- `pending_approvals` — all open grants
-- `dual_control_waiting` — subset awaiting external authenticated authority
+- `pending_approvals`: all open grants
+- `dual_control_waiting`: subset awaiting external authenticated authority
 
 ```bash
 locus doctor --json | jq '{verdict,pending_approvals,dual_control_waiting,findings}'
@@ -157,7 +163,7 @@ locus doctor --json
 | Verdict | Exit | Meaning |
 |---------|------|---------|
 | **SAFE** | 0 | Seal ok, no critical drift, no blocking findings |
-| **WARN** | 1 | Operational gaps (unresolved phm, require_pin unmet, pending dual-control, …) |
+| **WARN** | 0 or 1 | Setup advisories alone exit 0; actionable findings or a refused Phantom preflight exit 1 |
 | **UNSAFE** | 2 | Identity plane broken (invalid seal, binding/tenant drift, corrupt approvals) |
 
 Also reports: home, bindings count, pin (alias/tenant/expires/seal), runtime drift, approvals, phantom + phm refs, autopin config, workspace allowlist, last 5 audit ops.
@@ -185,10 +191,10 @@ When the engagement ends, remove the **unit** of access:
    ```
 7. **Doctor**: `locus doctor` should no longer list those bindings; no pin to A remains.
 
-Optional engagement helper (if your build includes it):
+Engagement helper:
 
 ```bash
-locus engagement close client-a --archive   # when available
+locus engagement close client-a --archive
 ```
 
 ## Checklist (agency laptop)
