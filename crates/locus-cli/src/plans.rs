@@ -516,37 +516,38 @@ pub(super) fn plan_onboard(detect_only: bool, reset: bool, json: bool) -> Result
     plan.needs_control().emit(json)
 }
 
-/// `--dry-run` for the mutating adapter subcommands. Install still fetches
-/// and verifies the signed manifest (read-only network), so a plan fails on
-/// the same signature or trust errors as the real install.
+/// `--dry-run` for the mutating adapter subcommands. Plans make no network
+/// calls: install checks the configured index URLs and trust keys offline and
+/// says the real run fetches and verifies the signed manifest.
 pub(super) fn plan_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
     let s = dry_run::existing_store()?;
     let home = s.home();
     let adapters_dir = home.join(locus_core::marketplace::ADAPTERS_DIR);
     match sub {
         AdapterCmd::Install { id, yes } => {
-            let hit = community_search_in(home, Some(&id))?
-                .into_iter()
-                .find(|hit| hit.id == id)
-                .ok_or_else(|| anyhow!("community adapter not found in configured indexes"))?;
+            let sources = locus_core::marketplace::load_index_sources(home)?;
+            if sources.is_empty() {
+                bail!("no community indexes configured; use locus adapter registry index add <HTTPS URL>");
+            }
+            for source in &sources {
+                locus_core::marketplace::validate_index_url(&source.url)?;
+            }
             let keys = load_merged_trust_keys(home);
             if keys.is_empty() {
                 bail!("install requires explicit trusted publisher trust keys (locus adapter trust add)");
             }
-            let manifest = locus_core::marketplace::fetch_manifest(&hit)?;
-            locus_core::marketplace::verify_community_manifest_with_keys(&manifest, &keys)?;
             let mut plan = dry_run::Plan::new(format!("locus adapter install {id}"));
             plan.write_file(
                 &adapters_dir.join(format!("{id}.json")),
                 Some(format!(
-                    "community adapter {} {} (executes publisher-supplied code)",
-                    manifest.entry.id, manifest.version
+                    "community adapter {id} (executes publisher-supplied code)"
                 )),
             )
             .needs_control()
-            .with("id", &manifest.entry.id)
-            .with("version", &manifest.version)
-            .with("tools", &manifest.entry.tools);
+            .with("id", &id)
+            .with("network", false)
+            .with("indexes", sources.len())
+            .note("--dry-run makes no network calls; the real run fetches the configured indexes and verifies the signed manifest");
             if !yes {
                 plan.note("the real run needs --yes after reviewing the executable envelope");
             }
@@ -619,7 +620,7 @@ pub(super) fn plan_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
                     };
                     plan.write_file(&file, Some(detail))
                         .with("name", name)
-                        .with("url", redact_url(&url))
+                        .with("url", locus_core::marketplace::redact_url_for_display(&url))
                         .note("--dry-run does not fetch the index; the real run fetches and verifies it");
                 }
                 AdapterIndexCmd::Remove { name } => {
@@ -723,59 +724,22 @@ pub(super) fn emit_binding_add_plan(plan: &dry_run::Plan, json: bool, toml: &str
     Ok(())
 }
 
-/// A URL safe to print in a plan: scheme, host, port and path only.
-/// Userinfo (`user:token@`), the query and the fragment can carry
-/// credentials, so they are dropped and marked.
-pub(super) fn redact_url(raw: &str) -> String {
-    let mut rest = raw;
-    let mut marked = false;
-    if let Some(i) = rest.find('#') {
-        rest = &rest[..i];
-        marked = true;
-    }
-    if let Some(i) = rest.find('?') {
-        rest = &rest[..i];
-        marked = true;
-    }
-    let (scheme, after) = match rest.find("://") {
-        Some(i) => (&rest[..i + 3], &rest[i + 3..]),
-        None => ("", rest),
-    };
-    let auth_end = after.find('/').unwrap_or(after.len());
-    let (authority, path) = after.split_at(auth_end);
-    let host = match authority.rfind('@') {
-        Some(i) => {
-            marked = true;
-            &authority[i + 1..]
-        }
-        None => authority,
-    };
-    let mut out = format!("{scheme}{host}{path}");
-    if marked {
-        out.push_str(" (redacted)");
-    }
-    out
-}
-
 #[cfg(test)]
-mod redact_tests {
-    use super::redact_url;
+mod plan_tests {
 
     #[test]
-    fn redact_url_strips_userinfo_query_and_fragment() {
-        assert_eq!(
-            redact_url("https://user:s3cret@idx.example.com:8443/a/index.json?token=t0k#frag"),
-            "https://idx.example.com:8443/a/index.json (redacted)"
+    fn plans_use_the_shared_marketplace_redactor() {
+        let shown = locus_core::marketplace::redact_url_for_display(
+            "https://idx.example.com:8443/a/index.json?token=s3cret",
         );
         assert_eq!(
-            redact_url("https://tok@idx.example.com/index.json"),
-            "https://idx.example.com/index.json (redacted)"
+            shown,
+            "https://idx.example.com:8443/a/index.json?<redacted>"
         );
-        assert_eq!(
-            redact_url("https://idx.example.com/index.json"),
-            "https://idx.example.com/index.json"
+        let src = include_str!("plans.rs");
+        assert!(
+            !src.contains(concat!("fn redact", "_url(")),
+            "plans.rs must not carry its own redactor"
         );
-        let r = redact_url("https://a:b@h/p?q=s3cret#s3cret");
-        assert!(!r.contains("s3cret") && !r.contains("a:b"), "{r}");
     }
 }

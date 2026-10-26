@@ -998,7 +998,7 @@ fn registry_index_add_dry_run_does_not_fetch_and_redacts_the_url() {
         !text.contains("PLANSECRET") && !text.contains("PLANFRAG"),
         "{text}"
     );
-    assert_eq!(v["url"], "https://127.0.0.1:9/index.json (redacted)", "{v}");
+    assert_eq!(v["url"], "https://127.0.0.1:9/index.json?<redacted>", "{v}");
     assert_eq!(v["name"], "probe");
     assert_eq!(env.snapshot(), before, "a plan wrote something");
     // Credentials or a fragment in the URL are refused before planning

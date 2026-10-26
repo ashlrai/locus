@@ -5565,6 +5565,15 @@ fn cmd_adapter(sub: AdapterCmd, json: bool, dry_run: bool) -> Result<()> {
         AdapterCmd::Search { query } => {
             let hits = community_search(query.as_deref())?;
             if json {
+                // Publisher manifest URLs may be signed; never echo the query.
+                let hits: Vec<_> = hits
+                    .into_iter()
+                    .map(|mut hit| {
+                        hit.manifest_url =
+                            locus_core::marketplace::redact_url_for_display(&hit.manifest_url);
+                        hit
+                    })
+                    .collect();
                 println!("{}", json!({"hits": hits}));
             } else {
                 for hit in hits {
@@ -5613,6 +5622,14 @@ fn cmd_adapter(sub: AdapterCmd, json: bool, dry_run: bool) -> Result<()> {
         }
         AdapterCmd::Uninstall { id, yes } => {
             require_local_control_boundary("locus adapter uninstall")?;
+            if json && !yes {
+                // `--json` never prompts (#188): refuse instead of writing a
+                // prompt into the JSON stream.
+                return Err(UsageError(
+                    "--json never prompts; pass --yes to confirm removing the adapter".into(),
+                )
+                .into());
+            }
             if !yes && !prompt_confirm("remove this installed community adapter?", false)? {
                 bail!("removal declined");
             }
@@ -6866,7 +6883,7 @@ fn prompt_value(
     validate: &dyn Fn(&str) -> std::result::Result<(), String>,
 ) -> Result<String> {
     use std::io::Write;
-    if !dry_run::interactive(false) {
+    if !dry_run::interactive(JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed)) {
         bail!("missing {label} — pass {flag_hint} (not an interactive terminal)");
     }
     loop {
@@ -6901,7 +6918,7 @@ fn prompt_value(
 /// Optional prompt: empty input → None. Non-interactive → None (flags rule).
 fn prompt_optional(label: &str) -> Result<Option<String>> {
     use std::io::Write;
-    if !dry_run::interactive(false) {
+    if !dry_run::interactive(JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed)) {
         return Ok(None);
     }
     print!("  {label}: ");
@@ -6919,7 +6936,7 @@ fn prompt_optional(label: &str) -> Result<Option<String>> {
 /// Y/n confirm. Non-interactive returns the default (never blocks scripts).
 fn prompt_confirm(question: &str, default_yes: bool) -> Result<bool> {
     use std::io::Write;
-    if !dry_run::interactive(false) {
+    if !dry_run::interactive(JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed)) {
         return Ok(default_yes);
     }
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
