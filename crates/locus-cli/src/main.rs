@@ -4864,6 +4864,8 @@ fn cmd_adapter_index(sub: AdapterIndexCmd, json: bool) -> Result<()> {
         AdapterIndexCmd::List => {}
         AdapterIndexCmd::Add { url, name } => {
             require_local_control_boundary("locus adapter registry index add")?;
+            // Refuse userinfo/fragments up front, without echoing the URL.
+            locus_core::marketplace::validate_index_url(&url)?;
             let index = locus_core::marketplace::fetch_index(&url)?;
             let name = name.unwrap_or(index.name);
             validate_name_component("index name", &name)?;
@@ -4882,10 +4884,19 @@ fn cmd_adapter_index(sub: AdapterIndexCmd, json: bool) -> Result<()> {
             locus_core::marketplace::save_index_sources(s.home(), &sources)?;
         }
     }
+    // The stored URL may carry a query (e.g. a signed URL); display only the
+    // redacted form. Plain URLs print byte-for-byte as before.
+    let shown: Vec<_> = sources
+        .iter()
+        .map(|source| locus_core::marketplace::IndexSource {
+            name: source.name.clone(),
+            url: locus_core::marketplace::redact_url_for_display(&source.url),
+        })
+        .collect();
     if json {
-        println!("{}", json!({"sources":sources}));
+        println!("{}", json!({"sources":shown}));
     } else {
-        for source in sources {
+        for source in shown {
             println!("{}  {}", source.name, source.url);
         }
     }

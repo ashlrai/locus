@@ -305,8 +305,10 @@ pub fn load_index_sources(home: &Path) -> Result<Vec<IndexSource>> {
     }
     let text = String::from_utf8(read_bounded_file(&path)?)
         .map_err(|_| LocusError::msg("invalid community metadata text"))?;
+    // The TOML parser error quotes the offending source line, which can hold a
+    // stored index URL query; keep the error generic so nothing leaks.
     let file: File = toml::from_str(&text)
-        .map_err(|e| LocusError::msg(format!("parse {}: {e}", path.display())))?;
+        .map_err(|_| LocusError::msg(format!("parse {}: invalid TOML", path.display())))?;
     Ok(file.source)
 }
 
@@ -321,6 +323,49 @@ pub fn save_index_sources(home: &Path, sources: &[IndexSource]) -> Result<()> {
     let path = home.join(INDEXES_FILE);
     atomic_metadata_write(&path, text.as_bytes())?;
     Ok(())
+}
+
+/// Display-safe form of a marketplace/index URL, for human output, JSON
+/// output, logs and error messages.
+///
+/// Plain URLs (no userinfo, query or fragment) are returned byte-for-byte.
+/// Otherwise the result keeps only scheme, host, port and path, appends
+/// `?<redacted>` when a query was present, and drops userinfo and fragment.
+/// Unparseable input is never echoed. Reusable by any caller that prints an
+/// index URL (for example registry dry-run output).
+pub fn redact_url_for_display(raw: &str) -> String {
+    let Ok(parsed) = Url::parse(raw) else {
+        return "<invalid URL>".to_string();
+    };
+    if parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+    {
+        return raw.to_string();
+    }
+    let mut out = format!("{}://", parsed.scheme());
+    match parsed.host() {
+        Some(Host::Ipv6(ip)) => out.push_str(&format!("[{ip}]")),
+        Some(host) => out.push_str(&host.to_string()),
+        None => {}
+    }
+    if let Some(port) = parsed.port() {
+        out.push_str(&format!(":{port}"));
+    }
+    out.push_str(parsed.path());
+    if parsed.query().is_some() {
+        out.push_str("?<redacted>");
+    }
+    out
+}
+
+/// Validate an index URL before anything is fetched or stored: refuses
+/// userinfo (`user:pass@`), fragments, non-HTTPS non-loopback URLs. Errors
+/// never echo the URL. Query strings are allowed (signed index URLs need
+/// them) but must only ever be shown via [`redact_url_for_display`].
+pub fn validate_index_url(raw: &str) -> Result<()> {
+    marketplace_url(raw).map(|_| ())
 }
 
 /// Parse the URL rather than accepting host prefixes or userinfo lookalikes.
@@ -880,6 +925,37 @@ mod tests {
         assert!(uninstall_adapter(&home, "customfigma").unwrap());
         assert!(!uninstall_adapter(&home, "customfigma").unwrap());
         assert!(load_installed(&home).unwrap().is_empty());
+    }
+
+    #[test]
+    fn redact_url_for_display_contract() {
+        let plain = "https://example.com:8443/a/index.json";
+        assert_eq!(redact_url_for_display(plain), plain);
+        assert_eq!(
+            redact_url_for_display("https://example.com/i.json?sig=SECRETSIG&x=1"),
+            "https://example.com/i.json?<redacted>"
+        );
+        let r = redact_url_for_display("https://u:SECRETPW@example.com:444/p?t=SECRETTOK#frag");
+        assert_eq!(r, "https://example.com:444/p?<redacted>");
+        assert!(!r.contains("SECRET"));
+        assert_eq!(
+            redact_url_for_display("http://[::1]:9/i.json?k=SECRETK"),
+            "http://[::1]:9/i.json?<redacted>"
+        );
+        assert_eq!(redact_url_for_display("not a url SECRET"), "<invalid URL>");
+    }
+
+    #[test]
+    fn validate_index_url_refuses_userinfo_without_echo() {
+        for raw in [
+            "https://user:SECRETPW@example.com/index.json",
+            "https://SECRETUSER@example.com/index.json",
+        ] {
+            let err = validate_index_url(raw).unwrap_err().to_string();
+            assert!(!err.contains("SECRET"), "error leaked: {err}");
+            assert!(err.contains("credentials"));
+        }
+        assert!(validate_index_url("https://example.com/i.json?sig=x").is_ok());
     }
 
     #[test]

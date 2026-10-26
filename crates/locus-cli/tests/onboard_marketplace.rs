@@ -384,3 +384,72 @@ fn binding_from_adapter_captures_verified_envelope_and_requires_qualified_scope(
         "onboarding must not pin"
     );
 }
+
+#[test]
+fn index_url_userinfo_refused_without_echo() {
+    let (home, cwd) = init_store();
+    for url in [
+        "https://user:SECRETPW@example.com/index.json",
+        "https://SECRETUSER@example.com/index.json",
+    ] {
+        for json in [false, true] {
+            let mut args = vec!["adapter", "registry", "index", "add", url];
+            if json {
+                args.push("--json");
+            }
+            let out = locus(home.path(), cwd.path(), &args);
+            assert!(!out.status.success(), "userinfo URL must be refused");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(stderr.contains("credentials"), "got: {stderr:?}");
+            assert!(!stderr.contains("SECRET"), "stderr leaked: {stderr:?}");
+            assert!(!stdout.contains("SECRET"), "stdout leaked: {stdout:?}");
+        }
+    }
+    assert!(!home.path().join("adapter-indexes.toml").exists());
+}
+
+#[test]
+fn index_url_query_is_redacted_in_list_output() {
+    let (home, cwd) = init_store();
+    let (base, listener) = serve_index();
+    run_server(listener, base.clone(), 2);
+    let index_url = format!("{base}/index.json?sig=SECRETSIG&exp=1");
+    let out = locus(
+        home.path(),
+        cwd.path(),
+        &[
+            "adapter", "registry", "index", "add", &index_url, "--name", "signed",
+        ],
+    );
+    assert!(out.status.success(), "index add failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("SECRET"), "add output leaked: {stdout:?}");
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("SECRET"));
+
+    let expected = format!("{base}/index.json?<redacted>");
+    let out = locus(
+        home.path(),
+        cwd.path(),
+        &["adapter", "registry", "index", "list"],
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("SECRET"), "human list leaked: {stdout:?}");
+    assert!(stdout.contains(&expected), "got: {stdout:?}");
+
+    let out = locus(
+        home.path(),
+        cwd.path(),
+        &["adapter", "registry", "index", "list", "--json"],
+    );
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("SECRET"), "json list leaked: {stdout:?}");
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["sources"][0]["url"], expected.as_str());
+
+    // Stored config keeps the full URL so signed fetches still work.
+    let stored = std::fs::read_to_string(home.path().join("adapter-indexes.toml")).unwrap();
+    assert!(stored.contains("sig=SECRETSIG"));
+}
