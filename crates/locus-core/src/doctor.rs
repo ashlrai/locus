@@ -583,6 +583,8 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     }
     // Why the pin's authority anchor is gone, when Locus can tell (e.g. the
     // pinning shell exited or exec'd into another program). Diagnostic only.
+    // Alias for recovery hints only (the recipe drops anything not alias-shaped).
+    let active_alias = active.as_ref().map(|sess| sess.binding_alias.clone());
     let anchor_loss = if runtime.authority_anchor_ok {
         None
     } else {
@@ -666,8 +668,8 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                     "anchor_unavailable",
                     format!(
                         "session authority anchor unavailable ({cause}) — human re-pin \
-                         required; if `locus leave` also fails, clear the wedged pin with \
-                         `locus leave --force`"
+                         required: {}",
+                        crate::recovery::dead_broker_recovery(active_alias.as_deref())
                     ),
                 ));
             }
@@ -1598,7 +1600,7 @@ mod tests {
     }
 
     #[test]
-    fn doctor_names_force_leave_when_anchor_unavailable() {
+    fn doctor_names_enter_first_when_anchor_unavailable() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         store
@@ -1626,7 +1628,9 @@ mod tests {
             .expect("anchor_unavailable finding");
         assert_eq!(finding.severity, IssueSeverity::Warn);
         assert!(
-            finding.message.contains("locus leave --force"),
+            finding
+                .message
+                .contains("locus enter acme || { locus leave --force && locus enter acme; }"),
             "recovery hint missing: {}",
             finding.message
         );

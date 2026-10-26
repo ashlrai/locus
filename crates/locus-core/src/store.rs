@@ -1795,6 +1795,34 @@ impl Store {
         }
     }
 
+    /// `locus autopin suggest --apply`: write the current suggestion as
+    /// `default_binding` in the workspace `.locus.toml`.
+    ///
+    /// Requires the operator control capability (same gate as other control
+    /// actions), so an agent cannot widen its own default. The suggestion is
+    /// recomputed here from the live remote, never from a cached report. The
+    /// write is atomic: a `create_new` + `O_NOFOLLOW` temp file in the same
+    /// directory, then a rename; a symlinked `.locus.toml` is refused.
+    /// Returns the report and the file written.
+    pub fn autopin_apply_suggestion(
+        &self,
+        cwd: &Path,
+    ) -> Result<(crate::autopin_suggest::SuggestReport, PathBuf)> {
+        authority_anchor::authorize_control(&self.home)?;
+        let report = crate::autopin_suggest::suggest(&self.home, cwd)?;
+        let Some(alias) = report.suggestion.clone() else {
+            return Err(LocusError::msg(format!(
+                "no autopin suggestion to apply ({}); nothing was written",
+                report.reason
+            )));
+        };
+        // Must name a real binding; never write a dangling default.
+        self.load_binding(&alias)?;
+        let file = apply_target(cwd)?;
+        write_default_binding(&file, &alias)?;
+        Ok((report, file))
+    }
+
     pub fn leave(&self) -> Result<Option<Session>> {
         authority_anchor::authorize_control(&self.home)?;
         // Always operates on active.json — not LOCUS_SESSION_ID overrides.
@@ -3339,6 +3367,130 @@ pub struct ProviderView {
     pub repos: Vec<String>,
 }
 
+/// Which `.locus.toml` `autopin suggest --apply` may write.
+///
+/// The root is the git toplevel of `cwd`, or `cwd` itself outside a repo.
+/// The nearest `.locus.toml` is used only when it lives inside that root.
+/// When the nearest one is above the root (a parent shared by other repos),
+/// apply refuses rather than writing it or creating a new file at the root:
+/// a new file would shadow the parent's policy (for example `require_pin`)
+/// for this repo, so the operator has to make that choice by hand.
+fn apply_target(cwd: &Path) -> Result<PathBuf> {
+    let root = git_toplevel(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let root_c = fs::canonicalize(&root).unwrap_or(root.clone());
+    match find_workspace(cwd)? {
+        None => Ok(root.join(".locus.toml")),
+        Some((path, _)) => {
+            let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+            let dir_c = fs::canonicalize(&dir).unwrap_or(dir);
+            if dir_c.starts_with(&root_c) {
+                Ok(path)
+            } else {
+                Err(LocusError::msg(format!(
+                    "nearest .locus.toml is {}, outside this repo ({}); refusing to change a \
+                     shared parent policy. Create {} by hand to scope a default to this repo; \
+                     nothing was written",
+                    path.display(),
+                    root.display(),
+                    root.join(".locus.toml").display()
+                )))
+            }
+        }
+    }
+}
+
+fn git_toplevel(cwd: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then(|| PathBuf::from(s))
+}
+
+/// Read an existing `.locus.toml` through one `O_NOFOLLOW` fd, checked with
+/// `fstat` to be a regular file, so a symlink swapped in can never be read.
+/// `Ok(None)` when absent.
+fn read_locus_toml_nofollow(file: &Path) -> Result<Option<String>> {
+    use std::io::Read;
+    let mut o = fs::OpenOptions::new();
+    o.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    }
+    let mut f = match o.open(file) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(LocusError::msg(format!(
+                "{} is a symlink; refusing to write through it",
+                file.display()
+            )))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if !f.metadata()?.is_file() {
+        return Err(LocusError::msg(format!(
+            "{} is not a regular file; refusing to write it",
+            file.display()
+        )));
+    }
+    let mut text = String::new();
+    f.read_to_string(&mut text)?;
+    Ok(Some(text))
+}
+
+/// Atomically set `default_binding` in a `.locus.toml`, keeping other keys.
+fn write_default_binding(file: &Path, alias: &str) -> Result<()> {
+    use std::io::Write;
+    let mut table = match read_locus_toml_nofollow(file)? {
+        Some(text) => toml::from_str::<toml::Table>(&text)
+            .map_err(|e| LocusError::msg(format!("{}: {e}", file.display())))?,
+        None => {
+            let mut t = toml::Table::new();
+            t.insert("version".into(), toml::Value::Integer(1));
+            t
+        }
+    };
+    table.insert(
+        "default_binding".into(),
+        toml::Value::String(alias.to_string()),
+    );
+    let text = toml::to_string_pretty(&table)
+        .map_err(|e| LocusError::msg(format!("serialize .locus.toml: {e}")))?;
+    let dir = file
+        .parent()
+        .ok_or_else(|| LocusError::msg("workspace file has no parent"))?;
+    let mut nonce = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let tmp = dir.join(format!(".locus.toml.{}.tmp", hex::encode(nonce)));
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o644).custom_flags(libc::O_NOFOLLOW);
+    }
+    let res = (|| -> std::io::Result<()> {
+        let mut f = o.open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, file)
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res.map_err(Into::into)
+}
+
 pub fn locus_home() -> Result<PathBuf> {
     if let Ok(h) = std::env::var("LOCUS_HOME") {
         return Ok(PathBuf::from(h));
@@ -3378,6 +3530,31 @@ fn write_secret_file_new(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn locus_toml_read_refuses_symlink_via_eloop() {
+        let d = tempfile::tempdir().unwrap();
+        let victim = d.path().join("victim.toml");
+        std::fs::write(&victim, "secret = \"x\"\n").unwrap();
+        let link = d.path().join(".locus.toml");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let err = super::read_locus_toml_nofollow(&link)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink"), "{err}");
+        let err = super::write_default_binding(&link, "acme")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symlink"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "secret = \"x\"\n"
+        );
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
 
     #[cfg(unix)]
     #[test]
@@ -3423,6 +3600,15 @@ mod tests {
             .unwrap()
             .file_type()
             .is_symlink());
+    }
+
+    #[test]
+    fn locus_toml_read_refuses_non_regular_and_reports_absent() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join(".locus.toml");
+        assert!(super::read_locus_toml_nofollow(&dir).unwrap().is_none());
+        std::fs::create_dir(&dir).unwrap();
+        assert!(super::read_locus_toml_nofollow(&dir).is_err());
     }
 
     #[cfg(unix)]
