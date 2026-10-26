@@ -230,6 +230,53 @@ pub(crate) fn existing_store() -> Result<Store> {
     })
 }
 
+/// Validate a historical alias without Store::load_binding's migration lock
+/// (opening that lock can create a file). This is an advisory snapshot only;
+/// the real apply still loads under the lock and authenticates control.
+pub(crate) fn validate_binding_alias(store: &Store, alias: &str) -> Result<()> {
+    locus_core::validate_name_component("alias", alias)?;
+    let dir = store.bindings_dir();
+    let path = dir.join(format!("{alias}.toml"));
+    if !path.exists() {
+        return Err(locus_core::LocusError::BindingNotFound(alias.into()).into());
+    }
+    let canonical = std::fs::canonicalize(&path)?;
+    if !canonical.starts_with(std::fs::canonicalize(&dir)?) {
+        return Err(anyhow!(
+            "binding '{alias}' resolves outside the bindings directory"
+        ));
+    }
+    let raw = std::fs::read_to_string(canonical)
+        .map_err(|_| anyhow!("binding '{alias}' is unreadable"))?;
+    // Parser and validation errors may include credential text. A preview
+    // reports only the alias, never the contents of a malformed binding.
+    let binding = locus_core::Binding::parse_toml(&raw)
+        .map_err(|_| anyhow!("binding '{alias}' is malformed"))?;
+    binding
+        .validate()
+        .map_err(|_| anyhow!("binding '{alias}' has invalid configuration"))?;
+    Ok(())
+}
+
+/// Existing filenames are sufficient for guided alias collision hints. Unlike
+/// Store::list_bindings, this never creates a migration lock or parses secrets.
+pub(crate) fn binding_aliases(store: &Store) -> Result<Vec<String>> {
+    let mut aliases = Vec::new();
+    for entry in std::fs::read_dir(store.bindings_dir())? {
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+            continue;
+        }
+        if let Some(alias) = path.file_stem().and_then(|s| s.to_str()) {
+            if locus_core::validate_name_component("alias", alias).is_ok() {
+                aliases.push(alias.to_owned());
+            }
+        }
+    }
+    aliases.sort();
+    Ok(aliases)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

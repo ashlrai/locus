@@ -7,6 +7,77 @@
 
 use super::*;
 
+pub(super) fn plan_autopin_suggest(json: bool) -> Result<()> {
+    let s = dry_run::existing_store()?;
+    let here = cwd();
+    let report = locus_core::autopin_suggest::suggest(s.home(), &here)?;
+    let alias = report.suggestion.as_deref().ok_or_else(|| {
+        anyhow!(
+            "no autopin suggestion to apply ({}); --apply would refuse",
+            report.reason
+        )
+    })?;
+    // Historical pins can outlive a binding; apply refuses a dangling default.
+    dry_run::validate_binding_alias(&s, alias)?;
+    let target = autopin_apply_target(&here)?;
+    let mut plan = dry_run::Plan::new("locus autopin suggest --apply");
+    plan.write_file(&target, Some(format!("default_binding = \"{alias}\"")))
+        .needs_control()
+        .with("suggestion", alias)
+        .with("report", &report);
+    plan.emit(json)
+}
+
+/// Read-only counterpart of Store's private autopin apply target checks.
+/// Keep the repo-root and shared-parent rules in sync with the write path.
+fn autopin_apply_target(here: &Path) -> Result<PathBuf> {
+    let root = std::process::Command::new("git")
+        .arg("-C")
+        .arg(here)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| here.to_path_buf());
+    let target = match find_workspace(here)? {
+        None => root.join(".locus.toml"),
+        Some((path, _)) => {
+            let dir = path.parent().context("workspace file has no parent")?;
+            let root_c = std::fs::canonicalize(&root).unwrap_or(root.clone());
+            let dir_c = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+            if !dir_c.starts_with(root_c) {
+                bail!(
+                    "nearest .locus.toml is {}, outside this repo ({}); refusing to change a shared parent policy; nothing was written",
+                    path.display(), root.display()
+                );
+            }
+            path
+        }
+    };
+    // A plan must not offer to replace a symlink that the atomic writer refuses.
+    match std::fs::symlink_metadata(&target) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            bail!(
+                "{} is a symlink; refusing to write through it",
+                target.display()
+            );
+        }
+        Ok(meta) if !meta.is_file() => {
+            bail!(
+                "{} is not a regular file; refusing to write it",
+                target.display()
+            );
+        }
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(target)
+}
+
 /// The control-capability step of init/quickstart, planned without minting.
 /// Mirrors [`bootstrap_control_capability`]; never reads or prints a value.
 pub(super) fn plan_capability_bootstrap(plan: &mut dry_run::Plan, home: &Path, persist: bool) {
@@ -535,6 +606,9 @@ pub(super) fn plan_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
             }
             let manifest = locus_core::marketplace::fetch_manifest(&hit)?;
             locus_core::marketplace::verify_community_manifest_with_keys(&manifest, &keys)?;
+            // Installation reads the ledger before writing either file. Do not
+            // promise a successful install when that ledger cannot be read.
+            locus_core::marketplace::load_installed(home)?;
             let mut plan = dry_run::Plan::new(format!("locus adapter install {id}"));
             plan.write_file(
                 &adapters_dir.join(format!("{id}.json")),
@@ -542,6 +616,10 @@ pub(super) fn plan_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
                     "community adapter {} {} (executes publisher-supplied code)",
                     manifest.entry.id, manifest.version
                 )),
+            )
+            .write_file(
+                &adapters_dir.join(locus_core::marketplace::INSTALLED_FILE),
+                Some(format!("record installed adapter {id}")),
             )
             .needs_control()
             .with("id", &manifest.entry.id)
@@ -553,14 +631,20 @@ pub(super) fn plan_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
             plan.emit(json)
         }
         AdapterCmd::Uninstall { id, yes } => {
-            let installed = locus_core::marketplace::installed_manifests(home)
+            // Uninstall acts on ledger membership even if the manifest is
+            // missing, corrupt, or no longer trusted. Match that recovery path.
+            let installed = locus_core::marketplace::load_installed(home)?
                 .into_iter()
-                .any(|(_, m)| m.entry.id == id);
+                .any(|record| record.id == id);
             let mut plan = dry_run::Plan::new(format!("locus adapter uninstall {id}"));
             if installed {
-                plan.delete_file(
-                    &adapters_dir.join(format!("{id}.json")),
-                    Some(format!("community adapter {id}")),
+                let manifest = adapters_dir.join(format!("{id}.json"));
+                if manifest.exists() {
+                    plan.delete_file(&manifest, Some(format!("community adapter {id}")));
+                }
+                plan.write_file(
+                    &adapters_dir.join(locus_core::marketplace::INSTALLED_FILE),
+                    Some(format!("remove installed adapter {id} from ledger")),
                 );
             } else {
                 plan.note(format!("{id} is not installed — nothing to remove"));

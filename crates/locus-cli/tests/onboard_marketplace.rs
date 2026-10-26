@@ -3,8 +3,8 @@
 //! Offline: the marketplace index is served by a tiny loopback HTTP server
 //! (plain HTTP is allowed for exact 127.0.0.1 and [::1] only). Install's positive path is
 //! covered by `locus-core` unit tests; here we assert the CLI contract:
-//! NDJSON detect events, index add/list/remove, search output, and the
-//! fail-closed install behavior without trust keys.
+//! NDJSON detect events, index add/list/remove, search output, fail-closed
+//! trust checks, and complete install/uninstall dry-run plans with no writes.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -281,15 +281,16 @@ fn onboard_yes_never_accepts_detected_candidates_without_reviewed_plan() {
     assert!(!home.path().join("sessions/active.json").exists());
 }
 
-#[test]
-fn binding_from_adapter_captures_verified_envelope_and_requires_qualified_scope() {
+fn signed_fixture(
+    home: &std::path::Path,
+) -> (
+    locus_core::marketplace::CommunityAdapterManifest,
+    locus_core::RegistryTrustKey,
+) {
     use locus_core::adapter_registry::{
         sign_entry_material, AdapterManifestEntry, RegistryTrustKey,
     };
-    use locus_core::marketplace::{
-        install_adapter, CommunityAdapterManifest, COMMUNITY_MANIFEST_VERSION,
-    };
-    let (home, cwd) = init_store();
+    use locus_core::marketplace::{CommunityAdapterManifest, COMMUNITY_MANIFEST_VERSION};
     let secret = "09".repeat(32); // synthetic fixture material only
     let key = RegistryTrustKey::hmac_sha256("fixture", &secret);
     let mut manifest = CommunityAdapterManifest {
@@ -316,8 +317,16 @@ fn binding_from_adapter_captures_verified_envelope_and_requires_qualified_scope(
     };
     manifest.entry.signature =
         Some(sign_entry_material(&manifest.signing_material(), &key).unwrap());
-    std::fs::create_dir_all(home.path().join("trust")).unwrap();
-    std::fs::write(home.path().join("trust/adapter-keys.toml"), format!("version = 1\n[[keys]]\nid = 'fixture'\nscheme = 'hmac-sha256'\nsecret_hex = '{secret}'\n")).unwrap();
+    std::fs::create_dir_all(home.join("trust")).unwrap();
+    std::fs::write(home.join("trust/adapter-keys.toml"), format!("version = 1\n[[keys]]\nid = 'fixture'\nscheme = 'hmac-sha256'\nsecret_hex = '{secret}'\n")).unwrap();
+    (manifest, key)
+}
+
+#[test]
+fn binding_from_adapter_captures_verified_envelope_and_requires_qualified_scope() {
+    use locus_core::marketplace::install_adapter;
+    let (home, cwd) = init_store();
+    let (manifest, key) = signed_fixture(home.path());
     install_adapter(home.path(), &manifest, &[key], true).unwrap();
     let out = locus(
         home.path(),
@@ -469,5 +478,263 @@ fn index_add_refuses_non_exact_loopback_http() {
         assert!(!out.status.success(), "{url} must be refused");
         let stderr = String::from_utf8_lossy(&out.stderr);
         assert!(stderr.contains("loopback HTTP"), "got: {stderr:?}");
+    }
+}
+
+/// An initialized store without a live broker: dry runs must not create one.
+/// The entire fixture, including runtime, is checked for file and metadata changes.
+struct DryAdapterEnv {
+    root: tempfile::TempDir,
+}
+
+#[derive(PartialEq, Eq)]
+struct SnapshotEntry {
+    bytes: Vec<u8>,
+    kind: std::fs::FileType,
+    modified: std::time::SystemTime,
+    permissions: std::fs::Permissions,
+}
+
+impl DryAdapterEnv {
+    fn new() -> Self {
+        let root = tempfile::tempdir().unwrap();
+        locus_core::Store::open(root.path().join("locus")).unwrap();
+        std::fs::create_dir(root.path().join("user")).unwrap();
+        std::fs::create_dir(root.path().join("project")).unwrap();
+        Self { root }
+    }
+
+    fn home(&self) -> std::path::PathBuf {
+        self.root.path().join("locus").canonicalize().unwrap()
+    }
+
+    fn snapshot(&self) -> std::collections::BTreeMap<std::path::PathBuf, SnapshotEntry> {
+        fn visit(
+            root: &std::path::Path,
+            path: &std::path::Path,
+            out: &mut std::collections::BTreeMap<std::path::PathBuf, SnapshotEntry>,
+        ) {
+            let meta = std::fs::symlink_metadata(path).unwrap();
+            let bytes = if meta.is_file() {
+                std::fs::read(path).unwrap()
+            } else if meta.is_symlink() {
+                std::fs::read_link(path)
+                    .unwrap()
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .to_vec()
+            } else {
+                Vec::new()
+            };
+            out.insert(
+                path.strip_prefix(root).unwrap().to_path_buf(),
+                SnapshotEntry {
+                    bytes,
+                    kind: meta.file_type(),
+                    modified: meta.modified().unwrap(),
+                    permissions: meta.permissions(),
+                },
+            );
+            if meta.is_dir() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    visit(root, &entry.unwrap().path(), out);
+                }
+            }
+        }
+        let mut out = std::collections::BTreeMap::new();
+        visit(self.root.path(), self.root.path(), &mut out);
+        out
+    }
+
+    fn dry(&self, command: &str, json: bool) -> std::process::Output {
+        let before = self.snapshot();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
+        cmd.env_clear()
+            .env("HOME", self.root.path().join("user"))
+            .env("LOCUS_HOME", self.home())
+            .env("NO_COLOR", "1")
+            .current_dir(self.root.path().join("project"))
+            .args(["adapter", command, "linear", "--dry-run"]);
+        if json {
+            cmd.arg("--json");
+        }
+        let out = cmd.output().unwrap();
+        // Do not include snapshots in failure output: they contain synthetic keys.
+        assert!(
+            before == self.snapshot(),
+            "adapter {command} dry run changed the filesystem"
+        );
+        out
+    }
+}
+
+struct ManifestServer {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ManifestServer {
+    fn new(
+        home: &std::path::Path,
+        manifest: &locus_core::marketplace::CommunityAdapterManifest,
+    ) -> Self {
+        use locus_core::marketplace::{save_index_sources, IndexSource};
+        let (base, listener) = serve_index();
+        listener.set_nonblocking(true).unwrap();
+        let mut index: serde_json::Value = serde_json::from_str(&index_json(&base)).unwrap();
+        index["adapters"][0]["tools"] = serde_json::json!(manifest.entry.tools);
+        let index = index.to_string();
+        let manifest = serde_json::to_string(manifest).unwrap();
+        save_index_sources(
+            home,
+            &[IndexSource {
+                name: "fixture".into(),
+                url: format!("{base}/index.json"),
+            }],
+        )
+        .unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let done = stop.clone();
+        let thread = std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                            .unwrap();
+                        let mut request = [0; 4096];
+                        let n = stream.read(&mut request).unwrap_or(0);
+                        let body =
+                            if String::from_utf8_lossy(&request[..n]).contains("GET /index.json") {
+                                &index
+                            } else {
+                                &manifest
+                            };
+                        let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10))
+                    }
+                    Err(e) => panic!("fixture listener failed: {e}"),
+                }
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for ManifestServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+fn adapter_plan(out: &std::process::Output) -> serde_json::Value {
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["schema"], "locus.plan.v1");
+    assert_eq!(plan["dry_run"], true);
+    assert_eq!(plan["requires_control_capability"], true);
+    assert_eq!(plan["control_capability_in_env"], false);
+    plan
+}
+
+fn assert_adapter_change(plan: &serde_json::Value, action: &str, path: &std::path::Path) {
+    assert!(
+        plan["changes"].as_array().unwrap().iter().any(|change| {
+            change["action"] == action && change["target"] == path.to_string_lossy().as_ref()
+        }),
+        "missing {action} for {}",
+        path.display()
+    );
+}
+
+#[test]
+fn adapter_install_dry_run_plans_new_and_overwritten_manifest_and_ledger_without_writes() {
+    let env = DryAdapterEnv::new();
+    let (manifest, key) = signed_fixture(&env.home());
+    let _server = ManifestServer::new(&env.home(), &manifest);
+    for action in ["create", "overwrite"] {
+        let plan = adapter_plan(&env.dry("install", true));
+        assert_adapter_change(&plan, action, &env.home().join("adapters/linear.json"));
+        assert_adapter_change(&plan, action, &env.home().join("adapters/installed.toml"));
+        assert_eq!(plan["changes"].as_array().unwrap().len(), 2);
+        let human = env.dry("install", false);
+        assert!(human.status.success());
+        assert!(String::from_utf8_lossy(&human.stdout).contains("nothing written"));
+        locus_core::marketplace::install_adapter(
+            &env.home(),
+            &manifest,
+            std::slice::from_ref(&key),
+            true,
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn adapter_uninstall_dry_run_preserves_installed_corrupt_and_missing_manifests() {
+    let env = DryAdapterEnv::new();
+    let (manifest, key) = signed_fixture(&env.home());
+    locus_core::marketplace::install_adapter(&env.home(), &manifest, &[key], true).unwrap();
+    let manifest_path = env.home().join("adapters/linear.json");
+    for state in ["valid", "corrupt", "missing"] {
+        match state {
+            "corrupt" => std::fs::write(&manifest_path, "invalid envelope").unwrap(),
+            "missing" => std::fs::remove_file(&manifest_path).unwrap(),
+            _ => {}
+        }
+        let plan = adapter_plan(&env.dry("uninstall", true));
+        assert_adapter_change(
+            &plan,
+            "overwrite",
+            &env.home().join("adapters/installed.toml"),
+        );
+        if state != "missing" {
+            assert_adapter_change(&plan, "delete", &manifest_path);
+        }
+        assert_eq!(
+            plan["changes"].as_array().unwrap().len(),
+            if state == "missing" { 1 } else { 2 }
+        );
+        assert!(env.dry("uninstall", false).status.success());
+    }
+}
+
+#[test]
+fn adapter_dry_runs_refuse_malformed_installed_ledger_without_writes() {
+    let env = DryAdapterEnv::new();
+    let (manifest, _) = signed_fixture(&env.home());
+    let _server = ManifestServer::new(&env.home(), &manifest);
+    std::fs::create_dir(env.home().join("adapters")).unwrap();
+    std::fs::write(env.home().join("adapters/installed.toml"), "[invalid").unwrap();
+    for command in ["install", "uninstall"] {
+        for json in [true, false] {
+            let out = env.dry(command, json);
+            assert!(!out.status.success(), "malformed ledger must fail closed");
+            assert!(!String::from_utf8_lossy(&out.stdout).contains("locus.plan.v1"));
+        }
+    }
+}
+
+#[test]
+fn adapter_install_dry_run_refuses_tampered_signature_without_writes() {
+    let env = DryAdapterEnv::new();
+    let (mut manifest, _) = signed_fixture(&env.home());
+    manifest.version = "99.0.0".into();
+    let _server = ManifestServer::new(&env.home(), &manifest);
+    for json in [true, false] {
+        let out = env.dry("install", json);
+        assert!(!out.status.success(), "tampered envelope must fail closed");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("signature"));
     }
 }
