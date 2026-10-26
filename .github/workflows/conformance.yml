@@ -8,6 +8,7 @@ on:
   pull_request:
     branches: [main, master]
     types: [opened, synchronize, reopened, ready_for_review]
+  merge_group:
   workflow_dispatch:
 
 # Cancel superseded PR runs; never cancel main/master.
