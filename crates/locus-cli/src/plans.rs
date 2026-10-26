@@ -165,7 +165,8 @@ pub(super) fn plan_pin(
     let r = s
         .resolve_pin(&alias, &cwd, force, namespaces, requested_ttl)
         .map_err(|e| with_alias_suggestions(&s, e))?;
-    let current = s.active_session().ok().flatten();
+    // Pin replaces active.json, never a LOCUS_SESSION_ID session.
+    let current = s.active_pin_session().ok().flatten();
     let ttl_capped = requested_ttl.is_some_and(|req| r.ttl < req);
 
     let mut plan = dry_run::Plan::new(format!("{command} {}", r.binding.alias));
@@ -225,7 +226,7 @@ pub(super) fn plan_leave(force: bool, json: bool) -> Result<()> {
     });
     if path.exists() {
         // A wedged session may not parse or verify; --force still clears it.
-        match s.active_session() {
+        match s.active_pin_session() {
             Ok(Some(cur)) => {
                 plan.change(
                     "unpin",

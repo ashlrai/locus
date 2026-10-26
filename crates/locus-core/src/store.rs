@@ -1818,6 +1818,13 @@ impl Store {
         ))
     }
 
+    /// The operator pin in `sessions/active.json`, ignoring any
+    /// `LOCUS_SESSION_ID` override: the session `leave` and `pin` act on.
+    /// Read-only (for `--dry-run` plans).
+    pub fn active_pin_session(&self) -> Result<Option<Session>> {
+        self.read_active_session_file()
+    }
+
     /// Read `sessions/active.json` only (ignores `LOCUS_SESSION_ID`).
     fn read_active_session_file(&self) -> Result<Option<Session>> {
         let path = self.active_session_path();
