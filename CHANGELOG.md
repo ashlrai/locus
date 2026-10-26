@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `locus exec` no longer waits on a 10 ms broker accept poll, and the healthy path checks the seal and the broker once before the executor grant instead of three times. The audit record, `--expect` refusal, ambient scrub, and executor capability gate are unchanged. On the measured host, `locus exec -- true` with a live pin moved from a median of 0.051 s to 0.004 s (21 runs, first dropped, release build). Details: [docs/exec-latency.md](docs/exec-latency.md). `cargo bench -p locus-core --bench exec_authority` prints the in-process pin-check median and does not gate CI.
+
 ### Security
 
 - **Session file writes no longer follow a symlink at `active.json`.** `write_session_file` writes a fresh `create_new` temp file and renames it over the target, so a symlink planted at `sessions/active.json` is replaced instead of written through (shipped with the 0.5.1 stale-pin fix, #156).

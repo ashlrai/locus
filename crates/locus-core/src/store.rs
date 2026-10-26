@@ -1754,13 +1754,19 @@ impl Store {
     }
 
     pub fn require_active(&self) -> Result<Session> {
+        Ok(self.require_active_resolved()?.session)
+    }
+
+    /// [`Store::require_active`] plus the canonical session path, so a caller
+    /// can freeze that file without resolving and validating the pin again.
+    pub fn require_active_resolved(&self) -> Result<ResolvedSession> {
         let key = self.seal_key()?;
         match self.resolve_active_session()? {
             None => Err(LocusError::NotPinned),
             Some(resolved) => {
                 resolved.session.verify(&key)?;
                 self.validate_session_authority(&resolved.session)?;
-                Ok(resolved.session)
+                Ok(resolved)
             }
         }
     }
@@ -2241,6 +2247,21 @@ impl Store {
     /// [`Store::verify_runtime`] against an explicit resolved session (MCP
     /// tenant grants) — identical checks, no `active.json` involvement.
     pub fn verify_runtime_for(&self, resolved: &ResolvedSession) -> Result<RuntimeDrift> {
+        self.verify_runtime_inner(resolved, false, None)
+    }
+
+    /// Seal and broker checks, optionally reusing a validation and binding the
+    /// caller just produced for this same session value.
+    ///
+    /// `authority_already_validated` skips the broker round trip. It does not
+    /// skip the seal HMAC. `known_binding` is used only when its alias or id
+    /// is the session's binding; otherwise the file is loaded again.
+    fn verify_runtime_inner(
+        &self,
+        resolved: &ResolvedSession,
+        authority_already_validated: bool,
+        known_binding: Option<&Binding>,
+    ) -> Result<RuntimeDrift> {
         let key = self.seal_key()?;
         let mut drift = empty_runtime_drift();
         let session = resolved.session.clone();
@@ -2286,64 +2307,82 @@ impl Store {
             drift.issues.push("session_frozen".into());
         }
 
-        match self.validate_session_authority(&session) {
-            Ok(_) => drift.authority_anchor_ok = true,
-            Err(LocusError::AuthorityAnchorMismatch) => {
-                drift.issues.push("authority_anchor_mismatch".into())
+        if authority_already_validated {
+            drift.authority_anchor_ok = true;
+        } else {
+            match self.validate_session_authority(&session) {
+                Ok(_) => drift.authority_anchor_ok = true,
+                Err(LocusError::AuthorityAnchorMismatch) => {
+                    drift.issues.push("authority_anchor_mismatch".into())
+                }
+                Err(LocusError::ExecutorAuthorityUnavailable(_)) => {
+                    drift.issues.push("executor_authority_unavailable".into())
+                }
+                Err(_) => drift.issues.push("authority_anchor_unavailable".into()),
             }
-            Err(LocusError::ExecutorAuthorityUnavailable(_)) => {
-                drift.issues.push("executor_authority_unavailable".into())
-            }
-            Err(_) => drift.issues.push("authority_anchor_unavailable".into()),
         }
 
-        match self.load_binding(&session.binding_alias) {
-            Ok(binding) => {
-                drift.binding_present = true;
-                drift.binding_id_file = Some(binding.id.clone());
-                drift.tenant_file = Some(binding.tenant.clone());
-                drift.binding_id_match = binding.id == session.binding_id;
-                drift.tenant_match = binding.tenant == session.tenant;
-                if !drift.binding_id_match {
-                    drift.issues.push("binding_id_drift".into());
+        let use_known = known_binding.is_some_and(|binding| {
+            binding.alias == session.binding_alias || binding.id == session.binding_id
+        });
+        let loaded_binding = if use_known {
+            None
+        } else {
+            match self.load_binding(&session.binding_alias) {
+                Ok(binding) => Some(binding),
+                Err(_) => {
+                    drift.issues.push("binding_missing".into());
+                    None
                 }
-                if !drift.tenant_match {
-                    drift.issues.push("tenant_drift".into());
-                }
+            }
+        };
+        let binding_for_drift = if use_known {
+            known_binding
+        } else {
+            loaded_binding.as_ref()
+        };
+        if let Some(binding) = binding_for_drift {
+            drift.binding_present = true;
+            drift.binding_id_file = Some(binding.id.clone());
+            drift.tenant_file = Some(binding.tenant.clone());
+            drift.binding_id_match = binding.id == session.binding_id;
+            drift.tenant_match = binding.tenant == session.tenant;
+            if !drift.binding_id_match {
+                drift.issues.push("binding_id_drift".into());
+            }
+            if !drift.tenant_match {
+                drift.issues.push("tenant_drift".into());
+            }
 
-                // Provider / full material fingerprint
-                let fp_now = binding_fingerprint(&binding);
-                if let Some(ref fp_pin) = session.binding_fp {
-                    if fp_now != *fp_pin {
-                        drift.providers_match = false;
-                        if !drift.issues.iter().any(|i| i == "providers_drift") {
-                            drift.issues.push("providers_drift".into());
-                        }
+            // Provider / full material fingerprint
+            let fp_now = binding_fingerprint(binding);
+            if let Some(ref fp_pin) = session.binding_fp {
+                if fp_now != *fp_pin {
+                    drift.providers_match = false;
+                    if !drift.issues.iter().any(|i| i == "providers_drift") {
+                        drift.issues.push("providers_drift".into());
                     }
-                } else if !drift.binding_id_match || !drift.tenant_match {
-                    // Legacy sessions without fp: id/tenant already covered
-                    drift.providers_match = drift.binding_id_match && drift.tenant_match;
                 }
+            } else if !drift.binding_id_match || !drift.tenant_match {
+                // Legacy sessions without fp: id/tenant already covered
+                drift.providers_match = drift.binding_id_match && drift.tenant_match;
+            }
 
-                drift.providers = binding
-                    .providers
-                    .iter()
-                    .map(|p| ProviderView {
-                        provider: p.provider.clone(),
-                        account: p.account.clone(),
-                        credential: credential_metadata(&p.credential_ref),
-                        project_ref: p.scope.project_ref.clone(),
-                        team_id: p.scope.team_id.clone(),
-                        account_id: p.scope.account_id.clone(),
-                        read_only: p.scope.read_only,
-                        orgs: p.scope.orgs.clone(),
-                        repos: p.scope.repos.clone(),
-                    })
-                    .collect();
-            }
-            Err(_) => {
-                drift.issues.push("binding_missing".into());
-            }
+            drift.providers = binding
+                .providers
+                .iter()
+                .map(|p| ProviderView {
+                    provider: p.provider.clone(),
+                    account: p.account.clone(),
+                    credential: credential_metadata(&p.credential_ref),
+                    project_ref: p.scope.project_ref.clone(),
+                    team_id: p.scope.team_id.clone(),
+                    account_id: p.scope.account_id.clone(),
+                    read_only: p.scope.read_only,
+                    orgs: p.scope.orgs.clone(),
+                    repos: p.scope.repos.clone(),
+                })
+                .collect();
         }
 
         // Namespaced secondary bindings
@@ -2410,7 +2449,32 @@ impl Store {
     /// (MCP tenant grants). A freeze writes ONLY the resolved session's file
     /// (`save_session_at`) — `active.json` and other grants stay untouched.
     pub fn check_drift_and_freeze_for(&self, resolved: &ResolvedSession) -> Result<RuntimeDrift> {
-        let mut drift = self.verify_runtime_for(resolved)?;
+        self.check_drift_and_freeze_inner(resolved, false, None)
+    }
+
+    /// Drift check for a session [`Store::require_active_resolved`] just
+    /// accepted, using the binding already loaded for that session.
+    ///
+    /// The seal is checked again. The broker is not contacted on the healthy
+    /// path, because that validation just succeeded. A drift that would freeze
+    /// the session asks the broker again before writing, and does not freeze
+    /// if the generation is no longer current.
+    pub fn check_drift_and_freeze_fresh(
+        &self,
+        resolved: &ResolvedSession,
+        binding: &Binding,
+    ) -> Result<RuntimeDrift> {
+        self.check_drift_and_freeze_inner(resolved, true, Some(binding))
+    }
+
+    fn check_drift_and_freeze_inner(
+        &self,
+        resolved: &ResolvedSession,
+        authority_already_validated: bool,
+        known_binding: Option<&Binding>,
+    ) -> Result<RuntimeDrift> {
+        let mut drift =
+            self.verify_runtime_inner(resolved, authority_already_validated, known_binding)?;
         if !drift.pinned {
             return Ok(drift);
         }
@@ -2427,6 +2491,29 @@ impl Store {
         });
 
         if should_freeze && drift.seal_ok && drift.backing_ok && drift.authority_anchor_ok {
+            if authority_already_validated {
+                match self.validate_session_authority(&resolved.session) {
+                    Ok(_) => {}
+                    Err(LocusError::AuthorityAnchorMismatch) => {
+                        drift.authority_anchor_ok = false;
+                        drift.issues.push("authority_anchor_mismatch".into());
+                        drift.ok = false;
+                        return Ok(drift);
+                    }
+                    Err(LocusError::ExecutorAuthorityUnavailable(_)) => {
+                        drift.authority_anchor_ok = false;
+                        drift.issues.push("executor_authority_unavailable".into());
+                        drift.ok = false;
+                        return Ok(drift);
+                    }
+                    Err(_) => {
+                        drift.authority_anchor_ok = false;
+                        drift.issues.push("authority_anchor_unavailable".into());
+                        drift.ok = false;
+                        return Ok(drift);
+                    }
+                }
+            }
             {
                 let mut session = resolved.session.clone();
                 if !session.frozen {
@@ -5931,6 +6018,22 @@ allowed_bindings = ["acme"]
             store.require_active().unwrap_err(),
             LocusError::SessionFrozen(_)
         ));
+
+        // The exec fast path passes the binding it just loaded. Drift still
+        // freezes, and the broker is asked again before that write.
+        b.providers[0].scope.project_ref = Some("p1".into());
+        store.save_binding(&b).unwrap();
+        store.leave().unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let resolved = store.require_active_resolved().unwrap();
+        b.providers[0].scope.project_ref = Some("mutated_again".into());
+        store.save_binding(&b).unwrap();
+        let fresh = store.check_drift_and_freeze_fresh(&resolved, &b).unwrap();
+        assert!(!fresh.ok);
+        assert!(fresh.frozen);
+        assert!(fresh.seal_ok);
+        assert!(fresh.issues.iter().any(|i| i == "providers_drift"));
+        assert!(store.active_session().unwrap().unwrap().frozen);
 
         // Re-pin clears freeze
         store.leave().unwrap();

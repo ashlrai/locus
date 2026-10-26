@@ -37,6 +37,10 @@ const BROKER_START_TIMEOUT_ENV: &str = "LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS"
 const CONTROL_TTL: Duration = Duration::from_secs(2);
 const MAX_CLIENTS: usize = 64;
 const SUPERVISOR_POLL: Duration = Duration::from_millis(250);
+/// Idle accept wait. A client wakes `poll` immediately, so this is not added
+/// to a request. It bounds how long retirement or home deletion waits behind
+/// a blocking accept. The supervisor probe stays on [`SUPERVISOR_POLL`].
+const ACCEPT_IDLE_SLICE: Duration = Duration::from_millis(10);
 static EXECUTOR_ONLY_VALIDATION: AtomicBool = AtomicBool::new(false);
 
 type HmacSha256 = Hmac<Sha256>;
@@ -408,8 +412,8 @@ pub(crate) fn validate(
     subject_digest: &str,
 ) -> Result<ValidationMode> {
     let (auth, mode) = validation_auth()?;
+    // `read_endpoint` already checked shape, supervisor, and socket parent.
     let endpoint = read_endpoint(home).map_err(no_current_endpoint)?;
-    validate_endpoint_shape(home, &endpoint)?;
     if lease.version != AUTHORITY_ANCHOR_VERSION || lease.epoch != endpoint.epoch {
         return Err(LocusError::AuthorityAnchorMismatch);
     }
@@ -1099,7 +1103,15 @@ fn run_server(
             }
             next_supervisor_check = Instant::now() + SUPERVISOR_POLL;
         }
-        match platform::accept(&listener) {
+        // Block until a client connects, the supervisor check is due, or the
+        // idle slice elapses so retirement and home deletion are noticed.
+        // `poll` wakes as soon as a client connects. A fixed sleep here made
+        // every accept wait out the rest of a 10 ms poll, and `locus exec`
+        // opens a new connection per authority call.
+        let wait = next_supervisor_check
+            .saturating_duration_since(Instant::now())
+            .min(ACCEPT_IDLE_SLICE);
+        match platform::accept_for(&listener, wait) {
             Ok(Some(connection)) => {
                 if clients.fetch_add(1, Ordering::AcqRel) >= MAX_CLIENTS {
                     clients.fetch_sub(1, Ordering::AcqRel);
@@ -1117,7 +1129,7 @@ fn run_server(
                     clients.fetch_sub(1, Ordering::AcqRel);
                 });
             }
-            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {}
             Err(error) => {
                 retire_endpoint_if_current(&home, &endpoint);
                 return Err(error);
@@ -2895,7 +2907,6 @@ mod tests {
 #[cfg(unix)]
 mod platform {
     use super::*;
-    #[cfg(not(test))]
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{
         DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt,
@@ -3054,6 +3065,30 @@ mod platform {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Wait up to `timeout` for a connection. The listener stays nonblocking;
+    /// `poll` wakes as soon as a client connects and returns on timeout so the
+    /// accept loop can re-check the supervisor.
+    pub fn accept_for(listener: &Listener, timeout: Duration) -> Result<Option<Connection>> {
+        let mut fds = [libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        let millis = timeout.as_millis().min(i32::MAX as u128) as libc::c_int;
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 1, millis) };
+        if rc == 0 {
+            return Ok(None);
+        }
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(None);
+            }
+            return Err(err.into());
+        }
+        accept(listener)
     }
 
     pub fn connect(endpoint: &AuthorityAnchorEndpoint, _timeout: Duration) -> Result<Connection> {
@@ -3433,6 +3468,12 @@ mod platform {
     pub fn accept(_listener: &Listener) -> Result<Option<Connection>> {
         Ok(None)
     }
+    pub fn accept_for(listener: &Listener, timeout: Duration) -> Result<Option<Connection>> {
+        if !timeout.is_zero() {
+            thread::sleep(timeout);
+        }
+        accept(listener)
+    }
     pub fn connect(_endpoint: &AuthorityAnchorEndpoint, _timeout: Duration) -> Result<Connection> {
         Err(LocusError::AuthorityAnchorUnavailable(
             "native Windows peer-authenticated named-pipe authority is required but unavailable"
@@ -3503,6 +3544,9 @@ mod platform {
         unavailable()
     }
     pub fn accept(_listener: &Listener) -> Result<Option<Connection>> {
+        unavailable()
+    }
+    pub fn accept_for(_listener: &Listener, _timeout: Duration) -> Result<Option<Connection>> {
         unavailable()
     }
     pub fn connect(_endpoint: &AuthorityAnchorEndpoint, _timeout: Duration) -> Result<Connection> {
