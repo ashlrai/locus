@@ -518,10 +518,6 @@ pub fn resolve_binding_secrets(binding: &crate::binding::Binding) -> ResolvedBin
         for key in keys {
             out.insert(key, Zeroizing::new(value.as_str().to_string()));
         }
-        // Also set LOCUS_<PROVIDER>_RESOLVED=1 (not the secret) for debugging
-        let flag = format!("LOCUS_{}_CREDENTIAL_RESOLVED", p.provider.to_uppercase());
-        // Don't put secrets in out under flag — use empty marker via separate path
-        let _ = flag;
     }
     ResolvedBindingSecrets { env: out, issues }
 }
