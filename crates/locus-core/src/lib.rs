@@ -145,10 +145,10 @@ pub use isolation::{
 };
 pub use marketplace::{
     fetch_index, fetch_manifest, fetch_url, install_adapter, installed_manifests,
-    load_index_sources, load_installed, load_installed_manifest, save_index_sources,
-    search_indexes, uninstall_adapter, validate_index_entry, CommunityAdapterManifest,
-    CommunityIndex, CommunityIndexEntry, IndexSource, InstallReport, InstalledAdapter, SearchHit,
-    ADAPTERS_DIR,
+    load_index_sources, load_installed, load_installed_manifest, redact_url_for_display,
+    save_index_sources, search_indexes, uninstall_adapter, validate_index_entry,
+    validate_index_url, CommunityAdapterManifest, CommunityIndex, CommunityIndexEntry, IndexSource,
+    InstallReport, InstalledAdapter, SearchHit, ADAPTERS_DIR,
 };
 pub use onboard::steps;
 pub use onboard::{
