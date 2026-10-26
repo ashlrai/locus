@@ -85,9 +85,19 @@ def main():
         )
         return 2
     locus = sys.argv[1]
+    if os.path.sep not in locus and (
+        os.path.altsep is None or os.path.altsep not in locus
+    ):
+        print(
+            "error: pass the locus binary as a path, not a bare name",
+            file=sys.stderr,
+        )
+        return 2
     if not os.path.isfile(locus):
         print(f"error: locus binary not found: {locus}", file=sys.stderr)
         return 2
+    # Absolute path so execvpe runs this file and does not search PATH.
+    locus = os.path.abspath(locus)
     locus_home = require_locus_home()
     if locus_home is None:
         return 2

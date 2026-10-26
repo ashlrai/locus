@@ -6082,6 +6082,38 @@ allowed_bindings = ["acme"]
     }
 
     #[test]
+    fn fresh_freeze_does_not_write_when_broker_recheck_fails() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut b = sample_binding("acme", "acme-corp", "p1");
+        store.save_binding(&b).unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let resolved = store.require_active_resolved().unwrap();
+
+        b.providers[0].scope.project_ref = Some("mutated_ref".into());
+        store.save_binding(&b).unwrap();
+        crate::authority_anchor::retire_for_test(dir.path()).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(40));
+
+        let drift = store.check_drift_and_freeze_fresh(&resolved, &b).unwrap();
+        assert!(!drift.ok);
+        assert!(
+            !drift.frozen,
+            "a failed broker re-check must not freeze the session"
+        );
+        assert!(drift.issues.iter().any(|i| i == "providers_drift"));
+        assert!(drift.issues.iter().any(|i| {
+            matches!(
+                i.as_str(),
+                "authority_anchor_unavailable"
+                    | "authority_anchor_mismatch"
+                    | "executor_authority_unavailable"
+            )
+        }));
+        assert!(!store.active_session().unwrap().unwrap().frozen);
+    }
+
+    #[test]
     fn pin_namespaced_two_bindings() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();

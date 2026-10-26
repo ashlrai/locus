@@ -3628,6 +3628,56 @@ impl ExecTrace {
     }
 }
 
+/// Stop `locus exec` before secret resolution when the drift check is not a
+/// healthy pin. A frozen session keeps its existing error. Any other failure,
+/// including a broker re-check that declined to freeze, is named here.
+fn refuse_exec_drift(drift: &locus_core::RuntimeDrift) -> Result<()> {
+    if drift.frozen {
+        bail!(
+            "session_frozen: re-pin — binding drifted under active pin ({})",
+            drift.issues.join(", ")
+        );
+    }
+    if !drift.ok {
+        bail!("pin check failed before exec ({})", drift.issues.join(", "));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod exec_drift_gate {
+    use super::refuse_exec_drift;
+
+    fn unfrozen_broker_refusal() -> locus_core::RuntimeDrift {
+        serde_json::from_value(serde_json::json!({
+            "pinned": true,
+            "seal_ok": true,
+            "authority_anchor_ok": false,
+            "backing_ok": true,
+            "binding_present": true,
+            "binding_id_match": true,
+            "tenant_match": true,
+            "providers_match": false,
+            "frozen": false,
+            "expired": false,
+            "providers": [],
+            "issues": ["providers_drift", "authority_anchor_unavailable"],
+            "ok": false
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn broker_recheck_failure_is_refused_before_exec() {
+        let err = refuse_exec_drift(&unfrozen_broker_refusal()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("pin check failed before exec"));
+        assert!(msg.contains("providers_drift"));
+        assert!(msg.contains("authority_anchor_unavailable"));
+        assert!(!msg.contains("session_frozen"));
+    }
+}
+
 /// Delegated or exact-session exec: no credential resolution, one child.
 fn exec_delegated(
     s: &Store,
@@ -3719,12 +3769,10 @@ fn cmd_exec(
     let drift = s
         .check_drift_and_freeze_fresh(&resolved, &binding)
         .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))?;
-    if drift.frozen {
-        bail!(
-            "session_frozen: re-pin — binding drifted under active pin ({})",
-            drift.issues.join(", ")
-        );
-    }
+    // Frozen is the drift write. A broker re-check that refuses to freeze
+    // leaves `ok` false and `frozen` false; stop here instead of continuing
+    // to secret resolution and hoping the executor grant rejects the lease.
+    refuse_exec_drift(&drift)?;
     trace.mark("drift");
     let session = &resolved.session;
     let iso = isolated_child_env(&s, session, &binding, resolve_secrets);
