@@ -7,6 +7,7 @@
 
 mod composite;
 mod mcp_stdio;
+pub(crate) mod pool;
 mod sandbox;
 mod stdio_client;
 mod synthetic;

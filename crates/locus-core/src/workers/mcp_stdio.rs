@@ -95,6 +95,8 @@ pub struct McpStdioConfig {
 /// Stdio MCP backend with live JSON-RPC clients.
 pub struct McpStdioBackend {
     config: McpStdioConfig,
+    delivery: Mutex<Option<super::pool::Delivery>>,
+    cancellation: Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
     /// session:provider → Child process
     children: Mutex<BTreeMap<WorkerKey, Child>>,
     /// Live MCP clients (stdin/stdout taken from children)
@@ -109,11 +111,44 @@ impl McpStdioBackend {
     pub fn new(config: McpStdioConfig) -> Self {
         Self {
             config,
+            delivery: Mutex::new(None),
+            cancellation: Mutex::new(None),
             children: Mutex::new(BTreeMap::new()),
             clients: Mutex::new(BTreeMap::new()),
             known_secrets: Mutex::new(BTreeMap::new()),
             community_contracts: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    pub(crate) fn set_cancellation(
+        &self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Result<()> {
+        *self
+            .cancellation
+            .lock()
+            .map_err(|_| LocusError::msg("worker cancellation unavailable"))? = cancellation;
+        Ok(())
+    }
+
+    pub(crate) fn set_delivery(&self, delivery: Option<super::pool::Delivery>) -> Result<()> {
+        let mut guard = self
+            .delivery
+            .lock()
+            .map_err(|_| LocusError::msg("credential delivery guard unavailable"))?;
+        if guard.as_ref() != delivery.as_ref()
+            && !self
+                .clients
+                .lock()
+                .map_err(|_| LocusError::msg("clients lock poisoned"))?
+                .is_empty()
+        {
+            return Err(LocusError::msg(
+                "shared worker credential source changed; human re-pin required",
+            ));
+        }
+        *guard = delivery;
+        Ok(())
     }
 
     /// Build a `Command` ready to spawn with isolated env.
@@ -146,12 +181,33 @@ impl McpStdioBackend {
         }
         provider.community_frozen_values()?;
         let community = provider.verified_community_adapter()?.is_some();
+        let delivery = self
+            .delivery
+            .lock()
+            .map_err(|_| LocusError::msg("credential delivery guard unavailable"))?;
         let mut iso = build_isolated_env_for_provider_opts(
             session,
             binding,
             provider,
-            self.config.resolve_secrets,
+            self.config.resolve_secrets && delivery.is_none(),
         );
+        if let Some(delivery) = delivery.as_ref().filter(|_| self.config.resolve_secrets) {
+            let allowed = crate::credential::inject_keys_for_binding_provider(provider)?;
+            if delivery.0.is_empty() || delivery.0.keys().any(|key| !allowed.contains(key)) {
+                return Err(LocusError::msg(
+                    "shared worker credential delivery unavailable",
+                ));
+            }
+            iso.vars.extend(delivery.0.clone());
+            iso.vars.insert(
+                format!(
+                    "LOCUS_{}_CREDENTIAL_RESOLVED",
+                    provider.provider.to_uppercase()
+                ),
+                "1".into(),
+            );
+        }
+        drop(delivery);
         if self.config.resolve_secrets && !iso.secrets_failed.is_empty() {
             return Err(LocusError::msg(
                 "upstream credential resolution failed; refusing worker launch",
@@ -291,9 +347,18 @@ impl McpStdioBackend {
                 "community worker credential mapping unavailable",
             ));
         }
-        let current = crate::credential::resolve(&crate::credential::CredentialRef::validate(
-            &provider.credential_ref,
-        )?)?;
+        let delivery = self
+            .delivery
+            .lock()
+            .map_err(|_| LocusError::msg("credential delivery guard unavailable"))?;
+        let current = if let Some(delivery) = delivery.as_ref() {
+            zeroize::Zeroizing::new(delivery.0.values().next().cloned().unwrap_or_default())
+        } else {
+            crate::credential::resolve(&crate::credential::CredentialRef::validate(
+                &provider.credential_ref,
+            )?)?
+        };
+        drop(delivery);
         let secrets = self
             .known_secrets
             .lock()
@@ -418,7 +483,7 @@ impl WorkerBackend for McpStdioBackend {
                 .verified_community_adapter()?
                 .map(|manifest| community_launch_digest(binding, provider, manifest))
                 .transpose()?;
-            let keys = if provider.verified_community_adapter()?.is_some() {
+            let keys = if self.config.resolve_secrets {
                 crate::credential::inject_keys_for_binding_provider(provider)?
             } else {
                 Vec::new()
@@ -443,7 +508,22 @@ impl WorkerBackend for McpStdioBackend {
                 Ok(mut child) => {
                     pid = Some(child.id());
                     // Handshake before storing as Running
-                    let client = McpStdioClient::from_child(&mut child)?;
+                    let client = match McpStdioClient::from_child(&mut child) {
+                        Ok(client) => client,
+                        Err(error) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(error);
+                        }
+                    };
+                    if let Some(cancellation) = self
+                        .cancellation
+                        .lock()
+                        .map_err(|_| LocusError::msg("worker cancellation unavailable"))?
+                        .clone()
+                    {
+                        client.set_cancellation(cancellation)?;
+                    }
                     match client.handshake() {
                         Ok(_tools) => {
                             state = WorkerState::Running;

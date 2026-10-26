@@ -261,3 +261,40 @@ store.verify_capability_ticket(&t)?;
 - Pool: ensure reuses same slot; `reap_idle` after timeout
 - Tickets: mint/verify unit tests; store cross-key reject
 - HTTP: `GET /health` unauthenticated; `POST /mcp` token reject + JSON-RPC ping
+
+## Shared child pool
+
+For sealed sessions, the live authority broker owns upstream MCP children. Five
+independent `locus-mcp` clients using the same server and pin generation share
+one initialized child. Binding namespaces and providers remain separate; no
+worker or credential is reused across pins. Client disconnect releases only the
+client's handle. The broker owns child cleanup, including supervisor loss.
+
+The shared pool defaults to a **300-second idle timeout**. Set a positive
+`LOCUS_WORKER_IDLE_SECS` before pinning to override it. Unset, zero and invalid
+values use the shared-pool default; they do not disable cleanup. Discovery reads
+cached schemas only: `tools/list` never resolves credentials, starts children,
+or extends their lifetime. A later authorized call can start a fresh child after
+idle reaping.
+
+A re-pin (including the same alias), renewal, revoked backing, freeze or expiry
+retires the old generation. Upstream pipe reads and writes observe cancellation
+on Unix, including partial responses. Calls queued during a pin change are
+rejected, and in-flight results are discarded after authority changes. Calls
+are never replayed automatically.
+
+The broker loads bindings itself and authenticates each pool operation against
+the executor's exact session and generation. Clients deliver only the selected
+provider's allowlisted credential injection keys over the authenticated local
+channel; delivery buffers are zeroized and debug output is redacted. The broker
+inherits only explicit nonsecret execution settings, not ambient credentials.
+Credential changes on a live child fail closed until re-pin or idle reaping.
+Sandbox settings are never reduced to match another client; a stricter client
+setting that the broker cannot satisfy requires a human re-pin.
+
+The pool uses the same `McpStdioBackend` spawn/teardown path as local workers,
+so per-child resource supervision belongs there and runs once per shared child.
+The broker’s operator launch workspace supplies process-level worker settings,
+including workspace resource limits.
+Pool RPCs are bounded to 1 MiB and a 60-second client wait. Unix upstream pipe
+operations have a 10-second deadline; a failed call is returned without replay.

@@ -122,6 +122,10 @@ pub struct CompositeWorkerManager {
     /// on every call). Lifecycle is instead driven by explicit per-grant
     /// teardown (DELETE /mcp, dead-grant sweeps, TTL reconcile) + idle reap.
     multi_session: bool,
+    /// Broker-owned managers must not recursively forward to themselves.
+    shared: bool,
+    delivery: Option<super::pool::Delivery>,
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for CompositeWorkerManager {
@@ -139,7 +143,38 @@ impl CompositeWorkerManager {
             last_used: BTreeMap::new(),
             idle_timeout: idle_timeout_from_env(),
             multi_session: false,
+            shared: true,
+            delivery: None,
+            cancellation: None,
         }
+    }
+
+    pub(crate) fn local_pool() -> Self {
+        let mut manager = Self::new();
+        manager.shared = false;
+        manager.multi_session = true;
+        manager.idle_timeout = Some(manager.idle_timeout.unwrap_or(Duration::from_secs(300)));
+        manager
+    }
+
+    pub(crate) fn ensure_delivered(
+        &mut self,
+        session: &Session,
+        binding: &Binding,
+        provider: &str,
+        delivery: super::pool::Delivery,
+        cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<WorkerSlot> {
+        self.delivery = Some(delivery);
+        self.cancellation = Some(cancellation);
+        let result = self.ensure_provider(session, binding, provider);
+        self.delivery = None;
+        self.cancellation = None;
+        result
+    }
+
+    fn uses_shared_pool(&self, session: &Session) -> bool {
+        self.shared && session.authority_anchor.is_some()
     }
 
     /// Construct with an explicit idle timeout (overrides env for this instance).
@@ -283,6 +318,16 @@ impl CompositeWorkerManager {
         binding: &Binding,
         provider: &str,
     ) -> Result<Vec<UpstreamTool>> {
+        if self.uses_shared_pool(session)
+            && binding.provider(provider).is_some_and(|p| p.has_upstream())
+        {
+            return crate::authority_anchor::worker_request(
+                session,
+                binding,
+                provider,
+                super::pool::Operation::List,
+            );
+        }
         let key = Self::worker_key(session, binding, provider);
         let backend = self
             .mcp
@@ -438,6 +483,20 @@ impl CompositeWorkerManager {
             )));
         };
 
+        if self.uses_shared_pool(session)
+            && binding.provider(provider).is_some_and(|p| p.has_upstream())
+        {
+            return crate::authority_anchor::worker_request(
+                session,
+                binding,
+                provider,
+                super::pool::Operation::Call {
+                    tool: tool.into(),
+                    args: args.clone(),
+                },
+            );
+        }
+
         let pb = binding
             .provider(provider)
             .ok_or_else(|| LocusError::msg("upstream provider absent from binding"))?;
@@ -467,7 +526,10 @@ impl CompositeWorkerManager {
 
         if let Some(backend) = self.mcp.get(&key) {
             let upstream_name = strip_provider_prefix(provider, tool);
-            return backend.call_tool(&slot, binding, &upstream_name, &scoped_args);
+            let result = backend.call_tool(&slot, binding, &upstream_name, &scoped_args);
+            // Idle time starts when the in-flight operation has finished.
+            self.touch(&key);
+            return result;
         }
 
         // No upstream — fall through to synthetic (may still error unknown tool).
@@ -482,10 +544,25 @@ impl WorkerManager for CompositeWorkerManager {
         binding: &Binding,
         provider: &str,
     ) -> Result<WorkerSlot> {
+        if self.uses_shared_pool(session)
+            && binding.provider(provider).is_some_and(|p| p.has_upstream())
+        {
+            let slot: WorkerSlot = crate::authority_anchor::worker_request(
+                session,
+                binding,
+                provider,
+                super::pool::Operation::Ensure,
+            )?;
+            let key = Self::worker_key(session, binding, provider);
+            self.slots.insert(key.clone(), slot.clone());
+            self.touch(&key);
+            return Ok(slot);
+        }
         if let Some(pb) = binding.provider(provider) {
             let community = pb.verified_community_adapter()?.is_some();
             pb.community_frozen_values()?;
             if community
+                && self.delivery.is_none()
                 && pb
                     .upstream
                     .as_ref()
@@ -512,6 +589,7 @@ impl WorkerManager for CompositeWorkerManager {
                 // A cached community worker must retain the currently authorized source key.
                 if let (Some(backend), Some(pb)) = (self.mcp.get(&key), binding.provider(provider))
                 {
+                    backend.set_delivery(self.delivery.clone())?;
                     backend.validate_community_worker_contract(existing, binding, pb)?;
                 }
                 let out = existing.clone();
@@ -544,6 +622,8 @@ impl WorkerManager for CompositeWorkerManager {
         let slot = if let Some(spec) = pb.upstream.as_ref().filter(|u| u.is_declared()) {
             let cfg = mcp_config_from_upstream(spec)?;
             let backend = McpStdioBackend::new(cfg);
+            backend.set_delivery(self.delivery.clone())?;
+            backend.set_cancellation(self.cancellation.clone())?;
             let slot = backend.ensure(session, binding, pb, &work_dir)?;
             self.mcp.insert(key.clone(), backend);
             slot

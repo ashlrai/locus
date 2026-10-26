@@ -8,21 +8,134 @@ use crate::error::{LocusError, Result};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout};
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Poll the pipe before each read, including partial NDJSON lines and framed
+/// bodies. Cancellation must interrupt a child that never finishes a response.
+struct InterruptibleOutput {
+    stdout: ChildStdout,
+    cancelled: Option<Arc<AtomicBool>>,
+    deadline: Option<std::time::Instant>,
+}
+
+impl Read for InterruptibleOutput {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            loop {
+                if self
+                    .cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Acquire))
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "worker pin retired",
+                    ));
+                }
+                if self
+                    .deadline
+                    .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "upstream response deadline exceeded",
+                    ));
+                }
+                let mut fd = libc::pollfd {
+                    fd: self.stdout.as_raw_fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: fd is one valid pollfd backed by our owned pipe.
+                let ready = unsafe { libc::poll(&mut fd, 1, 50) };
+                if ready > 0 {
+                    break;
+                }
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        self.stdout.read(bytes)
+    }
+}
+
+struct InterruptibleInput {
+    stdin: ChildStdin,
+    cancelled: Option<Arc<AtomicBool>>,
+    deadline: Option<std::time::Instant>,
+}
+impl Write for InterruptibleInput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            loop {
+                if self
+                    .cancelled
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::Acquire))
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "worker pin retired",
+                    ));
+                }
+                if self
+                    .deadline
+                    .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "upstream write deadline exceeded",
+                    ));
+                }
+                let mut fd = libc::pollfd {
+                    fd: self.stdin.as_raw_fd(),
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                // SAFETY: fd describes our owned pipe. With one writer, a
+                // writable pipe accepts at least POSIX's minimum PIPE_BUF.
+                let ready = unsafe { libc::poll(&mut fd, 1, 50) };
+                if ready > 0 {
+                    break;
+                }
+                if ready < 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+        self.stdin.write(&bytes[..bytes.len().min(512)])
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stdin.flush()
+    }
+}
 
 /// Live connection to one upstream MCP server process.
 pub struct McpStdioClient {
-    stdin: Mutex<ChildStdin>,
-    stdout: Mutex<BufReader<ChildStdout>>,
+    stdin: Mutex<InterruptibleInput>,
+    request_lock: Mutex<()>,
+    stdout: Mutex<BufReader<InterruptibleOutput>>,
     next_id: AtomicU64,
     /// Cached tools from last tools/list: name → schema meta (optional).
     tools: Mutex<Vec<UpstreamTool>>,
     initialized: Mutex<bool>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UpstreamTool {
     pub name: String,
     pub description: String,
@@ -41,12 +154,34 @@ impl McpStdioClient {
             .take()
             .ok_or_else(|| LocusError::msg("child missing stdout"))?;
         Ok(Self {
-            stdin: Mutex::new(stdin),
-            stdout: Mutex::new(BufReader::new(stdout)),
+            stdin: Mutex::new(InterruptibleInput {
+                stdin,
+                cancelled: None,
+                deadline: None,
+            }),
+            request_lock: Mutex::new(()),
+            stdout: Mutex::new(BufReader::new(InterruptibleOutput {
+                stdout,
+                cancelled: None,
+                deadline: None,
+            })),
             next_id: AtomicU64::new(1),
             tools: Mutex::new(Vec::new()),
             initialized: Mutex::new(false),
         })
+    }
+
+    pub(crate) fn set_cancellation(&self, cancelled: Arc<AtomicBool>) -> Result<()> {
+        self.stdin
+            .lock()
+            .map_err(|_| LocusError::msg("stdin lock poisoned"))?
+            .cancelled = Some(Arc::clone(&cancelled));
+        self.stdout
+            .lock()
+            .map_err(|_| LocusError::msg("stdout lock poisoned"))?
+            .get_mut()
+            .cancelled = Some(cancelled);
+        Ok(())
     }
 
     fn next_id(&self) -> u64 {
@@ -59,6 +194,7 @@ impl McpStdioClient {
             .stdin
             .lock()
             .map_err(|_| LocusError::msg("stdin lock poisoned"))?;
+        stdin.deadline = Some(std::time::Instant::now() + Duration::from_secs(10));
         let line = serde_json::to_string(msg)?;
         writeln!(stdin, "{line}").map_err(|e| LocusError::msg(format!("write mcp: {e}")))?;
         stdin
@@ -74,9 +210,10 @@ impl McpStdioClient {
             .lock()
             .map_err(|_| LocusError::msg("stdout lock poisoned"))?;
 
-        // Bound reads so a hung child can't block forever in tests
-        // (platform-dependent; we rely on short mock servers).
+        // On Unix, every pipe read observes this deadline and pin cancellation,
+        // even when the upstream emits only part of a JSON-RPC message.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        stdout.get_mut().deadline = Some(deadline);
 
         loop {
             if std::time::Instant::now() > deadline {
@@ -152,6 +289,12 @@ impl McpStdioClient {
     }
 
     fn request(&self, method: &str, params: Value) -> Result<Value> {
+        // A shared stream must keep a request and its matching response in one
+        // critical section; independent stdin/stdout locks can lose responses.
+        let _request = self
+            .request_lock
+            .lock()
+            .map_err(|_| LocusError::msg("request lock poisoned"))?;
         let id = self.next_id();
         let msg = json!({
             "jsonrpc": "2.0",

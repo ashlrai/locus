@@ -28,6 +28,8 @@ pub const EXECUTOR_CAPABILITY_ENV: &str = "LOCUS_EXECUTOR_CAPABILITY";
 const SERVER_ENV: &str = "LOCUS_INTERNAL_AUTHORITY_ANCHOR_SERVER";
 const MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+const WORKER_IO_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_WORKER_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Production wait for broker handoff (spawn + SHA-256 identity + socket bind).
 /// 3s proved flaky under CI load after heavy `cargo test` + large debug binaries.
 const START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -123,10 +125,13 @@ enum ControlOperation {
     Retire,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum AnchorRequest {
     Ping,
+    Worker {
+        request: Box<crate::workers::pool::Request>,
+    },
     BeginControl {
         operation: ControlOperation,
     },
@@ -189,6 +194,8 @@ struct AuthenticatedResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AnchorResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker: Option<serde_json::Value>,
     ok: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     epoch: Option<String>,
@@ -887,8 +894,20 @@ fn start_broker(
             .or_else(|_| retry_current_endpoint(home, auth, may_restart));
     }
 
-    let mut child = Command::new(&executable)
-        .env_clear()
+    let mut command = Command::new(&executable);
+    command.env_clear().env("LOCUS_HOME", &startup.home);
+    for key in [
+        "PATH",
+        "LOCUS_ADAPTER_TRUST_KEYS",
+        "LOCUS_WORKER_IDLE_SECS",
+        "LOCUS_WORKER_SANDBOX",
+        "LOCUS_WORKER_SANDBOX_NO_NETWORK",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    let mut child = command
         .env(SERVER_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1085,6 +1104,10 @@ fn run_server(
         controls: HashMap::new(),
         executors: HashMap::new(),
     }));
+    let cancellations = crate::workers::pool::Cancellations::default();
+    let pool = Arc::new(Mutex::new(crate::workers::pool::Pool::new(
+        cancellations.clone(),
+    )));
     let retired = Arc::new(AtomicBool::new(false));
     let clients = Arc::new(AtomicUsize::new(0));
 
@@ -1094,6 +1117,16 @@ fn run_server(
             break;
         }
         if Instant::now() >= next_supervisor_check {
+            {
+                let guard = state.lock().expect("authority state poisoned");
+                cancellations.cancel_stale(|session| pool_session_current(&guard, session));
+            }
+            // Never wait for a slow upstream while owning the authority lock.
+            // Generation changes remain responsive even during a tool call.
+            if let Ok(mut workers) = pool.try_lock() {
+                let guard = state.lock().expect("authority state poisoned");
+                let _ = workers.reap(|session| pool_session_current(&guard, session));
+            }
             // Never `?` here: a supervisor that exited makes the probe error,
             // and an early return would skip endpoint/socket retirement and
             // leave a stale authority.json behind.
@@ -1122,8 +1155,16 @@ fn run_server(
                 let clients = Arc::clone(&clients);
                 let identity = broker_identity.clone();
                 let error_home = home.clone();
+                let pool = Arc::clone(&pool);
                 thread::spawn(move || {
-                    if let Err(error) = serve_connection(connection, &identity, &state, &retired) {
+                    if let Err(error) = serve_connection(
+                        connection,
+                        &identity,
+                        &state,
+                        &retired,
+                        &pool,
+                        &error_home,
+                    ) {
                         record_broker_error(&error_home, &error);
                     }
                     clients.fetch_sub(1, Ordering::AcqRel);
@@ -1131,11 +1172,17 @@ fn run_server(
             }
             Ok(None) => {}
             Err(error) => {
+                retired.store(true, Ordering::Release);
+                cancellations.cancel_stale(|_| false);
+                pool.lock().expect("worker pool poisoned").clear()?;
                 retire_endpoint_if_current(&home, &endpoint);
                 return Err(error);
             }
         }
     }
+    retired.store(true, Ordering::Release);
+    cancellations.cancel_stale(|_| false);
+    pool.lock().expect("worker pool poisoned").clear()?;
     platform::retire(&endpoint);
     retire_endpoint_if_current(&home, &endpoint);
     drop(lock);
@@ -1147,15 +1194,22 @@ fn serve_connection(
     broker: &BrokerIdentity,
     state: &Arc<Mutex<AnchorState>>,
     retired: &Arc<AtomicBool>,
+    pool: &Mutex<crate::workers::pool::Pool>,
+    home: &Path,
 ) -> Result<()> {
     platform::set_deadlines(&connection, IO_TIMEOUT)?;
     let peer = connection_peer_identity(&connection)?;
     authenticate_peer(broker, &peer)?;
-    let raw = platform::read_message(&mut connection, MAX_MESSAGE_BYTES, IO_TIMEOUT)?;
+    let raw = zeroize::Zeroizing::new(platform::read_message(
+        &mut connection,
+        MAX_WORKER_MESSAGE_BYTES,
+        IO_TIMEOUT,
+    )?);
     let envelope: AuthenticatedRequest = serde_json::from_slice(&raw).map_err(|_| {
         LocusError::AuthorityAnchorUnavailable("invalid authenticated broker request".into())
     })?;
-    if envelope.version != AUTHORITY_ENDPOINT_VERSION
+    if (!matches!(envelope.request, AnchorRequest::Worker { .. }) && raw.len() > MAX_MESSAGE_BYTES)
+        || envelope.version != AUTHORITY_ENDPOINT_VERSION
         || envelope.nonce.len() != 64
         || !envelope.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
     {
@@ -1177,6 +1231,54 @@ fn serve_connection(
             &key,
         );
     }
+    if let AnchorRequest::Worker { request } = envelope.request {
+        platform::set_deadlines(&connection, WORKER_IO_TIMEOUT)?;
+        let validation = pool_validation_request(&request.session)?;
+        let valid = handle_request(&mut guard, &peer, &envelope.credential, validation, retired);
+        if !valid.ok {
+            drop(guard);
+            return write_authenticated_response(&mut connection, &envelope.nonce, valid, &key);
+        }
+        drop(guard);
+        let mut workers = pool
+            .lock()
+            .map_err(|_| LocusError::msg("shared worker pool unavailable"))?;
+        // A request may have waited behind another client while the pin changed.
+        let mut guard = state.lock().expect("authority state poisoned");
+        let valid = handle_request(
+            &mut guard,
+            &peer,
+            &envelope.credential,
+            pool_validation_request(&request.session)?,
+            retired,
+        );
+        drop(guard);
+        {
+            let guard = state.lock().expect("authority state poisoned");
+            workers.reap(|session| pool_session_current(&guard, session))?;
+        }
+        let result = if valid.ok && !retired.load(Ordering::Acquire) {
+            workers.execute(home, &request)
+        } else {
+            Err(LocusError::AuthorityAnchorMismatch)
+        };
+        let guard = state.lock().expect("authority state poisoned");
+        let current =
+            !retired.load(Ordering::Acquire) && pool_session_current(&guard, &request.session);
+        drop(guard);
+        let response = if !current {
+            let guard = state.lock().expect("authority state poisoned");
+            workers.reap(|session| pool_session_current(&guard, session))?;
+            response_error("pin changed during shared worker operation")
+        } else {
+            match result {
+                Ok(value) => { let mut response = valid; response.worker = Some(value); response }
+                Err(_) => response_error("shared worker operation failed; check pin, policy, binding and credential availability"),
+            }
+        };
+        drop(workers);
+        return write_authenticated_response(&mut connection, &envelope.nonce, response, &key);
+    }
     let response = handle_request(
         &mut guard,
         &peer,
@@ -1186,6 +1288,87 @@ fn serve_connection(
     );
     drop(guard);
     write_authenticated_response(&mut connection, &envelope.nonce, response, &key)
+}
+
+fn pool_validation_request(session: &crate::Session) -> Result<AnchorRequest> {
+    let lease = session
+        .authority_anchor
+        .as_ref()
+        .ok_or(LocusError::InvalidSeal)?;
+    let backing = session.backing.as_ref().ok_or(LocusError::InvalidSeal)?;
+    Ok(AnchorRequest::Validate {
+        session_id: session.session_id.clone(),
+        backing_type: backing.backing_type.as_str().into(),
+        epoch: lease.epoch.clone(),
+        generation: lease.generation,
+        subject_digest: session.authority_subject_digest(),
+    })
+}
+
+fn pool_session_current(state: &AnchorState, session: &crate::Session) -> bool {
+    let Some(lease) = &session.authority_anchor else {
+        return false;
+    };
+    let Some(backing) = &session.backing else {
+        return false;
+    };
+    let persisted = crate::workers::pool::persisted_session(session).ok();
+    persisted.as_ref() == Some(session)
+        && !session.frozen
+        && lease.epoch == state.epoch
+        && chrono::Utc::now() < session.expires_at
+        && lease_is_current(
+            state,
+            &session.session_id,
+            backing.backing_type.as_str(),
+            lease.generation,
+            &session.authority_subject_digest(),
+        )
+}
+
+pub(crate) fn worker_request<T: serde::de::DeserializeOwned>(
+    session: &crate::Session,
+    binding: &crate::Binding,
+    provider: &str,
+    operation: crate::workers::pool::Operation,
+) -> Result<T> {
+    let home = crate::store::locus_home()?;
+    let (auth, _) = validation_auth()?;
+    let endpoint = read_endpoint(&home).map_err(no_current_endpoint)?;
+    let pb = binding.provider(provider).ok_or(LocusError::InvalidSeal)?;
+    let config = crate::workers::mcp_config_from_upstream(
+        pb.upstream.as_ref().ok_or(LocusError::InvalidSeal)?,
+    )?;
+    let delivery = if matches!(operation, crate::workers::pool::Operation::List) {
+        Default::default()
+    } else {
+        crate::workers::pool::Delivery::prepare(session, binding, provider)?
+    };
+    let response = request(
+        &endpoint,
+        &AnchorRequest::Worker {
+            request: Box::new(crate::workers::pool::Request {
+                session: Box::new(session.clone()),
+                alias: binding.alias.clone(),
+                provider: provider.into(),
+                operation,
+                delivery,
+                sandbox: config.sandbox,
+                no_network: config.sandbox_no_network,
+            }),
+        },
+        &auth,
+    )?;
+    if !response.ok {
+        return Err(LocusError::msg(
+            response
+                .error
+                .unwrap_or_else(|| "shared worker refused".into()),
+        ));
+    }
+    Ok(serde_json::from_value(response.worker.ok_or_else(
+        || LocusError::msg("shared worker response missing"),
+    )?)?)
 }
 
 fn request_key(state: &AnchorState, credential: &RequestCredential) -> Option<[u8; 32]> {
@@ -1203,7 +1386,7 @@ fn credential_allows_request(credential: &RequestCredential, request: &AnchorReq
         RequestCredential::Executor { .. } => {
             matches!(
                 request,
-                AnchorRequest::Ping | AnchorRequest::Validate { .. }
+                AnchorRequest::Ping | AnchorRequest::Validate { .. } | AnchorRequest::Worker { .. }
             )
         }
     }
@@ -1222,7 +1405,11 @@ fn write_authenticated_response(
         response,
         mac,
     };
-    platform::write_message(connection, &serde_json::to_vec(&envelope)?, IO_TIMEOUT)
+    let encoded = zeroize::Zeroizing::new(serde_json::to_vec(&envelope)?);
+    if encoded.len() > MAX_WORKER_MESSAGE_BYTES {
+        return Err(LocusError::msg("worker response exceeds protocol limit"));
+    }
+    platform::write_message(connection, &encoded, IO_TIMEOUT)
 }
 
 fn authenticate_peer(broker: &BrokerIdentity, peer: &PeerIdentity) -> Result<()> {
@@ -1245,6 +1432,7 @@ fn handle_request(
         .controls
         .retain(|_, control| control.expires > Instant::now());
     match request {
+        AnchorRequest::Worker { .. } => response_error("worker request requires pool dispatch"),
         AnchorRequest::Ping => response_ok(state, None),
         AnchorRequest::BeginControl { operation } => {
             let challenge = random_hex(32);
@@ -1257,6 +1445,7 @@ fn handle_request(
                 },
             );
             AnchorResponse {
+                worker: None,
                 ok: true,
                 epoch: Some(state.epoch.clone()),
                 generation: None,
@@ -1340,6 +1529,7 @@ fn handle_request(
                 },
             );
             AnchorResponse {
+                worker: None,
                 ok: true,
                 epoch: Some(state.epoch.clone()),
                 generation: Some(generation),
@@ -1508,6 +1698,7 @@ fn valid_subject_digest(value: &str) -> bool {
 
 fn response_ok(state: &AnchorState, generation: Option<u64>) -> AnchorResponse {
     AnchorResponse {
+        worker: None,
         ok: true,
         epoch: Some(state.epoch.clone()),
         generation,
@@ -1520,6 +1711,7 @@ fn response_ok(state: &AnchorState, generation: Option<u64>) -> AnchorResponse {
 
 fn response_error(error: &str) -> AnchorResponse {
     AnchorResponse {
+        worker: None,
         ok: false,
         epoch: None,
         generation: None,
@@ -1532,6 +1724,7 @@ fn response_error(error: &str) -> AnchorResponse {
 
 fn response_error_code(error: &str, error_code: AnchorErrorCode) -> AnchorResponse {
     AnchorResponse {
+        worker: None,
         ok: false,
         epoch: None,
         generation: None,
@@ -1547,25 +1740,36 @@ fn request(
     request: &AnchorRequest,
     auth: &RequestAuth,
 ) -> Result<AnchorResponse> {
+    let worker = matches!(request, AnchorRequest::Worker { .. });
+    let timeout = if worker {
+        WORKER_IO_TIMEOUT
+    } else {
+        IO_TIMEOUT
+    };
+    let limit = if worker {
+        MAX_WORKER_MESSAGE_BYTES
+    } else {
+        MAX_MESSAGE_BYTES
+    };
     let mut connection = platform::connect(endpoint, IO_TIMEOUT)?;
-    platform::set_deadlines(&connection, IO_TIMEOUT)?;
+    platform::set_deadlines(&connection, timeout)?;
     authenticate_server(endpoint, &connection)?;
     let nonce = random_hex(32);
     let envelope = AuthenticatedRequest {
         version: AUTHORITY_ENDPOINT_VERSION,
         nonce: nonce.clone(),
         credential: auth.credential.clone(),
-        request: serde_json::from_value(serde_json::to_value(request)?)?,
+        request: request.clone(),
         mac: request_mac(&auth.key, &nonce, &auth.credential, request)?,
     };
-    let encoded = serde_json::to_vec(&envelope)?;
-    if encoded.len() > MAX_MESSAGE_BYTES {
+    let encoded = zeroize::Zeroizing::new(serde_json::to_vec(&envelope)?);
+    if encoded.len() > limit {
         return Err(LocusError::AuthorityAnchorUnavailable(
             "authority request exceeds protocol limit".into(),
         ));
     }
     platform::write_message(&mut connection, &encoded, IO_TIMEOUT)?;
-    let raw = platform::read_message(&mut connection, MAX_MESSAGE_BYTES, IO_TIMEOUT)?;
+    let raw = platform::read_message(&mut connection, limit, timeout)?;
     let response: AuthenticatedResponse = serde_json::from_slice(&raw).map_err(|error| {
         LocusError::AuthorityAnchorUnavailable(format!("invalid broker response: {error}"))
     })?;
@@ -1584,7 +1788,12 @@ fn request_mac(
     credential: &RequestCredential,
     request: &AnchorRequest,
 ) -> Result<String> {
-    let material = serde_json::to_vec(&(AUTHORITY_ENDPOINT_VERSION, nonce, credential, request))?;
+    let material = zeroize::Zeroizing::new(serde_json::to_vec(&(
+        AUTHORITY_ENDPOINT_VERSION,
+        nonce,
+        credential,
+        request,
+    ))?);
     Ok(mac_hex(key, &material))
 }
 
@@ -1656,16 +1865,6 @@ fn authenticate_server(
     Ok(())
 }
 
-#[cfg(test)]
-fn connection_peer_identity(_connection: &platform::Connection) -> Result<PeerIdentity> {
-    Ok(PeerIdentity {
-        pid: std::process::id(),
-        uid: platform::current_user_identity()?,
-        executable: std::env::current_exe()?,
-    })
-}
-
-#[cfg(not(test))]
 fn connection_peer_identity(connection: &platform::Connection) -> Result<PeerIdentity> {
     platform::peer_identity(connection)
 }
@@ -3134,7 +3333,6 @@ mod platform {
         Ok(())
     }
 
-    #[cfg(not(test))]
     pub fn peer_identity(connection: &Connection) -> Result<PeerIdentity> {
         let (pid, uid) = peer_process(connection)?;
         let executable = peer_executable(pid)?;
@@ -3145,7 +3343,7 @@ mod platform {
         })
     }
 
-    #[cfg(all(not(test), target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     fn peer_process(connection: &Connection) -> Result<(u32, String)> {
         let mut credentials: libc::ucred = unsafe { std::mem::zeroed() };
         let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -3167,7 +3365,7 @@ mod platform {
         Ok((credentials.pid as u32, credentials.uid.to_string()))
     }
 
-    #[cfg(all(not(test), any(target_os = "macos", target_os = "ios")))]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     fn peer_process(connection: &Connection) -> Result<(u32, String)> {
         let mut uid: libc::uid_t = 0;
         let mut gid: libc::gid_t = 0;
@@ -3198,10 +3396,7 @@ mod platform {
         Ok((pid as u32, uid.to_string()))
     }
 
-    #[cfg(all(
-        not(test),
-        not(any(target_os = "linux", target_os = "macos", target_os = "ios"))
-    ))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "ios")))]
     fn peer_process(_connection: &Connection) -> Result<(u32, String)> {
         Err(LocusError::AuthorityAnchorUnavailable(
             "peer PID authentication is unsupported on this Unix platform".into(),
@@ -3501,7 +3696,6 @@ mod platform {
             "Windows authority unavailable".into(),
         ))
     }
-    #[cfg(not(test))]
     pub fn peer_identity(_connection: &Connection) -> Result<PeerIdentity> {
         Err(LocusError::AuthorityAnchorUnavailable(
             "Windows peer identity unavailable".into(),
@@ -3569,7 +3763,6 @@ mod platform {
     ) -> Result<()> {
         unavailable()
     }
-    #[cfg(not(test))]
     pub fn peer_identity(_connection: &Connection) -> Result<PeerIdentity> {
         unavailable()
     }
