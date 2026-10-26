@@ -60,7 +60,7 @@ Use explicit environment (`env:`) references for supported credential resolution
 ## Install options
 
 ```bash
-# Homebrew (tap live) — installs locus + locus-mcp
+# Homebrew (tap live): installs locus + locus-mcp
 brew install ashlrai/tap/locus
 
 # npm (release binary, or cargo if this platform has no asset)
@@ -105,14 +105,14 @@ eval "$(locus hook zsh)"
 locus init --with-samples
 locus enter personal && locus whoami
 
-# Switch client — previous identity is gone from the process env
+# Switch client: previous identity is gone from the process env
 locus enter acme && locus whoami
 
 # Local identity dashboard (loopback UI + API)
 locus dashboard                  # http://127.0.0.1:8750
 
 # Run any command with only the pinned binding's surface
-locus exec -- env | grep LOCUS_
+locus exec -- echo ok
 
 # Wire AI clients + hub readiness
 locus agent setup --apply
@@ -155,7 +155,7 @@ locus pin acme
         ▼
   Session sealed (HMAC) to binding "acme"
         │
-        ├─► locus-mcp   → tools = only this binding (+ locus_whoami)
+        ├─► locus mcp --supervised → control + pinned provider tools
         │                 agents cannot pin (locus_request_pin only)
         │                 scope freeze: wrong project_ref → deny
         │
@@ -186,11 +186,12 @@ Legacy bare Phantom names are never silently skipped. Inspect the safe dry run w
 ```bash
 # after Install (cargo / brew / npm)
 locus enter acme
-locus agent setup --apply      # MCP configs + AGENT.md (or: locus setup --client claude)
-# restart Claude Code — tools: locus_whoami, supabase.scope, … + resources/prompts
+locus agent setup --apply      # control MCP configs + AGENT.md
+# For provider tools, register the supervised launch, then restart Claude Code:
+claude mcp add locus -- locus mcp --supervised
 
-# Optional: HTTP MCP for CI agents (loopback + token)
-LOCUS_MCP_HTTP_TOKEN=secret locus-mcp --http 127.0.0.1:8742
+# Optional: HTTP MCP for CI agents (loopback; supply auth outside agent context)
+locus-mcp --http 127.0.0.1:8742
 # POST /mcp  ·  GET /health
 ```
 
@@ -204,8 +205,8 @@ MCP identity and provider-scope responses report only credential presence and so
 |------|---------|
 | **Binding** | principal × tenant × providers × CredentialRefs × policy |
 | **Session** | Live pin sealed to exactly one Binding |
-| **Workspace** | `.locus.toml` — default pin + allowlist for a repo tree |
-| **CredentialRef** | `phm:NAME` / vault pointer — never the secret itself |
+| **Workspace** | `.locus.toml`: default pin + allowlist for a repo tree |
+| **CredentialRef** | `env:VAR` / reserved `phm:NAME` pointer; never the secret itself |
 
 Workspace policy discovery is fail closed: if the nearest `.locus.toml` exists but is unreadable or malformed, explicit pin, autopin, and `--force` pin stop with an error, while `locus doctor` reports `UNSAFE`.
 
@@ -245,6 +246,11 @@ scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 
 ## CLI
 
+Use `locus --help` for the command groups and `locus <command> --help` for
+accepted flags and subcommands. The reference below uses `|` for alternatives;
+choose one alternative when running a command. For MCP tool names, see the
+[control catalog](./docs/mcp.md#always-control-plane).
+
 ```
 locus init [--with-samples] · quickstart
 locus onboard [--detect-only] [--yes] [--reset]  # guided refs-only tenant setup
@@ -283,7 +289,7 @@ locus completion zsh|bash|fish        # shell completions
 locus topic <name>                    # dashboard · forensics · serve · goal · verify · …
 ```
 
-**Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
+**Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/): personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
 
 **Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/phantom/](./integrations/phantom/)
 
@@ -299,7 +305,7 @@ locus events --last 20 --op approval.advisory --json
 # Provider execution stays blocked pending a closed external authorization envelope.
 ```
 
-Graph share (bindings + workspace templates only — CredentialRefs, never secret values):
+Graph share (bindings + workspace templates only: CredentialRefs, never secret values):
 
 ```bash
 export LOCUS_GRAPH_PASSPHRASE='…'   # required for encrypt/decrypt
@@ -345,7 +351,7 @@ cargo build --release
 
 # Full shell e2e (pin, isolation, MCP freeze/approval, dual-control,
 # doctor, events, enter/run, notify, graph, ci, heartbeat, dashboard health,
-# forensics, goal status — feature-detected)
+# forensics, goal status: feature-detected)
 ./scripts/e2e.sh
 ```
 
@@ -355,7 +361,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test/lint and how to add adap
 
 | App | Role |
 |-----|------|
-| [`apps/web/`](./apps/web) | Marketing landing — AI-native identity plane hero |
+| [`apps/web/`](./apps/web) | Marketing landing: AI-native identity plane hero |
 | [`apps/dashboard/`](./apps/dashboard) | Operator UI embedded by `locus serve` / `dashboard` |
 
 ```bash
@@ -410,7 +416,7 @@ locus approve grant appr_… --as mason  # advisory only; never execution author
 locus notify status                  # OFF by default (no spam)
 locus doctor                         # SAFE | WARN | UNSAFE
 
-# Encrypted binding-graph share (CredentialRefs only — never secret values)
+# Encrypted binding-graph share (CredentialRefs only: never secret values)
 export LOCUS_GRAPH_PASSPHRASE='…'    # or interactive TTY prompt
 locus graph export --out team.locusgraph
 locus graph import team.locusgraph
@@ -456,6 +462,6 @@ Issues and PRs are welcome. Look for [`good first issue`](https://github.com/ash
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT: see [LICENSE](./LICENSE).
 
 Code of Conduct: [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md).

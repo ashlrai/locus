@@ -14,20 +14,31 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Docs an agent reads to learn the CLI and MCP surface.
-const DOCS: &[&str] = &[
-    "CLAUDE.md",
-    "AGENTS.md",
-    "README.md",
-    "CONTRIBUTING.md",
-    "docs/mcp.md",
-    "docs/onboarding.md",
-    "docs/architecture.md",
-    "docs/policy.md",
-    "docs/firm-mode.md",
-    "docs/agency-starter.md",
-    "docs/workers.md",
-    "docs/adapters.md",
-];
+fn docs() -> Vec<String> {
+    fn collect(dir: &Path, root: &Path, paths: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, root, paths);
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                paths.push(
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    let root = repo_root();
+    let mut paths = ["CLAUDE.md", "AGENTS.md", "README.md", "CONTRIBUTING.md"]
+        .map(str::to_owned)
+        .to_vec();
+    collect(&root.join("docs"), &root, &mut paths);
+    paths.sort();
+    paths
+}
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -102,19 +113,26 @@ fn help_group(help: &str, group: &str) -> Vec<String> {
         .collect()
 }
 
-/// Text an agent would copy: fenced code blocks and inline backtick spans,
+/// CLI examples an agent would copy: shell fences and inline backtick spans,
 /// with the 1-based line number each came from.
 fn code_spans(doc: &str) -> Vec<(usize, String)> {
     let mut spans = Vec::new();
     let mut fenced = false;
+    let mut shell_fence = false;
     for (i, line) in doc.lines().enumerate() {
         let n = i + 1;
         if line.trim_start().starts_with("```") {
+            if !fenced {
+                let language = line.trim_start().trim_start_matches('`').trim();
+                shell_fence = matches!(language, "" | "bash" | "sh" | "shell" | "zsh" | "console");
+            }
             fenced = !fenced;
             continue;
         }
         if fenced {
-            spans.push((n, line.to_string()));
+            if shell_fence && !line.trim_start().starts_with('#') {
+                spans.push((n, line.to_string()));
+            }
             continue;
         }
         let mut parts = line.split('`');
@@ -160,6 +178,36 @@ fn invocations(span: &str) -> Vec<(String, Option<String>)> {
 }
 
 #[test]
+fn documentation_discovery_includes_the_full_docs_tree() {
+    let paths = docs();
+    for path in [
+        "README.md",
+        "docs/FIRST-RUN.md",
+        "docs/phantom-enrolled-repos.md",
+        "docs/verification-plane.md",
+    ] {
+        assert!(paths.iter().any(|p| p == path), "missing {path}");
+    }
+    assert_eq!(paths.iter().collect::<BTreeSet<_>>().len(), paths.len());
+}
+
+#[test]
+fn command_examples_are_extracted_from_inline_and_fenced_code() {
+    let doc = "Prose locus imaginary is ignored.\n`locus binding list`\n```bash\n# locus imaginary in a comment\nlocus mcp --supervised\n```\n```typescript\nthrow new Error(\"locus imaginary\");\n```\n";
+    let commands: Vec<_> = code_spans(doc)
+        .into_iter()
+        .flat_map(|(_, span)| invocations(&span))
+        .collect();
+    assert_eq!(
+        commands,
+        vec![
+            ("binding".into(), Some("list".into())),
+            ("mcp".into(), None),
+        ]
+    );
+}
+
+#[test]
 fn every_documented_locus_command_is_a_real_subcommand() {
     let top_help = locus_output(&["--help"]);
     let top = help_commands(&top_help);
@@ -170,8 +218,8 @@ fn every_documented_locus_command_is_a_real_subcommand() {
 
     let mut subs: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut failures = Vec::new();
-    for doc in DOCS {
-        for (line, span) in code_spans(&read_doc(doc)) {
+    for doc in docs() {
+        for (line, span) in code_spans(&read_doc(&doc)) {
             for (cmd, sub) in invocations(&span) {
                 if !top.contains(&cmd) {
                     failures.push(format!(
@@ -352,9 +400,19 @@ fn docs_mcp_tool_lists_match_the_control_catalog() {
     known.insert("locus_context".into());
     // Rust crate paths, not tools.
     known.extend(["locus_core", "locus_cli", "locus_mcp"].map(String::from));
+    // Documented JSON fields, trace labels and Markdown anchors, not tools.
+    known.extend(
+        [
+            "locus_version",
+            "locus_exec_phase",
+            "locus_reg",
+            "locus_enforce",
+        ]
+        .map(String::from),
+    );
     let mut failures = Vec::new();
-    for rel in DOCS {
-        for (i, line) in read_doc(rel).lines().enumerate() {
+    for rel in docs() {
+        for (i, line) in read_doc(&rel).lines().enumerate() {
             for tok in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
                 if tok.len() > "locus_".len() && tok.starts_with("locus_") && !known.contains(tok) {
                     failures.push(format!(
