@@ -22,7 +22,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      actions: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -30,8 +29,9 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          # Required with a SHA pin: the action can no longer read it from the ref.
           toolchain: stable
           components: rustfmt, clippy, llvm-tools-preview
 
@@ -84,7 +84,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      actions: read
       id-token: write
     # No checkout: this job runs no repo code. It only uploads the artifact.
     steps:

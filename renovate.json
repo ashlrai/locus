@@ -9,7 +9,8 @@
   "minimumReleaseAge": "3 days",
   "separateMajorMinor": true,
   "vulnerabilityAlerts": {
-    "enabled": true
+    "enabled": true,
+    "minimumReleaseAge": null
   },
   "packageRules": [
     {
