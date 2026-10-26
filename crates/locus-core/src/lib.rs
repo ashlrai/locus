@@ -43,6 +43,7 @@ pub mod recovery;
 pub mod seal;
 pub mod session;
 pub mod store;
+pub mod swarm;
 pub mod ticket;
 pub mod verify;
 pub mod workers;
@@ -172,6 +173,7 @@ pub use store::{
     ForceLeaveOutcome, McpGrant, McpGrantAuthError, PinResolution, ProviderView, RenewOutcome,
     ResolvedSession, RuntimeDrift, Store, Whoami,
 };
+pub use swarm::{SwarmAgent, SwarmGraph};
 pub use ticket::{
     mint_ticket, verify_ticket, verify_ticket_parts, CapabilityTicket, DEFAULT_TICKET_TTL_SECS,
     TICKET_ID_PREFIX,
