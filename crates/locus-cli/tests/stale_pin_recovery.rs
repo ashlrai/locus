@@ -295,3 +295,178 @@ fn stale_pin_recovery_never_names_a_missing_binding() {
     }
     assert!(!home.path().join("bindings/nosuch.toml").exists());
 }
+
+// ── Negative tests for the replace-stale branch of `enter` (#156) ─────────
+
+/// Number of `session.replace_stale` audit records under `home`.
+fn replace_stale_audits(home: &Path) -> usize {
+    std::fs::read_dir(home.join("audit"))
+        .map(|dir| {
+            dir.map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap_or_default())
+                .map(|s| s.matches("session.replace_stale").count())
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+fn active_bytes(home: &Path) -> Vec<u8> {
+    std::fs::read(home.join("sessions/active.json")).expect("active.json")
+}
+
+/// Wait until the pin under `home` can no longer be verified.
+fn wait_dead(home: &Path, cwd: &Path, cap: &str) {
+    for _ in 0..100 {
+        if !locus(home, cwd, cap, &["whoami"]).status.success() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("pin stayed verifiable after its supervising shell exited");
+}
+
+/// Rewrite the dead active pin with `edit`, resealed with the store seal key
+/// (an attacker who can read `daemon.key`), or not resealed.
+fn edit_active(home: &Path, reseal: bool, edit: impl FnOnce(&mut locus_core::session::Session)) {
+    let path = home.join("sessions/active.json");
+    let mut s: locus_core::session::Session =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut s);
+    if reseal {
+        let key = std::fs::read_to_string(home.join("daemon.key")).unwrap();
+        s.reseal(&locus_core::seal::SealKey::from_hex(&key).unwrap());
+    }
+    std::fs::write(&path, serde_json::to_vec_pretty(&s).unwrap()).unwrap();
+}
+
+/// Assert `enter acme` is refused, leaves active.json byte-identical and
+/// writes no `session.replace_stale` record (item 5 for every case).
+fn assert_refused_untouched(out: &Output, home: &Path, before: &[u8], case: &str) {
+    assert!(!out.status.success(), "{case}: enter must be refused");
+    assert_eq!(active_bytes(home), before, "{case}: active.json changed");
+    assert_eq!(
+        replace_stale_audits(home),
+        0,
+        "{case}: replace_stale audited"
+    );
+}
+
+/// (1) Live pin + wrong capability: refused by the live broker
+/// (authorize_control), active.json untouched; the right capability still
+/// replaces the live pin, and that is not a stale replacement.
+#[test]
+fn live_pin_replacement_still_runs_authorize_control() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    // Pin from this live test process so the broker stays up.
+    let qs = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .arg("quickstart")
+        .env("LOCUS_HOME", home.path())
+        .env_remove("LOCUS_CONTROL_CAPABILITY")
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    assert!(qs.status.success(), "quickstart: {}", stderr(&qs));
+    let cap = std::fs::read_to_string(home.path().join("control_capability")).unwrap();
+    let cap = cap.trim();
+    assert!(locus(home.path(), cwd.path(), cap, &["whoami"])
+        .status
+        .success());
+    let before = active_bytes(home.path());
+
+    let wrong = "ab".repeat(32);
+    let out = locus_fail_closed(home.path(), cwd.path(), &wrong, &["enter", "acme"]);
+    assert_refused_untouched(&out, home.path(), &before, "live pin, wrong capability");
+    let err = stderr(&out);
+    assert!(
+        err.contains("a live authority broker answered but refused this control capability"),
+        "a live pin must be gated by the live broker's authentication: {err}"
+    );
+
+    let ok = locus(home.path(), cwd.path(), cap, &["enter", "acme"]);
+    assert!(ok.status.success(), "right capability: {}", stderr(&ok));
+    assert_ne!(active_bytes(home.path()), before);
+    assert_eq!(
+        replace_stale_audits(home.path()),
+        0,
+        "live replacement is not stale"
+    );
+}
+
+/// (2) An explicit LOCUS_SESSION_ID keeps the strict check on a dead pin.
+#[test]
+fn explicit_session_id_on_dead_pin_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+    let before = active_bytes(home.path());
+    let v: serde_json::Value = serde_json::from_slice(&before).unwrap();
+    let id = v["session_id"].as_str().unwrap();
+
+    let out = locus_cmd(home.path(), cwd.path(), &cap, &["enter", "acme"])
+        .env("LOCUS_SESSION_ID", id)
+        .env("LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS", "500")
+        .output()
+        .unwrap();
+    assert_refused_untouched(&out, home.path(), &before, "explicit LOCUS_SESSION_ID");
+}
+
+/// (3a) A dead pin whose seal was tampered with is refused.
+#[test]
+fn dead_pin_with_tampered_seal_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+    edit_active(home.path(), false, |s| s.seal = "deadbeef".into());
+    let before = active_bytes(home.path());
+
+    let out = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "acme"]);
+    assert_refused_untouched(&out, home.path(), &before, "tampered seal");
+}
+
+/// (3b) A dead pin whose sealed authority is not local control is refused,
+/// even when resealed with the store key.
+#[test]
+fn dead_non_local_control_pin_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+    edit_active(home.path(), true, |s| {
+        s.authority = locus_core::session::SessionAuthority::Delegated
+    });
+    let before = active_bytes(home.path());
+
+    let out = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "acme"]);
+    assert_refused_untouched(&out, home.path(), &before, "delegated pin");
+    assert!(
+        stderr(&out).contains("requires an authenticated local-control session"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// (4) Strict posture (`init --no-persist-capability`): no persisted
+/// verifier exists once the broker is gone, so the dead pin is not replaced
+/// (only `leave --force --no-verifier` can clear it).
+#[test]
+fn dead_pin_without_persisted_capability_is_refused() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = "cd".repeat(32);
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg("\"$0\" init --with-samples --no-persist-capability >/dev/null 2>&1 && \"$0\" enter personal >/dev/null 2>&1; true")
+        .arg(env!("CARGO_BIN_EXE_locus"))
+        .env("LOCUS_HOME", home.path())
+        .env("LOCUS_CONTROL_CAPABILITY", &cap)
+        .current_dir(cwd.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(!home.path().join("control_capability").exists());
+    let before = active_bytes(home.path());
+    wait_dead(home.path(), cwd.path(), &cap);
+
+    let out = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "acme"]);
+    assert_refused_untouched(&out, home.path(), &before, "no persisted capability");
+    assert!(stderr(&out).contains("--no-verifier"), "{}", stderr(&out));
+}

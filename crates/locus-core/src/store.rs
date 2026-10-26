@@ -279,19 +279,21 @@ impl Store {
                 "{operation} requires an authenticated local-control session"
             )));
         }
+        // Authenticate the capability BEFORE classifying the old pin, and
+        // before any new broker can start under the presented capability:
+        // the `locus leave --force` verifier (no `--no-verifier` escape)
+        // pings a live broker with it, or, when no broker answers, checks it
+        // against the persisted operator capability. Then the normal
+        // live-broker gate. A wrong capability is refused here whether the
+        // old pin is live or dead.
+        authority_anchor::authorize_control_teardown(&self.home, false)?;
+        authority_anchor::authorize_control(&self.home)?;
         match self.validate_session_authority(session) {
-            Ok(_) => authority_anchor::authorize_control(&self.home).map(|()| None),
+            Ok(_) => Ok(None),
             Err(
                 e @ (LocusError::AuthorityAnchorMismatch
                 | LocusError::AuthorityAnchorUnavailable(_)),
-            ) => {
-                // Same verifier as `locus leave --force` (no `--no-verifier`),
-                // checked BEFORE a new broker can be started under whatever
-                // capability this process carries.
-                authority_anchor::authorize_control_teardown(&self.home, false)?;
-                authority_anchor::authorize_control(&self.home)?;
-                Ok(Some((session.session_id.clone(), e.to_string())))
-            }
+            ) => Ok(Some((session.session_id.clone(), e.to_string()))),
             Err(e) => Err(e),
         }
     }
@@ -1403,7 +1405,9 @@ impl Store {
 
         if write_active {
             let path = self.active_session_path();
-            self.write_session_file(&path, &session)?;
+            // Audit the stale replacement BEFORE overwriting active.json: if
+            // the audit write fails, the dead pin stays as it was (no
+            // unaudited replacement, no half state).
             if let Some((old_id, reason)) = replaced_stale {
                 self.audit(
                     "session.replace_stale",
@@ -1415,6 +1419,7 @@ impl Store {
                     })),
                 )?;
             }
+            self.write_session_file(&path, &session)?;
             self.audit(
                 "session.pin",
                 &binding.alias,
@@ -1442,10 +1447,34 @@ impl Store {
             .map(|backing| backing.backing_type)
             .ok_or(LocusError::InvalidSeal)?;
         session.verify_backing(backing_type, &self.canonical_session_path(path)?)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| LocusError::msg("session path has no parent"))?;
+        fs::create_dir_all(parent)?;
+        // Write a fresh temp file, then rename over the target: rename
+        // replaces a symlink planted at the target instead of following it
+        // (plain `fs::write` would write through it to wherever it points).
+        let name = path.file_name().ok_or(LocusError::InvalidSeal)?;
+        let tmp = parent.join(format!(
+            ".{}.{}.tmp",
+            name.to_string_lossy(),
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&tmp);
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(serde_json::to_string_pretty(session)?.as_bytes())?;
+                f.sync_all()
+            })
+            .and_then(|()| fs::rename(&tmp, path));
+        if let Err(e) = written {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
         }
-        fs::write(path, serde_json::to_string_pretty(session)?)?;
         Ok(())
     }
 
@@ -4473,6 +4502,36 @@ credential_ref = "ghp_UNSAFE/CANARY"
         store.leave().unwrap();
         store.pin("acme", dir.path(), None, false).unwrap();
         assert!(store.verify_runtime().unwrap().ok);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pin_does_not_write_through_a_symlink_at_active_json() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        // Plant active.json as a symlink to a file outside sessions/.
+        let path = store.active_session_path();
+        let outside = dir.path().join("outside.json");
+        fs::copy(&path, &outside).unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        let outside_before = fs::read(&outside).unwrap();
+
+        store.pin("personal", dir.path(), None, false).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), outside_before);
+        assert!(!fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(store.require_active().unwrap().binding_alias, "personal");
     }
 
     #[test]
