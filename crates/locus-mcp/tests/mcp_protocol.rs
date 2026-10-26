@@ -152,7 +152,39 @@ impl McpClient {
         }));
         let resp = self.read_msg();
         assert_eq!(resp.get("id"), Some(&json!(id)), "id mismatch: {resp}");
+        if let Some(result) = resp.get("result") {
+            assert_eq!(result["resultType"], "complete", "{method} result type");
+            if matches!(
+                method,
+                "server/discover"
+                    | "tools/list"
+                    | "resources/list"
+                    | "resources/read"
+                    | "prompts/list"
+            ) {
+                assert_eq!(result["ttlMs"].as_u64(), Some(0), "{method} cache TTL");
+                assert_eq!(result["cacheScope"], "private", "{method} cache scope");
+            } else {
+                assert!(result.get("ttlMs").is_none(), "{method} is not cacheable");
+                assert!(
+                    result.get("cacheScope").is_none(),
+                    "{method} is not cacheable"
+                );
+            }
+        } else {
+            assert!(resp.get("error").is_some(), "missing result or error");
+            assert!(resp["error"].get("resultType").is_none());
+        }
         resp
+    }
+
+    fn modern_request(&mut self, method: &str, mut params: Value) -> Value {
+        params["_meta"] = json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": "locus-test", "version": "0.0.1" },
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        self.request(method, params)
     }
 
     fn notify(&mut self, method: &str, params: Value) {
@@ -263,16 +295,25 @@ fn beta_binding(store: &Store) {
 }
 
 fn handshake(client: &mut McpClient) -> Value {
+    handshake_version(client, "2026-07-28")
+}
+
+fn handshake_version(client: &mut McpClient, protocol_version: &str) -> Value {
     let init = client.request(
         "initialize",
         json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": protocol_version,
             "capabilities": {},
             "clientInfo": { "name": "locus-test", "version": "0.0.1" }
         }),
     );
     assert!(init.get("result").is_some(), "initialize failed: {init}");
     let result = init.get("result").unwrap().clone();
+    assert_eq!(result["protocolVersion"], protocol_version);
+    assert!(!result["serverInfo"]["name"]
+        .as_str()
+        .unwrap()
+        .contains("__"));
     assert_eq!(
         result
             .get("serverInfo")
@@ -295,6 +336,137 @@ fn parse_resource_text(resp: &Value) -> String {
         .and_then(|t| t.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+#[test]
+fn protocol_revisions_negotiate_over_both_stdio_framings() {
+    let dir = tempdir().unwrap();
+    for framing in [Framing::Ndjson, Framing::ContentLength] {
+        for version in ["2026-07-28", "2025-06-18", "2025-03-26", "2024-11-05"] {
+            let mut client = McpClient::spawn(dir.path(), framing);
+            handshake_version(&mut client, version);
+            let list = client.request("tools/list", json!({}));
+            assert!(list["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|tool| { tool["name"].as_str().unwrap().starts_with("locus_") }));
+            let pong = client.request("ping", json!({}));
+            assert_eq!(pong["result"], json!({ "resultType": "complete" }));
+        }
+    }
+}
+
+#[test]
+fn modern_requests_work_without_initialize_and_return_private_cache_hints() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    for framing in [Framing::Ndjson, Framing::ContentLength] {
+        let mut client = McpClient::spawn(dir.path(), framing);
+        let discovery = client.modern_request("server/discover", json!({}));
+        let result = &discovery["result"];
+        assert_eq!(
+            result["supportedVersions"],
+            json!(["2026-07-28", "2025-06-18", "2025-03-26", "2024-11-05"])
+        );
+        let name = result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"]
+            .as_str()
+            .unwrap();
+        assert_eq!(name, "locus-mcp");
+        assert!(!name.contains("__"));
+        assert!(result["capabilities"]["tools"].is_object());
+
+        for method in ["tools/list", "resources/list", "prompts/list"] {
+            let response = client.modern_request(method, json!({}));
+            assert!(response.get("result").is_some(), "{method} failed");
+        }
+        for uri in ["locus://session", "locus://doctor", "locus://bindings"] {
+            let response = client.modern_request("resources/read", json!({ "uri": uri }));
+            assert!(!parse_resource_text(&response).is_empty(), "{uri}");
+        }
+        let prompt = client.modern_request("prompts/get", json!({ "name": "locus_context" }));
+        assert!(prompt["result"]["messages"].is_array());
+        let whoami = client.modern_request(
+            "tools/call",
+            json!({ "name": "locus_whoami", "arguments": {} }),
+        );
+        assert!(McpClient::tool_text(&whoami).1);
+        let refused = client.modern_request(
+            "tools/call",
+            json!({ "name": "github.scope", "arguments": {} }),
+        );
+        assert!(McpClient::tool_text(&refused).1);
+        let invalid = client.modern_request("tools/call", json!({}));
+        assert_eq!(invalid["error"]["code"], -32602);
+        assert!(invalid.get("result").is_none());
+    }
+    assert!(store.active_session().unwrap().is_none());
+}
+
+#[test]
+fn modern_pinned_tools_preserve_scope_and_approval_gates() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    store.pin("acme", dir.path(), None, false).unwrap();
+    for framing in [Framing::Ndjson, Framing::ContentLength] {
+        let mut client = McpClient::spawn(dir.path(), framing);
+        let list = client.modern_request("tools/list", json!({}));
+        assert!(list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "github.scope"));
+        let scope = client.modern_request(
+            "tools/call",
+            json!({ "name": "github.scope", "arguments": {} }),
+        );
+        let (text, is_error) = McpClient::tool_text(&scope);
+        assert!(!is_error);
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["orgs"], json!(["acme-corp"]));
+
+        for (name, arguments) in [
+            ("github.scope", json!({ "org": "other-corp" })),
+            ("vercel.deploy.prod", json!({})),
+        ] {
+            let refused = client.modern_request(
+                "tools/call",
+                json!({ "name": name, "arguments": arguments }),
+            );
+            assert!(McpClient::tool_text(&refused).1, "{name} must remain gated");
+        }
+    }
+}
+
+#[test]
+fn per_request_versions_reject_unsupported_or_malformed_metadata_before_dispatch() {
+    let dir = tempdir().unwrap();
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+    for (version, code) in [
+        (json!("2099-01-01"), -32022),
+        (json!(42), -32602),
+        (Value::Null, -32602),
+    ] {
+        // Missing tool name would normally produce -32602. Version rejection
+        // must happen first, and never be disguised as a tool-level result.
+        let response = client.request(
+            "tools/call",
+            json!({
+                "_meta": { "io.modelcontextprotocol/protocolVersion": version }
+            }),
+        );
+        assert_eq!(response["error"]["code"], code);
+        assert!(response.get("result").is_none());
+        if code == -32022 {
+            assert_eq!(response["error"]["data"]["requested"], version);
+            assert_eq!(response["error"]["data"]["supported"][0], "2026-07-28");
+        }
+    }
+    let pong = client.modern_request("ping", json!({}));
+    assert_eq!(pong["result"]["resultType"], "complete");
 }
 
 #[test]
@@ -2306,6 +2478,16 @@ fn stdio_cross_alias_repin_refuses_with_pin_changed() {
     store
         .pin("beta", dir.path(), Some("anchor-swap".into()), false)
         .unwrap();
+
+    // Discovery and rejected modern initialization must not adopt a re-pin.
+    client.modern_request("server/discover", json!({}));
+    let unsupported = client.request(
+        "initialize",
+        json!({
+            "_meta": { "io.modelcontextprotocol/protocolVersion": "2099-01-01" }
+        }),
+    );
+    assert_eq!(unsupported["error"]["code"], -32022);
 
     // Provider call now fails closed with pin_changed — not runtime_unhealthy.
     let refused = client.request(
