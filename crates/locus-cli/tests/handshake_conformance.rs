@@ -9,7 +9,7 @@ use std::process::Command;
 
 const CONTRACT: &str = include_str!("contract/ashlr-handshake.v1.json");
 const CONTRACT_SHA: &str = include_str!("contract/ashlr-handshake.v1.json.sha256");
-const PINNED_SHA256: &str = "e4fa6e79ae7523fb11c44fc16843f0edf385f6c8e4c164409a62d05a76e0ac95";
+const PINNED_SHA256: &str = "1f6679138a048f6882eb33f84ab2894b54e51898f887a5cb9c19cc9731c5c171";
 const KEBAB: &str = "^[a-z0-9]+(-[a-z0-9]+)*$";
 const SEMVER: &str = "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.+-]+)?$";
 
@@ -261,4 +261,115 @@ fn the_checker_catches_drift() {
     let mut h = good.clone();
     h.as_object_mut().unwrap().remove("receipts");
     assert_eq!(check(&h, &c), vec!["missing field receipts".to_string()]);
+}
+
+/// Problems with a `doctor --json` object under the contract's `doctor`
+/// section (the `ashlr.doctor` v1 wrapper). Other fields are allowed.
+fn check_doctor(d: &Value, c: &Value) -> Vec<String> {
+    let r = &c["doctor"];
+    let mut out = Vec::new();
+    for k in r["required"].as_array().unwrap() {
+        if d.get(k.as_str().unwrap()).is_none() {
+            out.push(format!("missing field {k}"));
+        }
+    }
+    if d["kind"] != r["kind"] {
+        out.push("kind".into());
+    }
+    if d["schema_version"] != r["schema_version"] {
+        out.push("schema_version".into());
+    }
+    if !d["tool"].as_str().is_some_and(kebab) {
+        out.push("tool".into());
+    }
+    if !r["status"].as_array().unwrap().contains(&d["status"]) {
+        out.push("status".into());
+    }
+    if !d["native_status"].is_string() {
+        out.push("native_status".into());
+    }
+    let checks = d["checks"].as_array().cloned().unwrap_or_default();
+    for (i, ck) in checks.iter().enumerate() {
+        for k in r["check_required"].as_array().unwrap() {
+            if ck.get(k.as_str().unwrap()).is_none() {
+                out.push(format!("checks[{i}] missing {k}"));
+            }
+        }
+        if !r["check_status"]
+            .as_array()
+            .unwrap()
+            .contains(&ck["status"])
+        {
+            out.push(format!("checks[{i}].status"));
+        }
+        if !ck["summary"].is_string() {
+            out.push(format!("checks[{i}].summary"));
+        }
+        if let Some(id) = ck.get("id") {
+            if !id.as_str().is_some_and(kebab) {
+                out.push(format!("checks[{i}].id"));
+            }
+        }
+    }
+    if d["status"] != "fail" && checks.iter().any(|c| c["status"] == "fail") {
+        out.push("a check is fail but status is not fail".into());
+    }
+    out
+}
+
+/// `locus doctor --json` in a fresh home carries the ashlr.doctor v1 wrapper,
+/// keeps its native fields, maps the verdict, and keeps its exit code.
+#[test]
+fn doctor_json_carries_the_ashlr_doctor_wrapper() {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .args(["doctor", "--json"])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", home.path())
+        .env("LOCUS_HOME", home.path().join(".locus"))
+        .output()
+        .unwrap();
+    let d: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(check_doctor(&d, &contract()), Vec::<String>::new());
+    assert_eq!(d["tool"], "locus");
+    // Native fields stay.
+    for k in ["verdict", "findings", "issues", "ok", "home"] {
+        assert!(d.get(k).is_some(), "{k} missing");
+    }
+    let native = d["native_status"].as_str().unwrap();
+    assert_eq!(native, d["verdict"].as_str().unwrap());
+    let (want_status, want_exit) = match native {
+        "SAFE" => ("ok", 0),
+        "WARN" => ("warn", 1),
+        _ => ("fail", 2),
+    };
+    assert_eq!(d["status"], want_status);
+    assert_eq!(out.status.code(), Some(want_exit), "exit code changed");
+    assert_eq!(
+        d["checks"].as_array().unwrap().len(),
+        d["findings"].as_array().unwrap().len()
+    );
+}
+
+#[test]
+fn doctor_checker_catches_a_bad_wrapper() {
+    let c = contract();
+    let good = serde_json::json!({
+        "kind": "ashlr.doctor", "schema_version": 1, "tool": "locus", "status": "warn",
+        "native_status": "WARN", "checks": [{"id": "no-bindings", "status": "warn", "summary": "x"}]
+    });
+    assert!(check_doctor(&good, &c).is_empty());
+    let mut bad = good.clone();
+    bad["status"] = "unsafe".into();
+    assert!(!check_doctor(&bad, &c).is_empty());
+    let mut bad = good.clone();
+    bad["checks"][0]["status"] = "fail".into();
+    assert_eq!(
+        check_doctor(&bad, &c),
+        vec!["a check is fail but status is not fail".to_string()]
+    );
+    let mut bad = good.clone();
+    bad.as_object_mut().unwrap().remove("native_status");
+    assert!(!check_doctor(&bad, &c).is_empty());
 }

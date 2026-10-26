@@ -6339,6 +6339,79 @@ fn missing_workspace_aliases<'a>(aliases: &'a [String], known: &[&str]) -> Vec<&
         .collect()
 }
 
+/// Adds the shared `ashlr.doctor` v1 wrapper (ashlr-stack
+/// docs/ashlr-handshake.md, "Doctor JSON") to `locus doctor --json`.
+/// Additive: every existing field stays and exit codes do not change.
+/// Mapping: verdict SAFE ok, WARN warn, UNSAFE fail; a refused Phantom
+/// preflight is fail; findings map info/warn/unsafe to info/warn/fail.
+fn add_doctor_envelope(value: &mut serde_json::Value, preflight_refused: bool) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    let native = obj
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNKNOWN")
+        .to_string();
+    let mut checks: Vec<serde_json::Value> = obj
+        .get("findings")
+        .and_then(|f| f.as_array())
+        .map(|a| {
+            a.iter()
+                .map(|f| {
+                    let status = match f["severity"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_ascii_lowercase()
+                        .as_str()
+                    {
+                        "info" => "info",
+                        "warn" => "warn",
+                        _ => "fail",
+                    };
+                    let id: String = f["code"]
+                        .as_str()
+                        .unwrap_or("finding")
+                        .to_ascii_lowercase()
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                        .collect();
+                    serde_json::json!({
+                        "id": id.trim_matches('-'),
+                        "status": status,
+                        "summary": f["message"].as_str().unwrap_or(""),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if preflight_refused {
+        checks.push(serde_json::json!({
+            "id": "phantom-preflight",
+            "status": "fail",
+            "summary": "phantom preflight refused",
+        }));
+    }
+    let status = match native.to_ascii_uppercase().as_str() {
+        "SAFE" if preflight_refused => "fail",
+        "SAFE" => "ok",
+        "WARN" => "warn",
+        _ => "fail",
+    };
+    // A fail check under a WARN verdict is not expected, but never report it as less than fail.
+    let status = if checks.iter().any(|c| c["status"] == "fail") {
+        "fail"
+    } else {
+        status
+    };
+    obj.insert("kind".into(), "ashlr.doctor".into());
+    obj.insert("schema_version".into(), 1.into());
+    obj.insert("tool".into(), "locus".into());
+    obj.insert("status".into(), status.into());
+    obj.insert("native_status".into(), native.into());
+    obj.insert("checks".into(), checks.into());
+}
+
 fn cmd_doctor(json: bool) -> Result<()> {
     let s = store()?;
 
@@ -6362,6 +6435,8 @@ fn cmd_doctor(json: bool) -> Result<()> {
         if let (Some(p), Some(obj)) = (&preflight, value.as_object_mut()) {
             obj.insert("phantom_preflight".into(), serde_json::to_value(p)?);
         }
+        let refused = preflight.as_ref().is_some_and(|p| p.refuse);
+        add_doctor_envelope(&mut value, refused);
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         print_doctor_human(&report);

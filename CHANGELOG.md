@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `locus doctor --json` carries the shared `ashlr.doctor` v1 wrapper (`kind`, `schema_version`, `tool`, `status`, `native_status`, `checks`): verdict SAFE is ok, WARN warn, UNSAFE fail, a refused Phantom preflight fail; `checks` mirror `findings`. Additive: every existing field and the exit codes (0/1/2) are unchanged. The vendored handshake contract is re-pinned to the ashlr-stack version with the `doctor` section, and the conformance test validates the doctor output in a fresh home.
 - Handshake conformance test (`tests/handshake_conformance.rs`): validates `locus --ashlr-handshake --json` against the Ashlr handshake v1 contract vendored from ashlr-stack (`tests/contract/`, pinned by sha256) and runs `doctor --fix --json` for the advertised `doctor-fix` capability.
 - Fixed: `locus doctor --fix` (the preview) no longer initializes a missing LOCUS_HOME (it created the store directories and `daemon.key`). It now reports an empty plan and writes nothing, as documented. Found by the conformance test.
 - `locus exec --expect <alias> -- <cmd>` refuses before the child starts (exit 1, the existing pre-spawn refusal code) unless the pinned binding is `<alias>`: a mismatch, no pin or a frozen pin never runs the command. The refusal names aliases only and says `locus enter <alias>`; `--json` returns the usual error document with a `pin_mismatch:` message. Without `--expect` nothing changes.
