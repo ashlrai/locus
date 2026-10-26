@@ -385,6 +385,7 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [docs/phantom-enrolled-repos.md](./docs/phantom-enrolled-repos.md) | Phantom workbench: personal / company / client scope bindings per enrolled repo |
 | [docs/gateway-base-urls.md](./docs/gateway-base-urls.md) | Model gateways (for example a LiteLLM proxy): Locus makes no provider calls, `locus exec` drops unknown env vars, and how to set a gateway URL inside it |
 | [docs/PQ-READINESS.md](./docs/PQ-READINESS.md) | Post-quantum readiness note: what Locus uses today (Ed25519 for adapter manifests, classical only) and what a migration would touch. No quantum-safety claim |
+| [docs/broker.md](./docs/broker.md) | Per-engine CLI and MCP server allowlists |
 | [docs/mcp.md](./docs/mcp.md) | `locus-mcp` with Claude Code / Cursor |
 | [docs/onboarding.md](./docs/onboarding.md) | Agency onboarding: 3 agent clients × 3 tenants end-to-end |
 | [docs/adapters.md](./docs/adapters.md) | Writing a provider adapter |

@@ -17,6 +17,7 @@ mod authority_anchor;
 pub mod autopin;
 pub mod autopin_suggest;
 pub mod binding;
+pub mod broker;
 pub mod budget;
 pub mod config;
 pub mod credential;

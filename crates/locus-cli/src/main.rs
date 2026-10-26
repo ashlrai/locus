@@ -362,6 +362,13 @@ enum Commands {
     #[command(next_help_heading = "Setup", subcommand)]
     Verify(VerifyCmd),
 
+    /// Inspect operator-managed engine permissions
+    #[command(next_help_heading = "Daily use")]
+    Broker {
+        #[command(subcommand)]
+        command: BrokerCmd,
+    },
+
     /// Run a command with only the pinned binding's identity surface
     #[command(next_help_heading = "Daily use")]
     Exec {
@@ -1467,6 +1474,7 @@ fn run() -> Result<()> {
         Commands::Agent(sub) => cmd_agent(sub, json, dry_run),
         Commands::Goal(sub) => cmd_goal(sub, json),
         Commands::Verify(sub) => cmd_verify(sub, json),
+        Commands::Broker { command } => cmd_broker(command, json),
         Commands::Exec {
             for_cli,
             no_resolve,
@@ -1654,6 +1662,7 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
         | Commands::Watch { .. }
         | Commands::Hook { .. }
         | Commands::Goal(_)
+        | Commands::Broker { .. }
         | Commands::Verify(_)
         | Commands::Upstream(_)
         | Commands::Completion { .. }
@@ -2306,6 +2315,9 @@ fn isolated_child_env(
     resolve_secrets: bool,
 ) -> IsolatedEnv {
     let mut isolated = build_isolated_env_opts(session, binding, resolve_secrets);
+    if let Ok(engine) = env::var("LOCUS_ENGINE_ID") {
+        isolated.vars.insert("LOCUS_ENGINE_ID".into(), engine);
+    }
     isolated
         .vars
         .insert("LOCUS_HOME".into(), store.home().display().to_string());
@@ -4228,6 +4240,29 @@ fn exec_delegated(
     )
 }
 
+#[derive(clap::Subcommand, Debug)]
+enum BrokerCmd {
+    /// Check cli:<executable> or mcp:<server> against the operator allowlist
+    Check { engine: String, tool: String },
+}
+
+fn cmd_broker(command: BrokerCmd, json: bool) -> Result<()> {
+    let BrokerCmd::Check { engine, tool } = command;
+    let s = store()?;
+    let policy = locus_core::broker::load(s.home())
+        .map_err(|_| anyhow::anyhow!("broker policy unavailable or invalid"))?;
+    let decision = policy.check(&engine, &tool);
+    if json {
+        println!("{}", serde_json::to_string(&decision)?);
+    } else {
+        println!("{}", decision.reason);
+    }
+    if !decision.allowed {
+        bail!("broker denied access");
+    }
+    Ok(())
+}
+
 fn cmd_exec(
     cmd: Vec<String>,
     resolve_secrets: bool,
@@ -4253,6 +4288,8 @@ fn cmd_exec(
 
     let s = store()?;
     trace.mark("store_open");
+    locus_core::broker::enforce(&s, &format!("cli:{}", args[0]))
+        .map_err(|_| anyhow::anyhow!("broker denied access"))?;
     // An explicit session id is the delegated gate. It verifies the seal and
     // the broker once, and it refuses before --expect when that check fails.
     if exact_session_selected() {
