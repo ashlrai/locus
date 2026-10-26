@@ -153,7 +153,7 @@ jobs:
                 run=true
               elif ! files="$(git diff --name-only "$BASE" HEAD)"; then
                 run=true
-              elif printf '%s\n' "$files" | grep -Eq '(^|/)Cargo\.toml$|(^|/)Cargo\.lock$'; then
+              elif printf '%s\n' "$files" | grep -Eq '(^|/)Cargo\.toml$|(^|/)Cargo\.lock$|\.rs$|(^|/)rust-toolchain[^/]*$|(^|/)\.cargo/'; then
                 run=true
               fi
               ;;
