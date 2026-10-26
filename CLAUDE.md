@@ -35,7 +35,9 @@ locus doctor                     # exits 1 on WARN, e.g. when phantom is not ins
 ```
 
 A later shell sees `no current broker endpoint ... human re-pin required`.
-Recover with `eval "$(locus hook bash)"; locus leave --force; locus enter personal`.
+`locus enter personal` starts a new broker for that case. The error text still
+names `locus leave --force` first. Use `--force` when `enter` is refused
+(an expired pin). See [docs/FIRST-RUN.md](./docs/FIRST-RUN.md).
 
 ## Architecture
 

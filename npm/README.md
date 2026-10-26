@@ -7,10 +7,15 @@ npm wrapper for the [Locus](https://github.com/ashlrai/locus) CLI — identity p
 ## Install
 
 ```bash
-npm install -g locus-cli
+npm install -g locus-cli@0.5.1
 # or
-npx locus-cli --help
+npx locus-cli@0.5.1 --help
 ```
+
+Install `0.5.1`. `locus-cli@0.5.0` printed `locus 0.5.0` and had not exited
+when `timeout` returned 124 at 8 seconds. `locus doctor` after `quickstart`
+can exit 1 with verdict WARN when `phantom` is not on `PATH`. The sample
+bindings use `env:` refs, and `quickstart` itself stays exit 0.
 
 On first run the wrapper:
 

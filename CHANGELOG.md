@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Documentation
 
 - **Pin history threat model.** Module docs state what `history.key` protects (a log shared on its own) and what it does not (a reader of all of `$LOCUS_HOME`, who can already see pins and config). The key stays next to the log.
+- **First-run measurements.** [docs/BENCHMARKS.md](docs/BENCHMARKS.md) and [docs/FIRST-RUN.md](docs/FIRST-RUN.md) record install time, peer timings, and the agent-use audit. The README, `CLAUDE.md`, `AGENTS.md`, and `docs/mcp.md` now match the dead-broker run: `locus enter` succeeded without `locus leave --force` first. The error string is unchanged.
 
 ## [0.5.1] — 2026-10-25
 
