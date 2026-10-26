@@ -72,6 +72,39 @@ binding fingerprint. Remaining time surfaces in `whoami`
 (`expires_in_secs`), `binding list` (`* pinned (… left)`), and `doctor`
 emits a `pin_expiring` **Warn** finding in the final 5 minutes.
 
+#### Expired pins
+
+An expired pin grants nothing, so once its seal still verifies it is treated
+as absent: `locus leave` clears it and reports `"expired": true` (exit 0), and
+`locus enter <alias>` replaces it in place (audited `session.replace_stale`,
+reason `session expired at ...`). Both still need the control capability. A
+pin whose seal does not verify still needs `locus leave --force`.
+
+#### Self-renew (`locus renew`, opt-in)
+
+`locus renew [--json]` extends the live `active.json` pin without a human
+re-pin, but only when the binding opts in with `policy.max_session_lifetime`:
+
+```toml
+[binding.policy]
+max_ttl = "12h"
+max_session_lifetime = "24h"   # unset (default) = renew disabled
+```
+
+New expiry is `min(now + max_ttl, pinned_at + max_session_lifetime)`, where
+`pinned_at` is the original human pin and never moves, so no pin outlives the
+lifetime bound without a human `locus enter`. Renew is refused (exit 1) when:
+the field is unset; the pin is missing, expired, frozen, tampered or not local
+control; its authority generation is stale (`human re-pin required`); the
+binding id or fingerprint changed; `LOCUS_SESSION_ID` selects a CI or run
+session; or the new expiry would not extend the pin by at least 1m. The
+session id, binding, alias and `pinned_at` stay the same; the broker issues
+the next generation for the same session and the old record stops validating.
+Audited as `session.renew`. `--json` prints `renewed`, `expires_at`,
+`previous_expires_at`, `lifetime_ends_at` and `capped_by`. `--dry-run` prints
+a `locus.plan.v1` plan. `max_session_lifetime` accepts `1m` to `30d` and is
+outside the binding fingerprint.
+
 ### Evaluation order
 
 ```
