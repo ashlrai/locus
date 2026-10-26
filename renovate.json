@@ -27,7 +27,8 @@
     },
     {
       "description": "Each major update gets its own pull request",
-      "matchUpdateTypes": ["major"]
+      "matchUpdateTypes": ["major"],
+      "groupName": null
     }
   ]
 }
