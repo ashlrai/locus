@@ -15,6 +15,7 @@ pub mod agent_report;
 pub mod approval;
 mod authority_anchor;
 pub mod autopin;
+pub mod autopin_suggest;
 pub mod binding;
 pub mod budget;
 pub mod config;

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`locus autopin suggest [--json] [--apply]` (learned bindings, L2).** Reads local pin history for the current repo, matched by the keyed hash of the live remote (userinfo such as `user:token@` stripped first), and suggests the binding you usually pin there, with evidence per alias: pins, `pin_mismatch` refusals, score and last seen. Ranking is deterministic: score = pins minus mismatches where that alias was the wrong one pinned; a suggestion needs a score of at least 3 and a strict lead, so thin or tied evidence suggests nothing. `--json` emits `locus.autopin.suggest.v1`. `--apply` writes `default_binding` to `.locus.toml` only after the control capability gate, recomputes from the live remote at apply time, refuses a symlinked `.locus.toml`, and writes atomically (temp file plus rename). With history off it says so and suggests nothing. The raw remote URL is never stored or printed.
+
 ### Fixed
 
 - **Dead-broker recovery hint says `locus enter` first.** When a pin's broker died with the shell that pinned it (`no current broker endpoint`, anchor unavailable or mismatched, seal intact), `locus enter <alias>` has replaced the pin directly since #156, but every surface still printed `locus leave --force` first. `whoami`, `status`, control commands, `doctor`, `agent report` and the MCP hint now print `eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }`. Expired pins, invalid or legacy seals and unreadable session files, which enter still refuses, keep the `locus leave --force; locus enter <alias>` recipe. New test `printed_dead_broker_hint_works_verbatim` runs the printed line as is.
