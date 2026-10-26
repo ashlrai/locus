@@ -34,6 +34,10 @@ fn freeze_env_target(args: &Value, allowlist: &[String]) -> Result<Option<String
 }
 
 impl ProviderAdapter for VercelAdapter {
+    fn cli_name(&self) -> Option<&'static str> {
+        Some("vercel")
+    }
+
     fn name(&self) -> &'static str {
         "vercel"
     }
