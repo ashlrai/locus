@@ -2091,7 +2091,6 @@ impl Store {
         self.require_local_control("initialize engagement")?;
         let EngagementInitPlan {
             workspace_path: workspace_target,
-            readme_path: _,
             ..
         } = self.engagement_init_preflight(
             alias,
