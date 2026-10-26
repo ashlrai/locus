@@ -216,3 +216,26 @@ fn pin_and_refusal_land_in_local_history_and_env_switch_stops_writes() {
     assert_eq!(off.status.code(), Some(1));
     assert_eq!(history(&f).len(), n, "LOCUS_PIN_HISTORY=0 must stop writes");
 }
+
+#[test]
+fn failed_history_write_never_blocks_pin_leave_or_refusal() {
+    let f = fixture();
+    let alias = f.pinned().split(':').next().unwrap().to_string();
+    let other = if alias == "acme" { "personal" } else { "acme" };
+    // A directory where the log should be makes every history write fail.
+    let log = f.home.path().join("pin-history.jsonl");
+    std::fs::remove_file(&log).unwrap();
+    std::fs::create_dir(&log).unwrap();
+    assert_eq!(
+        f.exec_expect(other, false).status.code(),
+        Some(1),
+        "refusal unchanged"
+    );
+    let ok = f.exec_expect(&alias, false);
+    assert!(ok.status.success() && f.marker().exists(), "{ok:?}");
+    let leave = f.locus(&["leave"]);
+    assert!(leave.status.success(), "{leave:?}");
+    let pin = f.locus(&["pin", &alias]);
+    assert!(pin.status.success(), "{pin:?}");
+    assert!(log.is_dir());
+}

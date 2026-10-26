@@ -1598,9 +1598,11 @@ impl Store {
                 &s.binding_alias,
                 Some(serde_json::json!({ "session_id": s.session_id })),
             )?;
-            if let Ok(cwd) = std::env::current_dir() {
-                crate::pin_history::record(&self.home, "leave", Some(&s.binding_alias), None, &cwd);
-            }
+            let session_dir = match &s.source {
+                PinSource::Dir { path } => Some(PathBuf::from(path)),
+                _ => None,
+            };
+            crate::pin_history::record_leave(&self.home, &s.binding_alias, session_dir.as_deref());
         }
         fs::remove_file(path)?;
         Ok(session)
