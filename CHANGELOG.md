@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Pin history threat model.** Module docs state what `history.key` protects (a log shared on its own) and what it does not (a reader of all of `$LOCUS_HOME`, who can already see pins and config). The key stays next to the log.
 
+### Changed
+
+- **Minimum supported Rust is 1.89.** The workspace `rust-version` is `1.89` (rustc 1.89.0). `cargo check --workspace --locked` succeeds on 1.89.0 and on stable 1.99.1, and fails on 1.88.0 because `File::lock` is still unstable. Cargo 1.85 through 1.88 refuse the build with `requires rustc 1.89`. Cargo 1.83.0 still fails while parsing `idna_adapter` 1.2.2 (edition 2024) before it can report `rust-version`. `rust-toolchain.toml` keeps selecting stable for in-repo builds and does not apply to `cargo install --git` outside the repo.
+
 ## [0.5.1] — 2026-10-25
 
 ### Documentation

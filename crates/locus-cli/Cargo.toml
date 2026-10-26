@@ -2,6 +2,7 @@
 name = "locus-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "Locus CLI — pin, whoami, exec, binding management"
 authors.workspace = true

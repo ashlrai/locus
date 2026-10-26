@@ -69,8 +69,12 @@ npm install -g locus-cli@0.5.1 @ashlrai/locus-mcp@0.5.1
 npx locus-cli@0.5.1 --help
 npx @ashlrai/locus-mcp@0.5.1   # MCP server for Claude Code / Cursor
 
-# cargo (Linux without Homebrew, or any source install): needs a Rust
-# toolchain (rustup, stable). Measured on one Linux box: 179 s for both binaries.
+# cargo (Linux without Homebrew, or any source install): rustc 1.89 or newer
+# (workspace rust-version). Cargo 1.85 to 1.88 stops with "requires rustc 1.89".
+# Cargo 1.83 fails earlier: idna_adapter in the lockfile needs edition 2024.
+# rust-toolchain.toml pins stable inside a checkout and does not apply to
+# `cargo install --git` run outside the repo.
+# Measured on one Linux box: 179 s for both binaries.
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
 ```
