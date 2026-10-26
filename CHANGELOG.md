@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Session file writes no longer follow a symlink at `active.json`.** `write_session_file` writes a fresh `create_new` temp file and renames it over the target, so a symlink planted at `sessions/active.json` is replaced instead of written through (shipped with the 0.5.1 stale-pin fix, #156).
+- **Session temp file is created 0600, and the rename is made durable.** The mode is set at open (not chmod after), and on unix the parent directory is fsynced after the rename.
+- **Pin history key creation is race-safe.** `history.key` is written in full to a private temp file and hard-linked into place, so concurrent first writers share one key and no record is dropped on a half-written key.
+- **`leave` reads pin history under the history lock.** The fallback lookup of the alias's last pin and the append now happen under one exclusive lock.
+
+### Documentation
+
+- **Pin history threat model.** Module docs state what `history.key` protects (a log shared on its own) and what it does not (a reader of all of `$LOCUS_HOME`, who can already see pins and config). The key stays next to the log.
+
 ## [0.5.1] — 2026-10-25
 
 ### Documentation

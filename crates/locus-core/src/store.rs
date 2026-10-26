@@ -1462,9 +1462,16 @@ impl Store {
             std::process::id()
         ));
         let _ = fs::remove_file(&tmp);
-        let written = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        // 0600 at creation: the session (control seal) is never readable by
+        // others, not even between open and a later chmod.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let written = opts
             .open(&tmp)
             .and_then(|mut f| {
                 use std::io::Write;
@@ -1476,6 +1483,9 @@ impl Store {
             let _ = fs::remove_file(&tmp);
             return Err(e.into());
         }
+        // Make the rename itself durable.
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
         Ok(())
     }
 
@@ -4538,6 +4548,24 @@ credential_ref = "ghp_UNSAFE/CANARY"
             .file_type()
             .is_symlink());
         assert_eq!(store.require_active().unwrap().binding_alias, "personal");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_file_is_created_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let mode = fs::symlink_metadata(store.active_session_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "active.json must be owner-only: {mode:o}");
     }
 
     #[test]

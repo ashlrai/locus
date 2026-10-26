@@ -14,6 +14,17 @@
 //! control capability. Writes take an exclusive lock on
 //! `.pin-history.lock`, write a fresh `create_new` + `O_NOFOLLOW` 0600 temp file
 //! and rename it over the log, so symlinks and leftover files are never followed.
+//! The key is written in full to a temp file and then hard-linked into place,
+//! so a concurrent first writer either wins the link or reads a complete key.
+//!
+//! Threat model for the key: it lives next to the log on purpose. It protects
+//! the hashes when the log alone leaves the machine (pasted into an issue,
+//! synced, attached to a bug report). It does not protect against someone who
+//! can read `$LOCUS_HOME` as a whole: that reader can recompute hashes for
+//! guessed paths and remotes. Such a reader already sees `config.toml`,
+//! `.locus.toml` pins and audit logs, so moving the key elsewhere under the
+//! same home would add no real boundary. Treat `$LOCUS_HOME` (0700) as the
+//! secret, and delete `history.key` to unlink all past hashes from future ones.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -76,26 +87,42 @@ fn read_nofollow(p: &Path) -> std::io::Result<String> {
     Ok(s)
 }
 
-/// Per-install HMAC key, created 0600 on first use (race-safe via `create_new`).
+/// Per-install HMAC key, created 0600 on first use. Race-safe: the key is
+/// written in full to a private temp file, then hard-linked to `history.key`;
+/// the link fails with `AlreadyExists` if another writer won, and that
+/// writer's file is already complete, so it is read instead.
 pub fn history_key(home: &Path) -> std::io::Result<Vec<u8>> {
     let p = home.join(KEY_FILE);
+    match read_key(&p) {
+        Ok(k) => return Ok(k),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
-    match open_opts(true).open(&p) {
-        Ok(mut f) => {
-            f.write_all(hex::encode(key).as_bytes())?;
-            f.sync_all()?;
-            Ok(key.to_vec())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let k = hex::decode(read_nofollow(&p)?.trim()).map_err(std::io::Error::other)?;
-            if k.len() != 32 {
-                return Err(std::io::Error::other("history.key is malformed"));
-            }
-            Ok(k)
-        }
+    let mut nonce = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let tmp = home.join(format!(".{KEY_FILE}.{}.tmp", hex::encode(nonce)));
+    let res = (|| {
+        let mut f = open_opts(true).open(&tmp)?;
+        f.write_all(hex::encode(key).as_bytes())?;
+        f.sync_all()?;
+        fs::hard_link(&tmp, &p)
+    })();
+    let _ = fs::remove_file(&tmp);
+    match res {
+        Ok(()) => Ok(key.to_vec()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => read_key(&p),
         Err(e) => Err(e),
     }
+}
+
+fn read_key(p: &Path) -> std::io::Result<Vec<u8>> {
+    let k = hex::decode(read_nofollow(p)?.trim()).map_err(std::io::Error::other)?;
+    if k.len() != 32 {
+        return Err(std::io::Error::other("history.key is malformed"));
+    }
+    Ok(k)
 }
 
 pub fn keyed_hash(key: &[u8], s: &str) -> String {
@@ -175,19 +202,24 @@ pub fn record_leave(home: &Path, alias: &str, session_dir: Option<&Path>) {
     if !enabled(home) {
         return;
     }
-    let mut e = match history_key(home) {
-        Ok(k) => entry_for(&k, "leave", Some(alias), None, None),
-        Err(_) => return,
-    };
-    if let Some(last) = read(home)
-        .into_iter()
-        .rev()
-        .find(|x| x.event == "pin" && x.alias.as_deref() == Some(alias))
-    {
-        e.workspace_hash = last.workspace_hash;
-        e.remote_hashes = last.remote_hashes;
-    }
-    let _ = append(home, &e, load_config(home).history.max_entries);
+    let _ = (|| -> std::io::Result<()> {
+        let key = history_key(home)?;
+        let mut e = entry_for(&key, "leave", Some(alias), None, None);
+        let max = load_config(home).history.max_entries;
+        // Read the last pin and append under one lock, so a concurrent writer
+        // cannot rewrite the log between the lookup and the append.
+        with_lock(home, |p| {
+            if let Some(last) = parse(&read_nofollow_or_empty(p)?)
+                .into_iter()
+                .rev()
+                .find(|x| x.event == "pin" && x.alias.as_deref() == Some(alias))
+            {
+                e.workspace_hash = last.workspace_hash;
+                e.remote_hashes = last.remote_hashes;
+            }
+            append_locked(home, p, &e, max)
+        })
+    })();
 }
 
 fn try_record(
@@ -205,20 +237,41 @@ fn try_record(
     append(home, &entry_for(&key, event, alias, expected, dir), max)
 }
 
-/// Append one entry under an exclusive lock and enforce the cap (oldest first).
-pub fn append(home: &Path, entry: &HistoryEntry, max_entries: usize) -> std::io::Result<()> {
+fn with_lock<T>(home: &Path, f: impl FnOnce(&Path) -> std::io::Result<T>) -> std::io::Result<T> {
     let lock = open_opts(false).open(home.join(LOCK_FILE))?;
     lock.lock_exclusive()?;
-    let p = path(home);
-    let mut lines: Vec<String> = match read_nofollow(&p) {
-        Ok(s) => s
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(str::to_string)
-            .collect(),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => return Err(e),
-    };
+    f(&path(home))
+}
+
+fn read_nofollow_or_empty(p: &Path) -> std::io::Result<String> {
+    match read_nofollow(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        r => r,
+    }
+}
+
+fn parse(s: &str) -> Vec<HistoryEntry> {
+    s.lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// Append one entry under an exclusive lock and enforce the cap (oldest first).
+pub fn append(home: &Path, entry: &HistoryEntry, max_entries: usize) -> std::io::Result<()> {
+    with_lock(home, |p| append_locked(home, p, entry, max_entries))
+}
+
+fn append_locked(
+    home: &Path,
+    p: &Path,
+    entry: &HistoryEntry,
+    max_entries: usize,
+) -> std::io::Result<()> {
+    let mut lines: Vec<String> = read_nofollow_or_empty(p)?
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_string)
+        .collect();
     lines.push(serde_json::to_string(entry).map_err(std::io::Error::other)?);
     let max = max_entries.max(1);
     if lines.len() > max {
@@ -233,7 +286,7 @@ pub fn append(home: &Path, entry: &HistoryEntry, max_entries: usize) -> std::io:
         buf.push('\n');
         f.write_all(buf.as_bytes())?;
         f.sync_all()?;
-        fs::rename(&tmp, &p)
+        fs::rename(&tmp, p)
     })();
     if res.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -241,15 +294,10 @@ pub fn append(home: &Path, entry: &HistoryEntry, max_entries: usize) -> std::io:
     res
 }
 
-/// Read all entries (skips malformed lines; never follows a symlinked log).
+/// Read all entries under the history lock (skips malformed lines; never
+/// follows a symlinked log).
 pub fn read(home: &Path) -> Vec<HistoryEntry> {
-    read_nofollow(&path(home))
-        .map(|s| {
-            s.lines()
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect()
-        })
-        .unwrap_or_default()
+    with_lock(home, |p| Ok(parse(&read_nofollow_or_empty(p)?))).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -446,5 +494,75 @@ mod tests {
         let cfg = load_config(home.path());
         assert!(cfg.history.enabled);
         assert_eq!(cfg.history.max_entries, DEFAULT_MAX_ENTRIES);
+    }
+    #[test]
+    fn concurrent_first_writers_share_one_key_and_keep_every_record() {
+        for _ in 0..20 {
+            let home = tempfile::tempdir().unwrap();
+            let repo = git_repo_with_remote("git@github.com:acme-corp/app.git");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let threads: Vec<_> = (0..8)
+                .map(|t| {
+                    let (h, r, b) = (
+                        home.path().to_path_buf(),
+                        repo.path().to_path_buf(),
+                        barrier.clone(),
+                    );
+                    std::thread::spawn(move || {
+                        b.wait();
+                        try_record(&h, "pin", Some(&format!("t{t}")), None, Some(&r)).unwrap();
+                    })
+                })
+                .collect();
+            for t in threads {
+                t.join().unwrap();
+            }
+            let h = read(home.path());
+            assert_eq!(h.len(), 8, "every first writer's record lands");
+            let ws = &h[0].workspace_hash;
+            assert!(
+                h.iter().all(|e| &e.workspace_hash == ws),
+                "one key for all writers"
+            );
+            let tmps = fs::read_dir(home.path())
+                .unwrap()
+                .filter(|d| {
+                    d.as_ref()
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".tmp")
+                })
+                .count();
+            assert_eq!(tmps, 0);
+        }
+    }
+
+    #[test]
+    fn leave_fallback_reads_under_the_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = git_repo_with_remote("git@github.com:acme-corp/app.git");
+        try_record(home.path(), "pin", Some("acme"), None, Some(repo.path())).unwrap();
+        let lock = open_opts(false).open(home.path().join(LOCK_FILE)).unwrap();
+        lock.lock_exclusive().unwrap();
+        let h = home.path().to_path_buf();
+        let leaver = std::thread::spawn(move || record_leave(&h, "acme", None));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !leaver.is_finished(),
+            "leave must wait for the history lock"
+        );
+        // While the lock is held, rewrite the log; leave must see this version.
+        let mut e = entry_for(KEY, "pin", Some("acme"), None, None);
+        e.workspace_hash = Some("rewritten".into());
+        append_locked(home.path(), &path(home.path()), &e, 100).unwrap();
+        FileExt::unlock(&lock).unwrap();
+        leaver.join().unwrap();
+        let got = read(home.path());
+        assert_eq!(got.last().unwrap().event, "leave");
+        assert_eq!(
+            got.last().unwrap().workspace_hash.as_deref(),
+            Some("rewritten")
+        );
     }
 }
