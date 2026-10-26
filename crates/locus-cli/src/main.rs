@@ -23,6 +23,7 @@ mod phantom_preflight;
 mod phm_names;
 mod plans;
 mod serve;
+mod swarm_serve;
 
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
@@ -471,22 +472,30 @@ enum Commands {
     Forensics(ForensicsCmd),
 
     // ────────────────────────── Local UI ─────────────────────────────
-    /// Serve the local identity dashboard + JSON API (127.0.0.1 only)
+    /// Serve the dashboard or a grant-scoped swarm MCP broker (127.0.0.1 only)
     ///
     /// Endpoints: GET /api/status|whoami|bindings|approvals|doctor|events
     /// and POST /api/approve/{id}/grant. Never returns resolved secrets.
     /// Optional auth: LOCUS_DASHBOARD_TOKEN or --token.
+    /// With --swarm, serve MCP instead; requires LOCUS_CONTROL_CAPABILITY
+    /// and LOCUS_MCP_HTTP_TOKEN. Graph node grants narrow the MCP tool surface.
     #[command(next_help_heading = "Local UI")]
     Serve {
         /// TCP port (bound to 127.0.0.1 only)
         #[arg(long, default_value_t = serve::DEFAULT_PORT)]
         port: u16,
         /// Shared secret for /api/* (env: LOCUS_DASHBOARD_TOKEN)
-        #[arg(long, env = "LOCUS_DASHBOARD_TOKEN")]
+        #[arg(long, env = "LOCUS_DASHBOARD_TOKEN", conflicts_with = "swarm")]
         token: Option<String>,
         /// Open the default browser after bind
-        #[arg(long)]
+        #[arg(long, conflicts_with = "swarm")]
         open: bool,
+        /// Serve a grant-scoped swarm MCP broker using this graph JSON
+        #[arg(long, value_name = "GRAPH_JSON")]
+        swarm: Option<PathBuf>,
+        /// Swarm server binary (default: locus-mcp next to locus, or PATH)
+        #[arg(long, requires = "swarm")]
+        mcp_bin: Option<String>,
     },
 
     /// Open the local identity dashboard (serve + browser)
@@ -1573,7 +1582,16 @@ fn run() -> Result<()> {
             None => cmd_events(last, op, binding, json),
         },
         Commands::Forensics(sub) => cmd_forensics(sub, json, dry_run),
-        Commands::Serve { port, token, open } => cmd_serve(port, token, open),
+        Commands::Serve {
+            port,
+            token,
+            open,
+            swarm,
+            mcp_bin,
+        } => match swarm {
+            Some(graph) => swarm_serve::run(port, &graph, mcp_bin),
+            None => cmd_serve(port, token, open),
+        },
         Commands::Dashboard {
             port,
             token,
