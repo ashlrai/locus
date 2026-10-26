@@ -7,9 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [0.5.1] — 2026-10-25
 
-- `locus enter <alias>` (and `locus pin`) right after `locus quickstart` no longer fails with "session authority generation is stale or unknown" when quickstart ran in another shell (or through the npm wrapper). A pin whose broker generation died with its shell no longer blocks its own replacement, so `locus leave --force` is not needed first. The gate is unchanged otherwise: the capability must pass the same verifier as `locus leave --force` (no `--no-verifier` escape) before a new broker starts, then authenticate against the live broker; the old pin's seal must verify and be local control; an explicit `LOCUS_SESSION_ID` keeps the strict check; only an anchor mismatch or unavailable anchor is tolerated. The replacement is audited as `session.replace_stale` with both session ids.
+### Documentation
+
+- **Using Locus with Phantom** ([docs/PHANTOM-USAGE.md](docs/PHANTOM-USAGE.md)): `phantom exec` and the `locus exec` allowlist, the `[gateway]` block, `phm:` reference status, and LiteLLM 1.83.0 or newer (prefer a current release).
+
+### Security
+
+- **Audit webhook errors no longer carry the webhook URL.** A failed `locus events export --sink webhook` post (URL from `--url` or `LOCUS_AUDIT_WEBHOOK_URL`) (a non-2xx status or a connection error) put ureq's error text in the message, and that text starts with the full URL: user name, password, path token and query token included. The error now names only `scheme://host` and the status or transport kind. A new test posts to a 401, a 500 and a closed port with canary tokens in the path, query and password and fails on any 8-character run of them.
+
+- **`locus dashboard` / `locus serve --open` no longer put `LOCUS_DASHBOARD_TOKEN` in the opened URL.** The browser opener (`open`, `xdg-open`, `gio`, `cmd /C start`) received `http://127.0.0.1:<port>/?token=<token>` as an argument, visible to other local users in `ps`, and the browser kept it in history. The plain URL is opened; with a token set the page's token gate asks for it once. `?token=` is still accepted by the API.
 
 ### Added
 
@@ -24,21 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `locus doctor --fix` previews safe repairs (stale `allowed_bindings` entries, a stale `default_binding`, legacy bare Phantom names) and writes nothing; `locus doctor --fix --apply` makes them, backing up each file first. It never removes the last allowlist entry, never runs Phantom, and needs local control to apply. Guide: docs/doctor-fix.md.
 - `locus status` shows how long the pin has left (`expires  in 2h 05m`), yellow with a `locus enter <alias>` hint under 15 minutes; `locus status --json` adds `expires_at` and `expires_in_secs`. `--oneline` is unchanged.
 - `locus --ashlr-handshake` prints the Ashlr companion handshake v1 (name, version, protocols, capabilities, local health, files Locus may edit) as one JSON line, before argument parsing and without opening the store. Contract: docs/ashlr-handshake.md.
-
-## [0.5.1] — 2026-10-24
-
-### Documentation
-
-- **Using Locus with Phantom** ([docs/PHANTOM-USAGE.md](docs/PHANTOM-USAGE.md)): `phantom exec` and the `locus exec` allowlist, the `[gateway]` block, `phm:` reference status, and LiteLLM 1.83.0 or newer (prefer a current release).
-
-### Security
-
-- **Audit webhook errors no longer carry the webhook URL.** A failed `locus events export --sink webhook` post (URL from `--url` or `LOCUS_AUDIT_WEBHOOK_URL`) (a non-2xx status or a connection error) put ureq's error text in the message, and that text starts with the full URL: user name, password, path token and query token included. The error now names only `scheme://host` and the status or transport kind. A new test posts to a 401, a 500 and a closed port with canary tokens in the path, query and password and fails on any 8-character run of them.
-
-- **`locus dashboard` / `locus serve --open` no longer put `LOCUS_DASHBOARD_TOKEN` in the opened URL.** The browser opener (`open`, `xdg-open`, `gio`, `cmd /C start`) received `http://127.0.0.1:<port>/?token=<token>` as an argument, visible to other local users in `ps`, and the browser kept it in history. The plain URL is opened; with a token set the page's token gate asks for it once. `?token=` is still accepted by the API.
-
-### Added
-
 - **Opt-in `[exec] inherit_env`** lets the isolated `locus exec` child inherit exact, named parent variables. It is empty by default, which leaves the child environment unchanged. Key-shaped names cross only as `phm_` placeholders from `phantom exec`. Values that look like well-known keys, and URLs with userinfo, are refused. `*_BASE_URL` values must pass the `[gateway]` rules. Locus's own variables, the gateway URL and injected credentials always win. Refusals use closed codes without names or values. See [docs/PHANTOM-USAGE.md](docs/PHANTOM-USAGE.md).
 - **`doctor --fix` core module (not wired to the CLI yet).** `locus_core::doctor_fix`
   plans repairs as a dry run by default: stale `allowed_bindings` entries, a stale
@@ -104,6 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `locus enter <alias>` (and `locus pin`) right after `locus quickstart` no longer fails with "session authority generation is stale or unknown" when quickstart ran in another shell (or through the npm wrapper). A pin whose broker generation died with its shell no longer blocks its own replacement, so `locus leave --force` is not needed first. The gate is unchanged otherwise: the capability must pass the same verifier as `locus leave --force` (no `--no-verifier` escape) before a new broker starts, then authenticate against the live broker; the old pin's seal must verify and be local control; an explicit `LOCUS_SESSION_ID` keeps the strict check; only an anchor mismatch or unavailable anchor is tolerated. The replacement is audited as `session.replace_stale` with both session ids.
 - **`--json` usage errors are JSON.** `locus --json whoami --jsn` or
   `locus --json approvals` printed clap's multi-line prose, so an agent that
   asked for JSON got text it could not parse. A usage error now prints the
