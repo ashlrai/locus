@@ -1,0 +1,241 @@
+---
+title: Locus · AI-native identity plane
+description: AI-native identity plane for coding agents. Pin a client: every CLI command, MCP tool, and the dashboard is hard-scoped to it. Wrong account, impossible.
+schema: home
+---
+    <header>
+      <p class="eyebrow">AI-native identity plane · v0.2</p>
+      <h1>Wrong account,<br /><span class="dim">impossible.</span></h1>
+      <p class="lede">
+        Pin a client and every CLI command, MCP tool, and the <strong>local dashboard</strong>
+        is hard-scoped to that binding until you re-pin. Agents inherit a sealed session,
+        not ambient <code>gh auth</code>.
+      </p>
+      <div class="cta-row">
+        <a class="btn primary" href="https://github.com/ashlrai/locus">View on GitHub →</a>
+        <a class="btn" href="#install">Install</a>
+        <a class="btn" href="https://phm.dev">Sibling: Phantom</a>
+      </div>
+    </header>
+
+    <div class="sibling">
+      <article data-claim>
+        <div class="label">Phantom · phm.dev</div>
+        <h2>Can this secret enter the model?</h2>
+        <p>
+          <a href="https://phm.dev">Phantom</a> protects secrets <em>in context</em>:
+          vault + proxy so AI never sees real keys.
+        </p>
+        <div class="srcs"><a class="src ext" href="https://phm.dev">phm.dev</a></div>
+      </article>
+      <article data-claim>
+        <div class="label">Locus · this</div>
+        <h2>As whom, against which tenant?</h2>
+        <p>
+          Locus seals the active identity. Wrong tenant tools do not exist.
+          Scope freeze denies override attempts.
+        </p>
+        <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/AGENTS.md#invariants-do-not-break">AGENTS.md · invariants</a></div>
+      </article>
+    </div>
+
+    <section id="install">
+      <div class="sec-label">Install</div>
+      <div class="term">
+        <div class="install-tabs" role="tablist">
+          <button type="button" class="active" data-tab="cargo" role="tab" aria-selected="true">cargo</button>
+          <button type="button" data-tab="npx" role="tab" aria-selected="false">npx</button>
+          <button type="button" data-tab="brew" role="tab" aria-selected="false">brew</button>
+        </div>
+        <div class="term-block active" id="tab-cargo" role="tabpanel">
+          <pre><span class="cmt"># release binaries into ~/.cargo/bin</span>
+<span class="cmd">export PATH="$HOME/.cargo/bin:$PATH"</span>
+<span class="cmd">cargo install --git https://github.com/ashlrai/locus \
+  locus-cli locus-mcp --locked</span>
+
+<span class="cmt"># or from a local checkout</span>
+<span class="cmd">cargo install --path crates/locus-cli</span>
+<span class="cmd">cargo install --path crates/locus-mcp</span></pre>
+        </div>
+        <div class="term-block" id="tab-npx" role="tabpanel">
+          <pre><span class="cmt"># downloads a release binary (falls back to cargo)</span>
+<span class="cmd">npx locus-cli --help</span>
+<span class="cmd">npx locus-mcp</span>  <span class="cmt"># MCP server for Claude Code / Cursor</span></pre>
+        </div>
+        <div class="term-block" id="tab-brew" role="tabpanel">
+          <pre><span class="cmt"># when the tap is published</span>
+<span class="cmd">brew install ashlrai/tap/locus</span></pre>
+        </div>
+      </div>
+      <p class="copy-hint">MIT · open source · github.com/ashlrai/locus</p>
+    </section>
+
+    <section>
+      <div class="sec-label">Quick start · v0.2</div>
+      <div class="term">
+        <div class="term-bar">
+          <span class="c"></span><span class="c"></span><span class="c"></span>
+          <span class="title">zsh · locus</span>
+        </div>
+        <pre><span class="cmd">locus quickstart</span>  <span class="cmt"># init samples · enter · whoami · doctor</span>
+<span class="cmd">locus enter personal && locus whoami</span>
+<span class="out">ok  entered personal (personal)</span>
+
+<span class="cmd">locus enter acme && locus whoami</span>
+<span class="out">ok  entered acme (acme-corp)</span>
+<span class="cmt"># previous identity is gone from the process env</span>
+
+<span class="cmd">locus agent setup --apply</span>  <span class="cmt"># wire MCP + AGENT.md</span>
+<span class="cmd">locus doctor</span>  <span class="cmt"># SAFE | WARN | UNSAFE</span>
+<span class="cmd">locus dashboard</span>  <span class="cmt"># local identity UI · 127.0.0.1:8750</span>
+<span class="cmd">locus goal status</span>  <span class="cmt"># northstar from GOALS.md</span>
+<span class="cmd">locus verify claim --text "Deploy hits https://api.x/v2"</span>
+<span class="cmt"># MCP: locus_safe_next → single best next action (enter / approve / ready)</span></pre>
+      </div>
+    </section>
+
+    <section id="surfaces">
+      <div class="sec-label">0.2 surfaces</div>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-n">UI</div>
+          <div data-claim>
+            <h3>Local dashboard</h3>
+            <p><code>locus dashboard</code> / <code>locus serve</code>: pin, whoami, approvals, doctor, audit on loopback. No secrets.</p>
+            <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/README.md#more-of-the-cli">README.md</a></div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">MCP</div>
+          <div data-claim>
+            <h3>Stdio + HTTP MCP</h3>
+            <p>Claude Code / Cursor via stdio. CI agents: <code>locus-mcp --http</code> with token auth on <code>POST /mcp</code>. Agents call <code>locus_safe_next</code> for the single best next action.</p>
+            <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/mcp.md">docs/mcp.md</a></div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">AUD</div>
+          <div data-claim>
+            <h3>Forensics pack</h3>
+            <p><code>locus forensics export</code>: shareable pin + doctor + audit snapshot (CredentialRefs only).</p>
+            <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/README.md#more-of-the-cli">README.md</a></div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">HUB</div>
+          <div data-claim>
+            <h3>Goal + agent report</h3>
+            <p><code>locus goal status</code> · <code>locus agent report --json</code> for hub gates (ready / protected / unsafe).</p>
+            <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/GOALS.md">GOALS.md</a></div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">VRF</div>
+          <div data-claim>
+            <h3>Verify claim</h3>
+            <p><code>locus verify claim --text "…"</code> / MCP <code>locus_verify_claim</code>: heuristic confidence + <code>needs_tool</code> before acting on numbers, URLs, or versions.</p>
+            <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/verification-plane.md">docs/verification-plane.md</a></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="arch">
+      <div class="sec-label">Architecture</div>
+      <div class="arch" aria-label="Architecture diagram">
+<span class="hl">locus enter acme</span>
+        <span class="dim">│</span>
+        <span class="dim">▼</span>
+  Session sealed <span class="ok">(HMAC)</span> → binding <span class="hl">"acme"</span>
+        <span class="dim">│</span>
+        <span class="dim">├─►</span> <span class="hl">locus-mcp</span>   tools = this binding only (+ locus_whoami)
+        <span class="dim">│</span>             agents cannot pin · freeze · resources/prompts
+        <span class="dim">│</span>
+        <span class="dim">├─►</span> <span class="hl">dashboard</span>  serve · whoami · doctor · approvals (127.0.0.1)
+        <span class="dim">│</span>
+        <span class="dim">└─►</span> <span class="hl">locus exec</span>  scrub ambient · resolve phm:/env: · private worker dirs
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-label">How it works</div>
+      <div class="flow">
+        <div class="flow-step">
+          <div class="flow-n">01</div>
+          <div data-claim>
+            <h3>Bind tenant × providers × policy</h3>
+            <p>A binding is principal, tenant, credential refs, and freeze scopes, never raw secrets.</p>
+            <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/firm-mode.md">docs/firm-mode.md</a></div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">02</div>
+          <div data-claim>
+            <h3>Human pins. Agents cannot.</h3>
+            <p><code>locus enter acme</code> seals the session. MCP only offers <code>locus_request_pin</code>.</p>
+            <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/AGENTS.md#invariants-do-not-break">AGENTS.md · invariants</a></div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">03</div>
+          <div data-claim>
+            <h3>Catalog is the isolation boundary</h3>
+            <p>Unpinned → control tools only. Pinned → that client's provider tools. Nothing ambient leaks in.</p>
+            <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/AGENTS.md#invariants-do-not-break">AGENTS.md · invariants</a></div>
+          </div>
+        </div>
+        <div class="flow-step">
+          <div class="flow-n">04</div>
+          <div data-claim>
+            <h3>Freeze + approval</h3>
+            <p>Wrong <code>project_ref</code> / <code>team_id</code> is denied. Destructive patterns hit <code>require_approval</code>.</p>
+            <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/policy.md">docs/policy.md</a></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="use-cases">
+      <div class="sec-label">Use cases</div>
+      <div class="uc-grid">
+        <a class="uc" href="/use-cases/multi-client-agents">
+          <h3>Multi-client agents</h3>
+          <p>One laptop, many client tenants. Enter, work, leave: no residual identity between engagements.</p>
+          <span class="go">/use-cases/multi-client-agents</span>
+        </a>
+        <a class="uc" href="/use-cases/mcp-tool-scoping">
+          <h3>MCP tool scoping</h3>
+          <p>The tool catalog is the isolation boundary: only the pinned binding's provider tools exist.</p>
+          <span class="go">/use-cases/mcp-tool-scoping</span>
+        </a>
+        <a class="uc" href="/use-cases/ci-agent-identity">
+          <h3>CI agent identity</h3>
+          <p>Ephemeral sealed pins and token-authed HTTP MCP for runners and remote agents.</p>
+          <span class="go">/use-cases/ci-agent-identity</span>
+        </a>
+        <a class="uc" href="/compare/locus-vs-direnv-sops">
+          <h3>vs direnv and sops</h3>
+          <p>Measured install, latency, and ambient-env numbers from the repo benchmark.</p>
+          <span class="go">/compare/locus-vs-direnv-sops</span>
+        </a>
+      </div>
+    </section>
+
+    <script>
+      (function () {
+        var tabs = document.querySelectorAll(".install-tabs button");
+        tabs.forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            tabs.forEach(function (b) {
+              b.classList.remove("active");
+              b.setAttribute("aria-selected", "false");
+            });
+            btn.classList.add("active");
+            btn.setAttribute("aria-selected", "true");
+            document.querySelectorAll(".term-block").forEach(function (el) {
+              el.classList.toggle("active", el.id === "tab-" + btn.dataset.tab);
+            });
+          });
+        });
+      })();
+    </script>

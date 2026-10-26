@@ -1,0 +1,129 @@
+---
+title: Locus vs direnv and sops · measured
+description: Measured comparison of Locus, direnv, and sops exec-env from the repo benchmark: install to first result, core-operation latency, and ambient environment reach.
+schema: article
+crumb: vs direnv and sops
+---
+    <nav class="crumb" aria-label="Breadcrumb"><a href="/">locus</a> / <a href="/#use-cases">use cases</a> / vs direnv and sops</nav>
+
+    <header>
+      <p class="eyebrow">Comparison · measured, not vibes</p>
+      <h1>Locus vs direnv<br /><span class="dim">and sops.</span></h1>
+      <p class="lede">
+        direnv loads directory variables; sops decrypts a file into one command.
+        Locus seals a session to one binding. Different jobs, and the repo ships a
+        benchmark so you can check the numbers instead of trusting this page.
+      </p>
+      <div class="cta-row">
+        <a class="btn primary" href="https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md">Full benchmark →</a>
+        <a class="btn" href="/#install">Install Locus</a>
+      </div>
+    </header>
+
+    <section class="prose">
+      <div class="sec-label">Method</div>
+      <div data-claim>
+        <p>All numbers on this page come from <strong>docs/BENCHMARKS.md</strong>, measured 2026-10-26 UTC on one Linux x86_64 machine (4 vCPU, 15.6 GiB): npm <code>locus-cli</code> 0.5.1 and git <code>e969d9c4</code>, direnv v2.38.2, sops v3.13.3 with age v1.3.2. Latency series are 21 runs with the first dropped.</p>
+        <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a></div>
+      </div>
+      <div data-claim>
+        <p>The benchmark compares against <a href="https://github.com/direnv/direnv">direnv</a> (MIT) and <a href="https://github.com/getsops/sops">sops</a> (MPL-2.0); 1Password CLI was named in the README table but not installed.</p>
+        <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a><a class="src" href="https://github.com/ashlrai/locus/blob/main/README.md#how-it-compares">README.md · how it compares</a></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-label">Install to first useful result</div>
+      <div class="cmp-wrap" data-claim>
+        <table class="cmp">
+          <thead><tr><th>Path</th><th>Wall</th><th>First useful result</th></tr></thead>
+          <tbody>
+            <tr><td><strong>locus</strong> (npm)</td><td class="num">0.775 s</td><td>quickstart in the same shell, +0.123 s</td></tr>
+            <tr><td><strong>locus</strong> (cargo, stable)</td><td class="num">86.488 s</td><td>one command, then quickstart +0.138 s</td></tr>
+            <tr><td>direnv (install.sh)</td><td class="num">0.530 s</td><td>allow 3 ms + exec 19 ms</td></tr>
+            <tr><td>sops + age</td><td class="num">0.970 s</td><td>keygen, encrypt, exec-env in 0.040 s</td></tr>
+          </tbody>
+        </table>
+        <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a><a class="src ext" href="https://direnv.net/docs/installation.html">direnv install docs</a></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-label">Core-operation latency</div>
+      <div class="cmp-wrap" data-claim>
+        <table class="cmp">
+          <thead><tr><th>Command</th><th>Median</th><th>Note</th></tr></thead>
+          <tbody>
+            <tr><td><code>locus whoami</code></td><td class="num">0.020 s</td><td>HEAD binary, live pin</td></tr>
+            <tr><td><code>locus exec -- true</code></td><td class="num">0.051 s</td><td>seal check + scrub + spawn</td></tr>
+            <tr><td><code>direnv exec true</code></td><td class="num">0.016 s</td><td>after <code>direnv allow</code></td></tr>
+            <tr><td><code>sops exec-env true</code></td><td class="num">0.011 s</td><td>age key already set</td></tr>
+          </tbody>
+        </table>
+        <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a></div>
+      </div>
+      <div data-claim>
+        <p><strong>Honest read:</strong> direnv and sops are faster at spawning a bare <code>true</code>. A later latency pass cut <code>locus exec -- true</code> to a 0.004 s median; the remaining delta buys the seal verification, the ambient scrub, and the scope freeze.</p>
+        <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/exec-latency.md">docs/exec-latency.md</a></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-label">What the child can reach</div>
+      <div class="cmp-wrap" data-claim>
+        <table class="cmp">
+          <thead><tr><th>Launcher</th><th>Ambient creds</th><th>HOME</th></tr></thead>
+          <tbody>
+            <tr><td><strong><code>locus exec</code></strong></td><td>unset (<code>GH_TOKEN</code>, <code>AWS_*</code> scrubbed)</td><td>rewritten</td></tr>
+            <tr><td><code>direnv exec</code></td><td>still set</td><td>same</td></tr>
+            <tr><td><code>sops exec-env</code></td><td>still set</td><td>same</td></tr>
+            <tr><td><code>sops exec-env --pristine</code></td><td>unset</td><td>same</td></tr>
+          </tbody>
+        </table>
+        <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a></div>
+      </div>
+      <div data-claim>
+        <p>The benchmark set four synthetic parent variables; <code>locus exec</code> reported <code>scrubbed 41 ambient</code> and rewrote <code>HOME</code>, while direnv and sops left the same shell environment in place. <code>locus exec --expect acme</code> under a <code>personal</code> pin exited 1 with <code>pin_mismatch</code> and ran nothing.</p>
+        <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a></div>
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-label">Where each keeps identity</div>
+      <ul class="claims">
+        <li data-claim>
+          <p><strong><code>gh auth switch</code></strong> stores the active account in gh's shared <code>hosts.yml</code>; every process that reads that config sees the switch until the next one.</p>
+          <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/README.md#how-it-compares">README.md</a><a class="src ext" href="https://cli.github.com/manual/gh_auth_switch">gh manual</a></div>
+        </li>
+        <li data-claim>
+          <p><strong>direnv</strong> exports only the variables in an allowed <code>.envrc</code> on <code>cd</code>; the rest of the shell's environment stays as it was.</p>
+          <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/README.md#how-it-compares">README.md</a><a class="src ext" href="https://direnv.net/">direnv.net</a></div>
+        </li>
+        <li data-claim>
+          <p><strong>1Password <code>op run</code></strong> resolves secret references for one command.</p>
+          <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/README.md#how-it-compares">README.md</a><a class="src ext" href="https://developer.1password.com/docs/cli/">1Password CLI docs</a></div>
+        </li>
+        <li data-claim>
+          <p><strong>Locus</strong> binds the session to one binding: ambient <code>GH_TOKEN</code>, <code>AWS_*</code>, <code>SUPABASE_*</code> are scrubbed, a directory's <code>.locus.toml</code> can refuse other bindings, and MCP provider tools are only the pinned binding's.</p>
+          <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/README.md#how-it-compares">README.md</a><a class="src" href="https://github.com/ashlrai/locus/blob/main/AGENTS.md#invariants-do-not-break">AGENTS.md · invariants</a></div>
+        </li>
+      </ul>
+    </section>
+
+    <section class="prose">
+      <div class="sec-label">Takeaway</div>
+      <div data-claim>
+        <p>If the job is "put variables in this shell," direnv and sops are the right tools and the latency table shows they are faster at it. If the job is "this agent acts only as this tenant, and nothing ambient may leak into its children," that is what Locus seals, scrubs, and freezes.</p>
+        <div class="srcs"><a class="src" href="https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md">docs/BENCHMARKS.md</a><a class="src" href="https://github.com/ashlrai/locus/blob/main/DESIGN.md">DESIGN.md</a></div>
+      </div>
+    </section>
+
+    <section class="related">
+      <div class="sec-label">Related</div>
+      <ul>
+        <li><a href="/use-cases/multi-client-agents">Multi-client agents</a> <span>· firm-mode workflow</span></li>
+        <li><a href="/use-cases/mcp-tool-scoping">MCP tool scoping</a> <span>· the catalog boundary</span></li>
+        <li><a href="/use-cases/ci-agent-identity">CI agent identity</a> <span>· ephemeral pins</span></li>
+        <li><a href="/#install">Install</a> <span>· cargo, npx, brew</span></li>
+      </ul>
+    </section>
