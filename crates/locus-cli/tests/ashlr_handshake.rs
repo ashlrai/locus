@@ -16,6 +16,7 @@ fn prints_one_json_line_and_creates_nothing() {
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert_eq!(stdout.trim().lines().count(), 1);
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(v["schema"], "locus.ashlr.handshake.v1");
     assert_eq!(v["kind"], "ashlr.handshake");
     assert_eq!(v["command"], "locus");
     assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
@@ -34,6 +35,7 @@ fn advertises_doctor_fix_and_the_flag_exists() {
         .output()
         .unwrap();
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["schema"], "locus.ashlr.handshake.v1");
     let caps: Vec<&str> = v["capabilities"]
         .as_array()
         .unwrap()
