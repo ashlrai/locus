@@ -11,7 +11,7 @@
 //! module declared after this one. On `BrokenPipe` they unwind with
 //! [`StdoutClosed`] via `resume_unwind` (no panic hook, so nothing is printed,
 //! and destructors such as worker teardown still run); `main` maps that to
-//! exit status 141 (128 + SIGPIPE), the shell convention, which stays non-zero
+//! `ExitCode::StdoutClosed` (141 = 128 + SIGPIPE), the shell convention, which stays non-zero
 //! so a truncated report never reads as success. Any other stdout error keeps
 //! std's panic.
 
@@ -19,9 +19,6 @@ use std::io::{self, Write};
 
 /// Unwind payload for "stdout reader went away".
 pub(crate) struct StdoutClosed;
-
-/// Exit status for a closed stdout: 128 + SIGPIPE, as a shell reports it.
-pub(crate) const STDOUT_CLOSED_EXIT: i32 = 141;
 
 /// Write formatted output to stdout; a closed pipe unwinds with [`StdoutClosed`].
 pub(crate) fn write_stdout(args: std::fmt::Arguments<'_>) {

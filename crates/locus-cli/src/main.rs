@@ -12,9 +12,13 @@
 mod stdout;
 
 mod cred_diag;
+mod dry_run;
+mod exit;
 mod handshake;
+mod json_out;
 mod phantom_preflight;
 mod phm_names;
+mod plans;
 mod serve;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -69,9 +73,14 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Emit machine-readable JSON where applicable
+    /// Emit machine-readable JSON where applicable (versioned: `schema` key)
     #[arg(long, global = true)]
     json: bool,
+
+    /// Print the planned changes of a mutating command without writing
+    /// (read-only commands accept it and change nothing; see `locus topic agent-contract`)
+    #[arg(long, global = true)]
+    dry_run: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -579,12 +588,10 @@ enum AgentCmd {
         /// on PATH)
         #[arg(long, default_value = "project", value_parser = ["project", "user"])]
         claude_scope: String,
-        /// Apply changes (write MCP configs, AGENT.md, optional workspace stub)
+        /// Apply changes (write MCP configs, AGENT.md, optional workspace stub);
+        /// preview them with the global `--dry-run`
         #[arg(long)]
         apply: bool,
-        /// Show planned actions without writing
-        #[arg(long)]
-        dry_run: bool,
         /// Write a project `.locus.toml` stub if missing
         #[arg(long)]
         workspace: bool,
@@ -1077,8 +1084,9 @@ struct BindingAddArgs {
     /// Never prompt — fail listing the missing flags instead
     #[arg(long)]
     non_interactive: bool,
-    /// Validate and print the binding TOML without writing
-    #[arg(long)]
+    /// Validate and print the binding TOML without writing (the global
+    /// `--dry-run`; set by dispatch)
+    #[arg(skip)]
     dry_run: bool,
     /// Replace an existing binding with the same alias
     #[arg(long)]
@@ -1092,7 +1100,7 @@ fn main() {
     if let Some(result) = locus_core::run_authority_anchor_server_if_requested() {
         if let Err(error) = result {
             eprintln!("authority anchor error: {error}");
-            std::process::exit(1);
+            exit::ExitCode::Failure.exit();
         }
         return;
     }
@@ -1108,19 +1116,13 @@ fn main() {
         Ok(Err(e)) => {
             let e = stale_pin_recovery_fallback(e);
             if JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed) {
-                emit_json_error(&e);
+                emit_json_error(&e, error_exit_code(&e));
             } else {
                 eprintln!("{} {e:#}", "error:".red().bold());
             }
-            // A child that never started exits like a shell would (127 not
-            // found, 126 not executable), so callers can tell it apart from
-            // the child's own exit 1.
-            let code = e
-                .downcast_ref::<ChildSpawnError>()
-                .map_or(1, ChildSpawnError::exit_code);
-            std::process::exit(code);
+            error_exit_code(&e).exit();
         }
-        Err(()) => std::process::exit(stdout::STDOUT_CLOSED_EXIT),
+        Err(()) => exit::ExitCode::StdoutClosed.exit(),
     }
 }
 
@@ -1135,13 +1137,39 @@ struct ChildSpawnError {
 impl ChildSpawnError {
     /// 127 when the program is not found, 126 when it exists but cannot be
     /// executed (the POSIX shell convention), 1 for any other spawn failure.
-    fn exit_code(&self) -> i32 {
+    fn exit_code(&self) -> exit::ExitCode {
         match self.source.kind() {
-            std::io::ErrorKind::NotFound => 127,
-            std::io::ErrorKind::PermissionDenied => 126,
-            _ => 1,
+            std::io::ErrorKind::NotFound => exit::ExitCode::NotFound,
+            std::io::ErrorKind::PermissionDenied => exit::ExitCode::CannotExecute,
+            _ => exit::ExitCode::Failure,
         }
     }
+}
+
+/// A usage error found after parsing (e.g. `--dry-run` on a command that
+/// cannot plan). Exits [`exit::ExitCode::Usage`] like clap's own errors.
+#[derive(Debug)]
+struct UsageError(String);
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageError {}
+
+/// Exit code for a command that returned an error. A child that never
+/// started exits like a shell would (127 not found, 126 not executable), so
+/// callers can tell it apart from the child's own exit 1.
+fn error_exit_code(e: &anyhow::Error) -> exit::ExitCode {
+    if let Some(spawn) = e.downcast_ref::<ChildSpawnError>() {
+        return spawn.exit_code();
+    }
+    if e.downcast_ref::<UsageError>().is_some() {
+        return exit::ExitCode::Usage;
+    }
+    exit::ExitCode::Failure
 }
 
 impl std::fmt::Display for ChildSpawnError {
@@ -1187,7 +1215,7 @@ fn child_audit_fields(spawned: &Result<std::process::ExitStatus>) -> (Option<i32
         Err(e) => (
             Some(
                 e.downcast_ref::<ChildSpawnError>()
-                    .map_or(1, ChildSpawnError::exit_code),
+                    .map_or(1, |s| s.exit_code().code()),
             ),
             Some(e.to_string()),
         ),
@@ -1215,16 +1243,27 @@ static JSON_ERRORS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 
 /// Machine-readable form of a top-level CLI error, matching the `ok` field the
 /// success payloads carry. Same text as the human `error:` line (never secrets).
-fn json_error_payload(e: &anyhow::Error) -> serde_json::Value {
-    json!({ "ok": false, "error": format!("{e:#}") })
+fn json_error_payload(e: &anyhow::Error, code: exit::ExitCode) -> serde_json::Value {
+    error_envelope(format!("{e:#}"), code)
+}
+
+/// `locus.error.v1`: the one error shape every `--json` failure prints on stderr.
+fn error_envelope(error: String, code: exit::ExitCode) -> serde_json::Value {
+    json!({
+        "schema": json_out::ERROR,
+        "ok": false,
+        "error": error,
+        "exit_code": code.code(),
+        "exit_code_name": code.name(),
+    })
 }
 
 /// Print the JSON error as one line on stderr. Stdout keeps the existing
 /// `--json` stream contract (at most one JSON document, e.g. the
 /// `verify session` pack printed before its non-zero exit); errors stay on
 /// stderr, now parseable instead of a human `error:` line.
-fn emit_json_error(e: &anyhow::Error) {
-    eprintln!("{}", json_error_payload(e));
+fn emit_json_error(e: &anyhow::Error, code: exit::ExitCode) {
+    eprintln!("{}", json_error_payload(e, code));
 }
 
 /// `--json` given before any `--` (after it, the flag belongs to the child).
@@ -1259,7 +1298,12 @@ fn json_parse_error_payload(e: &clap::Error) -> Option<serde_json::Value> {
         }
         error.push_str(line);
     }
-    Some(json!({ "ok": false, "error": error }))
+    let code = if e.exit_code() == exit::ExitCode::Usage.code() {
+        exit::ExitCode::Usage
+    } else {
+        exit::ExitCode::Failure
+    };
+    Some(error_envelope(error, code))
 }
 
 /// Exit for a failed parse with clap's own exit code (2 for usage errors),
@@ -1274,59 +1318,137 @@ fn exit_on_parse_error<I: IntoIterator<Item = String>>(e: clap::Error, args: I) 
     e.exit()
 }
 
+/// Commands that run a child or a server never had a `--dry-run` flag.
+/// Before the global flag existed, `locus exec --dry-run -- cmd` reached
+/// exec's own argument check (exit 1) and every other placement was clap's
+/// "unexpected argument" (exit 2). Keep those exact results: for these
+/// commands the flag is parsed as top-level only, and a top-level use is
+/// reported the way clap reported it before.
+fn argv_targets_unplannable(args: &[std::ffi::OsString]) -> bool {
+    let mut words = args
+        .iter()
+        .skip(1)
+        .filter_map(|a| a.to_str())
+        .filter(|a| !a.starts_with('-'));
+    match words.next() {
+        Some("exec" | "run" | "serve" | "dashboard") => true,
+        // `mcp` alone is the server; `mcp mint/list/revoke` plan normally.
+        Some("mcp") => {
+            use clap::CommandFactory;
+            let next = words.next();
+            !Cli::command()
+                .find_subcommand("mcp")
+                .is_some_and(|m| next.is_some_and(|w| m.find_subcommand(w).is_some()))
+        }
+        Some("ci") => words.next() == Some("run"),
+        _ => false,
+    }
+}
+
+fn parse_cli(args: Vec<std::ffi::OsString>) -> Result<Cli, clap::Error> {
+    use clap::{CommandFactory, FromArgMatches};
+    if !argv_targets_unplannable(&args) {
+        return Cli::try_parse_from(args);
+    }
+    let bin = args
+        .first()
+        .and_then(|a| std::path::Path::new(a).file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("locus")
+        .to_string();
+    let mut cmd = Cli::command()
+        .bin_name(bin)
+        .mut_arg("dry_run", |a| a.global(false).hide(true));
+    // Before the subcommand, clap rejected the unknown flag first, ahead
+    // of any later error (such as a missing `--binding`).
+    let top_level_dry_run = args
+        .iter()
+        .skip(1)
+        .filter_map(|a| a.to_str())
+        .take_while(|a| a.starts_with('-'))
+        .any(|a| a == "--dry-run");
+    if top_level_dry_run {
+        return Err(cmd.error(
+            clap::error::ErrorKind::UnknownArgument,
+            "unexpected argument '--dry-run' found",
+        ));
+    }
+    let matches = cmd.try_get_matches_from_mut(args)?;
+    let cli = Cli::from_arg_matches(&matches)?;
+    if cli.dry_run {
+        return Err(cmd.error(
+            clap::error::ErrorKind::UnknownArgument,
+            "unexpected argument '--dry-run' found",
+        ));
+    }
+    Ok(cli)
+}
+
 fn run() -> Result<()> {
     // Support `locus help topic <name>` without fighting clap's built-in help.
     {
         let argv: Vec<String> = env::args().collect();
         if argv.len() >= 3 && argv[1] == "help" && argv[2] == "topic" {
             let name = argv.get(3).cloned();
-            return cmd_topic(name.as_deref());
+            let json = argv.iter().any(|a| a == "--json");
+            return cmd_topic(name.as_deref(), json);
         }
     }
 
-    let cli = match Cli::try_parse() {
+    let cli = match parse_cli(env::args_os().collect()) {
         Ok(cli) => cli,
         Err(e) => exit_on_parse_error(e, env::args().skip(1)),
     };
     JSON_ERRORS.store(cli.json, std::sync::atomic::Ordering::Relaxed);
+    let json = cli.json;
+    let dry_run = cli.dry_run;
+    if dry_run && dry_run_support(&cli.command) == DryRunSupport::Unsupported {
+        return Err(UsageError(format!(
+            "--dry-run is not supported by `locus {}`: it runs a child or a server rather than planning changes",
+            unplannable_command_name(&cli.command)
+        ))
+        .into());
+    }
     match cli.command {
         Commands::Init {
             with_samples,
             no_persist_capability,
-        } => cmd_init(with_samples, !no_persist_capability, cli.json),
+        } => cmd_init(with_samples, !no_persist_capability, json, dry_run),
         Commands::Quickstart {
             no_persist_capability,
-        } => cmd_quickstart(!no_persist_capability, cli.json),
-        Commands::Capability(sub) => cmd_capability(sub, cli.json),
+        } => cmd_quickstart(!no_persist_capability, json, dry_run),
+        Commands::Capability(sub) => cmd_capability(sub, json, dry_run),
         Commands::Enter {
             alias,
             force,
             client,
             ttl,
             exports,
-        } => cmd_enter(alias, force, client, exports, ttl, cli.json),
+        } => cmd_enter(alias, force, client, exports, ttl, json, dry_run),
         Commands::Switch {
             alias,
             force,
             client,
             ttl,
-        } => cmd_switch(alias, force, client, ttl, cli.json),
+        } => cmd_switch(alias, force, client, ttl, json, dry_run),
         Commands::Pin {
             alias,
             force,
             client,
             ns,
             ttl,
-        } => cmd_pin(alias, force, client, ns, ttl, cli.json),
-        Commands::Leave { force, no_verifier } => cmd_leave(force, no_verifier, cli.json),
-        Commands::Engagement(sub) => cmd_engagement(sub, cli.json),
-        Commands::Graph(sub) => cmd_graph(sub, cli.json),
-        Commands::Whoami => cmd_whoami(cli.json),
-        Commands::Autopin(AutopinCmd::Suggest { apply }) => cmd_autopin_suggest(apply, cli.json),
-        Commands::Status { oneline } => cmd_status(oneline, cli.json),
-        Commands::Agent(sub) => cmd_agent(sub, cli.json),
-        Commands::Goal(sub) => cmd_goal(sub, cli.json),
-        Commands::Verify(sub) => cmd_verify(sub, cli.json),
+        } => cmd_pin(alias, force, client, ns, ttl, json, dry_run),
+        Commands::Leave { force, no_verifier } => cmd_leave(force, no_verifier, json, dry_run),
+        Commands::Engagement(sub) => cmd_engagement(sub, json, dry_run),
+        Commands::Graph(sub) => cmd_graph(sub, json, dry_run),
+        Commands::Whoami => cmd_whoami(json),
+        Commands::Autopin(AutopinCmd::Suggest { apply }) => {
+            cmd_autopin_suggest(apply, json, dry_run)
+        }
+        Commands::Status { oneline } => cmd_status(oneline, json),
+        Commands::Agent(sub) => cmd_agent(sub, json, dry_run),
+        Commands::Goal(sub) => cmd_goal(sub, json),
+        Commands::Verify(sub) => cmd_verify(sub, json),
         Commands::Exec {
             no_resolve,
             strict_creds,
@@ -1341,45 +1463,45 @@ fn run() -> Result<()> {
             force,
             cmd,
         } => cmd_run(binding, share_pin, cmd, !no_resolve, strict_creds, force),
-        Commands::Ci(sub) => cmd_ci(sub, cli.json),
+        Commands::Ci(sub) => cmd_ci(sub, json, dry_run),
         Commands::Mcp {
             supervised,
             mcp_bin,
             cmd,
         } => match cmd {
             None => cmd_mcp(supervised, mcp_bin),
-            Some(sub) => cmd_mcp_sub(sub, cli.json),
+            Some(sub) => cmd_mcp_sub(sub, json, dry_run),
         },
-        Commands::Binding(sub) => cmd_binding(sub, cli.json),
-        Commands::Client(sub) => cmd_client(sub, cli.json),
-        Commands::Upstream(sub) => cmd_upstream(sub, cli.json),
-        Commands::Adapter(sub) => cmd_adapter(sub, cli.json),
+        Commands::Binding(sub) => cmd_binding(sub, json, dry_run),
+        Commands::Client(sub) => cmd_client(sub, json, dry_run),
+        Commands::Upstream(sub) => cmd_upstream(sub, json),
+        Commands::Adapter(sub) => cmd_adapter(sub, json, dry_run),
         Commands::Onboard {
             detect_only,
             yes,
             reset,
-        } => cmd_onboard(detect_only, yes, reset, cli.json),
+        } => cmd_onboard(detect_only, yes, reset, json, dry_run),
         Commands::Workspace {
             default,
             allow,
             require_pin,
             force,
-        } => cmd_workspace(default, allow, require_pin, force, cli.json),
-        Commands::Doctor { fix: true, apply } => cmd_doctor_fix(cli.json, apply),
-        Commands::Doctor { .. } => cmd_doctor(cli.json),
+        } => cmd_workspace(default, allow, require_pin, force, json, dry_run),
+        Commands::Doctor { fix: true, apply } => cmd_doctor_fix(json, apply, dry_run),
+        Commands::Doctor { .. } => cmd_doctor(json),
         Commands::Watch {
             interval,
             once,
             require_ok,
-        } => cmd_watch(&interval, once, require_ok, cli.json),
+        } => cmd_watch(&interval, once, require_ok, json),
         Commands::Hook { shell } => cmd_hook(&shell),
         Commands::Setup {
             client,
             print,
             mcp_bin,
-        } => cmd_setup(&client, print, mcp_bin, cli.json),
-        Commands::Approve(sub) => cmd_approve(sub, cli.json),
-        Commands::Notify(sub) => cmd_notify(sub, cli.json),
+        } => cmd_setup(&client, print, mcp_bin, json, dry_run),
+        Commands::Approve(sub) => cmd_approve(sub, json, dry_run),
+        Commands::Notify(sub) => cmd_notify(sub, json, dry_run),
         Commands::Events {
             last,
             op,
@@ -1396,19 +1518,22 @@ fn run() -> Result<()> {
                 sink,
                 url,
             }) => cmd_events_export(
-                last,
-                op,
-                binding,
-                otlp,
-                out,
-                service_name,
-                sink.into(),
-                url,
-                cli.json,
+                EventsExportArgs {
+                    last,
+                    op,
+                    binding,
+                    otlp,
+                    out,
+                    service_name,
+                    sink: sink.into(),
+                    url,
+                },
+                json,
+                dry_run,
             ),
-            None => cmd_events(last, op, binding, cli.json),
+            None => cmd_events(last, op, binding, json),
         },
-        Commands::Forensics(sub) => cmd_forensics(sub, cli.json),
+        Commands::Forensics(sub) => cmd_forensics(sub, json, dry_run),
         Commands::Serve { port, token, open } => cmd_serve(port, token, open),
         Commands::Dashboard {
             port,
@@ -1422,13 +1547,13 @@ fn run() -> Result<()> {
             stdout::write_stdout_bytes(&buf);
             Ok(())
         }
-        Commands::Topic { name } => cmd_topic(name.as_deref()),
+        Commands::Topic { name } => cmd_topic(name.as_deref(), json),
         Commands::Version => {
-            if cli.json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "version": VERSION, "name": "locus" })
-                );
+            if json {
+                json_out::print_line(
+                    json_out::VERSION,
+                    &json!({ "version": VERSION, "name": "locus" }),
+                )?;
             } else {
                 println!("locus {VERSION}");
             }
@@ -1437,8 +1562,192 @@ fn run() -> Result<()> {
     }
 }
 
+/// How a command treats the global `--dry-run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DryRunSupport {
+    /// Mutating: prints a `locus.plan.v1` plan and writes nothing.
+    Plans,
+    /// Never writes state; `--dry-run` is accepted and changes nothing.
+    ReadOnly,
+    /// Runs a child or a server; `--dry-run` is a usage error (exit 2).
+    Unsupported,
+}
+
+/// Exhaustive on purpose: a new command does not compile until it says how
+/// it treats `--dry-run`. `docs/agent-contract.md` lists the same table.
+fn dry_run_support(cmd: &Commands) -> DryRunSupport {
+    use DryRunSupport::{Plans, ReadOnly, Unsupported};
+    match cmd {
+        Commands::Init { .. }
+        | Commands::Quickstart { .. }
+        | Commands::Onboard { .. }
+        | Commands::Setup { .. }
+        | Commands::Workspace { .. }
+        | Commands::Enter { .. }
+        | Commands::Switch { .. }
+        | Commands::Pin { .. }
+        | Commands::Leave { .. }
+        | Commands::Engagement(_)
+        | Commands::Binding(BindingCmd::Add(_))
+        | Commands::Binding(BindingCmd::Rm { .. })
+        | Commands::Binding(BindingCmd::MigrateCredentialRefs { .. })
+        | Commands::Client(_)
+        | Commands::Autopin(AutopinCmd::Suggest { apply: true })
+        | Commands::Ci(CiCmd::Mint { .. })
+        | Commands::Ci(CiCmd::Env { .. })
+        | Commands::Forensics(_)
+        | Commands::Agent(AgentCmd::Setup { .. })
+        | Commands::Graph(GraphCmd::Export { .. })
+        | Commands::Graph(GraphCmd::Import { .. })
+        | Commands::Capability(CapabilityCmd::Persist)
+        | Commands::Capability(CapabilityCmd::Unpersist)
+        | Commands::Notify(NotifyCmd::On)
+        | Commands::Notify(NotifyCmd::Off)
+        | Commands::Approve(ApproveCmd::Grant { .. })
+        | Commands::Approve(ApproveCmd::Deny { .. })
+        | Commands::Events {
+            action: Some(EventsAction::Export { .. }),
+            ..
+        } => Plans,
+        Commands::Doctor { fix, .. } => {
+            if *fix {
+                Plans
+            } else {
+                ReadOnly
+            }
+        }
+        Commands::Mcp { cmd, .. } => match cmd {
+            None => Unsupported,
+            Some(McpCmd::List { .. }) => ReadOnly,
+            Some(McpCmd::Mint { .. } | McpCmd::Revoke { .. }) => Plans,
+        },
+        Commands::Adapter(sub) => adapter_dry_run_support(sub),
+        Commands::Whoami
+        | Commands::Autopin(AutopinCmd::Suggest { apply: false })
+        | Commands::Status { .. }
+        | Commands::Watch { .. }
+        | Commands::Hook { .. }
+        | Commands::Goal(_)
+        | Commands::Verify(_)
+        | Commands::Upstream(_)
+        | Commands::Completion { .. }
+        | Commands::Topic { .. }
+        | Commands::Version
+        | Commands::Events { action: None, .. }
+        | Commands::Agent(AgentCmd::Doctor | AgentCmd::Report { .. })
+        | Commands::Binding(BindingCmd::List | BindingCmd::Show { .. })
+        | Commands::Graph(GraphCmd::List)
+        | Commands::Capability(CapabilityCmd::Status)
+        | Commands::Notify(NotifyCmd::Status)
+        | Commands::Approve(
+            ApproveCmd::List { .. } | ApproveCmd::Status { .. } | ApproveCmd::Wait { .. },
+        ) => ReadOnly,
+        Commands::Exec { .. }
+        | Commands::Run { .. }
+        | Commands::Ci(CiCmd::Run { .. })
+        | Commands::Serve { .. }
+        | Commands::Dashboard { .. } => Unsupported,
+    }
+}
+
+fn adapter_dry_run_support(sub: &AdapterCmd) -> DryRunSupport {
+    match sub {
+        AdapterCmd::Install { .. }
+        | AdapterCmd::Uninstall { .. }
+        | AdapterCmd::Trust(AdapterTrustCmd::Add { .. })
+        | AdapterCmd::Registry(AdapterRegistryCmd::Export { .. })
+        | AdapterCmd::Registry(AdapterRegistryCmd::Index(
+            AdapterIndexCmd::Add { .. } | AdapterIndexCmd::Remove { .. },
+        )) => DryRunSupport::Plans,
+        AdapterCmd::Search { .. }
+        | AdapterCmd::List
+        | AdapterCmd::Verify { .. }
+        | AdapterCmd::VerifyManifest { .. }
+        | AdapterCmd::Trust(AdapterTrustCmd::List)
+        | AdapterCmd::Registry(AdapterRegistryCmd::Index(AdapterIndexCmd::List)) => {
+            DryRunSupport::ReadOnly
+        }
+    }
+}
+
+/// Name of a command that cannot plan, for the `--dry-run` usage error.
+fn unplannable_command_name(cmd: &Commands) -> &'static str {
+    match cmd {
+        Commands::Exec { .. } => "exec",
+        Commands::Run { .. } => "run",
+        Commands::Ci(_) => "ci run",
+        Commands::Serve { .. } => "serve",
+        Commands::Dashboard { .. } => "dashboard",
+        Commands::Mcp { .. } => "mcp",
+        _ => "this command",
+    }
+}
+
 /// Extended product-surface help (`locus topic <name>` / `locus help topic <name>`).
-fn cmd_topic(name: Option<&str>) -> Result<()> {
+/// `locus topic agent-contract`: exit codes, schema ids and the `--dry-run`
+/// and non-interactive rules, generated from the code that enforces them.
+fn agent_contract_topic(json: bool) -> Result<()> {
+    if json {
+        return json_out::print(
+            json_out::CONTRACT,
+            &json!({
+                "version": VERSION,
+                "exit_codes": exit::ExitCode::ALL.iter().map(|c| json!({
+                    "code": c.code(),
+                    "name": c.name(),
+                    "meaning": c.meaning(),
+                })).collect::<Vec<_>>(),
+                "schemas": json_out::CATALOGUE.iter().map(|(command, id)| json!({
+                    "command": command,
+                    "schema": id,
+                })).collect::<Vec<_>>(),
+                "dry_run": {
+                    "flag": "--dry-run",
+                    "plan_schema": json_out::PLAN,
+                    "unsupported": ["exec", "run", "ci run", "mcp", "serve", "dashboard"],
+                },
+                "non_interactive_env": dry_run::NON_INTERACTIVE_ENV,
+            }),
+        );
+    }
+    println!(
+        "{} {}",
+        "topic".magenta().bold(),
+        "agent-contract".cyan().bold()
+    );
+    println!();
+    println!("Exit codes (exec/run/ci run pass the child's own code through):");
+    println!();
+    print!("{}", exit::ExitCode::markdown_table());
+    println!();
+    println!("JSON schemas: every object below starts with \"schema\": \"<id>\".");
+    println!("The .vN suffix changes only when a field is removed, renamed or retyped.");
+    println!();
+    for (command, id) in json_out::CATALOGUE {
+        println!("  {:44} {}", command, id.cyan());
+    }
+    println!();
+    println!(
+        "--dry-run: mutating commands print a {} plan and write nothing;",
+        json_out::PLAN
+    );
+    println!("read-only commands accept it and change nothing; exec, run, ci run, mcp,");
+    println!("serve and dashboard do not take it: they fail as before the flag existed");
+    println!("(exec: exit 1, its own argument check; the others: clap usage error, exit 2).");
+    println!();
+    println!("Non-interactive: prompts only when stdin is a terminal, --json is off,");
+    println!(
+        "and {} is unset. Otherwise missing input fails closed.",
+        dry_run::NON_INTERACTIVE_ENV
+    );
+    println!("Machine form: locus topic agent-contract --json   Docs: docs/agent-contract.md");
+    Ok(())
+}
+
+fn cmd_topic(name: Option<&str>, json: bool) -> Result<()> {
+    if name.map(|n| n.trim().eq_ignore_ascii_case("agent-contract")) == Some(true) {
+        return agent_contract_topic(json);
+    }
     let topics: &[(&str, &str)] = &[
         (
             "dashboard",
@@ -1633,6 +1942,10 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                 let first = body.lines().next().unwrap_or("");
                 println!("  {:12} {}", n.cyan(), first);
             }
+            println!(
+                "  {:12} Exit codes, JSON schema ids, --dry-run and non-interactive rules",
+                "agent-contract".cyan()
+            );
             println!();
             println!("Also: locus help <command>  for clap flag help.");
             Ok(())
@@ -1645,7 +1958,8 @@ fn cmd_topic(name: Option<&str>) -> Result<()> {
                 println!("{body}");
                 Ok(())
             } else {
-                let names: Vec<&str> = topics.iter().map(|(k, _)| *k).collect();
+                let mut names: Vec<&str> = topics.iter().map(|(k, _)| *k).collect();
+                names.push("agent-contract");
                 bail!("unknown topic '{n}'. Available: {}", names.join(", "));
             }
         }
@@ -1764,7 +2078,31 @@ fn bootstrap_control_capability_plan(
 /// explicit levers between the onboarding default (persisted 0600, ambient for
 /// same-user processes) and the strict posture (shell-profile export only).
 /// See SECURITY.md § Control-plane authority boundary.
-fn cmd_capability(sub: CapabilityCmd, json: bool) -> Result<()> {
+fn cmd_capability(sub: CapabilityCmd, json: bool, dry_run: bool) -> Result<()> {
+    if dry_run && !matches!(sub, CapabilityCmd::Status) {
+        let s = dry_run::existing_store()?;
+        let file = locus_core::control_capability_file(s.home());
+        let mut plan = dry_run::Plan::new(match sub {
+            CapabilityCmd::Persist => "locus capability persist",
+            _ => "locus capability unpersist",
+        });
+        if matches!(sub, CapabilityCmd::Persist) {
+            if env::var_os(locus_core::CONTROL_CAPABILITY_ENV).is_none() {
+                bail!(
+                    "{} is not set in this shell — nothing to persist",
+                    locus_core::CONTROL_CAPABILITY_ENV
+                );
+            }
+            plan.write_file(&file, Some("this shell's control capability, 0600".into()));
+        } else if file.exists() {
+            plan.delete_file(&file, Some("persisted control capability".into()))
+                .note("the real run prints the export line so you keep a copy");
+        } else {
+            plan.note("nothing persisted — already strict");
+        }
+        plan.with("file", file.display().to_string());
+        return plan.needs_control().emit(json);
+    }
     let s = store()?;
     let home = s.home();
     match sub {
@@ -1772,9 +2110,9 @@ fn cmd_capability(sub: CapabilityCmd, json: bool) -> Result<()> {
             let status = locus_core::control_capability_status(home);
             let posture = capability_posture(&status);
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
+                json_out::print_line(
+                    json_out::CAPABILITY_STATUS,
+                    &json!({
                         "ok": true,
                         "posture": posture,
                         "env_present": status.env_present,
@@ -1784,8 +2122,8 @@ fn cmd_capability(sub: CapabilityCmd, json: bool) -> Result<()> {
                         "persisted_permissions_ok": status.persisted_permissions_ok,
                         "matches_persisted": status.matches_persisted,
                         "file": locus_core::control_capability_file(home).display().to_string(),
-                    })
-                );
+                    }),
+                )?;
             } else {
                 println!(
                     "{} control capability  {}",
@@ -2018,7 +2356,11 @@ fn cmd_serve(port: u16, token: Option<String>, open_browser: bool) -> Result<()>
     rt.block_on(serve::run_serve(port, token, open_browser))
 }
 
-fn cmd_init(with_samples: bool, persist_capability: bool, json: bool) -> Result<()> {
+fn cmd_init(with_samples: bool, persist_capability: bool, json: bool, dry_run: bool) -> Result<()> {
+    if dry_run {
+        let home = locus_core::locus_home()?;
+        return plans::plan_init("locus init", &home, with_samples, persist_capability).emit(json);
+    }
     let s = store()?;
     // Mint/adopt the operator control capability BEFORE the control boundary,
     // or a fresh operator can never get past step zero.
@@ -2233,7 +2575,10 @@ fn write_annotated_binding(s: &Store, alias: &str, toml: &str) -> Result<()> {
 }
 
 /// First 60 seconds: ensure home + samples, enter workspace default if unpinned, whoami + doctor.
-fn cmd_quickstart(persist_capability: bool, json: bool) -> Result<()> {
+fn cmd_quickstart(persist_capability: bool, json: bool, dry_run: bool) -> Result<()> {
+    if dry_run {
+        return plans::plan_quickstart(persist_capability, json);
+    }
     let s = store()?;
     // Mint/adopt the operator control capability BEFORE the control boundary,
     // or a fresh operator can never get past step zero.
@@ -2422,7 +2767,7 @@ fn cmd_quickstart(persist_capability: bool, json: bool) -> Result<()> {
 
     // Soft exit: unsafe still signals; warn does not abort first-run UX
     match report.verdict {
-        DoctorVerdict::Unsafe => std::process::exit(2),
+        DoctorVerdict::Unsafe => exit::ExitCode::Unsafe.exit(),
         _ => Ok(()),
     }
 }
@@ -2434,7 +2779,19 @@ fn cmd_enter(
     exports: bool,
     ttl: Option<String>,
     json: bool,
+    dry_run: bool,
 ) -> Result<()> {
+    if dry_run {
+        let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
+        return plans::plan_pin(
+            "locus enter",
+            alias.as_deref(),
+            None,
+            force,
+            requested_ttl,
+            json,
+        );
+    }
     require_local_control_to_replace_pin("locus enter")
         .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
     let s = store()?;
@@ -2554,19 +2911,13 @@ fn switch_flow(
     client: Option<String>,
     requested_ttl: Option<chrono::Duration>,
 ) -> Result<SwitchOutcome> {
-    // Pre-flight: unknown target refuses (with suggestions) before leaving.
+    // Pre-flight through the pin path's own read-only resolution: an
+    // unknown target or a workspace-allowlist refusal fails (with
+    // suggestions) before leaving.
     let target = s
-        .load_binding(alias)
-        .map_err(|e| with_alias_suggestions(s, e))?;
-    // Pre-flight: same workspace-allowlist rule the pin path enforces.
-    if let Some((policy, cfg)) = find_workspace(cwd)? {
-        if !cfg.allows(&target.alias) && !cfg.allows(&target.id) && !force {
-            return Err(with_alias_suggestions(
-                s,
-                LocusError::binding_not_allowed(&target.alias, &policy, &cfg.allowed_bindings),
-            ));
-        }
-    }
+        .resolve_pin(alias, cwd, force, None, requested_ttl)
+        .map_err(|e| with_alias_suggestions(s, e))?
+        .binding;
     // Leave-if-pinned: the normal leave path (audits session.leave, revokes
     // session authority, cleans the worker home). A wedged session fails
     // closed here exactly like `locus leave` would.
@@ -2609,7 +2960,19 @@ fn cmd_switch(
     client: Option<String>,
     ttl: Option<String>,
     json: bool,
+    dry_run: bool,
 ) -> Result<()> {
+    if dry_run {
+        let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
+        return plans::plan_pin(
+            "locus switch",
+            Some(&alias),
+            None,
+            force,
+            requested_ttl,
+            json,
+        );
+    }
     require_local_control_boundary("locus switch").map_err(wedged_session_recovery)?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
@@ -2690,26 +3053,38 @@ fn cmd_pin(
     ns: Option<String>,
     ttl: Option<String>,
     json: bool,
+    dry_run: bool,
 ) -> Result<()> {
+    let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
+    let ns_aliases = ns
+        .as_deref()
+        .map(|raw| namespaced_pin_aliases(alias.as_deref(), raw))
+        .transpose()?;
+    if dry_run {
+        return match ns_aliases {
+            Some(aliases) => plans::plan_pin(
+                "locus pin --ns",
+                Some(&aliases[0]),
+                Some(aliases[1..].to_vec()),
+                force,
+                requested_ttl,
+                json,
+            ),
+            None => plans::plan_pin(
+                "locus pin",
+                alias.as_deref(),
+                None,
+                force,
+                requested_ttl,
+                json,
+            ),
+        };
+    }
     require_local_control_to_replace_pin("locus pin")
         .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
-    let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
-    let session = if let Some(ns_raw) = ns {
-        let mut aliases: Vec<String> = Vec::new();
-        if let Some(a) = alias {
-            aliases.push(a);
-        }
-        for part in ns_raw.split(',') {
-            let p = part.trim();
-            if !p.is_empty() && !aliases.iter().any(|x| x == p) {
-                aliases.push(p.into());
-            }
-        }
-        if aliases.len() < 2 {
-            bail!("--ns requires at least two distinct bindings (e.g. --ns personal,acme)");
-        }
+    let session = if let Some(aliases) = ns_aliases {
         s.pin_namespaced_with_ttl(&aliases, &cwd(), client, force, requested_ttl)
             .map_err(|e| wedged_session_recovery(with_alias_suggestions(&s, e)))?
     } else {
@@ -2818,6 +3193,24 @@ fn cmd_pin(
     Ok(())
 }
 
+/// `locus pin [alias] --ns a,b`: primary first, deduplicated, at least two.
+fn namespaced_pin_aliases(alias: Option<&str>, ns_raw: &str) -> Result<Vec<String>> {
+    let mut aliases: Vec<String> = Vec::new();
+    if let Some(a) = alias {
+        aliases.push(a.to_string());
+    }
+    for part in ns_raw.split(',') {
+        let p = part.trim();
+        if !p.is_empty() && !aliases.iter().any(|x| x == p) {
+            aliases.push(p.into());
+        }
+    }
+    if aliases.len() < 2 {
+        bail!("--ns requires at least two distinct bindings (e.g. --ns personal,acme)");
+    }
+    Ok(aliases)
+}
+
 /// Route wedged-session control errors to the recovery hatch.
 ///
 /// When `leave` / `status` / `doctor` / `exec` fail closed on the ACTIVE
@@ -2912,7 +3305,10 @@ fn repin_hint(left: Option<&str>) -> String {
     }
 }
 
-fn cmd_leave(force: bool, no_verifier: bool, json: bool) -> Result<()> {
+fn cmd_leave(force: bool, no_verifier: bool, json: bool, dry_run: bool) -> Result<()> {
+    if dry_run {
+        return plans::plan_leave(force, json);
+    }
     if force {
         return cmd_leave_force(no_verifier, json);
     }
@@ -3023,7 +3419,24 @@ fn cmd_leave_force(no_verifier: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_graph(sub: GraphCmd, json: bool) -> Result<()> {
+/// Graph passphrase: `LOCUS_GRAPH_PASSPHRASE`, else a prompt only when interactive.
+/// Never prompts when stdin is not a terminal, under `--json`, or with
+/// `LOCUS_NON_INTERACTIVE` set.
+fn graph_passphrase(json: bool) -> Result<impl std::ops::Deref<Target = String>> {
+    let in_env = env::var_os(locus_core::GRAPH_PASSPHRASE_ENV).is_some_and(|v| !v.is_empty());
+    if !in_env && !dry_run::interactive(json) {
+        bail!(
+            "{} is required for non-interactive graph export/import",
+            locus_core::GRAPH_PASSPHRASE_ENV
+        );
+    }
+    resolve_passphrase().context("graph passphrase")
+}
+
+fn cmd_graph(sub: GraphCmd, json: bool, dry_run: bool) -> Result<()> {
+    if dry_run && !matches!(sub, GraphCmd::List) {
+        return plans::plan_graph(sub, json);
+    }
     let s = store()?;
     match sub {
         GraphCmd::List => {
@@ -3082,7 +3495,7 @@ fn cmd_graph(sub: GraphCmd, json: bool) -> Result<()> {
             Ok(())
         }
         GraphCmd::Export { bindings, out } => {
-            let passphrase = resolve_passphrase().context("graph passphrase")?;
+            let passphrase = graph_passphrase(json)?;
             let out_path = out.unwrap_or_else(|| PathBuf::from(default_export_filename()));
             let aliases = bindings.as_deref();
             let result = s
@@ -3116,7 +3529,7 @@ fn cmd_graph(sub: GraphCmd, json: bool) -> Result<()> {
             Ok(())
         }
         GraphCmd::Import { path, force } => {
-            let passphrase = resolve_passphrase().context("graph passphrase")?;
+            let passphrase = graph_passphrase(json)?;
             let result = s
                 .graph_import(&path, passphrase.as_str(), force)
                 .context("graph import")?;
@@ -3163,7 +3576,10 @@ fn cmd_graph(sub: GraphCmd, json: bool) -> Result<()> {
     }
 }
 
-fn cmd_engagement(sub: EngagementCmd, json: bool) -> Result<()> {
+fn cmd_engagement(sub: EngagementCmd, json: bool, dry_run: bool) -> Result<()> {
+    if dry_run {
+        return plans::plan_engagement(sub, json);
+    }
     let s = store()?;
     match sub {
         EngagementCmd::Init {
@@ -3255,8 +3671,7 @@ fn cmd_whoami(json: bool) -> Result<()> {
         wedged_session_recovery_for(anyhow::Error::new(e), alias.as_deref())
     })?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&w)?);
-        return Ok(());
+        return json_out::print(json_out::WHOAMI, &w);
     }
     println!(
         "{} {}  tenant={}  session={}",
@@ -3351,13 +3766,13 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
     {
         None => {
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
+                json_out::print_line(
+                    json_out::STATUS,
+                    &json!({
                         "pinned": false,
                         "require_pin": require_pin,
-                    })
-                );
+                    }),
+                )?;
             } else if oneline {
                 // Hook-friendly tokens:
                 //   unpinned | require_pin | frozen | invalid | alias:tenant
@@ -3387,9 +3802,9 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
             let check = status_pin_check(&s, &session, seal_ok);
             let ok = seal_ok && check.usable && !frozen && !session.is_expired();
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({
+                json_out::print_line(
+                    json_out::STATUS,
+                    &json!({
                         "pinned": true,
                         "binding": session.binding_alias,
                         "tenant": session.tenant,
@@ -3407,8 +3822,8 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                         "ok": ok,
                         "error": check.error,
                         "recovery": check.recovery,
-                    })
-                );
+                    }),
+                )?;
             } else if oneline {
                 if frozen {
                     println!("frozen");
@@ -3462,7 +3877,7 @@ fn cmd_status(oneline: bool, json: bool) -> Result<()> {
                 }
             }
             if !ok {
-                std::process::exit(2);
+                exit::ExitCode::Unsafe.exit();
             }
         }
     }
@@ -3871,7 +4286,25 @@ fn cmd_exec(
     Ok(())
 }
 
-fn cmd_ci(sub: CiCmd, json: bool) -> Result<()> {
+fn cmd_ci(sub: CiCmd, json: bool, dry_run: bool) -> Result<()> {
+    if dry_run {
+        let (command, binding, ttl, force, resolve) = match sub {
+            CiCmd::Mint {
+                binding,
+                ttl,
+                force,
+                resolve,
+            } => ("locus ci mint", binding, ttl, force, resolve),
+            CiCmd::Env {
+                binding,
+                ttl,
+                force,
+                resolve,
+            } => ("locus ci env", binding, ttl, force, resolve),
+            CiCmd::Run { .. } => unreachable!("ci run rejects --dry-run before dispatch"),
+        };
+        return plans::plan_ci_mint(command, &binding, &ttl, force, resolve, json);
+    }
     match sub {
         CiCmd::Mint {
             binding,
@@ -4567,8 +5000,15 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_mcp_sub(sub: McpCmd, json_flag: bool) -> Result<()> {
+fn cmd_mcp_sub(sub: McpCmd, json_flag: bool, dry_run: bool) -> Result<()> {
     match sub {
+        McpCmd::Mint {
+            binding,
+            ttl,
+            label,
+            force,
+            json,
+        } if dry_run => plans::plan_mcp_mint(&binding, &ttl, label, force, json || json_flag),
         McpCmd::Mint {
             binding,
             ttl,
@@ -4581,8 +5021,61 @@ fn cmd_mcp_sub(sub: McpCmd, json_flag: bool) -> Result<()> {
             grant_id,
             binding,
             all,
+        } if dry_run => {
+            let s = dry_run::existing_store()?;
+            let targets = mcp_revoke_targets(&s, grant_id, binding, all)?;
+            let known: Vec<String> = s
+                .list_mcp_grants()?
+                .into_iter()
+                .map(|g| g.grant_id)
+                .collect();
+            let mut plan = dry_run::Plan::new("locus mcp revoke");
+            for id in &targets {
+                if known.contains(id) {
+                    plan.change(
+                        "revoke",
+                        id.clone(),
+                        Some("grant + its tenant session records".into()),
+                    );
+                } else {
+                    plan.note(format!("unknown grant `{id}` (already revoked?)"));
+                }
+            }
+            plan.needs_control()
+                .with("grants", &targets)
+                .emit(json_flag)
+        }
+        McpCmd::Revoke {
+            grant_id,
+            binding,
+            all,
         } => cmd_mcp_revoke(grant_id, binding, all),
     }
+}
+
+/// Grant ids `locus mcp revoke` acts on: one id, every grant of a binding, or all.
+fn mcp_revoke_targets(
+    s: &Store,
+    grant_id: Option<String>,
+    binding: Option<String>,
+    all: bool,
+) -> Result<Vec<String>> {
+    Ok(if all {
+        s.list_mcp_grants()?
+            .iter()
+            .map(|g| g.grant_id.clone())
+            .collect()
+    } else if let Some(alias) = binding {
+        s.list_mcp_grants()?
+            .iter()
+            .filter(|g| g.binding_alias == alias)
+            .map(|g| g.grant_id.clone())
+            .collect()
+    } else if let Some(id) = grant_id {
+        vec![id]
+    } else {
+        bail!("specify a <grant_id>, --binding <alias>, or --all");
+    })
 }
 
 /// Mint a multi-tenant MCP grant. The bearer token is printed exactly once
@@ -4736,22 +5229,7 @@ fn cmd_mcp_list(json: bool) -> Result<()> {
 fn cmd_mcp_revoke(grant_id: Option<String>, binding: Option<String>, all: bool) -> Result<()> {
     require_local_control_boundary("locus mcp revoke")?;
     let s = store()?;
-    let targets: Vec<String> = if all {
-        s.list_mcp_grants()?
-            .iter()
-            .map(|g| g.grant_id.clone())
-            .collect()
-    } else if let Some(alias) = binding {
-        s.list_mcp_grants()?
-            .iter()
-            .filter(|g| g.binding_alias == alias)
-            .map(|g| g.grant_id.clone())
-            .collect()
-    } else if let Some(id) = grant_id {
-        vec![id]
-    } else {
-        bail!("specify a <grant_id>, --binding <alias>, or --all");
-    };
+    let targets = mcp_revoke_targets(&s, grant_id, binding, all)?;
     if targets.is_empty() {
         println!("{} no matching grants", "->".dimmed());
         return Ok(());
@@ -4846,7 +5324,16 @@ mod mt_session_reconcile_tests {
 fn community_search(
     query: Option<&str>,
 ) -> Result<Vec<locus_core::marketplace::CommunityIndexEntry>> {
-    let sources = locus_core::marketplace::load_index_sources(store()?.home())?;
+    community_search_in(store()?.home(), query)
+}
+
+/// `community_search` against a given home, without opening the store
+/// (dry-run plans must not create, chmod or mint anything).
+fn community_search_in(
+    home: &Path,
+    query: Option<&str>,
+) -> Result<Vec<locus_core::marketplace::CommunityIndexEntry>> {
+    let sources = locus_core::marketplace::load_index_sources(home)?;
     if sources.is_empty() {
         bail!("no community indexes configured; use locus adapter registry index add <HTTPS URL>");
     }
@@ -4903,8 +5390,10 @@ fn cmd_adapter_index(sub: AdapterIndexCmd, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_onboard(detect_only: bool, yes: bool, reset: bool, json: bool) -> Result<()> {
-    use std::io::IsTerminal;
+fn cmd_onboard(detect_only: bool, yes: bool, reset: bool, json: bool, dry_run: bool) -> Result<()> {
+    if dry_run {
+        return plans::plan_onboard(detect_only, reset, json);
+    }
     let s = store()?;
     if reset {
         require_local_control_boundary("locus onboard reset")?;
@@ -4936,7 +5425,7 @@ fn cmd_onboard(detect_only: bool, yes: bool, reset: bool, json: bool) -> Result<
         bail!("unsupported onboard plan schema");
     }
     if !yes {
-        if json || !io::stdin().is_terminal() {
+        if !dry_run::interactive(json) {
             bail!("onboarding requires an operator TTY; --yes applies only a reviewed refs-only saved plan, never detected candidates");
         }
         println!("Candidates are hints. Supply and review each binding; nothing is pinned and no credential values are requested.");
@@ -5049,7 +5538,7 @@ fn cmd_onboard(detect_only: bool, yes: bool, reset: bool, json: bool) -> Result<
                 }
             },
         )?;
-        cmd_workspace(default, None, true, false, false)?;
+        cmd_workspace(default, None, true, false, false, false)?;
         plan.workspaces.push(cwd().display().to_string());
         plan.mark_done(locus_core::steps::WORKSPACES);
         plan.save(s.home())?;
@@ -5068,7 +5557,10 @@ fn cmd_onboard(detect_only: bool, yes: bool, reset: bool, json: bool) -> Result<
     Ok(())
 }
 
-fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
+fn cmd_adapter(sub: AdapterCmd, json: bool, dry_run: bool) -> Result<()> {
+    if dry_run && adapter_dry_run_support(&sub) == DryRunSupport::Plans {
+        return plans::plan_adapter(sub, json);
+    }
     match sub {
         AdapterCmd::Search { query } => {
             let hits = community_search(query.as_deref())?;
@@ -5096,8 +5588,7 @@ fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
             locus_core::marketplace::verify_community_manifest_with_keys(&manifest, &keys)?;
             eprintln!("Community adapter upstream executes publisher-supplied code. Its signature authenticates against a configured key, not publisher identity or code safety; review the command, args and sandbox policy.");
             if !yes {
-                use std::io::IsTerminal;
-                if json || !io::stdin().is_terminal() {
+                if !dry_run::interactive(json) {
                     bail!("install requires explicit --yes after reviewing executable code");
                 }
                 eprintln!("{}", serde_json::to_string_pretty(&manifest)?);
@@ -5249,7 +5740,7 @@ fn cmd_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
                         json!(adapter_trust_keys_path(store.home()).display().to_string()),
                     );
                 }
-                println!("{}", serde_json::to_string_pretty(&v)?);
+                json_out::print(json_out::ADAPTER_VERIFY, &v)?;
             } else {
                 let verdict = if report.ok {
                     "ok".green().bold()
@@ -5434,7 +5925,7 @@ fn cmd_adapter_verify_manifest(file: &Path, allow_unsigned: bool, json: bool) ->
                 json!(adapter_trust_keys_path(store.home()).display().to_string()),
             );
         }
-        println!("{}", serde_json::to_string_pretty(&v)?);
+        json_out::print(json_out::ADAPTER_VERIFY_MANIFEST, &v)?;
     } else {
         let verdict = if report.ok {
             "ok".green().bold()
@@ -5709,8 +6200,16 @@ fn cmd_upstream(sub: UpstreamCmd, json: bool) -> Result<()> {
     }
 }
 
-fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
-    let s = store()?;
+fn cmd_binding(sub: BindingCmd, json: bool, dry_run: bool) -> Result<()> {
+    if let BindingCmd::Add(mut args) = sub {
+        args.dry_run = dry_run;
+        return cmd_binding_add(args, false, json);
+    }
+    let s = if dry_run {
+        dry_run::existing_store()?
+    } else {
+        store()?
+    };
     match sub {
         BindingCmd::List => {
             let list = s.list_bindings()?;
@@ -5781,6 +6280,26 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
                 println!("{}", b.to_toml()?);
             }
         }
+        BindingCmd::MigrateCredentialRefs { alias, write } if dry_run => {
+            // The preview (`write = false`) is the migration's own read-only mode.
+            let result = s.migrate_legacy_credential_refs(&alias, false)?;
+            let mut plan =
+                dry_run::Plan::new(format!("locus binding migrate-credential-refs {alias}"));
+            if result.migrated > 0 {
+                plan.write_file(
+                    &s.bindings_dir().join(format!("{}.toml", result.alias)),
+                    Some(format!(
+                        "rewrite {} legacy credential reference(s)",
+                        result.migrated
+                    )),
+                )
+                .needs_control();
+            }
+            if !write {
+                plan.note("the real run needs --write to persist");
+            }
+            plan.with("migration", &result).emit(json)?;
+        }
         BindingCmd::MigrateCredentialRefs { alias, write } => {
             let result = s.migrate_legacy_credential_refs(&alias, write)?;
             if json {
@@ -5807,7 +6326,30 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
                 );
             }
         }
-        BindingCmd::Add(args) => cmd_binding_add(args, false, json)?,
+        BindingCmd::Add(_) => unreachable!("handled above"),
+        BindingCmd::Rm { alias, yes } if dry_run => {
+            validate_name_component("alias", &alias)?;
+            let path = s.bindings_dir().join(format!("{alias}.toml"));
+            if !path.exists() {
+                return Err(with_alias_suggestions(
+                    &s,
+                    LocusError::BindingNotFound(alias),
+                ));
+            }
+            let mut plan = dry_run::Plan::new(format!("locus binding rm {alias}"));
+            plan.delete_file(&path, Some(format!("binding {alias}")));
+            if s.active_session()
+                .ok()
+                .flatten()
+                .is_some_and(|a| a.all_aliases().contains(&alias))
+            {
+                plan.note("this binding is pinned; the pin freezes on drift after removal");
+            }
+            if !yes {
+                plan.note("the real run needs --yes");
+            }
+            plan.needs_control().with("alias", &alias).emit(json)?;
+        }
         BindingCmd::Rm { alias, yes } => {
             if !yes {
                 bail!("refusing to remove without --yes");
@@ -5824,9 +6366,12 @@ fn cmd_binding(sub: BindingCmd, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_client(sub: ClientCmd, json: bool) -> Result<()> {
+fn cmd_client(sub: ClientCmd, json: bool, dry_run: bool) -> Result<()> {
     match sub {
-        ClientCmd::Add(args) => cmd_binding_add(args, true, json),
+        ClientCmd::Add(mut args) => {
+            args.dry_run = dry_run;
+            cmd_binding_add(args, true, json)
+        }
     }
 }
 
@@ -6131,8 +6676,43 @@ fn scope_prompts(provider: &str) -> &'static [(&'static str, bool)] {
 /// `Store::save_binding` — validation, bindings lock, reserved-alias check,
 /// audit `binding.save`.
 fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -> Result<()> {
-    use std::io::IsTerminal;
-    let s = store()?;
+    // A dry run against an uninitialized home validates flags only: opening
+    // the store would create the home and its seal key.
+    let home = locus_core::locus_home()?;
+    if args.dry_run && !home.join("daemon.key").exists() {
+        if args.from_adapter.is_some() {
+            bail!(
+                "{} is not initialized — --from-adapter needs an installed adapter",
+                home.display()
+            );
+        }
+        if !args.scope.is_empty() {
+            bail!("--scope requires --from-adapter");
+        }
+        let answers = resolve_add_answers(&args)?;
+        let toml = binding_from_answers(&answers).to_toml()?;
+        return plans::emit_binding_add_plan(
+            plans::binding_add_plan(
+                &home
+                    .join("bindings")
+                    .join(format!("{}.toml", answers.alias)),
+                &answers.alias,
+                &toml,
+                false,
+            )
+            .note(format!(
+                "{} is not initialized; `locus init` first",
+                home.display()
+            )),
+            json,
+            &toml,
+        );
+    }
+    let s = if args.dry_run {
+        dry_run::existing_store()?
+    } else {
+        store()?
+    };
     let community = if let Some(id) = &args.from_adapter {
         let manifest = locus_core::marketplace::load_installed_manifest(s.home(), id)?;
         if args
@@ -6151,7 +6731,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
         bail!("--scope requires --from-adapter");
     }
     let guided = guided_default || args.guided;
-    let can_prompt = !args.non_interactive && !json && io::stdin().is_terminal();
+    let can_prompt = !args.non_interactive && dry_run::interactive(json);
     let answers = if can_prompt && (guided || !missing_add_flags(&args).is_empty()) {
         resolve_add_answers_interactive(&s, &args)?
     } else {
@@ -6214,27 +6794,19 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
     }
     let toml = b.to_toml()?;
 
-    if args.dry_run {
-        if json {
-            println!(
-                "{}",
-                serde_json::json!({ "ok": true, "dry_run": true, "alias": answers.alias, "toml": toml })
-            );
-        } else {
-            println!("{toml}");
-            println!("{} dry run — nothing written", "ok".green().bold());
-        }
-        return Ok(());
-    }
-
     // An existing binding is never replaced silently: its scope and
     // credential ref would change under every workspace that names it.
     // symlink_metadata: a dangling symlink is an existing entry too.
-    let exists = s
-        .bindings_dir()
-        .join(format!("{}.toml", answers.alias))
-        .symlink_metadata()
-        .is_ok();
+    let target = s.bindings_dir().join(format!("{}.toml", answers.alias));
+    let exists = target.symlink_metadata().is_ok();
+
+    if args.dry_run {
+        let mut plan = plans::binding_add_plan(&target, &answers.alias, &toml, exists);
+        if exists && !args.force {
+            plan.note("binding exists: the real run refuses without --force");
+        }
+        return plans::emit_binding_add_plan(&plan, json, &toml);
+    }
     if exists && !args.force && !(can_prompt && guided) {
         bail!(
             "binding '{alias}' already exists; nothing written. \
@@ -6286,16 +6858,16 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
     Ok(())
 }
 
-/// Prompt for a required value on a TTY; fail closed when stdin is not a TTY.
+/// Prompt for a required value on a TTY; fail closed when not interactive.
 fn prompt_value(
     label: &str,
     flag_hint: &str,
     default: Option<&str>,
     validate: &dyn Fn(&str) -> std::result::Result<(), String>,
 ) -> Result<String> {
-    use std::io::{IsTerminal, Write};
-    if !io::stdin().is_terminal() {
-        bail!("missing {label} — pass {flag_hint} (stdin is not a TTY)");
+    use std::io::Write;
+    if !dry_run::interactive(false) {
+        bail!("missing {label} — pass {flag_hint} (not an interactive terminal)");
     }
     loop {
         match default {
@@ -6326,10 +6898,10 @@ fn prompt_value(
     }
 }
 
-/// Optional prompt: empty input → None. Non-TTY → None (flags rule).
+/// Optional prompt: empty input → None. Non-interactive → None (flags rule).
 fn prompt_optional(label: &str) -> Result<Option<String>> {
-    use std::io::{IsTerminal, Write};
-    if !io::stdin().is_terminal() {
+    use std::io::Write;
+    if !dry_run::interactive(false) {
         return Ok(None);
     }
     print!("  {label}: ");
@@ -6344,10 +6916,10 @@ fn prompt_optional(label: &str) -> Result<Option<String>> {
     })
 }
 
-/// Y/n confirm. Non-TTY returns the default (never blocks scripts).
+/// Y/n confirm. Non-interactive returns the default (never blocks scripts).
 fn prompt_confirm(question: &str, default_yes: bool) -> Result<bool> {
-    use std::io::{IsTerminal, Write};
-    if !io::stdin().is_terminal() {
+    use std::io::Write;
+    if !dry_run::interactive(false) {
         return Ok(default_yes);
     }
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
@@ -6439,7 +7011,40 @@ fn cmd_workspace(
     require_pin: bool,
     force: bool,
     json: bool,
+    dry_run: bool,
 ) -> Result<()> {
+    if dry_run {
+        let planned = plan_workspace_file(&cwd(), default, allow, require_pin, force)?;
+        let toml = planned.config.to_toml()?;
+        let missing: Vec<String> = dry_run::existing_store()
+            .and_then(|s| Ok(s.list_bindings()?))
+            .map(|known| {
+                let known: Vec<&str> = known.iter().map(|b| b.alias.as_str()).collect();
+                missing_workspace_aliases(&planned.config.allowed_bindings, &known)
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut plan = dry_run::Plan::new("locus workspace");
+        plan.write_file(
+            &planned.path,
+            Some(format!(
+                "default_binding={}",
+                planned.config.default_binding.as_deref().unwrap_or("-")
+            )),
+        )
+        .needs_control()
+        .with("default_binding", &planned.config.default_binding)
+        .with("allowed_bindings", &planned.config.allowed_bindings)
+        .with("require_pin", planned.config.require_pin)
+        .with("unknown_bindings", &missing)
+        .with("toml", toml);
+        for alias in &missing {
+            plan.note(format!("binding '{alias}' does not exist yet"));
+        }
+        return plan.emit(json);
+    }
     require_local_control_boundary("locus workspace")?;
     let written = write_workspace_file(&cwd(), default, allow, require_pin, force)?;
     // Advisory only: README/e2e flows name aliases before they exist locally,
@@ -6491,6 +7096,20 @@ fn write_workspace_file(
     require_pin: bool,
     force: bool,
 ) -> Result<WorkspaceWrite> {
+    let WorkspaceWrite { path, config } =
+        plan_workspace_file(dir, default, allow, require_pin, force)?;
+    let path = locus_core::stage_file_replace(&path, config.to_toml()?.as_bytes())?.commit()?;
+    Ok(WorkspaceWrite { path, config })
+}
+
+/// The `.locus.toml` [`write_workspace_file`] would write, refusals included.
+fn plan_workspace_file(
+    dir: &Path,
+    default: String,
+    allow: Option<String>,
+    require_pin: bool,
+    force: bool,
+) -> Result<WorkspaceWrite> {
     let path = dir.join(".locus.toml");
     // Without following a final symlink: a dangling `.locus.toml` link reads
     // as absent through `exists()`, and writing through it created the link's
@@ -6516,7 +7135,6 @@ fn write_workspace_file(
         allowed_bindings: allowed,
         require_pin,
     };
-    let path = locus_core::stage_file_replace(&path, config.to_toml()?.as_bytes())?.commit()?;
     Ok(WorkspaceWrite { path, config })
 }
 
@@ -6627,7 +7245,7 @@ fn cmd_doctor(json: bool) -> Result<()> {
         }
         let refused = preflight.as_ref().is_some_and(|p| p.refuse);
         add_doctor_envelope(&mut value, refused);
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        json_out::print(json_out::DOCTOR, &value)?;
     } else {
         print_doctor_human(&report);
         if let Some(p) = &preflight {
@@ -6640,24 +7258,35 @@ fn cmd_doctor(json: bool) -> Result<()> {
 
     let refused = preflight.as_ref().is_some_and(|p| p.refuse);
     match report.verdict {
-        DoctorVerdict::Safe if refused => std::process::exit(1),
-        DoctorVerdict::Safe => Ok(()),
-        DoctorVerdict::Warn => std::process::exit(1),
-        DoctorVerdict::Unsafe => std::process::exit(2),
+        DoctorVerdict::Safe if refused => exit::ExitCode::Failure.exit(),
+        verdict => exit::ExitCode::from_doctor(verdict).exit_unless_success(),
     }
+    Ok(())
 }
 
-/// `locus doctor --fix [--apply]`: preview, then (only with `--apply`) make
-/// the repairs planned by `locus_core::doctor_fix`. In a Phantom project
-/// (cwd has `.phantom.toml`) the value-free `phantom list --json` probe in
-/// `phm_names` supplies the name list; otherwise, or on any probe failure,
-/// every `phm:` reference is reported as unavailable (fail closed). Output
-/// carries binding aliases, provider labels and file paths only, never
-/// reference strings or Phantom names.
-///
-/// Exit codes: 0 when there is nothing to fix, the preview listed fixes, or
-/// every fix applied; 1 when an applied fix was refused or skipped.
-fn cmd_autopin_suggest(apply: bool, json: bool) -> Result<()> {
+/// `locus autopin suggest [--apply]`. `--apply --dry-run` plans the
+/// `.locus.toml` write; the suggestion itself is read-only.
+fn cmd_autopin_suggest(apply: bool, json: bool, dry_run: bool) -> Result<()> {
+    if apply && dry_run {
+        let s = dry_run::existing_store()?;
+        let here = cwd();
+        let report = locus_core::autopin_suggest::suggest(s.home(), &here)?;
+        let alias = report.suggestion.clone().ok_or_else(|| {
+            anyhow!(
+                "no autopin suggestion to apply ({}); --apply would refuse",
+                report.reason
+            )
+        })?;
+        let target = find_workspace(&here)?
+            .map(|(p, _)| p)
+            .unwrap_or_else(|| here.join(".locus.toml"));
+        let mut plan = dry_run::Plan::new("locus autopin suggest --apply");
+        plan.write_file(&target, Some(format!("default_binding = \"{alias}\"")))
+            .needs_control()
+            .with("suggestion", &alias)
+            .with("report", &report);
+        return plan.emit(json);
+    }
     let s = store()?;
     let here = cwd();
     let (report, written) = if apply {
@@ -6672,8 +7301,7 @@ fn cmd_autopin_suggest(apply: bool, json: bool) -> Result<()> {
             "applied": written.is_some(),
             "written": written.as_ref().map(|p| p.display().to_string()),
         });
-        println!("{}", serde_json::to_string_pretty(&value)?);
-        return Ok(());
+        return json_out::print(json_out::AUTOPIN_SUGGEST, &value);
     }
     match report.reason {
         "history_disabled" => println!(
@@ -6710,12 +7338,30 @@ fn cmd_autopin_suggest(apply: bool, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_doctor_fix(json: bool, apply: bool) -> Result<()> {
+/// `locus doctor --fix [--apply]`: preview, then (only with `--apply`) make
+/// the repairs planned by `locus_core::doctor_fix`. In a Phantom project
+/// (cwd has `.phantom.toml`) the value-free `phantom list --json` probe in
+/// `phm_names` supplies the name list; otherwise, or on any probe failure,
+/// every `phm:` reference is reported as unavailable (fail closed). Output
+/// carries binding aliases, provider labels and file paths only, never
+/// reference strings or Phantom names.
+///
+/// Exit codes: 0 when there is nothing to fix, the preview listed fixes, or
+/// every fix applied; 1 when an applied fix was refused or skipped.
+///
+/// `--dry-run` prints the same fixes as a `locus.plan.v1` plan.
+fn cmd_doctor_fix(json: bool, apply: bool, dry_run: bool) -> Result<()> {
+    if apply && dry_run {
+        return Err(UsageError("--apply cannot be combined with --dry-run".into()).into());
+    }
     // The preview is documented as writing nothing. Opening the store would
     // initialize a fresh LOCUS_HOME (directories and daemon.key), so a dry run
     // without a home reports an empty plan instead (handshake contract v1,
     // gated capability `doctor-fix`).
-    if !apply && !locus_core::store::locus_home()?.exists() {
+    // A dry run never opens (and so never creates) the store either.
+    let home = locus_core::store::locus_home()?;
+    let initialized = home.join("daemon.key").is_file();
+    if !apply && (!home.exists() || (dry_run && !initialized)) {
         let plan = locus_core::doctor_fix::FixPlan::default();
         // No bindings exist yet, so no Phantom name list is needed.
         let names = phm_names::NamesStatus::Unavailable {
@@ -6728,14 +7374,25 @@ fn cmd_doctor_fix(json: bool, apply: bool) -> Result<()> {
                 "plan": plan,
                 "outcome": Option::<locus_core::doctor_fix::FixOutcome>::None,
             });
-            println!("{}", serde_json::to_string_pretty(&value)?);
+            if dry_run {
+                return plans::doctor_fix_plan(&plan, &value).emit(json);
+            }
+            json_out::print(json_out::DOCTOR_FIX, &value)?;
+        } else if dry_run {
+            plans::doctor_fix_plan(&plan, &serde_json::Value::Null)
+                .note("locus home not initialized; run `locus init` first")
+                .emit(false)?;
         } else {
             print_doctor_fix_human(&plan, None, false);
             println!("locus home not initialized; run `locus init` first");
         }
         return Ok(());
     }
-    let s = store()?;
+    let s = if dry_run {
+        dry_run::existing_store()?
+    } else {
+        store()?
+    };
     let here = cwd();
     // Value-free `phantom list --json`, only here (never on a resolution path)
     // and only when this directory is a Phantom project. Fails closed to None.
@@ -6767,7 +7424,12 @@ fn cmd_doctor_fix(json: bool, apply: bool) -> Result<()> {
             "plan": plan,
             "outcome": outcome,
         });
-        println!("{}", serde_json::to_string_pretty(&value)?);
+        if dry_run {
+            return plans::doctor_fix_plan(&plan, &value).emit(json);
+        }
+        json_out::print(json_out::DOCTOR_FIX, &value)?;
+    } else if dry_run {
+        plans::doctor_fix_plan(&plan, &serde_json::Value::Null).emit(false)?;
     } else {
         print_doctor_fix_human(&plan, outcome.as_ref(), apply);
         match &names.status {
@@ -6782,7 +7444,7 @@ fn cmd_doctor_fix(json: bool, apply: bool) -> Result<()> {
         }
     }
     if failed {
-        std::process::exit(1);
+        exit::ExitCode::Failure.exit();
     }
     Ok(())
 }
@@ -6830,13 +7492,12 @@ fn print_doctor_fix_human(
 }
 
 /// AI-native agent plane: setup / doctor / report.
-fn cmd_agent(sub: AgentCmd, json: bool) -> Result<()> {
+fn cmd_agent(sub: AgentCmd, json: bool, dry_run: bool) -> Result<()> {
     match sub {
         AgentCmd::Setup {
             client,
             claude_scope,
             apply,
-            dry_run,
             workspace,
             mcp_bin,
         } => cmd_agent_setup(
@@ -6848,8 +7509,10 @@ fn cmd_agent(sub: AgentCmd, json: bool) -> Result<()> {
             mcp_bin,
             json,
         ),
-        AgentCmd::Doctor => cmd_agent_doctor(json),
-        AgentCmd::Report { json: report_json } => cmd_agent_report(json || report_json),
+        AgentCmd::Doctor => cmd_agent_readiness(json, json_out::AGENT_DOCTOR),
+        AgentCmd::Report { json: report_json } => {
+            cmd_agent_readiness(json || report_json, json_out::AGENT_REPORT)
+        }
     }
 }
 
@@ -6889,8 +7552,7 @@ fn cmd_verify_claim(text: &str, json: bool) -> Result<()> {
     );
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&result)?);
-        return Ok(());
+        return json_out::print(json_out::VERIFY_CLAIM, &result);
     }
 
     // Structured human view — same fields as the JSON contract.
@@ -6933,7 +7595,7 @@ fn cmd_verify_claim(text: &str, json: bool) -> Result<()> {
     }
     println!("  suggestion  {}", result.suggestion);
     // Always emit machine JSON line for pipelines that ignore human formatting.
-    println!("{}", serde_json::to_string(&result)?);
+    json_out::print_line(json_out::VERIFY_CLAIM, &result)?;
     Ok(())
 }
 
@@ -6966,7 +7628,7 @@ fn cmd_verify_session(json: bool) -> Result<()> {
     );
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&pack)?);
+        json_out::print(json_out::VERIFY_SESSION, &pack)?;
         return verify_session_exit(pack.session_ok);
     }
 
@@ -7009,7 +7671,7 @@ fn cmd_verify_session(json: bool) -> Result<()> {
         println!("  command     {}", cmd.cyan());
     }
     // Machine JSON line for pipelines.
-    println!("{}", serde_json::to_string(&pack)?);
+    json_out::print_line(json_out::VERIFY_SESSION, &pack)?;
     verify_session_exit(pack.session_ok)
 }
 
@@ -7041,9 +7703,9 @@ fn cmd_goal_status(json: bool) -> Result<()> {
     let total_remaining = total_items.saturating_sub(total_done);
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&json!({
+        json_out::print(
+            json_out::GOAL_STATUS,
+            &json!({
                 "version": VERSION,
                 "vision": "wrong-account impossible · AI-native · hub-native",
                 "source": source,
@@ -7066,8 +7728,8 @@ fn cmd_goal_status(json: bool) -> Result<()> {
                     "total": total_items,
                     "remaining": total_remaining,
                 },
-            }))?
-        );
+            }),
+        )?;
         return Ok(());
     }
 
@@ -7429,28 +8091,19 @@ fn print_agent_report_human(report: &locus_core::AgentReport) {
     );
 }
 
-fn cmd_agent_doctor(json: bool) -> Result<()> {
+/// `locus agent doctor` / `locus agent report`: the same readiness report
+/// under each command's schema id. Exit: ready=0, protected=1, unsafe=2.
+fn cmd_agent_readiness(json: bool, schema: &str) -> Result<()> {
     let s = store()?;
     let _ = s.check_drift_and_freeze()?;
     let report = build_hub_agent_report(&s)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
+        json_out::print(schema, &report)?;
     } else {
         print_agent_report_human(&report);
     }
-    std::process::exit(report.exit_code);
-}
-
-fn cmd_agent_report(json: bool) -> Result<()> {
-    let s = store()?;
-    let _ = s.check_drift_and_freeze()?;
-    let report = build_hub_agent_report(&s)?;
-    if json {
-        println!("{}", serde_json::to_string_pretty(&report)?);
-    } else {
-        print_agent_report_human(&report);
-    }
-    std::process::exit(report.exit_code);
+    exit::ExitCode::from_agent(report.status).exit_unless_success();
+    Ok(())
 }
 
 fn cmd_agent_setup(
@@ -7466,6 +8119,7 @@ fn cmd_agent_setup(
         bail!("pass --apply or --dry-run (refusing to mutate without intent)");
     }
     if apply && dry_run {
+        // Exit 1, as before the global `--dry-run`: callers match on it.
         bail!("pass only one of --apply or --dry-run");
     }
     if apply {
@@ -7507,8 +8161,24 @@ fn cmd_agent_setup(
         None
     };
 
-    // Ensure ~/.locus (or LOCUS_HOME) exists — init layout + seal key if needed.
-    let s = store()?;
+    // Ensure ~/.locus (or LOCUS_HOME) exists — init layout + seal key if
+    // needed. A dry run only plans it: opening the store would create it.
+    let mut plan = dry_run::Plan::new("locus agent setup");
+    // The real run goes through require_local_control_boundary.
+    plan.needs_control();
+    let home = if apply {
+        store()?.home().to_path_buf()
+    } else {
+        let home = locus_core::locus_home()?;
+        if !home.join("daemon.key").exists() {
+            plan.change(
+                "create",
+                home.display().to_string(),
+                Some("locus home + seal key".into()),
+            );
+        }
+        home
+    };
     if let Some(b) = mcp_bin.as_deref() {
         validate_explicit_mcp_bin(b)?;
     }
@@ -7523,7 +8193,7 @@ fn cmd_agent_setup(
     }
     let mut actions: Vec<String> = Vec::new();
     let project = cwd();
-    actions.push(format!("ensure locus home → {}", s.home().display()));
+    actions.push(format!("ensure locus home → {}", home.display()));
 
     // Grok Build / generic stdio clients: canonical entry emitted for paste
     // (JSON + TOML shapes) — never a guessed config-path write.
@@ -7554,6 +8224,14 @@ fn cmd_agent_setup(
                         .map(|p| p.display().to_string())
                         .unwrap_or_else(|| "NOT FOUND on PATH".into())
                 ));
+                plan.change(
+                    "register",
+                    "claude mcp (user scope)",
+                    Some("claude mcp add-json locus … --scope user".into()),
+                );
+                if claude_cli.is_none() {
+                    plan.note("--claude-scope user: the real run refuses without `claude` on PATH");
+                }
                 if apply {
                     let cli = claude_cli
                         .as_ref()
@@ -7567,6 +8245,7 @@ fn cmd_agent_setup(
                     "mcp claude → {} (LOCUS_AUTO_PIN=cwd, LOCUS_CLIENT=claude)",
                     path.display()
                 ));
+                plan.write_file(&path, Some("merge mcpServers.locus".into()));
                 if apply {
                     merge_mcp_json(&path, "locus", &server_entry)?;
                 }
@@ -7577,6 +8256,13 @@ fn cmd_agent_setup(
                     "mcp cursor → {} (LOCUS_AUTO_PIN=cwd, LOCUS_CLIENT=cursor)",
                     path.display()
                 ));
+                plan.write_file(&path, Some("merge mcpServers.locus".into()));
+                if let Some(global) = dirs::home_dir()
+                    .map(|h| h.join(".cursor").join("mcp.json"))
+                    .filter(|g| g.exists())
+                {
+                    plan.write_file(&global, Some("merge mcpServers.locus".into()));
+                }
                 if apply {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent)?;
@@ -7598,6 +8284,7 @@ fn cmd_agent_setup(
                     "mcp codex → {} (LOCUS_AUTO_PIN=cwd, LOCUS_CLIENT=codex)",
                     path.display()
                 ));
+                plan.write_file(&path, Some("upsert [mcp_servers.locus]".into()));
                 if apply {
                     merge_codex_mcp(&path, &bin, c)?;
                 }
@@ -7611,6 +8298,13 @@ fn cmd_agent_setup(
                     "mcp gemini → {} (LOCUS_AUTO_PIN=cwd, LOCUS_CLIENT=gemini)",
                     path.display()
                 ));
+                plan.write_file(&path, Some("merge mcpServers.locus".into()));
+                if let Some(global) = dirs::home_dir()
+                    .map(|h| h.join(".gemini").join("settings.json"))
+                    .filter(|g| g.exists())
+                {
+                    plan.write_file(&global, Some("merge mcpServers.locus".into()));
+                }
                 if apply {
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent)?;
@@ -7635,6 +8329,7 @@ fn cmd_agent_setup(
                     "mcp grok → {} (LOCUS_AUTO_PIN=cwd, LOCUS_CLIENT=grok)",
                     path.display()
                 ));
+                plan.write_file(&path, Some("upsert [mcp_servers.locus]".into()));
                 if apply {
                     merge_codex_mcp(&path, &bin, c)?;
                 }
@@ -7645,6 +8340,11 @@ fn cmd_agent_setup(
                      emitted server entry into the client's MCP settings; register the \
                      probe with LOCUS_GROK_MCP_CONFIG=<path-to-its-config>)"
                         .to_string(),
+                );
+                plan.change(
+                    "print",
+                    "stdout",
+                    Some("generic MCP server entry to paste".into()),
                 );
                 paste_entry = Some((
                     json!({ "mcpServers": { "locus": server_entry.clone() } }),
@@ -7657,6 +8357,7 @@ fn cmd_agent_setup(
 
     let agent_path = agent_md_path(&project);
     actions.push(format!("agent guidance → {}", agent_path.display()));
+    plan.write_file(&agent_path, Some("agent guidance".into()));
     if apply {
         if let Some(parent) = agent_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -7673,6 +8374,7 @@ fn cmd_agent_setup(
             ));
         } else {
             actions.push(format!("workspace stub → {}", ws.display()));
+            plan.write_file(&ws, Some("workspace stub".into()));
             if apply {
                 std::fs::write(&ws, workspace_stub_toml())?;
             }
@@ -7728,31 +8430,39 @@ fn cmd_agent_setup(
         verified = Some(probe);
     }
 
+    let report = json!({
+        "ok": verify_failures.is_empty(),
+        "apply": apply,
+        "dry_run": dry_run,
+        "clients": clients,
+        "home": home.display().to_string(),
+        "mcp_bin": bin,
+        "mcp_bin_fallback": bin_fallback,
+        "actions": actions,
+        "verified": verified,
+        "verify_failures": verify_failures,
+        "paste_server_entry": paste_entry.as_ref().map(|(j, _)| j.clone()),
+        "paste_server_toml": paste_entry.as_ref().map(|(_, t)| t.clone()),
+        "env": {
+            "LOCUS_AUTO_PIN": "cwd",
+            "LOCUS_CLIENT": "<client>",
+            "LOCUS_NOTIFY": null,
+        },
+    });
+    if dry_run {
+        if let Some(obj) = report.as_object() {
+            for (k, v) in obj {
+                plan.with(k, v);
+            }
+        }
+        if json {
+            return plan.emit(true);
+        }
+    }
     if json {
-        println!(
-            "{}",
-            json!({
-                "ok": verify_failures.is_empty(),
-                "apply": apply,
-                "dry_run": dry_run,
-                "clients": clients,
-                "home": s.home().display().to_string(),
-                "mcp_bin": bin,
-                "mcp_bin_fallback": bin_fallback,
-                "actions": actions,
-                "verified": verified,
-                "verify_failures": verify_failures,
-                "paste_server_entry": paste_entry.as_ref().map(|(j, _)| j.clone()),
-                "paste_server_toml": paste_entry.as_ref().map(|(_, t)| t.clone()),
-                "env": {
-                    "LOCUS_AUTO_PIN": "cwd",
-                    "LOCUS_CLIENT": "<client>",
-                    "LOCUS_NOTIFY": null,
-                },
-            })
-        );
+        println!("{report}");
         if !verify_failures.is_empty() {
-            std::process::exit(1);
+            exit::ExitCode::Failure.exit();
         }
     } else if !verify_failures.is_empty() {
         eprintln!(
@@ -7763,7 +8473,7 @@ fn cmd_agent_setup(
             eprintln!("   · locus entry not found after write — {f}");
         }
         eprintln!("   inspect the file(s) above, then re-run `locus agent setup --apply`");
-        std::process::exit(1);
+        exit::ExitCode::Failure.exit();
     } else {
         let mode = if dry_run { "dry-run" } else { "applied" };
         println!("{} agent setup ({mode})", "ok".green().bold());
@@ -8090,7 +8800,7 @@ fn cmd_watch(interval: &str, once: bool, require_ok: bool, json: bool) -> Result
 
         if json {
             // NDJSON: one compact object per tick for hub stream consumers.
-            println!("{}", serde_json::to_string(&hb)?);
+            json_out::print_line(json_out::WATCH, &hb)?;
         } else {
             let ok_s = if hb.session_ok {
                 "ok".green().bold().to_string()
@@ -8669,14 +9379,20 @@ fn supervised_mcp_hint(locus_bin: &str) -> [String; 3] {
     ]
 }
 
-fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>, json: bool) -> Result<()> {
+fn cmd_setup(
+    client: &str,
+    print_only: bool,
+    mcp_bin: Option<String>,
+    json: bool,
+    dry_run: bool,
+) -> Result<()> {
     if !matches!(
         client,
         "claude" | "cursor" | "codex" | "grok" | "gemini" | "generic"
     ) {
         bail!("unknown client: {client} (claude|cursor|codex|grok|gemini|generic)");
     }
-    if !print_only && client != "generic" {
+    if !print_only && client != "generic" && !dry_run {
         require_local_control_boundary("locus setup")?;
     }
     let bin = resolve_mcp_bin(mcp_bin);
@@ -8729,6 +9445,44 @@ fn cmd_setup(client: &str, print_only: bool, mcp_bin: Option<String>, json: bool
         println!("# `locus agent doctor` / `locus agent report` can verify registration");
         println!("# (JSON mcpServers shape or TOML [mcp_servers] shape).");
         return Ok(());
+    }
+
+    if dry_run {
+        let mut plan = dry_run::Plan::new(format!("locus setup --client {client}"));
+        let targets: Vec<PathBuf> = match client {
+            "claude" => vec![cwd().join(".mcp.json")],
+            "cursor" | "gemini" => {
+                let rel = if client == "cursor" {
+                    [".cursor", "mcp.json"]
+                } else {
+                    [".gemini", "settings.json"]
+                };
+                let mut t = vec![cwd().join(rel[0]).join(rel[1])];
+                t.extend(
+                    dirs::home_dir()
+                        .map(|h| h.join(rel[0]).join(rel[1]))
+                        .filter(|g| g.exists()),
+                );
+                t
+            }
+            _ => {
+                let home =
+                    dirs::home_dir().with_context(|| format!("home dir for {client} config"))?;
+                vec![home.join(format!(".{client}")).join("config.toml")]
+            }
+        };
+        for path in &targets {
+            plan.write_file(path, Some("merge the locus MCP server entry".into()));
+        }
+        plan.needs_control().with("client", client).with(
+            "entry",
+            if toml_client {
+                json!(toml_entry)
+            } else {
+                json_entry.clone()
+            },
+        );
+        return plan.emit(json);
     }
 
     let mut written: Vec<std::path::PathBuf> = Vec::new();
@@ -8930,19 +9684,22 @@ fn cmd_events(last: usize, op: Option<String>, binding: Option<String>, json: bo
 ///
 /// `--sink webhook` POSTs the same redacted body (no secrets). Unset URL fails
 /// soft (skip, exit 0). Secret-looking bodies fail closed (error, no POST).
-#[allow(clippy::too_many_arguments)]
-fn cmd_events_export(
-    last: usize,
-    op: Option<String>,
-    binding: Option<String>,
-    otlp: bool,
-    out: Option<PathBuf>,
-    service_name: String,
-    sink: EventsExportSink,
-    url: Option<String>,
-    _json: bool,
-) -> Result<()> {
-    let s = store()?;
+fn cmd_events_export(args: EventsExportArgs, json: bool, dry_run: bool) -> Result<()> {
+    let EventsExportArgs {
+        last,
+        op,
+        binding,
+        otlp,
+        out,
+        service_name,
+        sink,
+        url,
+    } = args;
+    let s = if dry_run {
+        dry_run::existing_store()?
+    } else {
+        store()?
+    };
     let all = s.read_audit_events()?;
     let format = if otlp {
         EventsExportFormat::Otlp
@@ -8959,6 +9716,47 @@ fn cmd_events_export(
             service_name: Some(service_name),
         },
     )?;
+
+    if dry_run {
+        let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
+        let detail = format!(
+            "{} bytes, {}",
+            body.len(),
+            if otlp {
+                "OTLP JSON".to_string()
+            } else {
+                format!("{lines} JSON line(s)")
+            }
+        );
+        let mut plan = dry_run::Plan::new("locus events export");
+        if sink == EventsExportSink::Webhook {
+            match resolve_audit_webhook_url(url.as_deref()) {
+                // Scheme + host only: the URL may carry a token.
+                Some(u) => {
+                    plan.change(
+                        "send",
+                        locus_core::webhook_url_safe_label(&u),
+                        Some(format!("HTTP POST, {detail}")),
+                    );
+                }
+                None => {
+                    plan.note(format!(
+                        "webhook sink skipped — set {AUDIT_WEBHOOK_URL_ENV} or --url (fail soft)"
+                    ));
+                }
+            }
+        }
+        match &out {
+            Some(path) => {
+                plan.write_file(path, Some(detail));
+            }
+            None if sink == EventsExportSink::Local => {
+                plan.change("print", "stdout", Some(detail));
+            }
+            None => {}
+        }
+        return plan.emit(json);
+    }
 
     match sink {
         EventsExportSink::Webhook => {
@@ -8999,6 +9797,18 @@ fn cmd_events_export(
     Ok(())
 }
 
+/// Flags of `locus events export`.
+struct EventsExportArgs {
+    last: usize,
+    op: Option<String>,
+    binding: Option<String>,
+    otlp: bool,
+    out: Option<PathBuf>,
+    service_name: String,
+    sink: EventsExportSink,
+    url: Option<String>,
+}
+
 fn write_events_export_file(path: &std::path::Path, body: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -9015,10 +9825,14 @@ fn write_events_export_file(path: &std::path::Path, body: &str) -> Result<()> {
     Ok(())
 }
 
-fn cmd_forensics(sub: ForensicsCmd, json: bool) -> Result<()> {
+fn cmd_forensics(sub: ForensicsCmd, json: bool, dry_run: bool) -> Result<()> {
     match sub {
         ForensicsCmd::Export { binding, last, out } => {
-            let s = store()?;
+            let s = if dry_run {
+                dry_run::existing_store()?
+            } else {
+                store()?
+            };
             let phantom = phantom_on_path();
             let unresolved = collect_unresolved_phm_refs(&s, phantom).unwrap_or_default();
             let pack = export_forensics_pack(
@@ -9042,6 +9856,23 @@ fn cmd_forensics(sub: ForensicsCmd, json: bool) -> Result<()> {
                     Some(PathBuf::from("pack.json"))
                 }
             });
+            if dry_run {
+                let detail = format!(
+                    "forensics pack v{}: {} binding(s), {} audit event(s); no secrets",
+                    pack.pack_version,
+                    pack.bindings.len(),
+                    pack.audit_event_count
+                );
+                let mut plan = dry_run::Plan::new("locus forensics export");
+                match &target {
+                    Some(path) => plan.write_file(path, Some(detail)),
+                    None => plan.change("print", "stdout", Some(detail)),
+                };
+                return plan
+                    .with("pack_version", pack.pack_version)
+                    .with("audit_event_count", pack.audit_event_count)
+                    .emit(json);
+            }
 
             if let Some(path) = target {
                 if let Some(parent) = path.parent() {
@@ -9090,9 +9921,25 @@ fn cmd_forensics(sub: ForensicsCmd, json: bool) -> Result<()> {
     }
 }
 
-fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {
+fn cmd_notify(sub: NotifyCmd, json: bool, dry_run: bool) -> Result<()> {
     use locus_core::{load_config, notifications_enabled};
 
+    if dry_run && !matches!(sub, NotifyCmd::Status) {
+        let s = dry_run::existing_store()?;
+        let enable = matches!(sub, NotifyCmd::On);
+        let current = load_config(s.home()).notify.enabled;
+        let mut plan = dry_run::Plan::new(if enable {
+            "locus notify on"
+        } else {
+            "locus notify off"
+        });
+        if current == enable {
+            plan.note(format!("notify.enabled is already {enable}"));
+        } else {
+            plan.write_file(&s.config_path(), Some(format!("notify.enabled = {enable}")));
+        }
+        return plan.needs_control().with("enabled", enable).emit(json);
+    }
     let s = store()?;
     let home = s.home();
     match sub {
@@ -9100,16 +9947,16 @@ fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {
             let cfg = load_config(home);
             let effective = notifications_enabled();
             if json {
-                println!(
-                    "{}",
-                    json!({
+                json_out::print_line(
+                    json_out::NOTIFY_STATUS,
+                    &json!({
                         "config_enabled": cfg.notify.enabled,
                         "effective": effective,
                         "default": "off",
                         "env_LOCUS_NOTIFY": std::env::var("LOCUS_NOTIFY").ok(),
                         "hint": "Banners are opt-in. Enable with `locus notify on` or LOCUS_NOTIFY=1.",
-                    })
-                );
+                    }),
+                )?;
             } else {
                 println!(
                     "{} desktop notifications: {} (config={})",
@@ -9177,7 +10024,74 @@ fn cmd_notify(sub: NotifyCmd, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
+/// An approval record plus its (advisory-only) authority fields, shared by
+/// `approve grant --json` and `approve status --json`.
+fn approval_json(
+    rec: &locus_core::ApprovalRecord,
+    dual: bool,
+    required: usize,
+) -> Result<serde_json::Value> {
+    let mut v = serde_json::to_value(rec)?;
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("dual_control".into(), json!(dual));
+        obj.insert("required_grants".into(), json!(required));
+        obj.insert("approval_authority".into(), json!("local_advisory"));
+        obj.insert("authoritative_grants".into(), json!(0));
+        obj.insert("required_authoritative_grants".into(), json!(required));
+        obj.insert("authoritative_path_enabled".into(), json!(false));
+        obj.insert("grants_progress".into(), json!(format!("0/{required}")));
+        obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
+        obj.insert(
+            "authority_blocker".into(),
+            json!(locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER),
+        );
+    }
+    Ok(v)
+}
+
+fn cmd_approve(sub: ApproveCmd, json: bool, dry_run: bool) -> Result<()> {
+    if dry_run {
+        let target = match &sub {
+            ApproveCmd::Grant {
+                id, ttl, touchid, ..
+            } => Some((id, true, ttl.as_ref(), *touchid)),
+            ApproveCmd::Deny { id } => Some((id, false, None, false)),
+            _ => None,
+        };
+        if let Some((id, grant, ttl, touchid)) = target {
+            let s = dry_run::existing_store()?;
+            if let Some(raw) = ttl {
+                parse_mint_ttl(raw)?;
+            }
+            let rec = s.load_approval(id)?;
+            let mut plan = dry_run::Plan::new(format!(
+                "locus approve {} {id}",
+                if grant { "grant" } else { "deny" }
+            ));
+            plan.change(
+                if grant { "grant" } else { "deny" },
+                format!("approval {id}"),
+                Some(format!(
+                    "tool={} binding={} status={}",
+                    rec.tool,
+                    rec.binding,
+                    rec.status.as_str()
+                )),
+            )
+            .needs_control()
+            .with("id", id)
+            .with("tool", &rec.tool)
+            .with("binding", &rec.binding)
+            .with("status", rec.status.as_str());
+            if grant {
+                plan.note("local grants are advisory labels; they never authorize a blocked call");
+                if touchid {
+                    plan.note("--touchid: the real run confirms before writing");
+                }
+            }
+            return plan.emit(json);
+        }
+    }
     let s = store()?;
     match sub {
         ApproveCmd::List { limit } => {
@@ -9272,22 +10186,10 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
             let required = locus_core::required_grant_count(dual);
             if json {
-                let mut v = serde_json::to_value(&rec)?;
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("dual_control".into(), json!(dual));
-                    obj.insert("required_grants".into(), json!(required));
-                    obj.insert("approval_authority".into(), json!("local_advisory"));
-                    obj.insert("authoritative_grants".into(), json!(0));
-                    obj.insert("required_authoritative_grants".into(), json!(required));
-                    obj.insert("authoritative_path_enabled".into(), json!(false));
-                    obj.insert("grants_progress".into(), json!(format!("0/{required}")));
-                    obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
-                    obj.insert(
-                        "authority_blocker".into(),
-                        json!(locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER),
-                    );
-                }
-                println!("{}", serde_json::to_string_pretty(&v)?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&approval_json(&rec, dual, required)?)?
+                );
             } else {
                 print_grant_summary(&rec, &principal, dual, required, ttl.as_deref());
             }
@@ -9298,22 +10200,10 @@ fn cmd_approve(sub: ApproveCmd, json: bool) -> Result<()> {
             let dual = s.tool_requires_dual_control(&rec.binding, &rec.tool);
             let required = if dual { 2 } else { 1 };
             if json {
-                let mut v = serde_json::to_value(&rec)?;
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("dual_control".into(), json!(dual));
-                    obj.insert("required_grants".into(), json!(required));
-                    obj.insert("approval_authority".into(), json!("local_advisory"));
-                    obj.insert("authoritative_grants".into(), json!(0));
-                    obj.insert("required_authoritative_grants".into(), json!(required));
-                    obj.insert("authoritative_path_enabled".into(), json!(false));
-                    obj.insert("grants_progress".into(), json!(format!("0/{required}")));
-                    obj.insert("advisory_assertions".into(), json!(rec.grants.len()));
-                    obj.insert(
-                        "authority_blocker".into(),
-                        json!(locus_core::EXTERNAL_APPROVAL_AUTHORITY_BLOCKER),
-                    );
-                }
-                println!("{}", serde_json::to_string_pretty(&v)?);
+                json_out::print(
+                    json_out::APPROVE_STATUS,
+                    &approval_json(&rec, dual, required)?,
+                )?;
             } else {
                 println!(
                     "{} {}  status={}",
@@ -11481,5 +12371,58 @@ mod pin_time_left_tests {
     #[test]
     fn warn_threshold_is_fifteen_minutes() {
         assert_eq!(PIN_EXPIRY_WARN_SECS, 900);
+    }
+}
+
+#[cfg(test)]
+mod agent_contract_tests {
+    use super::{dry_run_support, error_exit_code, Cli, DryRunSupport, UsageError};
+    use clap::Parser;
+
+    fn class(argv: &[&str]) -> DryRunSupport {
+        let mut full = vec!["locus"];
+        full.extend_from_slice(argv);
+        dry_run_support(&Cli::try_parse_from(full).expect("parses").command)
+    }
+
+    #[test]
+    fn dry_run_classes_follow_the_flags_that_decide_mutation() {
+        use DryRunSupport::{Plans, ReadOnly, Unsupported};
+        assert_eq!(class(&["autopin", "suggest"]), ReadOnly);
+        assert_eq!(class(&["autopin", "suggest", "--apply"]), Plans);
+        assert_eq!(class(&["doctor"]), ReadOnly);
+        assert_eq!(class(&["doctor", "--fix"]), Plans);
+        assert_eq!(class(&["mcp"]), Unsupported);
+        assert_eq!(class(&["mcp", "list"]), ReadOnly);
+        assert_eq!(class(&["mcp", "revoke", "--all"]), Plans);
+        assert_eq!(class(&["events"]), ReadOnly);
+        assert_eq!(class(&["events", "export"]), Plans);
+        assert_eq!(class(&["adapter", "trust", "list"]), ReadOnly);
+        assert_eq!(class(&["exec", "--", "true"]), Unsupported);
+        assert_eq!(class(&["ci", "run", "-b", "x", "--", "true"]), Unsupported);
+        assert_eq!(class(&["ci", "mint", "-b", "x"]), Plans);
+    }
+
+    #[test]
+    fn global_dry_run_reaches_binding_add_and_agent_setup() {
+        let cli = Cli::try_parse_from(["locus", "binding", "add", "a", "--dry-run"]).unwrap();
+        assert!(cli.dry_run);
+        let cli = Cli::try_parse_from(["locus", "agent", "setup", "--dry-run"]).unwrap();
+        assert!(cli.dry_run);
+    }
+
+    #[test]
+    fn usage_errors_map_to_exit_two() {
+        let e = anyhow::Error::new(UsageError("x".into()));
+        assert_eq!(error_exit_code(&e).code(), 2);
+        assert_eq!(error_exit_code(&anyhow::anyhow!("plain")).code(), 1);
+    }
+
+    #[test]
+    fn json_and_env_force_non_interactive() {
+        assert!(!crate::dry_run::interactive(true));
+        std::env::set_var(crate::dry_run::NON_INTERACTIVE_ENV, "1");
+        assert!(!crate::dry_run::interactive(false));
+        std::env::remove_var(crate::dry_run::NON_INTERACTIVE_ENV);
     }
 }

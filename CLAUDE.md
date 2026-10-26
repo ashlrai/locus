@@ -69,6 +69,7 @@ Clients → data plane (locus-mcp / exec)
 - MCP stdout is protocol-only (no logging)
 - `LOCUS_HOME` for tests; production binaries reject `test:` refs regardless of environment
 - fmt + clippy `-D warnings` must pass (CI)
+- CLI exits only through `exit::ExitCode`; `--json` check/status output goes through `json_out` (schema id first); a new command must pick a `DryRunSupport` class (docs/agent-contract.md)
 - Adapters live in `crates/locus-core/src/adapters/`; guide: [docs/adapters.md](./docs/adapters.md)
 
 ## Key paths
@@ -94,6 +95,7 @@ Clients → data plane (locus-mcp / exec)
 | [docs/firm-mode.md](./docs/firm-mode.md) | Multi-client / dual-control ops |
 | [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
 | [docs/mcp.md](./docs/mcp.md) | Client wiring (Claude Code, Cursor, Codex, Gemini CLI, Grok Build) |
+| [docs/agent-contract.md](./docs/agent-contract.md) | `--json` schema ids, exit codes, `--dry-run`, non-interactive rules |
 | [docs/onboarding.md](./docs/onboarding.md) | `locus onboard` + clients × tenants walkthrough |
 | [docs/workers.md](./docs/workers.md) | Worker backends |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | PR + adapter checklist |
