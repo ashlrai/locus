@@ -7,6 +7,7 @@ contract is implemented by `stack --ashlr-handshake` (ashlr-stack) and
 
 ```json
 {
+  "schema": "locus.ashlr.handshake.v1",
   "kind": "ashlr.handshake",
   "schema_version": 1,
   "name": "locus",
@@ -23,7 +24,7 @@ contract is implemented by `stack --ashlr-handshake` (ashlr-stack) and
 Rules every implementation follows:
 
 - **Fast and local:** no network, no vault or keychain, and no secret values or project contents in the output.
-- **Stable shape:** `kind` and `schema_version` identify the contract. New fields may be added in v1; renames or removals bump `schema_version`.
+- **Stable shape:** `schema`, `kind` and `schema_version` identify the contract. New fields may be added in v1; renames or removals bump `schema_version`.
 - **Ids:** `capabilities` and check `id`s are kebab-case. `protocols` maps a protocol name to the version spoken.
 - **Health:** `health.status` is `ok`, `degraded` (works, something it relies on is missing) or `unknown`. A check status is `ok`, `missing` (counts against health) or `absent` (informational, such as phantom not installed when no binding uses `phm:`).
 - **Edits:** paths the CLI may write. `~/` is the home directory; other paths are relative to the project.
