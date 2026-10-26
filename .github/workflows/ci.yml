@@ -110,3 +110,75 @@ jobs:
 
       - name: Recipes (examples/recipes against the release build)
         run: node --test examples/recipes
+
+  # Declared MSRV (workspace.package.rust-version). cargo check only.
+  # Pull requests run it when a Cargo.toml or Cargo.lock changes. Every other
+  # event runs it, because a .rs change breaks the MSRV as often as a manifest
+  # change. Not one of the required checks. RUSTUP_TOOLCHAIN overrides
+  # rust-toolchain.toml, which pins stable for in-repo development. RUSTFLAGS
+  # is cleared so dependency warnings on the older compiler are not promoted
+  # to errors.
+  msrv:
+    name: msrv (rustc 1.89)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      RUSTFLAGS: ""
+      RUSTUP_TOOLCHAIN: "1.89.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide whether to run
+        id: manifests
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          run=false
+          case "$EVENT" in
+            pull_request)
+              files=""
+              # Default checkout depth is 1. Fetch the base commit and use a
+              # two-dot diff: `git diff A B` only needs those two trees. A
+              # three-dot diff needs a merge base, which this depth does not have.
+              if [ -z "$BASE" ]; then
+                run=true
+              elif ! git fetch --no-tags --depth=1 origin "$BASE"; then
+                run=true
+              elif ! files="$(git diff --name-only "$BASE" HEAD)"; then
+                run=true
+              elif printf '%s\n' "$files" | grep -Eq '(^|/)Cargo\.toml$|(^|/)Cargo\.lock$|\.rs$|(^|/)rust-toolchain[^/]*$|(^|/)\.cargo/'; then
+                run=true
+              fi
+              ;;
+            push|merge_group|schedule|workflow_dispatch)
+              run=true
+              ;;
+            *)
+              run=true
+              ;;
+          esac
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+          echo "msrv cargo check: $run ($EVENT)"
+
+      - name: Install Rust toolchain
+        if: steps.manifests.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: 1.89.0
+
+      - name: Cache cargo
+        if: steps.manifests.outputs.run == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: msrv-1.89.0
+
+      - name: Check
+        if: steps.manifests.outputs.run == 'true'
+        run: cargo +1.89.0 check --workspace --locked
