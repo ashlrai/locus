@@ -1047,6 +1047,7 @@ dependencies = [
  "clap_complete",
  "colored",
  "dirs",
+ "libc",
  "locus-core",
  "serde",
  "serde_json",
@@ -1057,6 +1058,7 @@ dependencies = [
  "toml_edit",
  "tower",
  "tower-http",
+ "zeroize",
 ]
 
 [[package]]

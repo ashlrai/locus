@@ -10,6 +10,7 @@
 // Must stay first: shadows `println!` / `print!` for every module below.
 #[macro_use]
 mod stdout;
+mod supervisor;
 
 mod cred_diag;
 mod dry_run;
@@ -61,7 +62,7 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard\n  \
+  Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · supervisor · engagement · graph · goal · verify · upstream · adapter · onboard\n  \
   Daily use     enter · switch · pin · leave · renew · whoami · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
@@ -87,6 +88,9 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Own the authority broker independently of the entering shell (Unix)
+    #[command(next_help_heading = "Setup", subcommand)]
+    Supervisor(supervisor::SupervisorCmd),
     // ───────────────────────────── Setup ─────────────────────────────
     /// Initialize ~/.locus (or LOCUS_HOME)
     #[command(next_help_heading = "Setup")]
@@ -1118,6 +1122,13 @@ fn main() {
         }
         return;
     }
+    if let Some(result) = supervisor::run_internal_if_requested() {
+        if let Err(error) = result {
+            eprintln!("supervisor error: {error:#}");
+            exit::ExitCode::Failure.exit();
+        }
+        return;
+    }
     // Companion handshake (docs/ashlr-handshake.md): before clap and the
     // store, so it never needs a subcommand and reads no bindings.
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -1345,7 +1356,7 @@ fn argv_targets_unplannable(args: &[std::ffi::OsString]) -> bool {
         .filter_map(|a| a.to_str())
         .filter(|a| !a.starts_with('-'));
     match words.next() {
-        Some("exec" | "run" | "serve" | "dashboard") => true,
+        Some("exec" | "run" | "serve" | "dashboard" | "supervisor") => true,
         // `mcp` alone is the server; `mcp mint/list/revoke` plan normally.
         Some("mcp") => {
             use clap::CommandFactory;
@@ -1424,6 +1435,7 @@ fn run() -> Result<()> {
         .into());
     }
     match cli.command {
+        Commands::Supervisor(command) => supervisor::run(command, json),
         Commands::Init {
             with_samples,
             no_persist_capability,
@@ -1659,6 +1671,7 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
             ApproveCmd::List { .. } | ApproveCmd::Status { .. } | ApproveCmd::Wait { .. },
         ) => ReadOnly,
         Commands::Exec { .. }
+        | Commands::Supervisor(_)
         | Commands::Run { .. }
         | Commands::Ci(CiCmd::Run { .. })
         | Commands::Serve { .. }
@@ -1689,6 +1702,7 @@ fn adapter_dry_run_support(sub: &AdapterCmd) -> DryRunSupport {
 /// Name of a command that cannot plan, for the `--dry-run` usage error.
 fn unplannable_command_name(cmd: &Commands) -> &'static str {
     match cmd {
+        Commands::Supervisor(_) => "supervisor",
         Commands::Exec { .. } => "exec",
         Commands::Run { .. } => "run",
         Commands::Ci(_) => "ci run",
@@ -1720,7 +1734,7 @@ fn agent_contract_topic(json: bool) -> Result<()> {
                 "dry_run": {
                     "flag": "--dry-run",
                     "plan_schema": json_out::PLAN,
-                    "unsupported": ["exec", "run", "ci run", "mcp", "serve", "dashboard"],
+                    "unsupported": ["exec", "run", "ci run", "mcp", "serve", "dashboard", "supervisor"],
                 },
                 "non_interactive_env": dry_run::NON_INTERACTIVE_ENV,
             }),
@@ -1748,7 +1762,9 @@ fn agent_contract_topic(json: bool) -> Result<()> {
         json_out::PLAN
     );
     println!("read-only commands accept it and change nothing; exec, run, ci run, mcp,");
-    println!("serve and dashboard do not take it: they fail as before the flag existed");
+    println!(
+        "serve, dashboard and supervisor do not take it: they fail as before the flag existed"
+    );
     println!("(exec: exit 1, its own argument check; the others: clap usage error, exit 2).");
     println!();
     println!("Non-interactive: prompts only when stdin is a terminal, --json is off,");

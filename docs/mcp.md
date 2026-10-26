@@ -57,12 +57,17 @@ unpersist` (keep the printed export line in your shell profile); `locus
 capability status` shows the current posture without printing the value. See
 [SECURITY.md § Control-plane authority boundary](../SECURITY.md#control-plane-authority-boundary).
 
-The pin is backed by an authority broker that the pinning shell supervises.
+By default, the pin is backed by an authority broker that the pinning shell supervises.
 When that shell exits, `whoami` and `enter` report `no current broker
 endpoint ... human re-pin required`. Run `locus enter <alias>` in the new shell
 (enter replaces a pin whose broker died); only if enter is refused (an expired
 pin or a bad seal), run `locus leave --force` first. Pin from the long-lived
 shell you launch your agent from.
+
+For a bridge that must survive that shell, start `locus supervisor start`
+before entering. The [durable supervisor](./supervisor.md) owns the broker;
+its death still invalidates the pin. Provider tools still require the
+supervised MCP launch described below.
 
 Until a valid pin exists, `tools/list` returns **control tools only** (`locus_whoami`, `locus_safe_next`, `locus_status`, `locus_heartbeat`, `locus_enter_hint`, `locus_list_bindings`, `locus_request_pin`, `locus_verify_claim`, `locus_verify_session`). There is **no** ambient fallthrough to personal accounts. With a pin but launched directly by a client, it adds only `locus_providers`.
 

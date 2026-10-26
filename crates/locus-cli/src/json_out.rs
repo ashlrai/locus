@@ -29,6 +29,7 @@ pub(crate) const AUTOPIN_SUGGEST: &str = locus_core::autopin_suggest::SCHEMA;
 pub(crate) const ADAPTER_VERIFY: &str = "locus.adapter.verify.v1";
 pub(crate) const ADAPTER_VERIFY_MANIFEST: &str = "locus.adapter.verify_manifest.v1";
 pub(crate) const VERSION: &str = "locus.version.v1";
+pub(crate) const SUPERVISOR: &str = "locus.supervisor.v1";
 pub(crate) const PLAN: &str = "locus.plan.v1";
 pub(crate) const ERROR: &str = "locus.error.v1";
 pub(crate) const CONTRACT: &str = "locus.contract.v1";
@@ -52,6 +53,7 @@ pub(crate) const CATALOGUE: &[(&str, &str)] = &[
     ("locus adapter verify", ADAPTER_VERIFY),
     ("locus adapter verify-manifest", ADAPTER_VERIFY_MANIFEST),
     ("locus version", VERSION),
+    ("locus supervisor start/run", SUPERVISOR),
     ("any mutating command with --dry-run", PLAN),
     ("any command failing under --json (stderr)", ERROR),
     ("locus topic agent-contract", CONTRACT),
