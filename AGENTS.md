@@ -46,8 +46,9 @@ CI enforces fmt + clippy `-D warnings` + test + release build (see `.github/work
 
 Run it as one shell script (one Bash call). The pin's authority broker lives
 only as long as the shell that pinned, so a pin made in one tool call is gone
-in the next (`no current broker endpoint ... human re-pin required`). Run
-`locus enter <alias>`; use `locus leave --force` only if enter is refused.
+in the next (`no current broker endpoint ... human re-pin required`). In the
+new shell, repeat the `export LOCUS_HOME=...` and `eval "$(locus hook bash)"`
+lines, then run `locus enter <alias>`; use `locus leave --force` only if enter is refused.
 
 ```bash
 export LOCUS_HOME=/tmp/locus-agent-test

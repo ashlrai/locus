@@ -82,4 +82,4 @@ The locus line's stderr included `scrubbed 41 ambient` and `resolved 0 secret(s)
 
 ## Release assets
 
-Locus prebuilt assets on the v0.5.1 release are the three platform archives listed above. The measurement machine is `x86_64-unknown-linux-gnu`, which has an asset. Linux arm64 and Windows are not in that asset list.
+Locus prebuilt assets on the v0.5.1 release are three platform archives: `locus-aarch64-apple-darwin.tar.gz`, `locus-x86_64-apple-darwin.tar.gz` and `locus-x86_64-unknown-linux-gnu.tar.gz` (each with a `.sha256`). The measurement machine is `x86_64-unknown-linux-gnu`, which has an asset. Linux arm64 and Windows are not in that asset list.
