@@ -59,14 +59,24 @@ pub fn build_isolated_env_opts(
     binding: &Binding,
     resolve_secrets: bool,
 ) -> IsolatedEnv {
+    let home = crate::store::locus_home().ok();
+    let cfg = home.as_ref().map(|path| crate::config::load_config(path));
+    let inherit = cfg
+        .as_ref()
+        .map(|cfg| cfg.exec.inherit_env.as_slice())
+        .unwrap_or(&[]);
+
     let mut vars = BTreeMap::new();
     let mut scrubbed = Vec::new();
     let mut parent = BTreeMap::new();
     // Positive construction: unknown parent keys never reach the child.
+    // Values are kept only when `[exec] inherit_env` might copy one across.
     for (k, v) in std::env::vars() {
         if !is_runtime_env_key(&k) {
             scrubbed.push(k.clone());
-            parent.insert(k, v);
+            if !inherit.is_empty() {
+                parent.insert(k, v);
+            }
             continue;
         }
         vars.insert(k, v);
@@ -164,7 +174,11 @@ pub fn build_isolated_env_opts(
     // closed: no credential is resolved, so a key never reaches a child that
     // would talk to the provider directly instead of the configured gateway.
     let mut resolve_secrets = resolve_secrets;
-    match crate::gateway::resolve_from_home() {
+    let gateway = cfg
+        .as_ref()
+        .map(|cfg| crate::gateway::resolve(&cfg.gateway))
+        .unwrap_or(crate::gateway::GatewayChild::Off);
+    match gateway {
         crate::gateway::GatewayChild::Off => {}
         crate::gateway::GatewayChild::Set {
             target,
@@ -226,17 +240,18 @@ pub fn build_isolated_env_opts(
     // own variables, the gateway URL and injected credentials always win.
     // Empty (the default) changes nothing. Key-shaped names cross only as
     // `phm_` placeholders; see `inherit_env.rs`.
-    if let Ok(home) = crate::store::locus_home() {
-        let cfg = crate::config::load_config(&home);
-        if !cfg.exec.inherit_env.is_empty() {
-            secrets_failed.extend(crate::inherit_env::apply(
-                &cfg.exec.inherit_env,
-                &cfg.gateway.allowed_hosts,
-                &parent,
-                &mut vars,
-                &mut scrubbed,
-            ));
-        }
+    if !inherit.is_empty() {
+        let allowed_hosts = cfg
+            .as_ref()
+            .map(|cfg| cfg.gateway.allowed_hosts.as_slice())
+            .unwrap_or(&[]);
+        secrets_failed.extend(crate::inherit_env::apply(
+            inherit,
+            allowed_hosts,
+            &parent,
+            &mut vars,
+            &mut scrubbed,
+        ));
     }
     drop(parent);
 
