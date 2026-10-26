@@ -564,17 +564,27 @@ impl Store {
     // ── Bindings ──────────────────────────────────────────────────────────
 
     pub fn save_binding(&self, binding: &Binding) -> Result<PathBuf> {
-        self.write_binding(binding, true)
+        self.write_binding(binding, true).map(|(path, _)| path)
     }
 
-    /// [`Store::save_binding`] that refuses, under the bindings lock, to
-    /// replace an existing binding unless `replace` is set, so a check made
-    /// before the write cannot be raced by another writer.
+    /// Create a binding, treating a semantically identical existing file as
+    /// a no-op. Different bindings require `replace`, checked under the lock.
     pub fn create_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
+        self.create_binding_if_changed(binding, replace)
+            .map(|(path, _)| path)
+    }
+
+    /// Like [`Store::create_binding`], returning whether the file was written.
+    /// Equality is checked under the bindings lock, after rejecting symlinks.
+    pub fn create_binding_if_changed(
+        &self,
+        binding: &Binding,
+        replace: bool,
+    ) -> Result<(PathBuf, bool)> {
         self.write_binding(binding, replace)
     }
 
-    fn write_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
+    fn write_binding(&self, binding: &Binding, replace: bool) -> Result<(PathBuf, bool)> {
         self.require_local_control("save binding")?;
         binding.validate()?;
         // Double-check alias cannot escape bindings/ (also enforced in validate)
@@ -605,17 +615,29 @@ impl Store {
                     path.display()
                 )));
             }
-            Ok(_) if !replace => {
-                return Err(LocusError::msg(format!(
-                    "binding '{}' already exists; nothing written",
-                    binding.alias
-                )));
+            Ok(_) => {
+                // Compare the complete validated model, not bytes: comments and
+                // formatting must survive retries. Never normalize away policy,
+                // scope, credential-reference, or upstream differences.
+                let same = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|raw| Binding::parse_toml(&raw).ok())
+                    .is_some_and(|existing| existing == *binding);
+                if same {
+                    return Ok((path, false));
+                }
+                if !replace {
+                    return Err(LocusError::msg(format!(
+                        "binding '{}' already exists; nothing written. Review with `locus binding show {0}` or use --force to replace it",
+                        binding.alias
+                    )));
+                }
             }
             _ => {}
         }
         fs::write(&path, binding.to_toml()?)?;
         self.audit("binding.save", &binding.alias, None)?;
-        Ok(path)
+        Ok((path, true))
     }
 
     pub fn load_binding(&self, alias_or_id: &str) -> Result<Binding> {
@@ -4294,7 +4316,8 @@ mod tests {
         );
         // Agent-facing view reports source metadata, never credential refs.
         for p in &w1.providers {
-            assert!(p.credential.present);
+            assert!(p.credential.reference_present);
+            assert!(!p.credential.present);
             assert_eq!(p.credential.source, "phantom");
         }
         assert!(!serde_json::to_string(&w1)
@@ -4308,7 +4331,8 @@ mod tests {
         let w2 = store.whoami().unwrap();
         assert_eq!(w2.binding_alias, "personal");
         for p in &w2.providers {
-            assert!(p.credential.present);
+            assert!(p.credential.reference_present);
+            assert!(!p.credential.present);
             assert_eq!(p.credential.source, "phantom");
         }
         let w2_json = serde_json::to_string(&w2).unwrap();
@@ -5776,7 +5800,14 @@ credential_ref = "ghp_UNSAFE/CANARY"
         assert!(init.binding_path.exists());
         assert!(init.workspace_path.as_ref().unwrap().exists());
         assert!(init.readme_path.as_ref().unwrap().exists());
-        assert!(init.credentials.iter().all(|credential| credential.present));
+        assert!(init
+            .credentials
+            .iter()
+            .all(|credential| credential.reference_present));
+        assert!(init
+            .credentials
+            .iter()
+            .all(|credential| !credential.present));
         assert!(init
             .credentials
             .iter()
@@ -7164,7 +7195,10 @@ allowed_bindings = ["acme"]
             .iter()
             .find(|e| e.name == "acme" && e.kind == "binding");
         let credentials = &acme.unwrap().credentials;
-        assert!(credentials.iter().all(|credential| credential.present));
+        assert!(credentials
+            .iter()
+            .all(|credential| credential.reference_present));
+        assert!(credentials.iter().all(|credential| !credential.present));
         assert!(credentials
             .iter()
             .all(|credential| credential.source == "phantom"));

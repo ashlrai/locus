@@ -3,7 +3,7 @@
 /**
  * Thin npm wrapper for the `locus` binary.
  *
- * 1. Prefer a cached download under ~/.locus/bin
+ * 1. Prefer the newest compatible native binary in the cache, PATH or Cargo home
  * 2. Else download the matching GitHub release asset (locus-<target>.tar.gz)
  * 3. Else fall back to `cargo install --git` and use ~/.cargo/bin/locus
  */
@@ -11,18 +11,20 @@
 const { execFileSync, spawnSync } = require("child_process");
 const {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
-  readFileSync,
+  readSync,
   rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } = require("fs");
-const { dirname, join } = require("path");
+const { delimiter, dirname, join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
@@ -132,23 +134,55 @@ function parseSha256File(buf, expectedFilename) {
   return null;
 }
 
-function isCachedBinaryStale(binaryPath) {
-  // Prefer sidecar (locus-mcp has no --version CLI; keep locus consistent)
-  const sidecar = getVersionSidecarPath(binaryPath);
-  if (existsSync(sidecar)) {
-    try {
-      return readFileSync(sidecar, "utf8").trim() !== VERSION;
-    } catch {
-      return true;
-    }
+// Compare SemVer precedence without numeric coercion (version components can
+// exceed Number.MAX_SAFE_INTEGER). Build metadata does not affect precedence.
+function parseVersion(value) {
+  const match = value.trim().match(/^(?:locus\s+|v)?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/);
+  if (!match) return null;
+  const prerelease = match[4] ? match[4].split(".") : [];
+  if (prerelease.some((part) => /^0\d+$/.test(part))) return null;
+  return { core: match.slice(1, 4), prerelease };
+}
+
+function compareNumeric(a, b) {
+  return a.length === b.length ? (a > b ? 1 : a < b ? -1 : 0) : a.length > b.length ? 1 : -1;
+}
+
+function compareVersions(a, b) {
+  for (let i = 0; i < 3; i++) {
+    const compared = compareNumeric(a.core[i], b.core[i]);
+    if (compared) return compared;
   }
+  if (!a.prerelease.length || !b.prerelease.length) {
+    return a.prerelease.length ? -1 : b.prerelease.length ? 1 : 0;
+  }
+  for (let i = 0; i < Math.max(a.prerelease.length, b.prerelease.length); i++) {
+    const left = a.prerelease[i];
+    const right = b.prerelease[i];
+    if (left === undefined) return -1;
+    if (right === undefined) return 1;
+    if (left === right) continue;
+    const leftNumeric = /^\d+$/.test(left);
+    const rightNumeric = /^\d+$/.test(right);
+    if (leftNumeric && rightNumeric) return compareNumeric(left, right);
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return left > right ? 1 : -1;
+  }
+  return 0;
+}
+
+function binaryVersion(binaryPath) {
+  if (isNodeShim(binaryPath)) return null;
   try {
+    // Probe the executable itself: a sidecar can survive a manual upgrade.
     const out = execFileSync(binaryPath, ["--version"], {
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: 5_000,
+      maxBuffer: 4096,
     });
-    return !out.toString().includes(VERSION);
+    return parseVersion(out.toString());
   } catch {
-    return true;
+    return null;
   }
 }
 
@@ -260,39 +294,51 @@ function removeIfExists(path) {
 
 function cargoBinPath() {
   const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
-  const name = getBinaryFilename();
-  return join(home, ".cargo", "bin", name);
+  const cargoHome = process.env.CARGO_HOME || join(home, ".cargo");
+  return join(cargoHome, "bin", getBinaryFilename());
 }
 
 function isNodeShim(path) {
   try {
     const real = require("fs").realpathSync(path);
     if (real === require("fs").realpathSync(__filename)) return true;
-    const head = readFileSync(real).subarray(0, 64).toString("utf8");
-    return head.startsWith("#!") && head.includes("node");
+    const fd = openSync(real, "r");
+    try {
+      const buffer = Buffer.alloc(64);
+      const bytes = readSync(fd, buffer, 0, buffer.length, 0);
+      const head = buffer.subarray(0, bytes).toString("utf8");
+      return head.startsWith("#!") && head.includes("node");
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return false;
   }
 }
 
-function tryExistingOnPath() {
-  const which = process.platform === "win32" ? "where" : "which";
-  const result = spawnSync(which, [BINARY_NAME], { encoding: "utf8" });
-  if (result.status === 0) {
-    // Skip this npm shim itself (and any other node wrapper): `which` finds
-    // the npm-installed bin first, and executing it recurses forever.
-    const candidates = (result.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
-    for (const path of candidates) {
-      if (path && existsSync(path) && !isNodeShim(path)) {
-        return path;
+function findUsableBinary() {
+  const filename = getBinaryFilename();
+  const candidates = [getBinaryPath()];
+  // Inspect every PATH entry, not just `which locus`: npm's own shim commonly
+  // shadows a newer Homebrew binary. Never execute another Node wrapper.
+  for (const dir of (process.env.PATH || "").split(delimiter).filter(Boolean)) {
+    candidates.push(join(dir, filename));
+  }
+  candidates.push(cargoBinPath());
+  let best = null;
+  let bestVersion = parseVersion(VERSION);
+  for (const candidate of new Set(candidates)) {
+    if (!existsSync(candidate)) continue;
+    const version = binaryVersion(candidate);
+    if (version && compareVersions(version, bestVersion) >= 0) {
+      // Keep the first candidate on equal precedence (prefer the cache).
+      if (!best || compareVersions(version, bestVersion) > 0) {
+        best = candidate;
+        bestVersion = version;
       }
     }
   }
-  const cargoPath = cargoBinPath();
-  if (existsSync(cargoPath)) {
-    return cargoPath;
-  }
-  return null;
+  return best;
 }
 
 function installViaCargo() {
@@ -306,7 +352,8 @@ function installViaCargo() {
       `https://github.com/${REPO}`,
       CARGO_PACKAGE,
       "--locked",
-      "--force",
+      // Let Cargo refuse an existing unmanaged binary. A failed version probe
+      // must never turn into permission to overwrite a potentially newer CLI.
     ],
     { stdio: "inherit", env: process.env }
   );
@@ -380,28 +427,10 @@ async function downloadReleaseBinary(binaryPath) {
 async function ensureBinary() {
   const binaryPath = getBinaryPath();
 
-  if (existsSync(binaryPath) && !isCachedBinaryStale(binaryPath)) {
-    return binaryPath;
-  }
-  if (existsSync(binaryPath) && isCachedBinaryStale(binaryPath)) {
-    console.error(`Cached locus is out of date — refreshing to v${VERSION}...`);
-    removeIfExists(binaryPath);
-    removeIfExists(getVersionSidecarPath(binaryPath));
-  }
-
-  // Prefer already-installed binary (brew / prior cargo install)
-  const existing = tryExistingOnPath();
-  if (existing) {
-    // If PATH binary is current enough, use it; otherwise still try download
-    try {
-      if (!isCachedBinaryStale(existing)) {
-        return existing;
-      }
-    } catch {
-      // use it anyway if we can't tell
-      return existing;
-    }
-  }
+  const existing = findUsableBinary();
+  if (existing) return existing;
+  // Keep an older cache intact until a replacement has been downloaded and
+  // extracted successfully; a network failure must not destroy an install.
 
   let target = null;
   try {
@@ -512,7 +541,9 @@ if (require.main === module) {
 
 module.exports = {
   getBinaryPath,
-  isCachedBinaryStale,
+  findUsableBinary,
+  parseVersion,
+  compareVersions,
   downloadReleaseBinary,
   ensureBinary,
   linkNativeBin,

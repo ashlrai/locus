@@ -112,14 +112,33 @@ impl CredentialRef {
 /// Agent-safe credential metadata. The reference name/value is intentionally absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialMetadata {
+    /// A nonempty supported credential is available in this process. This is
+    /// a local availability check, not proof that the provider accepts it.
     pub present: bool,
+    /// A valid CredentialRef is configured, independently of availability.
+    #[serde(default)]
+    pub reference_present: bool,
     pub source: String,
 }
 
 pub fn credential_metadata(raw: &str) -> CredentialMetadata {
     let parsed = CredentialRef::parse(raw);
+    let reference_present = CredentialRef::validate(raw).is_ok();
+    // Metadata never probes a provider or a vault. In particular, a stored
+    // phm: ref cannot imply availability while the scoped bridge is absent.
+    // Any env value read for this boolean is immediately zeroized.
+    let present = reference_present
+        && match &parsed {
+            CredentialRef::Env { var } => std::env::var(var)
+                .ok()
+                .map(Zeroizing::new)
+                .is_some_and(|value| !value.is_empty()),
+            CredentialRef::Test { value } => cfg!(test) && !value.is_empty(),
+            _ => false,
+        };
     CredentialMetadata {
-        present: !raw.trim().is_empty(),
+        present,
+        reference_present,
         source: parsed.source().to_string(),
     }
 }
@@ -199,9 +218,16 @@ pub fn resolve(cred: &CredentialRef) -> Result<Zeroizing<String>> {
     match cred {
         CredentialRef::Phantom { .. } => Err(LocusError::PhantomCredentialIntegrationUnsupported),
         CredentialRef::Env { var } => {
-            let v = std::env::var(var)
-                .map_err(|_| LocusError::msg("credential unavailable (source=environment)"))?;
-            Ok(Zeroizing::new(v))
+            let v = Zeroizing::new(
+                std::env::var(var)
+                    .map_err(|_| LocusError::msg("credential unavailable (source=environment)"))?,
+            );
+            if v.is_empty() {
+                return Err(LocusError::msg(
+                    "credential unavailable (source=environment)",
+                ));
+            }
+            Ok(v)
         }
         CredentialRef::Test { value } => {
             if !cfg!(test) {
@@ -569,8 +595,28 @@ mod tests {
         let metadata = credential_metadata("phm:TOP_SECRET_CANARY");
         let json = serde_json::to_string(&metadata).unwrap();
         assert_eq!(metadata.source, "phantom");
-        assert!(metadata.present);
+        assert!(metadata.reference_present);
+        assert!(
+            !metadata.present,
+            "unsupported phm: resolution is unavailable"
+        );
         assert!(!json.contains("TOP_SECRET_CANARY"));
+    }
+
+    #[test]
+    fn metadata_rejects_invalid_references_without_reporting_availability() {
+        for raw in [
+            "",
+            "env:",
+            "env:BAD-NAME",
+            " env:PATH",
+            "phm:",
+            "raw-canary",
+        ] {
+            let metadata = credential_metadata(raw);
+            assert!(!metadata.reference_present);
+            assert!(!metadata.present);
+        }
     }
 
     #[test]

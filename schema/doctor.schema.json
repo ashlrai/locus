@@ -208,7 +208,14 @@
       "additionalProperties": false,
       "required": ["present", "source"],
       "properties": {
-        "present": { "type": "boolean" },
+        "present": {
+          "type": "boolean",
+          "description": "A nonempty supported credential is locally available; does not prove provider validity."
+        },
+        "reference_present": {
+          "type": "boolean",
+          "description": "A valid credential reference is configured, independently of local availability."
+        },
         "source": { "type": "string" }
       }
     },

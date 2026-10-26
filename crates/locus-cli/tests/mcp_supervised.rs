@@ -102,9 +102,12 @@ fn supervised_launch_hands_child_executor_capability_and_no_control_authority() 
         !env.contains_key("LOCUS_CONTROL_CAPABILITY"),
         "control authority must never reach the agent-facing server"
     );
+    // Store homes are canonical authority roots. On macOS /var may be a
+    // symlink to /private/var; require the exact canonical fixture directory.
+    let canonical_home = home.path().canonicalize().unwrap();
     assert_eq!(
         env.get("LOCUS_HOME").map(String::as_str),
-        Some(home.path().to_str().unwrap())
+        Some(canonical_home.to_str().unwrap())
     );
     assert_eq!(
         env.get("LOCUS_WORKER_HOME"),

@@ -21,6 +21,7 @@ mod json_out;
 mod phantom_preflight;
 mod phm_names;
 mod plans;
+mod samples;
 mod serve;
 mod swarm_serve;
 
@@ -2528,83 +2529,9 @@ enabled = false
 
 fn write_sample_bindings(s: &Store) -> Result<()> {
     // Annotated TOML so first-run users know what to replace. Never raw secrets.
-    let personal = r#"# Sample personal binding — REPLACE project_ref / team_id placeholders.
-# CredentialRefs are explicit env:VAR pointers. Never put raw tokens here.
-# Supply those variables outside agent context before supervised execution.
-# phm: references currently require an unavailable scoped bridge.
-# Then: locus enter personal && locus whoami && locus doctor
-
-[binding]
-id = "bnd_personal"
-alias = "personal"
-tenant = "personal"
-description = "Personal projects — sample; edit scopes before real use"
-
-[binding.policy]
-default = "allow"
-max_ttl = "12h"
-
-[[binding.providers]]
-provider = "supabase"
-account = "personal"
-credential_ref = "env:LOCUS_SUPABASE_PERSONAL"
-# project_ref is frozen on every tool call — set the real ref.
-scope = { project_ref = "personal_ref_replace_me", read_only = false }
-
-[[binding.providers]]
-provider = "github"
-account = "personal"
-credential_ref = "env:LOCUS_GH_TOKEN_PERSONAL"
-# Empty orgs/repos = no allowlist restriction (tighten for client work).
-scope = { orgs = [], repos = [] }
-
-[[binding.providers]]
-provider = "vercel"
-account = "personal"
-credential_ref = "env:LOCUS_VERCEL_TOKEN_PERSONAL"
-scope = { team_id = "team_personal_replace_me", env = ["preview", "production"] }
-"#;
-
-    let acme = r#"# Sample client binding (Acme) — REPLACE placeholders before real work.
-# Client work: prefer read_only on prod Supabase; require_approval on delete/deploy.
-# Switch: locus switch acme   |   leave: locus leave
-# Dual-control / firm mode: docs/firm-mode.md
-
-[binding]
-id = "bnd_acme"
-alias = "acme"
-tenant = "acme-corp"
-description = "Acme client engagement — sample"
-
-[binding.policy]
-default = "allow"
-max_ttl = "8h"
-# Closed external authorization is required; local approve labels are advisory only.
-require_approval = ["*.delete*", "vercel.deploy.prod"]
-
-[[binding.providers]]
-provider = "supabase"
-account = "acme-prod"
-credential_ref = "env:LOCUS_SUPABASE_ACME"
-scope = { project_ref = "acme_ref_replace_me", read_only = true }
-
-[[binding.providers]]
-provider = "github"
-account = "acme-corp"
-credential_ref = "env:LOCUS_GH_TOKEN_ACME"
-# Frozen org/repo allowlist — model cannot reach outside.
-scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
-
-[[binding.providers]]
-provider = "vercel"
-account = "acme-team"
-credential_ref = "env:LOCUS_VERCEL_TOKEN_ACME"
-scope = { team_id = "team_acme_replace_me", projects = ["acme-web"], env = ["preview"] }
-"#;
-
     // Prefer annotated files over re-serialize (preserves comments).
-    write_annotated_binding(s, "personal", personal)?;
-    write_annotated_binding(s, "acme", acme)?;
+    write_annotated_binding(s, "personal", samples::PERSONAL)?;
+    write_annotated_binding(s, "acme", samples::ACME)?;
     Ok(())
 }
 
@@ -3847,7 +3774,17 @@ fn cmd_whoami(json: bool) -> Result<()> {
             "    {}  {}  {}",
             p.provider.cyan(),
             bits.join("  ").dimmed(),
-            format!("credential={}", p.credential.source).dimmed()
+            format!(
+                "credential={} reference={} available={}",
+                p.credential.source,
+                if p.credential.reference_present {
+                    "configured"
+                } else {
+                    "missing"
+                },
+                if p.credential.present { "yes" } else { "no" },
+            )
+            .dimmed()
         );
     }
     Ok(())
@@ -4348,8 +4285,7 @@ fn cmd_exec(
     if let Some(route) = &route {
         route.prepare_env(&mut iso)?;
     }
-    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
-    let cred_lines = cred_diag::describe_unresolved(child_binding, &cred_issues, cred_phantom);
+    let cred_lines = cred_diag::describe_unresolved(child_binding, &iso.secrets_failed);
     if strict_creds && !iso.secrets_failed.is_empty() {
         bail!(
             "credential resolve failed (--strict-creds): {}",
@@ -4387,13 +4323,7 @@ fn cmd_exec(
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    for line in &cred_lines {
-        eprintln!(
-            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
-            "warn".yellow(),
-            line
-        );
-    }
+    cred_diag::print_launch_diagnostics(child_binding, &iso.secrets_failed, &cred_lines);
 
     let spawned = run_child(&mut child, program);
     trace.mark("spawn_wait");
@@ -4617,8 +4547,7 @@ fn cmd_ci_run(
 
     // Child gets full isolated env (may resolve secrets for the command to work).
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
-    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
-    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &iso.secrets_failed);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_ci_session(&ci_path, &session);
         bail!(
@@ -4652,13 +4581,7 @@ fn cmd_ci_run(
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    for line in &cred_lines {
-        eprintln!(
-            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
-            "warn".yellow(),
-            line
-        );
-    }
+    cred_diag::print_launch_diagnostics(&binding, &iso.secrets_failed, &cred_lines);
 
     let spawned = run_child(&mut child, program);
     let (exit, spawn_error) = child_audit_fields(&spawned);
@@ -4771,8 +4694,7 @@ fn cmd_run(
     }
 
     let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
-    let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
-    let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
+    let cred_lines = cred_diag::describe_unresolved(&binding, &iso.secrets_failed);
     if strict_creds && !iso.secrets_failed.is_empty() {
         let _ = s.cleanup_run_session(&run_path, &session);
         bail!(
@@ -4827,13 +4749,7 @@ fn cmd_run(
         iso.scrubbed.len(),
         iso.secrets_resolved
     );
-    for line in &cred_lines {
-        eprintln!(
-            "{} unresolved credential, child runs without it (--strict-creds to fail): {}",
-            "warn".yellow(),
-            line
-        );
-    }
+    cred_diag::print_launch_diagnostics(&binding, &iso.secrets_failed, &cred_lines);
 
     let spawned = run_child(&mut child, program);
     let (exit, spawn_error) = child_audit_fields(&spawned);
@@ -6808,8 +6724,8 @@ fn scope_prompts(provider: &str) -> &'static [(&'static str, bool)] {
 
 /// Shared handler for `locus binding add` (guided_default=false) and
 /// `locus client add` (guided_default=true). The write path is exactly
-/// `Store::save_binding` — validation, bindings lock, reserved-alias check,
-/// audit `binding.save`.
+/// `Store::create_binding_if_changed` — validation, bindings lock,
+/// reserved-alias check, and `binding.save` audit only for actual writes.
 fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -> Result<()> {
     // A dry run against an uninitialized home validates flags only: opening
     // the store would create the home and its seal key.
@@ -6833,6 +6749,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
                     .join(format!("{}.toml", answers.alias)),
                 &answers.alias,
                 &toml,
+                false,
                 false,
             )
             .note(format!(
@@ -6933,25 +6850,21 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
     // credential ref would change under every workspace that names it.
     // symlink_metadata: a dangling symlink is an existing entry too.
     let target = s.bindings_dir().join(format!("{}.toml", answers.alias));
-    let exists = target.symlink_metadata().is_ok();
+    let metadata = target.symlink_metadata().ok();
+    let exists = metadata.is_some();
+    let unchanged = metadata.is_some_and(|meta| meta.is_file())
+        && s.load_binding(&answers.alias)
+            .is_ok_and(|existing| existing == b);
 
     if args.dry_run {
-        let mut plan = plans::binding_add_plan(&target, &answers.alias, &toml, exists);
-        if exists && !args.force {
+        let mut plan = plans::binding_add_plan(&target, &answers.alias, &toml, exists, unchanged);
+        if exists && !unchanged && !args.force {
             plan.note("binding exists: the real run refuses without --force");
         }
         return plans::emit_binding_add_plan(&plan, json, &toml);
     }
-    if exists && !args.force && !(can_prompt && guided) {
-        bail!(
-            "binding '{alias}' already exists; nothing written. \
-             Review it with `locus binding show {alias}`, rerun with --force to replace it, \
-             or choose another alias",
-            alias = answers.alias
-        );
-    }
-
-    if can_prompt && guided {
+    let mut replace = args.force;
+    if can_prompt && guided && !unchanged {
         println!();
         println!("{toml}");
         let question = if exists && !args.force {
@@ -6962,16 +6875,23 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
         if !prompt_confirm(&question, !exists || args.force)? {
             bail!("aborted — nothing written");
         }
+        // Consent applies only to an existing binding shown in this prompt.
+        // An alias created concurrently still needs explicit --force.
+        replace |= exists;
     }
 
     // Re-checked under the bindings lock: another writer may have created
     // the alias since `exists` was read (or while the prompt waited).
-    let path = s.create_binding(&b, exists || args.force)?;
+    let (path, written) = s.create_binding_if_changed(&b, replace)?;
     if json {
         println!(
             "{}",
-            serde_json::json!({ "ok": true, "path": path.display().to_string() })
+            serde_json::json!({ "ok": true, "path": path.display().to_string(), "unchanged": !written })
         );
+        return Ok(());
+    }
+    if !written {
+        println!("{} unchanged {}", "ok".green().bold(), path.display());
         return Ok(());
     }
     println!("{} wrote {}", "ok".green().bold(), path.display());
@@ -8170,13 +8090,7 @@ fn gather_doctor_external_with_phantom_status(
     // An invalid binding file is reported by build_doctor_report as an
     // UNSAFE `binding_invalid` finding; do not abort the diagnostic here.
     let unresolved_phm = if s.list_bindings().is_ok() {
-        let mut unresolved = collect_unresolved_phm_refs(s, phantom)?;
-        // `phantom list` only proves the locator exists; probe the real
-        // resolve path so a refused/failed reveal is not reported as ok.
-        let extra = cred_diag::probe_phm_reveal(s, phantom, &unresolved);
-        unresolved.extend(extra);
-        unresolved.sort_by(|a, b| a.provider.cmp(&b.provider));
-        unresolved
+        collect_unresolved_phm_refs(s, phantom)?
     } else {
         Vec::new()
     };
@@ -9200,11 +9114,7 @@ fn print_doctor_human(report: &locus_core::DoctorReport) {
         );
         let mut causes: Vec<String> = Vec::new();
         for issue in &report.unresolved_phm {
-            let line = format!(
-                "{}: {}",
-                issue.code,
-                cred_diag::cause(issue, report.phantom_on_path)
-            );
+            let line = format!("{}: {}", issue.code, cred_diag::cause(issue));
             if !causes.contains(&line) {
                 causes.push(line);
             }
