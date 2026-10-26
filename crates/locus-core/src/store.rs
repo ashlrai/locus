@@ -1684,6 +1684,37 @@ impl Store {
         }
     }
 
+    /// `locus autopin suggest --apply`: write the current suggestion as
+    /// `default_binding` in the workspace `.locus.toml`.
+    ///
+    /// Requires the operator control capability (same gate as other control
+    /// actions), so an agent cannot widen its own default. The suggestion is
+    /// recomputed here from the live remote, never from a cached report. The
+    /// write is atomic: a `create_new` + `O_NOFOLLOW` temp file in the same
+    /// directory, then a rename; a symlinked `.locus.toml` is refused.
+    /// Returns the report and the file written.
+    pub fn autopin_apply_suggestion(
+        &self,
+        cwd: &Path,
+    ) -> Result<(crate::autopin_suggest::SuggestReport, PathBuf)> {
+        authority_anchor::authorize_control(&self.home)?;
+        let report = crate::autopin_suggest::suggest(&self.home, cwd)?;
+        let Some(alias) = report.suggestion.clone() else {
+            return Err(LocusError::msg(format!(
+                "no autopin suggestion to apply ({}); nothing was written",
+                report.reason
+            )));
+        };
+        // Must name a real binding; never write a dangling default.
+        self.load_binding(&alias)?;
+        let file = match find_workspace(cwd)? {
+            Some((path, _)) => path,
+            None => cwd.join(".locus.toml"),
+        };
+        write_default_binding(&file, &alias)?;
+        Ok((report, file))
+    }
+
     pub fn leave(&self) -> Result<Option<Session>> {
         authority_anchor::authorize_control(&self.home)?;
         // Always operates on active.json — not LOCUS_SESSION_ID overrides.
@@ -3226,6 +3257,59 @@ pub struct ProviderView {
     pub orgs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repos: Vec<String>,
+}
+
+/// Atomically set `default_binding` in a `.locus.toml`, keeping other keys.
+fn write_default_binding(file: &Path, alias: &str) -> Result<()> {
+    use std::io::Write;
+    let mut table = match fs::symlink_metadata(file) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err(LocusError::msg(format!(
+                "{} is a symlink; refusing to write through it",
+                file.display()
+            )))
+        }
+        Ok(_) => {
+            let text = fs::read_to_string(file)?;
+            toml::from_str::<toml::Table>(&text)
+                .map_err(|e| LocusError::msg(format!("{}: {e}", file.display())))?
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let mut t = toml::Table::new();
+            t.insert("version".into(), toml::Value::Integer(1));
+            t
+        }
+        Err(e) => return Err(e.into()),
+    };
+    table.insert(
+        "default_binding".into(),
+        toml::Value::String(alias.to_string()),
+    );
+    let text = toml::to_string_pretty(&table)
+        .map_err(|e| LocusError::msg(format!("serialize .locus.toml: {e}")))?;
+    let dir = file
+        .parent()
+        .ok_or_else(|| LocusError::msg("workspace file has no parent"))?;
+    let mut nonce = [0u8; 8];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let tmp = dir.join(format!(".locus.toml.{}.tmp", hex::encode(nonce)));
+    let mut o = fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o644).custom_flags(libc::O_NOFOLLOW);
+    }
+    let res = (|| -> std::io::Result<()> {
+        let mut f = o.open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&tmp, file)
+    })();
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    res.map_err(Into::into)
 }
 
 pub fn locus_home() -> Result<PathBuf> {

@@ -206,6 +206,10 @@ MCP identity and provider-scope responses report only credential presence and so
 
 Workspace policy discovery is fail closed: if the nearest `.locus.toml` exists but is unreadable or malformed, explicit pin, autopin, and `--force` pin stop with an error, while `locus doctor` reports `UNSAFE`.
 
+### Learned bindings: `locus autopin suggest`
+
+locus keeps a local pin history (`$LOCUS_HOME/pin-history.jsonl`, 0600, remotes stored only as keyed hashes). In a repo, `locus autopin suggest` shows which binding you usually pin there, with pins, `pin_mismatch` refusals and last seen per alias. A suggestion needs a score (pins minus mismatches) of at least 3 and a strict lead; otherwise it suggests nothing. Add `--json` for the `locus.autopin.suggest.v1` shape. `locus autopin suggest --apply` writes `default_binding` to `.locus.toml` and requires `LOCUS_CONTROL_CAPABILITY`, so an agent cannot apply it. Turn history off with `[history] enabled = false` or `LOCUS_PIN_HISTORY=0`.
+
 Example binding (`~/.locus/bindings/acme.toml`):
 
 ```toml
