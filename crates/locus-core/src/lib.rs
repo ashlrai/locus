@@ -34,6 +34,7 @@ pub mod inherit_env;
 pub mod isolation;
 pub mod marketplace;
 pub mod onboard;
+pub mod pin_history;
 pub mod policy;
 pub mod recipes;
 pub mod recovery;

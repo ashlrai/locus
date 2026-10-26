@@ -49,6 +49,36 @@ pub struct LocusConfig {
     /// Exact parent variable names the isolated child may inherit, **none by default**.
     #[serde(default)]
     pub exec: ExecConfig,
+    /// Local pin history for autopin suggestions, **on by default** (local only, hashed remotes).
+    #[serde(default)]
+    pub history: HistoryConfig,
+}
+
+/// `[history]`: local pin history (`pin-history.jsonl`). Override with `LOCUS_PIN_HISTORY=0|1`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Oldest entries are dropped first past this many.
+    #[serde(default = "default_history_max")]
+    pub max_entries: usize,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_entries: crate::pin_history::DEFAULT_MAX_ENTRIES,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_history_max() -> usize {
+    crate::pin_history::DEFAULT_MAX_ENTRIES
 }
 
 /// `[exec]`: options for the isolated `locus exec` child.

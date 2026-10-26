@@ -3540,6 +3540,9 @@ fn check_expected_alias(s: &Store, pinned: Option<&str>, expected: &str) -> Resu
         return Ok(());
     }
     let want = expect_label(expected);
+    if let Ok(cwd) = std::env::current_dir() {
+        locus_core::pin_history::record(s.home(), "pin_mismatch", pinned, Some(expected), &cwd);
+    }
     let mut msg = match pinned {
         Some(p) => format!(
             "pin_mismatch: expected binding '{want}' but '{}' is pinned; nothing was run. Run: locus enter {want}",

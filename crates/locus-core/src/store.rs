@@ -1355,6 +1355,7 @@ impl Store {
                     "ttl_source": ttl_source,
                 })),
             )?;
+            crate::pin_history::record(&self.home, "pin", Some(&binding.alias), None, cwd);
         }
         Ok(session)
     }
@@ -1597,6 +1598,9 @@ impl Store {
                 &s.binding_alias,
                 Some(serde_json::json!({ "session_id": s.session_id })),
             )?;
+            if let Ok(cwd) = std::env::current_dir() {
+                crate::pin_history::record(&self.home, "leave", Some(&s.binding_alias), None, &cwd);
+            }
         }
         fs::remove_file(path)?;
         Ok(session)
