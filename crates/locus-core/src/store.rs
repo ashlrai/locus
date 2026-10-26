@@ -236,6 +236,68 @@ impl Store {
         Ok(())
     }
 
+    /// [`Store::require_local_control`] for an operation that overwrites
+    /// `active.json` (`locus enter`, quickstart's first pin).
+    ///
+    /// Identical gate, with one narrow difference: when the pin being replaced
+    /// is the `active.json` session and its broker generation is dead (the
+    /// shell that pinned it exited, so the broker epoch moved on), that dead
+    /// generation does not block its own replacement. Everything else stays
+    /// fail closed:
+    ///
+    /// - the control capability must pass the `locus leave --force` verifier
+    ///   ([`authority_anchor::authorize_control_teardown`], no `--no-verifier`
+    ///   escape) BEFORE any new broker starts, and then authenticate against
+    ///   a live, current broker ([`authority_anchor::authorize_control`]);
+    /// - an explicit `LOCUS_SESSION_ID` selection gets the full strict check;
+    /// - the old session's seal must verify and its sealed authority must be
+    ///   local control;
+    /// - only an anchor mismatch or an unavailable anchor is tolerated; it
+    ///   returns the dead session id and reason so the pin that replaces it
+    ///   is audited (`session.replace_stale`).
+    ///
+    /// Replacing a *live* pin needs nothing beyond the capability today, so a
+    /// dead pin no longer demands more than a live one (it used to force
+    /// `locus leave --force` first, which is the same capability).
+    pub fn require_local_control_to_replace_active(
+        &self,
+        operation: &str,
+    ) -> Result<Option<(String, String)>> {
+        let explicit_session = std::env::var("LOCUS_SESSION_ID")
+            .map(|id| !id.trim().is_empty())
+            .unwrap_or(false);
+        if explicit_session {
+            return self.require_local_control(operation).map(|()| None);
+        }
+        let Some(resolved) = self.resolve_active_session()? else {
+            return authority_anchor::authorize_control(&self.home).map(|()| None);
+        };
+        let session = &resolved.session;
+        session.verify_seal(&self.seal_key()?)?;
+        if session.authority != SessionAuthority::LocalControl {
+            return Err(LocusError::msg(format!(
+                "{operation} requires an authenticated local-control session"
+            )));
+        }
+        // Authenticate the capability BEFORE classifying the old pin, and
+        // before any new broker can start under the presented capability:
+        // the `locus leave --force` verifier (no `--no-verifier` escape)
+        // pings a live broker with it, or, when no broker answers, checks it
+        // against the persisted operator capability. Then the normal
+        // live-broker gate. A wrong capability is refused here whether the
+        // old pin is live or dead.
+        authority_anchor::authorize_control_teardown(&self.home, false)?;
+        authority_anchor::authorize_control(&self.home)?;
+        match self.validate_session_authority(session) {
+            Ok(_) => Ok(None),
+            Err(
+                e @ (LocusError::AuthorityAnchorMismatch
+                | LocusError::AuthorityAnchorUnavailable(_)),
+            ) => Ok(Some((session.session_id.clone(), e.to_string()))),
+            Err(e) => Err(e),
+        }
+    }
+
     // ── Bindings ──────────────────────────────────────────────────────────
 
     pub fn save_binding(&self, binding: &Binding) -> Result<PathBuf> {
@@ -1208,7 +1270,12 @@ impl Store {
         ttl_override: Option<Duration>,
         authority: SessionAuthority,
     ) -> Result<Session> {
-        self.require_local_control("mint or replace session")?;
+        let replaced_stale = if write_active && backing_type == SessionBackingType::Active {
+            self.require_local_control_to_replace_active("mint or replace session")?
+        } else {
+            self.require_local_control("mint or replace session")?;
+            None
+        };
         let binding = self.load_binding(alias_or_id)?;
         let ws = find_workspace(cwd)?;
 
@@ -1338,6 +1405,20 @@ impl Store {
 
         if write_active {
             let path = self.active_session_path();
+            // Audit the stale replacement BEFORE overwriting active.json: if
+            // the audit write fails, the dead pin stays as it was (no
+            // unaudited replacement, no half state).
+            if let Some((old_id, reason)) = replaced_stale {
+                self.audit(
+                    "session.replace_stale",
+                    &binding.alias,
+                    Some(serde_json::json!({
+                        "replaced_session_id": old_id,
+                        "session_id": session.session_id,
+                        "reason": reason,
+                    })),
+                )?;
+            }
             self.write_session_file(&path, &session)?;
             self.audit(
                 "session.pin",
@@ -1366,10 +1447,34 @@ impl Store {
             .map(|backing| backing.backing_type)
             .ok_or(LocusError::InvalidSeal)?;
         session.verify_backing(backing_type, &self.canonical_session_path(path)?)?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| LocusError::msg("session path has no parent"))?;
+        fs::create_dir_all(parent)?;
+        // Write a fresh temp file, then rename over the target: rename
+        // replaces a symlink planted at the target instead of following it
+        // (plain `fs::write` would write through it to wherever it points).
+        let name = path.file_name().ok_or(LocusError::InvalidSeal)?;
+        let tmp = parent.join(format!(
+            ".{}.{}.tmp",
+            name.to_string_lossy(),
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&tmp);
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(serde_json::to_string_pretty(session)?.as_bytes())?;
+                f.sync_all()
+            })
+            .and_then(|()| fs::rename(&tmp, path));
+        if let Err(e) = written {
+            let _ = fs::remove_file(&tmp);
+            return Err(e.into());
         }
-        fs::write(path, serde_json::to_string_pretty(session)?)?;
         Ok(())
     }
 
@@ -4397,6 +4502,36 @@ credential_ref = "ghp_UNSAFE/CANARY"
         store.leave().unwrap();
         store.pin("acme", dir.path(), None, false).unwrap();
         assert!(store.verify_runtime().unwrap().ok);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pin_does_not_write_through_a_symlink_at_active_json() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        store
+            .save_binding(&sample_binding("personal", "personal", "p2"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+
+        // Plant active.json as a symlink to a file outside sessions/.
+        let path = store.active_session_path();
+        let outside = dir.path().join("outside.json");
+        fs::copy(&path, &outside).unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        let outside_before = fs::read(&outside).unwrap();
+
+        store.pin("personal", dir.path(), None, false).unwrap();
+        assert_eq!(fs::read(&outside).unwrap(), outside_before);
+        assert!(!fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(store.require_active().unwrap().binding_alias, "personal");
     }
 
     #[test]
