@@ -252,6 +252,54 @@ pub(super) fn plan_leave(force: bool, json: bool) -> Result<()> {
     plan.needs_control().emit(json)
 }
 
+/// `--dry-run` for `locus renew`.
+pub(super) fn plan_renew(json: bool) -> Result<()> {
+    let s = dry_run::existing_store()?;
+    let path = s.active_session_path();
+    let mut plan = dry_run::Plan::new("locus renew");
+    // Mirror the real command's local refusals (no broker, no capability).
+    if std::env::var("LOCUS_SESSION_ID").is_ok_and(|v| !v.trim().is_empty()) {
+        bail!("locus renew only renews the active.json pin; unset LOCUS_SESSION_ID");
+    }
+    match s.active_pin_session() {
+        Ok(Some(cur)) => {
+            if cur.is_expired() {
+                bail!(
+                    "pin expired at {}; renew refused, human re-pin required (`locus enter {}`)",
+                    cur.expires_at.to_rfc3339(),
+                    cur.binding_alias
+                );
+            }
+            if cur.frozen {
+                bail!("pin is frozen; renew refused, human re-pin required");
+            }
+            if cur.authority != locus_core::SessionAuthority::LocalControl {
+                bail!("renew requires an authenticated local-control session");
+            }
+            let binding = s.load_binding(&cur.binding_alias)?;
+            locus_core::renew_identity_check(&s, &cur, &binding)?;
+            let (new_expiry, _, capped_by) = locus_core::renew_bounds(&cur, &binding)?;
+            plan.with("expires_at", new_expiry.to_rfc3339());
+            plan.with("capped_by", capped_by.to_string());
+            plan.change(
+                "renew",
+                cur.binding_alias.clone(),
+                Some(format!(
+                    "session {} expiry extended within policy.max_ttl and policy.max_session_lifetime",
+                    cur.session_id
+                )),
+            );
+            plan.with("binding", cur.binding_alias.clone());
+            plan.write_file(&path, Some("active session (new expiry)".into()));
+        }
+        Ok(None) => {
+            plan.note("no active pin to renew");
+        }
+        Err(e) => return Err(wedged_session_recovery(anyhow::Error::new(e))),
+    }
+    plan.needs_control().emit(json)
+}
+
 /// `--dry-run` for `graph export` / `graph import`.
 pub(super) fn plan_graph(sub: GraphCmd, json: bool) -> Result<()> {
     let s = dry_run::existing_store()?;
