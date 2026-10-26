@@ -167,10 +167,10 @@ pub use session::{
     SessionMode, CURRENT_SEAL_VERSION,
 };
 pub use store::{
-    is_safe_mcp_grant_id, locus_home, parse_mcp_grant_token, ApprovalsHealth, AuditEvent,
-    CredentialRefMigration, EngagementInitPlan, EngagementInitResult, ForceLeaveOutcome, McpGrant,
-    McpGrantAuthError, PinResolution, ProviderView, RenewOutcome, ResolvedSession, RuntimeDrift,
-    Store, Whoami,
+    is_safe_mcp_grant_id, locus_home, parse_mcp_grant_token, renew_bounds, ApprovalsHealth,
+    AuditEvent, CredentialRefMigration, EngagementInitPlan, EngagementInitResult,
+    ForceLeaveOutcome, McpGrant, McpGrantAuthError, PinResolution, ProviderView, RenewOutcome,
+    ResolvedSession, RuntimeDrift, Store, Whoami,
 };
 pub use ticket::{
     mint_ticket, verify_ticket, verify_ticket_parts, CapabilityTicket, DEFAULT_TICKET_TTL_SECS,

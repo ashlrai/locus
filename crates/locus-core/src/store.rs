@@ -548,56 +548,7 @@ impl Store {
             }
         }
 
-        let Some(lifetime_raw) = binding.policy.max_session_lifetime.as_deref() else {
-            return Err(LocusError::msg(format!(
-                "renew is disabled for '{}': set policy.max_session_lifetime on the binding \
-                 (e.g. \"24h\") to allow self-renew, or re-pin with `locus enter {}`",
-                binding.alias, binding.alias
-            )));
-        };
-        let lifetime = parse_ttl(lifetime_raw)?;
-        let max_ttl = binding
-            .policy
-            .max_ttl
-            .as_deref()
-            .map(parse_ttl)
-            .transpose()?
-            .unwrap_or_else(|| Duration::hours(8));
-        let now = Utc::now();
-        let lifetime_ends_at = session.pinned_at + lifetime;
-        if now >= lifetime_ends_at {
-            return Err(LocusError::msg(format!(
-                "pin reached policy.max_session_lifetime ({lifetime_raw}) at {}; renew refused, \
-                 human re-pin required (`locus enter {}`)",
-                lifetime_ends_at.to_rfc3339(),
-                binding.alias
-            )));
-        }
-        let by_ttl = now + max_ttl;
-        let (new_expiry, capped_by) = if by_ttl <= lifetime_ends_at {
-            (by_ttl, "max_ttl")
-        } else {
-            (lifetime_ends_at, "max_session_lifetime")
-        };
-        // Round down to whole seconds so the rfc3339 seal tuple is stable.
-        let new_expiry = DateTime::<Utc>::from_timestamp(new_expiry.timestamp(), 0)
-            .ok_or_else(|| LocusError::msg("renew expiry out of range"))?;
-        if new_expiry < session.expires_at + Duration::minutes(1) {
-            let why = if capped_by == "max_session_lifetime" {
-                format!(
-                    "pin is at policy.max_session_lifetime ({lifetime_raw}, ends {}); human re-pin \
-                     required (`locus enter {}`)",
-                    lifetime_ends_at.to_rfc3339(),
-                    binding.alias
-                )
-            } else {
-                "pin is already at policy.max_ttl; renew again later".to_string()
-            };
-            return Err(LocusError::msg(format!(
-                "renew would not extend the pin by at least 1m (expires {}): {why}",
-                session.expires_at.to_rfc3339()
-            )));
-        }
+        let (new_expiry, lifetime_ends_at, capped_by) = renew_bounds(&session, &binding)?;
         let previous_expires_at = session.expires_at;
         let previous_generation = session.authority_anchor.as_ref().map(|a| a.generation);
         session.expires_at = new_expiry;
@@ -3563,6 +3514,67 @@ pub struct RenewOutcome {
     pub lifetime_ends_at: DateTime<Utc>,
     /// `max_ttl` or `max_session_lifetime`: which bound set the new expiry.
     pub capped_by: &'static str,
+}
+
+/// Pure renew arithmetic shared by [`Store::renew_active`] and its dry-run
+/// plan: `(new_expiry, lifetime_ends_at, capped_by)`, or the refusal when
+/// renew is disabled, the lifetime bound is reached, or the pin would not
+/// extend by at least 1m. No broker, no capability, no writes.
+pub fn renew_bounds(
+    session: &Session,
+    binding: &Binding,
+) -> Result<(DateTime<Utc>, DateTime<Utc>, &'static str)> {
+    let Some(lifetime_raw) = binding.policy.max_session_lifetime.as_deref() else {
+        return Err(LocusError::msg(format!(
+            "renew is disabled for '{}': set policy.max_session_lifetime on the binding \
+                 (e.g. \"24h\") to allow self-renew, or re-pin with `locus enter {}`",
+            binding.alias, binding.alias
+        )));
+    };
+    let lifetime = parse_ttl(lifetime_raw)?;
+    let max_ttl = binding
+        .policy
+        .max_ttl
+        .as_deref()
+        .map(parse_ttl)
+        .transpose()?
+        .unwrap_or_else(|| Duration::hours(8));
+    let now = Utc::now();
+    let lifetime_ends_at = session.pinned_at + lifetime;
+    if now >= lifetime_ends_at {
+        return Err(LocusError::msg(format!(
+            "pin reached policy.max_session_lifetime ({lifetime_raw}) at {}; renew refused, \
+                 human re-pin required (`locus enter {}`)",
+            lifetime_ends_at.to_rfc3339(),
+            binding.alias
+        )));
+    }
+    let by_ttl = now + max_ttl;
+    let (new_expiry, capped_by) = if by_ttl <= lifetime_ends_at {
+        (by_ttl, "max_ttl")
+    } else {
+        (lifetime_ends_at, "max_session_lifetime")
+    };
+    // Round down to whole seconds so the rfc3339 seal tuple is stable.
+    let new_expiry = DateTime::<Utc>::from_timestamp(new_expiry.timestamp(), 0)
+        .ok_or_else(|| LocusError::msg("renew expiry out of range"))?;
+    if new_expiry < session.expires_at + Duration::minutes(1) {
+        let why = if capped_by == "max_session_lifetime" {
+            format!(
+                "pin is at policy.max_session_lifetime ({lifetime_raw}, ends {}); human re-pin \
+                     required (`locus enter {}`)",
+                lifetime_ends_at.to_rfc3339(),
+                binding.alias
+            )
+        } else {
+            "pin is already at policy.max_ttl; renew again later".to_string()
+        };
+        return Err(LocusError::msg(format!(
+            "renew would not extend the pin by at least 1m (expires {}): {why}",
+            session.expires_at.to_rfc3339()
+        )));
+    }
+    Ok((new_expiry, lifetime_ends_at, capped_by))
 }
 
 fn explicit_session_selected() -> bool {
