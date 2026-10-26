@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-10-26
+
+Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
+
 ### Added
 
 - **`locus renew` (opt-in pin self-renew) and expired-pin recovery.** `locus leave` now clears an expired pin and exits 0 with a note (`"expired": true` in `--json`), and `locus enter` replaces an expired pin in place (audited `session.replace_stale`), so nobody has to move `active.json` aside. New `locus renew [--json]` extends a live pin to `min(now + policy.max_ttl, pinned_at + policy.max_session_lifetime)`; it is disabled unless the binding sets the new `policy.max_session_lifetime` (1m to 30d), keeps the session id, binding and original `pinned_at`, and refuses an expired, frozen, tampered or stale-generation pin (`human re-pin required`), a changed binding, CI or run sessions, and any renew that would not extend the pin. Audited as `session.renew`. See [docs/policy.md](docs/policy.md).
@@ -27,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Plain HTTP and the MCP HTTP bind allow only exact `127.0.0.1` and `::1` (#187).** One shared rule in `locus-core::loopback`. Adapter registry index and manifest URLs over `http://` must use `127.0.0.1` or `[::1]`; `http://localhost` and the rest of `127.0.0.0/8` (for example `127.0.0.2`) are now refused. HTTPS is unchanged, including `https://localhost`. `locus-mcp --http` binding any 127.x address other than `127.0.0.1` now needs `LOCUS_MCP_HTTP_ALLOW_REMOTE=1`, like any other non-loopback bind. **Upgrade note:** configs with an `http://localhost` index URL or a 127.x MCP bind other than `127.0.0.1` must switch to `127.0.0.1`.
+- **Adapter registry index URLs never display credentials or query strings (#185).** `adapter registry index add` refuses URLs with userinfo (`user:pass@`) or a fragment before any fetch, with an error that does not echo the URL. `index add/list/remove` human and `--json` output show a redacted URL (scheme, host, port, path, plus `?<redacted>` when a query is present); the stored config keeps the query so signed index URLs still fetch. TOML parse errors in index sources no longer quote the offending line.
 - **Session file writes no longer follow a symlink at `active.json`.** `write_session_file` writes a fresh `create_new` temp file and renames it over the target, so a symlink planted at `sessions/active.json` is replaced instead of written through (shipped with the 0.5.1 stale-pin fix, #156).
 - **Session temp file is created 0600, and the rename is made durable.** The mode is set at open (not chmod after), and on unix the parent directory is fsynced after the rename.
 - **Pin history key creation is race-safe.** `history.key` is written in full to a private temp file and hard-linked into place, so concurrent first writers share one key and no record is dropped on a half-written key.
