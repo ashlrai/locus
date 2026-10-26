@@ -5,7 +5,8 @@
 //! and never call remote APIs with ambient credentials.
 
 mod anthropic;
-mod aws;
+pub(crate) mod aws;
+mod cli;
 mod cloudflare;
 mod github;
 mod openai;
@@ -23,6 +24,7 @@ use serde_json::{json, Value};
 
 pub use anthropic::AnthropicAdapter;
 pub use aws::AwsAdapter;
+pub use cli::CliRoute;
 pub use cloudflare::CloudflareAdapter;
 pub use github::GithubAdapter;
 pub use openai::OpenaiAdapter;
@@ -62,6 +64,21 @@ pub struct ToolCallResult {
 /// Trait every provider adapter implements.
 pub trait ProviderAdapter: Send + Sync {
     fn name(&self) -> &'static str;
+    /// Native executable supported for single-provider CLI credential routing.
+    fn cli_name(&self) -> Option<&'static str> {
+        None
+    }
+    /// All these keys must be nonempty before a routed CLI may start.
+    fn cli_required_credentials(&self) -> &'static [&'static str] {
+        crate::credential::inject_keys_for_provider(self.name())
+    }
+    /// Provider-specific native CLI defaults; never ambient identity.
+    fn configure_cli_env(
+        &self,
+        _provider: &ProviderBinding,
+        _vars: &mut std::collections::BTreeMap<String, String>,
+    ) {
+    }
     fn tools(&self, provider: &ProviderBinding, binding: &Binding) -> Vec<AdapterTool>;
     fn call(
         &self,
