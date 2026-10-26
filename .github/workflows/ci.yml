@@ -103,12 +103,13 @@ jobs:
       - name: Recipes (examples/recipes against the release build)
         run: node --test examples/recipes
 
-  # Declared MSRV (workspace.package.rust-version). cargo check only, and only
-  # when a Cargo.toml or Cargo.lock changes, so a lockfile bump that needs a
-  # newer rustc fails here. Not one of the required checks. RUSTUP_TOOLCHAIN
-  # overrides rust-toolchain.toml, which pins stable for in-repo development.
-  # RUSTFLAGS is cleared so dependency warnings on the older compiler are not
-  # promoted to errors.
+  # Declared MSRV (workspace.package.rust-version). cargo check only.
+  # Pull requests run it when a Cargo.toml or Cargo.lock changes. Every other
+  # event runs it, because a .rs change breaks the MSRV as often as a manifest
+  # change. Not one of the required checks. RUSTUP_TOOLCHAIN overrides
+  # rust-toolchain.toml, which pins stable for in-repo development. RUSTFLAGS
+  # is cleared so dependency warnings on the older compiler are not promoted
+  # to errors.
   msrv:
     name: msrv (rustc 1.89)
     runs-on: ubuntu-latest
@@ -124,36 +125,39 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Detect manifest changes
+      - name: Decide whether to run
         id: manifests
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
-          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           run=false
-          files=""
-          # Default checkout depth is 1. Fetch the other commit and use a
-          # two-dot diff: `git diff A B` only needs those two trees. A
-          # three-dot diff needs a merge base, which this depth does not have.
-          if [ "$EVENT" = "pull_request" ]; then
-            other="$BASE"
-          else
-            other="${BEFORE}"
-          fi
-          if [ -z "$other" ] || [ "$other" = "0000000000000000000000000000000000000000" ]; then
-            run=true
-          elif ! git fetch --no-tags --depth=1 origin "$other"; then
-            run=true
-          elif ! files="$(git diff --name-only "$other" HEAD)"; then
-            run=true
-          fi
-          if [ "$run" != true ] && printf '%s\n' "$files" | grep -Eq '(^|/)Cargo\.toml$|(^|/)Cargo\.lock$'; then
-            run=true
-          fi
+          case "$EVENT" in
+            pull_request)
+              files=""
+              # Default checkout depth is 1. Fetch the base commit and use a
+              # two-dot diff: `git diff A B` only needs those two trees. A
+              # three-dot diff needs a merge base, which this depth does not have.
+              if [ -z "$BASE" ]; then
+                run=true
+              elif ! git fetch --no-tags --depth=1 origin "$BASE"; then
+                run=true
+              elif ! files="$(git diff --name-only "$BASE" HEAD)"; then
+                run=true
+              elif printf '%s\n' "$files" | grep -Eq '(^|/)Cargo\.toml$|(^|/)Cargo\.lock$'; then
+                run=true
+              fi
+              ;;
+            push|merge_group|schedule|workflow_dispatch)
+              run=true
+              ;;
+            *)
+              run=true
+              ;;
+          esac
           echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "msrv cargo check: $run"
+          echo "msrv cargo check: $run ($EVENT)"
 
       - name: Install Rust toolchain
         if: steps.manifests.outputs.run == 'true'
