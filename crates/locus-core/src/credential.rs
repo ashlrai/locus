@@ -239,7 +239,7 @@ pub fn inject_keys_for_provider(provider: &str) -> &'static [&'static str] {
         "github" => &["GH_TOKEN", "GITHUB_TOKEN", "GITHUB_PERSONAL_ACCESS_TOKEN"],
         "vercel" => &["VERCEL_TOKEN"],
         "cloudflare" => &["CLOUDFLARE_API_TOKEN"],
-        "aws" => &["AWS_SECRET_ACCESS_KEY"], // incomplete without key id — phase 2
+        "aws" => crate::adapters::aws::CREDENTIAL_ENV_KEYS,
         "resend" => &["RESEND_API_KEY"],
         "stripe" => &["STRIPE_API_KEY", "STRIPE_SECRET_KEY"],
         "openai" => &["OPENAI_API_KEY"],
@@ -518,8 +518,19 @@ pub fn resolve_binding_secrets(binding: &crate::binding::Binding) -> ResolvedBin
             });
             continue;
         }
-        for key in keys {
-            out.insert(key, Zeroizing::new(value.as_str().to_string()));
+        if p.provider.eq_ignore_ascii_case("aws") {
+            match crate::adapters::aws::credential_env(&value) {
+                Ok(env) => out.extend(env),
+                Err(_) => issues.push(CredentialResolutionIssue {
+                    provider: safe_provider_label(&p.provider),
+                    source: cred.source().into(),
+                    code: "invalid-credential-bundle".into(),
+                }),
+            }
+        } else {
+            for key in keys {
+                out.insert(key, Zeroizing::new(value.as_str().to_string()));
+            }
         }
     }
     ResolvedBindingSecrets { env: out, issues }
@@ -620,6 +631,50 @@ mod tests {
     fn inject_keys() {
         assert!(inject_keys_for_provider("supabase").contains(&"SUPABASE_ACCESS_TOKEN"));
         assert!(inject_keys_for_provider("github").contains(&"GH_TOKEN"));
+    }
+
+    #[test]
+    fn aws_bundle_resolution_uses_adapter_mapping() {
+        let mut binding = phm_binding(
+            r#"test:{"AWS_ACCESS_KEY_ID":"fake-id","AWS_SECRET_ACCESS_KEY":"fake-secret","AWS_SESSION_TOKEN":"fake-session"}"#,
+        );
+        binding.providers[0].provider = "aws".into();
+        let resolved = resolve_binding_secrets(&binding);
+        assert!(resolved.issues.is_empty());
+        assert!(resolved.env.len() == 3);
+        assert!(resolved.env["AWS_ACCESS_KEY_ID"].as_str() == "fake-id");
+        assert!(resolved.env["AWS_SECRET_ACCESS_KEY"].as_str() == "fake-secret");
+        assert!(resolved.env["AWS_SESSION_TOKEN"].as_str() == "fake-session");
+        assert!(resolved
+            .env
+            .keys()
+            .all(|key| inject_keys_for_provider("aws").contains(&key.as_str())));
+    }
+
+    #[test]
+    fn invalid_aws_bundle_withholds_every_credential() {
+        let mut binding = phm_binding(
+            r#"test:{"AWS_ACCESS_KEY_ID":"fake-id","AWS_SECRET_ACCESS_KEY":"fake-secret","unexpected":"canary"}"#,
+        );
+        binding.providers[0].provider = "aws".into();
+        let resolved = resolve_binding_secrets(&binding);
+        assert!(resolved.env.is_empty());
+        assert!(resolved.issues.len() == 1);
+        assert_eq!(resolved.issues[0].code, "invalid-credential-bundle");
+        let diagnostics = serde_json::to_string(&resolved.issues).unwrap();
+        for input in ["fake-id", "fake-secret", "canary", "unexpected"] {
+            assert!(!diagnostics.contains(input));
+        }
+    }
+
+    #[test]
+    fn aws_scalar_resolution_keeps_legacy_secret_key_only() {
+        let mut binding = phm_binding("test:fake-legacy-secret");
+        binding.providers[0].provider = "aws".into();
+        let resolved = resolve_binding_secrets(&binding);
+        assert!(resolved.issues.is_empty());
+        assert!(resolved.env.len() == 1);
+        assert!(resolved.env["AWS_SECRET_ACCESS_KEY"].as_str() == "fake-legacy-secret");
     }
 
     fn phm_binding(credential_ref: &str) -> crate::binding::Binding {
