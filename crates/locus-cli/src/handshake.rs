@@ -24,6 +24,7 @@ fn locus_home() -> Option<PathBuf> {
 pub fn build(version: &str, home_initialized: bool, phantom_on_path: bool) -> Value {
     let status = if home_initialized { "ok" } else { "degraded" };
     json!({
+        "schema": crate::json_out::ASHLR_HANDSHAKE,
         "kind": "ashlr.handshake",
         "schema_version": 1,
         "name": "locus",
@@ -80,6 +81,7 @@ mod tests {
     fn identifies_the_contract() {
         let h = build("1.2.3", true, true);
         assert_eq!(h["kind"], "ashlr.handshake");
+        assert_eq!(h["schema"], crate::json_out::ASHLR_HANDSHAKE);
         assert_eq!(h["schema_version"], 1);
         assert_eq!(h["name"], "locus");
         assert_eq!(h["version"], "1.2.3");
