@@ -157,6 +157,30 @@ fn tighten_home_fd(home: &Path, euid: u32) -> std::io::Result<HomeTighten> {
     Ok(HomeTighten::Tightened)
 }
 
+/// Files [`Store::engagement_init`] would write, from its read-only preflight.
+#[derive(Debug, Clone)]
+pub struct EngagementInitPlan {
+    pub binding_path: PathBuf,
+    pub meta_path: PathBuf,
+    pub workspace_path: Option<PathBuf>,
+    pub readme_path: Option<PathBuf>,
+}
+
+/// Result of [`Store::resolve_pin`]: what a pin would bind, without pinning.
+#[derive(Debug, Clone)]
+pub struct PinResolution {
+    pub binding: Binding,
+    /// Extra namespaced aliases (primary excluded, deduplicated).
+    pub namespaces: Vec<String>,
+    pub namespace_fps: Vec<String>,
+    /// The `.locus.toml` that governed the allowlist check, if any.
+    pub workspace: Option<(PathBuf, WorkspaceConfig)>,
+    /// Effective TTL after the `policy.max_ttl` cap.
+    pub ttl: Duration,
+    /// `flag` | `binding_default` | `max_ttl`.
+    pub ttl_source: &'static str,
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     home: PathBuf,
@@ -192,6 +216,24 @@ impl Store {
         // Ensure seal key exists
         let _ = s.seal_key()?;
         Ok(s)
+    }
+
+    /// Open an initialized home without creating, chmod-ing or minting
+    /// anything (`locus … --dry-run`). [`Store::open`] makes the home, its
+    /// subdirectories and the seal key; a plan must not. Fails when the home
+    /// or its seal key is missing.
+    pub fn open_existing(home: impl Into<PathBuf>) -> Result<Self> {
+        let home = home.into();
+        let seal = home.join("daemon.key");
+        if !seal.is_file() {
+            return Err(LocusError::msg(format!(
+                "{} is not initialized (no seal key)",
+                home.display()
+            )));
+        }
+        Ok(Self {
+            home: fs::canonicalize(home)?,
+        })
     }
 
     pub fn home(&self) -> &Path {
@@ -662,6 +704,52 @@ impl Store {
         passphrase: &str,
     ) -> Result<GraphExportResult> {
         self.require_local_control("export binding graph")?;
+        let (bindings, workspaces) = self.graph_export_selection(aliases)?;
+        let meta = GraphMeta {
+            source_host: source_host(),
+            locus_version: Some(crate::VERSION.into()),
+        };
+        let envelope = GraphEnvelope::build(bindings, workspaces, meta)?;
+        let plain = envelope.to_json_bytes()?;
+        let encrypted = encrypt_graph(&plain, passphrase)?;
+
+        if let Some(parent) = out.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent)?;
+            }
+        }
+        fs::write(out, &encrypted)?;
+
+        let binding_aliases: Vec<String> =
+            envelope.bindings.iter().map(|b| b.alias.clone()).collect();
+        let workspace_names: Vec<String> =
+            envelope.workspaces.iter().map(|w| w.name.clone()).collect();
+
+        self.audit(
+            "graph.export",
+            binding_aliases.first().map(|s| s.as_str()).unwrap_or("-"),
+            Some(serde_json::json!({
+                "path": out.display().to_string(),
+                "bindings": binding_aliases,
+                "workspaces": workspace_names,
+                "exported_at": envelope.exported_at,
+            })),
+        )?;
+
+        Ok(GraphExportResult {
+            path: out.display().to_string(),
+            binding_aliases,
+            workspace_names,
+            exported_at: envelope.exported_at,
+        })
+    }
+
+    /// The bindings and workspace templates [`Store::graph_export`] would
+    /// include. Read-only (`locus graph export --dry-run`).
+    pub fn graph_export_selection(
+        &self,
+        aliases: Option<&[String]>,
+    ) -> Result<(Vec<Binding>, Vec<WorkspaceTemplate>)> {
         let summaries = self.list_bindings()?;
         let wanted: Vec<String> = match aliases {
             None | Some([]) => summaries.iter().map(|s| s.alias.clone()).collect(),
@@ -702,43 +790,7 @@ impl Store {
             }
         }
 
-        let meta = GraphMeta {
-            source_host: source_host(),
-            locus_version: Some(crate::VERSION.into()),
-        };
-        let envelope = GraphEnvelope::build(bindings, workspaces, meta)?;
-        let plain = envelope.to_json_bytes()?;
-        let encrypted = encrypt_graph(&plain, passphrase)?;
-
-        if let Some(parent) = out.parent() {
-            if !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
-        }
-        fs::write(out, &encrypted)?;
-
-        let binding_aliases: Vec<String> =
-            envelope.bindings.iter().map(|b| b.alias.clone()).collect();
-        let workspace_names: Vec<String> =
-            envelope.workspaces.iter().map(|w| w.name.clone()).collect();
-
-        self.audit(
-            "graph.export",
-            binding_aliases.first().map(|s| s.as_str()).unwrap_or("-"),
-            Some(serde_json::json!({
-                "path": out.display().to_string(),
-                "bindings": binding_aliases,
-                "workspaces": workspace_names,
-                "exported_at": envelope.exported_at,
-            })),
-        )?;
-
-        Ok(GraphExportResult {
-            path: out.display().to_string(),
-            binding_aliases,
-            workspace_names,
-            exported_at: envelope.exported_at,
-        })
+        Ok((bindings, workspaces))
     }
 
     /// Import an encrypted `.locusgraph` file: validate + `save_binding` each entry.
@@ -752,6 +804,28 @@ impl Store {
         force: bool,
     ) -> Result<GraphImportResult> {
         self.require_local_control("import binding graph")?;
+        self.graph_import_with(path, passphrase, force, true)
+    }
+
+    /// What [`Store::graph_import`] would import or skip, without writing or
+    /// the control gate (`locus graph import --dry-run`). Still decrypts, so
+    /// a wrong passphrase or corrupt file fails exactly like the real import.
+    pub fn graph_import_preview(
+        &self,
+        path: &Path,
+        passphrase: &str,
+        force: bool,
+    ) -> Result<GraphImportResult> {
+        self.graph_import_with(path, passphrase, force, false)
+    }
+
+    fn graph_import_with(
+        &self,
+        path: &Path,
+        passphrase: &str,
+        force: bool,
+        write: bool,
+    ) -> Result<GraphImportResult> {
         let file_bytes = fs::read(path)
             .map_err(|e| LocusError::msg(format!("read graph file {}: {e}", path.display())))?;
         let plain = decrypt_graph(&file_bytes, passphrase)?;
@@ -770,8 +844,10 @@ impl Store {
                 bindings_skipped.push(binding.alias.clone());
                 continue;
             }
-            // save_binding audits binding.save — also track graph.import at end
-            self.save_binding(&binding)?;
+            if write {
+                // save_binding audits binding.save — also track graph.import at end
+                self.save_binding(&binding)?;
+            }
             bindings_imported.push(binding.alias.clone());
         }
 
@@ -787,27 +863,31 @@ impl Store {
                 workspaces_skipped.push(ws.name.clone());
                 continue;
             }
-            self.save_workspace_template(&ws.name, &ws.config)?;
+            if write {
+                self.save_workspace_template(&ws.name, &ws.config)?;
+            }
             workspaces_imported.push(ws.name.clone());
         }
 
-        self.audit(
-            "graph.import",
-            bindings_imported
-                .first()
-                .or(bindings_skipped.first())
-                .map(|s| s.as_str())
-                .unwrap_or("-"),
-            Some(serde_json::json!({
-                "path": path.display().to_string(),
-                "bindings_imported": bindings_imported,
-                "bindings_skipped": bindings_skipped,
-                "workspaces_imported": workspaces_imported,
-                "workspaces_skipped": workspaces_skipped,
-                "force": force,
-                "source_exported_at": envelope.exported_at,
-            })),
-        )?;
+        if write {
+            self.audit(
+                "graph.import",
+                bindings_imported
+                    .first()
+                    .or(bindings_skipped.first())
+                    .map(|s| s.as_str())
+                    .unwrap_or("-"),
+                Some(serde_json::json!({
+                    "path": path.display().to_string(),
+                    "bindings_imported": bindings_imported,
+                    "bindings_skipped": bindings_skipped,
+                    "workspaces_imported": workspaces_imported,
+                    "workspaces_skipped": workspaces_skipped,
+                    "force": force,
+                    "source_exported_at": envelope.exported_at,
+                })),
+            )?;
+        }
 
         Ok(GraphImportResult {
             bindings_imported,
@@ -1366,27 +1446,19 @@ impl Store {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn pin_with_opts_source(
+    /// Read-only half of every pin: load the binding (and namespaces), apply
+    /// the workspace allowlist, and resolve the effective TTL. No control
+    /// gate, no write. `locus pin/enter/switch --dry-run` previews through
+    /// this exact path, so a plan and the real pin cannot disagree on target,
+    /// allowlist or TTL.
+    pub fn resolve_pin(
         &self,
         alias_or_id: &str,
         cwd: &Path,
-        client: Option<String>,
         force: bool,
         extra_namespaces: Option<Vec<String>>,
-        write_active: bool,
-        backing_type: SessionBackingType,
-        backing_path: Option<PathBuf>,
-        source_override: Option<PinSource>,
         ttl_override: Option<Duration>,
-        authority: SessionAuthority,
-    ) -> Result<Session> {
-        let replaced_stale = if write_active && backing_type == SessionBackingType::Active {
-            self.require_local_control_to_replace_active("mint or replace session")?
-        } else {
-            self.require_local_control("mint or replace session")?;
-            None
-        };
+    ) -> Result<PinResolution> {
         let binding = self.load_binding(alias_or_id)?;
         let ws = find_workspace(cwd)?;
 
@@ -1423,26 +1495,6 @@ impl Store {
             }
         }
 
-        let source = if let Some(src) = source_override {
-            src
-        } else if client.as_deref() == Some("run") {
-            PinSource::Run
-        } else if client.as_deref() == Some("ci") {
-            PinSource::Ci
-        } else if let Some((ref path, ref cfg)) = ws {
-            if cfg.default_binding.as_deref() == Some(binding.alias.as_str())
-                || cfg.default_binding.as_deref() == Some(binding.id.as_str())
-            {
-                PinSource::Dir {
-                    path: path.display().to_string(),
-                }
-            } else {
-                PinSource::Explicit
-            }
-        } else {
-            PinSource::Explicit
-        };
-
         let max_ttl = binding
             .policy
             .max_ttl
@@ -1467,6 +1519,65 @@ impl Store {
         let ttl = match requested {
             Some(req) if req <= max_ttl => req,
             _ => max_ttl,
+        };
+        Ok(PinResolution {
+            binding,
+            namespaces: ns_aliases,
+            namespace_fps: ns_fps,
+            workspace: ws,
+            ttl,
+            ttl_source,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pin_with_opts_source(
+        &self,
+        alias_or_id: &str,
+        cwd: &Path,
+        client: Option<String>,
+        force: bool,
+        extra_namespaces: Option<Vec<String>>,
+        write_active: bool,
+        backing_type: SessionBackingType,
+        backing_path: Option<PathBuf>,
+        source_override: Option<PinSource>,
+        ttl_override: Option<Duration>,
+        authority: SessionAuthority,
+    ) -> Result<Session> {
+        let replaced_stale = if write_active && backing_type == SessionBackingType::Active {
+            self.require_local_control_to_replace_active("mint or replace session")?
+        } else {
+            self.require_local_control("mint or replace session")?;
+            None
+        };
+        let PinResolution {
+            binding,
+            namespaces: ns_aliases,
+            namespace_fps: ns_fps,
+            workspace: ws,
+            ttl,
+            ttl_source,
+        } = self.resolve_pin(alias_or_id, cwd, force, extra_namespaces, ttl_override)?;
+
+        let source = if let Some(src) = source_override {
+            src
+        } else if client.as_deref() == Some("run") {
+            PinSource::Run
+        } else if client.as_deref() == Some("ci") {
+            PinSource::Ci
+        } else if let Some((ref path, ref cfg)) = ws {
+            if cfg.default_binding.as_deref() == Some(binding.alias.as_str())
+                || cfg.default_binding.as_deref() == Some(binding.id.as_str())
+            {
+                PinSource::Dir {
+                    path: path.display().to_string(),
+                }
+            } else {
+                PinSource::Explicit
+            }
+        } else {
+            PinSource::Explicit
         };
 
         let key = self.seal_key()?;
@@ -1978,47 +2089,20 @@ impl Store {
         force: bool,
     ) -> Result<EngagementInitResult> {
         self.require_local_control("initialize engagement")?;
-        validate_name_component("alias", alias)?;
-        if tenant.trim().is_empty() {
-            return Err(LocusError::msg("tenant must be non-empty"));
-        }
-
-        let binding_path = self.bindings_dir().join(format!("{alias}.toml"));
-        if binding_path.exists() && !force {
-            return Err(LocusError::msg(format!(
-                "binding '{alias}' already exists — use --force to overwrite"
-            )));
-        }
-
-        // Pre-flight every refusal BEFORE the first write: a `.locus.toml`
-        // conflict found after the binding was saved left a half-created
-        // engagement whose retry then failed on "binding already exists".
-        // Existence is checked without following a final symlink: a dangling
-        // `.locus.toml` link reads as absent through `exists()`, and writing
-        // through it created the link's target outside the project.
-        let workspace_target = cwd.join(".locus.toml");
-        if write_workspace && crate::workspace::path_entry_exists(&workspace_target) && !force {
-            return Err(LocusError::msg(format!(
-                "{} already exists — nothing was created; re-run with --force to overwrite it, \
-                 or without --workspace to keep it",
-                workspace_target.display()
-            )));
-        }
+        let EngagementInitPlan {
+            workspace_path: workspace_target,
+            readme_path: _,
+            ..
+        } = self.engagement_init_preflight(
+            alias,
+            tenant,
+            cwd,
+            write_workspace,
+            write_readme,
+            force,
+        )?;
+        let workspace_target = workspace_target.unwrap_or_else(|| cwd.join(".locus.toml"));
         let locus_dir = cwd.join(".locus");
-        if write_readme {
-            match fs::symlink_metadata(&locus_dir) {
-                Ok(m) if m.is_dir() => {}
-                Ok(_) => {
-                    return Err(LocusError::msg(format!(
-                        "{} exists and is not a plain directory — nothing was created; move it aside \
-                         or re-run with --no-readme",
-                        locus_dir.display()
-                    )));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
         // Staged before the binding is saved: an unwritable project directory
         // (or a directory where `.locus.toml` should be) fails here, with
         // nothing created.
@@ -2085,6 +2169,70 @@ impl Store {
                 .iter()
                 .map(|p| crate::credential::credential_metadata(&p.credential_ref))
                 .collect(),
+        })
+    }
+
+    /// Every refusal of [`Store::engagement_init`], checked before its first
+    /// write, and the files it would create. Read-only (no control gate):
+    /// `locus engagement init --dry-run` plans through it.
+    pub fn engagement_init_preflight(
+        &self,
+        alias: &str,
+        tenant: &str,
+        cwd: &Path,
+        write_workspace: bool,
+        write_readme: bool,
+        force: bool,
+    ) -> Result<EngagementInitPlan> {
+        validate_name_component("alias", alias)?;
+        if tenant.trim().is_empty() {
+            return Err(LocusError::msg("tenant must be non-empty"));
+        }
+
+        let binding_path = self.bindings_dir().join(format!("{alias}.toml"));
+        if binding_path.exists() && !force {
+            return Err(LocusError::msg(format!(
+                "binding '{alias}' already exists — use --force to overwrite"
+            )));
+        }
+
+        // Pre-flight every refusal BEFORE the first write: a `.locus.toml`
+        // conflict found after the binding was saved left a half-created
+        // engagement whose retry then failed on "binding already exists".
+        // Existence is checked without following a final symlink: a dangling
+        // `.locus.toml` link reads as absent through `exists()`, and writing
+        // through it created the link's target outside the project.
+        let workspace_target = cwd.join(".locus.toml");
+        if write_workspace && crate::workspace::path_entry_exists(&workspace_target) && !force {
+            return Err(LocusError::msg(format!(
+                "{} already exists — nothing was created; re-run with --force to overwrite it, \
+                 or without --workspace to keep it",
+                workspace_target.display()
+            )));
+        }
+        let locus_dir = cwd.join(".locus");
+        if write_readme {
+            match fs::symlink_metadata(&locus_dir) {
+                Ok(m) if m.is_dir() => {}
+                Ok(_) => {
+                    return Err(LocusError::msg(format!(
+                        "{} exists and is not a plain directory — nothing was created; move it aside \
+                         or re-run with --no-readme",
+                        locus_dir.display()
+                    )));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let readme = locus_dir.join("README.md");
+        Ok(EngagementInitPlan {
+            binding_path,
+            meta_path: self.engagements_dir().join(format!("{alias}.json")),
+            workspace_path: write_workspace.then_some(workspace_target),
+            // An existing README is kept unless --force (non-fatal skip).
+            readme_path: (write_readme && (force || !crate::workspace::path_entry_exists(&readme)))
+                .then_some(readme),
         })
     }
 
@@ -3530,6 +3678,50 @@ fn write_secret_file_new(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn open_existing_never_creates_a_home_or_seal_key() {
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        assert!(super::Store::open_existing(&home).is_err());
+        assert!(!home.exists(), "open_existing created the home");
+        std::fs::create_dir(&home).unwrap();
+        assert!(super::Store::open_existing(&home).is_err());
+        assert!(
+            !home.join("daemon.key").exists(),
+            "open_existing minted a seal key"
+        );
+        assert_eq!(std::fs::read_dir(&home).unwrap().count(), 0);
+
+        super::Store::open(&home).unwrap();
+        let before: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        let s = super::Store::open_existing(&home).unwrap();
+        assert_eq!(s.home(), std::fs::canonicalize(&home).unwrap());
+        let after: Vec<_> = std::fs::read_dir(&home)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(before.len(), after.len());
+    }
+
+    #[test]
+    fn resolve_pin_matches_the_pin_refusals_without_writing() {
+        let d = tempfile::tempdir().unwrap();
+        let s = super::Store::open(d.path().join("home")).unwrap();
+        let cwd = d.path().join("proj");
+        std::fs::create_dir(&cwd).unwrap();
+        let err = s
+            .resolve_pin("ghost", &cwd, false, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ghost"), "{err}");
+        assert!(!s.active_session_path().exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn locus_toml_read_refuses_symlink_via_eloop() {
