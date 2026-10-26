@@ -3487,6 +3487,14 @@ fn parse_binding_safely(raw: &str, label: &str) -> Result<Binding> {
 }
 
 fn validate_loaded_binding(binding: &Binding, label: &str) -> Result<()> {
+    // Checked before `validate` below so the failure names the policy field
+    // instead of the catch-all credential message.
+    if binding.policy.normalized_default().is_none() {
+        return Err(LocusError::msg(format!(
+            "binding '{label}' has invalid policy.default '{}': use \"allow\" or \"deny\"",
+            binding.policy.default
+        )));
+    }
     if binding
         .providers
         .iter()
@@ -4386,6 +4394,61 @@ allowed_bindings = ["acme"]
             assert!(err.to_string().contains("workspace policy malformed"));
             assert!(store.active_session().unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn wrong_typed_workspace_blocks_pin() {
+        // Valid TOML, wrong field types: as malformed as broken syntax — the
+        // discovery error must still refuse the pin instead of falling back
+        // to a permissive default config.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp", "p1"))
+            .unwrap();
+        let project = dir.path().join("client-acme");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join(".locus.toml"),
+            "allowed_bindings = \"acme\"\nrequire_pin = \"yes\"\n",
+        )
+        .unwrap();
+
+        for force in [false, true] {
+            let err = store.pin("acme", &project, None, force).unwrap_err();
+            assert!(err.to_string().contains("workspace policy malformed"));
+            assert!(store.active_session().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn load_binding_rejects_unrecognized_policy_default() {
+        // A typo'd policy.default parses as TOML but must fail closed at load
+        // — evaluation alone denying is not enough to surface the mistake.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        fs::write(
+            store.bindings_dir().join("typo.toml"),
+            r#"
+[binding]
+id = "bnd_typo"
+alias = "typo"
+tenant = "acme-corp"
+
+[binding.policy]
+default = "denny"
+
+[[binding.providers]]
+provider = "github"
+account = "acme-corp"
+credential_ref = "env:GH_TOKEN"
+"#,
+        )
+        .unwrap();
+
+        let err = store.load_binding("typo").unwrap_err().to_string();
+        assert!(err.contains("policy.default"), "{err}");
+        assert!(err.contains("denny"), "{err}");
     }
 
     #[test]
