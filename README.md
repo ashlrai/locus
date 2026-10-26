@@ -258,6 +258,7 @@ locus exec --expect <alias> -- <cmd>  # refuse (exit 1, child never starts) unle
 locus run -b <alias> -- <command>     # one-shot; global pin unchanged
 locus binding list|show|add|rm
 locus workspace --default <alias> [--allow a,b] [--require-pin]
+locus autopin suggest [--json] [--apply]  # learn a default from local pin history
 locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2)
 locus doctor --fix [--apply]          # preview safe repairs; --apply makes them, backing up first
 locus watch [--once] [--require-ok]   # session heartbeat each tick (NDJSON with --json)

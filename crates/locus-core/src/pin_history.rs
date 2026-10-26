@@ -305,10 +305,13 @@ fn append_locked(
     res
 }
 
-/// Read all entries under the history lock (skips malformed lines; never
-/// follows a symlinked log).
+/// Read a snapshot without creating a lock or any other files (skips malformed
+/// lines; never follows a symlinked log). Writers replace the log atomically,
+/// so an open reader sees one complete version without taking the writer lock.
 pub fn read(home: &Path) -> Vec<HistoryEntry> {
-    with_lock(home, |p| Ok(parse(&read_nofollow_or_empty(p)?))).unwrap_or_default()
+    read_nofollow_or_empty(&path(home))
+        .map(|text| parse(&text))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -353,6 +356,55 @@ mod tests {
             .map(|e| e.alias.unwrap())
             .collect();
         assert_eq!(got, vec!["a4", "a5", "a6"]);
+    }
+
+    #[test]
+    fn read_with_existing_key_does_not_create_a_missing_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let key = history_key(home.path()).unwrap();
+        let entry = entry_for(&key, "pin", Some("acme"), None, None);
+        let raw = format!("{}\n", serde_json::to_string(&entry).unwrap());
+        fs::write(path(home.path()), &raw).unwrap();
+        assert!(!home.path().join(LOCK_FILE).exists());
+
+        assert_eq!(read(home.path()), vec![entry]);
+
+        assert!(!home.path().join(LOCK_FILE).exists());
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 2);
+        assert_eq!(fs::read_to_string(path(home.path())).unwrap(), raw);
+        assert_eq!(existing_history_key(home.path()).unwrap(), Some(key));
+    }
+
+    #[test]
+    fn read_from_absent_home_writes_nothing() {
+        let parent = tempfile::tempdir().unwrap();
+        let home = parent.path().join("missing");
+
+        assert!(read(&home).is_empty());
+
+        assert!(!home.exists());
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_refuses_symlinked_log_without_creating_a_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let victim = home.path().join("victim.jsonl");
+        let entry = entry_for(KEY, "pin", Some("acme"), None, None);
+        let raw = format!("{}\n", serde_json::to_string(&entry).unwrap());
+        fs::write(&victim, &raw).unwrap();
+        std::os::unix::fs::symlink(&victim, path(home.path())).unwrap();
+
+        assert!(read(home.path()).is_empty());
+
+        assert!(!home.path().join(LOCK_FILE).exists());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), raw);
+        assert!(fs::symlink_metadata(path(home.path()))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 2);
     }
 
     #[test]
