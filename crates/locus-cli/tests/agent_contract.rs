@@ -12,6 +12,9 @@ use std::process::{Command, Output};
 /// paths) and a project directory, all temporary.
 struct Env {
     root: tempfile::TempDir,
+    /// Outside the snapshot: state that third-party CLIs probed during
+    /// detection (for example `gh`'s device id) keep for themselves.
+    tool_state: tempfile::TempDir,
 }
 
 impl Env {
@@ -19,7 +22,10 @@ impl Env {
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(root.path().join("user")).unwrap();
         std::fs::create_dir_all(root.path().join("project")).unwrap();
-        Self { root }
+        Self {
+            root,
+            tool_state: tempfile::tempdir().unwrap(),
+        }
     }
 
     fn home(&self) -> PathBuf {
@@ -46,6 +52,7 @@ impl Env {
             .env("LOCUS_HOME", self.home())
             .env("HOME", self.user())
             .env("NO_COLOR", "1")
+            .env("XDG_STATE_HOME", self.tool_state.path())
             .env_remove("LOCUS_SESSION_ID")
             .env_remove("LOCUS_CONTROL_CAPABILITY")
             .env_remove("LOCUS_GRAPH_PASSPHRASE")
