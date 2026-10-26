@@ -8,7 +8,7 @@
 //!   never cross into child processes.
 
 use crate::binding::{Binding, ProviderBinding};
-use crate::credential::{resolve_binding_secrets, CredentialResolutionIssue};
+use crate::credential::{resolve_binding_secrets, CredentialRef, CredentialResolutionIssue};
 use crate::error::Result;
 use crate::session::Session;
 use std::collections::BTreeMap;
@@ -59,20 +59,73 @@ pub fn build_isolated_env_opts(
     binding: &Binding,
     resolve_secrets: bool,
 ) -> IsolatedEnv {
+    build_isolated_env_inner(session, binding, resolve_secrets, None)
+}
+
+/// Routed CLIs do not inherit opt-in parent variables: even a placeholder or
+/// profile from another provider would widen the selected identity surface.
+/// The caller supplies a fresh private worker home and the full pinned binding
+/// so credential source names from unselected providers are also scrubbed.
+pub fn build_routed_cli_env(
+    session: &Session,
+    binding: &Binding,
+    provider: &ProviderBinding,
+) -> IsolatedEnv {
+    let mut scoped = binding.clone();
+    scoped.providers = vec![provider.clone()];
+    build_isolated_env_inner(session, &scoped, true, Some(binding))
+}
+
+fn build_isolated_env_inner(
+    session: &Session,
+    binding: &Binding,
+    resolve_secrets: bool,
+    route_parent_binding: Option<&Binding>,
+) -> IsolatedEnv {
     let home = crate::store::locus_home().ok();
     let cfg = home.as_ref().map(|path| crate::config::load_config(path));
     let inherit = cfg
         .as_ref()
+        .filter(|_| route_parent_binding.is_none())
         .map(|cfg| cfg.exec.inherit_env.as_slice())
         .unwrap_or(&[]);
 
     let mut vars = BTreeMap::new();
     let mut scrubbed = Vec::new();
     let mut parent = BTreeMap::new();
+    // CredentialRefs may name even runtime variables such as LANG. Exclude
+    // every provider's source before injection, including unselected ones.
+    // Removing them after injection would also remove a valid selected output
+    // alias when its reference is e.g. env:GH_TOKEN.
+    let credential_sources: Vec<String> = route_parent_binding
+        .into_iter()
+        .flat_map(|binding| &binding.providers)
+        .filter_map(
+            |provider| match CredentialRef::parse(&provider.credential_ref) {
+                CredentialRef::Env { var } => Some(var),
+                _ => None,
+            },
+        )
+        .collect();
     // Positive construction: unknown parent keys never reach the child.
     // Values are kept only when `[exec] inherit_env` might copy one across.
     for (k, v) in std::env::vars() {
-        if !is_runtime_env_key(&k) {
+        let runtime = if route_parent_binding.is_some() {
+            RUNTIME_ENV_KEYS.contains(&k.as_str())
+                || matches!(
+                    k.as_str(),
+                    "LC_ALL"
+                        | "LC_CTYPE"
+                        | "LC_COLLATE"
+                        | "LC_MESSAGES"
+                        | "LC_MONETARY"
+                        | "LC_NUMERIC"
+                        | "LC_TIME"
+                )
+        } else {
+            is_runtime_env_key(&k)
+        };
+        if !runtime || credential_sources.contains(&k) {
             scrubbed.push(k.clone());
             if !inherit.is_empty() {
                 parent.insert(k, v);
