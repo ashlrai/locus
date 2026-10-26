@@ -866,6 +866,8 @@ fn legacy_agent_setup_dry_run_json_keeps_every_field() {
     assert_eq!(v["env"]["LOCUS_AUTO_PIN"], "cwd");
     assert_eq!(v["env"]["LOCUS_CLIENT"], "<client>");
     assert!(v["env"]["LOCUS_NOTIFY"].is_null(), "{v}");
+    // Plan fields sit alongside; --apply needs the control capability.
+    assert_eq!(v["requires_control_capability"], true, "{v}");
 }
 
 #[test]

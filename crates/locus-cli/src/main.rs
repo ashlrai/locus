@@ -5194,7 +5194,16 @@ mod mt_session_reconcile_tests {
 fn community_search(
     query: Option<&str>,
 ) -> Result<Vec<locus_core::marketplace::CommunityIndexEntry>> {
-    let sources = locus_core::marketplace::load_index_sources(store()?.home())?;
+    community_search_in(store()?.home(), query)
+}
+
+/// `community_search` against a given home, without opening the store
+/// (dry-run plans must not create, chmod or mint anything).
+fn community_search_in(
+    home: &Path,
+    query: Option<&str>,
+) -> Result<Vec<locus_core::marketplace::CommunityIndexEntry>> {
+    let sources = locus_core::marketplace::load_index_sources(home)?;
     if sources.is_empty() {
         bail!("no community indexes configured; use locus adapter registry index add <HTTPS URL>");
     }
@@ -8014,6 +8023,8 @@ fn cmd_agent_setup(
     // Ensure ~/.locus (or LOCUS_HOME) exists — init layout + seal key if
     // needed. A dry run only plans it: opening the store would create it.
     let mut plan = dry_run::Plan::new("locus agent setup");
+    // The real run goes through require_local_control_boundary.
+    plan.needs_control();
     let home = if apply {
         store()?.home().to_path_buf()
     } else {
@@ -9926,6 +9937,7 @@ fn cmd_approve(sub: ApproveCmd, json: bool, dry_run: bool) -> Result<()> {
                     rec.status.as_str()
                 )),
             )
+            .needs_control()
             .with("id", id)
             .with("tool", &rec.tool)
             .with("binding", &rec.binding)

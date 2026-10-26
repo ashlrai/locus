@@ -520,7 +520,7 @@ pub(super) fn plan_adapter(sub: AdapterCmd, json: bool) -> Result<()> {
     let adapters_dir = home.join(locus_core::marketplace::ADAPTERS_DIR);
     match sub {
         AdapterCmd::Install { id, yes } => {
-            let hit = community_search(Some(&id))?
+            let hit = community_search_in(home, Some(&id))?
                 .into_iter()
                 .find(|hit| hit.id == id)
                 .ok_or_else(|| anyhow!("community adapter not found in configured indexes"))?;
