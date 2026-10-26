@@ -33,6 +33,7 @@ pub(crate) const PEERS: &str = "locus.peers.v1";
 pub(crate) const PLAN: &str = "locus.plan.v1";
 pub(crate) const ERROR: &str = "locus.error.v1";
 pub(crate) const CONTRACT: &str = "locus.contract.v1";
+pub(crate) const ASHLR_HANDSHAKE: &str = "locus.ashlr.handshake.v1";
 
 /// `(command, schema id)` for every stamped surface, in docs order.
 pub(crate) const CATALOGUE: &[(&str, &str)] = &[
@@ -57,6 +58,7 @@ pub(crate) const CATALOGUE: &[(&str, &str)] = &[
     ("any mutating command with --dry-run", PLAN),
     ("any command failing under --json (stderr)", ERROR),
     ("locus topic agent-contract", CONTRACT),
+    ("locus --ashlr-handshake", ASHLR_HANDSHAKE),
 ];
 
 #[derive(Serialize)]
@@ -162,6 +164,15 @@ mod tests {
                 version.starts_with('v') && version[1..].parse::<u32>().is_ok(),
                 "{id}"
             );
+        }
+    }
+
+    #[test]
+    fn every_catalogued_command_has_a_schema_field() {
+        for (command, id) in CATALOGUE {
+            let output = render(id, &serde_json::json!({ "ok": true }), false).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+            assert_eq!(value["schema"], *id, "{command}");
         }
     }
 }
