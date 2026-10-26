@@ -38,7 +38,7 @@ dual_control = []
 | `require_approval` | Legacy tool-name globs → fail-closed external authority gate |
 | `dual_control` | Legacy globs that require two externally authenticated identities |
 | `dual_control_all_approvals` | Every `require_approval` match (rule or legacy) needs two externally authenticated identities |
-| `default` | When nothing matches: `"allow"` or `"deny"` |
+| `default` | When nothing matches: `"allow"` or `"deny"`; any other value fails closed → deny and the binding refuses to load |
 
 ### Rule actions
 
@@ -77,7 +77,7 @@ emits a `pin_expiring` **Warn** finding in the final 5 minutes.
 ```
 1. Structured rules     first matching [[binding.policy.rules]] entry
 2. Legacy globs         require_approval, then dual_control
-3. policy.default       allow | deny
+3. policy.default       allow | deny (unrecognized values fail closed → deny)
 ```
 
 Example: allow Supabase list tools, gate deletes, dual-control prod deploy:

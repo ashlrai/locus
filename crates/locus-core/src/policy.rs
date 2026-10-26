@@ -4,7 +4,7 @@
 //!
 //! 1. **Structured rules** (`[[binding.policy.rules]]`) — first matching rule wins
 //! 2. **Legacy globs** — `require_approval`, then `dual_control`
-//! 3. **`policy.default`** — `"allow"` or `"deny"`
+//! 3. **`policy.default`** — `"allow"` or `"deny"`; unrecognized values fail closed (deny)
 //!
 //! # Glob syntax (simplified)
 //!
@@ -124,17 +124,26 @@ pub fn evaluate(policy: &Policy, tool: &str) -> PolicyVerdict {
         }
     }
 
-    // 4) Default
-    match policy.default.as_str() {
-        "deny" => PolicyVerdict {
+    // 4) Default — only a recognized keyword decides; anything else fails
+    // closed (a malformed `default` must deny, never silently allow).
+    match policy.normalized_default() {
+        Some("deny") => PolicyVerdict {
             decision: Decision::Deny,
             matched_rule: Some("default".into()),
             reason: "policy.default = deny".into(),
         },
-        _ => PolicyVerdict {
+        Some("allow") => PolicyVerdict {
             decision: Decision::Allow,
             matched_rule: Some("default".into()),
             reason: "policy.default = allow".into(),
+        },
+        _ => PolicyVerdict {
+            decision: Decision::Deny,
+            matched_rule: Some("default".into()),
+            reason: format!(
+                "policy.default '{}' is not a recognized keyword (allow|deny); fail closed",
+                policy.default
+            ),
         },
     }
 }
@@ -435,5 +444,95 @@ action = "dual_control"
         let prod = evaluate(&p, "vercel.deploy.prod");
         assert_eq!(prod.decision, Decision::RequireApproval);
         assert!(p.requires_dual_control("vercel.deploy.prod"));
+    }
+
+    // ── Malformed input fails closed ─────────────────────────────────────
+
+    #[test]
+    fn unrecognized_default_denies_instead_of_allowing() {
+        // A typo'd or empty policy.default previously fell through to allow.
+        for bad in ["denny", "permit", "", "deny-all", "allow_all"] {
+            let p = Policy {
+                default: bad.into(),
+                ..empty_policy()
+            };
+            let v = evaluate(&p, "github.list_prs");
+            assert_eq!(v.decision, Decision::Deny, "default={bad:?}");
+            assert_eq!(v.matched_rule.as_deref(), Some("default"));
+            assert!(v.reason.contains("fail closed"), "{bad}: {}", v.reason);
+        }
+    }
+
+    #[test]
+    fn default_keyword_normalizes_case_and_whitespace() {
+        for (raw, want) in [
+            ("DENY", Decision::Deny),
+            (" deny ", Decision::Deny),
+            ("Allow", Decision::Allow),
+        ] {
+            let p = Policy {
+                default: raw.into(),
+                ..empty_policy()
+            };
+            assert_eq!(
+                evaluate(&p, "github.list_prs").decision,
+                want,
+                "default={raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrecognized_default_still_lets_matched_rules_decide() {
+        // Structured rules run before the default; the malformed default only
+        // denies what nothing else claimed.
+        let p = Policy {
+            rules: vec![PolicyRule::new("github.*", "allow")],
+            default: "denny".into(),
+            ..empty_policy()
+        };
+        assert_eq!(evaluate(&p, "github.list_prs").decision, Decision::Allow);
+        assert_eq!(
+            evaluate(&p, "supabase.execute_sql").decision,
+            Decision::Deny
+        );
+    }
+
+    #[test]
+    fn toml_unrecognized_default_denies_unmatched_tools() {
+        let p: Policy = toml::from_str("default = \"denny\"").expect("parses");
+        let v = evaluate(&p, "supabase.execute_sql");
+        assert_eq!(v.decision, Decision::Deny);
+        assert!(v.reason.contains("denny"), "{}", v.reason);
+        assert!(v.reason.contains("fail closed"), "{}", v.reason);
+    }
+
+    #[test]
+    fn malformed_policy_toml_is_rejected_not_interpreted() {
+        // Wrong types and half-specified rules must fail deserialization —
+        // a malformed policy must never weaken into serde defaults.
+        for bad in [
+            "default = 3",
+            "default = true",
+            "require_approval = \"*\"",
+            "dual_control = \"vercel.*\"",
+            "rules = \"*\"",
+            "parallel_sessions = \"four\"",
+            "max_ttl = 8",
+            "dual_control_all_approvals = \"yes\"",
+            "[[rules]]\naction = \"allow\"",
+            "[[rules]]\nmatch = \"*\"",
+            "[[rules]]\nmatch = 1\naction = \"allow\"",
+            // Unknown keys: every field is optional, so a typo'd gate key
+            // would silently disable it — the doc must fail to parse.
+            "require_approvals = [\"*\"]",
+            "dual-controll = [\"*\"]",
+            "[[rules]]\nmatch = \"*\"\naction = \"allow\"\nnote = \"x\"",
+        ] {
+            assert!(
+                toml::from_str::<Policy>(bad).is_err(),
+                "must reject: {bad:?}"
+            );
+        }
     }
 }
