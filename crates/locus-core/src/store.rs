@@ -31,6 +31,13 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Home directory permissions (unix): [`Store::open`] creates a missing
+/// `$LOCUS_HOME` with mode 0700. An existing home that is a real directory
+/// owned by the current user has its group and other bits cleared (0700).
+/// A home owned by another user is left as is. If `$LOCUS_HOME` is a
+/// symlink, it is not chmod'ed through; the target's mode is the user's
+/// choice. Files with secrets are additionally created 0600.
+///
 /// Layout:
 /// ```text
 /// $LOCUS_HOME/
@@ -46,6 +53,110 @@ use std::path::{Path, PathBuf};
 ///   archives/<alias>-<date>.jsonl
 ///   trust/adapter-keys.toml  # adapter registry trust pins (0600; lazy)
 /// ```
+/// Create `home` as 0700 if missing, and tighten an existing home owned by the
+/// current user to 0700. Never chmods through a symlink. See [`Store`].
+///
+/// Creation uses a recursive `DirBuilder` with mode 0700, so any missing
+/// parent directories are also created as 0700 (before umask).
+///
+/// Tightening is fd-based to avoid a lstat-then-chmod race: the home is opened
+/// with `O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC`, then `fstat` and
+/// `fchmod` act on that fd. A symlinked home fails the open with `ELOOP` (or
+/// `ENOTDIR` on some platforms) and is skipped with a warning.
+fn ensure_private_home(home: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        if fs::symlink_metadata(home).is_err() {
+            match fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(home)
+            {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        match tighten_home_fd(home, euid)? {
+            HomeTighten::Symlink => {
+                eprintln!(
+                    "locus: warning: LOCUS_HOME {} is a symlink; not tightening permissions",
+                    home.display()
+                );
+                // It must still resolve to a directory.
+                fs::create_dir_all(home)?;
+            }
+            HomeTighten::OtherOwner(owner) => {
+                eprintln!(
+                    "locus: warning: LOCUS_HOME {} is owned by uid {owner}, not {euid}; not tightening permissions",
+                    home.display()
+                );
+            }
+            HomeTighten::Tightened | HomeTighten::AlreadyPrivate => {}
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(home)?;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum HomeTighten {
+    Tightened,
+    AlreadyPrivate,
+    Symlink,
+    OtherOwner(u32),
+}
+
+/// Open `home` without following symlinks and tighten it to 0700 via the fd
+/// when it is owned by `euid` and has any group/other bits set.
+#[cfg(unix)]
+fn tighten_home_fd(home: &Path, euid: u32) -> std::io::Result<HomeTighten> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::unix::io::AsRawFd;
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(home)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            let code = e.raw_os_error();
+            if code == Some(libc::ELOOP) {
+                return Ok(HomeTighten::Symlink);
+            }
+            if code == Some(libc::ENOTDIR)
+                && fs::symlink_metadata(home)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false)
+            {
+                return Ok(HomeTighten::Symlink);
+            }
+            return Err(e);
+        }
+    };
+    let meta = file.metadata()?; // fstat on the fd
+    if meta.uid() != euid {
+        return Ok(HomeTighten::OtherOwner(meta.uid()));
+    }
+    if meta.mode() & 0o077 == 0 {
+        return Ok(HomeTighten::AlreadyPrivate);
+    }
+    // SAFETY: fd is valid for the lifetime of `file`.
+    let rc = unsafe { libc::fchmod(file.as_raw_fd(), 0o700) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(HomeTighten::Tightened)
+}
+
 #[derive(Debug, Clone)]
 pub struct Store {
     home: PathBuf,
@@ -66,7 +177,7 @@ impl Store {
 
     pub fn open(home: impl Into<PathBuf>) -> Result<Self> {
         let home = home.into();
-        fs::create_dir_all(&home)?;
+        ensure_private_home(&home)?;
         let home = fs::canonicalize(home)?;
         fs::create_dir_all(home.join("bindings"))?;
         fs::create_dir_all(home.join("workspaces"))?;
@@ -3267,6 +3378,92 @@ fn write_secret_file_new(path: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn open_creates_fresh_home_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("fresh").join("home");
+        Store::open(&home).unwrap();
+        let mode = fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "fresh home must be 0700, got {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_tightens_existing_0755_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+        Store::open(&home).unwrap();
+        let mode = fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "existing home must be tightened, got {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_does_not_chmod_through_symlinked_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        Store::open(&link).unwrap();
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "symlink target must not be chmod'ed, got {mode:o}"
+        );
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tighten_fd_skips_symlinked_home_leaving_target_0755() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        fs::create_dir(&target).unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let euid = unsafe { libc::geteuid() };
+        assert_eq!(tighten_home_fd(&link, euid).unwrap(), HomeTighten::Symlink);
+        let mode = fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "fd path must not chmod symlink target, got {mode:o}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tighten_fd_skips_home_owned_by_other_uid() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o755)).unwrap();
+        // Simulate another owner by passing an euid that does not match.
+        let other = unsafe { libc::geteuid() }.wrapping_add(1);
+        assert!(matches!(
+            tighten_home_fd(&home, other).unwrap(),
+            HomeTighten::OtherOwner(_)
+        ));
+        let mode = fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "other-owner home must not be chmod'ed, got {mode:o}"
+        );
+    }
     use super::*;
     use crate::binding::{BindingBody, Policy, ProviderBinding, Scope};
     use std::sync::{Mutex, MutexGuard};
