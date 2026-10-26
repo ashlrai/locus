@@ -23,6 +23,7 @@
 mod anchor;
 mod grant;
 mod http_session;
+mod stdio_lifetime;
 
 use anchor::{AnchorDecision, SessionAnchor};
 use anyhow::{bail, Context, Result};
@@ -361,6 +362,10 @@ struct RunMode {
 }
 
 fn main() {
+    if std::env::var_os(locus_core::workers::MCP_UPSTREAM_CHILD_ENV).is_some() {
+        eprintln!("locus-mcp: refusing recursive multiplexor launch from an upstream worker");
+        std::process::exit(1);
+    }
     if let Some(result) = locus_core::run_authority_anchor_server_if_requested() {
         if let Err(error) = result {
             eprintln!("authority anchor error: {error}");
@@ -531,14 +536,37 @@ fn env_truthy(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn teardown_stdio_workers(wait: bool) {
+    let manager = if wait {
+        Some(worker_manager().lock().unwrap_or_else(|e| e.into_inner()))
+    } else {
+        // A provider call may own this mutex forever. Forced disconnect must
+        // not wait on it; process exit closes its pipes as the final fallback.
+        worker_manager().try_lock().ok()
+    };
+    if let Some(mut manager) = manager {
+        for slot in manager.list() {
+            let _ = manager.teardown(&slot.key);
+        }
+    }
+}
+
 fn run_stdio() -> Result<()> {
-    let stdin = io::stdin();
+    // Static worker managers do not run Drop at process exit. Tear workers down
+    // on EOF, parent death, framing errors, and broken client output alike.
+    struct Teardown;
+    impl Drop for Teardown {
+        fn drop(&mut self) {
+            teardown_stdio_workers(true);
+        }
+    }
+    let _teardown = Teardown;
+    let input = stdio_lifetime::Input::start()?;
     let mut stdout = io::stdout();
-    let mut reader = stdin.lock();
     let mut seen_content_length = false;
 
     loop {
-        let Some((parsed, framing)) = read_frame(&mut reader)? else {
+        let Some((parsed, framing)) = input.next()? else {
             break; // EOF
         };
         seen_content_length |= framing == Framing::ContentLength;

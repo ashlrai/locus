@@ -18,6 +18,7 @@ mod exec_perf;
 mod exit;
 mod handshake;
 mod json_out;
+mod mcp_lifetime;
 mod phantom_preflight;
 mod phm_names;
 mod plans;
@@ -1218,6 +1219,19 @@ fn run_child(child: &mut Command, program: &str) -> Result<std::process::ExitSta
             source,
         })
     })
+}
+
+/// The MCP supervisor must itself follow its launching client's lifetime; the
+/// native server only sees this CLI as its immediate parent.
+fn run_mcp_child(child: &mut Command, program: &str) -> Result<std::process::ExitStatus> {
+    let parent = mcp_lifetime::prepare(child);
+    let spawned = child.spawn().map_err(|source| {
+        anyhow::Error::new(ChildSpawnError {
+            program: program.to_string(),
+            source,
+        })
+    })?;
+    Ok(mcp_lifetime::wait(spawned, parent)?)
 }
 
 /// Audit fields for a child run: its exit code (127/126 when it never
@@ -5049,7 +5063,7 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
         }
     }
 
-    let spawned = run_child(&mut child, &bin);
+    let spawned = run_mcp_child(&mut child, &bin);
     let (exit, spawn_error) = child_audit_fields(&spawned);
     if let Some((s, session)) = audit_ctx {
         s.audit(

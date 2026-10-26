@@ -7,13 +7,16 @@
  * 2. Else download the matching GitHub release asset (locus-<target>.tar.gz)
  * 3. Else fall back to `cargo install --git` and use ~/.cargo/bin/locus-mcp
  *
- * Note: locus-mcp is a long-running stdio MCP server — do not call it with
- * --version for health checks (it has no CLI version flag).
+ * The wrapper owns the child lifetime for stdio clients; HTTP is daemon mode.
  */
 
-const { execFileSync, spawnSync } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const {
   chmodSync,
+  closeSync,
+  openSync,
+  readSync,
+  realpathSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -33,6 +36,9 @@ const VERSION = "0.5.2";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus-mcp";
 const CARGO_PACKAGE = "locus-mcp";
+// Inherited by every launch, including shell shims that hide their target.
+const RECURSION_MARKER = "LOCUS_MCP_WRAPPER_ACTIVE";
+const INITIAL_PARENT = process.ppid;
 // `cargo install` takes the crate as a positional argument; it has no --package flag.
 const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} ${CARGO_PACKAGE} --locked`;
 const CACHE_DIR = join(
@@ -99,26 +105,39 @@ function getVersionSidecarPath(binaryPath) {
   return `${binaryPath}.version`;
 }
 
-function download(url) {
+function checkPreparation(signal) {
+  if (signal?.aborted) throw new Error("client disconnected during binary preparation");
+}
+
+function download(url, signal, redirects = 0) {
+  checkPreparation(signal);
+  if (redirects > 5) return Promise.reject(new Error("too many release redirects"));
   return new Promise((resolve, reject) => {
-    https
-      .get(url, (res) => {
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          // Drain every response we do not read, or its socket keeps the
-          // process alive after the download finishes.
-          res.resume();
-          return download(res.headers.location).then(resolve).catch(reject);
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-        }
-        const chunks = [];
-        res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () => resolve(Buffer.concat(chunks)));
-        res.on("error", reject);
-      })
-      .on("error", reject);
+    const request = https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        cleanup();
+        return download(res.headers.location, signal, redirects + 1).then(resolve, reject);
+      }
+      if (res.statusCode !== 200) {
+        res.resume();
+        cleanup();
+        return reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+      }
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => { cleanup(); resolve(Buffer.concat(chunks)); });
+      res.on("error", (error) => { cleanup(); reject(error); });
+    });
+    const abort = () => request.destroy(new Error("client disconnected during download"));
+    const deadline = setTimeout(() => request.destroy(new Error("release download timed out")), 30_000);
+    const cleanup = () => {
+      clearTimeout(deadline);
+      signal?.removeEventListener("abort", abort);
+    };
+    request.on("error", (error) => { cleanup(); reject(error); });
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
   });
 }
 
@@ -135,7 +154,7 @@ function parseSha256File(buf, expectedFilename) {
 }
 
 function isCachedBinaryStale(binaryPath) {
-  // locus-mcp has no --version CLI — use sidecar only
+  // Validate the cache without executing an untrusted candidate for --version.
   const sidecar = getVersionSidecarPath(binaryPath);
   if (!existsSync(sidecar)) {
     // Unknown version: treat as usable if file exists (avoid re-download loop)
@@ -182,13 +201,32 @@ function findBinaryInDir(dir, binaryFilename) {
   return null;
 }
 
-function extractBinaryFromArchive(archivePath, binaryPath) {
+// Reuse group supervision rather than execFile's abort callback: cancellation
+// must reap the extractor before the wrapper exits, including stubborn shims.
+async function runPreparationCommand(binary, args, signal) {
+  checkPreparation(signal);
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener("abort", abort, { once: true });
+  const timer = setTimeout(abort, 10_000);
+  try {
+    const status = await launch(binary, args, true, controller.signal, true, true);
+    checkPreparation(controller.signal);
+    if (status !== 0) throw new Error("release extraction failed");
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
+  }
+}
+
+async function extractBinaryFromArchive(archivePath, binaryPath, signal) {
+  checkPreparation(signal);
   const stagingDir = mkdtempSync(join(CACHE_DIR, ".extract-"));
   const binaryFilename = getBinaryFilename();
 
   try {
     if (process.platform === "win32") {
-      execFileSync(
+      await runPreparationCommand(
         "powershell",
         [
           "-NoProfile",
@@ -198,10 +236,10 @@ function extractBinaryFromArchive(archivePath, binaryPath) {
           archivePath,
           stagingDir,
         ],
-        { stdio: "pipe" }
+        signal
       );
     } else {
-      execFileSync("tar", ["xzf", archivePath, "-C", stagingDir], { stdio: "pipe" });
+      await runPreparationCommand("tar", ["xzf", archivePath, "-C", stagingDir], signal);
     }
 
     const extractedBinaryPath = findBinaryInDir(stagingDir, binaryFilename);
@@ -233,19 +271,26 @@ function cargoBinPath() {
 }
 
 function isNodeShim(path) {
+  let fd;
   try {
-    const real = require("fs").realpathSync(path);
-    if (real === require("fs").realpathSync(__filename)) return true;
-    const head = readFileSync(real).subarray(0, 64).toString("utf8");
-    return head.startsWith("#!") && head.includes("node");
+    const real = realpathSync(path);
+    if (real === realpathSync(__filename)) return true;
+    // Read a bounded prefix: native binaries can be tens of megabytes.
+    fd = openSync(real, "r");
+    const prefix = Buffer.alloc(256);
+    const head = prefix.subarray(0, readSync(fd, prefix, 0, prefix.length, 0)).toString("utf8");
+    return head.startsWith("#!") && /\bnode(?:js)?\b/.test(head.split(/\r?\n/, 1)[0]);
   } catch {
-    return false;
+    // An unreadable candidate cannot be established as a native executable.
+    return true;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
 function tryExistingOnPath() {
   const which = process.platform === "win32" ? "where" : "which";
-  const result = spawnSync(which, [BINARY_NAME], { encoding: "utf8" });
+  const result = spawnSync(which, [BINARY_NAME], { encoding: "utf8", timeout: 1000, killSignal: "SIGKILL" });
   if (result.status === 0) {
     // Skip this npm shim itself (and any other node wrapper): `which` finds
     // the npm-installed bin first, and executing it recurses forever.
@@ -257,16 +302,17 @@ function tryExistingOnPath() {
     }
   }
   const cargoPath = cargoBinPath();
-  if (existsSync(cargoPath)) {
+  if (existsSync(cargoPath) && !isNodeShim(cargoPath)) {
     return cargoPath;
   }
   return null;
 }
 
-function installViaCargo() {
+async function installViaCargo(signal) {
+  checkPreparation(signal);
   console.error(`Falling back to: ${INSTALL_FROM_SOURCE}`);
   const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
-  const result = spawnSync(
+  const status = await launch(
     cargo,
     [
       "install",
@@ -276,21 +322,25 @@ function installViaCargo() {
       "--locked",
       "--force",
     ],
-    { stdio: "inherit", env: process.env }
+    true,
+    signal,
+    true
   );
-  if (result.status !== 0) {
+  checkPreparation(signal);
+  if (status !== 0) {
     throw new Error(
-      `cargo install failed (exit ${result.status}). Install Rust from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
+      `cargo install failed (exit ${status}). Install Rust from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
     );
   }
   const path = cargoBinPath();
-  if (!existsSync(path)) {
-    throw new Error(`cargo install succeeded but ${path} not found`);
+  if (!existsSync(path) || isNodeShim(path)) {
+    throw new Error("cargo install did not produce a native locus-mcp executable");
   }
   return path;
 }
 
-async function downloadReleaseBinary(binaryPath) {
+async function downloadReleaseBinary(binaryPath, signal) {
+  checkPreparation(signal);
   const target = getPlatformTarget();
   const isWindows = process.platform === "win32";
   const archiveExt = isWindows ? "zip" : "tar.gz";
@@ -306,13 +356,14 @@ async function downloadReleaseBinary(binaryPath) {
   try {
     let expected = null;
     try {
-      const sumBuf = await download(sha256Url);
+      const sumBuf = await download(sha256Url, signal);
       expected = parseSha256File(sumBuf, archiveName);
     } catch {
       expected = null;
     }
 
-    const data = await download(url);
+    checkPreparation(signal);
+    const data = await download(url, signal);
 
     if (expected) {
       const actual = crypto.createHash("sha256").update(data).digest("hex");
@@ -333,7 +384,7 @@ async function downloadReleaseBinary(binaryPath) {
     }
 
     writeFileSync(archivePath, data);
-    extractBinaryFromArchive(archivePath, binaryPath);
+    await extractBinaryFromArchive(archivePath, binaryPath, signal);
     removeIfExists(archivePath);
     console.error(`Installed locus-mcp to ${binaryPath}`);
     return binaryPath;
@@ -343,10 +394,11 @@ async function downloadReleaseBinary(binaryPath) {
   }
 }
 
-async function ensureBinary() {
+async function ensureBinary(signal) {
+  checkPreparation(signal);
   const binaryPath = getBinaryPath();
 
-  if (existsSync(binaryPath) && !isCachedBinaryStale(binaryPath)) {
+  if (existsSync(binaryPath) && !isNodeShim(binaryPath) && !isCachedBinaryStale(binaryPath)) {
     return binaryPath;
   }
   if (existsSync(binaryPath) && isCachedBinaryStale(binaryPath)) {
@@ -368,39 +420,183 @@ async function ensureBinary() {
   }
   if (target && !hasPrebuiltBinary(target)) {
     console.error(cargoFallbackMessage(process, "no-prebuilt"));
-    try {
-      return installViaCargo();
-    } catch (cargoErr) {
-      console.error(cargoErr.message);
-      process.exit(1);
-    }
+    return installViaCargo(signal);
   }
 
   try {
-    return await downloadReleaseBinary(binaryPath);
+    return await downloadReleaseBinary(binaryPath, signal);
   } catch (err) {
+    checkPreparation(signal);
     console.error(`Failed to download locus-mcp: ${err.message}`);
     console.error(cargoFallbackMessage(process, "download-failed"));
-    try {
-      return installViaCargo();
-    } catch (cargoErr) {
-      console.error(cargoErr.message);
-      process.exit(1);
-    }
+    return installViaCargo(signal);
   }
 }
 
-async function main() {
-  const binary = await ensureBinary();
-  const args = process.argv.slice(2);
+function isHttpMode(args, env = process.env) {
+  return args.some((arg) => arg === "--http" || arg === "-H" || arg.startsWith("--http=")) || /^(1|true|on|yes)$/i.test((env.LOCUS_MCP_HTTP || "").trim());
+}
 
-  try {
-    execFileSync(binary, args, { stdio: "inherit" });
-  } catch (err) {
-    process.exit(err.status || 1);
+function launch(binary, args, httpMode, signal, ignoreInput = false, ignoreOutput = false) {
+  checkPreparation(signal);
+  return new Promise((resolve, reject) => {
+    const initialParent = INITIAL_PARENT;
+    const grouped = process.platform !== "win32";
+    const child = spawn(binary, args, {
+      env: { ...process.env, [RECURSION_MARKER]: "1" },
+      // A separate group lets cancellation collect shell-shim descendants too.
+      detached: grouped,
+      stdio: [ignoreInput ? "ignore" : httpMode ? "inherit" : "pipe", ignoreOutput ? "ignore" : "inherit", ignoreOutput ? "ignore" : "inherit"],
+    });
+    let stopping = false;
+    let timer;
+    let watchdog;
+    let requestedStatus;
+    const signals = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
+    const handlers = new Map();
+    const kill = (signal) => {
+      try {
+        if (grouped && child.pid) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch (err) {
+        if (err.code !== "ESRCH") throw err;
+      }
+    };
+    const stop = (status = 0, signal = "SIGTERM", graceful = false) => {
+      if (stopping) return;
+      stopping = true;
+      requestedStatus = graceful ? undefined : status;
+      process.stdin.unpipe(child.stdin);
+      if (child.stdin) child.stdin.end();
+      const terminate = () => {
+        requestedStatus = status;
+        kill(signal);
+        // A server ignoring termination must not keep an ended session alive.
+        timer = setTimeout(() => kill("SIGKILL"), 1000);
+      };
+      // Let the server drain its final request and answer after EOF; bound the
+      // grace so a server ignoring EOF still cannot outlive an ended session.
+      if (graceful) timer = setTimeout(terminate, 1000);
+      else terminate();
+    };
+    const eof = () => stop(0, "SIGTERM", true);
+    const inputError = () => stop(1);
+    const cleanup = () => {
+      signal?.removeEventListener("abort", cancel);
+      clearInterval(watchdog);
+      clearTimeout(timer);
+      process.stdin.removeListener("end", eof);
+      process.stdin.removeListener("close", eof);
+      process.stdin.removeListener("error", inputError);
+      if (!httpMode) {
+        process.stdin.unpipe(child.stdin);
+        process.stdin.pause();
+      }
+      for (const [signal, handler] of handlers) process.removeListener(signal, handler);
+    };
+    const cancel = () => stop(0);
+    signal?.addEventListener("abort", cancel, { once: true });
+    if (signal?.aborted) cancel();
+    for (const [signal, status] of Object.entries(signals)) {
+      const handler = () => stop(status, signal);
+      handlers.set(signal, handler);
+      process.on(signal, handler);
+    }
+    child.once("error", (err) => { cleanup(); reject(err); });
+    child.once("close", (code, signal) => {
+      // The immediate child may have exited while descendants retained pipes.
+      kill("SIGKILL");
+      cleanup();
+      resolve(requestedStatus ?? code ?? signals[signal] ?? 1);
+    });
+    if (!httpMode) {
+      // A child that fails early can close its input before its exit event.
+      // Preserve that child exit code instead of converting EPIPE to success.
+      child.stdin.on("error", (err) => { if (err.code !== "EPIPE") stop(1); });
+      process.stdin.once("end", eof);
+      process.stdin.once("close", eof);
+      process.stdin.once("error", inputError);
+      process.stdin.pipe(child.stdin);
+      if (process.stdin.readableEnded) eof();
+      // stdin can remain open in another process after the original client dies.
+      watchdog = setInterval(() => {
+        if (initialParent <= 1 || process.ppid !== initialParent) stop();
+        else {
+          try { process.kill(initialParent, 0); }
+          catch (err) { if (err.code === "ESRCH") stop(); }
+        }
+      }, 100);
+    }
+  });
+}
+
+// While lazy installation runs, consume input only into a bounded buffer. This
+// observes EOF without losing the client's initialize frame, and keeps the
+// parent watcher responsive during downloads and cargo compilation.
+function prepareInput() {
+  const controller = new AbortController();
+  const chunks = [];
+  let bytes = 0;
+  const abort = () => controller.abort();
+  const error = abort;
+  const data = (chunk) => {
+    bytes += chunk.length;
+    if (bytes > 8 * 1024 * 1024) error();
+    else chunks.push(chunk);
+  };
+  process.stdin.on("data", data);
+  process.stdin.once("end", abort);
+  process.stdin.once("close", abort);
+  process.stdin.once("error", error);
+  const watchdog = setInterval(() => {
+    if (INITIAL_PARENT <= 1 || process.ppid !== INITIAL_PARENT) abort();
+    else {
+      try { process.kill(INITIAL_PARENT, 0); }
+      catch (err) { if (err.code === "ESRCH") abort(); }
+    }
+  }, 100);
+  let finished = false;
+  return {
+    signal: controller.signal,
+    finish: () => {
+      if (finished) return;
+      finished = true;
+      clearInterval(watchdog);
+      process.stdin.pause();
+      process.stdin.removeListener("data", data);
+      process.stdin.removeListener("end", abort);
+      process.stdin.removeListener("close", abort);
+      process.stdin.removeListener("error", error);
+      if (!controller.signal.aborted) {
+        for (let i = chunks.length - 1; i >= 0; i--) process.stdin.unshift(chunks[i]);
+      }
+    },
+  };
+}
+
+async function main() {
+  // Check before resolution/probing: even a copied or shell-disguised shim
+  // must never reach a second download, cargo build, or child launch.
+  if ([RECURSION_MARKER, "LOCUS_MCP_UPSTREAM_CHILD"].some((key) => Object.prototype.hasOwnProperty.call(process.env, key))) {
+    console.error("locus-mcp: refusing recursive npm wrapper launch");
+    process.exit(1);
   }
-  // Exit explicitly: a lingering download socket must never hold the client.
-  process.exit(0);
+  const args = process.argv.slice(2);
+  // One-shot CLI queries must print their answer even when stdin is /dev/null.
+  const standalone = isHttpMode(args) || args.some((arg) => ["--version", "-V", "--help", "-h"].includes(arg));
+  const preparation = standalone ? null : prepareInput();
+  try {
+    const binary = await ensureBinary(preparation?.signal);
+    if (isNodeShim(binary)) throw new Error("refusing to launch a locus-mcp Node shim as a native binary");
+    checkPreparation(preparation?.signal);
+    preparation?.finish();
+    process.exit(await launch(binary, args, standalone));
+  } catch (err) {
+    preparation?.finish();
+    if (preparation?.signal.aborted) process.exit(1);
+    console.error(`locus-mcp: ${err.message}`);
+    process.exit(1);
+  }
 }
 
 if (require.main === module) {
