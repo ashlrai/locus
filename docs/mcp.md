@@ -3,6 +3,8 @@
 `locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding (provider tools need a supervised launch; see [below](#provider-tools-need-a-supervised-launch)). It is the agent-facing half of the identity plane.
 
 CLI and MCP share the same store and seal under `~/.locus` (or `LOCUS_HOME`).
+For per-agent graph grants over multi-tenant HTTP, see the
+[swarm broker](./swarm-broker.md) (`locus serve --swarm graph.json`).
 `locus exec --no-resolve`, `locus run --no-resolve`, and
 `locus ci run --no-resolve` are manual,
 identity-only diagnostics: they cannot resolve provider credentials or spawn
