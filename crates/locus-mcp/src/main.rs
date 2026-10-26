@@ -636,8 +636,34 @@ fn dispatch_rpc(msg: &Value, scope: &RequestScope) -> Option<Value> {
         return None;
     }
 
+    if let Some(requested) = params.pointer("/_meta/io.modelcontextprotocol~1protocolVersion") {
+        if !requested
+            .as_str()
+            .is_some_and(|v| SUPPORTED_PROTOCOL_VERSIONS.contains(&v))
+        {
+            return Some(json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": { "code": -32022, "message": "unsupported protocol version",
+                    "data": { "requested": requested, "supported": SUPPORTED_PROTOCOL_VERSIONS } }
+            }));
+        }
+    }
+
     let swarm = SWARM_BROKER.get().is_some();
     let result = match method {
+        "server/discover" => Ok(json!({
+            "supportedVersions": SUPPORTED_PROTOCOL_VERSIONS,
+            "capabilities": if swarm { json!({"tools": {"listChanged": true}}) } else {
+                json!({
+                    "tools": {"listChanged": true},
+                    "resources": {"subscribe": false, "listChanged": true},
+                    "prompts": {"listChanged": true}
+                })
+            },
+            "_meta": { "io.modelcontextprotocol/serverInfo": {
+                "name": "locus-mcp", "version": VERSION
+            }}
+        })),
         "initialize" => Ok(handle_initialize(&params, scope)),
         "ping" => Ok(json!({})),
         "tools/list" => handle_tools_list(scope),
@@ -657,11 +683,24 @@ fn dispatch_rpc(msg: &Value, scope: &RequestScope) -> Option<Value> {
     };
 
     Some(match result {
-        Ok(r) => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": r,
-        }),
+        Ok(mut r) => {
+            // These additive fields are also safe for legacy clients. Apply at
+            // the wire boundary so empty and tool-error results are covered.
+            r["resultType"] = json!("complete");
+            if matches!(
+                method,
+                "server/discover"
+                    | "tools/list"
+                    | "resources/list"
+                    | "resources/read"
+                    | "prompts/list"
+            ) {
+                // Catalogs can change on a human pin and contain tenant data.
+                r["ttlMs"] = json!(0);
+                r["cacheScope"] = json!("private");
+            }
+            json!({ "jsonrpc": "2.0", "id": id, "result": r })
+        }
         Err(err) => json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -2484,10 +2523,9 @@ fn agent_instructions(session_anchor: Option<&SessionAnchor>) -> String {
     lines.join("\n")
 }
 
-/// MCP protocol revisions this server speaks, newest first. Everything
-/// locus-mcp uses (tools, resources, prompts, listChanged, instructions) is
-/// unchanged across them.
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+/// MCP protocol revisions this server speaks, newest first.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2026-07-28", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// MCP version negotiation: echo the client's requested revision when we
 /// support it; otherwise answer our latest and let the client decide whether

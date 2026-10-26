@@ -123,7 +123,7 @@ impl Server {
             Some(&rpc(
                 "initialize",
                 json!({
-                    "protocolVersion": "2024-11-05", "capabilities": {},
+                    "protocolVersion": "2026-07-28", "capabilities": {},
                     "clientInfo": {"name":"swarm-test", "version":"1"}
                 }),
             )),
@@ -136,6 +136,9 @@ impl Server {
             response.get("result").is_some(),
             "initialize result required"
         );
+        assert_eq!(response["result"]["protocolVersion"], "2026-07-28");
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(response["result"]["serverInfo"]["name"], "locus-mcp");
         headers
             .lines()
             .find_map(|line| {
@@ -258,6 +261,16 @@ fn same_tenant_agents_receive_disjoint_exact_catalogs_and_successful_granted_cal
     let a = w.srv.initialize(&w.token_a);
     let b = w.srv.initialize(&w.token_b);
     let list_a = w.srv.rpc(&w.token_a, &a, "tools/list", json!({}));
+    assert_eq!(list_a["result"]["resultType"], "complete");
+    assert_eq!(list_a["result"]["ttlMs"], 0);
+    assert_eq!(list_a["result"]["cacheScope"], "private");
+    let discovered = w.srv.rpc(&w.token_a, &a, "server/discover", json!({}));
+    assert_eq!(discovered["result"]["resultType"], "complete");
+    assert_eq!(discovered["result"]["ttlMs"], 0);
+    assert_eq!(discovered["result"]["cacheScope"], "private");
+    assert!(discovered["result"]["capabilities"]
+        .get("resources")
+        .is_none());
     let mut names_a = tools(&list_a);
     names_a.sort_unstable();
     assert_eq!(names_a, ["github.scope", "locus_whoami"]);

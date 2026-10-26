@@ -138,10 +138,11 @@ fn initialize_negotiates_protocol_version() {
     for (requested, expected) in [
         (Some("2024-11-05"), "2024-11-05"),
         (Some("2025-03-26"), "2025-03-26"),
+        (Some("2026-07-28"), "2026-07-28"),
         (Some("2025-06-18"), "2025-06-18"),
         // Newer or unknown revision: answer our latest; the client decides.
-        (Some("2099-01-01"), "2025-06-18"),
-        (None, "2025-06-18"),
+        (Some("2099-01-01"), "2026-07-28"),
+        (None, "2026-07-28"),
     ] {
         let mut c = Client::spawn(dir.path());
         let result = c.initialize(requested);
@@ -151,7 +152,7 @@ fn initialize_negotiates_protocol_version() {
         );
         // The session keeps working after negotiation.
         let pong = c.request(2, "ping", json!({}));
-        assert_eq!(pong["result"], json!({}));
+        assert_eq!(pong["result"], json!({"resultType": "complete"}));
     }
 }
 
@@ -177,7 +178,7 @@ fn batch_and_non_object_messages_get_an_error_instead_of_silence() {
     // A client response (no method) is not answered; the next request is.
     c.send_raw(r#"{"jsonrpc":"2.0","id":99,"result":{}}"#);
     let pong = c.request(6, "ping", json!({}));
-    assert_eq!(pong["result"], json!({}));
+    assert_eq!(pong["result"], json!({"resultType": "complete"}));
 }
 
 #[test]
@@ -193,7 +194,7 @@ fn unparseable_line_gets_parse_error_with_null_id_and_server_keeps_serving() {
     assert_eq!(resp["error"]["code"], -32700, "{resp}");
 
     let pong = c.request(7, "ping", json!({}));
-    assert_eq!(pong["result"], json!({}));
+    assert_eq!(pong["result"], json!({"resultType": "complete"}));
 }
 
 #[test]

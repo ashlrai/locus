@@ -737,3 +737,24 @@ LOCUS_HOME=/tmp/locus-debug locus pin personal
 - [docs/adapters.md](./adapters.md) — add provider tools  
 - [README.md](../README.md) — CLI quick start  
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — build and test  
+
+### Protocol conformance
+
+Locus negotiates MCP `2026-07-28` and retains its existing legacy revisions.
+`server/discover` advertises supported revisions and capabilities without
+reinitializing the identity anchor. Requests can declare their revision in
+`params._meta["io.modelcontextprotocol/protocolVersion"]`; unsupported revisions
+receive error `-32022` before method dispatch.
+
+All successful JSON-RPC results include `resultType: "complete"`, including
+empty results and tool results reporting `isError`. JSON-RPC errors remain error
+envelopes. Discovery, catalog lists, and resource reads advertise `ttlMs: 0`
+and `cacheScope: "private"`: their contents can change with the human-controlled
+pin and must never be reused across authorization contexts.
+
+The raw-wire regression coverage lives in `crates/locus-mcp/tests/`: stdio tests
+exercise both framing formats, and HTTP tests cover ordinary, tenant, and swarm
+servers. The implementation name remains `locus-mcp`, without double underscores.
+Tool namespaces are separate from server implementation names.
+
+Reference: [MCP 2026-07-28 schema](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2026-07-28/schema.ts).
