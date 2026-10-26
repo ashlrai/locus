@@ -4867,13 +4867,17 @@ fn cmd_adapter_index(sub: AdapterIndexCmd, json: bool) -> Result<()> {
             let index = locus_core::marketplace::fetch_index(&url)?;
             let name = name.unwrap_or(index.name);
             validate_name_component("index name", &name)?;
+            let safe_url = locus_core::marketplace::redact_index_url(&url);
             if sources
                 .iter()
-                .any(|source| source.name == name || source.url == url)
+                .any(|source| source.name == name || source.url == safe_url)
             {
                 bail!("index name or URL is already registered");
             }
-            sources.push(locus_core::marketplace::IndexSource { name, url });
+            sources.push(locus_core::marketplace::IndexSource {
+                name,
+                url: safe_url,
+            });
             locus_core::marketplace::save_index_sources(s.home(), &sources)?;
         }
         AdapterIndexCmd::Remove { name } => {

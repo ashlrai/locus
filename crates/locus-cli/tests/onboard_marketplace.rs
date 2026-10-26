@@ -165,7 +165,7 @@ fn marketplace_index_add_search_install_fail_closed() {
     let (base, listener) = serve_index();
     // index add (1 hit) + install's index fetch (1 hit) + search (1 hit)
     run_server(listener, base.clone(), 8);
-    let index_url = format!("{base}/index.json");
+    let index_url = format!("{base}/index.json?token=fixture-never-persist");
 
     // Add: fetches + parses before registering.
     let out = locus(
@@ -176,6 +176,16 @@ fn marketplace_index_add_search_install_fail_closed() {
         ],
     );
     assert!(out.status.success(), "index add failed: {out:?}");
+    let add_stdout = String::from_utf8_lossy(&out.stdout);
+    let add_stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!add_stdout.contains("fixture-never-persist"));
+    assert!(!add_stderr.contains("fixture-never-persist"));
+    let index_config = std::fs::read_to_string(home.path().join("adapter-indexes.toml")).unwrap();
+    assert!(
+        !index_config.contains("token"),
+        "query keys must not persist"
+    );
+    assert!(index_config.contains(&format!("{base}/index.json")));
 
     // List shows it.
     let out = locus(
@@ -186,6 +196,15 @@ fn marketplace_index_add_search_install_fail_closed() {
     assert!(out.status.success(), "index list failed: {out:?}");
     let stdout = String::from_utf8(out.stdout).unwrap();
     assert!(stdout.contains("test"), "list must show the index name");
+    assert!(!stdout.contains("fixture-never-persist"));
+    let out = locus(
+        home.path(),
+        cwd.path(),
+        &["adapter", "registry", "index", "list", "--json"],
+    );
+    assert!(out.status.success(), "index list --json failed: {out:?}");
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("fixture-never-persist"));
+    assert!(!stdout.contains("token"));
 
     // Search finds the adapter (human + JSON).
     let out = locus(home.path(), cwd.path(), &["adapter", "search", "linear"]);

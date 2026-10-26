@@ -307,7 +307,7 @@ pub fn load_index_sources(home: &Path) -> Result<Vec<IndexSource>> {
         .map_err(|_| LocusError::msg("invalid community metadata text"))?;
     let file: File = toml::from_str(&text)
         .map_err(|e| LocusError::msg(format!("parse {}: {e}", path.display())))?;
-    Ok(file.source)
+    Ok(file.source.iter().map(redact_index_source).collect())
 }
 
 /// Persist index sources (mode 0600).
@@ -316,11 +316,35 @@ pub fn save_index_sources(home: &Path, sources: &[IndexSource]) -> Result<()> {
     struct File<'a> {
         source: &'a [IndexSource],
     }
-    let text = toml::to_string_pretty(&File { source: sources })
-        .map_err(|e| LocusError::msg(format!("serialize index sources: {e}")))?;
+    let safe_sources: Vec<_> = sources.iter().map(redact_index_source).collect();
+    let text = toml::to_string_pretty(&File {
+        source: &safe_sources,
+    })
+    .map_err(|e| LocusError::msg(format!("serialize index sources: {e}")))?;
     let path = home.join(INDEXES_FILE);
     atomic_metadata_write(&path, text.as_bytes())?;
     Ok(())
+}
+
+/// Remove URL credentials and query parameters before an index URL is
+/// persisted or exposed. Invalid legacy values are replaced wholesale so
+/// malformed strings cannot smuggle credentials into CLI output.
+pub fn redact_index_url(raw: &str) -> String {
+    Url::parse(raw)
+        .map(|mut url| {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.to_string()
+        })
+        .unwrap_or_else(|_| "<invalid URL>".to_owned())
+}
+
+fn redact_index_source(source: &IndexSource) -> IndexSource {
+    IndexSource {
+        name: source.name.clone(),
+        url: redact_index_url(&source.url),
+    }
 }
 
 /// Parse the URL rather than accepting host prefixes or userinfo lookalikes.
@@ -437,7 +461,7 @@ pub fn search_indexes(sources: &[IndexSource], query: &str) -> (Vec<SearchHit>, 
             if q.is_empty() || haystack.contains(&q) {
                 hits.push(SearchHit {
                     index_name: src.name.clone(),
-                    index_url: src.url.clone(),
+                    index_url: redact_index_url(&src.url),
                     entry,
                 });
             }
@@ -897,6 +921,31 @@ mod tests {
         let back = load_index_sources(&home).unwrap();
         assert_eq!(back.len(), 1);
         assert_eq!(back[0].name, "curated");
+    }
+
+    #[test]
+    fn index_source_persistence_redacts_query_and_userinfo() {
+        let home = tmp_home("redacted-indexes");
+        save_index_sources(
+            &home,
+            &[IndexSource {
+                name: "private-index".into(),
+                url: "https://alice:password@example.com/index.json?token=never-store&mode=full"
+                    .into(),
+            }],
+        )
+        .unwrap();
+
+        let persisted = std::fs::read_to_string(home.join(INDEXES_FILE)).unwrap();
+        assert!(!persisted.contains("alice"));
+        assert!(!persisted.contains("password"));
+        assert!(!persisted.contains("token"));
+        assert!(!persisted.contains("mode"));
+        assert!(persisted.contains("https://example.com/index.json"));
+        assert_eq!(
+            load_index_sources(&home).unwrap()[0].url,
+            "https://example.com/index.json"
+        );
     }
 
     #[test]

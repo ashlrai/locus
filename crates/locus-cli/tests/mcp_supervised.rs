@@ -103,12 +103,15 @@ fn supervised_launch_hands_child_executor_capability_and_no_control_authority() 
         "control authority must never reach the agent-facing server"
     );
     assert_eq!(
-        env.get("LOCUS_HOME").map(String::as_str),
-        Some(home.path().to_str().unwrap())
+        std::fs::canonicalize(env.get("LOCUS_HOME").expect("LOCUS_HOME is set")).unwrap(),
+        std::fs::canonicalize(home.path()).unwrap(),
+        "LOCUS_HOME stays scoped to the configured Locus home"
     );
+    let worker_home = env.get("LOCUS_WORKER_HOME").expect("worker home is set");
+    let child_home = env.get("HOME").expect("child HOME is set");
     assert_eq!(
-        env.get("LOCUS_WORKER_HOME"),
-        env.get("HOME"),
+        std::fs::canonicalize(worker_home).unwrap(),
+        std::fs::canonicalize(child_home).unwrap(),
         "HOME is the isolated worker home, as under locus exec"
     );
     assert_eq!(env.get("LOCUS_CLIENT").map(String::as_str), Some("claude"));
