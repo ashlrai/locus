@@ -1,7 +1,7 @@
 //! Process exit codes: the one table every `locus` command maps to.
 //!
-//! Documented in `docs/agent-contract.md` § Exit codes (a test keeps the two
-//! in sync). Values are stable; a new meaning gets a new variant, never a
+//! Documented in `docs/agent-contract.md` and `docs/exit-codes.md` (tests keep
+//! the tables in sync). Values are stable; a new meaning gets a new variant, never a
 //! reused number. `exec`, `run`, `ci run` and `mcp --supervised` pass the
 //! child's own exit code through instead (`128 + signal` when a signal killed
 //! it), so for those commands only 126/127 come from this table.
@@ -30,15 +30,27 @@ pub(crate) enum ExitCode {
     NotFound,
     /// The stdout reader went away (`locus doctor | head -1`): 128 + SIGPIPE.
     StdoutClosed,
+    /// An action was explicitly refused by policy or an authority gate.
+    Refused,
+    /// The operator must establish a fresh pin before retrying.
+    RepinRequired,
+    /// The relevant pin, credential, or authorization has expired.
+    Expired,
+    /// Local Locus configuration is invalid or incomplete.
+    Misconfig,
 }
 
 impl ExitCode {
     /// Every variant, in table order (docs + tests iterate this).
-    pub(crate) const ALL: [ExitCode; 7] = [
+    pub(crate) const ALL: [ExitCode; 11] = [
         Self::Success,
         Self::Failure,
         Self::Unsafe,
         Self::Usage,
+        Self::Refused,
+        Self::RepinRequired,
+        Self::Expired,
+        Self::Misconfig,
         Self::CannotExecute,
         Self::NotFound,
         Self::StdoutClosed,
@@ -52,6 +64,10 @@ impl ExitCode {
             Self::CannotExecute => 126,
             Self::NotFound => 127,
             Self::StdoutClosed => 141,
+            Self::Refused => 3,
+            Self::RepinRequired => 4,
+            Self::Expired => 5,
+            Self::Misconfig => 6,
         }
     }
 
@@ -65,6 +81,10 @@ impl ExitCode {
             Self::CannotExecute => "cannot_execute",
             Self::NotFound => "not_found",
             Self::StdoutClosed => "stdout_closed",
+            Self::Refused => "refused",
+            Self::RepinRequired => "repin_required",
+            Self::Expired => "expired",
+            Self::Misconfig => "misconfig",
         }
     }
 
@@ -79,6 +99,10 @@ impl ExitCode {
             Self::CannotExecute => "child program exists but is not executable (exec/run/ci run)",
             Self::NotFound => "child program not found (exec/run/ci run)",
             Self::StdoutClosed => "stdout closed by the reader (128 + SIGPIPE)",
+            Self::Refused => "action refused by policy or an authority gate",
+            Self::RepinRequired => "human must establish a fresh pin before retrying",
+            Self::Expired => "pin, credential, or authorization expired",
+            Self::Misconfig => "local configuration is invalid or incomplete",
         }
     }
 
@@ -168,6 +192,27 @@ mod tests {
         assert!(names
             .iter()
             .all(|n| n.chars().all(|c| c.is_ascii_lowercase() || c == '_')));
+    }
+
+    #[test]
+    fn named_agent_outcomes_have_fixed_codes_and_names() {
+        assert_eq!(
+            [
+                (ExitCode::Refused.code(), ExitCode::Refused.name()),
+                (
+                    ExitCode::RepinRequired.code(),
+                    ExitCode::RepinRequired.name()
+                ),
+                (ExitCode::Expired.code(), ExitCode::Expired.name()),
+                (ExitCode::Misconfig.code(), ExitCode::Misconfig.name()),
+            ],
+            [
+                (3, "refused"),
+                (4, "repin_required"),
+                (5, "expired"),
+                (6, "misconfig")
+            ]
+        );
     }
 
     #[test]
