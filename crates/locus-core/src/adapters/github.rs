@@ -108,6 +108,10 @@ fn check_repo_allowed(
 }
 
 impl ProviderAdapter for GithubAdapter {
+    fn cli_name(&self) -> Option<&'static str> {
+        Some("gh")
+    }
+
     fn name(&self) -> &'static str {
         "github"
     }
