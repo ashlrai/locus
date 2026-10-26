@@ -180,44 +180,16 @@ fn trust_file_to_keys(doc: &AdapterTrustKeysFile) -> Result<Vec<RegistryTrustKey
             )));
         }
         let scheme = entry.scheme.trim().to_ascii_lowercase();
-        let key = match scheme.as_str() {
-            SIG_SCHEME_ED25519 => {
-                let material = entry
-                    .public_key_b64
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        LocusError::msg(format!(
-                            "trust key `{id}` scheme ed25519 requires public_key_b64"
-                        ))
-                    })?;
-                let k = RegistryTrustKey::ed25519_public(id, material);
-                k.ed25519_verifying_key()?;
-                k
-            }
-            SIG_SCHEME_HMAC_SHA256 => {
-                let material = entry
-                    .secret_hex
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        LocusError::msg(format!(
-                            "trust key `{id}` scheme hmac-sha256 requires secret_hex"
-                        ))
-                    })?;
-                let k = RegistryTrustKey::hmac_sha256(id, material);
-                k.secret_bytes()?;
-                k
-            }
-            other => {
-                return Err(LocusError::msg(format!(
-                    "trust key `{id}`: unknown scheme `{other}` (want `{SIG_SCHEME_ED25519}` or `{SIG_SCHEME_HMAC_SHA256}`)"
-                )));
-            }
+        let material = match scheme.as_str() {
+            SIG_SCHEME_ED25519 => entry.public_key_b64.as_deref(),
+            SIG_SCHEME_HMAC_SHA256 => entry.secret_hex.as_deref(),
+            _ => None,
         };
-        out.push(key);
+        out.push(RegistryTrustKey::from_encoded(
+            id,
+            &scheme,
+            material.unwrap_or_default(),
+        )?);
     }
     Ok(out)
 }
@@ -320,14 +292,8 @@ pub fn add_ed25519_trust_key(
 pub fn add_trust_key(locus_home: &Path, key: RegistryTrustKey) -> Result<TrustKeyAddResult> {
     let path = adapter_trust_keys_path(locus_home);
     let mut keys = load_trust_keys_file(&path)?;
-    let replaced =
-        if let Some(existing) = keys.iter_mut().find(|e| e.id.eq_ignore_ascii_case(&key.id)) {
-            *existing = key.clone();
-            true
-        } else {
-            keys.push(key.clone());
-            false
-        };
+    let replaced = keys.iter().any(|e| e.id.eq_ignore_ascii_case(&key.id));
+    merge_trust_keys(&mut keys, vec![key.clone()]);
     save_trust_keys_file(&path, &keys)?;
     Ok(TrustKeyAddResult {
         path,
@@ -343,52 +309,33 @@ pub fn list_trust_keys_file(locus_home: &Path) -> Result<Vec<RegistryTrustKey>> 
 
 /// List merged keys with origin metadata (file then env overlay).
 pub fn list_trust_keys_with_origin(locus_home: &Path) -> Result<Vec<TrustKeyListing>> {
-    let path = adapter_trust_keys_path(locus_home);
-    let file_keys = load_trust_keys_file(&path)?;
-    let mut listings: Vec<TrustKeyListing> = file_keys
-        .iter()
-        .map(|k| TrustKeyListing {
-            id: k.id.clone(),
-            scheme: k.scheme().into(),
-            material: trust_key_material_display(k),
-            origin: TrustKeyOrigin::File,
-        })
-        .collect();
-
-    if let Ok(raw) = std::env::var(LOCUS_ADAPTER_TRUST_KEYS_ENV) {
-        if !raw.trim().is_empty() {
-            let env_keys = parse_trust_keys_env(&raw)?;
-            for k in env_keys {
-                if let Some(existing) = listings
-                    .iter_mut()
-                    .find(|e| e.id.eq_ignore_ascii_case(&k.id))
-                {
-                    *existing = TrustKeyListing {
-                        id: k.id.clone(),
-                        scheme: k.scheme().into(),
-                        material: trust_key_material_display(&k),
-                        origin: TrustKeyOrigin::Env,
-                    };
-                } else {
-                    listings.push(TrustKeyListing {
-                        id: k.id.clone(),
-                        scheme: k.scheme().into(),
-                        material: trust_key_material_display(&k),
-                        origin: TrustKeyOrigin::Env,
-                    });
-                }
+    let mut listings: Vec<TrustKeyListing> = Vec::new();
+    for (origin, keys) in [
+        (TrustKeyOrigin::File, list_trust_keys_file(locus_home)?),
+        (TrustKeyOrigin::Env, load_env_trust_keys()?),
+    ] {
+        for key in keys {
+            let listing = TrustKeyListing {
+                id: key.id.clone(),
+                scheme: key.scheme().into(),
+                material: match key.key {
+                    RegistryKeyMaterial::Ed25519Public { public_key_b64 } => public_key_b64,
+                    // HMAC secrets never enter listings, including env overrides.
+                    RegistryKeyMaterial::HmacSha256 { .. } => "<redacted hmac secret>".into(),
+                },
+                origin,
+            };
+            if let Some(existing) = listings
+                .iter_mut()
+                .find(|e| e.id.eq_ignore_ascii_case(&listing.id))
+            {
+                *existing = listing;
+            } else {
+                listings.push(listing);
             }
         }
     }
     Ok(listings)
-}
-
-fn trust_key_material_display(k: &RegistryTrustKey) -> String {
-    match &k.key {
-        RegistryKeyMaterial::Ed25519Public { public_key_b64 } => public_key_b64.clone(),
-        // Never print HMAC secrets in CLI/listings.
-        RegistryKeyMaterial::HmacSha256 { .. } => "<redacted hmac secret>".into(),
-    }
 }
 
 #[cfg(test)]
@@ -492,7 +439,7 @@ mod tests {
         add_ed25519_trust_key(home, "root", &p_file).unwrap();
 
         let mut keys = load_trust_keys_file(&adapter_trust_keys_path(home)).unwrap();
-        let env_key = RegistryTrustKey::ed25519_public("root", &p_env);
+        let env_key = RegistryTrustKey::ed25519_public("ROOT", &p_env);
         merge_trust_keys(&mut keys, vec![env_key]);
         assert_eq!(keys.len(), 1);
         match &keys[0].key {
@@ -506,6 +453,18 @@ mod tests {
         merge_trust_keys(&mut keys, vec![extra]);
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[1].id, "mock");
+        merge_trust_keys(
+            &mut keys,
+            parse_trust_keys_env(&format!(
+                "root:hmac-sha256:{MOCK_SECRET_HEX};Root:ed25519:{p_env}"
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            keys.iter().map(|k| k.id.as_str()).collect::<Vec<_>>(),
+            ["Root", "mock"]
+        );
+        assert_eq!(keys[0].scheme(), SIG_SCHEME_ED25519);
     }
 
     #[test]
@@ -545,6 +504,43 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("version"), "{err}");
+    }
+
+    #[test]
+    fn file_and_env_material_validation_agree() {
+        let (_, public) = gen_ed25519();
+        for (scheme, material, valid) in [
+            (" Ed25519 ", public.as_str(), true),
+            (" HMAC-SHA256 ", MOCK_SECRET_HEX, true),
+            ("ed25519", "not-base64", false),
+            (
+                "ed25519",
+                "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+                false,
+            ),
+            ("ed25519", "YQ==", false),
+            ("hmac-sha256", "invalid-hex", false),
+            ("hmac-sha256", "ab", false),
+            ("hmac-sha256", "", false),
+            ("rsa", "", false),
+        ] {
+            let doc = AdapterTrustKeysFile {
+                version: 1,
+                keys: vec![AdapterTrustKeyFileEntry {
+                    id: " root ".into(),
+                    scheme: scheme.into(),
+                    public_key_b64: Some(format!(" {material} ")),
+                    secret_hex: Some(format!(" {material} ")),
+                }],
+            };
+            let file = trust_file_to_keys(&doc);
+            let env = parse_trust_keys_env(&format!(" root :{scheme}: {material} "));
+            assert_eq!(file.is_ok(), valid, "file validation for {scheme}");
+            assert_eq!(env.is_ok(), valid, "env validation for {scheme}");
+            if valid {
+                assert_eq!(file.unwrap(), env.unwrap());
+            }
+        }
     }
 
     #[test]
