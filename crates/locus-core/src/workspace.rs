@@ -330,4 +330,52 @@ require_pin = true
         assert!(!other.exists());
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
+
+    #[test]
+    fn wrong_typed_fields_fail_closed() {
+        // Valid TOML, wrong field types: the file is as malformed as broken
+        // syntax — parse must err, never fall back to a permissive default
+        // (an empty allowlist allows every binding).
+        for bad in [
+            "version = \"one\"\n",
+            "default_binding = 42\n",
+            "default_binding = [\"acme\"]\n",
+            "allowed_bindings = \"acme\"\n",
+            "allowed_bindings = [1, 2]\n",
+            "require_pin = \"yes\"\n",
+            "require_pin = 1\n",
+        ] {
+            assert!(WorkspaceConfig::parse(bad).is_err(), "must reject: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn wrong_typed_workspace_stops_walk_and_fails_closed() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let nested = root.join("apps").join("web");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(root.join(".locus.toml"), "default_binding = \"personal\"\n").unwrap();
+        fs::write(
+            root.join("apps").join(".locus.toml"),
+            "allowed_bindings = \"acme\"\n",
+        )
+        .unwrap();
+
+        let err = find_workspace(&nested).unwrap_err().to_string();
+        assert!(err.contains("workspace policy malformed"));
+        assert!(err.contains("apps/.locus.toml"));
+        assert!(!err.contains("personal"));
+    }
+
+    #[test]
+    fn non_utf8_workspace_stops_walk_and_fails_closed() {
+        let dir = tempdir().unwrap();
+        let nested = dir.path().join("repo");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join(".locus.toml"), b"\xff\xfe\x00\x32").unwrap();
+
+        let err = find_workspace(&nested).unwrap_err().to_string();
+        assert!(err.contains("unreadable"), "{err}");
+    }
 }
