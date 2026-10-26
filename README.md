@@ -12,7 +12,7 @@
 ## 30-second start
 
 ```bash
-npm install -g locus-cli@0.5.1 @ashlrai/locus-mcp@0.5.1
+npm install -g locus-cli @ashlrai/locus-mcp   # or brew or cargo; see Install options
 locus quickstart                        # sample bindings, pin, whoami, doctor
 eval "$(locus hook zsh)"                # or bash; exports the control capability
 locus enter personal                    # pin from this shell (it supervises the pin)
@@ -21,13 +21,11 @@ locus exec --expect personal -- echo ok # runs: personal is pinned
 locus exec --expect acme -- echo ok     # refused, exit 1, child never starts (pin_mismatch)
 ```
 
-Homebrew (`brew install ashlrai/tap/locus`) and a cargo build are under Install options. On the Linux VM in [docs/BENCHMARKS.md](./docs/BENCHMARKS.md), `brew` was not installed and the npm line above finished in 0.775 s. First-run notes: [docs/FIRST-RUN.md](./docs/FIRST-RUN.md).
-
 What the two extra steps are for:
 
 - **Control capability.** Control commands (`enter`, `pin`, `leave`, `exec`) need `LOCUS_CONTROL_CAPABILITY` in the shell. `locus quickstart` mints it and saves it at `~/.locus/control_capability` (0600, respects `LOCUS_HOME`); `eval "$(locus hook zsh)"` exports it without printing it. Without it, `locus exec` stops with `LOCUS_CONTROL_CAPABILITY is required for control-plane authority`. `locus capability status` shows the posture without the value.
-- **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. `locus enter personal` works straight after `quickstart`, including when quickstart ran in a shell that has already exited (fixed in #156, regression test `crates/locus-cli/tests/quickstart_then_enter.rs`). On the published npm 0.5.1 binary that re-enter exited 0 in 0.117 s.
-- **Recovery.** If a command says `human re-pin required` because `no current broker endpoint` (the pinning shell has exited), run `locus enter personal` again. That succeeded on npm 0.5.1 and on a `cargo install --git` build of `e969d9c`, without `locus leave --force`. The error text still prints `locus leave --force` before `locus enter`. That longer command also works: `--force` deletes session state only and never mints anything. An expired pin still needs `--force`.
+- **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. `locus enter personal` works straight after `quickstart`, including when quickstart ran in a shell that has already exited (fixed in #156, regression test `crates/locus-cli/tests/quickstart_then_enter.rs`).
+- **Recovery.** If a command says `human re-pin required` because `no current broker endpoint` (the pinning shell has exited), run `locus enter personal` again. The error text still names `locus leave --force` first; use `--force` only if `enter` is refused (an expired pin). `--force` deletes session state only and never mints anything.
 
 ## Connect your agent (MCP)
 
@@ -65,17 +63,15 @@ Use explicit environment (`env:`) references for supported credential resolution
 # Homebrew (tap live) — installs locus + locus-mcp
 brew install ashlrai/tap/locus
 
-# npm (release binary, or cargo if this platform has no asset).
-# Do not install locus-cli@0.5.0: its --version had not exited when timeout
-# returned 124 at 8 seconds. 0.5.1 exits.
-npm install -g locus-cli@0.5.1 @ashlrai/locus-mcp@0.5.1
-npx locus-cli@0.5.1 --help
-npx @ashlrai/locus-mcp@0.5.1   # MCP server for Claude Code / Cursor
+# npm (release binary, or cargo if this platform has no asset)
+npm install -g locus-cli @ashlrai/locus-mcp
+npx locus-cli --help
+npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
 
-# cargo (source build). cargo install --git uses the default toolchain,
-# not rust-toolchain.toml. rustc 1.83.0 failed in 1.924 s (zeroize_derive
-# 1.5.0 needs edition2024). rustc 1.99.1 finished in 86.488 s.
-# Method: docs/BENCHMARKS.md.
+# cargo (source build): needs a current stable rustc. cargo install --git
+# uses your default toolchain, not rust-toolchain.toml, and older compilers
+# fail on edition2024 dependencies. Run `rustup default stable` first, or
+# prefix the command with RUSTUP_TOOLCHAIN=stable.
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
 ```
@@ -374,7 +370,7 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [scripts/e2e.sh](./scripts/e2e.sh) | End-to-end shell suite |
 | [docs/architecture.md](./docs/architecture.md) | System diagram (DESIGN distilled) |
 | [docs/BENCHMARKS.md](./docs/BENCHMARKS.md) | Install and core-op timings, peers, method |
-| [docs/FIRST-RUN.md](./docs/FIRST-RUN.md) | README friction log, agent-use audit, follow-ups |
+| [docs/FIRST-RUN.md](./docs/FIRST-RUN.md) | First-run log and agent-use audit |
 | [docs/agency-certainty.md](./docs/agency-certainty.md) | Identity vs epistemic certainty (Ashlr stack) |
 | [docs/firm-mode.md](./docs/firm-mode.md) | Agencies: bindings, dual-control, workspaces |
 | [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |

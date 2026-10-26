@@ -5,13 +5,10 @@ MCP multiplexor for [Locus](https://github.com/ashlrai/locus) — tools hard-sco
 ## Install
 
 ```bash
-npm install -g @ashlrai/locus-mcp@0.5.1
+npm install -g @ashlrai/locus-mcp
 # or run via npx after pinning with locus:
-npx @ashlrai/locus-mcp@0.5.1
+npx @ashlrai/locus-mcp
 ```
-
-Use the `0.5.1` packages. `locus-cli@0.5.0` did not exit from `--version`
-within 8 seconds (`timeout` exit 124).
 
 On first run the wrapper downloads the release binary into `~/.locus/bin`, or falls back to:
 
@@ -23,7 +20,7 @@ cargo install --git https://github.com/ashlrai/locus locus-mcp --locked
 
 ```bash
 # Install CLI + MCP
-npm install -g locus-cli@0.5.1 @ashlrai/locus-mcp@0.5.1
+npm install -g locus-cli @ashlrai/locus-mcp
 # or: cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
 
 eval "$(locus hook bash)"      # exports LOCUS_CONTROL_CAPABILITY
@@ -32,21 +29,25 @@ locus setup --client claude   # writes/merges .mcp.json
 # restart Claude Code from that shell
 ```
 
-Provider tools need `locus mcp --supervised` from the shell that pinned.
-Plain `locus-mcp` serves control tools only. See the repo `docs/mcp.md`.
-
-Manual `.mcp.json` entry:
+`locus setup --client claude` writes this entry (`command` is the absolute
+`locus-mcp` path when it sits next to `locus`):
 
 ```json
 {
   "mcpServers": {
     "locus": {
-      "command": "locus",
-      "args": ["mcp", "--supervised"]
+      "type": "stdio",
+      "command": "locus-mcp",
+      "args": [],
+      "env": { "LOCUS_AUTO_PIN": "cwd", "LOCUS_CLIENT": "claude" }
     }
   }
 }
 ```
+
+That serves control tools only. For the pinned binding's provider tools, set
+`"command": "locus"` and `"args": ["mcp", "--supervised"]`, as `setup` prints,
+and launch the client from the shell that pinned. See the repo `docs/mcp.md`.
 
 ## Related
 
