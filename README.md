@@ -279,6 +279,7 @@ locus whoami [--json]
 locus status [--oneline] [--json]
 locus exec -- <command> [args...]
 locus exec --expect <alias> -- <cmd>  # refuse (exit 1, child never starts) unless <alias> is pinned
+locus exec --for gh -- gh pr list    # inject only the pinned GitHub credential
 locus run -b <alias> -- <command>     # one-shot; global pin unchanged
 locus binding list|show|add|rm
 locus workspace --default <alias> [--allow a,b] [--require-pin]
@@ -350,7 +351,7 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | **0** Daemon-less control plane, pin/whoami/exec, isolation tests | done |
 | **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | done |
 | **2** Firm UX, doctor pane, run/ns, notify, local `locus graph`, `locus ci` | done (0.1.1) |
-| **2.x / 0.2–0.5** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch`; 0.5 signed registry manifests, hub MT drop-in | **you are here (0.5.1)** |
+| **2.x / 0.2–0.5** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch`; 0.5 signed registry manifests, hub MT drop-in | **you are here (0.5.2)** |
 | **3** Remote binding graph sync, dual-control packs, offboard, SIEM export | next |
 | **4** Adapter SDK, broader prebuilt platforms | later |
 
@@ -451,6 +452,7 @@ approvals; banners only after `locus notify on` or `LOCUS_NOTIFY=1`
 - Session pins use **V3 HMAC seals plus a supervised live authority broker**. The broker binds the exact record digest, backing file, authority, expiry, and monotonic generation, so reading `daemon.key` alone cannot forge or replay current authority.
 - Workspace `allowed_bindings` blocks wrong-tenant pins (unless `--force`, audited).
 - `locus exec`, `locus run`, and `locus ci run` scrub ambient identity; resolved credentials are injected into the child by default. Their shared `--no-resolve` preflight expands recipe defaults and fails before child, worker, session, or credential effects when a declared upstream can resolve credentials. Credential-free upstreams remain usable.
+- `locus exec --for <cli>` routes `gh`, `vercel`, `supabase`, or `aws` with only the selected provider's credential and fresh private configuration. See [CLI routing](docs/cli-routing.md) for credential formats and the trusted-process boundary.
 - MCP never returns secret values; agents cannot pin (request only).
 - Scope freeze: model cannot override frozen `project_ref` / `team_id`.
 - Policy: globs + structured `[[rules]]`, `require_approval`, dual-control (2 principals).
