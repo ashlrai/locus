@@ -236,6 +236,66 @@ impl Store {
         Ok(())
     }
 
+    /// [`Store::require_local_control`] for an operation that overwrites
+    /// `active.json` (`locus enter`, quickstart's first pin).
+    ///
+    /// Identical gate, with one narrow difference: when the pin being replaced
+    /// is the `active.json` session and its broker generation is dead (the
+    /// shell that pinned it exited, so the broker epoch moved on), that dead
+    /// generation does not block its own replacement. Everything else stays
+    /// fail closed:
+    ///
+    /// - the control capability must pass the `locus leave --force` verifier
+    ///   ([`authority_anchor::authorize_control_teardown`], no `--no-verifier`
+    ///   escape) BEFORE any new broker starts, and then authenticate against
+    ///   a live, current broker ([`authority_anchor::authorize_control`]);
+    /// - an explicit `LOCUS_SESSION_ID` selection gets the full strict check;
+    /// - the old session's seal must verify and its sealed authority must be
+    ///   local control;
+    /// - only an anchor mismatch or an unavailable anchor is tolerated; it
+    ///   returns the dead session id and reason so the pin that replaces it
+    ///   is audited (`session.replace_stale`).
+    ///
+    /// Replacing a *live* pin needs nothing beyond the capability today, so a
+    /// dead pin no longer demands more than a live one (it used to force
+    /// `locus leave --force` first, which is the same capability).
+    pub fn require_local_control_to_replace_active(
+        &self,
+        operation: &str,
+    ) -> Result<Option<(String, String)>> {
+        let explicit_session = std::env::var("LOCUS_SESSION_ID")
+            .map(|id| !id.trim().is_empty())
+            .unwrap_or(false);
+        if explicit_session {
+            return self.require_local_control(operation).map(|()| None);
+        }
+        let Some(resolved) = self.resolve_active_session()? else {
+            return authority_anchor::authorize_control(&self.home).map(|()| None);
+        };
+        let session = &resolved.session;
+        session.verify_seal(&self.seal_key()?)?;
+        if session.authority != SessionAuthority::LocalControl {
+            return Err(LocusError::msg(format!(
+                "{operation} requires an authenticated local-control session"
+            )));
+        }
+        match self.validate_session_authority(session) {
+            Ok(_) => authority_anchor::authorize_control(&self.home).map(|()| None),
+            Err(
+                e @ (LocusError::AuthorityAnchorMismatch
+                | LocusError::AuthorityAnchorUnavailable(_)),
+            ) => {
+                // Same verifier as `locus leave --force` (no `--no-verifier`),
+                // checked BEFORE a new broker can be started under whatever
+                // capability this process carries.
+                authority_anchor::authorize_control_teardown(&self.home, false)?;
+                authority_anchor::authorize_control(&self.home)?;
+                Ok(Some((session.session_id.clone(), e.to_string())))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     // ── Bindings ──────────────────────────────────────────────────────────
 
     pub fn save_binding(&self, binding: &Binding) -> Result<PathBuf> {
@@ -1208,7 +1268,12 @@ impl Store {
         ttl_override: Option<Duration>,
         authority: SessionAuthority,
     ) -> Result<Session> {
-        self.require_local_control("mint or replace session")?;
+        let replaced_stale = if write_active && backing_type == SessionBackingType::Active {
+            self.require_local_control_to_replace_active("mint or replace session")?
+        } else {
+            self.require_local_control("mint or replace session")?;
+            None
+        };
         let binding = self.load_binding(alias_or_id)?;
         let ws = find_workspace(cwd)?;
 
@@ -1339,6 +1404,17 @@ impl Store {
         if write_active {
             let path = self.active_session_path();
             self.write_session_file(&path, &session)?;
+            if let Some((old_id, reason)) = replaced_stale {
+                self.audit(
+                    "session.replace_stale",
+                    &binding.alias,
+                    Some(serde_json::json!({
+                        "replaced_session_id": old_id,
+                        "session_id": session.session_id,
+                        "reason": reason,
+                    })),
+                )?;
+            }
             self.audit(
                 "session.pin",
                 &binding.alias,

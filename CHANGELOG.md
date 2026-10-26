@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `locus enter <alias>` (and `locus pin`) right after `locus quickstart` no longer fails with "session authority generation is stale or unknown" when quickstart ran in another shell (or through the npm wrapper). A pin whose broker generation died with its shell no longer blocks its own replacement, so `locus leave --force` is not needed first. The gate is unchanged otherwise: the capability must pass the same verifier as `locus leave --force` (no `--no-verifier` escape) before a new broker starts, then authenticate against the live broker; the old pin's seal must verify and be local control; an explicit `LOCUS_SESSION_ID` keeps the strict check; only an anchor mismatch or unavailable anchor is tolerated. The replacement is audited as `session.replace_stale` with both session ids.
+
 ### Added
 
 - `locus doctor --json` carries the shared `ashlr.doctor` v1 wrapper (`kind`, `schema_version`, `tool`, `status`, `native_status`, `checks`): verdict SAFE is ok, WARN warn, UNSAFE fail, a refused Phantom preflight fail; `checks` mirror `findings`. Additive: every existing field and the exit codes (0/1/2) are unchanged. The vendored handshake contract is re-pinned to the ashlr-stack version with the `doctor` section, and the conformance test validates the doctor output in a fresh home.

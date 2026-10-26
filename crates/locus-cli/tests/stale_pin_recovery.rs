@@ -153,13 +153,13 @@ fn stale_pin_surfaces_name_the_recovery() {
     let prompt = hook_prompt(home.path(), cwd.path(), &cap);
     assert!(prompt.contains("[locus:invalid]"), "prompt: {prompt}");
 
-    let enter = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "acme"]);
-    assert!(!enter.status.success(), "enter must still fail closed");
-    let err = stderr(&enter);
-    assert!(
-        err.contains("locus leave --force; locus enter acme"),
-        "enter must name the recovery: {err}"
-    );
+    // `enter` over the dead pin fails closed for a capability that does not
+    // pass the `leave --force` verifier (see quickstart_then_enter.rs for the
+    // operator path, which replaces the dead pin directly).
+    let wrong = "ab".repeat(32);
+    let enter = locus_fail_closed(home.path(), cwd.path(), &wrong, &["enter", "acme"]);
+    assert!(!enter.status.success(), "enter with a wrong capability");
+    assert!(stderr(&enter).contains("persisted operator capability"));
 
     // The named recovery works.
     let leave = locus(home.path(), cwd.path(), &cap, &["leave", "--force"]);
@@ -269,12 +269,18 @@ fn stale_pin_recovery_never_names_a_missing_binding() {
     let cwd = tempfile::tempdir().unwrap();
     let cap = pin_in_exited_shell(home.path(), cwd.path());
 
-    for args in [
-        &["pin", "nosuch"][..],
-        &["enter", "nosuch"][..],
-        &["--json", "switch", "nosuch"][..],
-        &["leave"][..],
-    ] {
+    // `enter`/`pin` may replace a dead pin, so for them a missing binding is
+    // the only error; it must still never be suggested.
+    for args in [&["pin", "nosuch"][..], &["enter", "nosuch"][..]] {
+        let out = locus_fail_closed(home.path(), cwd.path(), &cap, args);
+        assert!(!out.status.success(), "{args:?} must fail");
+        assert!(
+            !stderr(&out).contains("locus enter nosuch"),
+            "{args:?} must not suggest a missing binding: {}",
+            stderr(&out)
+        );
+    }
+    for args in [&["--json", "switch", "nosuch"][..], &["leave"][..]] {
         let out = locus_fail_closed(home.path(), cwd.path(), &cap, args);
         assert!(!out.status.success(), "{args:?} must fail closed");
         let err = stderr(&out);
