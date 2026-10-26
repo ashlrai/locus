@@ -1,0 +1,191 @@
+{
+  "tools": [
+    {
+      "description": "[locus:cmp] REQUIRED before infrastructure work when pin is unclear. Returns active pin: tenant, binding, providers, frozen scopes. Never secrets. If unpinned, ask human to pin \u2014 you cannot.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "locus_whoami"
+    },
+    {
+      "description": "[locus:cmp] Single best next human/agent action for identity safety (enter, re-pin, approve, doctor fix, or ready). Call when stuck, unpinned, blocked, or unsure what to do. Never secrets.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "locus_safe_next"
+    },
+    {
+      "description": "[locus:cmp] Short pin status: pinned|unpinned, binding alias, tenant, seal ok, frozen. Prefer locus_whoami or locus_safe_next for decisions.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "locus_status"
+    },
+    {
+      "description": "[locus:cmp] Identity heartbeat: runtime drift / doctor-lite (seal, freeze, binding match). Safe for agents \u2014 never secrets. Call when pin health is unclear or tools fail with freeze/seal errors.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "locus_heartbeat"
+    },
+    {
+      "description": "[locus:cmp] Shell command for the HUMAN to enter/pin a binding. AGENTS CANNOT PIN \u2014 surface this command to the operator; do not claim you switched accounts.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "alias": {
+            "description": "Optional binding alias (e.g. acme). When omitted, returns generic `locus enter`.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "locus_enter_hint"
+    },
+    {
+      "description": "[locus:cmp] List configured binding aliases and tenants (no secrets). Use to discover which alias to request via locus_request_pin.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "locus_list_bindings"
+    },
+    {
+      "description": "[locus:cmp] Request the HUMAN to pin a binding. AGENTS CANNOT PIN \u2014 records a request and returns the exact shell command. Pass alias from locus_list_bindings.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "alias": {
+            "description": "Binding alias to request (e.g. acme)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alias"
+        ],
+        "type": "object"
+      },
+      "name": "locus_request_pin"
+    },
+    {
+      "description": "[locus:cmp] Verification plane (M5): score a free-text claim before acting. Returns {claim, confidence: unknown|low|medium|high, needs_tool, suggestion, signals, grounding?}. Heuristic \u2014 numbers/URLs/versions/currency ($)/percentages/absolute language (always|never) \u21d2 needs_tool + low confidence; identity claims ground against whoami when pinned. Suggestion names concrete next steps (provider reads, locus exec, whoami). Never secrets. For hub session pack use locus_verify_session (or CLI: locus verify session --json).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "claim": {
+            "description": "Alias for text",
+            "type": "string"
+          },
+          "text": {
+            "description": "Claim to score (factual assertion before acting)",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "locus_verify_claim"
+    },
+    {
+      "description": "[locus:cmp] Verification plane (M5): hub session pack \u2014 same JSON as `locus verify session --json`. Returns {kind:\"session\", version, whoami?, doctor, safe_next, session_ok}. Available unpinned. Gate on session_ok (isError only on hard store failures). Never secrets \u2014 aliases, verdicts, scopes only.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "locus_verify_session"
+    },
+    {
+      "description": "[locus:cmp] Providers and frozen scopes for the active pin only. Frozen project_ref/team_id/orgs cannot be overridden by tool args.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "name": "locus_providers"
+    },
+    {
+      "description": "[locus:cmp] Frozen Supabase scope for tenant `cmp-co` binding `cmp`: project_ref=proj_cmp, read_only=true. Identity only \u2014 no SQL. project_ref is frozen on every tool.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "project_ref": {
+            "description": "Ignored if binding freezes project_ref; mismatch is denied.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "cmp__supabase.scope"
+    },
+    {
+      "description": "[locus:cmp] Return the frozen Supabase project_ref for this pin (proj_cmp). Agents must not invent another ref.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "project_ref": {
+            "description": "Ignored if binding freezes project_ref; mismatch is denied.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "cmp__supabase.project_ref"
+    },
+    {
+      "description": "[locus:cmp] Frozen Vercel scope for tenant `cmp-co`: team_id=team_cmp, projects=[], env=[<any>]. team_id and env target are frozen.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "env": {
+            "description": "Env target (production|preview|development). Denied if outside binding scope.env allowlist.",
+            "type": "string"
+          },
+          "target": {
+            "description": "Alias of env (production|preview|development).",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "Ignored if binding freezes team_id; mismatch is denied.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "cmp__vercel.scope"
+    },
+    {
+      "description": "[locus:cmp] SYNTHETIC prod deploy stub \u2014 policy-gated. Frozen team_id=team_cmp, env=[<any>]. Does not deploy in phase 1. [requires human approval under current pin]",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm": {
+            "type": "boolean"
+          },
+          "env": {
+            "description": "Env target; denied if outside binding scope.env allowlist.",
+            "type": "string"
+          },
+          "target": {
+            "description": "Alias of env.",
+            "type": "string"
+          },
+          "team_id": {
+            "description": "Ignored if binding freezes team_id; mismatch is denied.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "cmp__vercel.deploy.prod"
+    }
+  ]
+}

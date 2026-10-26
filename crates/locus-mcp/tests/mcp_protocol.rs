@@ -324,6 +324,9 @@ fn unpinned_tools_list_only_control_tools_ndjson() {
     );
 
     let list = client.request("tools/list", json!({}));
+    let expected: Value =
+        serde_json::from_str(include_str!("fixtures/catalog_unpinned.json")).unwrap();
+    assert_eq!(list["result"], expected, "unpinned catalog changed");
     let tools = list["result"]["tools"].as_array().expect("tools array");
     assert!(!tools.is_empty());
     // locus_whoami always first
