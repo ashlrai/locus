@@ -34,3 +34,8 @@ sha2 = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
 tower = { workspace = true, features = ["util"] }
+
+# Shared phantom+locus merge-queue test; skips when PHANTOM_BIN is unset.
+[[test]]
+name = "phantom_locus"
+path = "../../tests/integration/phantom_locus.rs"

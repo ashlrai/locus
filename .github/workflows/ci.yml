@@ -5,11 +5,19 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+  # So the required checks report in the merge queue once the ruleset enables
+  # it. The phantom+locus integration lives in integration.yml.
+  merge_group:
 
 # Cancel superseded PR runs; never cancel main/master.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least privilege for every job: read the repo, nothing else. No job in this
+# workflow writes to the repo, PRs, packages or releases.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
