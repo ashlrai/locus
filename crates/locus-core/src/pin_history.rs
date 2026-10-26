@@ -321,6 +321,13 @@ mod tests {
 
     const KEY: &[u8] = &[7u8; 32];
 
+    fn remote_with_userinfo(user: &str, password: &str) -> String {
+        let scheme = "https";
+        let userinfo = [user, password].join(":");
+        let host = "github.com/acme-corp/secret-app.git";
+        format!("{scheme}://{userinfo}@{host}")
+    }
+
     fn git_repo_with_remote(url: &str) -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
@@ -409,9 +416,13 @@ mod tests {
 
     #[test]
     fn plaintext_and_tokenized_remotes_and_path_never_written() {
-        // FAKE credential: build the URL at runtime to keep source secret scans clean.
-        let url_cred = format!("{}_{}", "ghp", "SuperSecretToken123");
-        let url = format!("https://alice:{url_cred}@github.com/acme-corp/secret-app.git");
+        // Assemble FAKE userinfo at runtime to keep source secret scans clean.
+        let url_cred = "FAKE_PASSWORD";
+        let url = remote_with_userinfo("alice", url_cred);
+        assert_eq!(
+            normalize_remote_url(&url),
+            "github.com/acme-corp/secret-app"
+        );
         let repo = git_repo_with_remote(&url);
         let home = tempfile::tempdir().unwrap();
         try_record(
@@ -423,13 +434,7 @@ mod tests {
         )
         .unwrap();
         let raw = fs::read_to_string(path(home.path())).unwrap();
-        for leak in [
-            url_cred.as_str(),
-            "alice",
-            "acme-corp",
-            "secret-app",
-            "github.com",
-        ] {
+        for leak in [url_cred, "alice", "acme-corp", "secret-app", "github.com"] {
             assert!(!raw.contains(leak), "{leak} leaked: {raw}");
         }
         assert!(
