@@ -306,6 +306,12 @@ locus agent setup --client all --apply
 
 `locus agent setup` injects `LOCUS_AUTO_PIN=cwd` + `LOCUS_CLIENT=<client>` into MCP env. It **never** sets `LOCUS_NOTIFY` (desktop banners stay opt-in).
 
+The JSON and setup commands above register a control-plane-only launch.
+For provider tools, set the Locus entry's `command` to `locus` and `args` to
+`["mcp", "--supervised"]`, then launch the client from the hooked shell with a
+live human pin. Restart after each re-pin. A pin alone cannot grant a directly
+launched server executor authority. See [supervised MCP launch](./mcp.md#supervised-launch-provider-tools).
+
 **Do not do this:**
 
 - Register separate MCP servers for Supabase / Vercel / GitHub with long-lived env tokens that bypass the pin.
