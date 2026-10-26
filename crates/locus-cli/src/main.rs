@@ -222,6 +222,9 @@ enum Commands {
         /// Grant the active pin's executor capability to the locus-mcp child
         #[arg(long)]
         supervised: bool,
+        /// Route only these pinned upstream providers (repeatable; implies --supervised)
+        #[arg(long, value_name = "PROVIDER")]
+        route: Vec<String>,
         /// Path to locus-mcp binary (default: same dir as locus, or PATH)
         #[arg(long)]
         mcp_bin: Option<String>,
@@ -1491,10 +1494,11 @@ fn run() -> Result<()> {
         Commands::Ci(sub) => cmd_ci(sub, json, dry_run),
         Commands::Mcp {
             supervised,
+            route,
             mcp_bin,
             cmd,
         } => match cmd {
-            None => cmd_mcp(supervised, mcp_bin),
+            None => cmd_mcp(supervised || !route.is_empty(), mcp_bin, route),
             Some(sub) => cmd_mcp_sub(sub, json, dry_run),
         },
         Commands::Binding(sub) => cmd_binding(sub, json, dry_run),
@@ -5026,7 +5030,14 @@ fn prepare_supervised_mcp(s: &Store) -> Result<SupervisedMcpLaunch> {
     })
 }
 
-fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
+fn cmd_mcp(supervised: bool, mcp_bin: Option<String>, routes: Vec<String>) -> Result<()> {
+    // Match the SPAWN-LEAK marker before env_clear can erase it. Older workers
+    // already carry LOCUS_WORKER_PROVIDER, so they receive the same protection.
+    if env::var_os("LOCUS_MCP_UPSTREAM_CHILD").is_some()
+        || env::var_os("LOCUS_WORKER_PROVIDER").is_some()
+    {
+        bail!("refusing recursive multiplexor launch from an upstream worker");
+    }
     let explicit = mcp_bin.is_some();
     let (bin, bare) = resolve_mcp_bin_with_fallback(mcp_bin);
     if explicit {
@@ -5038,6 +5049,9 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
     }
 
     let mut child = Command::new(&bin);
+    for provider in routes {
+        child.arg("--route").arg(provider);
+    }
     child
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
