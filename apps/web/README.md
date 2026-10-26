@@ -3,9 +3,27 @@
 Static landing page for [Locus](https://github.com/ashlrai/locus).
 
 - **Tagline:** AI-native identity plane · Wrong account, impossible.
-- **v0.2 surfaces:** local dashboard, forensics, HTTP MCP, goal status
+- **Surfaces:** local dashboard, forensics, HTTP MCP, goal status, verify
 - **Stack:** pure HTML + CSS in `public/index.html` (no build step)
 - **Aesthetic:** dark monochrome terminal — sibling positioning vs [Phantom](https://phm.dev)
+
+## Freshness
+
+Version strings, the install tabs, the CLI command surface and the MCP control
+tool list in `public/index.html` are generated from the repo sources of truth
+(Cargo workspace version, `CHANGELOG.md`, `README.md` install options, the
+clap command enums, `control_tools()`). Marked regions
+`<!-- fresh:KEY -->…<!-- /fresh:KEY -->` are rewritten by:
+
+```bash
+npm run freshness   # regenerate the marked regions in place
+npm run check       # fail if the page is stale or names a dead command/tool
+npm test            # node:test suite for the generator
+```
+
+`check` also scans the hand-written text: every `locus <sub>` must be a real
+command, every `locus_*` identifier a real control tool, and every version
+literal must equal the Cargo workspace version.
 
 ## Local
 
