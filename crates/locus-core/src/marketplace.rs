@@ -390,13 +390,13 @@ fn marketplace_url(raw: &str) -> Result<Url> {
     Ok(parsed)
 }
 
-/// No redirects: even an HTTPS/loopback index cannot redirect to another host.
 /// The URL checks `fetch_url` applies, without any network I/O (used by
-/// `--dry-run` plans).
+/// `--dry-run` plans). Same single check as [`validate_index_url`].
 pub fn check_marketplace_url(raw: &str) -> Result<()> {
-    marketplace_url(raw).map(|_| ())
+    validate_index_url(raw)
 }
 
+/// No redirects: even an HTTPS/loopback index cannot redirect to another host.
 pub fn fetch_url(raw: &str) -> Result<String> {
     let parsed = marketplace_url(raw)?;
     let agent = ureq::AgentBuilder::new()
