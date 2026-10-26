@@ -112,36 +112,42 @@ jobs:
   msrv:
     name: msrv (rustc 1.89)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
     env:
       RUSTFLAGS: ""
       RUSTUP_TOOLCHAIN: "1.89.0"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       - name: Detect manifest changes
         id: manifests
         env:
           EVENT: ${{ github.event_name }}
           BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
           BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           run=false
           files=""
+          # Default checkout depth is 1. Fetch the other commit and use a
+          # two-dot diff: `git diff A B` only needs those two trees. A
+          # three-dot diff needs a merge base, which this depth does not have.
           if [ "$EVENT" = "pull_request" ]; then
-            if ! files="$(git diff --name-only "$BASE...$HEAD")"; then
-              run=true
-            fi
+            other="$BASE"
           else
-            if [ -z "${BEFORE}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
-              run=true
-            elif ! files="$(git diff --name-only "$BEFORE" HEAD)"; then
-              run=true
-            fi
+            other="${BEFORE}"
+          fi
+          if [ -z "$other" ] || [ "$other" = "0000000000000000000000000000000000000000" ]; then
+            run=true
+          elif ! git fetch --no-tags --depth=1 origin "$other"; then
+            run=true
+          elif ! files="$(git diff --name-only "$other" HEAD)"; then
+            run=true
           fi
           if [ "$run" != true ] && printf '%s\n' "$files" | grep -Eq '(^|/)Cargo\.toml$|(^|/)Cargo\.lock$'; then
             run=true
@@ -151,11 +157,13 @@ jobs:
 
       - name: Install Rust toolchain
         if: steps.manifests.outputs.run == 'true'
-        uses: dtolnay/rust-toolchain@1.89.0
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: 1.89.0
 
       - name: Cache cargo
         if: steps.manifests.outputs.run == 'true'
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: msrv-1.89.0
 
