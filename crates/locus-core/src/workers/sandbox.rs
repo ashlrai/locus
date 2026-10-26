@@ -68,7 +68,7 @@ pub(crate) fn sandbox_enabled_with_env(config_flag: bool, env_flag: bool) -> boo
 
 /// Effective no-network: config/spec flag OR env (only meaningful when sandboxed).
 pub fn sandbox_no_network_enabled(config_flag: bool) -> bool {
-    sandbox_enabled_with_env(config_flag, sandbox_no_network_from_env())
+    sandbox_no_network_enabled_with_env(config_flag, sandbox_no_network_from_env())
 }
 
 pub(crate) fn sandbox_no_network_enabled_with_env(config_flag: bool, env_flag: bool) -> bool {
@@ -105,7 +105,7 @@ impl SandboxBackend {
     }
 
     /// True when a kernel/namespace wrapper is used (not the path-only fallback).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn is_os_isolation(self) -> bool {
         matches!(self, Self::SandboxExec | Self::Bwrap)
     }
@@ -116,18 +116,6 @@ impl SandboxBackend {
 struct BackendSelection {
     backend: SandboxBackend,
     wrapper: Option<PathBuf>,
-}
-
-/// True when macOS sandbox-exec is present.
-#[allow(dead_code)]
-pub fn sandbox_exec_available() -> bool {
-    sandbox_exec_path().is_some()
-}
-
-/// True when Linux bubblewrap is present on a fixed path.
-#[allow(dead_code)]
-pub fn bwrap_available() -> bool {
-    bwrap_path().is_some()
 }
 
 fn sandbox_exec_path() -> Option<PathBuf> {
@@ -409,8 +397,8 @@ fn validate_runtime_access(runtime: &RuntimeAccess, locus_home: &Path) -> Result
 /// [`ENV_WORKER_SANDBOX_NO_NETWORK`]) to omit outbound allows — macOS best-effort
 /// under imported Apple system profiles. Application listeners and non-system
 /// Unix-domain sockets are not part of the worker contract.
-#[allow(dead_code)]
-pub fn seatbelt_profile_for_worker(
+#[cfg(test)]
+fn seatbelt_profile_for_worker(
     work_dir: &Path,
     worker_home: &Path,
     executable: &Path,
@@ -423,6 +411,7 @@ pub fn seatbelt_profile_for_worker(
     )
 }
 
+#[cfg(test)]
 fn seatbelt_profile_for_worker_with_path(
     work_dir: &Path,
     worker_home: &Path,
@@ -432,6 +421,7 @@ fn seatbelt_profile_for_worker_with_path(
     seatbelt_profile_for_worker_with_opts(work_dir, worker_home, executable, search_path, false)
 }
 
+#[cfg(test)]
 fn seatbelt_profile_for_worker_with_opts(
     work_dir: &Path,
     worker_home: &Path,
@@ -443,12 +433,10 @@ fn seatbelt_profile_for_worker_with_opts(
     seatbelt_profile_for_runtime(work_dir, worker_home, &runtime, no_network)
 }
 
-/// Canonical work dir, worker home, and LOCUS_HOME after authority overlap checks.
+/// Canonical work dir and worker home after authority overlap checks.
 struct SandboxPaths {
     work_dir: PathBuf,
     worker_home: PathBuf,
-    #[allow(dead_code)]
-    locus_home: PathBuf,
 }
 
 fn validate_sandbox_paths(
@@ -466,7 +454,6 @@ fn validate_sandbox_paths(
     Ok(SandboxPaths {
         work_dir: wd,
         worker_home: wh,
-        locus_home,
     })
 }
 
@@ -552,7 +539,6 @@ fn seatbelt_profile_for_runtime(
     ))
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn seatbelt_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -914,9 +900,11 @@ mod tests {
         assert!(sandbox_enabled_with_env(false, true));
         assert!(sandbox_enabled_with_env(true, false));
         assert!(!sandbox_enabled_with_env(false, false));
+        assert!(sandbox_enabled_with_env(true, true));
         assert!(sandbox_no_network_enabled_with_env(false, true));
         assert!(sandbox_no_network_enabled_with_env(true, false));
         assert!(!sandbox_no_network_enabled_with_env(false, false));
+        assert!(sandbox_no_network_enabled_with_env(true, true));
     }
 
     #[test]
