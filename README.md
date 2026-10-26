@@ -25,7 +25,7 @@ What the two extra steps are for:
 
 - **Control capability.** Control commands (`enter`, `pin`, `leave`, `exec`) need `LOCUS_CONTROL_CAPABILITY` in the shell. `locus quickstart` mints it and saves it at `~/.locus/control_capability` (0600, respects `LOCUS_HOME`); `eval "$(locus hook zsh)"` exports it without printing it. Without it, `locus exec` stops with `LOCUS_CONTROL_CAPABILITY is required for control-plane authority`. `locus capability status` shows the posture without the value.
 - **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. `locus enter personal` works straight after `quickstart`, including when quickstart ran in a shell that has already exited (fixed in #156, regression test `crates/locus-cli/tests/quickstart_then_enter.rs`).
-- **Recovery.** If a command says `human re-pin required` because `no current broker endpoint` (the pinning shell has exited), load the hook in the new shell (`eval "$(locus hook zsh)"` or `bash`) and run `locus enter personal` again; the same applies before `locus leave --force`. The error text still names `locus leave --force` first; use `--force` only if `enter` is refused (an expired pin). `--force` deletes session state only and never mints anything.
+- **Recovery.** If a command says `human re-pin required` (for example `no current broker endpoint` after the pinning shell exited), load the hook in the new shell (`eval "$(locus hook zsh)"` or `bash`) and run `locus enter personal`: enter replaces a pin whose broker died. Only if enter is refused (for example an expired pin or a bad seal), run `locus leave --force` in that same hooked shell, then `locus enter personal`. `--force` deletes session state only and never mints anything.
 
 ## Connect your agent (MCP)
 
@@ -208,6 +208,10 @@ MCP identity and provider-scope responses report only credential presence and so
 | **CredentialRef** | `phm:NAME` / vault pointer — never the secret itself |
 
 Workspace policy discovery is fail closed: if the nearest `.locus.toml` exists but is unreadable or malformed, explicit pin, autopin, and `--force` pin stop with an error, while `locus doctor` reports `UNSAFE`.
+
+### Learned bindings: `locus autopin suggest`
+
+locus keeps a local pin history (`$LOCUS_HOME/pin-history.jsonl`, 0600, remotes stored only as keyed hashes). In a repo, `locus autopin suggest` shows which binding you usually pin there, with pins, `pin_mismatch` refusals and last seen per alias. A suggestion needs a score (pins minus mismatches) of at least 3 and a strict lead; otherwise it suggests nothing. When the repo has an `origin` remote only `origin` is matched, so an extra remote that mimics another repo borrows nothing; remotes are not authenticated, though, so an `origin` that mimics another repo still matches its history. Check the binding and file `--apply` prints. A read-only `suggest` never creates `history.key`. Add `--json` for the `locus.autopin.suggest.v1` shape. `locus autopin suggest --apply` writes `default_binding` to the nearest `.locus.toml` inside the git toplevel (or a new one there), refuses a parent `.locus.toml` above the toplevel, and requires `LOCUS_CONTROL_CAPABILITY`, so an agent cannot apply it. Turn history off with `[history] enabled = false` or `LOCUS_PIN_HISTORY=0`.
 
 Example binding (`~/.locus/bindings/acme.toml`):
 

@@ -48,7 +48,7 @@ fn matches(pattern: &str, s: &str) -> bool {
 }
 
 /// Problems with `h` under the contract; empty means it conforms.
-fn check(h: &Value, c: &Value) -> Vec<String> {
+pub(crate) fn check(h: &Value, c: &Value) -> Vec<String> {
     let mut out = Vec::new();
     for (key, rule) in c["fields"].as_object().unwrap() {
         let Some(v) = h.get(key) else {
@@ -140,7 +140,7 @@ fn check(h: &Value, c: &Value) -> Vec<String> {
     out
 }
 
-fn contract() -> Value {
+pub(crate) fn contract() -> Value {
     serde_json::from_str(CONTRACT).unwrap()
 }
 

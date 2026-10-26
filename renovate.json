@@ -1,0 +1,34 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "timezone": "America/New_York",
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2,
+  "automerge": false,
+  "minimumReleaseAge": "3 days",
+  "separateMajorMinor": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "minimumReleaseAge": null
+  },
+  "packageRules": [
+    {
+      "description": "One pull request for non-major dependency updates",
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "excludeManagers": ["github-actions"],
+      "groupName": "non-major updates"
+    },
+    {
+      "description": "One pull request for GitHub Actions updates, including digest and pin updates",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["minor", "patch", "pin", "digest"],
+      "groupName": "github-actions"
+    },
+    {
+      "description": "Each major update gets its own pull request",
+      "matchUpdateTypes": ["major"],
+      "groupName": null
+    }
+  ]
+}
