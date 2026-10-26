@@ -2254,8 +2254,9 @@ impl Store {
     /// caller just produced for this same session value.
     ///
     /// `authority_already_validated` skips the broker round trip. It does not
-    /// skip the seal HMAC. `known_binding` is used only when its alias or id
-    /// is the session's binding; otherwise the file is loaded again.
+    /// skip the seal HMAC. `known_binding` is used only when its alias is the
+    /// session's binding alias; otherwise the file is loaded again. A shared
+    /// id with a different alias is not reused.
     fn verify_runtime_inner(
         &self,
         resolved: &ResolvedSession,
@@ -2322,9 +2323,7 @@ impl Store {
             }
         }
 
-        let use_known = known_binding.is_some_and(|binding| {
-            binding.alias == session.binding_alias || binding.id == session.binding_id
-        });
+        let use_known = known_binding.is_some_and(|binding| binding.alias == session.binding_alias);
         let loaded_binding = if use_known {
             None
         } else {
@@ -6055,6 +6054,31 @@ allowed_bindings = ["acme"]
         let d = store.check_drift_and_freeze().unwrap();
         assert!(d.frozen);
         assert!(d.issues.iter().any(|i| i == "tenant_drift"));
+    }
+
+    #[test]
+    fn fresh_drift_does_not_trust_same_id_with_a_different_alias() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let pinned = sample_binding("acme", "acme-corp", "p1");
+        store.save_binding(&pinned).unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let resolved = store.require_active_resolved().unwrap();
+
+        // Same id as the pin, different alias, and material that would freeze
+        // the session if this value were trusted in place of the loaded file.
+        let mut other = sample_binding("other", "elsewhere", "should_not_count");
+        other.id = pinned.id.clone();
+        let drift = store
+            .check_drift_and_freeze_fresh(&resolved, &other)
+            .unwrap();
+        assert!(
+            drift.ok,
+            "same id with a different alias must not replace the pinned binding: {:?}",
+            drift.issues
+        );
+        assert!(!drift.frozen);
+        assert!(!store.active_session().unwrap().unwrap().frozen);
     }
 
     #[test]

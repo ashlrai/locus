@@ -1,6 +1,6 @@
 # `locus exec` latency
 
-Measured on 2026-10-26 on one x86_64 Linux machine (kernel 6.12.94+, rustc
+Measured on 2026-10-25 ET (2026-10-26 UTC) on one x86_64 Linux machine (kernel 6.12.94+, rustc
 1.99.1, release build). 21 runs, first dropped. Wall clock is
 `time.perf_counter` around the process. `ru_maxrss` comes from `os.wait4`
 and is kilobytes on this Linux. stdin is `/dev/null`. stdout and stderr are
