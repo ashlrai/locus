@@ -1094,6 +1094,9 @@ struct BindingAddArgs {
 }
 
 fn main() {
+    if std::env::var_os("LOCUS_EXEC_TRACE").is_some() {
+        let _ = EXEC_TRACE_ORIGIN.set(std::time::Instant::now());
+    }
     if let Some(result) = locus_core::run_authority_anchor_server_if_requested() {
         if let Err(error) = result {
             eprintln!("authority anchor error: {error}");
@@ -4028,6 +4031,122 @@ fn check_expected_alias(s: &Store, pinned: Option<&str>, expected: &str) -> Resu
     bail!(msg)
 }
 
+/// Process start, set only when `LOCUS_EXEC_TRACE` is present.
+static EXEC_TRACE_ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Stderr phase timings for `locus exec`. Off unless `LOCUS_EXEC_TRACE` is set.
+struct ExecTrace {
+    enabled: bool,
+    origin: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl ExecTrace {
+    fn new() -> Self {
+        let enabled = std::env::var_os("LOCUS_EXEC_TRACE").is_some();
+        let now = std::time::Instant::now();
+        let origin = EXEC_TRACE_ORIGIN.get().copied().unwrap_or(now);
+        Self {
+            enabled,
+            origin,
+            last: origin,
+        }
+    }
+
+    fn mark(&mut self, name: &str) {
+        if !self.enabled {
+            return;
+        }
+        let now = std::time::Instant::now();
+        eprintln!(
+            "locus_exec_phase {name} {:.3}",
+            (now - self.last).as_secs_f64() * 1e3
+        );
+        self.last = now;
+        if name == "audit" {
+            eprintln!(
+                "locus_exec_phase total {:.3}",
+                (now - self.origin).as_secs_f64() * 1e3
+            );
+        }
+    }
+}
+
+/// Stop `locus exec` before secret resolution when the drift check is not a
+/// healthy pin. A frozen session keeps its existing error. Any other failure,
+/// including a broker re-check that declined to freeze, is named here.
+fn refuse_exec_drift(drift: &locus_core::RuntimeDrift) -> Result<()> {
+    if drift.frozen {
+        bail!(
+            "session_frozen: re-pin — binding drifted under active pin ({})",
+            drift.issues.join(", ")
+        );
+    }
+    if !drift.ok {
+        bail!("pin check failed before exec ({})", drift.issues.join(", "));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod exec_drift_gate {
+    use super::refuse_exec_drift;
+
+    fn unfrozen_broker_refusal() -> locus_core::RuntimeDrift {
+        serde_json::from_value(serde_json::json!({
+            "pinned": true,
+            "seal_ok": true,
+            "authority_anchor_ok": false,
+            "backing_ok": true,
+            "binding_present": true,
+            "binding_id_match": true,
+            "tenant_match": true,
+            "providers_match": false,
+            "frozen": false,
+            "expired": false,
+            "providers": [],
+            "issues": ["providers_drift", "authority_anchor_unavailable"],
+            "ok": false
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn broker_recheck_failure_is_refused_before_exec() {
+        let err = refuse_exec_drift(&unfrozen_broker_refusal()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("pin check failed before exec"));
+        assert!(msg.contains("providers_drift"));
+        assert!(msg.contains("authority_anchor_unavailable"));
+        assert!(!msg.contains("session_frozen"));
+    }
+}
+
+/// Delegated or exact-session exec: no credential resolution, one child.
+fn exec_delegated(
+    s: &Store,
+    session: &Session,
+    args: &[String],
+    resolve_secrets: bool,
+    expect: Option<&str>,
+) -> Result<()> {
+    if let Some(want) = expect {
+        check_expected_alias(s, Some(&session.binding_alias), want)?;
+    }
+    if resolve_secrets {
+        bail!("locus exec cannot resolve credentials inside a delegated session; use --no-resolve");
+    }
+    let binding = s.load_binding(&session.binding_alias)?;
+    run_exact_session_child(
+        s,
+        session,
+        &binding,
+        args,
+        ChildLaunchSurface::Exec,
+        "session.exec.delegated",
+    )
+}
+
 fn cmd_exec(
     cmd: Vec<String>,
     resolve_secrets: bool,
@@ -4047,53 +4166,60 @@ fn cmd_exec(
     }
     reject_option_as_command("exec", &args)?;
 
+    let mut trace = ExecTrace::new();
+    trace.mark("args");
+
     let s = store()?;
-    if let Some(session) = delegated_child_session(&s)? {
-        if let Some(want) = expect {
-            check_expected_alias(&s, Some(&session.binding_alias), want)?;
+    trace.mark("store_open");
+    // An explicit session id is the delegated gate. It verifies the seal and
+    // the broker once, and it refuses before --expect when that check fails.
+    if exact_session_selected() {
+        if let Some(session) = delegated_child_session(&s)? {
+            return exec_delegated(&s, &session, &args, resolve_secrets, expect);
         }
-        if resolve_secrets {
-            bail!(
-                "locus exec cannot resolve credentials inside a delegated session; use --no-resolve"
-            );
-        }
-        let binding = s.load_binding(&session.binding_alias)?;
-        return run_exact_session_child(
-            &s,
-            &session,
-            &binding,
-            &args,
-            ChildLaunchSurface::Exec,
-            "session.exec.delegated",
-        );
     }
-    let session = match s.require_active() {
-        Ok(session) => session,
+    let resolved = match s.require_active_resolved() {
+        Ok(resolved) => resolved,
         Err(e) => {
-            if let Some(want) = expect {
-                check_expected_alias(&s, None, want)?;
+            // Missing pin: --expect runs, then the usual "need active pin".
+            // A pin file that fails the seal or the broker matches
+            // `delegated_child_session`: the error is the authority failure,
+            // and --expect does not run.
+            if !exact_session_selected() && s.active_session()?.is_none() {
+                if let Some(want) = expect {
+                    check_expected_alias(&s, None, want)?;
+                }
+            } else if !exact_session_selected() {
+                return Err(e).context("verify selected session authority");
             }
             return Err(wedged_session_recovery(anyhow::Error::new(e)))
                 .context("need active pin for exec");
         }
     };
+    trace.mark("pin_seal_broker");
+    if resolved.session.is_delegated() {
+        return exec_delegated(&s, &resolved.session, &args, resolve_secrets, expect);
+    }
     if let Some(want) = expect {
-        check_expected_alias(&s, Some(&session.binding_alias), want)?;
+        check_expected_alias(&s, Some(&resolved.session.binding_alias), want)?;
     }
-    let binding = s.load_binding(&session.binding_alias)?;
+    let binding = s.load_binding(&resolved.session.binding_alias)?;
     preflight_child_launch(&binding, resolve_secrets, ChildLaunchSurface::Exec)?;
+    trace.mark("binding_preflight");
 
-    // Drift check before privileged exec
+    // Local drift against the binding just loaded. The seal and the broker
+    // generation were checked in `require_active_resolved`. Freeze re-checks
+    // the broker before it writes.
     let drift = s
-        .check_drift_and_freeze()
+        .check_drift_and_freeze_fresh(&resolved, &binding)
         .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))?;
-    if drift.frozen {
-        bail!(
-            "session_frozen: re-pin — binding drifted under active pin ({})",
-            drift.issues.join(", ")
-        );
-    }
-    let iso = isolated_child_env(&s, &session, &binding, resolve_secrets);
+    // Frozen is the drift write. A broker re-check that refuses to freeze
+    // leaves `ok` false and `frozen` false; stop here instead of continuing
+    // to secret resolution and hoping the executor grant rejects the lease.
+    refuse_exec_drift(&drift)?;
+    trace.mark("drift");
+    let session = &resolved.session;
+    let iso = isolated_child_env(&s, session, &binding, resolve_secrets);
     let (cred_issues, cred_phantom) = cred_diag::refine_exec_issues(&s, &iso.secrets_failed);
     let cred_lines = cred_diag::describe_unresolved(&binding, &cred_issues, cred_phantom);
     if strict_creds && !iso.secrets_failed.is_empty() {
@@ -4102,7 +4228,9 @@ fn cmd_exec(
             cred_lines.join("; ")
         );
     }
-    let executor_capability = s.grant_executor_capability(&session)?;
+    trace.mark("scrub_resolve");
+    let executor_capability = s.grant_executor_capability(session)?;
+    trace.mark("executor_grant");
 
     let program = &args[0];
     let rest = &args[1..];
@@ -4136,6 +4264,7 @@ fn cmd_exec(
     }
 
     let spawned = run_child(&mut child, program);
+    trace.mark("spawn_wait");
     let (exit, spawn_error) = child_audit_fields(&spawned);
     s.audit(
         "session.exec",
@@ -4149,6 +4278,7 @@ fn cmd_exec(
             "secrets_failed": iso.secrets_failed,
         })),
     )?;
+    trace.mark("audit");
     let status = spawned?;
     if !status.success() {
         std::process::exit(child_exit_code(&status));
