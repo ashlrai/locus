@@ -13,6 +13,8 @@ mod stdout;
 
 mod cred_diag;
 mod dry_run;
+#[cfg(all(test, unix))]
+mod exec_perf;
 mod exit;
 mod handshake;
 mod json_out;
@@ -60,7 +62,7 @@ Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
   Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard\n  \
-  Daily use     enter · switch · pin · leave · whoami · status · exec · run · binding\n  \
+  Daily use     enter · switch · pin · leave · renew · whoami · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
   Audit         events · forensics\n  \
@@ -313,6 +315,15 @@ enum Commands {
         #[arg(long, requires = "force")]
         no_verifier: bool,
     },
+
+    /// Extend the live pin's expiry without a re-pin (opt-in per binding).
+    ///
+    /// Only a live, unexpired, current-generation pin on an unchanged
+    /// binding. New expiry is at most now + policy.max_ttl and never past
+    /// pinned_at + policy.max_session_lifetime; renew is refused when that
+    /// field is unset. Past the bound a human `locus enter` is required.
+    #[command(next_help_heading = "Daily use")]
+    Renew,
 
     /// Manage client engagements (init / close)
     #[command(next_help_heading = "Setup", subcommand)]
@@ -1442,6 +1453,7 @@ fn run() -> Result<()> {
             ttl,
         } => cmd_pin(alias, force, client, ns, ttl, json, dry_run),
         Commands::Leave { force, no_verifier } => cmd_leave(force, no_verifier, json, dry_run),
+        Commands::Renew => cmd_renew(json, dry_run),
         Commands::Engagement(sub) => cmd_engagement(sub, json, dry_run),
         Commands::Graph(sub) => cmd_graph(sub, json, dry_run),
         Commands::Whoami => cmd_whoami(json),
@@ -1590,6 +1602,7 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
         | Commands::Switch { .. }
         | Commands::Pin { .. }
         | Commands::Leave { .. }
+        | Commands::Renew
         | Commands::Engagement(_)
         | Commands::Binding(BindingCmd::Add(_))
         | Commands::Binding(BindingCmd::Rm { .. })
@@ -3330,6 +3343,7 @@ fn cmd_leave(force: bool, no_verifier: bool, json: bool, dry_run: bool) -> Resul
             }
         }
         Some(session) => {
+            let expired = session.is_expired();
             if json {
                 println!(
                     "{}",
@@ -3338,9 +3352,17 @@ fn cmd_leave(force: bool, no_verifier: bool, json: bool, dry_run: bool) -> Resul
                         "binding": session.binding_alias,
                         "tenant": session.tenant,
                         "session_id": session.session_id,
+                        "expired": expired,
                     })
                 );
             } else {
+                if expired {
+                    println!(
+                        "{} pin had already expired at {}; cleared it",
+                        "note:".yellow().bold(),
+                        session.expires_at.to_rfc3339()
+                    );
+                }
                 println!(
                     "{} left {} ({})",
                     "ok".green().bold(),
@@ -3358,6 +3380,52 @@ fn cmd_leave(force: bool, no_verifier: bool, json: bool, dry_run: bool) -> Resul
             }
         }
     }
+    Ok(())
+}
+
+/// `locus renew`: extend the live pin within policy bounds.
+fn cmd_renew(json: bool, dry_run: bool) -> Result<()> {
+    if dry_run {
+        return plans::plan_renew(json);
+    }
+    let s = store()?;
+    let out = s.renew_active()?;
+    let session = &out.session;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "renewed": true,
+                "binding": session.binding_alias,
+                "tenant": session.tenant,
+                "session_id": session.session_id,
+                "pinned_at": session.pinned_at.to_rfc3339(),
+                "previous_expires_at": out.previous_expires_at.to_rfc3339(),
+                "expires_at": session.expires_at.to_rfc3339(),
+                "expires_in_secs": (session.expires_at - chrono::Utc::now()).num_seconds().max(0),
+                "lifetime_ends_at": out.lifetime_ends_at.to_rfc3339(),
+                "capped_by": out.capped_by,
+            })
+        );
+        return Ok(());
+    }
+    println!(
+        "{} renewed {} ({})",
+        "ok".green().bold(),
+        session.binding_alias.cyan().bold(),
+        session.session_id.dimmed()
+    );
+    println!(
+        "   expires  {}  (was {}, capped by {})",
+        session.expires_at.to_rfc3339(),
+        out.previous_expires_at.to_rfc3339(),
+        out.capped_by
+    );
+    println!(
+        "   lifetime ends {}  (then a human `locus enter {}` is required)",
+        out.lifetime_ends_at.to_rfc3339(),
+        session.binding_alias
+    );
     Ok(())
 }
 
