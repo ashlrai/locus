@@ -9,7 +9,343 @@ use chrono::{DateTime, Duration, Utc};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::{Component, Path};
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
+
+/// Advisory local process metadata. These labels never grant session authority.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PeerRegistration {
+    pub session_id: String,
+    pub engine_id: String,
+    pub task: String,
+    pub cwd: PathBuf,
+    pub pid: u32,
+}
+
+/// Registry failures contain no supplied metadata or credentials.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PeerRegistryError {
+    #[error("unknown engines have read-only peer access")]
+    ReadOnly,
+    #[error("invalid peer metadata: {0}")]
+    Invalid(&'static str),
+    #[error("peer registry is at capacity")]
+    Capacity,
+    #[error("peer session belongs to another live process or engine")]
+    Conflict,
+    #[error("peer process is no longer running")]
+    DeadPid,
+}
+
+/// Matches the client engines supported by `locus setup`.
+///
+/// This is an enrollment convention, not proof of a process's identity.
+pub fn is_known_peer_engine(engine_id: &str) -> bool {
+    matches!(engine_id, "claude" | "cursor" | "codex" | "grok" | "gemini")
+}
+
+/// Bounded, in-memory directory of local agent processes.
+///
+/// Records are intentionally independent from sealed pins and credentials.
+/// A PID is only a liveness hint; it is never an authorization capability.
+#[derive(Debug)]
+pub struct PeerRegistry {
+    peers: BTreeMap<String, PeerRegistration>,
+    capacity: usize,
+}
+
+impl Default for PeerRegistry {
+    fn default() -> Self {
+        Self::new(256)
+    }
+}
+
+impl PeerRegistry {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            peers: BTreeMap::new(),
+            capacity,
+        }
+    }
+
+    /// Register or refresh metadata without replacing a live peer's identity.
+    pub fn register(
+        &mut self,
+        peer: PeerRegistration,
+    ) -> std::result::Result<PeerRegistration, PeerRegistryError> {
+        // Reject unknown writers before even pruning, preserving read-only access.
+        if !is_known_peer_engine(&peer.engine_id) {
+            return Err(PeerRegistryError::ReadOnly);
+        }
+        validate_peer_registration(&peer)?;
+        if !peer_pid_is_alive(peer.pid) {
+            return Err(PeerRegistryError::DeadPid);
+        }
+        self.prune_dead();
+        if let Some(existing) = self.peers.get(&peer.session_id) {
+            if existing.pid != peer.pid || existing.engine_id != peer.engine_id {
+                return Err(PeerRegistryError::Conflict);
+            }
+        } else if self.peers.len() >= self.capacity {
+            return Err(PeerRegistryError::Capacity);
+        }
+        self.peers.insert(peer.session_id.clone(), peer.clone());
+        Ok(peer)
+    }
+
+    /// List live peers in session-id order. Maintenance cannot alter authority.
+    pub fn list_peers(&mut self) -> Vec<PeerRegistration> {
+        self.prune_dead();
+        self.peers.values().cloned().collect()
+    }
+
+    /// Remove only PIDs confirmed absent by the operating system.
+    pub fn prune_dead(&mut self) -> usize {
+        let before = self.peers.len();
+        self.peers.retain(|_, peer| peer_pid_is_alive(peer.pid));
+        before - self.peers.len()
+    }
+}
+
+fn validate_peer_registration(
+    peer: &PeerRegistration,
+) -> std::result::Result<(), PeerRegistryError> {
+    let valid_label = |value: &str, max: usize| {
+        !value.trim().is_empty() && value.len() <= max && !value.chars().any(char::is_control)
+    };
+    if !valid_label(&peer.session_id, 128) {
+        return Err(PeerRegistryError::Invalid("session_id"));
+    }
+    if !valid_label(&peer.task, 4096) {
+        return Err(PeerRegistryError::Invalid("task"));
+    }
+    if !peer.cwd.is_absolute() || !peer.cwd.to_str().is_some_and(|cwd| valid_label(cwd, 4096)) {
+        return Err(PeerRegistryError::Invalid("cwd"));
+    }
+    // Prevent PID zero/group semantics and unsigned-to-signed wraparound.
+    if peer.pid == 0 || i32::try_from(peer.pid).is_err() {
+        return Err(PeerRegistryError::Invalid("pid"));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn peer_pid_is_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: a positive PID and signal zero only check process existence.
+    // EPERM and unexpected failures are not evidence that a process exited.
+    (unsafe { libc::kill(pid, 0) == 0 })
+        || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
+#[cfg(windows)]
+fn peer_pid_is_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: query-only access does not mutate the process, the exit-code
+    // pointer is valid, and every opened handle is closed before returning.
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // Access denial and unknown errors are not proof of process exit.
+            return GetLastError() != ERROR_INVALID_PARAMETER;
+        }
+        let mut exit_code = 0;
+        let queried = GetExitCodeProcess(handle, &mut exit_code);
+        CloseHandle(handle);
+        queried == 0 || exit_code == STILL_ACTIVE as u32
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn peer_pid_is_alive(_pid: u32) -> bool {
+    // Without an OS absence probe, retain records rather than guessing death.
+    true
+}
+
+#[cfg(test)]
+mod peer_registry_tests {
+    use super::*;
+
+    fn registration(session_id: &str) -> PeerRegistration {
+        PeerRegistration {
+            session_id: session_id.into(),
+            engine_id: "codex".into(),
+            task: "test the peer directory".into(),
+            cwd: std::env::temp_dir(),
+            pid: std::process::id(),
+        }
+    }
+
+    #[test]
+    fn peers_list_deterministically_and_refresh_at_capacity() {
+        let mut registry = PeerRegistry::new(2);
+        registry.register(registration("zulu")).unwrap();
+        registry.register(registration("alpha")).unwrap();
+        assert_eq!(
+            registry.register(registration("overflow")),
+            Err(PeerRegistryError::Capacity)
+        );
+        let mut update = registration("alpha");
+        update.task = "updated task".into();
+        update.cwd = std::env::temp_dir().join("different-worktree");
+        assert_eq!(registry.register(update.clone()).unwrap(), update);
+        assert_eq!(registry.register(update.clone()).unwrap(), update);
+        assert_eq!(registry.list_peers(), vec![update, registration("zulu")]);
+        assert_eq!(registry.prune_dead(), 0);
+    }
+
+    #[test]
+    fn supported_engines_enroll_but_unknown_engines_are_read_only() {
+        let mut registry = PeerRegistry::default();
+        for engine in ["claude", "cursor", "codex", "grok", "gemini"] {
+            let mut peer = registration(engine);
+            peer.engine_id = engine.into();
+            registry.register(peer).unwrap();
+        }
+        let expected = registry.list_peers();
+        for engine in ["", "unknown", "generic", "Codex", "codex "] {
+            let mut peer = registration("codex");
+            peer.engine_id = engine.into();
+            assert_eq!(registry.register(peer), Err(PeerRegistryError::ReadOnly));
+            assert_eq!(registry.list_peers(), expected);
+        }
+    }
+
+    #[test]
+    fn live_session_cannot_be_reassigned_to_another_engine() {
+        let mut registry = PeerRegistry::default();
+        let original = registration("same-session");
+        registry.register(original.clone()).unwrap();
+        let mut replacement = original.clone();
+        replacement.engine_id = "claude".into();
+        assert_eq!(
+            registry.register(replacement),
+            Err(PeerRegistryError::Conflict)
+        );
+        assert_eq!(registry.list_peers(), vec![original]);
+    }
+
+    #[test]
+    fn invalid_peer_metadata_is_rejected_without_insertion() {
+        let mut registry = PeerRegistry::default();
+        for value in ["".into(), " \t".into(), "x".repeat(129), "id\n".into()] {
+            let mut peer = registration("valid");
+            peer.session_id = value;
+            assert_eq!(
+                registry.register(peer),
+                Err(PeerRegistryError::Invalid("session_id"))
+            );
+        }
+        for value in ["".into(), " ".into(), "x".repeat(4097), "task\0".into()] {
+            let mut peer = registration("valid");
+            peer.task = value;
+            assert_eq!(
+                registry.register(peer),
+                Err(PeerRegistryError::Invalid("task"))
+            );
+        }
+        for value in [
+            PathBuf::from("relative"),
+            std::env::temp_dir().join("bad\npath"),
+            std::env::temp_dir().join("x".repeat(4097)),
+        ] {
+            let mut peer = registration("valid");
+            peer.cwd = value;
+            assert_eq!(
+                registry.register(peer),
+                Err(PeerRegistryError::Invalid("cwd"))
+            );
+        }
+        for value in [0, i32::MAX as u32 + 1, u32::MAX] {
+            let mut peer = registration("valid");
+            peer.pid = value;
+            assert_eq!(
+                registry.register(peer),
+                Err(PeerRegistryError::Invalid("pid"))
+            );
+        }
+        assert!(registry.list_peers().is_empty());
+    }
+
+    #[test]
+    fn wire_registration_refuses_authority_fields_and_missing_metadata() {
+        let peer = registration("session");
+        let mut value = serde_json::to_value(&peer).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PeerRegistration>(value.clone()).unwrap(),
+            peer
+        );
+        value["read_only"] = serde_json::json!(false);
+        assert!(serde_json::from_value::<PeerRegistration>(value).is_err());
+        let mut value = serde_json::to_value(peer).unwrap();
+        value.as_object_mut().unwrap().remove("pid");
+        assert!(serde_json::from_value::<PeerRegistration>(value).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dead_pid_is_pruned_and_cannot_register_again() {
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = ChildGuard(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .unwrap(),
+        );
+        let mut registry = PeerRegistry::new(2);
+        let live = registration("parent");
+        registry.register(live.clone()).unwrap();
+        let mut exiting = registration("child");
+        exiting.pid = child.0.id();
+        registry.register(exiting.clone()).unwrap();
+        let mut conflict = live.clone();
+        conflict.pid = exiting.pid;
+        assert_eq!(
+            registry.register(conflict),
+            Err(PeerRegistryError::Conflict)
+        );
+        child.0.kill().unwrap();
+        child.0.wait().unwrap();
+        assert_eq!(registry.prune_dead(), 1);
+        assert_eq!(registry.prune_dead(), 0);
+        assert_eq!(registry.list_peers(), vec![live]);
+        assert_eq!(registry.register(exiting), Err(PeerRegistryError::DeadPid));
+        registry.register(registration("replacement")).unwrap();
+        assert_eq!(registry.list_peers().len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn listing_opportunistically_prunes_exited_process() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let mut peer = registration("exited");
+        peer.pid = child.id();
+        child.wait().unwrap();
+        // Seed the pre-exit snapshot without racing a short-lived process.
+        let mut registry = PeerRegistry::default();
+        registry.peers.insert(peer.session_id.clone(), peer);
+        assert!(registry.list_peers().is_empty());
+        assert!(registry.peers.is_empty());
+    }
+}
 
 /// How the pin was established.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
