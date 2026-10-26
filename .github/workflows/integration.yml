@@ -1,0 +1,122 @@
+name: Integration
+
+# Shared phantom+locus integration test (tests/integration/phantom_locus.rs).
+# Merge-queue pattern from ashlr-md #186, per CI Efficiency:
+# - Triggers: pull_request, merge_group and a nightly schedule.
+# - Real work only on merge_group or the nightly run, and only once the repo
+#   variable MERGE_QUEUE is 'true'. Every other run skips the job, and a
+#   skipped job counts as success.
+# - Path filtering through a classify job (phantom #811 pattern), not
+#   workflow-level paths: (merge_group does not support on.paths).
+# Not a required check until the locus ruleset flip plus ~5 green merge_group
+# runs. Never part of release.yml or tag workflows. Dummy canary only, no secrets.
+on:
+  pull_request:
+    branches: [main, master]
+  merge_group:
+  schedule:
+    - cron: "41 6 * * *"
+
+concurrency:
+  group: integration-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Classify changes
+    if: (github.event_name == 'merge_group' || github.event_name == 'schedule') && vars.MERGE_QUEUE == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      run: ${{ steps.classify.outputs.run }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "merge_group" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          files="$(git diff --name-only "$BASE...$HEAD")"
+          printf '%s\n' "$files"
+          if printf '%s\n' "$files" | grep -Eq '^(crates/|npm[^/]*/|tests/integration/|Cargo\.(toml|lock)$|\.github/workflows/integration\.yml$)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "no phantom+locus inputs changed; skipping"
+          fi
+
+  phantom-locus:
+    name: Integration (phantom+locus)
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PHANTOM_VERSION: v0.7.9
+      PHANTOM_ASSET: phantom-x86_64-unknown-linux-gnu.tar.gz
+      # sha256 of the asset, as published in the v0.7.9 release SHA256SUMS.
+      PHANTOM_SHA256: d791d27389d6ebc8c9224458a30d4f708b52fa6cbc71954907ab895760b41598
+      # sha256 of the extracted `phantom` binary. Checked on every run, cache
+      # hit or miss, before the binary is used.
+      PHANTOM_BIN_SHA256: 3ca11386538a1ffde4eb4f99b2d65389bc0eebb7572fd1c67a852b55bc7d01d8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Cache phantom binary
+        id: phantom-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/phantom-pinned
+          key: phantom-${{ env.PHANTOM_VERSION }}-${{ env.PHANTOM_SHA256 }}
+
+      - name: Fetch and verify phantom
+        if: steps.phantom-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          d="$HOME/.cache/phantom-pinned"; mkdir -p "$d"; cd "$d"
+          base="https://github.com/ashlrai/phantom-secrets/releases/download/$PHANTOM_VERSION"
+          curl -fsSLO "$base/$PHANTOM_ASSET"
+          curl -fsSLO "$base/SHA256SUMS"
+          echo "$PHANTOM_SHA256  $PHANTOM_ASSET" | sha256sum -c -
+          grep -F "$PHANTOM_SHA256  $PHANTOM_ASSET" SHA256SUMS
+          tar xzf "$PHANTOM_ASSET" phantom
+          rm -f "$PHANTOM_ASSET" SHA256SUMS
+
+      - name: Verify phantom binary sha256 (every run)
+        run: |
+          set -euo pipefail
+          cd "$HOME/.cache/phantom-pinned"
+          echo "$PHANTOM_BIN_SHA256  phantom" | sha256sum -c -
+          ./phantom --version | grep -F "${PHANTOM_VERSION#v}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          # Required with a SHA pin: the action can no longer read it from the ref.
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Build test
+        run: cargo test -p locus-cli --test phantom_locus --no-run
+
+      - name: phantom+locus integration test
+        timeout-minutes: 3
+        run: |
+          export PHANTOM_BIN="$HOME/.cache/phantom-pinned/phantom"
+          cargo test -p locus-cli --test phantom_locus -- --nocapture
