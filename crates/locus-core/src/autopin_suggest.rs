@@ -127,7 +127,7 @@ pub fn suggest(home: &Path, cwd: &Path) -> std::io::Result<SuggestReport> {
         return Ok(SuggestReport::empty(true, true, "no_history"));
     };
     let hashes = live_remote_hashes(&key, cwd);
-    Ok(rank(&pin_history::read(home), &hashes))
+    Ok(rank(&pin_history::read_snapshot(home)?, &hashes))
 }
 
 /// Pure ranker over history entries for a repo identified by `remote_hashes`.

@@ -213,6 +213,15 @@ Workspace policy discovery is fail closed: if the nearest `.locus.toml` exists b
 
 locus keeps a local pin history (`$LOCUS_HOME/pin-history.jsonl`, 0600, remotes stored only as keyed hashes). In a repo, `locus autopin suggest` shows which binding you usually pin there, with pins, `pin_mismatch` refusals and last seen per alias. A suggestion needs a score (pins minus mismatches) of at least 3 and a strict lead; otherwise it suggests nothing. When the repo has an `origin` remote only `origin` is matched, so an extra remote that mimics another repo borrows nothing; remotes are not authenticated, though, so an `origin` that mimics another repo still matches its history. Check the binding and file `--apply` prints. A read-only `suggest` never creates `history.key`. Add `--json` for the `locus.autopin.suggest.v1` shape. `locus autopin suggest --apply` writes `default_binding` to the nearest `.locus.toml` inside the git toplevel (or a new one there), refuses a parent `.locus.toml` above the toplevel, and requires `LOCUS_CONTROL_CAPABILITY`, so an agent cannot apply it. Turn history off with `[history] enabled = false` or `LOCUS_PIN_HISTORY=0`.
 
+Preview with `locus autopin suggest --apply --dry-run`. Preview and apply both
+validate the suggested binding, destination and workspace allowlist (by alias or
+binding ID). A blocked winner is refused; Locus does not substitute a weaker
+candidate. A preview writes nothing and does not authenticate the control
+capability. If its binding migration lock is missing, run `locus binding list`
+to initialize that lock before previewing. Plain `suggest` also writes nothing,
+even with an uninitialized home or missing history lock; unreadable or symlinked
+history is an error.
+
 Example binding (`~/.locus/bindings/acme.toml`):
 
 ```toml

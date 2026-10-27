@@ -596,9 +596,28 @@ pub(crate) fn lock_bindings(store: &Store) -> Result<File> {
     lock_path_exclusive(&store.bindings_dir().join(".credential-migrations.lock"))
 }
 
+/// Planning must serialize with migrations without creating their lock file.
+/// A missing lock requires explicit initialization rather than an unlocked read.
+pub(crate) fn lock_bindings_existing(store: &Store) -> Result<File> {
+    lock_path_exclusive_with_creation(
+        &store.bindings_dir().join(".credential-migrations.lock"),
+        false,
+    )
+    .map_err(|error| match error {
+        LocusError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => LocusError::msg(
+            "credential migration lock is missing; run `locus binding list` to initialize it before previewing",
+        ),
+        error => error,
+    })
+}
+
 fn lock_path_exclusive(path: &Path) -> Result<File> {
+    lock_path_exclusive_with_creation(path, true)
+}
+
+fn lock_path_exclusive_with_creation(path: &Path, create: bool) -> Result<File> {
     let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
+    options.create(create).read(true).write(true);
     #[cfg(unix)]
     options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     let file = options.open(path)?;

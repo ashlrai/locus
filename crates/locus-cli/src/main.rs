@@ -7541,30 +7541,23 @@ fn cmd_autopin_suggest(apply: bool, json: bool, dry_run: bool) -> Result<()> {
     if apply && dry_run {
         let s = dry_run::existing_store()?;
         let here = cwd();
-        let report = locus_core::autopin_suggest::suggest(s.home(), &here)?;
-        let alias = report.suggestion.clone().ok_or_else(|| {
-            anyhow!(
-                "no autopin suggestion to apply ({}); --apply would refuse",
-                report.reason
-            )
-        })?;
-        let target = find_workspace(&here)?
-            .map(|(p, _)| p)
-            .unwrap_or_else(|| here.join(".locus.toml"));
+        let (report, target) = s.resolve_autopin_suggestion(&here)?;
+        let alias = report.suggestion.as_deref().expect("validated suggestion");
         let mut plan = dry_run::Plan::new("locus autopin suggest --apply");
         plan.write_file(&target, Some(format!("default_binding = \"{alias}\"")))
             .needs_control()
-            .with("suggestion", &alias)
+            .with("suggestion", alias)
             .with("report", &report);
         return plan.emit(json);
     }
-    let s = store()?;
     let here = cwd();
     let (report, written) = if apply {
+        let s = store()?;
         let (r, f) = s.autopin_apply_suggestion(&here)?;
         (r, Some(f))
     } else {
-        (locus_core::autopin_suggest::suggest(s.home(), &here)?, None)
+        let home = locus_core::locus_home()?;
+        (locus_core::autopin_suggest::suggest(&home, &here)?, None)
     };
     if json {
         let value = serde_json::json!({

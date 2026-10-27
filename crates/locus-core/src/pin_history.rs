@@ -311,12 +311,44 @@ pub fn read(home: &Path) -> Vec<HistoryEntry> {
     with_lock(home, |p| Ok(parse(&read_nofollow_or_empty(p)?))).unwrap_or_default()
 }
 
+/// Read a complete history snapshot without creating a lock file or hiding
+/// read failures. Writers replace the log atomically, so one open file sees
+/// either the old log or the new one; read-only suggestions need no lock.
+pub(crate) fn read_snapshot(home: &Path) -> std::io::Result<Vec<HistoryEntry>> {
+    Ok(parse(&read_nofollow_or_empty(&path(home))?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
 
     const KEY: &[u8] = &[7u8; 32];
+
+    #[test]
+    fn snapshot_reads_without_creating_a_lock() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(read_snapshot(home.path()).unwrap().is_empty());
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+
+        let entry = entry_for(KEY, "pin", Some("acme"), None, None);
+        append(home.path(), &entry, 10).unwrap();
+        fs::remove_file(home.path().join(LOCK_FILE)).unwrap();
+        assert_eq!(read_snapshot(home.path()).unwrap(), vec![entry]);
+        assert!(!home.path().join(LOCK_FILE).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_refuses_symlinked_history_instead_of_reporting_empty() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("outside.jsonl");
+        fs::write(&target, "untouched\n").unwrap();
+        std::os::unix::fs::symlink(&target, path(home.path())).unwrap();
+        assert!(read_snapshot(home.path()).is_err());
+        assert!(!home.path().join(LOCK_FILE).exists());
+        assert_eq!(fs::read_to_string(target).unwrap(), "untouched\n");
+    }
 
     fn git_repo_with_remote(url: &str) -> tempfile::TempDir {
         let d = tempfile::tempdir().unwrap();
