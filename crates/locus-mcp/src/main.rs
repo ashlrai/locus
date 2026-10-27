@@ -23,6 +23,7 @@
 mod anchor;
 mod grant;
 mod http_session;
+mod peers;
 
 use anchor::{AnchorDecision, SessionAnchor};
 use anyhow::{bail, Context, Result};
@@ -363,6 +364,7 @@ struct RunMode {
     /// Explicit multi-tenant opt-in (HTTP only; stdio + MT is a parse error).
     multi_tenant: bool,
     swarm: Option<PathBuf>,
+    peers: Option<PathBuf>,
 }
 
 fn main() {
@@ -382,6 +384,10 @@ fn main() {
 
 fn run() -> Result<()> {
     let mode = parse_run_mode(std::env::args().skip(1))?;
+    if let Some(path) = &mode.peers {
+        store()?.require_local_control("serve peers")?;
+        peers::configure(path)?;
+    }
     if let Some(path) = &mode.swarm {
         let graph = locus_core::SwarmGraph::load(path)?;
         store()?.require_local_control("serve swarm")?;
@@ -439,10 +445,22 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
     let mut http_arg: Option<String> = None;
     let mut multi_tenant_flag = false;
     let mut swarm = None;
+    let mut peers = None;
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
         match a.as_str() {
+            "--peers" => {
+                if peers.is_some() {
+                    bail!("--peers may only be supplied once");
+                }
+                let path = args
+                    .get(i + 1)
+                    .filter(|p| !p.starts_with('-'))
+                    .context("--peers requires an engine manifest path")?;
+                peers = Some(PathBuf::from(path));
+                i += 1;
+            }
             "--swarm" => {
                 if swarm.is_some() {
                     bail!("--swarm may only be supplied once");
@@ -488,6 +506,9 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
 
     let env_http = env_truthy("LOCUS_MCP_HTTP");
     let multi_tenant = multi_tenant_flag || env_truthy("LOCUS_MCP_MULTI_TENANT");
+    if peers.is_some() && (!multi_tenant || (!http_flag && !env_http)) {
+        bail!("--peers requires --http and --multi-tenant");
+    }
     if swarm.is_some() && (!multi_tenant || (!http_flag && !env_http)) {
         bail!("--swarm requires --http and --multi-tenant");
     }
@@ -501,6 +522,7 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
             http_addr: None,
             multi_tenant: false,
             swarm: None,
+            peers: None,
         });
     }
 
@@ -510,10 +532,14 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
     let addr: SocketAddr = addr_str
         .parse()
         .with_context(|| format!("invalid HTTP bind address: {addr_str}"))?;
+    if peers.is_some() {
+        peers::validate_bind(addr)?;
+    }
     Ok(RunMode {
         http_addr: Some(addr),
         multi_tenant,
         swarm,
+        peers,
     })
 }
 
@@ -526,6 +552,7 @@ fn print_help() {
            locus-mcp --http --multi-tenant   per-request tenant routing via\n\
                                      X-Locus-Tenant-Token (mint: `locus mcp mint`)\n\
            locus-mcp --http --multi-tenant --swarm GRAPH.json   graph-node tool grants\n\
+           locus-mcp --http --multi-tenant --peers ENGINES.json   local peer relay\n\
            locus-mcp --version       print the version and exit\n\n\
          HTTP endpoints:\n\
            GET  /health              unauthenticated liveness\n\
@@ -638,7 +665,17 @@ fn dispatch_rpc(msg: &Value, scope: &RequestScope) -> Option<Value> {
 
     let swarm = SWARM_BROKER.get().is_some();
     let result = match method {
-        "initialize" => Ok(handle_initialize(&params, scope)),
+        "initialize" => {
+            let mut result = handle_initialize(&params, scope);
+            match peers::initialize(&params, scope) {
+                Ok(Some(peer)) => {
+                    result["_meta"] = json!({"locus_peer": peer});
+                    Ok(result)
+                }
+                Ok(None) => Ok(result),
+                Err(()) => Err(rpc_error(-32602, "peer registration refused".into())),
+            }
+        }
         "ping" => Ok(json!({})),
         "tools/list" => handle_tools_list(scope),
         "tools/call" => handle_tools_call(&params, scope),
@@ -779,6 +816,9 @@ fn session_error_body(err: &HttpSessionError) -> (u16, Value) {
 }
 
 fn run_http(addr: SocketAddr) -> Result<()> {
+    if peers::enabled() {
+        peers::validate_bind(addr)?;
+    }
     if !locus_core::loopback::is_exact_loopback_ip(addr.ip())
         && !env_truthy("LOCUS_MCP_HTTP_ALLOW_REMOTE")
     {
@@ -1047,6 +1087,7 @@ fn handle_http_connection(mut stream: TcpStream, expected_token: &str) -> Result
                     map.remove(id)
                 };
                 if removed {
+                    peers::remove(id);
                     if let Some(t) = tenant_ctx.as_ref() {
                         maybe_teardown_grant_workers(t);
                     }
@@ -3540,6 +3581,7 @@ fn handle_binding_tools_list(scope: &RequestScope) -> std::result::Result<Value,
             }
             Some(AnchorDecision::Match) | None => {}
         }
+        tools.extend(peers::catalog(scope, bindings));
         let mgr = worker_manager()
             .lock()
             .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
@@ -3820,6 +3862,10 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
             return Ok(pin_changed_refusal(&scope.anchor, &anchored, &obs, &[]));
         }
         Some(AnchorDecision::Match) | None => {}
+    }
+
+    if name.starts_with("locus.peers.") {
+        return peers::call(scope, &session, &bindings, name, &args);
     }
 
     // Resolve target binding + un-prefixed tool name for namespaced sessions.
