@@ -19,6 +19,7 @@ mod exec_perf;
 mod exit;
 mod handshake;
 mod json_out;
+mod peers;
 mod phantom_preflight;
 mod phm_names;
 mod plans;
@@ -68,7 +69,7 @@ Commands are grouped (in display order):\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
   Audit         events · forensics\n  \
-  Local UI      serve · dashboard\n  \
+  Local UI      serve · dashboard · peers\n  \
   Maintenance   completion · topic · version\n\n\
 Topic help:  locus topic <name>  or  locus help topic <name>\n  \
   Topics: dashboard · forensics · serve · goal · verify · agent · mcp · http · upstream · adapter"
@@ -475,6 +476,10 @@ enum Commands {
     Forensics(ForensicsCmd),
 
     // ────────────────────────── Local UI ─────────────────────────────
+    /// Discover local agent sessions (advisory metadata, 127.0.0.1 only)
+    #[command(next_help_heading = "Local UI", subcommand)]
+    Peers(peers::PeersCmd),
+
     /// Serve the dashboard or a grant-scoped swarm MCP broker (127.0.0.1 only)
     ///
     /// Endpoints: GET /api/status|whoami|bindings|approvals|doctor|events
@@ -1371,6 +1376,7 @@ fn argv_targets_unplannable(args: &[std::ffi::OsString]) -> bool {
                 .is_none_or(|m| next.is_none_or(|w| m.find_subcommand(w).is_none()))
         }
         Some("ci") => words.next() == Some("run"),
+        Some("peers") => matches!(words.next(), Some("serve" | "register")),
         _ => false,
     }
 }
@@ -1594,6 +1600,7 @@ fn run() -> Result<()> {
             Some(graph) => swarm_serve::run(port, &graph, mcp_bin),
             None => cmd_serve(port, token, open),
         },
+        Commands::Peers(cmd) => peers::run(cmd, json),
         Commands::Dashboard {
             port,
             token,
@@ -1682,6 +1689,8 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
             Some(McpCmd::Mint { .. } | McpCmd::Revoke { .. }) => Plans,
         },
         Commands::Adapter(sub) => adapter_dry_run_support(sub),
+        Commands::Peers(peers::PeersCmd::List { .. }) => ReadOnly,
+        Commands::Peers(_) => Unsupported,
         Commands::Whoami
         | Commands::Autopin(AutopinCmd::Suggest { apply: false })
         | Commands::Status { .. }
@@ -1737,6 +1746,7 @@ fn unplannable_command_name(cmd: &Commands) -> &'static str {
         Commands::Run { .. } => "run",
         Commands::Ci(_) => "ci run",
         Commands::Serve { .. } => "serve",
+        Commands::Peers(_) => "peers serve/register",
         Commands::Dashboard { .. } => "dashboard",
         Commands::Mcp { .. } => "mcp",
         _ => "this command",

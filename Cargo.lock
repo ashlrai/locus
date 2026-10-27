@@ -1058,6 +1058,7 @@ dependencies = [
  "toml_edit",
  "tower",
  "tower-http",
+ "ureq",
 ]
 
 [[package]]

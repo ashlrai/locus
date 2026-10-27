@@ -27,6 +27,7 @@ tokio = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 chrono = { workspace = true }
+ureq = { workspace = true }
 tempfile = { workspace = true }
 # Format-preserving TOML edits for Codex config merges (already a transitive
 # dep via `toml` 0.8, so this adds no new lockfile entries).
