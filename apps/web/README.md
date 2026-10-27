@@ -16,6 +16,7 @@ clap command enums, `control_tools()`). Marked regions
 `<!-- fresh:KEY -->…<!-- /fresh:KEY -->` are rewritten by:
 
 ```bash
+cd apps/web
 npm run freshness   # regenerate the marked regions in place
 npm run check       # fail if the page is stale or names a dead command/tool
 npm test            # node:test suite for the generator
