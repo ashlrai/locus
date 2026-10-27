@@ -703,7 +703,7 @@ fn http_jsonrpc_initialize_and_tools_list() {
         "id": 1,
         "method": "initialize",
         "params": {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2026-07-28",
             "capabilities": {},
             "clientInfo": { "name": "http-test", "version": "0" }
         }
@@ -713,6 +713,8 @@ fn http_jsonrpc_initialize_and_tools_list() {
     assert_eq!(status, 200, "{resp}");
     let v: Value = serde_json::from_str(&resp).unwrap();
     assert_eq!(v["result"]["serverInfo"]["name"], "locus-mcp");
+    assert_eq!(v["result"]["protocolVersion"], "2026-07-28");
+    assert_eq!(v["result"]["resultType"], "complete");
     let session_id =
         header_lookup(&headers, "Mcp-Session-Id").expect("initialize must mint Mcp-Session-Id");
     assert_eq!(session_id.len(), 32, "opaque hex session id: {session_id}");
@@ -737,6 +739,9 @@ fn http_jsonrpc_initialize_and_tools_list() {
         Some(session_id.as_str())
     );
     let v: Value = serde_json::from_str(&resp).unwrap();
+    assert_eq!(v["result"]["resultType"], "complete");
+    assert_eq!(v["result"]["ttlMs"], 0);
+    assert_eq!(v["result"]["cacheScope"], "private");
     let tools = v["result"]["tools"].as_array().expect("tools");
     assert!(
         tools.iter().any(|t| t["name"] == "locus_whoami"),

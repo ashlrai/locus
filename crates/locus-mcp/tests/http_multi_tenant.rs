@@ -250,7 +250,7 @@ fn seed_bindings(store: &Store) {
 fn rpc_initialize(id: i64) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "jsonrpc": "2.0", "id": id, "method": "initialize", "params": {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2026-07-28",
             "capabilities": {},
             "clientInfo": { "name": "mt-test", "version": "0" }
         }
@@ -342,6 +342,10 @@ fn initialize_session(w: &MtWorld, token: &str, id: i64) -> String {
         w.srv
             .request("POST", "/mcp", Some(&rpc_initialize(id)), Some(token), None);
     assert_eq!(status, 200, "initialize failed: {body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["result"]["protocolVersion"], "2026-07-28");
+    assert_eq!(response["result"]["resultType"], "complete");
+    assert_eq!(response["result"]["serverInfo"]["name"], "locus-mcp");
     header_lookup(&headers, "Mcp-Session-Id").expect("session id minted")
 }
 
@@ -395,7 +399,29 @@ fn mt_two_tenants_isolated_catalogs_identities_and_cross_tenant_403() {
         Some(&sid_a),
     );
     assert_eq!(status, 200, "{body}");
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["result"]["resultType"], "complete");
+    assert_eq!(response["result"]["ttlMs"], 0);
+    assert_eq!(response["result"]["cacheScope"], "private");
     let names_a = tool_names(&body);
+    let discovery = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 30, "method": "server/discover", "params": {
+            "_meta": {"io.modelcontextprotocol/protocolVersion": "2026-07-28"}
+        }
+    }))
+    .unwrap();
+    let (status, _, body) = w.srv.request(
+        "POST",
+        "/mcp",
+        Some(&discovery),
+        Some(&w.token_a),
+        Some(&sid_a),
+    );
+    assert_eq!(status, 200);
+    let discovered: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(discovered["result"]["resultType"], "complete");
+    assert_eq!(discovered["result"]["ttlMs"], 0);
+    assert_eq!(discovered["result"]["cacheScope"], "private");
     assert!(
         names_a.iter().any(|n| n == "github.scope"),
         "acme catalog missing github tools: {names_a:?}"

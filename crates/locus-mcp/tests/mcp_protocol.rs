@@ -2520,6 +2520,14 @@ fn stdio_anchor_survives_leave_and_refuses_new_alias() {
     assert!(!is_err, "pre-leave call failed: {text}");
 
     store.leave().unwrap();
+    // Discovery must not have initialize's authority to clear an old anchor.
+    let discover = client.request(
+        "server/discover",
+        json!({"_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+        }}),
+    );
+    assert_eq!(discover["result"]["resultType"], "complete");
 
     // Unpinned gap: not_pinned WITH anchor context (anchor is not cleared).
     let call = client.request(
@@ -2905,4 +2913,100 @@ fn control_tools_reject_mistyped_arguments() {
     let (text, is_err) = McpClient::tool_text(&resp);
     assert!(is_err, "{text}");
     assert!(text.contains("locus_list_bindings"), "{text}");
+}
+
+/// Raw wire assertions: SDKs may consume these fields before exposing results.
+#[test]
+fn protocol_2026_07_28_conformance() {
+    for framing in [Framing::ContentLength, Framing::Ndjson] {
+        let home = tempdir().unwrap();
+        let mut client = McpClient::spawn(home.path(), framing);
+        let meta = json!({
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {}
+        });
+        // Discovery must work before initialize without granting provider access.
+        let discover = client.request("server/discover", json!({"_meta": meta}));
+        assert_eq!(discover["result"]["resultType"], "complete");
+        assert_eq!(discover["result"]["ttlMs"], 0);
+        assert_eq!(discover["result"]["cacheScope"], "private");
+        assert!(discover["result"]["supportedVersions"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("2026-07-28")));
+        let name = discover["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"]
+            .as_str()
+            .unwrap();
+        assert_eq!(name, "locus-mcp");
+        assert!(!name.contains("__"));
+
+        let init = client.request(
+            "initialize",
+            json!({
+                "protocolVersion": "2026-07-28", "capabilities": {},
+                "clientInfo": {"name": "radar-conformance", "version": "1"}
+            }),
+        );
+        assert_eq!(init["result"]["protocolVersion"], "2026-07-28");
+        assert_eq!(init["result"]["resultType"], "complete");
+        assert_eq!(
+            init["result"]["capabilities"],
+            discover["result"]["capabilities"]
+        );
+        assert!(!init["result"]["serverInfo"]["name"]
+            .as_str()
+            .unwrap()
+            .contains("__"));
+        for method in ["tools/list", "resources/list", "prompts/list"] {
+            let response = client.request(method, json!({"_meta": meta}));
+            let result = &response["result"];
+            assert_eq!(result["resultType"], "complete", "{method}: {response}");
+            assert_eq!(result["ttlMs"], 0, "{method}: {response}");
+            assert_eq!(result["cacheScope"], "private", "{method}: {response}");
+            if method == "resources/list" {
+                for resource in result["resources"].as_array().unwrap() {
+                    let read = client.request(
+                        "resources/read",
+                        json!({
+                            "_meta": meta, "uri": resource["uri"]
+                        }),
+                    );
+                    assert_eq!(read["result"]["resultType"], "complete", "{read}");
+                    assert_eq!(read["result"]["ttlMs"], 0, "{read}");
+                    assert_eq!(read["result"]["cacheScope"], "private", "{read}");
+                }
+            }
+            if method == "tools/list" {
+                assert!(result["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|tool| tool["name"].as_str().unwrap().starts_with("locus_")));
+            }
+        }
+        for (method, params) in [
+            ("ping", json!({"_meta": meta})),
+            (
+                "tools/call",
+                json!({"_meta": meta, "name": "locus_whoami", "arguments": {}}),
+            ),
+        ] {
+            let response = client.request(method, params);
+            assert_eq!(response["result"]["resultType"], "complete", "{response}");
+        }
+        let unknown = client.request("not/a/method", json!({"_meta": meta}));
+        assert_eq!(unknown["error"]["code"], -32601);
+        assert!(unknown.get("result").is_none());
+        let unsupported = client.request(
+            "tools/list",
+            json!({"_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2099-01-01"
+            }}),
+        );
+        assert_eq!(unsupported["error"]["code"], -32022);
+        assert_eq!(unsupported["error"]["data"]["requested"], "2099-01-01");
+        assert!(unsupported.get("result").is_none());
+        // A modern request must not prevent legacy negotiation on the transport.
+        assert_eq!(handshake(&mut client)["protocolVersion"], "2024-11-05");
+    }
 }
