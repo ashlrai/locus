@@ -38,6 +38,28 @@ locus --help
 locus-mcp --version   # prints `locus-mcp <version>` and exits (also -V)
 ```
 
+## Replace npx registrations during pin
+
+`locus pin personal --rewrite-configs` optionally replaces existing `npx`
+registrations for `@ashlrai/locus-mcp` or `locus-mcp` (including versioned
+packages) with the resolved native
+`locus-mcp` binary. It checks the binary beside `locus`, then `~/.locus/bin`,
+then PATH. It updates only MCP entries in `~/.codex/config.toml`,
+`~/.claude.json` (including project entries), and `~/.cursor/mcp.json`.
+Other entries and server arguments after the package name are retained.
+Missing files are left alone. Each changed file gets a timestamped `.bak`
+before replacement; repeated runs leave already migrated entries alone.
+Backups can contain the same private settings as the original. On Unix they
+are created with private permissions. Linked config files are refused, and this option does
+not access authentication files.
+
+The pin is completed before files are replaced. If replacement fails, the
+command reports that the pin succeeded and identifies the failure; earlier
+files may already have been updated and can be restored from their backups.
+Restart the client to use the new registration. A direct native server still
+provides control tools only; provider tools require a supervised launch as
+explained below. `--rewrite-configs` cannot be combined with `--dry-run`.
+
 ## Human workflow (pin first)
 
 Agents **cannot** pin a session. A human (or CI step) must:
