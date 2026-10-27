@@ -1,17 +1,28 @@
 name: CI
 
+# PR and merge_group run one fast required check (CI Gate): fmt, clippy,
+# the distribution wrapper and crypto policy checks, the sandbox tests and
+# a pinned diff secret scan. The full suite (nextest, doctests, release
+# build, Phantom contract, recipes, MSRV, conformance, coverage, macOS npm
+# smoke) runs at 6 AM and 6 PM ET on main and on workflow_dispatch; a red
+# scheduled run files a P0 FIX-MAIN issue (fix-main.yml). Pushes to main no
+# longer run CI: the merge queue already ran the gate on the merged tree.
+# The phantom+locus integration lives in integration.yml.
 on:
-  push:
-    branches: [main, master]
   pull_request:
     branches: [main, master]
-  # So the required checks report in the merge queue once the ruleset enables
-  # it. The phantom+locus integration lives in integration.yml.
   merge_group:
+  schedule:
+    # 6 AM and 6 PM ET (EDT, UTC-4).
+    - cron: "55 10 * * *"
+    - cron: "55 22 * * *"
+  workflow_dispatch:
 
-# Cancel superseded PR runs; never cancel main/master.
+# Cancel superseded PR runs; never cancel queue or scheduled runs. Schedule and
+# dispatch runs get a per-run group so a release-evidence dispatch is never
+# cancelled by a later queued run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.run_id || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege for every job: read the repo, nothing else. No job in this
@@ -24,8 +35,61 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
+  fast:
+    name: fmt · clippy · security
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          # Required with a SHA pin: the action can no longer read it from the ref.
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+
+      - name: Install Ruby
+        uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
+        with:
+          ruby-version: "3.3"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # Includes the crypto policy check (Tier-1).
+      - name: Validate distribution wrappers
+        run: |
+          node --check npm/install.js
+          node --check npm/bin/locus.js
+          node --check npm-mcp/install.js
+          node --check npm-mcp/bin/locus-mcp.js
+          node --test npm/test
+          node --test scripts/check-crypto.test.mjs
+          node scripts/check-crypto.mjs
+          ruby -c integrations/homebrew/Formula/locus.rb
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Tier-1: worker sandbox tests stay pre-merge on every PR and queue run.
+      - name: Sandbox tests
+        run: cargo test -p locus-core --lib --locked sandbox
+
   check:
     name: fmt · clippy · test · release build
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -75,27 +139,9 @@ jobs:
 
       # nextest: every test in its own process, parallel across binaries.
       # Doctests are not run by nextest, so they stay on cargo test --doc.
-      # PRs: only crates the diff touches plus their reverse deps (nextest
-      # rdeps filterset); manifest/lockfile/toolchain/CI changes select all().
-      # Pushes to main always run the complete suite.
-      - name: Select affected tests
-        id: affected
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          if [ "$EVENT" = "pull_request" ]; then
-            fs="$(bash scripts/ci/affected-filterset.sh "$BASE" "$HEAD" || echo 'all()')"
-          else
-            fs='all()'
-          fi
-          echo "filterset=$fs" >> "$GITHUB_OUTPUT"
-          echo "nextest filterset: $fs"
-
+      # Scheduled and dispatch runs always run the complete suite.
       - name: Test
-        if: steps.affected.outputs.filterset != 'none()'
-        run: cargo nextest run --workspace --no-fail-fast -E "${{ steps.affected.outputs.filterset }}"
+        run: cargo nextest run --workspace --no-fail-fast
 
       - name: Doctests
         run: cargo test --workspace --doc
@@ -111,16 +157,15 @@ jobs:
       - name: Recipes (examples/recipes against the release build)
         run: node --test examples/recipes
 
-  # Declared MSRV (workspace.package.rust-version). cargo check only.
-  # Pull requests run it when a Cargo.toml or Cargo.lock changes. Every other
-  # event runs it, because a .rs change breaks the MSRV as often as a manifest
-  # change. Not one of the required checks. RUSTUP_TOOLCHAIN overrides
+  # Declared MSRV (workspace.package.rust-version). cargo check only, on the
+  # schedule and on dispatch. Not one of the required checks. RUSTUP_TOOLCHAIN overrides
   # rust-toolchain.toml, which pins stable for in-repo development. RUSTFLAGS
   # is cleared so dependency warnings on the older compiler are not promoted
   # to errors.
   msrv:
     name: msrv (rustc 1.89)
     runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     timeout-minutes: 15
     permissions:
       contents: read
@@ -133,52 +178,87 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Decide whether to run
-        id: manifests
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          run=false
-          case "$EVENT" in
-            pull_request)
-              files=""
-              # Default checkout depth is 1. Fetch the base commit and use a
-              # two-dot diff: `git diff A B` only needs those two trees. A
-              # three-dot diff needs a merge base, which this depth does not have.
-              if [ -z "$BASE" ]; then
-                run=true
-              elif ! git fetch --no-tags --depth=1 origin "$BASE"; then
-                run=true
-              elif ! files="$(git diff --name-only "$BASE" HEAD)"; then
-                run=true
-              elif printf '%s\n' "$files" | grep -Eq '(^|/)Cargo\.toml$|(^|/)Cargo\.lock$|\.rs$|(^|/)rust-toolchain[^/]*$|(^|/)\.cargo/'; then
-                run=true
-              fi
-              ;;
-            push|merge_group|schedule|workflow_dispatch)
-              run=true
-              ;;
-            *)
-              run=true
-              ;;
-          esac
-          echo "run=$run" >> "$GITHUB_OUTPUT"
-          echo "msrv cargo check: $run ($EVENT)"
-
       - name: Install Rust toolchain
-        if: steps.manifests.outputs.run == 'true'
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: 1.89.0
 
       - name: Cache cargo
-        if: steps.manifests.outputs.run == 'true'
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: msrv-1.89.0
 
       - name: Check
-        if: steps.manifests.outputs.run == 'true'
         run: cargo +1.89.0 check --workspace --locked
+
+  secret-scan:
+    # Security floor: diff-only secret scan on every event, pinned Gitleaks
+    # 8.30.0 (sha256-verified). No path filter and no if-condition; the gate
+    # fails unless this job succeeds (skipped or cancelled fails closed).
+    name: Secret scan (diff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Install pinned Gitleaks
+        env:
+          GITLEAKS_VERSION: 8.30.0
+          GITLEAKS_SHA256: 79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 3 \
+            --output "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  ${archive}" | sha256sum --check --strict -
+          mkdir -p "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          "$RUNNER_TEMP/gitleaks-bin/gitleaks" version
+      - name: Scan the commits this event adds
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          MG_BASE: ${{ github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request) base="$(git merge-base "$PR_BASE" "$HEAD_SHA")" ;;
+            merge_group) base="$MG_BASE" ;;
+            *) base="" ;;
+          esac
+          if [ -z "$base" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then base="${HEAD_SHA}~1"; fi
+          # A PR must not allowlist its own leak: ignore any repo-supplied config.
+          rm -f .gitleaks.toml .gitleaksignore
+          echo "scanning ${base}..${HEAD_SHA}"
+          "$RUNNER_TEMP/gitleaks-bin/gitleaks" git . --log-opts="${base}..${HEAD_SHA}" --redact --no-banner --max-target-megabytes 5 --timeout 120
+
+  # The one required check. Every event needs the fast job and the secret
+  # scan; scheduled and dispatch runs also need the full suite and MSRV.
+  # Any needed job that is not success (failure, cancelled or skipped) fails.
+  gate:
+    name: CI Gate
+    if: always()
+    needs: [fast, secret-scan, check, msrv]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Require every needed job
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          full=false
+          if [ "$EVENT" = "schedule" ] || [ "$EVENT" = "workflow_dispatch" ]; then full=true; fi
+          bad="$(printf '%s' "$NEEDS" | jq -r --argjson full "$full" 'to_entries[] | select(.value.result != "success") | select(($full | not) and (.key == "check" or .key == "msrv") and .value.result == "skipped" | not) | "\(.key)=\(.value.result)"')"
+          if [ -n "$bad" ]; then echo "::error::CI Gate: $bad"; exit 1; fi
+          echo "CI Gate passed ($EVENT)"

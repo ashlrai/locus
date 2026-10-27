@@ -11,12 +11,12 @@ name: Integration
 #   workflow-level paths: (merge_group does not support on.paths).
 # Not a required check until the locus ruleset flip plus ~5 green merge_group
 # runs. Never part of release.yml or tag workflows. Dummy canary only, no secrets.
+# Runs with the scheduled full suite (6 AM and 6 PM ET) and on dispatch, off
+# PRs, the merge queue and main pushes, so they only wait on CI Gate.
 on:
-  pull_request:
-    branches: [main, master]
-  merge_group:
   schedule:
-    - cron: "23 6 * * *"
+    - cron: "57 10 * * *"
+    - cron: "57 22 * * *"
   workflow_dispatch:
 
 concurrency:
