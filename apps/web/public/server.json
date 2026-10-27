@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.github.ashlrai/locus-mcp",
+  "description": "MCP multiplexor for Locus: tools hard-scoped to the active pin so agents cannot act in the wrong tenant.",
+  "version": "0.5.2",
+  "repository": {
+    "url": "https://github.com/ashlrai/locus",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@ashlrai/locus-mcp",
+      "version": "0.5.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeHint": "npx"
+    }
+  ]
+}

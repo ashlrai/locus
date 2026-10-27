@@ -184,6 +184,8 @@ pub struct PinResolution {
 #[derive(Debug, Clone)]
 pub struct Store {
     home: PathBuf,
+    /// Opened with [`Store::open_existing`]: never mint a seal key.
+    existing_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -212,7 +214,10 @@ impl Store {
         fs::create_dir_all(home.join("engagements"))?;
         fs::create_dir_all(home.join("archives"))?;
         fs::create_dir_all(home.join("runtime"))?;
-        let s = Self { home };
+        let s = Self {
+            home,
+            existing_only: false,
+        };
         // Ensure seal key exists
         let _ = s.seal_key()?;
         Ok(s)
@@ -224,16 +229,25 @@ impl Store {
     /// or its seal key is missing.
     pub fn open_existing(home: impl Into<PathBuf>) -> Result<Self> {
         let home = home.into();
-        let seal = home.join("daemon.key");
-        if !seal.is_file() {
-            return Err(LocusError::msg(format!(
+        let not_initialized = || {
+            LocusError::msg(format!(
                 "{} is not initialized (no seal key)",
                 home.display()
-            )));
+            ))
+        };
+        // Canonicalize first so the key is checked where it will be read.
+        let canonical = fs::canonicalize(&home).map_err(|_| not_initialized())?;
+        let s = Self {
+            home: canonical,
+            existing_only: true,
+        };
+        if !s.seal_key_path().exists() && fs::symlink_metadata(s.seal_key_path()).is_err() {
+            return Err(not_initialized());
         }
-        Ok(Self {
-            home: fs::canonicalize(home)?,
-        })
+        // Refuses symlinks, non-regular files, foreign owners and group or
+        // other access; never generates.
+        s.seal_key_existing()?;
+        Ok(s)
     }
 
     pub fn home(&self) -> &Path {
@@ -288,6 +302,9 @@ impl Store {
     }
 
     pub fn seal_key(&self) -> Result<SealKey> {
+        if self.existing_only {
+            return self.seal_key_existing();
+        }
         let path = self.seal_key_path();
         if path.exists() {
             let hex = fs::read_to_string(&path)?;
@@ -297,6 +314,49 @@ impl Store {
             write_secret_file(&path, key.to_hex().as_bytes())?;
             Ok(key)
         }
+    }
+
+    /// Read the existing seal key without ever generating one. Opens with
+    /// `O_NOFOLLOW` and checks the opened file (fstat, so no TOCTOU between
+    /// check and read): regular file, owned by the effective uid, no group or
+    /// other permission bits.
+    pub fn seal_key_existing(&self) -> Result<SealKey> {
+        use std::io::Read as _;
+        let path = self.seal_key_path();
+        let refused = |why: &str| LocusError::msg(format!("seal key {}: {why}", path.display()));
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&path)
+                .map_err(|e| {
+                    if e.raw_os_error() == Some(libc::ELOOP) {
+                        refused("is a symlink; refusing")
+                    } else {
+                        refused("missing or unreadable (store not initialized)")
+                    }
+                })?;
+            let meta = file.metadata()?;
+            if !meta.file_type().is_file() {
+                return Err(refused("is not a regular file"));
+            }
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            if meta.uid() != unsafe { libc::geteuid() } {
+                return Err(refused("is not owned by the current user"));
+            }
+            if meta.mode() & 0o077 != 0 {
+                return Err(refused("must be mode 0600 (group/other access found)"));
+            }
+            file
+        };
+        #[cfg(not(unix))]
+        let mut file = fs::File::open(&path)
+            .map_err(|_| refused("missing or unreadable (store not initialized)"))?;
+        let mut hex = String::new();
+        file.by_ref().take(4096).read_to_string(&mut hex)?;
+        SealKey::from_hex(hex.trim())
     }
 
     fn issue_session_authority(
@@ -535,11 +595,12 @@ impl Store {
         let (new_expiry, lifetime_ends_at, capped_by) = renew_bounds(&session, &binding)?;
         let previous_expires_at = session.expires_at;
         let previous_generation = session.authority_anchor.as_ref().map(|a| a.generation);
+        let previous_seal = session.seal.clone();
         session.expires_at = new_expiry;
         session.authority_anchor = Some(self.issue_session_authority(&session)?);
         session.reseal(&key);
         let path = self.active_session_path();
-        self.write_session_file(&path, &session)?;
+        self.commit_renew(&path, &previous_seal, &session)?;
         self.audit(
             "session.renew",
             &session.binding_alias,
@@ -561,6 +622,37 @@ impl Store {
         })
     }
 
+    /// Write a renewed pin only if `active.json` still holds the exact record
+    /// renew started from (same seal). Without this, a `locus leave` or
+    /// `locus enter` that lands during renew's broker round trips is silently
+    /// undone: the broker's single active slot is re-issued to the old
+    /// session and the old record is written back over the new state. On a
+    /// mismatch the generation renew just issued is revoked (fail closed) and
+    /// nothing is written.
+    fn commit_renew(&self, path: &Path, previous_seal: &str, renewed: &Session) -> Result<()> {
+        let unchanged = matches!(
+            self.read_active_session_file(),
+            Ok(Some(ref cur)) if cur.seal == previous_seal
+        );
+        if !unchanged {
+            let _ = self.revoke_session_authority(renewed);
+            self.audit(
+                "session.renew_aborted",
+                &renewed.binding_alias,
+                Some(serde_json::json!({
+                    "session_id": renewed.session_id,
+                    "reason": "active pin changed during renew",
+                })),
+            )?;
+            return Err(LocusError::msg(
+                "active pin changed during renew (concurrent leave or enter); renew aborted \
+                 and its new generation revoked. Check `locus whoami`; re-pin with \
+                 `locus enter <alias>` if needed",
+            ));
+        }
+        self.write_session_file(path, renewed)
+    }
+
     // ── Bindings ──────────────────────────────────────────────────────────
 
     pub fn save_binding(&self, binding: &Binding) -> Result<PathBuf> {
@@ -572,6 +664,26 @@ impl Store {
     /// before the write cannot be raced by another writer.
     pub fn create_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
         self.write_binding(binding, replace)
+    }
+
+    /// Check for an equivalent existing binding without following symlinks.
+    /// The bindings lock keeps the file stable during the comparison.
+    pub fn binding_matches(&self, binding: &Binding) -> Result<bool> {
+        let _lock = crate::credential_migration::lock_bindings(self)?;
+        let path = self.bindings_dir().join(format!("{}.toml", binding.alias));
+        ensure_under_dir(&self.bindings_dir(), &path)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|_| LocusError::msg(format!("binding '{}' is unreadable", binding.alias)))?;
+        let existing = parse_binding_safely(&raw, &binding.alias)?;
+        Ok(existing.to_toml()? == binding.to_toml()?)
     }
 
     fn write_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
@@ -606,6 +718,13 @@ impl Store {
                 )));
             }
             Ok(_) if !replace => {
+                let existing = fs::read_to_string(&path).map_err(|_| {
+                    LocusError::msg(format!("binding '{}' is unreadable", binding.alias))
+                })?;
+                let existing = parse_binding_safely(&existing, &binding.alias)?;
+                if existing.to_toml()? == binding.to_toml()? {
+                    return Ok(path);
+                }
                 return Err(LocusError::msg(format!(
                     "binding '{}' already exists; nothing written",
                     binding.alias
@@ -4051,6 +4170,44 @@ mod tests {
         assert_eq!(before.len(), after.len());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn open_existing_refuses_unsafe_seal_keys_and_never_mints() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        super::Store::open(&home).unwrap();
+        let key = home.join("daemon.key");
+        assert!(super::Store::open_existing(&home).is_ok());
+
+        // Group/other readable key is refused.
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = super::Store::open_existing(&home).unwrap_err().to_string();
+        assert!(err.contains("0600"), "{err}");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Symlinked key is refused even when the target is a valid key.
+        let elsewhere = d.path().join("elsewhere.key");
+        std::fs::rename(&key, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &key).unwrap();
+        let err = super::Store::open_existing(&home).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        std::fs::remove_file(&key).unwrap();
+
+        // Directory in place of the key is refused.
+        std::fs::create_dir(&key).unwrap();
+        assert!(super::Store::open_existing(&home).is_err());
+        std::fs::remove_dir(&key).unwrap();
+        std::fs::rename(&elsewhere, &key).unwrap();
+
+        // A key that vanishes after open_existing is never re-minted.
+        let s = super::Store::open_existing(&home).unwrap();
+        std::fs::remove_file(&key).unwrap();
+        assert!(s.seal_key().is_err());
+        assert!(s.seal_key_existing().is_err());
+        assert!(!key.exists(), "read-only store minted a seal key");
+    }
+
     #[test]
     fn resolve_pin_matches_the_pin_refusals_without_writing() {
         let d = tempfile::tempdir().unwrap();
@@ -5682,6 +5839,22 @@ credential_ref = "ghp_UNSAFE/CANARY"
     }
 
     #[test]
+    fn create_binding_is_a_noop_when_existing_binding_matches() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let binding = sample_binding("acme", "acme-corp", "p1");
+        let path = store.create_binding(&binding, false).unwrap();
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+        let contents = fs::read(&path).unwrap();
+
+        let returned = store.create_binding(&binding, false).unwrap();
+
+        assert_eq!(returned, path);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+        assert_eq!(fs::read(&path).unwrap(), contents);
+    }
+
+    #[test]
     fn save_binding_rejects_empty_providers_and_bad_alias() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
@@ -6720,6 +6893,39 @@ allowed_bindings = ["acme"]
             store.require_local_control("locus leave"),
             Err(LocusError::AuthorityAnchorMismatch)
         ));
+    }
+
+    #[test]
+    fn renew_commit_refuses_when_pin_left_mid_renew() {
+        // Post-merge review of #193: a `locus leave` that lands between
+        // renew's read and its write must not be undone by renew.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(Some("1d"))).unwrap();
+        store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(5)))
+            .unwrap();
+        let path = store.active_session_path();
+        let original: Session = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        // The concurrent leave completes first.
+        store.leave().unwrap().expect("live pin is left");
+        assert!(!path.exists());
+        // Renew's broker round trip then re-issues the old session.
+        let mut renewed = original.clone();
+        renewed.expires_at += Duration::minutes(30);
+        renewed.authority_anchor = Some(store.issue_session_authority(&renewed).unwrap());
+        renewed.reseal(&store.seal_key().unwrap());
+        let err = store
+            .commit_renew(&path, &original.seal, &renewed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed during renew"), "{err}");
+        // The leave stands: no pin on disk, and the generation renew issued
+        // was revoked at the broker.
+        assert!(!path.exists());
+        assert!(store.validate_session_authority(&renewed).is_err());
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(audit.contains("session.renew_aborted"), "{audit}");
     }
 
     #[test]
