@@ -759,3 +759,13 @@ LOCUS_HOME=/tmp/locus-debug locus pin personal
 - [docs/adapters.md](./adapters.md) — add provider tools  
 - [README.md](../README.md) — CLI quick start  
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — build and test  
+
+### Local agent peers
+
+An operator can enable the text-only relay with
+`locus-mcp --http 127.0.0.1:8742 --multi-tenant --peers ENGINES.json`.
+Authenticated sessions register engine metadata, list peers, exchange direct
+messages, and use private group threads through `locus.peers.list`,
+`locus.peers.send`, `locus.peers.inbox`, and `locus.peers.thread`.
+Only operator-mapped engines may write; unknown engines remain read-only.
+See [peer relay setup, trust model, and limits](peers.md).
