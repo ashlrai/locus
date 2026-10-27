@@ -14,11 +14,12 @@ path = "src/main.rs"
 
 [dependencies]
 locus-core = { workspace = true }
+libc = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 colored = { workspace = true }
 dirs = { workspace = true }
 axum = { workspace = true }

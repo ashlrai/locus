@@ -3,10 +3,10 @@ name: Integration
 # Shared phantom+locus integration test (tests/integration/phantom_locus.rs).
 # Merge-queue pattern from ashlr-md #186, per CI Efficiency:
 # - Triggers: pull_request, merge_group, a nightly schedule and manual dispatch.
-# - Real work only on merge_group (gated on the repo variable MERGE_QUEUE ==
-#   'true'), the nightly schedule or workflow_dispatch (both ungated). Never on
-#   push or pull_request: the pull_request trigger exists only so the job
-#   reports as skipped, and a skipped job counts as success.
+# - Classify changes runs on every event (security floor). Real work only on
+#   merge_group (gated on the repo variable MERGE_QUEUE == 'true'), the
+#   nightly schedule or workflow_dispatch (both ungated). On pull_request,
+#   Classify selects run=false (no checkout), so Integration reports skipped.
 # - Path filtering through a classify job (phantom #811 pattern), not
 #   workflow-level paths: (merge_group does not support on.paths).
 # Not a required check until the locus ruleset flip plus ~5 green merge_group
@@ -29,13 +29,15 @@ permissions:
 jobs:
   changes:
     name: Classify changes
-    if: (github.event_name == 'merge_group' && vars.MERGE_QUEUE == 'true') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Security floor: runs on every event, pull_request and merge_group
+    # included. PRs need no checkout and always select run=false.
     runs-on: ubuntu-latest
     timeout-minutes: 3
     outputs:
       run: ${{ steps.classify.outputs.run }}
     steps:
       - name: Checkout
+        if: github.event_name != 'pull_request'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -43,11 +45,16 @@ jobs:
       - id: classify
         env:
           EVENT: ${{ github.event_name }}
+          QUEUE: ${{ vars.MERGE_QUEUE }}
           BASE: ${{ github.event.merge_group.base_sha }}
           HEAD: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" != "merge_group" ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          case "$EVENT" in
+            pull_request) echo "run=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            merge_group) if [ "$QUEUE" != true ]; then echo "run=false" >> "$GITHUB_OUTPUT"; exit 0; fi ;;
+            *) echo "run=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+          esac
           files="$(git diff --name-only "$BASE...$HEAD")"
           printf '%s\n' "$files"
           if printf '%s\n' "$files" | grep -Eq '^(crates/|npm[^/]*/|tests/integration/|Cargo\.(toml|lock)$|\.github/workflows/integration\.yml$)'; then
