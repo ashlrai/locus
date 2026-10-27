@@ -7,6 +7,7 @@
 
 mod composite;
 mod mcp_stdio;
+mod process_guard;
 mod sandbox;
 mod stdio_client;
 mod synthetic;
@@ -31,6 +32,10 @@ pub use sandbox::{
 };
 pub use stdio_client::{McpStdioClient, UpstreamTool};
 pub use synthetic::SyntheticBackend;
+
+/// Upstream subprocesses must never start another Locus multiplexor. Set after
+/// environment isolation so wrappers and native servers share the same guard.
+pub const MCP_UPSTREAM_CHILD_ENV: &str = "LOCUS_MCP_UPSTREAM_CHILD";
 
 /// Stable key for a worker slot: session (+ optional binding alias) + provider.
 ///
