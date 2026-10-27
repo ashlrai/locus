@@ -32,6 +32,10 @@ pub use sandbox::{
 pub use stdio_client::{McpStdioClient, UpstreamTool};
 pub use synthetic::SyntheticBackend;
 
+/// Upstream subprocesses must never start another Locus multiplexor. Set after
+/// environment isolation so wrappers and native servers share the same guard.
+pub const MCP_UPSTREAM_CHILD_ENV: &str = "LOCUS_MCP_UPSTREAM_CHILD";
+
 /// Stable key for a worker slot: session (+ optional binding alias) + provider.
 ///
 /// `binding_alias` is empty in exclusive mode. Namespaced multi-bind fills it so
@@ -432,6 +436,10 @@ mod tests {
         assert!(!env.values().any(|value| value.contains("GH_ACME")));
         assert!(!env.contains_key("MCP_UNLISTED_SECRET_CANARY"));
         assert!(!env.contains_key("ARBITRARY_EXTRA_SECRET"));
+        assert_eq!(
+            env.get(MCP_UPSTREAM_CHILD_ENV).map(String::as_str),
+            Some("1")
+        );
         assert!(!env.values().any(|value| value == "ambient-mcp-secret"));
         assert!(!env.values().any(|value| value == "configured-mcp-secret"));
         let slot_json = serde_json::to_string(&slot).unwrap();
