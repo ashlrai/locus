@@ -6,7 +6,10 @@
   "scripts": {
     "start": "npx --yes serve public -l 3000",
     "serve": "npx --yes serve public -l 3000",
-    "dev": "npx --yes serve public -l 3000"
+    "dev": "npx --yes serve public -l 3000",
+    "generate:agents": "node discoverability.mjs",
+    "check:agents": "node discoverability.mjs --check",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=18"
