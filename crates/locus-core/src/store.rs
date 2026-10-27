@@ -535,11 +535,12 @@ impl Store {
         let (new_expiry, lifetime_ends_at, capped_by) = renew_bounds(&session, &binding)?;
         let previous_expires_at = session.expires_at;
         let previous_generation = session.authority_anchor.as_ref().map(|a| a.generation);
+        let previous_seal = session.seal.clone();
         session.expires_at = new_expiry;
         session.authority_anchor = Some(self.issue_session_authority(&session)?);
         session.reseal(&key);
         let path = self.active_session_path();
-        self.write_session_file(&path, &session)?;
+        self.commit_renew(&path, &previous_seal, &session)?;
         self.audit(
             "session.renew",
             &session.binding_alias,
@@ -559,6 +560,37 @@ impl Store {
             lifetime_ends_at,
             capped_by,
         })
+    }
+
+    /// Write a renewed pin only if `active.json` still holds the exact record
+    /// renew started from (same seal). Without this, a `locus leave` or
+    /// `locus enter` that lands during renew's broker round trips is silently
+    /// undone: the broker's single active slot is re-issued to the old
+    /// session and the old record is written back over the new state. On a
+    /// mismatch the generation renew just issued is revoked (fail closed) and
+    /// nothing is written.
+    fn commit_renew(&self, path: &Path, previous_seal: &str, renewed: &Session) -> Result<()> {
+        let unchanged = matches!(
+            self.read_active_session_file(),
+            Ok(Some(ref cur)) if cur.seal == previous_seal
+        );
+        if !unchanged {
+            let _ = self.revoke_session_authority(renewed);
+            self.audit(
+                "session.renew_aborted",
+                &renewed.binding_alias,
+                Some(serde_json::json!({
+                    "session_id": renewed.session_id,
+                    "reason": "active pin changed during renew",
+                })),
+            )?;
+            return Err(LocusError::msg(
+                "active pin changed during renew (concurrent leave or enter); renew aborted \
+                 and its new generation revoked. Check `locus whoami`; re-pin with \
+                 `locus enter <alias>` if needed",
+            ));
+        }
+        self.write_session_file(path, renewed)
     }
 
     // ── Bindings ──────────────────────────────────────────────────────────
@@ -6720,6 +6752,39 @@ allowed_bindings = ["acme"]
             store.require_local_control("locus leave"),
             Err(LocusError::AuthorityAnchorMismatch)
         ));
+    }
+
+    #[test]
+    fn renew_commit_refuses_when_pin_left_mid_renew() {
+        // Post-merge review of #193: a `locus leave` that lands between
+        // renew's read and its write must not be undone by renew.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.save_binding(&renewable_binding(Some("1d"))).unwrap();
+        store
+            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::minutes(5)))
+            .unwrap();
+        let path = store.active_session_path();
+        let original: Session = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        // The concurrent leave completes first.
+        store.leave().unwrap().expect("live pin is left");
+        assert!(!path.exists());
+        // Renew's broker round trip then re-issues the old session.
+        let mut renewed = original.clone();
+        renewed.expires_at += Duration::minutes(30);
+        renewed.authority_anchor = Some(store.issue_session_authority(&renewed).unwrap());
+        renewed.reseal(&store.seal_key().unwrap());
+        let err = store
+            .commit_renew(&path, &original.seal, &renewed)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("changed during renew"), "{err}");
+        // The leave stands: no pin on disk, and the generation renew issued
+        // was revoked at the broker.
+        assert!(!path.exists());
+        assert!(store.validate_session_authority(&renewed).is_err());
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(audit.contains("session.renew_aborted"), "{audit}");
     }
 
     #[test]
