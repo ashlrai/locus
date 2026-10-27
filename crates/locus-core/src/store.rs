@@ -666,6 +666,26 @@ impl Store {
         self.write_binding(binding, replace)
     }
 
+    /// Check for an equivalent existing binding without following symlinks.
+    /// The bindings lock keeps the file stable during the comparison.
+    pub fn binding_matches(&self, binding: &Binding) -> Result<bool> {
+        let _lock = crate::credential_migration::lock_bindings(self)?;
+        let path = self.bindings_dir().join(format!("{}.toml", binding.alias));
+        ensure_under_dir(&self.bindings_dir(), &path)?;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|_| LocusError::msg(format!("binding '{}' is unreadable", binding.alias)))?;
+        let existing = parse_binding_safely(&raw, &binding.alias)?;
+        Ok(existing.to_toml()? == binding.to_toml()?)
+    }
+
     fn write_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
         self.require_local_control("save binding")?;
         binding.validate()?;
@@ -698,6 +718,13 @@ impl Store {
                 )));
             }
             Ok(_) if !replace => {
+                let existing = fs::read_to_string(&path).map_err(|_| {
+                    LocusError::msg(format!("binding '{}' is unreadable", binding.alias))
+                })?;
+                let existing = parse_binding_safely(&existing, &binding.alias)?;
+                if existing.to_toml()? == binding.to_toml()? {
+                    return Ok(path);
+                }
                 return Err(LocusError::msg(format!(
                     "binding '{}' already exists; nothing written",
                     binding.alias
@@ -5809,6 +5836,22 @@ credential_ref = "ghp_UNSAFE/CANARY"
             .create_binding(&sample_binding("acme", "other", "p2"), true)
             .unwrap();
         assert_eq!(store.load_binding("acme").unwrap().tenant, "other");
+    }
+
+    #[test]
+    fn create_binding_is_a_noop_when_existing_binding_matches() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let binding = sample_binding("acme", "acme-corp", "p1");
+        let path = store.create_binding(&binding, false).unwrap();
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+        let contents = fs::read(&path).unwrap();
+
+        let returned = store.create_binding(&binding, false).unwrap();
+
+        assert_eq!(returned, path);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+        assert_eq!(fs::read(&path).unwrap(), contents);
     }
 
     #[test]
