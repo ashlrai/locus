@@ -11,6 +11,10 @@ on:
   merge_group:
   workflow_dispatch:
 
+# Read-only token: no step needs write access.
+permissions:
+  contents: read
+
 # Cancel superseded PR runs; never cancel main/master.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
