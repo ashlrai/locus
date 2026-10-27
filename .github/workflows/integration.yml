@@ -3,10 +3,10 @@ name: Integration
 # Shared phantom+locus integration test (tests/integration/phantom_locus.rs).
 # Merge-queue pattern from ashlr-md #186, per CI Efficiency:
 # - Triggers: pull_request, merge_group, a nightly schedule and manual dispatch.
-# - Real work only on merge_group (gated on the repo variable MERGE_QUEUE ==
-#   'true'), the nightly schedule or workflow_dispatch (both ungated). Never on
-#   push or pull_request: the pull_request trigger exists only so the job
-#   reports as skipped, and a skipped job counts as success.
+# - Classify changes runs on every event (security floor). Real work only on
+#   merge_group (gated on the repo variable MERGE_QUEUE == 'true'), the
+#   nightly schedule or workflow_dispatch (both ungated). On pull_request,
+#   Classify selects run=false (no checkout), so Integration reports skipped.
 # - Path filtering through a classify job (phantom #811 pattern), not
 #   workflow-level paths: (merge_group does not support on.paths).
 # Not a required check until the locus ruleset flip plus ~5 green merge_group
