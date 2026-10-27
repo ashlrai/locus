@@ -84,13 +84,19 @@ pub fn namespace_upstream_tool(provider: &str, tool_name: &str) -> String {
 
 /// Strip `provider.` prefix for upstream fan-out (case-insensitive provider).
 pub fn strip_provider_prefix(provider: &str, tool: &str) -> String {
-    let prefix = format!("{}.", provider.to_ascii_lowercase());
-    let lower = tool.to_ascii_lowercase();
-    if lower.starts_with(&prefix) {
-        tool[prefix.len()..].to_string()
-    } else {
-        tool.to_string()
+    strip_provider_prefix_ref(provider, tool).to_owned()
+}
+
+fn strip_provider_prefix_ref<'a>(provider: &str, tool: &'a str) -> &'a str {
+    if tool
+        .get(..provider.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(provider))
+    {
+        if let Some(name) = tool[provider.len()..].strip_prefix('.') {
+            return name;
+        }
     }
+    tool
 }
 
 /// First path segment before `.` — used as provider key for routing.
@@ -179,7 +185,11 @@ impl CompositeWorkerManager {
     }
 
     fn touch(&mut self, key: &WorkerKey) {
-        self.last_used.insert(key.clone(), Instant::now());
+        if let Some(last_used) = self.last_used.get_mut(key) {
+            *last_used = Instant::now();
+        } else {
+            self.last_used.insert(key.clone(), Instant::now());
+        }
     }
 
     /// Tear down slots whose last use exceeds `timeout` (or configured idle).
@@ -454,23 +464,20 @@ impl CompositeWorkerManager {
             .clone();
         self.touch(&key);
 
-        // Prefer synthetic when the tool is owned by an in-process adapter.
-        let synthetic_names: Vec<String> = adapters::tools_for_binding(binding)
-            .into_iter()
-            .filter(|t| t.provider.eq_ignore_ascii_case(provider))
-            .map(|t| t.name)
-            .collect();
-
-        if synthetic_names.iter().any(|n| n == tool) {
-            return self.synthetic.call_tool(&slot, binding, tool, args);
-        }
-
         if let Some(backend) = self.mcp.get(&key) {
-            let upstream_name = strip_provider_prefix(provider, tool);
-            return backend.call_tool(&slot, binding, &upstream_name, &scoped_args);
+            // Catalog ownership only matters when an upstream could shadow it.
+            // Avoid retaining a second collection of allocated tool names.
+            if adapters::tools_for_binding(binding)
+                .into_iter()
+                .any(|t| t.provider.eq_ignore_ascii_case(provider) && t.name == tool)
+            {
+                return self.synthetic.call_tool(&slot, binding, tool, args);
+            }
+            let upstream_name = strip_provider_prefix_ref(provider, tool);
+            return backend.call_tool(&slot, binding, upstream_name, &scoped_args);
         }
 
-        // No upstream — fall through to synthetic (may still error unknown tool).
+        // No upstream: synthetic dispatch still rejects unknown tools.
         self.synthetic.call_tool(&slot, binding, tool, args)
     }
 }
@@ -725,6 +732,60 @@ for line in sys.stdin:
             provider_from_tool_name("supabase.table.delete"),
             Some("supabase")
         );
+    }
+
+    #[test]
+    fn prefix_matching_preserves_tool_bytes() {
+        for (provider, tool, expected) in [
+            ("GitHub", "GITHUB.Repos.List", "Repos.List"),
+            ("github", "githubx.ping", "githubx.ping"),
+            ("git.hub", "Git.Hub.ping", "ping"),
+            ("", ".ping", "ping"),
+            ("github", "github", "github"),
+            ("github", "github.", ""),
+            ("github", "github.雪", "雪"),
+            ("github", "雪.ping", "雪.ping"),
+        ] {
+            let stripped = strip_provider_prefix_ref(provider, tool);
+            assert_eq!(stripped, expected);
+            assert_eq!(strip_provider_prefix(provider, tool), expected);
+            assert_eq!(
+                stripped.as_ptr(),
+                tool.as_ptr().wrapping_add(tool.len() - expected.len())
+            );
+        }
+    }
+
+    #[test]
+    fn synthetic_dispatch_rejects_unknown_and_unbound_tools() {
+        let dir = tempdir().unwrap();
+        let session = session_at(dir.path().to_str().unwrap());
+        let binding = binding_mixed(false);
+        let mut manager = CompositeWorkerManager::with_idle_timeout(None);
+        manager.ensure_binding(&session, &binding).unwrap();
+        let key = CompositeWorkerManager::worker_key(&session, &binding, "github");
+        manager
+            .last_used
+            .insert(key.clone(), Instant::now() - Duration::from_secs(60));
+        let before = manager.last_used[&key];
+        let args = serde_json::json!({});
+        assert!(
+            manager
+                .call_tool(&session, &binding, "github.scope", &args)
+                .unwrap()
+                .ok
+        );
+        assert!(manager.last_used[&key] > before);
+        assert!(
+            !manager
+                .call_tool(&session, &binding, "github.unknown", &args)
+                .unwrap()
+                .ok
+        );
+        assert!(manager
+            .call_tool(&session, &binding, "unbound.scope", &args)
+            .is_err());
+        assert_eq!(manager.list().len(), 2);
     }
 
     #[test]
