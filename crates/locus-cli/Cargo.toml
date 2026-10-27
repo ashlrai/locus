@@ -32,6 +32,9 @@ tempfile = { workspace = true }
 # dep via `toml` 0.8, so this adds no new lockfile entries).
 toml_edit = "0.22"
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 sha2 = { workspace = true }
 toml = { workspace = true }

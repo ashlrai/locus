@@ -20,6 +20,9 @@ anyhow = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 libc = { workspace = true }
 tempfile = { workspace = true }
