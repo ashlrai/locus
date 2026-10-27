@@ -3,10 +3,13 @@ name: Coverage
 # This repo's ruleset has no merge queue, so merge_group alone never runs.
 # Push to main collects coverage. There is no pull_request trigger, and
 # ci.yml is unchanged. The upload job is the only job here with id-token: write.
+# Runs with the scheduled full suite (6 AM and 6 PM ET) and on dispatch, off
+# PRs, the merge queue and main pushes, so they only wait on CI Gate.
 on:
-  merge_group:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "59 10 * * *"
+    - cron: "59 22 * * *"
+  workflow_dispatch:
 
 concurrency:
   # Superseded PR runs cancel; merge_group entries and default-branch pushes
