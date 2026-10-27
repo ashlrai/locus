@@ -759,3 +759,7 @@ LOCUS_HOME=/tmp/locus-debug locus pin personal
 - [docs/adapters.md](./adapters.md) — add provider tools  
 - [README.md](../README.md) — CLI quick start  
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — build and test  
+
+Engine-specific server restrictions can additionally be enforced by the
+[broker allowlist](broker.md). Set `LOCUS_ENGINE_ID` in the operator launch
+environment and provision `broker.toml` before launching swarm engines.

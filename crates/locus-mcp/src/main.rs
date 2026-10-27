@@ -3667,6 +3667,14 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
     // Provider tools require a healthy pin
     let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
 
+    let server = name
+        .split_once("__")
+        .map_or(name, |(_, tool)| tool)
+        .split_once('.')
+        .map_or("", |(server, _)| server);
+    locus_core::broker::enforce(&s, &format!("mcp:{server}"))
+        .map_err(|_| rpc_error(-32000, "broker denied access".into()))?;
+
     // Continuous drift check — freezes session if binding file mutated.
     let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
 
