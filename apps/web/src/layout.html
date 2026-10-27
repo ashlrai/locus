@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{TITLE}}</title>
+  <meta name="description" content="{{DESCRIPTION}}" />
+  <meta name="theme-color" content="#0a0a0a" />
+  <link rel="canonical" href="{{CANONICAL}}" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="{{SITE_NAME}}" />
+  <meta property="og:title" content="{{TITLE}}" />
+  <meta property="og:description" content="{{DESCRIPTION}}" />
+  <meta property="og:url" content="{{CANONICAL}}" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="{{TITLE}}" />
+  <meta name="twitter:description" content="{{DESCRIPTION}}" />
+{{JSONLD}}
+  <style>{{CSS}}</style>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <div class="wrap">
+    <nav aria-label="Site">
+      <div class="brand"><span class="dot"></span> <a href="/">locus</a></div>
+      <div class="nav-links">
+        <a href="/#install">install</a>
+        <a href="/#use-cases">use cases</a>
+        <a href="/compare/locus-vs-direnv-sops">compare</a>
+        <a href="https://github.com/ashlrai/locus/tree/main/docs">docs</a>
+        <a href="https://github.com/ashlrai/locus">github</a>
+      </div>
+    </nav>
+    <main id="main">
+{{CONTENT}}
+    </main>
+    <footer>
+      <div>
+        <span class="badge"><i></i> MIT · open source</span>
+      </div>
+      <div>
+        <a href="/#use-cases">use cases</a>
+        &nbsp;·&nbsp;
+        <a href="https://github.com/ashlrai/locus">github.com/ashlrai/locus</a>
+        &nbsp;·&nbsp;
+        <a href="https://phm.dev">phm.dev</a>
+        &nbsp;·&nbsp;
+        <a href="https://github.com/ashlrai/locus/blob/main/LICENSE">license</a>
+      </div>
+    </footer>
+  </div>
+</body>
+</html>

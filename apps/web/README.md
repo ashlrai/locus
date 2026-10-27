@@ -1,89 +1,62 @@
 # Locus web
 
-Static landing page for [Locus](https://github.com/ashlrai/locus).
+Static site for [Locus](https://github.com/ashlrai/locus).
 
 - **Tagline:** AI-native identity plane · Wrong account, impossible.
 - **v0.2 surfaces:** local dashboard, forensics, HTTP MCP, goal status
-- **Stack:** pure HTML + CSS in `public/index.html` (no build step)
-- **Aesthetic:** dark monochrome terminal — sibling positioning vs [Phantom](https://phm.dev)
+- **Stack:** HTML in `src/pages/` + shared `src/layout.html` and `src/site.css`, assembled by `scripts/build.mjs` into `public/` (committed; no framework)
+- **Pages:** `/` plus `/use-cases/*` intent pages and `/compare/locus-vs-direnv-sops`; every factual claim block carries a `data-claim` source link into the repo's docs or code
 
 ## Local
 
 ```bash
 cd apps/web
-npm start
-# → http://localhost:3000
+npm run build   # regenerate public/ from src/
+npm test        # acceptance: claim sources, canonicals, sitemap, links
+npm start       # serve public/ on http://localhost:3000
 ```
 
-Or without npm:
+`npm start` uses `serve`, which resolves extensionless URLs like `/use-cases/mcp-tool-scoping`.
+
+## Site origin
+
+`site.config.mjs` holds the public origin used for canonicals, `sitemap.xml`, `robots.txt`, and OG tags. Default: `https://locus.ashlr.ai`. Override for staging:
 
 ```bash
-npx serve public -l 3000
-# or
-python3 -m http.server 3000 --directory public
+LOCUS_SITE_ORIGIN=https://preview.example.com npm run build
 ```
+
+## Sitemap
+
+`npm run build` writes `public/sitemap.xml`: one `<url>` per page with an absolute `<loc>` equal to the page canonical and `<lastmod>` taken from the file's last git commit (build date for uncommitted sources). `npm test` fails if `public/` drifts from `src/`.
 
 ## Deploy
 
-The site is the contents of `public/`. Set the publish directory to `public` (or `apps/web/public` from the monorepo root).
+The site is the contents of `public/`. `vercel.json` ships `cleanUrls: true` and `trailingSlash: false`; keep whatever host you use consistent with extensionless canonicals.
 
 ### Vercel
-
-```bash
-# from apps/web
-npx vercel --prod
-```
-
-Or in the Vercel dashboard / `vercel.json`:
 
 | Setting | Value |
 |---------|--------|
 | Root Directory | `apps/web` |
-| Build Command | *(none)* |
+| Build Command | `npm run build` (or none; `public/` is committed) |
 | Output Directory | `public` |
 | Framework | Other |
-
-Example `vercel.json` (optional, place in `apps/web/`):
-
-```json
-{
-  "version": 2,
-  "public": true,
-  "cleanUrls": true,
-  "trailingSlash": false
-}
-```
-
-Vercel static: set **Output Directory** to `public` with an empty build command.
 
 ### Cloudflare Pages
 
 | Setting | Value |
 |---------|--------|
-| Build command | *(leave empty)* or `echo static` |
+| Build command | `npm run build` or empty |
 | Build output directory | `public` |
 | Root directory | `apps/web` (if connecting the monorepo) |
 
-Direct upload:
+### GitHub Pages / Netlify
 
-```bash
-npx wrangler pages deploy public --project-name=locus
-```
-
-### GitHub Pages
-
-Publish `apps/web/public` via Actions or a `gh-pages` branch that contains only those files. Enable Pages → Deploy from branch / folder.
-
-### Netlify
-
-| Setting | Value |
-|---------|--------|
-| Base directory | `apps/web` |
-| Publish directory | `public` |
-| Build command | *(empty)* |
+Publish `apps/web/public`. GitHub Pages resolves `/x` to `x.html`; on Netlify rely on its default pretty-URL behavior.
 
 ## Notes
 
 - No secrets, no analytics, no framework lock-in.
 - Links point at `https://github.com/ashlrai/locus` and `https://phm.dev`.
-- Keep the page intentional: monochrome, tight type, terminal snippets — not generic “AI purple.”
+- Keep the site monochrome and tight: terminal snippets, measured claims, sources on every `data-claim` block.
