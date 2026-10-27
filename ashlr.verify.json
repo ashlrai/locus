@@ -72,6 +72,24 @@
       "profiles": ["merge", "deep"]
     },
     {
+      "id": "web-freshness",
+      "kind": "lint",
+      "cmd": ["node", "apps/web/freshness.mjs", "--check"],
+      "cwd": ".",
+      "timeoutMs": 120000,
+      "required": true,
+      "profiles": ["quick", "merge", "deep"]
+    },
+    {
+      "id": "web-freshness-tests",
+      "kind": "test",
+      "cmd": ["node", "--test", "apps/web/freshness.test.mjs"],
+      "cwd": ".",
+      "timeoutMs": 120000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    },
+    {
       "id": "clippy",
       "kind": "lint",
       "cmd": ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],

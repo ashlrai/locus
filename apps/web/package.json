@@ -6,7 +6,10 @@
   "scripts": {
     "start": "npx --yes serve public -l 3000",
     "serve": "npx --yes serve public -l 3000",
-    "dev": "npx --yes serve public -l 3000"
+    "dev": "npx --yes serve public -l 3000",
+    "freshness": "node freshness.mjs",
+    "check": "node freshness.mjs --check",
+    "test": "node --test freshness.test.mjs"
   },
   "engines": {
     "node": ">=18"

@@ -334,6 +334,17 @@
     .arch .ok { color: var(--ok); }
     .arch .dim { color: var(--dim); }
 
+    .catline {
+      display: grid;
+      grid-template-columns: 6.5rem 1fr;
+      gap: 0.75rem;
+    }
+
+    .catline + .catline { margin-top: 0.3rem; }
+    .catline .g { color: var(--dim); }
+
+    .flow-step .mcp { margin-top: 0.4rem; }
+
     /* ── flow cards ────────────────────────────────────── */
     .flow {
       display: grid;
@@ -423,13 +434,14 @@
       <div class="nav-links">
         <a href="#install">install</a>
         <a href="#surfaces">surfaces</a>
+        <a href="#cli">cli</a>
         <a href="#arch">arch</a>
         <a href="https://github.com/ashlrai/locus">github</a>
       </div>
     </nav>
 
     <header>
-      <p class="eyebrow">AI-native identity plane · v0.2</p>
+      <p class="eyebrow">AI-native identity plane · <!-- fresh:version -->v0.5.2<!-- /fresh:version --></p>
       <h1>Wrong account,<br /><span class="dim">impossible.</span></h1>
       <p class="lede">
         Pin a client — every CLI command, MCP tool, and the <strong>local dashboard</strong>
@@ -467,34 +479,33 @@
       <div class="term">
         <div class="install-tabs" role="tablist">
           <button type="button" class="active" data-tab="cargo" role="tab">cargo</button>
-          <button type="button" data-tab="npx" role="tab">npx</button>
+          <button type="button" data-tab="npm" role="tab">npm</button>
           <button type="button" data-tab="brew" role="tab">brew</button>
         </div>
         <div class="term-block active" id="tab-cargo">
-          <pre><span class="cmt"># release binaries into ~/.cargo/bin</span>
+          <pre><!-- fresh:install-cargo --><span class="cmt"># cargo (Linux without Homebrew, or any source install): rustc 1.89 or newer</span>
 <span class="cmd">export PATH="$HOME/.cargo/bin:$PATH"</span>
-<span class="cmd">cargo install --git https://github.com/ashlrai/locus \
-  locus-cli locus-mcp --locked</span>
-
+<span class="cmd">cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked</span>
 <span class="cmt"># or from a local checkout</span>
 <span class="cmd">cargo install --path crates/locus-cli</span>
-<span class="cmd">cargo install --path crates/locus-mcp</span></pre>
+<span class="cmd">cargo install --path crates/locus-mcp</span><!-- /fresh:install-cargo --></pre>
         </div>
-        <div class="term-block" id="tab-npx">
-          <pre><span class="cmt"># downloads a release binary (falls back to cargo)</span>
+        <div class="term-block" id="tab-npm">
+          <pre><!-- fresh:install-npm --><span class="cmt"># npm (release binary, or cargo if this platform has no asset)</span>
+<span class="cmd">npm install -g locus-cli @ashlrai/locus-mcp</span>
 <span class="cmd">npx locus-cli --help</span>
-<span class="cmd">npx locus-mcp</span>  <span class="cmt"># MCP server for Claude Code / Cursor</span></pre>
+<span class="cmd">npx @ashlrai/locus-mcp</span>  <span class="cmt"># MCP server for Claude Code / Cursor</span><!-- /fresh:install-npm --></pre>
         </div>
         <div class="term-block" id="tab-brew">
-          <pre><span class="cmt"># when the tap is published</span>
-<span class="cmd">brew install ashlrai/tap/locus</span></pre>
+          <pre><!-- fresh:install-brew --><span class="cmt"># Homebrew (tap live) - installs locus + locus-mcp</span>
+<span class="cmd">brew install ashlrai/tap/locus</span><!-- /fresh:install-brew --></pre>
         </div>
       </div>
       <p class="copy-hint">MIT · open source · github.com/ashlrai/locus</p>
     </section>
 
     <section>
-      <div class="sec-label">Quick start · v0.2</div>
+      <div class="sec-label">Quick start · <!-- fresh:version -->v0.5.2<!-- /fresh:version --></div>
       <div class="term">
         <div class="term-bar">
           <span class="c"></span><span class="c"></span><span class="c"></span>
@@ -518,7 +529,7 @@
     </section>
 
     <section id="surfaces">
-      <div class="sec-label">0.2 surfaces</div>
+      <div class="sec-label"><!-- fresh:version -->v0.5.2<!-- /fresh:version --> surfaces</div>
       <div class="flow">
         <div class="flow-step">
           <div class="flow-n">UI</div>
@@ -532,6 +543,7 @@
           <div>
             <h3>Stdio + HTTP MCP</h3>
             <p>Claude Code / Cursor via stdio. CI agents: <code>locus-mcp --http</code> with token auth on <code>POST /mcp</code>. Agents call <code>locus_safe_next</code> for the single best next action.</p>
+            <p class="mcp"><!-- fresh:mcp-tools -->control tools: <code>locus_whoami</code> <code>locus_safe_next</code> <code>locus_status</code> <code>locus_heartbeat</code> <code>locus_enter_hint</code> <code>locus_list_bindings</code> <code>locus_request_pin</code> <code>locus_verify_claim</code> <code>locus_verify_session</code> <code>locus_providers</code><!-- /fresh:mcp-tools --></p>
           </div>
         </div>
         <div class="flow-step">
@@ -556,6 +568,17 @@
           </div>
         </div>
       </div>
+    </section>
+
+    <section id="cli">
+      <div class="sec-label">cli surface · <!-- fresh:version -->v0.5.2<!-- /fresh:version --></div>
+      <div class="arch" aria-label="CLI command surface"><!-- fresh:cli-catalog --><div class="catline"><span class="g">setup</span><span>init · quickstart · onboard · capability [status persist unpersist] · autopin [suggest] · setup · doctor · watch · workspace · hook · mcp [mint list revoke] · engagement [init close] · graph [export import list] · agent [setup doctor report] · goal [status] · verify [claim session] · client [add] · upstream [list suggest] · adapter [search install uninstall list verify trust [list add] registry [index [add list remove] export] verify-manifest]</span></div>
+<div class="catline"><span class="g">daily use</span><span>enter · switch · pin · leave · renew · whoami · status · exec · run · binding [list show migrate-credential-refs add rm]</span></div>
+<div class="catline"><span class="g">ci</span><span>ci [mint env run]</span></div>
+<div class="catline"><span class="g">approvals</span><span>approve [list grant status wait deny] · notify [status on off]</span></div>
+<div class="catline"><span class="g">audit</span><span>events [export] · forensics [export]</span></div>
+<div class="catline"><span class="g">local ui</span><span>serve · dashboard</span></div>
+<div class="catline"><span class="g">maintenance</span><span>completion · topic · version</span></div><!-- /fresh:cli-catalog --></div>
     </section>
 
     <section id="arch">
