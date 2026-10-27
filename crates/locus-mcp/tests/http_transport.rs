@@ -239,7 +239,7 @@ fn http_get_mcp_capabilities_values_free() {
     assert_eq!(v["ok"], true);
     assert_eq!(v["service"], "locus-mcp");
     assert_eq!(v["transport"], "streamable-http-lite");
-    assert_eq!(v["protocolVersion"], "2024-11-05");
+    assert_eq!(v["protocolVersion"], "2026-07-28");
     assert!(v["capabilities"]["tools"].is_object());
     assert_eq!(v["pin"]["pinned"], false);
     let tools = v["tools"].as_array().expect("tools names array");
@@ -257,6 +257,32 @@ fn http_get_mcp_capabilities_values_free() {
         tools.iter().all(|t| t.is_string()),
         "tools must be name strings only: {tools:?}"
     );
+
+    let request = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "server/discover",
+        "params": { "_meta": {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { "name": "locus-test", "version": "0" },
+            "io.modelcontextprotocol/clientCapabilities": {}
+        } }
+    });
+    let (status, _, body) = srv.request(
+        "POST",
+        "/mcp",
+        Some(request.to_string().as_bytes()),
+        Some(&srv.token),
+    );
+    assert_eq!(status, 200);
+    let response: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(response["result"]["resultType"], "complete");
+    assert_eq!(response["result"]["ttlMs"], 0);
+    assert_eq!(response["result"]["cacheScope"], "private");
+    assert_eq!(response["result"]["supportedVersions"][0], "2026-07-28");
+    let name = response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"]
+        .as_str()
+        .unwrap();
+    assert_eq!(name, "locus-mcp");
+    assert!(!name.contains("__"));
 }
 
 #[test]

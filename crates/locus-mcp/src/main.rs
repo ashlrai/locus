@@ -637,8 +637,9 @@ fn dispatch_rpc(msg: &Value, scope: &RequestScope) -> Option<Value> {
     }
 
     let swarm = SWARM_BROKER.get().is_some();
-    let result = match method {
+    let result = validate_request_protocol(&params).and_then(|()| match method {
         "initialize" => Ok(handle_initialize(&params, scope)),
+        "server/discover" => Ok(handle_discover(scope)),
         "ping" => Ok(json!({})),
         "tools/list" => handle_tools_list(scope),
         "tools/call" => handle_tools_call(&params, scope),
@@ -654,13 +655,13 @@ fn dispatch_rpc(msg: &Value, scope: &RequestScope) -> Option<Value> {
         "prompts/list" => handle_prompts_list(scope),
         "prompts/get" => handle_prompts_get(&params, scope),
         other => Err(rpc_error(-32601, format!("method not found: {other}"))),
-    };
+    });
 
     Some(match result {
         Ok(r) => json!({
             "jsonrpc": "2.0",
             "id": id,
-            "result": r,
+            "result": complete_result(method, r),
         }),
         Err(err) => json!({
             "jsonrpc": "2.0",
@@ -1433,16 +1434,8 @@ fn http_mcp_capabilities_tenant(scope: &RequestScope, t: &TenantCtx) -> Value {
         "version": VERSION,
         "mode": if SWARM_BROKER.get().is_some() { "swarm" } else { "multi_tenant" },
         "transport": "streamable-http-lite",
-        "protocolVersion": "2024-11-05",
-        "capabilities": if SWARM_BROKER.get().is_some() {
-            json!({"tools": {"listChanged": true}})
-        } else {
-            json!({
-                "tools": { "listChanged": true },
-                "resources": { "subscribe": false, "listChanged": true },
-                "prompts": { "listChanged": true }
-            })
-        },
+        "protocolVersion": SUPPORTED_PROTOCOL_VERSIONS[0],
+        "capabilities": server_capabilities(),
         "grant_id": t.grant_id,
         "pin": pin,
         "tools": tool_names,
@@ -1512,12 +1505,8 @@ fn http_mcp_capabilities(scope: &RequestScope) -> Value {
         "service": "locus-mcp",
         "version": VERSION,
         "transport": "streamable-http-lite",
-        "protocolVersion": "2024-11-05",
-        "capabilities": {
-            "tools": { "listChanged": true },
-            "resources": { "subscribe": false, "listChanged": true },
-            "prompts": { "listChanged": true }
-        },
+        "protocolVersion": SUPPORTED_PROTOCOL_VERSIONS[0],
+        "capabilities": server_capabilities(),
         "pin": pin,
         "tools": tool_names,
         "endpoints": {
@@ -2443,6 +2432,47 @@ fn rpc_error(code: i64, message: String) -> Value {
     json!({ "code": code, "message": message })
 }
 
+/// All current handlers finish synchronously, including tool-level refusals.
+/// These additive result fields are also valid for legacy clients. Keep them
+/// at the RPC boundary so every transport and authorization mode agrees.
+fn complete_result(method: &str, mut result: Value) -> Value {
+    result["resultType"] = json!("complete");
+    if matches!(
+        method,
+        "server/discover" | "tools/list" | "resources/list" | "resources/read" | "prompts/list"
+    ) {
+        // Pin, policy and grant state can change on the next request. Never
+        // share identity-bearing catalogs or resources across auth contexts.
+        result["ttlMs"] = json!(0);
+        result["cacheScope"] = json!("private");
+    }
+    result
+}
+
+/// Modern requests declare their revision independently of initialization.
+/// Check before dispatch so an unsupported revision cannot execute a tool or
+/// reset the identity anchor. Requests without metadata keep legacy behavior.
+fn validate_request_protocol(params: &Value) -> std::result::Result<(), Value> {
+    let Some(version) = params
+        .get("_meta")
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+    else {
+        return Ok(());
+    };
+    let requested = version
+        .as_str()
+        .ok_or_else(|| rpc_error(-32602, "protocol version metadata must be a string".into()))?;
+    if SUPPORTED_PROTOCOL_VERSIONS.contains(&requested) {
+        Ok(())
+    } else {
+        Err(json!({
+            "code": -32022,
+            "message": "Unsupported protocol version",
+            "data": { "supported": SUPPORTED_PROTOCOL_VERSIONS, "requested": requested }
+        }))
+    }
+}
+
 // ─── Initialize / agent instructions ────────────────────────────────────────
 
 /// Crisp agent rules for `initialize.instructions` — pin state reflects the
@@ -2484,16 +2514,49 @@ fn agent_instructions(session_anchor: Option<&SessionAnchor>) -> String {
     lines.join("\n")
 }
 
-/// MCP protocol revisions this server speaks, newest first. Everything
-/// locus-mcp uses (tools, resources, prompts, listChanged, instructions) is
-/// unchanged across them.
-const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-06-18", "2025-03-26", "2024-11-05"];
+/// MCP protocol revisions this server speaks, newest first.
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2026-07-28", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+fn server_capabilities() -> Value {
+    if SWARM_BROKER.get().is_some() {
+        json!({ "tools": { "listChanged": true } })
+    } else {
+        json!({
+            "tools": { "listChanged": true },
+            "resources": { "subscribe": false, "listChanged": true },
+            "prompts": { "listChanged": true }
+        })
+    }
+}
+
+/// Discovery is an observation, never an initialize-style anchor reset.
+fn handle_discover(scope: &RequestScope) -> Value {
+    json!({
+        "supportedVersions": SUPPORTED_PROTOCOL_VERSIONS,
+        "capabilities": server_capabilities(),
+        "_meta": {
+            "io.modelcontextprotocol/serverInfo": { "name": "locus-mcp", "version": VERSION }
+        },
+        "instructions": if SWARM_BROKER.get().is_some() {
+            "Locus swarm broker: only tools listed for your authenticated graph node may be called.".to_string()
+        } else if let Some(t) = &scope.tenant {
+            tenant_agent_instructions(t)
+        } else {
+            agent_instructions(scope.anchor.get().as_ref())
+        }
+    })
+}
 
 /// MCP version negotiation: echo the client's requested revision when we
 /// support it; otherwise answer our latest and let the client decide whether
 /// to continue (spec: lifecycle / version negotiation).
 fn negotiate_protocol_version(params: &Value) -> &'static str {
-    let requested = params.get("protocolVersion").and_then(Value::as_str);
+    let requested = params
+        .get("_meta")
+        .and_then(|meta| meta.get("io.modelcontextprotocol/protocolVersion"))
+        .or_else(|| params.get("protocolVersion"))
+        .and_then(Value::as_str);
     SUPPORTED_PROTOCOL_VERSIONS
         .iter()
         .copied()
@@ -2507,7 +2570,7 @@ fn handle_initialize(params: &Value, scope: &RequestScope) -> Value {
         return json!({
             "protocolVersion": protocol_version,
             "serverInfo": { "name": "locus-mcp", "version": VERSION },
-            "capabilities": { "tools": { "listChanged": true } },
+            "capabilities": server_capabilities(),
             "instructions": "Locus swarm broker: your authenticated tenant grant maps to one operator-configured graph node. Only tools listed for that node may be called. Unmapped grants have zero tools. Tool arguments and headers cannot select another agent or tenant. All normal session, policy, scope and approval gates still apply.",
         });
     }
@@ -2517,11 +2580,7 @@ fn handle_initialize(params: &Value, scope: &RequestScope) -> Value {
         // rotates it, and the global pin is never consulted.
         return json!({
             "protocolVersion": protocol_version,
-            "capabilities": {
-                "tools": { "listChanged": true },
-                "resources": { "subscribe": false, "listChanged": true },
-                "prompts": { "listChanged": true }
-            },
+            "capabilities": server_capabilities(),
             "serverInfo": {
                 "name": "locus-mcp",
                 "version": VERSION
@@ -2571,11 +2630,7 @@ fn handle_initialize(params: &Value, scope: &RequestScope) -> Value {
     // listChanged=true: catalog may change after a human pin/leave; clients should re-list.
     json!({
         "protocolVersion": protocol_version,
-        "capabilities": {
-            "tools": { "listChanged": true },
-            "resources": { "subscribe": false, "listChanged": true },
-            "prompts": { "listChanged": true }
-        },
+        "capabilities": server_capabilities(),
         "serverInfo": {
             "name": "locus-mcp",
             "version": VERSION
