@@ -7335,6 +7335,7 @@ fn plan_workspace_file(
         default_binding: Some(default),
         allowed_bindings: allowed,
         require_pin,
+        child_rss_cap_bytes: None,
     };
     Ok(WorkspaceWrite { path, config })
 }
