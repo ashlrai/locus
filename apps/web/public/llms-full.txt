@@ -1,0 +1,459 @@
+# Locus
+
+> Your coding agent can't act as the wrong account.
+
+Complete heading index generated from README.md and every docs/*.md page.
+Fetch the linked Markdown file for full body text; section names are
+listed verbatim so an agent can jump straight to the right document.
+
+## README
+
+- [README](https://github.com/ashlrai/locus/blob/main/README.md)
+  - 30-second start
+  - Connect your agent (MCP)
+  - Install options
+  - More of the CLI
+  - Measured: wrong-client credential reachability
+  - How isolation works
+  - MCP (Claude Code / Cursor)
+  - Core concepts
+  - CLI
+  - Roadmap
+  - Development
+  - Daily firm workflow
+  - Security model
+  - Part of the Ashlr ecosystem
+  - Contributing
+  - License
+
+## docs/adapter-sdk.md
+
+- [Adapter SDK](https://github.com/ashlrai/locus/blob/main/docs/adapter-sdk.md)
+  - Layout
+    - Registry CLI (v0)
+  - The trait
+  - Scope freeze (required)
+  - Register
+  - Dispatch order
+  - Tests (minimum)
+  - Template
+  - What not to do
+  - Checklist before merge
+  - Phase 1 vs later
+  - Signed registry roadmap
+    - Manifest fields
+    - Signature schemes
+    - Production trust store ($LOCUSHOME/trust/)
+    - Verify semantics
+    - What is intentionally out of scope (now)
+    - Production trust store (status)
+
+## docs/adapters.md
+
+- [Writing a provider adapter](https://github.com/ashlrai/locus/blob/main/docs/adapters.md)
+  - Where adapters live (today)
+  - The trait
+  - Scope freeze (required)
+  - Tool naming and dispatch
+  - What not to do
+  - Step-by-step: new adapter
+    - Minimal skeleton
+  - Binding TOML example
+  - Phase 1 vs later
+  - Checklist before merge
+  - Community adapter marketplace
+
+## docs/agency-certainty.md
+
+- [Agency certainty - identity vs epistemic layers](https://github.com/ashlrai/locus/blob/main/docs/agency-certainty.md)
+  - The problem split
+  - Layers (current + next)
+  - Mechanism boundaries (do not blur)
+  - Firm-mode implication
+
+## docs/agency-starter.md
+
+- [Agency Starter](https://github.com/ashlrai/locus/blob/main/docs/agency-starter.md)
+  - Model
+  - Install the kit
+  - Binding graph
+  - Workspace fence
+  - Daily workflow
+  - Dual-control
+  - Doctor - “am I safe to act?”
+  - Events
+  - Offboarding
+  - Multi-client dogfood probe
+  - Multi-account pin walk (personal + client)
+  - Operator checklist
+  - Related
+
+## docs/agent-contract.md
+
+- [Agent contract: JSON schemas, exit codes, --dry-run](https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md)
+  - JSON schemas
+    - Errors
+  - Exit codes
+  - --dry-run
+  - Non-interactive by default
+
+## docs/architecture.md
+
+- [Architecture](https://github.com/ashlrai/locus/blob/main/docs/architecture.md)
+  - Problem
+  - System diagram
+  - Core types
+  - Pin path
+  - Policy order
+  - Isolation mechanisms
+  - Crate map
+  - What ships vs roadmap
+  - Composition
+
+## docs/ashlr-handshake.md
+
+- [Ashlr companion handshake (v1)](https://github.com/ashlrai/locus/blob/main/docs/ashlr-handshake.md)
+
+## docs/BENCHMARKS.md
+
+- [Benchmarks](https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md)
+  - What was compared
+  - Machine
+  - Method
+  - Install to first useful result
+  - Core-operation latency
+  - Ambient environment
+  - Release assets
+
+## docs/cli-routing.md
+
+- [Route a provider CLI](https://github.com/ashlrai/locus/blob/main/docs/cli-routing.md)
+  - AWS credential bundle
+  - Boundary
+
+## docs/credential-audit.md
+
+- [Signed credential injection audit (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/credential-audit.md)
+  - What a record holds
+  - Signing and key handling
+  - Verifying
+  - Failure behavior
+  - Scope
+
+## docs/credential-compatibility.md
+
+- [Credential compatibility](https://github.com/ashlrai/locus/blob/main/docs/credential-compatibility.md)
+  - Phantom Secrets references
+
+## docs/doctor-fix.md
+
+- [doctor --fix](https://github.com/ashlrai/locus/blob/main/docs/doctor-fix.md)
+  - Dry run by default
+  - Applying
+  - What it never does
+
+## docs/dogfood-multi-account.md
+
+- [Multi-account dogfood (personal + client)](https://github.com/ashlrai/locus/blob/main/docs/dogfood-multi-account.md)
+  - Prerequisites
+  - 1. Personal binding
+  - 2. Client binding
+  - 3. Wire Claude or Cursor (not both required)
+  - 4. Manual walk (personal → client)
+  - 5. Automated walk
+  - 6. Dual-IDE matrix (no secrets)
+  - 6b. Multi-tenant grant probe (optional)
+  - 7. What this does not cover
+  - Troubleshooting
+  - Operator checklist
+
+## docs/exec-latency.md
+
+- [locus exec latency](https://github.com/ashlrai/locus/blob/main/docs/exec-latency.md)
+  - Harness medians
+  - What the time was
+  - What changed
+  - After phases
+
+## docs/firm-mode.md
+
+- [Firm mode - multi-client agencies](https://github.com/ashlrai/locus/blob/main/docs/firm-mode.md)
+  - Model
+  - Bindings (one per engagement surface)
+  - Workspaces (repo = client fence)
+  - Daily loop
+    - Shell auto-enter (LOCUSAUTOENTER=1)
+    - Git remote autopin (opt-in)
+    - Fast engagement onboarding / offboard
+  - Dual-control (destructive actions)
+    - Walkthrough (two humans, one blast-radius tool)
+  - Pin discipline (load-bearing)
+  - Offboard a client (checklist)
+  - Compose with Phantom
+  - Operator checklist
+  - Related
+
+## docs/FIRST-RUN.md
+
+- [First run](https://github.com/ashlrai/locus/blob/main/docs/FIRST-RUN.md)
+  - README paths
+    - Dead broker
+  - Agent-use audit
+    - Non-interactive and JSON
+    - Dry-run and idempotent setup
+    - MCP schemas
+  - Follow-ups
+
+## docs/gateway-base-url.md
+
+- [Gateway base URL for locus exec (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/gateway-base-url.md)
+  - What the child gets
+  - Rules
+  - When the block is refused
+
+## docs/gateway-base-urls.md
+
+- [Model gateways and base URLs (audit note)](https://github.com/ashlrai/locus/blob/main/docs/gateway-base-urls.md)
+  - Findings
+  - What this means for a gateway
+  - Setting a gateway URL inside locus exec
+
+## docs/hub-integration.md
+
+- [Phantom ↔ Locus integration contract](https://github.com/ashlrai/locus/blob/main/docs/hub-integration.md)
+  - Invariants for hub agents
+  - Environment
+    - Pre-mutate enforce (LOCUSENFORCE + config.locus)
+    - Firm soft-warn (hub doctor / readiness - hub #277)
+    - Scrubbed mint env (withLocusSession)
+  - CLI contracts (shell these out)
+    - Exit codes
+    - 1. locus agent report --json ★ preferred hub entrypoint
+    - 2. locus doctor --json
+    - 3. locus whoami --json
+    - 4. locus status --oneline / locus status --json
+  - MCP registration (hub clients)
+    - REQUIREDSERVERS recommendation
+  - MCP-native multi-tenant dispatch (one URL, one token per job)
+    - Grant lifecycle a hub should drive
+    - Hub drop-in: withLocusMcpTenant (grant scope + auto-revoke)
+  - Suggested hub wiring sequence
+  - What hub must never do
+  - Fleet gate (hub pre-dispatch)
+    - Session heartbeat (verify session / watch)
+  - Validation
+  - Related docs
+
+## docs/mcp.md
+
+- [locus-mcp - Claude Code, Cursor, and friends](https://github.com/ashlrai/locus/blob/main/docs/mcp.md)
+  - Install
+  - Human workflow (pin first)
+    - Provider tools need a supervised launch
+  - Wire into Claude Code
+    - Supervised launch (provider tools)
+  - Wire into Cursor
+  - Wire into Codex / other stdio MCP clients
+  - Wire into Gemini CLI
+  - Wire into Grok Build
+  - Any other stdio MCP client (generic)
+  - Protocol notes
+  - HTTP transport (CI / remote agents)
+    - Mcp-Session-Id (memory + disk resume)
+    - Streamable Accept / Content-Type
+    - Remote deploy (reverse proxy)
+    - Capability tickets
+  - Multi-tenant HTTP (--multi-tenant)
+    - Operator flow
+    - Semantics
+    - Failure table
+  - Tools the agent sees
+    - Always (control plane)
+    - When pinned
+  - Resources
+  - Prompts
+  - MCP auto-pin (advisory only - the server never pins)
+    - Probe enable signals (no authority effect)
+    - Kill switches
+  - Scope freeze and policy
+  - Switching clients
+  - Isolation relative to other MCPs
+  - Troubleshooting
+  - Security properties (MCP-specific)
+  - Related
+
+## docs/observability.md
+
+- [Observability](https://github.com/ashlrai/locus/blob/main/docs/observability.md)
+  - Audit log
+  - Near-miss summary
+  - Forensics pack
+  - Events export (fleet pulse / OTLP)
+    - JSON lines (default)
+    - OTLP-compatible logs JSON
+    - Webhook sink (minimal SIEM / remote append)
+  - Doctor as mission control
+  - What not to export
+  - Related
+
+## docs/onboarding.md
+
+- [Onboarding - 3 clients × 3 tenants](https://github.com/ashlrai/locus/blob/main/docs/onboarding.md)
+  - 0. Prerequisites
+  - 1. Create the three tenant bindings
+  - 2. Pin project directories to tenants
+  - 3. Wire the three agent clients
+    - Claude Code and Codex CLI (write + verify)
+    - Grok Build
+    - Verify all three
+  - 4. Daily rhythm
+  - Serving multiple tenants (hub mode)
+  - 5. Troubleshooting
+  - Related
+
+## docs/phantom-enrolled-repos.md
+
+- [Locus for Phantom-enrolled repos](https://github.com/ashlrai/locus/blob/main/docs/phantom-enrolled-repos.md)
+  - 1. One binding per owner scope
+  - 2. Pin the repo to its scope
+  - 3. Run Phantom's agents inside the binding
+  - 4. Health checks Phantom can call
+  - Not in scope today
+
+## docs/phantom-preflight.md
+
+- [Phantom preflight in locus doctor](https://github.com/ashlrai/locus/blob/main/docs/phantom-preflight.md)
+
+## docs/PHANTOM-USAGE.md
+
+- [Using Locus with Phantom](https://github.com/ashlrai/locus/blob/main/docs/PHANTOM-USAGE.md)
+  - Running under phantom exec
+  - Passing phantom exec variables through (exec inheritenv, opt-in)
+  - phm: credential references
+  - LiteLLM
+  - What is tested
+  - Guard your agent's identity
+
+## docs/policy.md
+
+- [Policy & approvals](https://github.com/ashlrai/locus/blob/main/docs/policy.md)
+  - Binding policy surface
+    - Rule actions
+    - Session TTL (auto-leave)
+    - Evaluation order
+    - Glob syntax
+  - Approval flow
+    - CLI UX
+    - Dual-control
+    - Security notes
+  - Related
+
+## docs/PQ-READINESS.md
+
+- [Post-quantum readiness](https://github.com/ashlrai/locus/blob/main/docs/PQ-READINESS.md)
+  - Background (verified against NIST pages)
+  - What Locus uses today
+  - The check
+  - Library note
+  - If a migration is needed
+
+## docs/registry-trust.md
+
+- [Adapter registry release manifests (signed)](https://github.com/ashlrai/locus/blob/main/docs/registry-trust.md)
+  - What it is
+  - Trust model
+  - Commands
+    - Operator: sign at release time
+    - Consumer: verify
+  - What verify-manifest proves
+  - Non-goals
+
+## docs/RELEASE.md
+
+- [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+  - Preconditions
+  - Checklist - v0.5.1 (launch: Oct 20)
+  - Checklist - v0.5.0
+  - Checklist - v0.4.0 (shipped)
+  - Checklist - v0.3.0 (shipped)
+  - Checklist - v0.2.0 (shipped)
+  - Tag and push
+    - Prior release (v0.1.0) - reference digests
+  - What release.yml publishes
+  - After the tag (Homebrew / npm)
+    - Homebrew (source formula)
+    - Homebrew (optional prebuilt)
+    - npm wrappers
+  - Verify a release
+  - Hotfix / re-tag policy
+
+## docs/session-budget.md
+
+- [Session budget caps (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/session-budget.md)
+  - What is counted
+  - What happens at the cap
+  - State
+  - Relationship to other limits
+
+## docs/shell-completions.md
+
+- [Shell completions](https://github.com/ashlrai/locus/blob/main/docs/shell-completions.md)
+  - zsh
+  - bash
+  - fish
+  - PowerShell
+  - elvish
+  - After upgrading
+
+## docs/swarm-broker.md
+
+- [Grant-scoped swarm broker](https://github.com/ashlrai/locus/blob/main/docs/swarm-broker.md)
+  - Identity and authorization
+  - Graph format
+  - Operator launch
+  - Audit and recovery
+
+## docs/verification-plane.md
+
+- [Verification plane](https://github.com/ashlrai/locus/blob/main/docs/verification-plane.md)
+  - Vision
+  - Loop: proposal → verify → act
+  - Confidence
+  - Tool grounding
+  - Surfaces
+    - CLI
+    - Continuous watch (hub heartbeat stream)
+    - MCP
+    - Doctor (light)
+  - Heuristics (M5 stub)
+  - What this is not
+  - Roadmap (from GOALS M5)
+  - Code map
+
+## docs/workers.md
+
+- [Worker backends](https://github.com/ashlrai/locus/blob/main/docs/workers.md)
+  - Backends
+  - Isolation for MCP children
+  - Worker sandbox (best-effort / platform backends)
+    - Opt-in network isolation (harder sandbox)
+    - Backend matrix
+    - Spawn steps (all backends)
+    - Linux bubblewrap profile (when bwrap is used)
+  - Binding TOML - per-provider upstream
+    - Built-in recipes
+  - Composite + top-adapter recipes
+  - API sketch
+  - Worker pool reuse
+    - Optional idle timeout
+  - Capability tickets
+  - Tests
+
+## Agent surfaces
+
+- [capabilities.json](https://locus.dev/capabilities.json)
+- [server.json](https://locus.dev/server.json)
+- [robots.txt](https://locus.dev/robots.txt)
+- [sitemap.xml](https://locus.dev/sitemap.xml)
+- [AGENTS.md](https://locus.dev/AGENTS.md)
+- [.well-known/security.txt](https://locus.dev/.well-known/security.txt)
