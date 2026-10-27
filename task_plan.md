@@ -7,7 +7,7 @@ Deliver an evidence-based, executable child-job decomposition for Locus as the s
 - [x] Inspect initial workspace and constraints.
 - [x] Trace implemented broker boundaries and gaps.
 - [x] Write child-job backlog and validation tests.
-- [x] Run isolated checks and write BRIDGE_NOTES.md.
+- [x] Run isolated checks and write notes.md.
 
 ## Decisions
 - Leave the pre-existing .github/PULL_REQUEST_TEMPLATE.md modification untouched.
