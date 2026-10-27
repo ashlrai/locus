@@ -1,5 +1,11 @@
 # locus-cli
 
+<!-- fresh:begin install -->
+```bash
+npm install -g locus-cli@0.5.2 @ashlrai/locus-mcp@0.5.2
+```
+<!-- fresh:end -->
+
 npm wrapper for the [Locus](https://github.com/ashlrai/locus) CLI — identity plane for coding agents.
 
 **Wrong account, impossible.** Pin a binding; every command is hard-scoped to that tenant until you re-pin.
