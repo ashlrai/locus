@@ -184,6 +184,8 @@ pub struct PinResolution {
 #[derive(Debug, Clone)]
 pub struct Store {
     home: PathBuf,
+    /// Opened with [`Store::open_existing`]: never mint a seal key.
+    existing_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -212,7 +214,10 @@ impl Store {
         fs::create_dir_all(home.join("engagements"))?;
         fs::create_dir_all(home.join("archives"))?;
         fs::create_dir_all(home.join("runtime"))?;
-        let s = Self { home };
+        let s = Self {
+            home,
+            existing_only: false,
+        };
         // Ensure seal key exists
         let _ = s.seal_key()?;
         Ok(s)
@@ -224,16 +229,25 @@ impl Store {
     /// or its seal key is missing.
     pub fn open_existing(home: impl Into<PathBuf>) -> Result<Self> {
         let home = home.into();
-        let seal = home.join("daemon.key");
-        if !seal.is_file() {
-            return Err(LocusError::msg(format!(
+        let not_initialized = || {
+            LocusError::msg(format!(
                 "{} is not initialized (no seal key)",
                 home.display()
-            )));
+            ))
+        };
+        // Canonicalize first so the key is checked where it will be read.
+        let canonical = fs::canonicalize(&home).map_err(|_| not_initialized())?;
+        let s = Self {
+            home: canonical,
+            existing_only: true,
+        };
+        if !s.seal_key_path().exists() && fs::symlink_metadata(s.seal_key_path()).is_err() {
+            return Err(not_initialized());
         }
-        Ok(Self {
-            home: fs::canonicalize(home)?,
-        })
+        // Refuses symlinks, non-regular files, foreign owners and group or
+        // other access; never generates.
+        s.seal_key_existing()?;
+        Ok(s)
     }
 
     pub fn home(&self) -> &Path {
@@ -288,6 +302,9 @@ impl Store {
     }
 
     pub fn seal_key(&self) -> Result<SealKey> {
+        if self.existing_only {
+            return self.seal_key_existing();
+        }
         let path = self.seal_key_path();
         if path.exists() {
             let hex = fs::read_to_string(&path)?;
@@ -297,6 +314,49 @@ impl Store {
             write_secret_file(&path, key.to_hex().as_bytes())?;
             Ok(key)
         }
+    }
+
+    /// Read the existing seal key without ever generating one. Opens with
+    /// `O_NOFOLLOW` and checks the opened file (fstat, so no TOCTOU between
+    /// check and read): regular file, owned by the effective uid, no group or
+    /// other permission bits.
+    pub fn seal_key_existing(&self) -> Result<SealKey> {
+        use std::io::Read as _;
+        let path = self.seal_key_path();
+        let refused = |why: &str| LocusError::msg(format!("seal key {}: {why}", path.display()));
+        #[cfg(unix)]
+        let mut file = {
+            use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+            let file = fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&path)
+                .map_err(|e| {
+                    if e.raw_os_error() == Some(libc::ELOOP) {
+                        refused("is a symlink; refusing")
+                    } else {
+                        refused("missing or unreadable (store not initialized)")
+                    }
+                })?;
+            let meta = file.metadata()?;
+            if !meta.file_type().is_file() {
+                return Err(refused("is not a regular file"));
+            }
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            if meta.uid() != unsafe { libc::geteuid() } {
+                return Err(refused("is not owned by the current user"));
+            }
+            if meta.mode() & 0o077 != 0 {
+                return Err(refused("must be mode 0600 (group/other access found)"));
+            }
+            file
+        };
+        #[cfg(not(unix))]
+        let mut file = fs::File::open(&path)
+            .map_err(|_| refused("missing or unreadable (store not initialized)"))?;
+        let mut hex = String::new();
+        file.by_ref().take(4096).read_to_string(&mut hex)?;
+        SealKey::from_hex(hex.trim())
     }
 
     fn issue_session_authority(
@@ -4081,6 +4141,44 @@ mod tests {
             .map(|e| e.path())
             .collect();
         assert_eq!(before.len(), after.len());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_existing_refuses_unsafe_seal_keys_and_never_mints() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("home");
+        super::Store::open(&home).unwrap();
+        let key = home.join("daemon.key");
+        assert!(super::Store::open_existing(&home).is_ok());
+
+        // Group/other readable key is refused.
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = super::Store::open_existing(&home).unwrap_err().to_string();
+        assert!(err.contains("0600"), "{err}");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        // Symlinked key is refused even when the target is a valid key.
+        let elsewhere = d.path().join("elsewhere.key");
+        std::fs::rename(&key, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &key).unwrap();
+        let err = super::Store::open_existing(&home).unwrap_err().to_string();
+        assert!(err.contains("symlink"), "{err}");
+        std::fs::remove_file(&key).unwrap();
+
+        // Directory in place of the key is refused.
+        std::fs::create_dir(&key).unwrap();
+        assert!(super::Store::open_existing(&home).is_err());
+        std::fs::remove_dir(&key).unwrap();
+        std::fs::rename(&elsewhere, &key).unwrap();
+
+        // A key that vanishes after open_existing is never re-minted.
+        let s = super::Store::open_existing(&home).unwrap();
+        std::fs::remove_file(&key).unwrap();
+        assert!(s.seal_key().is_err());
+        assert!(s.seal_key_existing().is_err());
+        assert!(!key.exists(), "read-only store minted a seal key");
     }
 
     #[test]
