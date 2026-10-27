@@ -11,6 +11,7 @@
 #[macro_use]
 mod stdout;
 
+mod config_rewrite;
 mod cred_diag;
 mod dry_run;
 #[cfg(all(test, unix))]
@@ -291,6 +292,9 @@ enum Commands {
         /// Tools appear as `alias__tool` in locus-mcp. e.g. `--ns personal,acme`
         #[arg(long = "ns")]
         ns: Option<String>,
+        /// Replace npx Locus MCP entries in supported user configs with the native binary
+        #[arg(long)]
+        rewrite_configs: bool,
         /// Auto-expire this pin after DUR (e.g. 30m, 2h; min 1m, max 24h;
         /// capped by the binding's policy.max_ttl)
         #[arg(long, value_name = "DUR")]
@@ -1463,7 +1467,19 @@ fn run() -> Result<()> {
             client,
             ns,
             ttl,
-        } => cmd_pin(alias, force, client, ns, ttl, json, dry_run),
+            rewrite_configs,
+        } => cmd_pin(
+            alias,
+            client,
+            ns,
+            ttl,
+            PinOptions {
+                force,
+                rewrite_configs,
+                json,
+                dry_run,
+            },
+        ),
         Commands::Leave { force, no_verifier } => cmd_leave(force, no_verifier, json, dry_run),
         Commands::Renew => cmd_renew(json, dry_run),
         Commands::Engagement(sub) => cmd_engagement(sub, json, dry_run),
@@ -3090,15 +3106,29 @@ fn cmd_switch(
     Ok(())
 }
 
+struct PinOptions {
+    force: bool,
+    rewrite_configs: bool,
+    json: bool,
+    dry_run: bool,
+}
+
 fn cmd_pin(
     alias: Option<String>,
-    force: bool,
     client: Option<String>,
     ns: Option<String>,
     ttl: Option<String>,
-    json: bool,
-    dry_run: bool,
+    options: PinOptions,
 ) -> Result<()> {
+    let PinOptions {
+        force,
+        rewrite_configs,
+        json,
+        dry_run,
+    } = options;
+    if rewrite_configs && dry_run {
+        bail!("--rewrite-configs cannot be combined with --dry-run");
+    }
     let requested_ttl = ttl.as_deref().map(parse_pin_ttl).transpose()?;
     let ns_aliases = ns
         .as_deref()
@@ -3126,6 +3156,11 @@ fn cmd_pin(
     }
     require_local_control_to_replace_pin("locus pin")
         .map_err(|e| wedged_session_recovery_for(e, alias.as_deref()))?;
+    let rewrite = if rewrite_configs {
+        Some(config_rewrite::prepare()?)
+    } else {
+        None
+    };
     let s = store()?;
     let client = client.or_else(|| Some("cli".into()));
     let session = if let Some(aliases) = ns_aliases {
@@ -3141,6 +3176,11 @@ fn cmd_pin(
                 .map_err(|e| wedged_session_recovery(with_auto_alias_suggestions(&s, &cwd(), e)))?,
         }
     };
+    if let Some(rewrite) = rewrite {
+        rewrite
+            .apply()
+            .context("pin succeeded, but config rewrite failed")?;
+    }
     // Surface a silent policy.max_ttl clamp (5s slack for pin-time skew).
     let granted = session.expires_at - session.pinned_at;
     let ttl_capped = requested_ttl.is_some_and(|req| granted + chrono::Duration::seconds(5) < req);
@@ -5700,6 +5740,15 @@ fn cmd_adapter(sub: AdapterCmd, json: bool, dry_run: bool) -> Result<()> {
         AdapterCmd::Search { query } => {
             let hits = community_search(query.as_deref())?;
             if json {
+                // Publisher manifest URLs may be signed; never echo the query.
+                let hits: Vec<_> = hits
+                    .into_iter()
+                    .map(|mut hit| {
+                        hit.manifest_url =
+                            locus_core::marketplace::redact_url_for_display(&hit.manifest_url);
+                        hit
+                    })
+                    .collect();
                 println!("{}", json!({"hits": hits}));
             } else {
                 for hit in hits {
@@ -5748,6 +5797,14 @@ fn cmd_adapter(sub: AdapterCmd, json: bool, dry_run: bool) -> Result<()> {
         }
         AdapterCmd::Uninstall { id, yes } => {
             require_local_control_boundary("locus adapter uninstall")?;
+            if json && !yes {
+                // `--json` never prompts (#188): refuse instead of writing a
+                // prompt into the JSON stream.
+                return Err(UsageError(
+                    "--json never prompts; pass --yes to confirm removing the adapter".into(),
+                )
+                .into());
+            }
             if !yes && !prompt_confirm("remove this installed community adapter?", false)? {
                 bail!("removal declined");
             }
@@ -6934,6 +6991,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
     // symlink_metadata: a dangling symlink is an existing entry too.
     let target = s.bindings_dir().join(format!("{}.toml", answers.alias));
     let exists = target.symlink_metadata().is_ok();
+    let identical = exists && !args.force && s.binding_matches(&b)?;
 
     if args.dry_run {
         let mut plan = plans::binding_add_plan(&target, &answers.alias, &toml, exists);
@@ -6942,7 +7000,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
         }
         return plans::emit_binding_add_plan(&plan, json, &toml);
     }
-    if exists && !args.force && !(can_prompt && guided) {
+    if exists && !(args.force || identical || (can_prompt && guided)) {
         bail!(
             "binding '{alias}' already exists; nothing written. \
              Review it with `locus binding show {alias}`, rerun with --force to replace it, \
@@ -6951,7 +7009,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
         );
     }
 
-    if can_prompt && guided {
+    if can_prompt && guided && !identical {
         println!();
         println!("{toml}");
         let question = if exists && !args.force {
@@ -6966,11 +7024,19 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
 
     // Re-checked under the bindings lock: another writer may have created
     // the alias since `exists` was read (or while the prompt waited).
-    let path = s.create_binding(&b, exists || args.force)?;
+    let path = s.create_binding(&b, exists && !identical || args.force)?;
     if json {
         println!(
             "{}",
-            serde_json::json!({ "ok": true, "path": path.display().to_string() })
+            serde_json::json!({ "ok": true, "path": path.display().to_string(), "changed": !identical })
+        );
+        return Ok(());
+    }
+    if identical {
+        println!(
+            "{} binding '{}' already matches; nothing written",
+            "ok".green().bold(),
+            answers.alias
         );
         return Ok(());
     }
@@ -7001,7 +7067,7 @@ fn prompt_value(
     validate: &dyn Fn(&str) -> std::result::Result<(), String>,
 ) -> Result<String> {
     use std::io::Write;
-    if !dry_run::interactive(false) {
+    if !dry_run::interactive(JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed)) {
         bail!("missing {label} — pass {flag_hint} (not an interactive terminal)");
     }
     loop {
@@ -7036,7 +7102,7 @@ fn prompt_value(
 /// Optional prompt: empty input → None. Non-interactive → None (flags rule).
 fn prompt_optional(label: &str) -> Result<Option<String>> {
     use std::io::Write;
-    if !dry_run::interactive(false) {
+    if !dry_run::interactive(JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed)) {
         return Ok(None);
     }
     print!("  {label}: ");
@@ -7054,7 +7120,7 @@ fn prompt_optional(label: &str) -> Result<Option<String>> {
 /// Y/n confirm. Non-interactive returns the default (never blocks scripts).
 fn prompt_confirm(question: &str, default_yes: bool) -> Result<bool> {
     use std::io::Write;
-    if !dry_run::interactive(false) {
+    if !dry_run::interactive(JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed)) {
         return Ok(default_yes);
     }
     let hint = if default_yes { "[Y/n]" } else { "[y/N]" };

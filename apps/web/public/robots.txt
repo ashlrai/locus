@@ -1,0 +1,6 @@
+# Locus - identity plane for coding agents
+# Agents: see /llms.txt, /capabilities.json and /server.json
+User-agent: *
+Allow: /
+
+Sitemap: https://locus.dev/sitemap.xml
