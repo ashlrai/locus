@@ -5988,6 +5988,21 @@ credential_ref = "ghp_UNSAFE/CANARY"
     }
 
     #[test]
+    fn binding_matches_is_true_only_for_an_equivalent_binding() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let binding = sample_binding("acme", "acme-corp", "p1");
+
+        // Absent and different are not matches; only the same body is.
+        assert!(!store.binding_matches(&binding).unwrap());
+        store.save_binding(&binding).unwrap();
+        assert!(store.binding_matches(&binding).unwrap());
+        assert!(!store
+            .binding_matches(&sample_binding("acme", "other", "p1"))
+            .unwrap());
+    }
+
+    #[test]
     fn save_binding_rejects_empty_providers_and_bad_alias() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();

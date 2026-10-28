@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`locus binding add` is idempotent when the file already matches (#175).**
+  Re-adding an alias whose saved binding is equivalent now exits 0 without
+  writing (`"changed": false` in `--json`; `already matches; nothing written`
+  otherwise), and a `--dry-run` on it plans zero changes. A different body for
+  the same alias still refuses without `--force`, and `--force` still replaces.
+
 ## [0.5.2] - 2026-10-26
 
 Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
