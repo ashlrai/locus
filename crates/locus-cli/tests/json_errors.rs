@@ -156,6 +156,111 @@ fn binding_add_refuses_to_replace_an_existing_alias_without_force() {
     assert!(stderr.contains("did you mean `dup`?"), "{stderr}");
 }
 
+/// Issue #175: re-running `binding add` with the same values is a no-op that
+/// exits 0 instead of refusing. The file is not rewritten (bytes and mtime
+/// unchanged); `--json` reports `changed: false`.
+#[test]
+fn binding_add_is_a_noop_when_the_file_already_matches() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let add = |extra: &[&str]| {
+        let mut args = vec![
+            "--json",
+            "binding",
+            "add",
+            "same",
+            "--tenant",
+            "same",
+            "--provider",
+            "github",
+            "--account",
+            "acct",
+            "--credential-ref",
+            "env:SAME_TOKEN",
+            "--non-interactive",
+        ];
+        args.extend_from_slice(extra);
+        locus(home.path(), cwd.path(), Some(CAP), &args)
+    };
+    let toml = home.path().join("bindings").join("same.toml");
+
+    let first = add(&[]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let v: Value = serde_json::from_str(&String::from_utf8_lossy(&first.stdout)).unwrap();
+    assert_eq!(v["changed"], true, "{v}");
+    let original = std::fs::read_to_string(&toml).unwrap();
+    let modified = std::fs::metadata(&toml).unwrap().modified().unwrap();
+
+    let second = add(&[]);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let v: Value = serde_json::from_str(&String::from_utf8_lossy(&second.stdout)).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["changed"], false, "{v}");
+    assert_eq!(std::fs::read_to_string(&toml).unwrap(), original);
+    assert_eq!(
+        std::fs::metadata(&toml).unwrap().modified().unwrap(),
+        modified
+    );
+
+    // Human output says the same thing.
+    let human = locus(
+        home.path(),
+        cwd.path(),
+        Some(CAP),
+        &[
+            "binding",
+            "add",
+            "same",
+            "--tenant",
+            "same",
+            "--provider",
+            "github",
+            "--account",
+            "acct",
+            "--credential-ref",
+            "env:SAME_TOKEN",
+            "--non-interactive",
+        ],
+    );
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("already matches; nothing written"),
+        "{}",
+        String::from_utf8_lossy(&human.stdout)
+    );
+
+    // A dry run plans zero changes and says why.
+    let dry = add(&["--dry-run"]);
+    assert!(
+        dry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let plan: Value = serde_json::from_str(&String::from_utf8_lossy(&dry.stdout)).unwrap();
+    assert_eq!(plan["changes"], serde_json::json!([]), "{plan}");
+    assert!(
+        plan["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("already matches")),
+        "{plan}"
+    );
+    assert_eq!(std::fs::read_to_string(&toml).unwrap(), original);
+}
+
 #[cfg(unix)]
 #[test]
 fn binding_add_never_writes_through_a_dangling_symlink() {

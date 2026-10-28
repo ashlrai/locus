@@ -6884,6 +6884,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
                 &answers.alias,
                 &toml,
                 false,
+                false,
             )
             .note(format!(
                 "{} is not initialized; `locus init` first",
@@ -6987,8 +6988,10 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
     let identical = exists && !args.force && s.binding_matches(&b)?;
 
     if args.dry_run {
-        let mut plan = plans::binding_add_plan(&target, &answers.alias, &toml, exists);
-        if exists && !args.force {
+        let mut plan = plans::binding_add_plan(&target, &answers.alias, &toml, exists, identical);
+        if identical {
+            plan.note("binding already matches: the real run exits 0 without writing");
+        } else if exists && !args.force {
             plan.note("binding exists: the real run refuses without --force");
         }
         return plans::emit_binding_add_plan(&plan, json, &toml);

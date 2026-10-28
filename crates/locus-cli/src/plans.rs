@@ -742,21 +742,23 @@ pub(super) fn doctor_fix_plan(
 }
 
 /// `binding add --dry-run` plan: refs-only TOML, never a secret value.
+/// An identical existing binding plans zero changes: the real run no-ops.
 pub(super) fn binding_add_plan(
     path: &Path,
     alias: &str,
     toml: &str,
     exists: bool,
+    identical: bool,
 ) -> dry_run::Plan {
     let mut plan = dry_run::Plan::new(format!("locus binding add {alias}"));
-    plan.change(
-        if exists { "overwrite" } else { "create" },
-        path.display().to_string(),
-        Some(format!("binding {alias}")),
-    )
-    .needs_control()
-    .with("alias", alias)
-    .with("toml", toml);
+    if !identical {
+        plan.change(
+            if exists { "overwrite" } else { "create" },
+            path.display().to_string(),
+            Some(format!("binding {alias}")),
+        );
+    }
+    plan.needs_control().with("alias", alias).with("toml", toml);
     plan
 }
 
