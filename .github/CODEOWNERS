@@ -9,3 +9,4 @@
 /crates/locus-core/src/http_sessions.rs @masonwyatt23
 /crates/locus-mcp/src/http_session.rs @masonwyatt23
 /crates/locus-core/src/authority_anchor.rs @masonwyatt23
+/.github/tests/secret-shape/ @masonwyatt23
