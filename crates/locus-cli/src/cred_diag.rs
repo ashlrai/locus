@@ -173,7 +173,10 @@ pub(crate) fn cause(issue: &CredentialResolutionIssue, phantom_on_path: bool) ->
         ("phantom", "unavailable") => {
             "name not listed by `phantom list` (absent from the vault, or list failed)"
         }
-        ("environment", "unavailable") => "environment variable not set",
+        ("phantom", "unsupported-integration") => {
+            "Phantom credential integration unsupported; use an explicit env:VAR reference and supply its value"
+        }
+        ("environment", "unavailable") => "environment variable not set; supply the value for the env:VAR reference",
         (_, "unsupported-mapping") => "no env var mapping for this provider",
         (_, "invalid-adapter-contract") => "community adapter contract rejected",
         _ => "credential unavailable",
@@ -355,6 +358,10 @@ mod tests {
     #[test]
     fn causes_are_distinct_and_value_free() {
         assert!(cause(&issue("github", "phantom", REVEAL_FAILED), true).contains("reveal"));
+        assert!(
+            cause(&issue("github", "phantom", "unsupported-integration"), true)
+                .contains("use an explicit env:VAR")
+        );
         assert_eq!(
             cause(&issue("github", "phantom", "unavailable"), false),
             "phantom not on PATH"
@@ -362,7 +369,7 @@ mod tests {
         assert!(cause(&issue("github", "phantom", "unavailable"), true).contains("phantom list"));
         assert_eq!(
             cause(&issue("github", "environment", "unavailable"), true),
-            "environment variable not set"
+            "environment variable not set; supply the value for the env:VAR reference"
         );
     }
 
