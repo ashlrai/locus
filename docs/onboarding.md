@@ -133,6 +133,17 @@ write a `.locus.toml` stub, and `--mcp-bin /abs/path/locus-mcp` if the GUI
 launcher has a minimal `PATH`. Restart the client so the tool catalog
 reloads.
 
+The generated `locus-mcp` entry serves control tools. To expose the pinned
+binding's provider tools, register a supervised launch instead:
+
+```bash
+claude mcp add locus -- locus mcp --supervised
+codex mcp add locus -- locus mcp --supervised
+```
+
+Launch the client from the hooked shell with a live human pin, and restart it
+after re-pinning. See [supervised MCP launch](./mcp.md#supervised-launch-provider-tools).
+
 ### Grok Build
 
 Grok Build's documented MCP config is `~/.grok/config.toml` (Codex-style
