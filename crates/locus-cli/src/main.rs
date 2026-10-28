@@ -64,7 +64,7 @@ Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
   Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard\n  \
-  Daily use     enter · switch · pin · leave · renew · whoami · status · exec · run · binding\n  \
+  Daily use     enter · switch · pin · leave · renew · whoami · status · broker · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
   Audit         events · forensics\n  \
@@ -366,6 +366,13 @@ enum Commands {
     /// No ML — pure heuristics for hub/agent extension. See docs/verification-plane.md.
     #[command(next_help_heading = "Setup", subcommand)]
     Verify(VerifyCmd),
+
+    /// Inspect operator-managed engine permissions
+    #[command(next_help_heading = "Daily use")]
+    Broker {
+        #[command(subcommand)]
+        command: BrokerCmd,
+    },
 
     /// Run a command with only the pinned binding's identity surface
     #[command(next_help_heading = "Daily use")]
@@ -1492,6 +1499,7 @@ fn run() -> Result<()> {
         Commands::Agent(sub) => cmd_agent(sub, json, dry_run),
         Commands::Goal(sub) => cmd_goal(sub, json),
         Commands::Verify(sub) => cmd_verify(sub, json),
+        Commands::Broker { command } => cmd_broker(command, json),
         Commands::Exec {
             for_cli,
             no_resolve,
@@ -1688,6 +1696,7 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
         | Commands::Watch { .. }
         | Commands::Hook { .. }
         | Commands::Goal(_)
+        | Commands::Broker { .. }
         | Commands::Verify(_)
         | Commands::Upstream(_)
         | Commands::Completion { .. }
@@ -2044,12 +2053,7 @@ fn delegated_child_session(s: &Store) -> Result<Option<Session>> {
     let session = match s.require_active() {
         Ok(session) => session,
         Err(_) if !selected && s.active_session()?.is_none() => return Ok(None),
-        // Name the recovery here: `locus mcp --supervised` prints this error
-        // on its own fallback line, which never reaches the top-level hatch.
-        Err(error) => {
-            return Err(wedged_session_recovery(anyhow::Error::new(error)))
-                .context("verify selected session authority");
-        }
+        Err(error) => return Err(error).context("verify selected session authority"),
     };
     if selected || session.is_delegated() {
         Ok(Some(session))
@@ -2345,6 +2349,9 @@ fn isolated_child_env(
     resolve_secrets: bool,
 ) -> IsolatedEnv {
     let mut isolated = build_isolated_env_opts(session, binding, resolve_secrets);
+    if let Ok(engine) = env::var("LOCUS_ENGINE_ID") {
+        isolated.vars.insert("LOCUS_ENGINE_ID".into(), engine);
+    }
     isolated
         .vars
         .insert("LOCUS_HOME".into(), store.home().display().to_string());
@@ -3316,10 +3323,15 @@ fn wedged_session_recovery(err: anyhow::Error) -> anyhow::Error {
 fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyhow::Error {
     let wedged = err
         .downcast_ref::<locus_core::LocusError>()
-        .filter(|e| locus_core::recovery::is_stale_pin_error(e));
-    if let Some(stale_err) = wedged {
+        .filter(|e| locus_core::recovery::is_stale_pin_error(e))
+        .map(locus_core::recovery::enter_replaces_stale_pin);
+    if let Some(enter_first) = wedged {
         let alias = recovery_alias(alias);
-        let recipe = locus_core::recovery::recovery_for_error(stale_err, alias.as_deref());
+        let recipe = if enter_first {
+            locus_core::recovery::dead_broker_recovery(alias.as_deref())
+        } else {
+            locus_core::recovery::stale_pin_recovery(alias.as_deref())
+        };
         anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
     } else {
         err
@@ -3349,12 +3361,15 @@ fn recovery_alias(requested: Option<&str>) -> Option<String> {
 /// Message only: the error itself still fails closed.
 fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
     let stale = err.chain().find_map(|cause| {
-        cause.downcast_ref::<locus_core::LocusError>().filter(|e| {
-            locus_core::recovery::is_stale_pin_error(e)
-                && !matches!(e, locus_core::LocusError::Json(_))
-        })
+        cause
+            .downcast_ref::<locus_core::LocusError>()
+            .filter(|e| {
+                locus_core::recovery::is_stale_pin_error(e)
+                    && !matches!(e, locus_core::LocusError::Json(_))
+            })
+            .map(locus_core::recovery::enter_replaces_stale_pin)
     });
-    let Some(stale_err) = stale else {
+    let Some(enter_first) = stale else {
         return err;
     };
     if format!("{err:#}").contains("locus leave --force") {
@@ -3363,7 +3378,11 @@ fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
     let Some(alias) = store().ok().and_then(|s| active_alias_hint(&s)) else {
         return err;
     };
-    let recipe = locus_core::recovery::recovery_for_error(stale_err, Some(&alias));
+    let recipe = if enter_first {
+        locus_core::recovery::dead_broker_recovery(Some(&alias))
+    } else {
+        locus_core::recovery::stale_pin_recovery(Some(&alias))
+    };
     anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
 }
 
@@ -4279,6 +4298,29 @@ fn exec_delegated(
     )
 }
 
+#[derive(clap::Subcommand, Debug)]
+enum BrokerCmd {
+    /// Check cli:<executable> or mcp:<server> against the operator allowlist
+    Check { engine: String, tool: String },
+}
+
+fn cmd_broker(command: BrokerCmd, json: bool) -> Result<()> {
+    let BrokerCmd::Check { engine, tool } = command;
+    let s = store()?;
+    let policy = locus_core::broker::load(s.home())
+        .map_err(|_| anyhow::anyhow!("broker policy unavailable or invalid"))?;
+    let decision = policy.check(&engine, &tool);
+    if json {
+        println!("{}", serde_json::to_string(&decision)?);
+    } else {
+        println!("{}", decision.reason);
+    }
+    if !decision.allowed {
+        bail!("broker denied access");
+    }
+    Ok(())
+}
+
 fn cmd_exec(
     cmd: Vec<String>,
     resolve_secrets: bool,
@@ -4304,6 +4346,8 @@ fn cmd_exec(
 
     let s = store()?;
     trace.mark("store_open");
+    locus_core::broker::enforce(&s, &format!("cli:{}", args[0]))
+        .map_err(|_| anyhow::anyhow!("broker denied access"))?;
     // An explicit session id is the delegated gate. It verifies the seal and
     // the broker once, and it refuses before --expect when that check fails.
     if exact_session_selected() {
@@ -7328,7 +7372,6 @@ fn plan_workspace_file(
         default_binding: Some(default),
         allowed_bindings: allowed,
         require_pin,
-        child_rss_cap_bytes: None,
     };
     Ok(WorkspaceWrite { path, config })
 }
@@ -12518,6 +12561,9 @@ mod hook_and_help_tests {
     fn top_level_help_groups_list_every_subcommand() {
         let cmd = Cli::command();
         let groups = cmd.get_long_about().expect("long_about").to_string();
+        assert!(groups
+            .lines()
+            .any(|line| line.contains("Daily use") && line.contains("broker")));
         let words: Vec<&str> = groups
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
             .collect();

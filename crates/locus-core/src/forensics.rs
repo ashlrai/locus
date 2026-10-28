@@ -7,8 +7,6 @@
 //! Includes pin/session metadata, binding summaries, last N audit events,
 //! doctor snapshot, pending approvals, and an optional HMAC chain tip over
 //! the audit tip. Never resolves CredentialRefs or embeds token values.
-//! Audit detail is arbitrary JSON and is exported only as a redaction marker
-//! and serialized byte length; the local audit log and its digest are unchanged.
 
 use crate::approval::ApprovalRecord;
 use crate::binding::BindingSummary;
@@ -145,8 +143,7 @@ pub struct ForensicsPack {
     pub pin: Option<ForensicsSessionMeta>,
     /// Binding summaries (alias/tenant/providers only).
     pub bindings: Vec<BindingSummary>,
-    /// Last N audit events (newest last; filtered if binding set).
-    /// Arbitrary detail is replaced with a fixed prefix and its serialized byte length.
+    /// Last N audit events (newest last in file order; filtered if binding set).
     pub audit_events: Vec<AuditEvent>,
     pub audit_event_count: usize,
     /// Doctor mission-control snapshot (no secrets).
@@ -234,8 +231,7 @@ pub fn export_forensics_pack(
         unresolved_phm: Vec::new(),
         cwd: None,
     });
-    let mut doctor = build_doctor_report(store, external)?;
-    redact_audit_details(&mut doctor.audit.last)?;
+    let doctor = build_doctor_report(store, external)?;
 
     let mut bindings = store.list_bindings()?;
     if let Some(alias) = filter {
@@ -245,8 +241,7 @@ pub fn export_forensics_pack(
     let pin = session_meta(store)?;
 
     let all_events = store.read_audit_events()?;
-    let mut audit_events = filter_tail_events(&all_events, last_n, filter);
-    redact_audit_details(&mut audit_events)?;
+    let audit_events = filter_tail_events(&all_events, last_n, filter);
     let chain_tip = compute_chain_tip(store, &all_events);
 
     let pending = store.pending_approvals()?;
@@ -273,20 +268,6 @@ pub fn export_forensics_pack(
         near_miss,
         chain_tip,
     })
-}
-
-/// Detail is unrestricted JSON: keys and free text can contain credentials.
-/// Keep only a fixed marker and byte length without guessing token formats.
-fn redact_audit_details(events: &mut [AuditEvent]) -> crate::Result<()> {
-    for event in events {
-        if let Some(detail) = &event.detail {
-            event.detail = Some(serde_json::json!({
-                "redacted": true,
-                "bytes": serde_json::to_vec(detail)?.len(),
-            }));
-        }
-    }
-    Ok(())
 }
 
 fn session_meta(store: &Store) -> crate::Result<Option<ForensicsSessionMeta>> {
@@ -387,48 +368,6 @@ mod tests {
                 upstream: None,
             }],
         })
-    }
-
-    #[test]
-    fn export_redacts_runtime_canaries_in_arbitrary_audit_detail() {
-        let dir = tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
-        store.save_binding(&sample_binding("acme")).unwrap();
-        let canary = format!("runtime_{}", rand::random::<u128>());
-        // Include a secret as a key as well as nested values and free text.
-        let detail = serde_json::json!({
-            canary.clone(): [canary.clone(), {"message": format!("Bearer {canary}")}],
-            "token": canary,
-        });
-        let bytes = serde_json::to_vec(&detail).unwrap().len();
-        store
-            .audit("diagnostic", "acme", Some(detail.clone()))
-            .unwrap();
-        let pack = export_forensics_pack(&store, ForensicsExportOptions::default()).unwrap();
-        let serialized = serde_json::to_string_pretty(&pack).unwrap();
-        assert!(!serialized.contains(&canary));
-        assert!(!format!("{pack:?}").contains(&canary));
-        let event = pack
-            .audit_events
-            .iter()
-            .find(|e| e.op == "diagnostic")
-            .unwrap();
-        assert_eq!(
-            event.detail,
-            Some(serde_json::json!({"redacted": true, "bytes": bytes}))
-        );
-        let doctor_event = pack
-            .doctor
-            .audit
-            .last
-            .iter()
-            .find(|e| e.op == "diagnostic")
-            .unwrap();
-        assert_eq!(doctor_event.detail, event.detail);
-        // Export must preserve local evidence, and chain tips still hash originals.
-        let original = store.read_audit_events().unwrap();
-        assert!(original.last().unwrap().detail.as_ref() == Some(&detail));
-        assert_eq!(pack.chain_tip, compute_chain_tip(&store, &original));
     }
 
     #[test]

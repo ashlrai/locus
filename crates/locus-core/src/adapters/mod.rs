@@ -270,19 +270,6 @@ pub fn enforce_policy(
     if let Some(blocked) = enforce_read_only_scope(binding, tool_name) {
         return Ok(Some(blocked));
     }
-    enforce_session_policy(binding, tool_name, args, gate)
-}
-
-/// Policy, external approval and budget gate shared with local session tools.
-/// Provider dispatch must use `enforce_policy`, which additionally enforces
-/// adapter schemas, scope freezing and provider read-only constraints first.
-/// Local callers must validate their own closed schema before entering here.
-pub fn enforce_session_policy(
-    binding: &Binding,
-    tool_name: &str,
-    args: &Value,
-    gate: Option<ApprovalGate<'_>>,
-) -> Result<Option<ToolCallResult>> {
     // Opt-in session budget (`[budget]` in config.toml). With no cap configured
     // this is a no-op that does no I/O. Needs a session id, so calls without a
     // gate (CLI-side dispatch) are not counted.

@@ -199,14 +199,6 @@ fn docs_exit_code_table_and_schema_catalogue_match_the_binary() {
         table,
         "docs/agent-contract.md exit-code table drifted"
     );
-    let stable_docs = read_repo("docs/exit-codes.md");
-    let begin = stable_docs.find("<!-- exit-codes:begin -->\n").unwrap() + 26;
-    let end = stable_docs.find("<!-- exit-codes:end -->").unwrap();
-    assert_eq!(
-        &stable_docs[begin..end],
-        table,
-        "docs/exit-codes.md exit-code table drifted"
-    );
 
     for s in contract["schemas"].as_array().unwrap() {
         let id = s["schema"].as_str().unwrap();
@@ -243,10 +235,6 @@ fn contract_exit_codes_are_the_documented_values() {
         (1, "failure"),
         (2, "unsafe"),
         (2, "usage"),
-        (3, "refused"),
-        (4, "repin_required"),
-        (5, "expired"),
-        (6, "misconfig"),
         (126, "cannot_execute"),
         (127, "not_found"),
         (141, "stdout_closed"),

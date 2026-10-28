@@ -84,10 +84,6 @@ onto it: doctor SAFE/WARN/UNSAFE and agent `ready`/`protected`/`unsafe` give
 | 1 | `failure` | command error or refusal; check commands: degraded (doctor WARN, agent protected, session not ok) |
 | 2 | `unsafe` | check commands: unsafe (doctor UNSAFE, agent unsafe, status pin invalid/frozen/expired) |
 | 2 | `usage` | usage error (bad flag/value, --dry-run on a command that cannot plan); no report on stdout |
-| 3 | `refused` | action refused by policy or an authority gate |
-| 4 | `repin_required` | human must establish a fresh pin before retrying |
-| 5 | `expired` | pin, credential, or authorization expired |
-| 6 | `misconfig` | local configuration is invalid or incomplete |
 | 126 | `cannot_execute` | child program exists but is not executable (exec/run/ci run) |
 | 127 | `not_found` | child program not found (exec/run/ci run) |
 | 141 | `stdout_closed` | stdout closed by the reader (128 + SIGPIPE) |

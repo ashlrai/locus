@@ -1,11 +1,5 @@
 # locus-mcp — Claude Code, Cursor, and friends
 
-<!-- fresh:begin install -->
-```bash
-npm install -g locus-cli@0.5.2 @ashlrai/locus-mcp@0.5.2
-```
-<!-- fresh:end -->
-
 `locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding (provider tools need a supervised launch; see [below](#provider-tools-need-a-supervised-launch)). It is the agent-facing half of the identity plane.
 
 CLI and MCP share the same store and seal under `~/.locus` (or `LOCUS_HOME`).
@@ -766,12 +760,6 @@ LOCUS_HOME=/tmp/locus-debug locus pin personal
 - [README.md](../README.md) — CLI quick start  
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — build and test  
 
-### Local agent peers
-
-An operator can enable the text-only relay with
-`locus-mcp --http 127.0.0.1:8742 --multi-tenant --peers ENGINES.json`.
-Authenticated sessions register engine metadata, list peers, exchange direct
-messages, and use private group threads through `locus.peers.list`,
-`locus.peers.send`, `locus.peers.inbox`, and `locus.peers.thread`.
-Only operator-mapped engines may write; unknown engines remain read-only.
-See [peer relay setup, trust model, and limits](peers.md).
+Engine-specific server restrictions can additionally be enforced by the
+[broker allowlist](broker.md). Set `LOCUS_ENGINE_ID` in the operator launch
+environment and provision `broker.toml` before launching swarm engines.
