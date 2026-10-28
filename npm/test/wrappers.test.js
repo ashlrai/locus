@@ -81,6 +81,64 @@ test("source-install commands use a positional crate (cargo install has no --pac
   }
 });
 
+test("locus rejects a release archive whose checksum does not match", () => {
+  const home = mkdtempSync(join(tmpdir(), "locus-checksum-"));
+  try {
+    const script = `
+        const assert = require("node:assert/strict");
+        const crypto = require("node:crypto");
+        const { EventEmitter } = require("node:events");
+        const fs = require("node:fs");
+        const path = require("node:path");
+        const https = require("node:https");
+        const installer = require(${JSON.stringify(wrappers.locus)});
+        const archive = Buffer.from("archive with a different digest");
+        const incorrectDigest = crypto.createHash("sha256").update("not the archive").digest("hex");
+        const requests = [];
+        https.get = (url, callback) => {
+          requests.push(url);
+          const request = new EventEmitter();
+          process.nextTick(() => {
+            const response = new EventEmitter();
+            response.statusCode = 200;
+            response.headers = {};
+            response.resume = () => {};
+            callback(response);
+            response.emit("data", Buffer.from(url.endsWith(".sha256")
+              ? incorrectDigest + "  " + path.basename(url.slice(0, -7)) + "\\n"
+              : archive));
+            response.emit("end");
+          });
+          return request;
+        };
+        (async () => {
+          const binaryPath = path.join(process.env.HOME, ".locus", "bin", "locus");
+          await assert.rejects(installer.downloadReleaseBinary(binaryPath), /SHA-256 mismatch/);
+          assert.equal(requests.length, 2);
+          assert.match(requests[0], /\\.tar\\.gz\\.sha256$/);
+          assert.match(requests[1], /\\.tar\\.gz$/);
+          assert.equal(fs.existsSync(binaryPath), false, "a checksum mismatch must not install the binary");
+          assert.deepEqual(fs.readdirSync(path.dirname(binaryPath)), [], "a checksum mismatch must not leave a cached archive");
+        })().catch((error) => {
+          console.error(error);
+          process.exitCode = 1;
+        });
+    `;
+    const result = spawnSync(process.execPath, ["-e", script], {
+      env: {
+        HOME: home,
+        USERPROFILE: home,
+      },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(result.status, 0, `locus checksum regression failed: ${result.stderr}`);
+    assert.equal(result.signal, null, "locus checksum regression was terminated");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
 // Regression: quickstart then `enter` failed with a stale session authority
 // because the Node wrapper, not the shell, was locus's parent process.
 test("locus: linkNativeBin replaces the wrapper with a symlink to the binary", () => {
