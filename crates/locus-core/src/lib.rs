@@ -36,6 +36,7 @@ pub mod isolation;
 pub mod loopback;
 pub mod marketplace;
 pub mod onboard;
+pub mod peers;
 pub mod pin_history;
 pub mod policy;
 pub mod recipes;

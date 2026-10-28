@@ -64,23 +64,13 @@ fn unavailable(reason: &'static str) -> Probe {
     }
 }
 
-/// Phantom's secret name rule: `[A-Z_][A-Z0-9_]*`, 1..=256 chars.
-fn valid_name(s: &str) -> bool {
-    let b = s.as_bytes();
-    !b.is_empty()
-        && b.len() <= 256
-        && (b[0].is_ascii_uppercase() || b[0] == b'_')
-        && b.iter()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
-}
-
 /// Parse `phantom list --json` stdout into names; any bad entry rejects it all.
 pub fn parse_names(stdout: &str) -> Option<BTreeSet<String>> {
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
     let mut out = BTreeSet::new();
     for entry in v.as_array()? {
         let name = entry.as_object()?.get("name")?.as_str()?;
-        if !valid_name(name) {
+        if !locus_core::credential::valid_phantom_name(name) {
             return None;
         }
         out.insert(name.to_string());
@@ -119,10 +109,11 @@ pub fn probe_with_timeout(cwd: &Path, timeout: Duration) -> Probe {
         let _ = child.wait();
         return unavailable("bad_output");
     };
-    let reader = std::thread::spawn(move || {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = (&mut out).take(STDOUT_CAP as u64 + 1).read_to_end(&mut buf);
-        buf
+        let _ = sender.send(buf);
     });
     let start = Instant::now();
     let status = loop {
@@ -140,7 +131,12 @@ pub fn probe_with_timeout(cwd: &Path, timeout: Duration) -> Probe {
         // only keeps that thread alive, never this command.
         return unavailable("timeout");
     };
-    let buf = reader.join().unwrap_or_default();
+    // A successful parent can leave a descendant holding stdout open. The
+    // original wall-clock deadline applies to the pipe as well as the process.
+    let remaining = timeout.saturating_sub(start.elapsed());
+    let Ok(buf) = receiver.recv_timeout(remaining) else {
+        return unavailable("timeout");
+    };
     if !status.success() {
         return unavailable("exit_nonzero");
     }

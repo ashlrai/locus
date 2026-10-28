@@ -72,6 +72,24 @@
       "profiles": ["merge", "deep"]
     },
     {
+      "id": "web-discoverability",
+      "kind": "lint",
+      "cmd": ["node", "apps/web/discoverability.mjs", "--check"],
+      "cwd": ".",
+      "timeoutMs": 120000,
+      "required": true,
+      "profiles": ["quick", "merge", "deep"]
+    },
+    {
+      "id": "web-discoverability-tests",
+      "kind": "test",
+      "cmd": ["node", "--test", "apps/web/discoverability.test.mjs"],
+      "cwd": ".",
+      "timeoutMs": 120000,
+      "required": true,
+      "profiles": ["merge", "deep"]
+    },
+    {
       "id": "clippy",
       "kind": "lint",
       "cmd": ["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],

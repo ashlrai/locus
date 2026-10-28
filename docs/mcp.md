@@ -1,5 +1,11 @@
 # locus-mcp — Claude Code, Cursor, and friends
 
+<!-- fresh:begin install -->
+```bash
+npm install -g locus-cli@0.5.2 @ashlrai/locus-mcp@0.5.2
+```
+<!-- fresh:end -->
+
 `locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding (provider tools need a supervised launch; see [below](#provider-tools-need-a-supervised-launch)). It is the agent-facing half of the identity plane.
 
 CLI and MCP share the same store and seal under `~/.locus` (or `LOCUS_HOME`).
@@ -31,6 +37,28 @@ which locus locus-mcp
 locus --help
 locus-mcp --version   # prints `locus-mcp <version>` and exits (also -V)
 ```
+
+## Replace npx registrations during pin
+
+`locus pin personal --rewrite-configs` optionally replaces existing `npx`
+registrations for `@ashlrai/locus-mcp` or `locus-mcp` (including versioned
+packages) with the resolved native
+`locus-mcp` binary. It checks the binary beside `locus`, then `~/.locus/bin`,
+then PATH. It updates only MCP entries in `~/.codex/config.toml`,
+`~/.claude.json` (including project entries), and `~/.cursor/mcp.json`.
+Other entries and server arguments after the package name are retained.
+Missing files are left alone. Each changed file gets a timestamped `.bak`
+before replacement; repeated runs leave already migrated entries alone.
+Backups can contain the same private settings as the original. On Unix they
+are created with private permissions. Linked config files are refused, and this option does
+not access authentication files.
+
+The pin is completed before files are replaced. If replacement fails, the
+command reports that the pin succeeded and identifies the failure; earlier
+files may already have been updated and can be restored from their backups.
+Restart the client to use the new registration. A direct native server still
+provides control tools only; provider tools require a supervised launch as
+explained below. `--rewrite-configs` cannot be combined with `--dry-run`.
 
 ## Human workflow (pin first)
 
@@ -737,3 +765,13 @@ LOCUS_HOME=/tmp/locus-debug locus pin personal
 - [docs/adapters.md](./adapters.md) — add provider tools  
 - [README.md](../README.md) — CLI quick start  
 - [CONTRIBUTING.md](../CONTRIBUTING.md) — build and test  
+
+### Local agent peers
+
+An operator can enable the text-only relay with
+`locus-mcp --http 127.0.0.1:8742 --multi-tenant --peers ENGINES.json`.
+Authenticated sessions register engine metadata, list peers, exchange direct
+messages, and use private group threads through `locus.peers.list`,
+`locus.peers.send`, `locus.peers.inbox`, and `locus.peers.thread`.
+Only operator-mapped engines may write; unknown engines remain read-only.
+See [peer relay setup, trust model, and limits](peers.md).
