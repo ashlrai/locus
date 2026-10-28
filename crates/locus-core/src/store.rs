@@ -2162,6 +2162,18 @@ impl Store {
         cwd: &Path,
     ) -> Result<(crate::autopin_suggest::SuggestReport, PathBuf)> {
         authority_anchor::authorize_control(&self.home)?;
+        let (report, file) = self.autopin_suggestion_plan(cwd)?;
+        let alias = report.suggestion.as_deref().expect("validated suggestion");
+        write_default_binding(&file, alias)?;
+        Ok((report, file))
+    }
+
+    /// Read-only validation shared by apply and its dry-run. In particular,
+    /// never propose a default that the workspace's pin-time gate would deny.
+    pub fn autopin_suggestion_plan(
+        &self,
+        cwd: &Path,
+    ) -> Result<(crate::autopin_suggest::SuggestReport, PathBuf)> {
         let report = crate::autopin_suggest::suggest(&self.home, cwd)?;
         let Some(alias) = report.suggestion.clone() else {
             return Err(LocusError::msg(format!(
@@ -2170,9 +2182,18 @@ impl Store {
             )));
         };
         // Must name a real binding; never write a dangling default.
-        self.load_binding(&alias)?;
+        let binding = self.load_binding(&alias)?;
         let file = apply_target(cwd)?;
-        write_default_binding(&file, &alias)?;
+        if let Some((text, _)) = read_locus_toml_nofollow(&file)? {
+            let cfg = WorkspaceConfig::parse(&text)?;
+            if !cfg.allows(&binding.alias) && !cfg.allows(&binding.id) {
+                return Err(LocusError::binding_not_allowed(
+                    &binding.alias,
+                    &file,
+                    &cfg.allowed_bindings,
+                ));
+            }
+        }
         Ok((report, file))
     }
 
@@ -3987,8 +4008,13 @@ pub struct ProviderView {
 /// a new file would shadow the parent's policy (for example `require_pin`)
 /// for this repo, so the operator has to make that choice by hand.
 fn apply_target(cwd: &Path) -> Result<PathBuf> {
-    let root = git_toplevel(cwd).unwrap_or_else(|| cwd.to_path_buf());
-    let root_c = fs::canonicalize(&root).unwrap_or(root.clone());
+    let root = git_toplevel(cwd)?.unwrap_or_else(|| cwd.to_path_buf());
+    let root_c = fs::canonicalize(&root)?;
+    if !fs::canonicalize(cwd)?.starts_with(&root_c) {
+        return Err(LocusError::msg(
+            "git toplevel does not contain the current directory; refusing to write .locus.toml",
+        ));
+    }
     match find_workspace(cwd)? {
         None => Ok(root.join(".locus.toml")),
         Some((path, _)) => {
@@ -4010,24 +4036,40 @@ fn apply_target(cwd: &Path) -> Result<PathBuf> {
     }
 }
 
-fn git_toplevel(cwd: &Path) -> Option<PathBuf> {
+fn git_toplevel(cwd: &Path) -> Result<Option<PathBuf>> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
+        .output()?;
     if !out.status.success() {
-        return None;
+        return Ok(None);
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (!s.is_empty()).then(|| PathBuf::from(s))
+    // Git appends one line ending. Whitespace (even a newline) can be part
+    // of a Unix directory name, so trim() would silently select another path.
+    let path = out.stdout.strip_suffix(b"\n").unwrap_or(&out.stdout);
+    #[cfg(windows)]
+    let path = path.strip_suffix(b"\r").unwrap_or(path);
+    if path.is_empty() {
+        return Err(LocusError::msg("git returned an empty toplevel"));
+    }
+    #[cfg(unix)]
+    let path = {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_vec(path.to_vec()))
+    };
+    #[cfg(not(unix))]
+    let path = PathBuf::from(
+        std::str::from_utf8(path)
+            .map_err(|_| LocusError::msg("git returned a non-UTF-8 toplevel"))?,
+    );
+    Ok(Some(path))
 }
 
 /// Read an existing `.locus.toml` through one `O_NOFOLLOW` fd, checked with
 /// `fstat` to be a regular file, so a symlink swapped in can never be read.
 /// `Ok(None)` when absent.
-fn read_locus_toml_nofollow(file: &Path) -> Result<Option<String>> {
+fn read_locus_toml_nofollow(file: &Path) -> Result<Option<(String, fs::Permissions)>> {
     use std::io::Read;
     let mut o = fs::OpenOptions::new();
     o.read(true);
@@ -4048,7 +4090,8 @@ fn read_locus_toml_nofollow(file: &Path) -> Result<Option<String>> {
         }
         Err(e) => return Err(e.into()),
     };
-    if !f.metadata()?.is_file() {
+    let metadata = f.metadata()?;
+    if !metadata.is_file() {
         return Err(LocusError::msg(format!(
             "{} is not a regular file; refusing to write it",
             file.display()
@@ -4056,14 +4099,29 @@ fn read_locus_toml_nofollow(file: &Path) -> Result<Option<String>> {
     }
     let mut text = String::new();
     f.read_to_string(&mut text)?;
-    Ok(Some(text))
+    Ok(Some((text, metadata.permissions())))
 }
 
 /// Atomically set `default_binding` in a `.locus.toml`, keeping other keys.
 fn write_default_binding(file: &Path, alias: &str) -> Result<()> {
+    write_default_binding_with_sync(file, alias, |dir| {
+        #[cfg(unix)]
+        fs::File::open(dir)?.sync_all()?;
+        #[cfg(not(unix))]
+        let _ = dir;
+        Ok(())
+    })
+}
+
+fn write_default_binding_with_sync(
+    file: &Path,
+    alias: &str,
+    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<()> {
     use std::io::Write;
-    let mut table = match read_locus_toml_nofollow(file)? {
-        Some(text) => toml::from_str::<toml::Table>(&text)
+    let existing = read_locus_toml_nofollow(file)?;
+    let mut table = match &existing {
+        Some((text, _)) => toml::from_str::<toml::Table>(text)
             .map_err(|e| LocusError::msg(format!("{}: {e}", file.display())))?,
         None => {
             let mut t = toml::Table::new();
@@ -4088,13 +4146,25 @@ fn write_default_binding(file: &Path, alias: &str) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        o.mode(0o644).custom_flags(libc::O_NOFOLLOW);
+        use std::os::unix::fs::PermissionsExt;
+        let mode = existing
+            .as_ref()
+            .map(|(_, permissions)| permissions.mode() & 0o777)
+            .unwrap_or(0o644);
+        o.mode(mode).custom_flags(libc::O_NOFOLLOW);
     }
     let res = (|| -> std::io::Result<()> {
         let mut f = o.open(&tmp)?;
         f.write_all(text.as_bytes())?;
+        if let Some((_, permissions)) = existing {
+            // fchmod restores bits removed by umask using the same fd whose
+            // contents are synced below; never chmod through the target path.
+            f.set_permissions(permissions)?;
+        }
         f.sync_all()?;
-        fs::rename(&tmp, file)
+        fs::rename(&tmp, file)?;
+        // File fsync alone does not make its new directory entry durable.
+        sync_parent(dir)
     })();
     if res.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -4221,6 +4291,38 @@ mod tests {
             .to_string();
         assert!(err.contains("ghost"), "{err}");
         assert!(!s.active_session_path().exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_binding_syncs_parent_after_rename_and_reports_sync_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".locus.toml");
+        fs::write(&file, "default_binding = \"old\"\nrequire_pin = true\n").unwrap();
+        let mut synced = false;
+        super::write_default_binding_with_sync(&file, "acme", |parent| {
+            assert_eq!(parent, dir.path());
+            let cfg = WorkspaceConfig::parse(&fs::read_to_string(&file)?).unwrap();
+            assert_eq!(cfg.default_binding.as_deref(), Some("acme"));
+            assert!(cfg.require_pin);
+            assert_eq!(fs::read_dir(parent)?.count(), 1, "temp already renamed");
+            fs::File::open(parent)?.sync_all()?;
+            synced = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(synced, "rename must be followed by directory fsync");
+
+        // The rename has happened if directory fsync fails. Surface the I/O
+        // error instead of claiming that the update is durably committed.
+        let err = super::write_default_binding_with_sync(&file, "personal", |_| {
+            Err(std::io::Error::other("directory sync failed"))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("directory sync failed"));
+        let cfg = WorkspaceConfig::parse(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(cfg.default_binding.as_deref(), Some("personal"));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
