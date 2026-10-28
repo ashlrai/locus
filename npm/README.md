@@ -27,6 +27,15 @@ On first run the wrapper:
 
 Requires Node ≥ 16. Cargo fallback needs [Rust](https://rustup.rs).
 
+The wrapper refuses to overwrite a newer `~/.locus/bin/locus` with its older
+release, including during npm postinstall. It also preserves an existing binary
+whose version cannot be determined. The refusal reports both versions when known.
+To intentionally replace that binary, run the wrapper with a leading `--force`,
+for example `locus --force --version`, or run `node install.js --force` from the
+installed `locus-cli` package directory. The wrapper consumes this leading flag;
+flags after a command, such as `locus leave --force`, belong to the native CLI
+and never authorize a downgrade. npm's own `--force` is not an override.
+
 ## Quick start
 
 ```bash

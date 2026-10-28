@@ -21,11 +21,13 @@ async function run() {
     target = wrapper.getPlatformTarget();
   } catch {}
   const cached = wrapper.getBinaryPath();
+  const options = { force: process.argv[2] === "--force" };
+  wrapper.assertCanReplace(cached, options);
   let binary = null;
   if (existsSync(cached) && !wrapper.isCachedBinaryStale(cached)) {
     binary = cached;
   } else if (target && wrapper.hasPrebuiltBinary(target)) {
-    binary = await wrapper.downloadReleaseBinary(cached);
+    binary = await wrapper.downloadReleaseBinary(cached, options);
   }
   if (binary && wrapper.linkNativeBin(binary, wrapperPath)) {
     console.log(`locus: linked native binary ${binary}`);
@@ -36,6 +38,10 @@ async function run() {
 
 run()
   .catch((err) => {
+    if (err.code === "LOCUS_NPM_DOWNGRADE") {
+      console.log(`locus: ${err.message}`);
+      return;
+    }
     console.log(`locus will download on first use (${err.message}).`);
   })
   // Never let a lingering socket stall `npm install`.
