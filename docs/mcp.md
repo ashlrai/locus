@@ -184,14 +184,98 @@ in the isolated environment `locus exec --no-resolve` builds:
 refuse bindings with credential-resolving upstreams, because those resolve
 inside locus-mcp's policy-gated workers rather than in the server env. Known
 limit, shared with `locus exec -- locus-mcp`: in that scrubbed environment
-`env:` references cannot resolve, and `phm:` references depend on Phantom
-finding its vault from the worker home. It needs `LOCUS_CONTROL_CAPABILITY` and a live pin in the environment the
+ambient `env:` references cannot resolve, and the supported scoped `phm:`
+bridge is currently unavailable (resolution fails closed). It needs
+`LOCUS_CONTROL_CAPABILITY` and a live pin in the environment the
 client launches it from (start the client from the shell where you ran
 `eval "$(locus hook zsh)"` and `locus pin`). When either is missing it says
 why on stderr and serves control tools only. The grant is bound to the pin at
 launch: after `locus switch` or a re-pin, restart the MCP server. Each launch is
 audited as `session.mcp.supervised` (`phase: grant`, then `phase: exit`).
 Under `locus exec`, `--supervised` passes the parent's grant through.
+
+### One router for multiple provider servers
+
+Register one Locus entry and select the provider MCP servers with repeatable
+`--route PROVIDER` options. `--route` implies `--supervised`:
+
+```json
+{
+  "mcpServers": {
+    "locus": {
+      "command": "/abs/path/to/locus",
+      "args": ["mcp", "--route", "github", "--route", "supabase"]
+    }
+  }
+}
+```
+
+Routes select **existing upstream configurations in the pinned binding**.
+Configure those upstreams before the human pins; changing them afterwards
+invalidates the pin. For example, the binding can contain:
+
+```toml
+[[binding.providers]]
+provider = "github"
+account = "acme-gh"
+credential_ref = "phm:ACME_GITHUB"
+[binding.providers.scope]
+orgs = ["acme"]
+[binding.providers.upstream]
+command = "/opt/acme/bin/github-mcp"
+args = ["stdio"]
+resolve_secrets = true
+
+[[binding.providers]]
+provider = "supabase"
+account = "acme-db"
+credential_ref = "phm:ACME_SUPABASE"
+[binding.providers.scope]
+project_ref = "example-project"
+read_only = true
+[binding.providers.upstream]
+command = "/opt/acme/bin/supabase-mcp"
+resolve_secrets = true
+```
+
+These executable paths and scopes are placeholders. Route flags contain only
+provider names, never commands or credentials. Use Phantom Secrets for secret
+management; this checkout's `phm:` bridge is currently unavailable and fails
+closed. Routing does not enable a bridge or bypass resolution. See
+[credential compatibility](./credential-compatibility.md) for the supported
+credential paths and the supervised environment's limitations.
+
+The server exposes Locus control tools plus selected providers' adapter tools
+and cached upstream tools. Upstream names are qualified (`github.ping`,
+`supabase.ping`), so identical names from different servers cannot collide.
+Adapter tools retain precedence on a name collision within one provider.
+Other providers are excluded from the catalog **and refused at call time**,
+even if they belong to the binding. Without `--route`, the existing all-bound-
+providers behavior is unchanged. Repeated identical routes are deduplicated.
+
+Discovery remains side-effect free: `initialize` and `tools/list` do not start
+provider processes or resolve credentials. The first authorized call to a
+provider's upstream tool starts only that provider's worker; subsequent calls
+reuse it, and later `tools/list` requests include its cached tool schemas.
+Use the upstream's documented tool name for that first call. Policy denies,
+approval requirements, and scope mismatches block before worker startup.
+
+Route mode requires one exclusive pin, with an upstream configured for every
+selected provider. An absent provider or missing upstream produces
+`invalid_route`; it never silently falls back to another server. Without a
+healthy pin and executor authority, only the control plane is available.
+Control tools remain available for recovery. Namespaced pins and
+`--multi-tenant` are not supported with `--route`. Restart after changing the
+launch configuration or re-pinning. A supervised direct invocation can also
+use `locus-mcp --route github --route supabase`.
+
+Upstream workers must never launch another multiplexor. Both `locus mcp` and
+`locus-mcp` refuse the SPAWN-LEAK `LOCUS_MCP_UPSTREAM_CHILD` marker on presence,
+including an empty value. They also recognize `LOCUS_WORKER_PROVIDER` for
+workers launched by older versions. Direct `locus-mcp` / `locus mcp` upstream
+commands (including a symlink resolving to the running server) are rejected
+before spawning. Opaque wrappers are stopped by the child-side marker before
+a nested router can serve; do not clear these markers in upstream wrappers.
 
 ## Wire into Cursor
 
