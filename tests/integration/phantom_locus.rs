@@ -132,6 +132,16 @@ fn walk(d: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
+/// Read every discovered file; an incomplete scan is an error.
+fn scan(root: &Path, canary: &str) -> io::Result<bool> {
+    let mut found = false;
+    for path in walk(root)? {
+        let bytes = fs::read(&path).map_err(|e| scan_err(&path, e))?;
+        found |= String::from_utf8_lossy(&bytes).contains(canary);
+    }
+    Ok(found)
+}
+
 fn setup(phantom: &Path) -> World {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
@@ -293,18 +303,15 @@ fn phantom_and_locus_compose_without_leaking_the_canary() {
     );
     assert!(!argv.contains(&canary), "canary in a phantom argv");
     assert!(!w.outputs.contains(&canary), "canary in a command output");
-    let mut files = Vec::new();
-    for root in [w.home.join(".locus"), w.proj.clone()] {
-        files.extend(walk(&root).unwrap_or_else(|e| panic!("canary scan: cannot list {e}")));
-    }
-    assert!(!files.is_empty());
-    for f in files {
-        let bytes = fs::read(&f)
-            .unwrap_or_else(|e| panic!("canary scan: cannot read {}: {e}", f.display()));
+    let roots = [w.home.join(".locus"), w.proj.clone()];
+    assert!(roots
+        .iter()
+        .any(|root| walk(root).is_ok_and(|files| !files.is_empty())));
+    for root in roots {
         assert!(
-            !String::from_utf8_lossy(&bytes).contains(&canary),
-            "canary found in {}",
-            f.display()
+            !scan(&root, &canary).unwrap_or_else(|e| panic!("canary scan failed: {e}")),
+            "canary found under {}",
+            root.display()
         );
     }
 }
@@ -351,4 +358,21 @@ fn canary_scan_walk_fails_closed_on_unreadable_paths() {
         (Ok(_), false) => panic!("walk silently skipped an unreadable dir"),
     }
     fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn canary_scan_fails_on_unreadable_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("unreadable");
+    fs::write(&file, b"fixture").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&file).is_err() {
+        let err = scan(tmp.path(), "fixture").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("unreadable"), "{err}");
+    } else {
+        eprintln!("note: privileged runner; mode-000 file stayed readable");
+    }
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(scan(tmp.path(), "fixture").unwrap());
 }
