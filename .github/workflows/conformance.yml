@@ -2,12 +2,17 @@
 # INV suite, MCP protocol, hub-smoke, and full e2e shell pack.
 name: Conformance
 
+# Runs with the scheduled full suite (6 AM and 6 PM ET) and on dispatch, off
+# PRs, the merge queue and main pushes, so they only wait on CI Gate.
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
+  schedule:
+    - cron: "57 10 * * *"
+    - cron: "57 22 * * *"
   workflow_dispatch:
+
+# Read-only token: no step needs write access.
+permissions:
+  contents: read
 
 # Cancel superseded PR runs; never cancel main/master.
 concurrency:
@@ -21,6 +26,7 @@ env:
 jobs:
   conformance:
     name: invariants · mcp · hub-smoke · e2e
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     # e2e builds release binaries and runs the full shell pack
     timeout-minutes: 90

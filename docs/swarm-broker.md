@@ -1,5 +1,7 @@
 # Grant-scoped swarm broker
 
+Current swarm execution backlog: [RQ-PLAN-LOCUS child jobs](swarm-child-jobs.md).
+
 Use `locus serve --swarm /absolute/path/to/graph.json` to serve each swarm
 agent only its explicitly granted MCP tools. Without `--swarm`, `locus serve`
 continues to run the identity dashboard. The swarm endpoint is

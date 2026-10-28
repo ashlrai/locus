@@ -471,3 +471,121 @@ fn index_add_refuses_non_exact_loopback_http() {
         assert!(stderr.contains("loopback HTTP"), "got: {stderr:?}");
     }
 }
+
+/// Serve one index whose manifest_url carries a signed-URL style query.
+fn run_signed_manifest_index(listener: TcpListener, base: String, hits: usize) {
+    std::thread::spawn(move || {
+        let index = serde_json::json!({
+            "version": 1,
+            "name": "signed-index",
+            "adapters": [{
+                "id": "linear",
+                "name": "Linear",
+                "description": "Issue tracking",
+                "publisher": "Test Publisher",
+                "version": "1.2.0",
+                "manifest_url": format!("{base}/linear.json?sig=SECRETSIG"),
+                "tools": ["linear.issue"],
+            }],
+        })
+        .to_string();
+        for stream in listener.incoming().take(hits) {
+            let Ok(mut stream) = stream else { continue };
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{index}",
+                index.len()
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        }
+    });
+}
+
+#[test]
+fn search_json_redacts_manifest_url_query() {
+    let (home, cwd) = init_store();
+    let (base, listener) = serve_index();
+    run_signed_manifest_index(listener, base.clone(), 4);
+    let index_url = format!("{base}/index.json");
+    let out = locus(
+        home.path(),
+        cwd.path(),
+        &[
+            "adapter", "registry", "index", "add", &index_url, "--name", "s",
+        ],
+    );
+    assert!(out.status.success(), "index add failed: {out:?}");
+    let out = locus(
+        home.path(),
+        cwd.path(),
+        &["adapter", "search", "linear", "--json"],
+    );
+    assert!(out.status.success(), "search --json failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("SECRET"),
+        "search --json leaked: {stdout:?}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        v["hits"][0]["manifest_url"],
+        format!("{base}/linear.json?<redacted>").as_str()
+    );
+}
+
+#[test]
+fn uninstall_json_without_yes_refuses_with_structured_error() {
+    let (home, cwd) = init_store();
+    let out = locus(
+        home.path(),
+        cwd.path(),
+        &["adapter", "uninstall", "linear", "--json"],
+    );
+    assert!(!out.status.success());
+    assert_eq!(out.status.code(), Some(2), "usage error exit: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stdout.contains("[y/N]") && !stderr.contains("[y/N]"),
+        "prompted"
+    );
+    let all = format!("{stdout}{stderr}");
+    let line = all
+        .lines()
+        .find(|l| l.trim_start().starts_with('{'))
+        .expect("structured JSON error");
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert!(v["error"].to_string().contains("--yes"), "{v}");
+}
+
+#[test]
+fn install_dry_run_makes_no_network_calls() {
+    let (home, cwd) = init_store();
+    let (base, listener) = serve_index();
+    listener.set_nonblocking(true).unwrap();
+    std::fs::write(
+        home.path().join("adapter-indexes.toml"),
+        format!("[[source]]\nname = \"t\"\nurl = \"{base}/index.json\"\n"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(home.path().join("trust")).unwrap();
+    std::fs::write(
+        home.path().join("trust/adapter-keys.toml"),
+        "version = 1\n[[keys]]\nid = 'fixture'\nscheme = 'hmac-sha256'\nsecret_hex = '0000000000000000000000000000000000000000000000000000000000000000'\n",
+    )
+    .unwrap();
+    let out = locus(
+        home.path(),
+        cwd.path(),
+        &["adapter", "install", "linear", "--dry-run", "--json"],
+    );
+    assert!(out.status.success(), "dry-run install failed: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(v["network"], false, "{v}");
+    assert!(
+        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "--dry-run contacted the index"
+    );
+}
