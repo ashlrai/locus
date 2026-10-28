@@ -52,6 +52,30 @@ jobs:
           toolchain: stable
           components: rustfmt, clippy
 
+      # PR and queue runs restore the cache saved by the daily main run and
+      # skip the save, so they do not pay the post-job upload.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # Runs beside fast so Node and Ruby setup stay off the Clippy critical path.
+  wrappers:
+    name: wrappers · crypto policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Install Node.js
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -61,12 +85,6 @@ jobs:
         uses: ruby/setup-ruby@7f797815d8adceb1c412e7abefdd1ab4abc47a5f # v1.335.0
         with:
           ruby-version: "3.3"
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-
-      - name: Format
-        run: cargo fmt --all -- --check
 
       # Includes the crypto policy check (Tier-1).
       - name: Validate distribution wrappers
@@ -80,12 +98,57 @@ jobs:
           node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+  # Tier-1 worker sandbox tests: pre-merge whenever the PR touches the sandbox,
+  # locus-core, the lockfile or CI, and on every daily and dispatch run. The
+  # job always runs and reports success, so the gate keeps exact keys.
+  sandbox:
+    name: sandbox tests (Tier-1)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
-      # Tier-1: worker sandbox tests stay pre-merge on every PR and queue run.
+      - name: Select
+        id: sel
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          run=true
+          if [ "$EVENT" = "pull_request" ] || [ "$EVENT" = "merge_group" ]; then
+            base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+            files="$(git diff --name-only "$base" "$HEAD_SHA")"
+            if ! grep -Eq '^(crates/locus-core/|\.cargo/|\.github/workflows/ci\.yml$)|(^|/)Cargo\.(toml|lock)$|(^|/)rust-toolchain' <<<"$files"; then run=false; fi
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"; echo "sandbox tests: $run"
+
+      - name: Install Rust toolchain
+        if: steps.sel.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - name: Cache cargo
+        if: steps.sel.outputs.run == 'true'
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' && github.event_name != 'merge_group' }}
+
       - name: Sandbox tests
-        run: cargo test -p locus-core --lib --locked sandbox
+        if: steps.sel.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          cargo test -p locus-core --lib --locked sandbox 2>&1 | tee sandbox.log
+          n="$(grep -Eo '^test result: ok\. [0-9]+ passed' sandbox.log | awk '{s+=$4} END {print s+0}')"
+          echo "sandbox tests passed: $n"
+          # Tier-1 guard: a rename that drops every sandbox test must fail, not pass empty.
+          [ "$n" -gt 0 ] || { echo "::error::no sandbox tests selected"; exit 1; }
 
   check:
     name: fmt · clippy · test · release build
@@ -276,7 +339,7 @@ jobs:
   gate:
     name: CI Gate
     if: always()
-    needs: [fast, secret-scan, check, msrv, secret-shape]
+    needs: [fast, wrappers, sandbox, secret-scan, check, msrv, secret-shape]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions: {}
@@ -288,7 +351,7 @@ jobs:
         run: |
           set -euo pipefail
           # Exact dependency keys: a missing or extra job fails closed.
-          printf '%s' "$NEEDS" | jq -e --argjson exp "[\"check\", \"fast\", \"msrv\", \"secret-scan\", \"secret-shape\"]" '(keys | sort) == $exp' > /dev/null || { echo "::error::gate dependency inventory changed"; exit 1; }
+          printf '%s' "$NEEDS" | jq -e --argjson exp "[\"check\", \"fast\", \"msrv\", \"sandbox\", \"secret-scan\", \"secret-shape\", \"wrappers\"]" '(keys | sort) == $exp' > /dev/null || { echo "::error::gate dependency inventory changed"; exit 1; }
           full=false
           if [ "$EVENT" = "schedule" ] || [ "$EVENT" = "workflow_dispatch" ]; then full=true; fi
           bad="$(printf '%s' "$NEEDS" | jq -r --argjson full "$full" 'to_entries[] | select(.value.result != "success") | select(($full | not) and (.key == "check" or .key == "msrv") and .value.result == "skipped" | not) | "\(.key)=\(.value.result)"')"
@@ -300,7 +363,7 @@ jobs:
     # ci-efficiency). One line per failed job from the needs context only: no
     # logs or env, read-only token, passed through the pinned scrub.pl.
     name: Daily fixup queue
-    needs: [fast, check, msrv, secret-scan, secret-shape, gate]
+    needs: [fast, wrappers, sandbox, check, msrv, secret-scan, secret-shape, gate]
     if: ${{ always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
