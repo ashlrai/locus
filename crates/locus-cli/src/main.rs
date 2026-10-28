@@ -7535,30 +7535,22 @@ fn cmd_autopin_suggest(apply: bool, json: bool, dry_run: bool) -> Result<()> {
     if apply && dry_run {
         let s = dry_run::existing_store()?;
         let here = cwd();
-        let report = locus_core::autopin_suggest::suggest(s.home(), &here)?;
-        let alias = report.suggestion.clone().ok_or_else(|| {
-            anyhow!(
-                "no autopin suggestion to apply ({}); --apply would refuse",
-                report.reason
-            )
-        })?;
-        let target = find_workspace(&here)?
-            .map(|(p, _)| p)
-            .unwrap_or_else(|| here.join(".locus.toml"));
+        let (report, target) = s.autopin_suggestion_plan(&here)?;
+        let alias = report.suggestion.as_deref().expect("validated suggestion");
         let mut plan = dry_run::Plan::new("locus autopin suggest --apply");
         plan.write_file(&target, Some(format!("default_binding = \"{alias}\"")))
             .needs_control()
-            .with("suggestion", &alias)
+            .with("suggestion", alias)
             .with("report", &report);
         return plan.emit(json);
     }
-    let s = store()?;
     let here = cwd();
     let (report, written) = if apply {
-        let (r, f) = s.autopin_apply_suggestion(&here)?;
+        let (r, f) = store()?.autopin_apply_suggestion(&here)?;
         (r, Some(f))
     } else {
-        (locus_core::autopin_suggest::suggest(s.home(), &here)?, None)
+        let home = locus_core::locus_home()?;
+        (locus_core::autopin_suggest::suggest(&home, &here)?, None)
     };
     if json {
         let value = serde_json::json!({
@@ -9433,7 +9425,7 @@ fn hook_script(shell: &str) -> Result<String> {
 # Control capability: export the persisted operator capability (0600 file
 # minted by `locus quickstart`) when this shell does not already carry one.
 if [[ -z "${{LOCUS_CONTROL_CAPABILITY:-}}" ]]; then
-  _locus_cap="${{LOCUS_HOME:-$HOME/.locus}}/control_capability"
+  _locus_cap="${{LOCUS_HOME:-${{HOME:-}}/.locus}}/control_capability"
   if [[ -r "$_locus_cap" ]]; then
     export LOCUS_CONTROL_CAPABILITY="$(cat "$_locus_cap")"
   fi
@@ -9464,15 +9456,19 @@ fi
 "#
             )
         }
-        "fish" => {
-            r#"# Locus prompt helper for fish
+        "fish" => r#"# Locus prompt helper for fish
 # [locus:enter] | [locus:enter!] (require_pin) | [locus:FROZEN] | [locus:alias:tenant]
 # LOCUS_AUTO_ENTER=1 → try enter when changing directories
 # Control capability: export the persisted operator capability if unset.
-set -l _locus_cap (test -n "$LOCUS_HOME"; and echo "$LOCUS_HOME"; or echo "$HOME/.locus")/control_capability
-if test -z "$LOCUS_CONTROL_CAPABILITY"; and test -r "$_locus_cap"
+set -l _locus_home
+set -q HOME; and set _locus_home "$HOME"
+set -q LOCUS_HOME; and set _locus_home "$LOCUS_HOME"
+set -l _locus_cap "$_locus_home/.locus/control_capability"
+if not set -q LOCUS_CONTROL_CAPABILITY; and test -r "$_locus_cap"
   set -gx LOCUS_CONTROL_CAPABILITY (cat "$_locus_cap")
 end
+set -e _locus_home
+set -e _locus_cap
 function locus_prompt
   # status exits non-zero for frozen/invalid but still prints the token.
   set -l s (locus status --oneline 2>/dev/null)
@@ -9501,13 +9497,12 @@ function locus_prompt
   echo
 end
 function _locus_auto_enter --on-variable PWD
-  if test "$LOCUS_AUTO_ENTER" = "1"
+  if set -q LOCUS_AUTO_ENTER; and test "$LOCUS_AUTO_ENTER" = "1"
     locus enter >/dev/null 2>&1; or true
   end
 end
 "#
-            .to_string()
-        }
+        .to_string(),
         other => bail!("unsupported shell: {other} (use zsh|bash|fish)"),
     };
     Ok(script)
@@ -12487,6 +12482,36 @@ credential_ref = "env:GH_TOKEN"
 mod hook_and_help_tests {
     use super::{hook_script, Cli};
     use clap::CommandFactory;
+
+    #[cfg(unix)]
+    #[test]
+    fn bash_hook_runs_with_unset_optional_variables_without_stderr() {
+        let bash = hook_script("bash").unwrap();
+        let output = std::process::Command::new("bash")
+            .args(["--noprofile", "--norc", "-eu", "-c"])
+            .arg(format!(
+                "{bash}\n_locus_auto_enter\n_locus_prompt >/dev/null\n"
+            ))
+            .env_remove("LOCUS_HOME")
+            .env_remove("LOCUS_CONTROL_CAPABILITY")
+            .env_remove("LOCUS_AUTO_ENTER")
+            .output()
+            .expect("bash is available for hook regression test");
+        assert!(output.status.success(), "{:?}", output.status);
+        assert!(
+            output.stderr.is_empty(),
+            "optional unset variables must not produce warnings: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn fish_hook_checks_optional_variables_before_reading_them() {
+        let fish = hook_script("fish").unwrap();
+        assert!(fish.contains("set -q LOCUS_HOME"), "{fish}");
+        assert!(fish.contains("set -q LOCUS_CONTROL_CAPABILITY"), "{fish}");
+        assert!(fish.contains("set -q LOCUS_AUTO_ENTER"), "{fish}");
+    }
 
     #[test]
     fn hook_bash_uses_bash_prompt_escapes() {
