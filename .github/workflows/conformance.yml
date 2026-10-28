@@ -2,13 +2,12 @@
 # INV suite, MCP protocol, hub-smoke, and full e2e shell pack.
 name: Conformance
 
+# Runs with the scheduled full suite (6 AM and 6 PM ET) and on dispatch, off
+# PRs, the merge queue and main pushes, so they only wait on CI Gate.
 on:
-  push:
-    branches: [main, master]
-  pull_request:
-    branches: [main, master]
-    types: [opened, synchronize, reopened, ready_for_review]
-  merge_group:
+  schedule:
+    - cron: "57 10 * * *"
+    - cron: "57 22 * * *"
   workflow_dispatch:
 
 # Read-only token: no step needs write access.
