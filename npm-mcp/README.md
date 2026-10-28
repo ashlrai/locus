@@ -65,4 +65,5 @@ and launch the client from the shell that pinned. See the repo `docs/mcp.md`.
 ## Related
 
 - CLI: [`locus-cli`](https://www.npmjs.com/package/locus-cli)
+- Pairs with `phantom` (Phantom Secrets) as `required_servers`: https://github.com/ashlrai/locus#how-locus-plugs-into-phantom
 - Docs: https://github.com/ashlrai/locus/blob/main/docs/mcp.md

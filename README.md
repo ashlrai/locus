@@ -1,21 +1,36 @@
-# Locus
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/ashlrai/locus/main/apps/web/public/og.png" alt="Locus — wrong account, impossible. Identity plane for coding agents." width="720" />
+
+<h1>Locus</h1>
+
+**Your coding agent can't act as the wrong account.**
+
+**The identity plane for coding agents · by [Ashlr](https://ashlr.ai).**
+
+Pin a client, and every CLI command, MCP tool and agent session is sealed to that identity until you re-pin. No more ambient `gh auth`, a shared Supabase token or "whichever Vercel team was last".
+
+[**30-second start**](#30-second-start) ·
+[**Install**](#install-options) ·
+[**Plugs into Phantom**](#how-locus-plugs-into-phantom) ·
+[**Security model**](#security-model) ·
+[**Docs**](#docs)
 
 <!-- fresh:begin badge -->
-[![Release 0.5.2](https://img.shields.io/badge/release-v0.5.2-blue)](https://github.com/ashlrai/locus/releases/tag/v0.5.2)
+[![Release 0.5.2](https://img.shields.io/badge/release-v0.5.2-blue?style=for-the-badge&labelColor=0b0b14)](https://github.com/ashlrai/locus/releases/tag/v0.5.2)
 <!-- fresh:end -->
+[![CI](https://img.shields.io/github/actions/workflow/status/ashlrai/locus/ci.yml?style=for-the-badge&label=CI&logo=github&labelColor=0b0b14)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
+[![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?style=for-the-badge&logo=npm&label=locus-cli&labelColor=0b0b14)](https://www.npmjs.com/package/locus-cli)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge&labelColor=0b0b14)](./LICENSE)
+[![Rust ≥1.89](https://img.shields.io/badge/rust-%E2%89%A51.89-CE412B?style=for-the-badge&logo=rust&labelColor=0b0b14)](./rust-toolchain.toml)
+
+</div>
 
 <!-- fresh:begin release -->
 Latest release: [v0.5.2](https://github.com/ashlrai/locus/releases/tag/v0.5.2) (2026-10-26).
 
 `locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
 <!-- fresh:end -->
-
-[![CI](https://github.com/ashlrai/locus/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
-[![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?label=npm%20locus-cli)](https://www.npmjs.com/package/locus-cli)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](./rust-toolchain.toml)
-
-**Your coding agent can't act as the wrong account.** Pin a client, and every CLI command, MCP tool and agent session is sealed to that identity until you re-pin. No more ambient `gh auth`, a shared Supabase token or "whichever Vercel team was last".
 
 ![locus quickstart pins a sample binding; locus whoami shows the sealed session and its scoped providers](docs/assets/locus-demo.gif)
 
@@ -232,6 +247,32 @@ MCP identity and provider-scope responses report only credential presence and so
 
 ---
 
+## How Locus plugs into Phantom
+
+Locus and [Phantom Secrets](https://phm.dev/secrets) are the two halves of the Ashlr agent-safety pair — different questions, different planes:
+
+| Plane | Tool | Question it answers |
+|-------|------|---------------------|
+| Secret plane | `phantom` ([phantom-secrets](https://github.com/ashlrai/phantom-secrets)) | *Can this secret enter the model?* Real keys stay in the vault behind `phm_` placeholders; agents get value-blind metadata only. |
+| Identity plane | `locus` (this repo) | *As whom, against which tenant, right now?* Every CLI command and MCP tool is sealed to one pinned binding. |
+
+**Wire both into your client** — the pair is declared as `required_servers` on every `locus agent report`. `locus agent setup --apply` registers `locus`; [Phantom's own setup](https://github.com/ashlrai/phantom-secrets) registers `phantom`:
+
+```json
+{ "mcpServers": {
+    "locus":   { "command": "locus", "args": ["mcp", "--supervised"] },
+    "phantom": { "command": "phantom", "args": ["mcp", "serve"] }
+} }
+```
+
+Do not register raw Supabase / Vercel / GitHub MCP servers with ambient tokens next to Locus — they bypass the pin.
+
+**For orchestrators** (the [Phantom workbench](https://github.com/ashlrai/phantom), or your own hub): shell out to the CLI — do not reimplement pin or seal. `locus agent report --json` is the single entrypoint (exit 0 ready / 1 protected / 2 unsafe); `locus ci mint` hands each job an ephemeral sealed session; `locus mcp mint` issues one revocable tenant grant per job against the multi-tenant HTTP server. Drop-in TypeScript helpers and the full contract live in [integrations/phantom/](./integrations/phantom/) and [docs/hub-integration.md](./docs/hub-integration.md).
+
+**On credentials:** bindings carry `credential_ref` pointers, never secrets. `env:VAR` resolves today — the operator supplies the value and Locus injects it only into the pinned provider's child environment. `phm:NAME` stays readable for metadata and migration, but resolution fails closed until a reviewed, tenant-scoped bridge exists; see [credential compatibility](./docs/credential-compatibility.md). Neither server's tool results ever contain a resolved secret value.
+
+---
+
 ## Core concepts
 
 | Term | Meaning |
@@ -392,6 +433,10 @@ cargo build --release
 # README quickstart rehearsal: replays the extracted 30-second start in a
 # throwaway HOME (--dry-run prints the plan without running it)
 ./scripts/check-readme-quickstart.sh
+
+# README link check: every markdown link, image and anchor must resolve
+# (--external also HEAD-requests remote URLs; loopback hosts skipped)
+node scripts/check-readme-links.mjs
 ```
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test/lint and how to add adapters. Agent-oriented rules: [AGENTS.md](./AGENTS.md). Short IDE guide: [CLAUDE.md](./CLAUDE.md).
@@ -421,6 +466,7 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [GOALS.md](./GOALS.md) | Northstar goal loop |
 | [scripts/e2e.sh](./scripts/e2e.sh) | End-to-end shell suite |
 | [scripts/check-readme-quickstart.sh](./scripts/check-readme-quickstart.sh) | README quickstart replay in a throwaway HOME |
+| [scripts/check-readme-links.mjs](./scripts/check-readme-links.mjs) | README link / anchor / image resolution check (`--external` for remote) |
 | [docs/architecture.md](./docs/architecture.md) | System diagram (DESIGN distilled) |
 | [docs/BENCHMARKS.md](./docs/BENCHMARKS.md) | Install and core-op timings, peers, method |
 | [docs/FIRST-RUN.md](./docs/FIRST-RUN.md) | First-run log and agent-use audit |
@@ -429,6 +475,8 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
 | [examples/agency-starter/](./examples/agency-starter/) | Bindings, workspaces, dual-control, offboarding |
 | [docs/phantom-enrolled-repos.md](./docs/phantom-enrolled-repos.md) | Phantom workbench: personal / company / client scope bindings per enrolled repo |
+| [docs/hub-integration.md](./docs/hub-integration.md) | Phantom ↔ Locus contract: agent report, fleet gate, MCP grants |
+| [integrations/phantom/](./integrations/phantom/) | Drop-in TS helpers + MCP gateway / doctor snippets |
 | [docs/gateway-base-urls.md](./docs/gateway-base-urls.md) | Model gateways (for example a LiteLLM proxy): Locus makes no provider calls, `locus exec` drops unknown env vars, and how to set a gateway URL inside it |
 | [docs/PQ-READINESS.md](./docs/PQ-READINESS.md) | Post-quantum readiness note: what Locus uses today (Ed25519 for adapter manifests, classical only) and what a migration would touch. No quantum-safety claim |
 | [docs/mcp.md](./docs/mcp.md) | `locus-mcp` with Claude Code / Cursor |
