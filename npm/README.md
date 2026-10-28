@@ -52,4 +52,5 @@ Step by step instead of `quickstart`: `locus init --with-samples`, then
 ## Related
 
 - MCP server: [`@ashlrai/locus-mcp`](https://www.npmjs.com/package/@ashlrai/locus-mcp)
+- Pairs with Phantom Secrets — the secret plane to Locus's identity plane: https://github.com/ashlrai/locus#how-locus-plugs-into-phantom
 - Source / Homebrew: https://github.com/ashlrai/locus

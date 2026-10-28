@@ -52,6 +52,14 @@ locus pin personal
 locus whoami
 ```
 
+Docs checks (Node 18+, no dependencies):
+
+```bash
+node scripts/check-readme-links.mjs   # every README link / anchor / image resolves
+node --test scripts/check-readme-links.test.mjs
+node scripts/freshness/check.mjs      # generated release blocks are in sync
+```
+
 ## Lint and format
 
 CI enforces these on every PR:

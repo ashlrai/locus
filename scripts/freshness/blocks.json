@@ -1,6 +1,6 @@
 {
   "templates": {
-    "badge": "[![Release {{version}}](https://img.shields.io/badge/release-v{{version}}-blue)](https://github.com/ashlrai/locus/releases/tag/v{{version}})",
+    "badge": "[![Release {{version}}](https://img.shields.io/badge/release-v{{version}}-blue?style=for-the-badge&labelColor=0b0b14)](https://github.com/ashlrai/locus/releases/tag/v{{version}})",
     "install": "```bash\nnpm install -g locus-cli@{{cli}} @ashlrai/locus-mcp@{{mcp}}\n```",
     "versions": "| Component | Current release |\n|---|---|\n| Rust workspace | {{version}} |\n| npm locus-cli | {{cli}} |\n| npm @ashlrai/locus-mcp | {{mcp}} |\n| Release date | {{date}} |",
     "pin": "```bash\nnpx --yes locus-cli@{{cli}} --version\nnpx --yes @ashlrai/locus-mcp@{{mcp}} --version\n```",
