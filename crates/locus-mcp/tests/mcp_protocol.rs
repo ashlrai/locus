@@ -2906,3 +2906,114 @@ fn control_tools_reject_mistyped_arguments() {
     assert!(is_err, "{text}");
     assert!(text.contains("locus_list_bindings"), "{text}");
 }
+
+#[test]
+fn bad_tool_params_return_rpc_errors_and_allow_recovery() {
+    for framing in [Framing::ContentLength, Framing::Ndjson] {
+        let dir = tempdir().unwrap();
+        let mut client = McpClient::spawn(dir.path(), framing);
+        handshake(&mut client);
+
+        for params in [
+            Value::Null,
+            json!([]),
+            json!("invalid"),
+            json!({}),
+            json!({"name": null}),
+            json!({"name": 42}),
+            json!({"name": []}),
+            json!({"name": "locus_whoami", "arguments": false}),
+            json!({"name": "locus_whoami", "arguments": 42}),
+            json!({"name": "locus_whoami", "arguments": []}),
+        ] {
+            let response = client.request("tools/call", params);
+            assert_eq!(response["jsonrpc"], "2.0", "{response}");
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+            assert!(response["error"]["message"].is_string(), "{response}");
+            assert!(response.get("result").is_none(), "{response}");
+            let ping = client.request("ping", json!({}));
+            assert_eq!(ping["result"], json!({}), "{ping}");
+        }
+    }
+}
+
+#[test]
+fn unknown_tools_return_rpc_errors_without_a_pin() {
+    for framing in [Framing::ContentLength, Framing::Ndjson] {
+        let dir = tempdir().unwrap();
+        let mut client = McpClient::spawn(dir.path(), framing);
+        handshake(&mut client);
+
+        for name in ["locus_nosuch", "nosuch", "locus_whoam"] {
+            let response = client.request("tools/call", json!({"name": name, "arguments": {}}));
+            assert_eq!(response["jsonrpc"], "2.0", "{response}");
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+            assert!(response.get("result").is_none(), "{response}");
+            let message = response["error"]["message"].as_str().unwrap();
+            assert!(
+                message.contains(&format!("unknown tool `{name}`")),
+                "{message}"
+            );
+            if name == "locus_whoam" {
+                assert!(
+                    message.contains("Did you mean `locus_whoami`?"),
+                    "{message}"
+                );
+            }
+        }
+        let response = client.request("tools/list", json!({}));
+        let tools = response["result"]["tools"].as_array().unwrap();
+        assert!(!tools.is_empty());
+        assert!(tools
+            .iter()
+            .all(|tool| tool["name"].as_str().unwrap().starts_with("locus_")));
+    }
+}
+
+#[test]
+fn oversized_stdio_bodies_close_the_connection_without_dispatch() {
+    // The public transport limit is 8 MiB. Content-Length must be refused
+    // from the header alone; NDJSON must stop even without a final newline.
+    const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
+    for framing in [Framing::ContentLength, Framing::Ndjson] {
+        let dir = tempdir().unwrap();
+        let mut client = McpClient::spawn(dir.path(), framing);
+        handshake(&mut client);
+        match framing {
+            Framing::ContentLength => {
+                write!(
+                    client.stdin,
+                    "Content-Length: {}\r\n\r\n",
+                    MAX_BODY_BYTES + 1
+                )
+                .unwrap();
+            }
+            Framing::Ndjson => {
+                // A valid JSON request padded past the cap, with stdin kept
+                // open, proves rejection does not depend on EOF or newline.
+                let mut body = br#"{"jsonrpc":"2.0","id":99,"method":"ping"}"#.to_vec();
+                body.resize(MAX_BODY_BYTES + 1, b' ');
+                client.stdin.write_all(&body).unwrap();
+            }
+        }
+        client.stdin.flush().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = client.child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "oversized frame did not terminate server"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(!status.success(), "oversized frame must fail closed");
+        let mut remaining = Vec::new();
+        client.stdout.read_to_end(&mut remaining).unwrap();
+        assert!(
+            remaining.is_empty(),
+            "refused frame must not emit a response"
+        );
+    }
+}
