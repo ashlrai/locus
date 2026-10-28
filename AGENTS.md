@@ -157,6 +157,7 @@ Firm / multi-client workflow: [docs/firm-mode.md](./docs/firm-mode.md).
 | [CLAUDE.md](./CLAUDE.md) | Short dev quick-reference |
 | [docs/architecture.md](./docs/architecture.md) | System diagram (DESIGN distilled) |
 | [docs/policy.md](./docs/policy.md) | Policy rules, evaluation order, approval UX |
+| [docs/broker.md](./docs/broker.md) | Operator engine allowlists (`broker.toml`, `locus broker check`) |
 | [docs/firm-mode.md](./docs/firm-mode.md) | Agencies: bindings, dual-control, workspaces |
 | [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
 | [examples/agency-starter/](./examples/agency-starter/) | Sample multi-client bindings + offboarding |

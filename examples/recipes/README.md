@@ -1,12 +1,5 @@
 # Recipes: one machine, several client identities
 
-<!-- fresh:begin pin -->
-```bash
-npx --yes locus-cli@0.5.2 --version
-npx --yes @ashlrai/locus-mcp@0.5.2 --version
-```
-<!-- fresh:end -->
-
 [run.mjs](run.mjs) runs each recipe below for real, in a disposable
 `LOCUS_HOME` with fake `env:` credentials. No provider is called and your real
 `~/.locus` is not touched.

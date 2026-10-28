@@ -369,29 +369,6 @@ other over HTTP.
    session cap: `LOCUS_MCP_SESSIONS_PER_GRANT` (default 8).
 
 Mint output contract: [`schema/mcp-grant.schema.json`](../schema/mcp-grant.schema.json).
-
-For a pinned, strict contract, Phantom consumers should vendor
-[`schema/mcp-grant.v1.schema.json`](../schema/mcp-grant.v1.schema.json), a
-self-contained JSON Schema Draft 2020-12 document. Its root validates mint
-output; `#/$defs/listEntry` validates one roster row and `#/$defs/list`
-validates the complete `locus mcp list --json` array. Enable `date-time`
-format assertions in the validator. Every grant object rejects unknown fields,
-including accidental credential fields on roster rows. The unversioned schema
-remains the legacy permissive contract.
-
-The filename and `$id` pin contract version 1 independently of the CLI release.
-There is no new field in CLI output. Changes to accepted fields, required fields,
-or types require a new versioned schema; consumers opt into that version
-explicitly. This strict grant contract is separate from the additive status
-payload conventions in [the agent contract](agent-contract.md).
-
-Schema validation checks structure, not authority: Phantom must still verify
-that a mint token embeds the reported grant ID, keep it only in memory, and
-present it to Locus for seal, expiry, revocation, policy and scope checks.
-Never treat schema validation as authorization. Offline fixture tests live in
-`crates/locus-core/tests/mcp_grant_contract.rs`; fixtures contain only synthetic
-identity metadata and the tests construct token-shaped dummy bytes in memory.
-Run them with `cargo test -p locus-core --test mcp_grant_contract`.
 Details: [docs/mcp.md](./mcp.md#multi-tenant-http---multi-tenant).
 
 ### Hub drop-in: `withLocusMcpTenant` (grant scope + auto-revoke)

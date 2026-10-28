@@ -1,14 +1,5 @@
 # Locus ↔ Phantom integration sketch
 
-<!-- fresh:begin versions -->
-| Component | Current release |
-|---|---|
-| Rust workspace | 0.5.2 |
-| npm locus-cli | 0.5.2 |
-| npm @ashlrai/locus-mcp | 0.5.2 |
-| Release date | 2026-10-26 |
-<!-- fresh:end -->
-
 How the **Phantom workbench** (AshlrAI's agent fleet orchestrator) can compose
 with **Locus** (answers *as whom, against which
 tenant, right now?*). Written from Locus's side only — nothing here changes

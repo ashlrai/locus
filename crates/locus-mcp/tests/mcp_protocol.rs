@@ -3017,3 +3017,38 @@ fn oversized_stdio_bodies_close_the_connection_without_dispatch() {
         );
     }
 }
+
+#[test]
+fn broker_engine_gate_denies_without_logging_arguments() {
+    let home = tempdir().unwrap();
+    Store::open(home.path()).unwrap();
+    std::fs::write(
+        home.path().join("broker.toml"),
+        "[engines.worker]\nmcp = ['github']",
+    )
+    .unwrap();
+    for engine in ["worker", "unknown"] {
+        let mut client = McpClient::spawn_opts(
+            home.path(),
+            Framing::Ndjson,
+            None,
+            &[("LOCUS_ENGINE_ID", engine)],
+        );
+        let denied = client.request(
+            "tools/call",
+            json!({"name": "vercel.list_projects", "arguments": {"token": "argument-secret"}}),
+        );
+        assert_eq!(denied["error"]["message"], "broker denied access");
+        let github = client.request(
+            "tools/call",
+            json!({"name": "github.list_repos", "arguments": {}}),
+        );
+        assert_eq!(
+            github.to_string().contains("broker denied access"),
+            engine == "unknown"
+        );
+    }
+    let audit = std::fs::read_to_string(home.path().join("audit/events.jsonl")).unwrap();
+    assert_eq!(audit.matches("broker.deny").count(), 3);
+    assert!(!audit.contains("argument-secret"));
+}

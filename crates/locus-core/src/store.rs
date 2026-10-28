@@ -2398,7 +2398,6 @@ impl Store {
                 default_binding: Some(alias.to_string()),
                 allowed_bindings: vec![alias.to_string()],
                 require_pin: true,
-                child_rss_cap_bytes: None,
             };
             Some(crate::workspace::stage_file_replace(
                 &workspace_target,
@@ -7395,7 +7394,6 @@ allowed_bindings = ["acme"]
                     default_binding: Some("acme".into()),
                     allowed_bindings: vec!["acme".into()],
                     require_pin: true,
-                    child_rss_cap_bytes: None,
                 },
             )
             .unwrap();
@@ -7494,7 +7492,6 @@ allowed_bindings = ["acme"]
                     default_binding: Some("acme".into()),
                     allowed_bindings: vec!["acme".into()],
                     require_pin: true,
-                    child_rss_cap_bytes: None,
                 },
             )
             .unwrap();

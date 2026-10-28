@@ -7,7 +7,6 @@
 
 mod composite;
 mod mcp_stdio;
-mod rss_watchdog;
 mod sandbox;
 mod stdio_client;
 mod synthetic;

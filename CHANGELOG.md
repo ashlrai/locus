@@ -1,11 +1,5 @@
 # Changelog
 
-<!-- fresh:begin release -->
-Latest release: [v0.5.2](https://github.com/ashlrai/locus/releases/tag/v0.5.2) (2026-10-26).
-
-`locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
-<!-- fresh:end -->
-
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
@@ -28,7 +22,6 @@ Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run
 ### Fixed
 
 - **Dead-broker recovery hint says `locus enter` first.** When a pin's broker died with the shell that pinned it (`no current broker endpoint`, anchor unavailable or mismatched, seal intact), `locus enter <alias>` has replaced the pin directly since #156, but every surface still printed `locus leave --force` first. `whoami`, `status`, control commands, `doctor`, `agent report` and the MCP hint now print `eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }`. Expired pins, invalid or legacy seals and unreadable session files, which enter still refuses, keep the `locus leave --force; locus enter <alias>` recipe. New test `printed_dead_broker_hint_works_verbatim` runs the printed line as is.
-- **`locus mcp --supervised` names the same recovery on its fallback line.** A dead pin under `--supervised` printed `human re-pin required` with no recipe at all: the error is reported by `mcp` itself and never reached the top-level stale-pin hatch. The fallback line now carries the enter-first recipe, and the recipe selection in `wedged_session_recovery` / `stale_pin_recovery_fallback` shares `recovery::recovery_for_error` instead of duplicating the dead-broker check. New test `supervised_mcp_fallback_on_dead_pin_names_the_recovery` (#166).
 
 ### Changed
 

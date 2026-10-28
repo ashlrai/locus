@@ -4,9 +4,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum LocusError {
-    #[error("child RSS supervision stopped worker")]
-    ChildRssStopped,
-
     #[error("{0}")]
     Message(String),
 

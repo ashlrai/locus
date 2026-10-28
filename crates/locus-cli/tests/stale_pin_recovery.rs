@@ -353,40 +353,6 @@ fn printed_dead_broker_hint_works_verbatim() {
     );
 }
 
-/// `locus mcp --supervised` cannot grant executor capability over a dead
-/// pin: it still serves control tools, and its own fallback line must name
-/// the same enter-first recovery. That stderr line is printed by `mcp`
-/// itself, so it never passes through the top-level recovery hatch.
-#[test]
-fn supervised_mcp_fallback_on_dead_pin_names_the_recovery() {
-    let home = tempfile::tempdir().unwrap();
-    let cwd = tempfile::tempdir().unwrap();
-    let cap = pin_in_exited_shell(home.path(), cwd.path());
-
-    // Stub locus-mcp that exits at once; only locus's own stderr is asserted.
-    let stub = cwd.path().join("fake-locus-mcp");
-    std::fs::write(&stub, "#!/bin/sh\nexit 0\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-
-    let out = locus_fail_closed(
-        home.path(),
-        cwd.path(),
-        &cap,
-        &["mcp", "--supervised", "--mcp-bin", stub.to_str().unwrap()],
-    );
-    let err = stderr(&out);
-    assert!(out.status.success(), "fallback still serves: {err}");
-    assert!(err.contains("serving control tools only"), "{err}");
-    assert!(
-        err.contains(DEAD_BROKER_RECOVERY),
-        "mcp --supervised fallback must name the enter-first recovery: {err}"
-    );
-}
-
 // ── Negative tests for the replace-stale branch of `enter` (#156) ─────────
 
 /// Number of `session.replace_stale` audit records under `home`.

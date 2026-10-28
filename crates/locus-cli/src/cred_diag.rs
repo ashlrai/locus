@@ -247,30 +247,9 @@ pub(crate) fn describe_unresolved(
             format!(
                 "binding={} provider={} source={} code={} env={}: {}",
                 binding.alias,
-                if binding
-                    .providers
-                    .iter()
-                    .any(|p| provider_label(&p.provider) == issue.provider)
-                {
-                    issue.provider.as_str()
-                } else {
-                    "unknown"
-                },
-                match issue.source.as_str() {
-                    "phantom" => "phantom",
-                    "environment" => "environment",
-                    "test" => "test",
-                    _ => "unknown",
-                },
-                match issue.code.as_str() {
-                    "unavailable"
-                    | "unsupported-integration"
-                    | "unsupported-mapping"
-                    | "invalid-adapter-contract"
-                    | REVEAL_FAILED
-                    | REVEAL_TIMEOUT => issue.code.as_str(),
-                    _ => "unavailable",
-                },
+                issue.provider,
+                issue.source,
+                issue.code,
                 env,
                 cause(issue, phantom_on_path)
             )
@@ -364,50 +343,6 @@ mod tests {
             cause(&issue("github", "environment", "unavailable"), true),
             "environment variable not set"
         );
-    }
-
-    #[test]
-    fn diagnostics_do_not_echo_runtime_credentials_or_error_payloads() {
-        // Runtime-only canary: never include diagnostic output in assertion messages.
-        let canary = format!(
-            "runtime_{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        );
-        let mut binding = locus_core::Binding::parse_toml(
-            r#"[binding]
- id = "bnd_diag"
- alias = "diag"
- tenant = "diag"
- [[binding.providers]]
- provider = "github"
- account = "diag"
- credential_ref = "env:GH_TOKEN"
- "#,
-        )
-        .unwrap();
-        for reference in [
-            format!("phm:{canary}"),
-            format!("env:{canary}"),
-            canary.clone(),
-        ] {
-            binding.providers[0].credential_ref = reference;
-            let lines = describe_unresolved(
-                &binding,
-                &[
-                    issue("github", "phantom", REVEAL_FAILED),
-                    issue("github", &canary, &canary),
-                    issue(&canary, &canary, &canary),
-                ],
-                true,
-            )
-            .join("\n");
-            assert!(!lines.contains(&canary));
-            assert!(lines.contains("source=unknown code=unavailable"));
-            assert!(lines.contains("env=GH_TOKEN,GITHUB_TOKEN"));
-        }
     }
 
     #[test]

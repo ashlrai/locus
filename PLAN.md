@@ -1,7 +1,5 @@
 # Locus — Identity Plane for Coding Agents
 
-Current swarm execution backlog: [RQ-PLAN-LOCUS child jobs](docs/swarm-child-jobs.md).
-
 **Repo codename:** `mmcp` · **Recommended product name:** **Locus** · **Workspace:** greenfield  
 **Full design already drafted:** [`DESIGN.md`](./DESIGN.md) (~1k lines)  
 **Sibling:** [Phantom Secrets](https://phm.dev) — secrets *in context*. Locus — *which identity acts*.

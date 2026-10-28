@@ -1,7 +1,5 @@
 # Locus — Northstar goal loop
 
-Current swarm execution backlog: [RQ-PLAN-LOCUS child jobs](docs/swarm-child-jobs.md).
-
 Living progress surface for the product. Print anytime:
 
 ```bash

@@ -1,11 +1,5 @@
 # @ashlrai/locus-mcp
 
-<!-- fresh:begin install -->
-```bash
-npm install -g locus-cli@0.5.2 @ashlrai/locus-mcp@0.5.2
-```
-<!-- fresh:end -->
-
 MCP multiplexor for [Locus](https://github.com/ashlrai/locus) — tools hard-scoped to the active pin so agents cannot act in the wrong tenant.
 
 ## Install
