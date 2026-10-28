@@ -297,3 +297,72 @@ fn binding_add_never_writes_through_a_dangling_symlink() {
     assert_json_error(&add(&["--force"]), "symlink");
     assert!(!victim.exists(), "nothing written outside LOCUS_HOME");
 }
+
+#[test]
+fn credential_errors_distinguish_unsupported_and_missing_without_exposing_values() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let canary = format!("SECRET_CANARY_{}", std::process::id());
+    for (alias, reference, expected) in [
+        (
+            "phantom",
+            format!("phm:{canary}"),
+            "Phantom credential integration unsupported",
+        ),
+        (
+            "missing",
+            "env:LOCUS_DIAG_MISSING_VALUE".into(),
+            "environment variable not set",
+        ),
+    ] {
+        let add = locus(
+            home.path(),
+            cwd.path(),
+            Some(CAP),
+            &[
+                "binding",
+                "add",
+                alias,
+                "--tenant",
+                alias,
+                "--provider",
+                "github",
+                "--account",
+                "acct",
+                "--credential-ref",
+                &reference,
+                "--non-interactive",
+            ],
+        );
+        assert!(add.status.success());
+        for json in [false, true] {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
+            if json {
+                cmd.arg("--json");
+            }
+            let out = cmd
+                .args(["run", "-b", alias, "--strict-creds", "--", "/usr/bin/true"])
+                .env("LOCUS_HOME", home.path())
+                .env("LOCUS_CONTROL_CAPABILITY", CAP)
+                .env("LOCUS_DIAG_CANARY", &canary)
+                .env_remove("LOCUS_DIAG_MISSING_VALUE")
+                .env_remove("LOCUS_SESSION_ID")
+                .current_dir(cwd.path())
+                .output()
+                .unwrap();
+            assert!(!out.status.success());
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(!stdout.contains(&canary));
+            assert!(!stderr.contains(&canary));
+            let message = if json {
+                let value: Value = serde_json::from_str(stderr.trim()).unwrap();
+                value["error"].as_str().unwrap().to_owned()
+            } else {
+                stderr.into_owned()
+            };
+            assert!(message.contains(expected));
+            assert!(message.contains("env:VAR"));
+        }
+    }
+}
