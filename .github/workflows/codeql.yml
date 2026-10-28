@@ -4,11 +4,9 @@ name: CodeQL
 # Push to main is included. There is no pull_request trigger.
 # Nightly minute 43 so this repo does not share ashlr-md's 06:17 UTC slot.
 on:
-  merge_group:
-  push:
-    branches: [main]
+  # Daily only (Mason, Oct 28 2026): CodeQL is not a required check.
   schedule:
-    - cron: "43 6 * * *"
+    - cron: "0 10 * * *"
   workflow_dispatch:
 
 concurrency:
