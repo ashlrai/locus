@@ -100,7 +100,8 @@ fn pin_acme_vs_personal_exclusive_credential_refs() {
     assert_eq!(w.binding_alias, "acme");
     assert_eq!(w.tenant, "acme-corp");
 
-    assert!(w.providers.iter().all(|p| p.credential.present));
+    // phm: locators remain readable, but the unsupported bridge fails closed.
+    assert!(w.providers.iter().all(|p| !p.credential.present));
     assert!(w.providers.iter().all(|p| p.credential.source == "phantom"));
     let whoami_json = serde_json::to_string(&w).unwrap();
     assert!(!whoami_json.contains("GH_TOKEN_ACME"));
@@ -127,7 +128,7 @@ fn pin_acme_vs_personal_exclusive_credential_refs() {
     let w2 = store.whoami().unwrap();
     assert_eq!(w2.binding_alias, "personal");
     for p in &w2.providers {
-        assert!(p.credential.present);
+        assert!(!p.credential.present);
         assert_eq!(p.credential.source, "phantom");
     }
     let whoami_json = serde_json::to_string(&w2).unwrap();
@@ -272,7 +273,7 @@ fn call_tool_github_and_vercel_scope_under_pin() {
     let gh = call_tool(&binding, "github.scope", &json!({})).unwrap();
     assert!(gh.ok, "github.scope failed: {:?}", gh.content);
     assert!(gh.content.get("credential_ref").is_none());
-    assert_eq!(gh.content["credential"]["present"], true);
+    assert_eq!(gh.content["credential"]["present"], false);
     assert_eq!(gh.content["credential"]["source"], "phantom");
     assert!(!serde_json::to_string(&gh.content)
         .unwrap()
