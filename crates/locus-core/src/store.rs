@@ -4591,16 +4591,22 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let mut binding = sample_binding("whoami-env", "tenant", "project");
+        let mut binding = sample_binding("whoami_env", "tenant", "project");
         binding.providers[0].credential_ref = format!("env:{VAR}");
         store.save_binding(&binding).unwrap();
         store
-            .pin("whoami-env", dir.path(), Some("test".into()), false)
+            .pin("whoami_env", dir.path(), Some("test".into()), false)
             .unwrap();
 
         let unavailable = store.whoami().unwrap();
         assert!(!unavailable.providers[0].credential.present);
         assert_eq!(unavailable.providers[0].credential.source, "environment");
+
+        // A var set but empty yields no usable credential: still not present.
+        std::env::set_var(VAR, "");
+        let empty = store.whoami().unwrap();
+        std::env::remove_var(VAR);
+        assert!(!empty.providers[0].credential.present);
 
         std::env::set_var(VAR, "whoami-test-value");
         let available = store.whoami().unwrap();

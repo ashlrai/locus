@@ -306,13 +306,11 @@ impl McpStdioBackend {
             .known_secrets
             .lock()
             .map_err(|_| LocusError::msg("worker secret guard unavailable"))?;
-        if current.is_empty()
-            || !secrets.get(&slot_client_key(slot)).is_some_and(|known| {
-                known
-                    .iter()
-                    .any(|secret| secret.as_str() == current.as_str())
-            })
-        {
+        if !secrets.get(&slot_client_key(slot)).is_some_and(|known| {
+            known
+                .iter()
+                .any(|secret| secret.as_str() == current.as_str())
+        }) {
             return Err(LocusError::msg(
                 "community worker credential source changed or unavailable; restart required",
             ));

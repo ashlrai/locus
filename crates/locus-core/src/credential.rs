@@ -203,12 +203,16 @@ pub fn resolve(cred: &CredentialRef) -> Result<Zeroizing<String>> {
     match cred {
         CredentialRef::Phantom { .. } => Err(LocusError::PhantomCredentialIntegrationUnsupported),
         CredentialRef::Env { var } => {
+            // A var set to the empty string yields no usable credential;
+            // treat it as unavailable so presence metadata stays truthful.
             let v = std::env::var(var)
-                .map_err(|_| LocusError::msg("credential unavailable (source=environment)"))?;
+                .ok()
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| LocusError::msg("credential unavailable (source=environment)"))?;
             Ok(Zeroizing::new(v))
         }
         CredentialRef::Test { value } => {
-            if !cfg!(test) {
+            if !cfg!(test) || value.is_empty() {
                 return Err(LocusError::msg("credential source unsupported"));
             }
             Ok(Zeroizing::new(value.clone()))
@@ -507,18 +511,6 @@ pub fn resolve_binding_secrets(binding: &crate::binding::Binding) -> ResolvedBin
                 continue;
             }
         };
-        if value.is_empty()
-            && p.upstream
-                .as_ref()
-                .is_some_and(|upstream| upstream.community_adapter.is_some())
-        {
-            issues.push(CredentialResolutionIssue {
-                provider: safe_provider_label(&p.provider),
-                source: cred.source().into(),
-                code: "unavailable".into(),
-            });
-            continue;
-        }
         if p.provider.eq_ignore_ascii_case("aws") {
             match crate::adapters::aws::credential_env(&value) {
                 Ok(env) => out.extend(env),
@@ -600,6 +592,11 @@ mod tests {
         assert_eq!(missing.source, "environment");
         assert!(!missing.present);
 
+        std::env::set_var(VAR, "");
+        let empty = credential_metadata(&format!("env:{VAR}"));
+        std::env::remove_var(VAR);
+        assert!(!empty.present);
+
         std::env::set_var(VAR, "metadata-test-value");
         let available = credential_metadata(&format!("env:{VAR}"));
         std::env::remove_var(VAR);
@@ -618,12 +615,35 @@ mod tests {
         assert_eq!(v.as_str(), "s3cret");
         std::env::remove_var("LOCUS_TEST_SECRET_XYZ");
 
+        std::env::set_var("LOCUS_TEST_SECRET_XYZ", "");
+        assert!(resolve(&CredentialRef::Env {
+            var: "LOCUS_TEST_SECRET_XYZ".into(),
+        })
+        .is_err());
+        std::env::remove_var("LOCUS_TEST_SECRET_XYZ");
+
         assert!(CredentialRef::validate("test:tval").is_ok());
         let v = resolve(&CredentialRef::Test {
             value: "tval".into(),
         })
         .unwrap();
         assert_eq!(v.as_str(), "tval");
+
+        assert!(resolve(&CredentialRef::Test { value: "".into() }).is_err());
+    }
+
+    #[test]
+    fn empty_env_credential_reports_unavailable_not_injected() {
+        const VAR: &str = "LOCUS_TEST_EMPTY_CREDENTIAL";
+        std::env::set_var(VAR, "");
+        let binding = phm_binding(&format!("env:{VAR}"));
+        let resolved = resolve_binding_secrets(&binding);
+        std::env::remove_var(VAR);
+        assert!(resolved.env.is_empty());
+        assert_eq!(resolved.issues.len(), 1);
+        assert_eq!(resolved.issues[0].code, "unavailable");
+        let diagnostics = serde_json::to_string(&resolved.issues).unwrap();
+        assert!(!diagnostics.contains(VAR));
     }
 
     #[test]
