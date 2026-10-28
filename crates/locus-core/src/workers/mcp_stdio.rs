@@ -11,6 +11,7 @@
 //! Network stays **allowed** by default for MCP → provider APIs. Opt in to deny
 //! with `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` or [`McpStdioConfig::sandbox_no_network`].
 
+use super::rss_watchdog::WatchedChild;
 use super::sandbox::{
     resolve_sandbox_spawn, sandbox_enabled, sandbox_no_network_enabled, ENV_WORKER_SANDBOXED,
     ENV_WORKER_SANDBOX_BACKEND, ENV_WORKER_SANDBOX_NO_NETWORK,
@@ -24,7 +25,7 @@ use crate::session::Session;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 fn slot_client_key(slot: &WorkerSlot) -> String {
@@ -96,7 +97,7 @@ pub struct McpStdioConfig {
 pub struct McpStdioBackend {
     config: McpStdioConfig,
     /// session:provider → Child process
-    children: Mutex<BTreeMap<WorkerKey, Child>>,
+    children: Mutex<BTreeMap<WorkerKey, WatchedChild>>,
     /// Live MCP clients (stdin/stdout taken from children)
     clients: Mutex<BTreeMap<String, McpStdioClient>>,
     /// Only this community child's injected values; never credentials from other workers.
@@ -114,6 +115,13 @@ impl McpStdioBackend {
             known_secrets: Mutex::new(BTreeMap::new()),
             community_contracts: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    pub(crate) fn rss_exceeded(&self) -> bool {
+        self.children
+            .lock()
+            .map(|children| children.values().any(WatchedChild::exceeded))
+            .unwrap_or(true)
     }
 
     /// Build a `Command` ready to spawn with isolated env.
@@ -413,6 +421,10 @@ impl WorkerBackend for McpStdioBackend {
                     "mcp_stdio spawn requested but command is empty",
                 ));
             }
+            let cap = crate::workspace::find_workspace(&std::env::current_dir()?)?
+                .and_then(|(_, config)| config.child_rss_cap_bytes)
+                .map(std::num::NonZeroU64::get)
+                .unwrap_or(super::rss_watchdog::DEFAULT_CAP);
             let mut cmd = self.build_command(session, binding, provider, work_dir)?;
             let contract = provider
                 .verified_community_adapter()?
@@ -443,7 +455,15 @@ impl WorkerBackend for McpStdioBackend {
                 Ok(mut child) => {
                     pid = Some(child.id());
                     // Handshake before storing as Running
-                    let client = McpStdioClient::from_child(&mut child)?;
+                    let client = match McpStdioClient::from_child(&mut child) {
+                        Ok(client) => client,
+                        Err(error) => {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Err(error);
+                        }
+                    };
+                    let child = WatchedChild::start(child, cap)?;
                     match client.handshake() {
                         Ok(_tools) => {
                             state = WorkerState::Running;
@@ -478,8 +498,13 @@ impl WorkerBackend for McpStdioBackend {
                                 .insert(key.clone(), child);
                         }
                         Err(e) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
+                            let stopped = child.exceeded();
+                            drop(child);
+                            if stopped {
+                                return Err(LocusError::msg(
+                                    "child RSS supervision stopped worker",
+                                ));
+                            }
                             return Err(LocusError::msg(format!(
                                 "mcp handshake failed for {}: {}",
                                 provider.provider,
@@ -535,10 +560,7 @@ impl WorkerBackend for McpStdioBackend {
             .children
             .lock()
             .map_err(|_| LocusError::msg("worker children lock poisoned"))?;
-        if let Some(mut child) = guard.remove(&slot.key) {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        drop(guard.remove(&slot.key));
         Ok(())
     }
 
@@ -566,6 +588,9 @@ impl WorkerBackend for McpStdioBackend {
             ));
         }
         self.validate_community_worker_contract(slot, binding, provider)?;
+        if self.rss_exceeded() {
+            return Err(LocusError::ChildRssStopped);
+        }
         let ck = slot_client_key(slot);
         let clients = self
             .clients

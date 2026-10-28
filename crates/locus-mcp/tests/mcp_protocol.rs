@@ -409,7 +409,7 @@ fn content_length_initialize_tools_list_and_call_with_freeze_deny() {
     assert!(!is_err, "github.scope error: {text}");
     let body: Value = serde_json::from_str(&text).expect("github body json");
     assert!(body.get("credential_ref").is_none());
-    assert_eq!(body["credential"]["present"], true);
+    assert_eq!(body["credential"]["present"], false);
     assert_eq!(body["credential"]["source"], "phantom");
     assert!(!text.contains("GH_TOKEN_ACME"));
     assert_eq!(body["tenant"], "acme-corp");
@@ -1492,7 +1492,7 @@ fn resources_session_whoami_when_pinned() {
     // Credential source/presence only — locator names are absent.
     for p in body["providers"].as_array().unwrap() {
         assert!(p.get("credential_ref").is_none());
-        assert_eq!(p["credential"]["present"], true);
+        assert_eq!(p["credential"]["present"], false);
         assert_eq!(p["credential"]["source"], "phantom");
     }
     for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME"] {

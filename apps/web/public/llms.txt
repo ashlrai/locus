@@ -1,0 +1,58 @@
+# Locus
+
+> Your coding agent can't act as the wrong account. AI-native identity plane for coding agents: pin a binding and every CLI command, MCP tool and agent session is sealed to that tenant until a human re-pins. Wrong account, impossible.
+
+Identity is resolved at the gate, not in the prompt. Bindings hold principal, tenant, CredentialRefs and policy; sessions are HMAC-sealed to exactly one binding, and agents cannot pin. Sibling product: Phantom (phm.dev) keeps real secret values out of model context.
+
+## Start
+
+- [README](https://github.com/ashlrai/locus/blob/main/README.md): install options, 30-second start, MCP wiring
+- [AGENTS.md](https://github.com/ashlrai/locus/blob/main/AGENTS.md): agent operating rules and invariants
+- [capabilities.json](https://locus.dev/capabilities.json): machine-readable capabilities, install and commands
+- [server.json](https://locus.dev/server.json): MCP registry manifest for io.github.ashlrai/locus-mcp
+
+## Guides
+
+- [Adapter SDK](https://github.com/ashlrai/locus/blob/main/docs/adapter-sdk.md)
+- [Writing a provider adapter](https://github.com/ashlrai/locus/blob/main/docs/adapters.md)
+- [Agency certainty - identity vs epistemic layers](https://github.com/ashlrai/locus/blob/main/docs/agency-certainty.md)
+- [Agency Starter](https://github.com/ashlrai/locus/blob/main/docs/agency-starter.md)
+- [Agent contract: JSON schemas, exit codes, --dry-run](https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md)
+- [Architecture](https://github.com/ashlrai/locus/blob/main/docs/architecture.md)
+- [Ashlr companion handshake (v1)](https://github.com/ashlrai/locus/blob/main/docs/ashlr-handshake.md)
+- [Benchmarks](https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md)
+- [Route a provider CLI](https://github.com/ashlrai/locus/blob/main/docs/cli-routing.md)
+- [Signed credential injection audit (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/credential-audit.md)
+- [Credential compatibility](https://github.com/ashlrai/locus/blob/main/docs/credential-compatibility.md)
+- [doctor --fix](https://github.com/ashlrai/locus/blob/main/docs/doctor-fix.md)
+- [Multi-account dogfood (personal + client)](https://github.com/ashlrai/locus/blob/main/docs/dogfood-multi-account.md)
+- [locus exec latency](https://github.com/ashlrai/locus/blob/main/docs/exec-latency.md)
+- [Firm mode - multi-client agencies](https://github.com/ashlrai/locus/blob/main/docs/firm-mode.md)
+- [First run](https://github.com/ashlrai/locus/blob/main/docs/FIRST-RUN.md)
+- [Gateway base URL for locus exec (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/gateway-base-url.md)
+- [Model gateways and base URLs (audit note)](https://github.com/ashlrai/locus/blob/main/docs/gateway-base-urls.md)
+- [Phantom ↔ Locus integration contract](https://github.com/ashlrai/locus/blob/main/docs/hub-integration.md)
+- [locus-mcp - Claude Code, Cursor, and friends](https://github.com/ashlrai/locus/blob/main/docs/mcp.md)
+- [Observability](https://github.com/ashlrai/locus/blob/main/docs/observability.md)
+- [Onboarding - 3 clients × 3 tenants](https://github.com/ashlrai/locus/blob/main/docs/onboarding.md)
+- [Locus for Phantom-enrolled repos](https://github.com/ashlrai/locus/blob/main/docs/phantom-enrolled-repos.md)
+- [Phantom preflight in locus doctor](https://github.com/ashlrai/locus/blob/main/docs/phantom-preflight.md)
+- [Using Locus with Phantom](https://github.com/ashlrai/locus/blob/main/docs/PHANTOM-USAGE.md)
+- [Policy & approvals](https://github.com/ashlrai/locus/blob/main/docs/policy.md)
+- [Post-quantum readiness](https://github.com/ashlrai/locus/blob/main/docs/PQ-READINESS.md)
+- [Adapter registry release manifests (signed)](https://github.com/ashlrai/locus/blob/main/docs/registry-trust.md)
+- [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+- [Session budget caps (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/session-budget.md)
+- [Shell completions](https://github.com/ashlrai/locus/blob/main/docs/shell-completions.md)
+- [Grant-scoped swarm broker](https://github.com/ashlrai/locus/blob/main/docs/swarm-broker.md)
+- [Verification plane](https://github.com/ashlrai/locus/blob/main/docs/verification-plane.md)
+- [Worker backends](https://github.com/ashlrai/locus/blob/main/docs/workers.md)
+
+## Reference
+
+- [DESIGN.md](https://github.com/ashlrai/locus/blob/main/DESIGN.md): full architecture and threat model
+- [docs/agent-contract.md](https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md): JSON schemas, exit codes, dry-run
+- [llms-full.txt](https://locus.dev/llms-full.txt): complete heading index of README and docs
+- [PLAN.md](https://github.com/ashlrai/locus/blob/main/PLAN.md): roadmap
+- [SECURITY.md](https://github.com/ashlrai/locus/blob/main/SECURITY.md): vulnerability reporting
+- [Site](https://locus.dev/)

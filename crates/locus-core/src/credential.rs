@@ -119,7 +119,10 @@ pub struct CredentialMetadata {
 pub fn credential_metadata(raw: &str) -> CredentialMetadata {
     let parsed = CredentialRef::parse(raw);
     CredentialMetadata {
-        present: !raw.trim().is_empty(),
+        // A reference by itself does not mean its credential can be used.
+        // Resolve only to establish availability; the zeroizing value is
+        // dropped here and is never included in metadata.
+        present: resolve(&parsed).is_ok(),
         source: parsed.source().to_string(),
     }
 }
@@ -161,10 +164,16 @@ fn safe_provider_label(provider: &str) -> String {
     }
 }
 
-fn valid_phantom_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphanumeric())
-        && chars.all(|c| c == '_' || c == '-' || c == '.' || c.is_ascii_alphanumeric())
+/// Phantom Secrets name grammar, shared by reference validation and metadata probes.
+/// Names are identifiers, never secret values or command-line fragments.
+pub fn valid_phantom_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 256
+        && (bytes[0].is_ascii_uppercase() || bytes[0] == b'_')
+        && bytes
+            .iter()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || *c == b'_')
 }
 
 fn valid_env_name(var: &str) -> bool {
@@ -179,12 +188,7 @@ fn invalid_ref() -> LocusError {
 
 /// Convert only a conservative legacy bare Phantom name. Unsafe input is never returned.
 pub fn migrate_legacy_phantom_ref(raw: &str) -> Option<String> {
-    let mut chars = raw.chars();
-    let conservative_name = matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_uppercase())
-        && chars.all(|c| {
-            c == '_' || c == '-' || c == '.' || c.is_ascii_uppercase() || c.is_ascii_digit()
-        });
-    if raw == raw.trim() && !raw.contains(':') && conservative_name {
+    if valid_phantom_name(raw) {
         Some(format!("phm:{raw}"))
     } else {
         None
@@ -538,6 +542,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn phantom_names_match_vault_grammar_and_migration() {
+        for name in ["A", "_", "FAKE_FIXTURE_123", &"A".repeat(256)] {
+            assert!(CredentialRef::validate(&format!("phm:{name}")).is_ok());
+            assert_eq!(
+                migrate_legacy_phantom_ref(name),
+                Some(format!("phm:{name}"))
+            );
+        }
+        for name in ["", "lower", "1ABC", "A-B", "A.B", "A B", &"A".repeat(257)] {
+            assert!(CredentialRef::validate(&format!("phm:{name}")).is_err());
+            assert!(migrate_legacy_phantom_ref(name).is_none());
+        }
+    }
+
+    #[test]
     fn parse_formats() {
         assert_eq!(
             CredentialRef::parse("phm:FOO"),
@@ -569,8 +588,24 @@ mod tests {
         let metadata = credential_metadata("phm:TOP_SECRET_CANARY");
         let json = serde_json::to_string(&metadata).unwrap();
         assert_eq!(metadata.source, "phantom");
-        assert!(metadata.present);
+        assert!(!metadata.present);
         assert!(!json.contains("TOP_SECRET_CANARY"));
+    }
+
+    #[test]
+    fn metadata_present_tracks_environment_resolution() {
+        const VAR: &str = "LOCUS_TEST_METADATA_CREDENTIAL";
+        std::env::remove_var(VAR);
+        let missing = credential_metadata(&format!("env:{VAR}"));
+        assert_eq!(missing.source, "environment");
+        assert!(!missing.present);
+
+        std::env::set_var(VAR, "metadata-test-value");
+        let available = credential_metadata(&format!("env:{VAR}"));
+        std::env::remove_var(VAR);
+        assert!(available.present);
+        let json = serde_json::to_string(&available).unwrap();
+        assert!(!json.contains("metadata-test-value"));
     }
 
     #[test]

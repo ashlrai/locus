@@ -362,3 +362,12 @@ fn empty_list_without_phm_refs_is_listed() {
     );
     assert!(codes(&v).is_empty(), "{v}");
 }
+
+#[test]
+fn exited_parent_with_inherited_stdout_still_obeys_deadline() {
+    let e = setup("sleep 8 &\nprintf '[]'\nexit 0", true);
+    let started = std::time::Instant::now();
+    let (v, _) = e.fix_json();
+    assert_eq!(v["phantom_names"]["reason"], "timeout");
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
+}

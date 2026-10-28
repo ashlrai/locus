@@ -65,6 +65,7 @@ pub struct Scope {
 /// resolve_secrets = true
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
 pub struct UpstreamSpec {
     /// Optional built-in recipe id (e.g. `github-mcp`, `filesystem-mcp`).
     /// When set and `command` is empty, Locus fills command/args from the
@@ -1315,6 +1316,19 @@ credential_ref = "phm:X"
             err.contains("provider") || err.contains("account") || err.contains("credential_ref"),
             "unexpected: {err}"
         );
+    }
+
+    #[test]
+    fn upstream_rejects_literal_environment_and_unknown_credential_fields() {
+        // FAKE fixture constructed at runtime; never an actual credential.
+        let fake = ["FAKE", "credential", "fixture"].join("_");
+        for field in ["env", "headers", "credentials"] {
+            let raw = format!("command = 'fake-mcp'\n[{field}]\nTOKEN = '{fake}'\n");
+            assert!(toml::from_str::<UpstreamSpec>(&raw).is_err());
+        }
+        let spec: UpstreamSpec =
+            toml::from_str("command = 'fake-mcp'\nresolve_secrets = true").unwrap();
+        assert!(spec.resolve_secrets);
     }
 
     #[test]
