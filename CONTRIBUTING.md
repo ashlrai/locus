@@ -109,6 +109,7 @@ Short checklist:
 3. Ensure `fmt`, `clippy -D warnings`, and `cargo test` pass.
 4. Describe **what isolation property** changes (or does not).
 5. Link related `DESIGN.md` sections when changing security-sensitive code.
+6. Conflict in a high-churn path? `CHANGELOG.md` unions itself via `.gitattributes`; `node scripts/resolve-merge-conflicts.mjs --continue` deterministically resolves `CLAUDE.md`/`README.md` and regenerates `Cargo.lock`/`bun.lock`/`package-lock.json` — never hand-merge lockfiles. See [docs/conflict-drivers.md](./docs/conflict-drivers.md).
 
 ## Reporting security issues
 
