@@ -23,3 +23,15 @@ Secrets v0.7.9 protects `reveal` with a trusted-terminal boundary. The legacy Lo
 A supported integration needs a separately reviewed, tenant-scoped, value-blind execution contract. Installation, stored reference presence, and a readable Secrets configuration do not establish that contract or grant execution authority. No bridge or runtime is activated by this change.
 
 This local source correction is **unreleased**. Published Locus v0.5.0 still contains the legacy adapter; these instructions describe the corrected checkout and do not claim a new release. Existing `phm:` bindings are preserved for owner review rather than automatically rewritten.
+
+## Configuration validation
+
+Phantom reference names follow the same grammar as the metadata listing probe:
+`[A-Z_][A-Z0-9_]*`, at most 256 ASCII characters. Invalid names are rejected by
+binding validation and are never automatically migrated from bare names.
+
+MCP upstream specifications reject unknown fields. In particular, `env`,
+`headers`, and `credentials` tables are not supported places to store literal
+credentials; use the provider's explicit `credential_ref` instead. This schema
+check does not inspect arbitrary command arguments for secret material. Never
+embed credentials in an upstream command or its arguments.
