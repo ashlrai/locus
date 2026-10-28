@@ -9451,7 +9451,7 @@ fi
 _locus_prompt() {{
   local s
   # status exits non-zero for frozen/invalid but still prints the token.
-  s="$(locus status --oneline 2>/dev/null)"
+  s="$(locus status --oneline 2>/dev/null)" || true
   [[ -n "$s" ]] || s="unpinned"
 {prompt_body}
 }}
@@ -12504,22 +12504,35 @@ mod hook_and_help_tests {
     #[test]
     fn bash_hook_runs_with_unset_optional_variables_without_stderr() {
         let bash = hook_script("bash").unwrap();
-        let output = std::process::Command::new("bash")
-            .args(["--noprofile", "--norc", "-eu", "-c"])
-            .arg(format!(
-                "{bash}\n_locus_auto_enter\n_locus_prompt >/dev/null\n"
-            ))
-            .env_remove("LOCUS_HOME")
-            .env_remove("LOCUS_CONTROL_CAPABILITY")
-            .env_remove("LOCUS_AUTO_ENTER")
-            .output()
-            .expect("bash is available for hook regression test");
-        assert!(output.status.success(), "{:?}", output.status);
-        assert!(
-            output.stderr.is_empty(),
-            "optional unset variables must not produce warnings: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let home = tempfile::tempdir().unwrap();
+        // Status deliberately returns nonzero for frozen/invalid pins. A missing
+        // executable also must fall back to the unpinned prompt under `set -e`.
+        for (status, code, expected) in [
+            ("frozen", 1, "FROZEN"),
+            ("invalid", 1, "invalid"),
+            ("", 127, "enter"),
+        ] {
+            let output = std::process::Command::new("bash")
+                .args(["--noprofile", "--norc", "-eu", "-c"])
+                .arg(format!(
+                    "locus() {{ printf '%s\\n' '{status}'; return {code}; }}\n{bash}\n_locus_auto_enter\n_locus_prompt\n"
+                ))
+                .env("HOME", home.path())
+                .env_remove("LOCUS_HOME")
+                .env_remove("LOCUS_CONTROL_CAPABILITY")
+                .env_remove("LOCUS_AUTO_ENTER")
+                .output()
+                .expect("bash is available for hook regression test");
+            assert!(output.status.success(), "{:?}", output.status);
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains(&format!("[locus:{expected}]"))
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "optional unset variables must not produce warnings: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]
