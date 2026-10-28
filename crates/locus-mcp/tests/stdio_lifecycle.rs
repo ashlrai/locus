@@ -290,3 +290,22 @@ fn version_flag_prints_version_and_exits_zero() {
         );
     }
 }
+
+#[test]
+fn upstream_marker_refuses_recursive_multiplexor_before_protocol_start() {
+    let dir = tempdir().unwrap();
+    let output = Command::new(mcp_bin())
+        .env("HOME", dir.path())
+        .env("LOCUS_HOME", dir.path())
+        // Presence, even empty, must refuse wrapper-mediated recursion.
+        .env(locus_core::workers::MCP_UPSTREAM_CHILD_ENV, "")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        output.stdout.is_empty(),
+        "refusal must not pollute MCP stdout"
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("recursive"));
+}

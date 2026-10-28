@@ -1,6 +1,6 @@
 //! Child-owned RSS supervision. Diagnostics never include child output or identity.
+use super::process_guard::GuardedChild;
 use crate::error::{LocusError, Result};
-use std::process::Child;
 #[cfg(any(not(any(target_os = "linux", target_os = "macos")), test))]
 use std::process::{Command, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
@@ -11,18 +11,18 @@ pub(crate) const DEFAULT_CAP: u64 = 1024 * 1024 * 1024;
 const INTERVAL: Duration = Duration::from_secs(2);
 
 pub(crate) struct WatchedChild {
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<GuardedChild>>,
     stop: mpsc::Sender<()>,
     thread: Option<JoinHandle<()>>,
     exceeded: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl WatchedChild {
-    pub(crate) fn start(child: Child, cap: u64) -> Result<Self> {
+    pub(crate) fn start(child: GuardedChild, cap: u64) -> Result<Self> {
         Self::with_interval(child, cap, INTERVAL)
     }
 
-    fn with_interval(child: Child, cap: u64, interval: Duration) -> Result<Self> {
+    fn with_interval(child: GuardedChild, cap: u64, interval: Duration) -> Result<Self> {
         let child = Arc::new(Mutex::new(child));
         let exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (stop, receiver) = mpsc::channel();
@@ -33,23 +33,27 @@ impl WatchedChild {
             .spawn(move || {
                 loop {
                     let mut child = watched.lock().unwrap_or_else(|e| e.into_inner());
-                    if matches!(child.try_wait(), Ok(Some(_))) {
-                        break;
+                    match child.is_running() {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(_) => {
+                            flag.store(true, std::sync::atomic::Ordering::Release);
+                            child.terminate();
+                            break;
+                        }
                     }
-                    match resident_bytes(child.id()) {
+                    match resident_bytes(child.child.id()) {
                         Ok(rss) if rss > cap => {
                             flag.store(true, std::sync::atomic::Ordering::Release);
                             eprintln!("locus: child_rss_cap_exceeded");
-                            let _ = child.kill();
-                            let _ = child.wait();
+                            child.terminate();
                             break;
                         }
                         // An unenforceable limit must not silently become unlimited.
                         Err(_) => {
                             flag.store(true, std::sync::atomic::Ordering::Release);
                             eprintln!("locus: child_rss_sample_failed");
-                            let _ = child.kill();
-                            let _ = child.wait();
+                            child.terminate();
                             break;
                         }
                         _ => {}
@@ -69,11 +73,17 @@ impl WatchedChild {
             }),
             Err(_) => {
                 let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = child.kill();
-                let _ = child.wait();
+                child.terminate();
                 Err(LocusError::msg("child RSS watchdog unavailable"))
             }
         }
+    }
+
+    pub(crate) fn is_running(&self) -> Result<bool> {
+        self.child
+            .lock()
+            .map_err(|_| LocusError::msg("worker child lock poisoned"))?
+            .is_running()
     }
 
     pub(crate) fn exceeded(&self) -> bool {
@@ -88,8 +98,7 @@ impl Drop for WatchedChild {
             let _ = thread.join();
         }
         let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = child.kill();
-        let _ = child.wait();
+        child.terminate();
     }
 }
 
@@ -156,16 +165,16 @@ mod tests {
     #[test]
     fn allocating_child_is_killed_and_reaped() {
         // Use this test executable as the fake child; no interpreter dependency.
-        let child = Command::new(std::env::current_exe().unwrap())
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
             .args(["--exact", "workers::rss_watchdog::tests::fake_allocator"])
             .env("LOCUS_FAKE_ALLOCATOR", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        let child = GuardedChild::spawn(&mut command).unwrap();
         assert!(
-            resident_bytes(child.id()).is_ok(),
+            resident_bytes(child.child.id()).is_ok(),
             "RSS sampling unavailable"
         );
         let watched =
@@ -176,29 +185,36 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(watched.exceeded());
-        assert!(!watched.child.lock().unwrap().wait().unwrap().success());
+        assert!(!watched
+            .child
+            .lock()
+            .unwrap()
+            .child
+            .wait()
+            .unwrap()
+            .success());
     }
 
     #[cfg(unix)]
     #[test]
     fn healthy_child_survives_and_drop_stops_and_reaps_promptly() {
-        let child = Command::new("/bin/sleep")
+        let mut command = Command::new("/bin/sleep");
+        command
             .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        assert!(resident_bytes(child.id()).unwrap() > 0);
+            .stderr(Stdio::null());
+        let child = GuardedChild::spawn(&mut command).unwrap();
+        assert!(resident_bytes(child.child.id()).unwrap() > 0);
         let watched = WatchedChild::start(child, u64::MAX).unwrap();
         std::thread::sleep(Duration::from_millis(50));
         assert!(!watched.exceeded());
         let child = watched.child.clone();
-        assert!(child.lock().unwrap().try_wait().unwrap().is_none());
+        assert!(child.lock().unwrap().child.try_wait().unwrap().is_none());
         let start = std::time::Instant::now();
         drop(watched);
         assert!(start.elapsed() < Duration::from_secs(1));
-        assert!(child.lock().unwrap().try_wait().unwrap().is_some());
+        assert!(child.lock().unwrap().child.try_wait().unwrap().is_some());
     }
 
     #[test]

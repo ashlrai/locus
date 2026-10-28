@@ -11,6 +11,7 @@
 //! Network stays **allowed** by default for MCP → provider APIs. Opt in to deny
 //! with `LOCUS_WORKER_SANDBOX_NO_NETWORK=1` or [`McpStdioConfig::sandbox_no_network`].
 
+use super::process_guard::GuardedChild;
 use super::rss_watchdog::WatchedChild;
 use super::sandbox::{
     resolve_sandbox_spawn, sandbox_enabled, sandbox_no_network_enabled, ENV_WORKER_SANDBOXED,
@@ -124,6 +125,32 @@ impl McpStdioBackend {
             .unwrap_or(true)
     }
 
+    /// Check without reaping: the process group remains reserved until cleanup.
+    pub fn is_running(&self, key: &WorkerKey) -> Result<bool> {
+        let ck = if key.binding_alias.is_empty() {
+            client_key(&key.session_id, &key.provider)
+        } else {
+            format!("{}:{}:{}", key.session_id, key.binding_alias, key.provider)
+        };
+        if !self
+            .clients
+            .lock()
+            .map_err(|_| LocusError::msg("clients lock poisoned"))?
+            .get(&ck)
+            .is_some_and(McpStdioClient::is_healthy)
+        {
+            return Ok(false);
+        }
+        let children = self
+            .children
+            .lock()
+            .map_err(|_| LocusError::msg("children lock poisoned"))?;
+        match children.get(key) {
+            Some(child) => child.is_running(),
+            None => Ok(false),
+        }
+    }
+
     /// Build a `Command` ready to spawn with isolated env.
     ///
     /// When sandbox is on: resolve the protected executable, select a platform
@@ -135,6 +162,23 @@ impl McpStdioBackend {
         provider: &ProviderBinding,
         work_dir: &Path,
     ) -> Result<Command> {
+        if std::env::var_os(super::MCP_UPSTREAM_CHILD_ENV).is_some() {
+            return Err(LocusError::msg("recursive MCP worker launch refused"));
+        }
+        let executable = Path::new(&self.config.command);
+        let resolved = executable.canonicalize().ok();
+        if [Some(executable), resolved.as_deref()]
+            .into_iter()
+            .flatten()
+            .any(|path| {
+                matches!(
+                    path.file_stem().and_then(|name| name.to_str()),
+                    Some("locus-mcp")
+                )
+            })
+        {
+            return Err(LocusError::msg("recursive locus-mcp upstream refused"));
+        }
         if let Some(manifest) = provider.verified_community_adapter()? {
             let signed = manifest
                 .upstream
@@ -224,12 +268,14 @@ impl McpStdioBackend {
             .current_dir(work_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .env_clear();
 
         for (k, v) in &iso.vars {
             cmd.env(k, v);
         }
+        // Shared with RQ-LOCUS-SPAWN-LEAK: wrappers inherit the recursion guard.
+        cmd.env(super::MCP_UPSTREAM_CHILD_ENV, "1");
         cmd.env("LOCUS_WORKER_PROVIDER", &provider.provider);
         cmd.env("LOCUS_WORKER_ACCOUNT", &provider.account);
         cmd.env("LOCUS_WORKER_DIR", work_dir);
@@ -389,6 +435,21 @@ impl McpStdioBackend {
     }
 }
 
+impl Drop for McpStdioBackend {
+    fn drop(&mut self) {
+        // Close protocol writers before releasing leases so cooperative servers
+        // get EOF. Recover poisoned locks: cleanup must also work after panic.
+        self.clients
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        self.children
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+    }
+}
+
 impl WorkerBackend for McpStdioBackend {
     fn name(&self) -> &'static str {
         "mcp_stdio"
@@ -451,18 +512,11 @@ impl WorkerBackend for McpStdioBackend {
                     }
                 })
                 .collect::<Vec<_>>();
-            match cmd.spawn() {
+            match GuardedChild::spawn(&mut cmd) {
                 Ok(mut child) => {
-                    pid = Some(child.id());
+                    pid = Some(child.child.id());
                     // Handshake before storing as Running
-                    let client = match McpStdioClient::from_child(&mut child) {
-                        Ok(client) => client,
-                        Err(error) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return Err(error);
-                        }
-                    };
+                    let client = McpStdioClient::from_child(&mut child.child)?;
                     let child = WatchedChild::start(child, cap)?;
                     match client.handshake() {
                         Ok(_tools) => {
@@ -498,6 +552,7 @@ impl WorkerBackend for McpStdioBackend {
                                 .insert(key.clone(), child);
                         }
                         Err(e) => {
+                            client.close_stdin();
                             let stopped = child.exceeded();
                             drop(child);
                             if stopped {

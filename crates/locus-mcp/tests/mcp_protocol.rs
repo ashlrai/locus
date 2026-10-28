@@ -51,8 +51,19 @@ impl McpClient {
         cwd: Option<&std::path::Path>,
         extra_env: &[(&str, &str)],
     ) -> Self {
+        Self::spawn_args(locus_home, framing, cwd, extra_env, &[])
+    }
+
+    fn spawn_args(
+        locus_home: &std::path::Path,
+        framing: Framing,
+        cwd: Option<&std::path::Path>,
+        extra_env: &[(&str, &str)],
+        args: &[&str],
+    ) -> Self {
         let mut cmd = Command::new(mcp_bin());
-        cmd.env("LOCUS_HOME", locus_home)
+        cmd.args(args)
+            .env("LOCUS_HOME", locus_home)
             // Default off so tests without workspace defaults stay unpinned.
             .env("LOCUS_MCP_AUTO_PIN", "0")
             .stdin(Stdio::piped())
@@ -324,6 +335,9 @@ fn unpinned_tools_list_only_control_tools_ndjson() {
     );
 
     let list = client.request("tools/list", json!({}));
+    let expected: Value =
+        serde_json::from_str(include_str!("fixtures/catalog_unpinned.json")).unwrap();
+    assert_eq!(list["result"], expected, "unpinned catalog changed");
     let tools = list["result"]["tools"].as_array().expect("tools array");
     assert!(!tools.is_empty());
     // locus_whoami always first
@@ -932,6 +946,215 @@ fn pinned_upstream_auto_spawn_list_and_call() {
     assert!(!is_err, "github.scope failed: {text}");
     assert!(text.contains("acme"));
     assert!(!text.contains("GH_TOKEN_ACME"));
+}
+
+#[cfg(unix)]
+mod upstream_lifetime {
+    use super::*;
+    use std::os::fd::OwnedFd;
+    use std::time::Instant;
+
+    const SERVER: &str = r#"
+import json, os, pathlib, subprocess, sys, time
+root = pathlib.Path(sys.argv[1])
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+(root / 'upstream-pids').write_text(str(os.getpid()) + '\n' + str(child.pid))
+for line in sys.stdin:
+    msg = json.loads(line)
+    if 'id' not in msg:
+        continue
+    if msg['method'] == 'initialize':
+        result = {'protocolVersion': '2024-11-05', 'capabilities': {},
+            'serverInfo': {'name': 'lifetime-fixture', 'version': '0'}}
+    elif msg['method'] == 'tools/list':
+        result = {'tools': [{'name': 'ping', 'description': 'ping', 'inputSchema': {'type': 'object'}}]}
+    else:
+        result = {'content': [{'type': 'text', 'text': 'pong'}], 'isError': False}
+    print(json.dumps({'jsonrpc': '2.0', 'id': msg['id'], 'result': result}), flush=True)
+(root / 'upstream-eof').write_text('stdin closed')
+time.sleep(60) # Deliberately ignore EOF after acknowledging it.
+"#;
+
+    struct TreeCleanup {
+        marker: PathBuf,
+        armed: bool,
+    }
+
+    impl TreeCleanup {
+        fn pids(&self) -> Vec<i32> {
+            std::fs::read_to_string(&self.marker)
+                .unwrap_or_default()
+                .lines()
+                .map(|line| line.parse().unwrap())
+                .collect()
+        }
+    }
+
+    impl Drop for TreeCleanup {
+        fn drop(&mut self) {
+            if self.armed {
+                let pids = self.pids();
+                if let Some(worker) = pids.first() {
+                    unsafe { libc::kill(-*worker, libc::SIGKILL) };
+                }
+                for pid in pids {
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+        }
+    }
+
+    fn running(pid: i32) -> bool {
+        if unsafe { libc::kill(pid, 0) } == -1
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            return false;
+        }
+        // Orphan zombies are dead, although PID 1 may not have reaped them yet.
+        #[cfg(target_os = "linux")]
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            if stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, tail)| tail.starts_with('Z'))
+            {
+                return false;
+            }
+        }
+        #[cfg(target_os = "macos")]
+        unsafe {
+            let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+            let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+            if libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            ) == size
+                && info.assume_init().pbi_status == libc::SZOMB
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn wait_until(description: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(Instant::now() < deadline, "timed out: {description}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn disconnect(kill: bool) {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&Binding::from_body(BindingBody {
+                id: "bnd_lifetime".into(),
+                alias: "lifetime".into(),
+                tenant: "synthetic".into(),
+                principal: None,
+                description: None,
+                policy: Policy::default(),
+                providers: vec![ProviderBinding {
+                    provider: "github".into(),
+                    account: "synthetic".into(),
+                    credential_ref: "env:LOCUS_UNUSED_LIFETIME_FIXTURE".into(),
+                    scope: Scope {
+                        orgs: vec!["synthetic".into()],
+                        ..Scope::default()
+                    },
+                    upstream: Some(
+                        UpstreamSpec::new("python3")
+                            .with_args(["-u", "-c", SERVER, dir.path().to_str().unwrap()])
+                            .resolve_secrets(false),
+                    ),
+                }],
+            }))
+            .unwrap();
+        store
+            .pin(
+                "lifetime",
+                dir.path(),
+                Some("mcp-lifetime-test".into()),
+                false,
+            )
+            .unwrap();
+        let mut cleanup = TreeCleanup {
+            marker: dir.path().join("upstream-pids"),
+            armed: true,
+        };
+        let mut client = McpClient::spawn_opts(
+            dir.path(),
+            Framing::Ndjson,
+            None,
+            &[
+                ("HOME", dir.path().to_str().unwrap()),
+                ("LOCUS_WORKER_SANDBOX", "0"),
+            ],
+        );
+        handshake(&mut client);
+        let response = client.request(
+            "tools/call",
+            json!({"name": "github.ping", "arguments": {}}),
+        );
+        let (text, error) = McpClient::tool_text(&response);
+        assert!(
+            !error && text.contains("pong"),
+            "fixture failed to start: {text}"
+        );
+        let pids = cleanup.pids();
+        assert_eq!(
+            pids.len(),
+            2,
+            "upstream must publish worker and descendant PIDs"
+        );
+        if kill {
+            client.child.kill().unwrap(); // SIGKILL bypasses MCP teardown and Drop.
+            client.child.wait().unwrap();
+        } else {
+            // Swap in an inert owned descriptor so the original pipe closes
+            // without leaking a raw fd or changing the existing client helper.
+            let inert: OwnedFd = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/null")
+                .unwrap()
+                .into();
+            drop(std::mem::replace(&mut client.stdin, inert.into()));
+            wait_until("locus-mcp exits on client stdin EOF", || {
+                if let Some(status) = client.child.try_wait().unwrap() {
+                    assert!(
+                        status.success(),
+                        "locus-mcp failed during EOF shutdown: {status}"
+                    );
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        wait_until("upstream worker and descendant terminate", || {
+            pids.iter().all(|pid| !running(*pid))
+        });
+        assert!(
+            dir.path().join("upstream-eof").exists(),
+            "upstream stdin must close before forced cleanup"
+        );
+        cleanup.armed = false;
+    }
+
+    #[test]
+    fn killing_locus_mcp_leaves_no_upstream_survivors() {
+        disconnect(true);
+    }
+
+    #[test]
+    fn locus_mcp_stdin_eof_reaps_upstream_process_tree() {
+        disconnect(false);
+    }
 }
 
 #[test]
@@ -2905,4 +3128,487 @@ fn control_tools_reject_mistyped_arguments() {
     let (text, is_err) = McpClient::tool_text(&resp);
     assert!(is_err, "{text}");
     assert!(text.contains("locus_list_bindings"), "{text}");
+}
+
+/// Two independently launched providers intentionally expose the same upstream
+/// names. Startup logs let assertions distinguish routing from accidental fanout.
+fn routed_binding(root: &std::path::Path, policy: Policy) -> Binding {
+    let script = mock_upstream_script()
+        .replace(
+            "pathlib.Path(sys.argv[1]).write_text(os.environ.get(\"GH_TOKEN\", \"missing\"))",
+            "with open(sys.argv[1], 'a') as marker: marker.write(str(os.getpid()) + '\\n')",
+        )
+        .replace("\"pong\"", "os.environ['LOCUS_WORKER_PROVIDER'] + ':pong'")
+        .replace(
+            "args.get(\"text\",\"\")",
+            "os.environ['LOCUS_WORKER_PROVIDER'] + ':' + args.get('text','')",
+        );
+    Binding::from_body(BindingBody {
+        id: "bnd_router".into(),
+        alias: "router".into(),
+        tenant: "router-tenant".into(),
+        principal: None,
+        description: None,
+        policy,
+        providers: ["github", "supabase"]
+            .into_iter()
+            .map(|provider| ProviderBinding {
+                provider: provider.into(),
+                account: format!("router-{provider}"),
+                credential_ref: "env:ROUTER_UNUSED_CREDENTIAL".into(),
+                scope: Scope {
+                    project_ref: (provider == "supabase").then(|| "router-project".into()),
+                    orgs: if provider == "github" {
+                        vec!["router-org".into()]
+                    } else {
+                        Vec::new()
+                    },
+                    ..Scope::default()
+                },
+                upstream: Some(
+                    UpstreamSpec::new("python3").with_args([
+                        "-u".into(),
+                        "-c".into(),
+                        script.clone(),
+                        root.join(format!("{provider}.starts"))
+                            .display()
+                            .to_string(),
+                    ]),
+                ),
+            })
+            .collect(),
+    })
+}
+
+fn pin_routed_binding(store: &Store, root: &std::path::Path, binding: &Binding) {
+    store.save_binding(binding).unwrap();
+    store
+        .pin("router", root, Some("route-tests".into()), false)
+        .unwrap();
+}
+
+#[test]
+fn route_multiplexes_colliding_tools_reuses_workers_and_keeps_discovery_cold() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    pin_routed_binding(
+        &store,
+        dir.path(),
+        &routed_binding(dir.path(), Policy::default()),
+    );
+    let mut client = McpClient::spawn_args(
+        dir.path(),
+        Framing::ContentLength,
+        None,
+        &[],
+        &[
+            "--route", "github", "--route", "supabase", "--route", "github",
+        ],
+    );
+    handshake(&mut client);
+    let cold = client.request("tools/list", json!({}));
+    assert!(cold["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|t| { !matches!(t["name"].as_str(), Some("github.ping" | "supabase.ping")) }));
+    for provider in ["github", "supabase"] {
+        assert!(!dir.path().join(format!("{provider}.starts")).exists());
+    }
+    for (index, provider) in ["github", "supabase", "github", "supabase"]
+        .into_iter()
+        .enumerate()
+    {
+        for (tool, args, expected) in [
+            ("ping", json!({}), format!("{provider}:pong")),
+            (
+                "echo",
+                json!({"text":"routed"}),
+                format!("{provider}:routed"),
+            ),
+        ] {
+            let response = client.request(
+                "tools/call",
+                json!({
+                    "name": format!("{provider}.{tool}"), "arguments": args,
+                }),
+            );
+            let (text, error) = McpClient::tool_text(&response);
+            assert!(!error && text.contains(&expected), "{response}");
+        }
+        if index == 0 {
+            assert!(
+                !dir.path().join("supabase.starts").exists(),
+                "GitHub call started Supabase"
+            );
+        }
+        if provider == "github" {
+            let count = std::fs::read_to_string(dir.path().join("github.starts")).unwrap();
+            assert_eq!(count.lines().count(), 1);
+        }
+    }
+    let warm = client.request("tools/list", json!({}));
+    let tools = warm["result"]["tools"].as_array().unwrap();
+    for provider in ["github", "supabase"] {
+        let starts =
+            std::fs::read_to_string(dir.path().join(format!("{provider}.starts"))).unwrap();
+        assert_eq!(starts.lines().count(), 1, "worker was respawned");
+        for tool in ["ping", "echo", "scope"] {
+            let name = format!("{provider}.{tool}");
+            assert_eq!(tools.iter().filter(|t| t["name"] == name).count(), 1);
+        }
+    }
+}
+
+#[test]
+fn route_excludes_synthetic_and_upstream_tools_before_worker_start() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    pin_routed_binding(
+        &store,
+        dir.path(),
+        &routed_binding(dir.path(), Policy::default()),
+    );
+    let mut client = McpClient::spawn_args(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[],
+        &["--route", "github"],
+    );
+    handshake(&mut client);
+    let list = client.request("tools/list", json!({}));
+    let tools = list["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|t| t["name"] == "github.scope"));
+    assert!(tools
+        .iter()
+        .all(|t| !t["name"].as_str().unwrap().starts_with("supabase.")));
+    for name in ["supabase.scope", "supabase.ping", "vercel.scope"] {
+        let response = client.request("tools/call", json!({"name":name,"arguments":{}}));
+        let (text, error) = McpClient::tool_text(&response);
+        assert!(error && text.contains("route_not_enabled"), "{response}");
+    }
+    assert!(!dir.path().join("github.starts").exists());
+    assert!(!dir.path().join("supabase.starts").exists());
+}
+
+#[test]
+fn route_invalid_binding_selection_fails_closed_but_control_tools_work() {
+    for missing in [true, false] {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut binding = routed_binding(dir.path(), Policy::default());
+        if missing {
+            binding.providers.retain(|p| p.provider != "supabase");
+        } else {
+            binding.providers[1].upstream = None;
+        }
+        pin_routed_binding(&store, dir.path(), &binding);
+        let mut client = McpClient::spawn_args(
+            dir.path(),
+            Framing::Ndjson,
+            None,
+            &[],
+            &["--route", "github", "--route", "supabase"],
+        );
+        handshake(&mut client);
+        let list = client.request("tools/list", json!({}));
+        assert!(
+            list["error"].to_string().contains("invalid_route"),
+            "{list}"
+        );
+        let response = client.request("tools/call", json!({"name":"github.ping","arguments":{}}));
+        let (text, error) = McpClient::tool_text(&response);
+        assert!(error && text.contains("invalid_route"), "{response}");
+        let response = client.request("tools/call", json!({"name":"locus_whoami","arguments":{}}));
+        assert!(response.get("result").is_some(), "{response}");
+        assert!(!dir.path().join("github.starts").exists());
+    }
+}
+
+#[test]
+fn route_preserves_scope_and_approval_gates_without_spawning() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let binding = routed_binding(
+        dir.path(),
+        Policy {
+            require_approval: vec!["github.ping".into()],
+            ..Policy::default()
+        },
+    );
+    pin_routed_binding(&store, dir.path(), &binding);
+    let mut client = McpClient::spawn_args(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[],
+        &["--route", "github", "--route", "supabase"],
+    );
+    handshake(&mut client);
+    for (name, args, expected) in [
+        (
+            "supabase.ping",
+            json!({"project_ref":"another-tenant"}),
+            "scope freeze",
+        ),
+        ("github.ping", json!({}), "requires_approval"),
+    ] {
+        let response = client.request("tools/call", json!({"name":name,"arguments":args}));
+        let (text, error) = McpClient::tool_text(&response);
+        assert!(error && text.contains(expected), "{response}");
+    }
+    assert_eq!(store.pending_approvals().unwrap().len(), 1);
+    assert!(!dir.path().join("github.starts").exists());
+    assert!(!dir.path().join("supabase.starts").exists());
+}
+
+#[test]
+fn route_does_not_supply_pin_or_executor_authority() {
+    for pinned in [false, true] {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        if pinned {
+            pin_routed_binding(
+                &store,
+                dir.path(),
+                &routed_binding(dir.path(), Policy::default()),
+            );
+        }
+        let mut client = McpClient::spawn_args(
+            dir.path(),
+            Framing::Ndjson,
+            None,
+            &[(locus_core::EXECUTOR_CAPABILITY_ENV, "")],
+            &["--route", "github"],
+        );
+        handshake(&mut client);
+        let list = client.request("tools/list", json!({}));
+        assert!(list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["name"].as_str().unwrap().starts_with("locus_")));
+        let response = client.request("tools/call", json!({"name":"github.ping","arguments":{}}));
+        assert!(McpClient::tool_text(&response).1, "{response}");
+        assert!(!dir.path().join("github.starts").exists());
+    }
+}
+
+#[test]
+fn route_recursion_markers_refuse_startup_without_protocol_output() {
+    for marker in ["LOCUS_MCP_UPSTREAM_CHILD", "LOCUS_WORKER_PROVIDER"] {
+        for value in ["", "1"] {
+            let dir = tempdir().unwrap();
+            let output = Command::new(mcp_bin())
+                .args(["--route", "github"])
+                .env("LOCUS_HOME", dir.path())
+                .env(marker, value)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(!output.status.success());
+            assert!(
+                output.stdout.is_empty(),
+                "recursive launch wrote to protocol stdout"
+            );
+            assert!(String::from_utf8_lossy(&output.stderr).contains("recursive"));
+        }
+    }
+}
+
+#[test]
+fn route_recursive_upstream_is_stopped_before_nested_router_handshake() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let mut binding = routed_binding(dir.path(), Policy::default());
+    binding.providers[0].upstream = Some(UpstreamSpec::new(mcp_bin().display().to_string()));
+    pin_routed_binding(&store, dir.path(), &binding);
+    let mut client = McpClient::spawn_args(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[],
+        &["--route", "github"],
+    );
+    handshake(&mut client);
+    let response = client.request("tools/call", json!({"name":"github.ping","arguments":{}}));
+    let (text, error) = McpClient::tool_text(&response);
+    assert!(error && text.contains("worker_ensure_failed"), "{response}");
+    let response = client.request("tools/call", json!({"name":"locus_whoami","arguments":{}}));
+    assert!(
+        response.get("result").is_some(),
+        "router must remain available"
+    );
+}
+
+#[test]
+fn route_rejects_malformed_options_without_echoing_values() {
+    for args in [
+        vec!["--route"],
+        vec!["--route="],
+        vec!["--route=--route=github"],
+        vec!["--route", "github.ping"],
+        vec!["--route", "tenant__github"],
+        vec!["--route", "GitHub"],
+        vec!["--route", "https://secret.invalid/token"],
+        vec!["--route", "github", "--multi-tenant"],
+    ] {
+        let dir = tempdir().unwrap();
+        let output = Command::new(mcp_bin())
+            .args(&args)
+            .env("LOCUS_HOME", dir.path())
+            .env_remove("LOCUS_MCP_HTTP")
+            .env_remove("LOCUS_MCP_MULTI_TENANT")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "invalid options accepted: {args:?}"
+        );
+        assert!(output.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("secret.invalid"));
+    }
+}
+
+#[test]
+fn route_cached_workers_cannot_follow_drift_or_another_tenants_pin() {
+    for repin in [false, true] {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut binding = routed_binding(dir.path(), Policy::default());
+        pin_routed_binding(&store, dir.path(), &binding);
+        let mut client =
+            McpClient::spawn_args(dir.path(), Framing::Ndjson, None, &[], &["--route=github"]);
+        handshake(&mut client);
+        let response = client.request("tools/call", json!({"name":"github.ping","arguments":{}}));
+        assert!(!McpClient::tool_text(&response).1, "{response}");
+        if repin {
+            beta_binding(&store);
+            store.leave().unwrap();
+            store
+                .pin("beta", dir.path(), Some("route-repin".into()), false)
+                .unwrap();
+        } else {
+            binding.providers[0].scope.orgs = vec!["different-org".into()];
+            store.save_binding(&binding).unwrap();
+        }
+        let response = client.request("tools/call", json!({"name":"github.ping","arguments":{}}));
+        let (text, error) = McpClient::tool_text(&response);
+        let expected = if repin {
+            "pin_changed"
+        } else {
+            "session_frozen"
+        };
+        assert!(error && text.contains(expected), "{response}");
+        let list = client.request("tools/list", json!({}));
+        assert!(list["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|t| t["name"].as_str().unwrap().starts_with("locus_")));
+        let starts = std::fs::read_to_string(dir.path().join("github.starts")).unwrap();
+        assert_eq!(starts.lines().count(), 1);
+    }
+}
+
+#[test]
+fn route_requires_an_exclusive_binding_even_for_namespaced_tool_calls() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    store
+        .save_binding(&routed_binding(dir.path(), Policy::default()))
+        .unwrap();
+    beta_binding(&store);
+    store
+        .pin_namespaced(
+            &["router".into(), "beta".into()],
+            dir.path(),
+            Some("route-namespaced".into()),
+            false,
+        )
+        .unwrap();
+    let mut client = McpClient::spawn_args(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[],
+        &["--route", "github"],
+    );
+    handshake(&mut client);
+    let list = client.request("tools/list", json!({}));
+    assert!(
+        list["error"].to_string().contains("invalid_route"),
+        "{list}"
+    );
+    let response = client.request(
+        "tools/call",
+        json!({"name":"router__github.ping","arguments":{}}),
+    );
+    let (text, error) = McpClient::tool_text(&response);
+    assert!(error && text.contains("invalid_route"), "{response}");
+    assert!(!dir.path().join("github.starts").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn route_never_launches_an_executable_named_locus_mcp() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let marker = dir.path().join("recursive-started");
+    let executable = dir.path().join("locus-mcp");
+    std::fs::write(&executable, "#!/bin/sh\ntouch \"$1\"\nexit 1\n").unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut binding = routed_binding(dir.path(), Policy::default());
+    binding.providers[0].upstream = Some(
+        UpstreamSpec::new(executable.display().to_string())
+            .with_args([marker.display().to_string()]),
+    );
+    pin_routed_binding(&store, dir.path(), &binding);
+    let mut client = McpClient::spawn_args(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[],
+        &["--route", "github"],
+    );
+    handshake(&mut client);
+    let response = client.request("tools/call", json!({"name":"github.ping","arguments":{}}));
+    let (text, error) = McpClient::tool_text(&response);
+    assert!(error && text.contains("recursive"), "{response}");
+    assert!(
+        !marker.exists(),
+        "recursive executable was launched before refusal"
+    );
+}
+
+#[test]
+fn route_wrapper_cannot_bypass_upstream_child_recursion_guard() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let marker = dir.path().join("wrapper-started");
+    let mut binding = routed_binding(dir.path(), Policy::default());
+    binding.providers[0].upstream = Some(UpstreamSpec::new("python3").with_args([
+        "-c".into(),
+        "import os, pathlib, sys; pathlib.Path(sys.argv[1]).write_text(os.environ.get('LOCUS_WORKER_PROVIDER', 'missing')); os.execv(sys.argv[2], [sys.argv[2]])".into(),
+        marker.display().to_string(),
+        mcp_bin().display().to_string(),
+    ]));
+    pin_routed_binding(&store, dir.path(), &binding);
+    let mut client = McpClient::spawn_args(
+        dir.path(),
+        Framing::Ndjson,
+        None,
+        &[],
+        &["--route", "github"],
+    );
+    handshake(&mut client);
+    let response = client.request("tools/call", json!({"name":"github.ping","arguments":{}}));
+    let (text, error) = McpClient::tool_text(&response);
+    assert!(error && text.contains("worker_ensure_failed"), "{response}");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "github");
+    let response = client.request("tools/call", json!({"name":"locus_whoami","arguments":{}}));
+    assert!(response.get("result").is_some());
 }

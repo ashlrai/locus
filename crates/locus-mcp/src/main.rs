@@ -24,6 +24,13 @@ mod anchor;
 mod grant;
 mod http_session;
 mod peers;
+mod tool_catalog;
+mod tool_control;
+mod tool_dispatch;
+
+use tool_catalog::handle_tools_list;
+use tool_dispatch::{handle_tools_call, tool_text};
+mod route;
 
 use anchor::{AnchorDecision, SessionAnchor};
 use anyhow::{bail, Context, Result};
@@ -33,10 +40,8 @@ use http_session::{
     HttpSessionPinSummary, HttpSessionTenant,
 };
 use locus_core::{
-    build_doctor_report, call_tool_gated, compute_safe_next, control_tools, enforce_policy,
-    find_workspace, gather_doctor_external, load_config, split_namespaced_tool, tools_for_binding,
-    validate_control_args, verify_claim, verify_session, AdapterTool, ApprovalGate, Binding,
-    Session, Store, WorkerManager, VERSION,
+    build_doctor_report, control_tools, find_workspace, gather_doctor_external, load_config,
+    verify_session, Binding, Session, Store, WorkerManager, VERSION,
 };
 use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
@@ -67,6 +72,12 @@ static MULTI_TENANT: AtomicBool = AtomicBool::new(false);
 /// Loaded once by the operator before serving. Client requests cannot replace
 /// the graph or select another node's identity.
 static SWARM_BROKER: OnceLock<SwarmBroker> = OnceLock::new();
+/// Immutable launch configuration; never supplied through model tool arguments.
+static ROUTES: OnceLock<route::Routes> = OnceLock::new();
+
+fn routes() -> &'static route::Routes {
+    ROUTES.get_or_init(route::Routes::default)
+}
 
 fn multi_tenant() -> bool {
     MULTI_TENANT.load(Ordering::SeqCst)
@@ -365,9 +376,14 @@ struct RunMode {
     multi_tenant: bool,
     swarm: Option<PathBuf>,
     peers: Option<PathBuf>,
+    routes: route::Routes,
 }
 
 fn main() {
+    if route::is_upstream_child() {
+        eprintln!("locus-mcp: refusing recursive multiplexor launch from an upstream worker");
+        std::process::exit(1);
+    }
     if let Some(result) = locus_core::run_authority_anchor_server_if_requested() {
         if let Err(error) = result {
             eprintln!("authority anchor error: {error}");
@@ -395,6 +411,9 @@ fn run() -> Result<()> {
             .set(SwarmBroker::new(graph))
             .map_err(|_| anyhow::anyhow!("swarm broker already initialized"))?;
     }
+    ROUTES
+        .set(mode.routes)
+        .map_err(|_| anyhow::anyhow!("MCP routes were already configured"))?;
     if mode.multi_tenant {
         // Multi-tenant validation authenticates EVERY tenant's sealed session
         // per request; executor capabilities are single-session, so the
@@ -446,6 +465,7 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
     let mut multi_tenant_flag = false;
     let mut swarm = None;
     let mut peers = None;
+    let mut routes = route::Routes::default();
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -472,6 +492,11 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
                 swarm = Some(PathBuf::from(path));
                 i += 1;
             }
+            "--route" => {
+                i += 1;
+                let provider = args.get(i).context("--route requires a provider name")?;
+                routes.insert(provider)?;
+            }
             "--multi-tenant" => {
                 multi_tenant_flag = true;
             }
@@ -497,6 +522,9 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
                 http_flag = true;
                 http_arg = Some(other.trim_start_matches("--http=").to_string());
             }
+            other if other.starts_with("--route=") => {
+                routes.insert(&other["--route=".len()..])?;
+            }
             other => {
                 bail!("unknown argument: {other} (try --help)");
             }
@@ -512,6 +540,9 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
     if swarm.is_some() && (!multi_tenant || (!http_flag && !env_http)) {
         bail!("--swarm requires --http and --multi-tenant");
     }
+    if multi_tenant && routes.is_enabled() {
+        bail!("--route selects providers from one pinned binding and cannot be combined with --multi-tenant");
+    }
     if !http_flag && !env_http {
         if multi_tenant {
             // Fail closed: multi-tenant is meaningless without per-request
@@ -523,6 +554,7 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
             multi_tenant: false,
             swarm: None,
             peers: None,
+            routes,
         });
     }
 
@@ -540,6 +572,7 @@ fn parse_run_mode(args: impl IntoIterator<Item = String>) -> Result<RunMode> {
         multi_tenant,
         swarm,
         peers,
+        routes,
     })
 }
 
@@ -548,6 +581,7 @@ fn print_help() {
         "locus-mcp {VERSION} — MCP multiplexor (pin-scoped tools)\n\n\
          Usage:\n\
            locus-mcp                 stdio MCP (Claude Code / Cursor default)\n\
+           locus-mcp --route PROVIDER  only selected pinned upstreams (repeatable; needs supervision)\n\
            locus-mcp --http [ADDR]   Streamable-HTTP-lite on ADDR (default {DEFAULT_HTTP_ADDR})\n\
            locus-mcp --http --multi-tenant   per-request tenant routing via\n\
                                      X-Locus-Tenant-Token (mint: `locus mcp mint`)\n\
@@ -588,7 +622,29 @@ fn env_truthy(key: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn teardown_stdio_workers(wait: bool) {
+    let manager = if wait {
+        Some(worker_manager().lock().unwrap_or_else(|e| e.into_inner()))
+    } else {
+        worker_manager().try_lock().ok()
+    };
+    if let Some(mut manager) = manager {
+        for slot in manager.list() {
+            let _ = manager.teardown(&slot.key);
+        }
+    }
+}
+
 fn run_stdio() -> Result<()> {
+    // Static managers do not run Drop at process exit. Match the companion
+    // spawn-leak change's teardown hook for EOF and transport errors.
+    struct Teardown;
+    impl Drop for Teardown {
+        fn drop(&mut self) {
+            teardown_stdio_workers(true);
+        }
+    }
+    let _teardown = Teardown;
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = stdin.lock();
@@ -3339,1291 +3395,6 @@ fn build_locus_context_prompt(scope: &RequestScope) -> String {
     lines.join("\n")
 }
 
-// ─── Tools list / call ──────────────────────────────────────────────────────
-
-/// Error body for `locus_whoami`. A server launched without an executor
-/// capability (the plain client entry) cannot observe the pin at all; it must
-/// not claim `pinned: false` or tell the human to re-pin, which never helps.
-fn whoami_error_body(e: &locus_core::LocusError) -> Value {
-    if matches!(e, locus_core::LocusError::ExecutorAuthorityUnavailable(_)) {
-        return json!({
-            "pinned": Value::Null,
-            "status": EXECUTOR_AUTHORITY_ISSUE,
-            "error": e.to_string(),
-            "hint": EXECUTOR_AUTHORITY_HINT,
-        });
-    }
-    json!({
-        "pinned": false,
-        "error": e.to_string(),
-        "hint": "Run `locus pin <alias>` in this workspace. Agents: locus_enter_hint."
-    })
-}
-
-/// Map tools to MCP list payload; ensure `locus_whoami` first + locus tags.
-fn tools_list_payload(mut tools: Vec<AdapterTool>, pin_alias: Option<&str>) -> Value {
-    tag_tool_descriptions(&mut tools, pin_alias);
-    ensure_whoami_first(&mut tools);
-    let list: Vec<Value> = tools
-        .into_iter()
-        .map(|t| {
-            json!({
-                "name": t.name,
-                "description": t.description,
-                "inputSchema": t.input_schema,
-            })
-        })
-        .collect();
-    json!({ "tools": list })
-}
-
-fn ensure_whoami_first(tools: &mut Vec<AdapterTool>) {
-    if let Some(i) = tools.iter().position(|t| t.name == "locus_whoami") {
-        if i != 0 {
-            let t = tools.remove(i);
-            tools.insert(0, t);
-        }
-    }
-}
-
-/// Prefix every tool description with `[locus:<alias|unpinned>]`.
-fn tag_tool_descriptions(tools: &mut [AdapterTool], pin_alias: Option<&str>) {
-    for t in tools.iter_mut() {
-        if t.description.starts_with("[locus:") {
-            continue;
-        }
-        let tag = if t.name.starts_with("locus_") {
-            match pin_alias {
-                Some(a) => format!("[locus:{a}]"),
-                None => "[locus:unpinned]".into(),
-            }
-        } else if let Some((alias, _)) = split_namespaced_tool(&t.name) {
-            format!("[locus:{alias}]")
-        } else {
-            match pin_alias {
-                Some(a) => format!("[locus:{a}]"),
-                None => "[locus:unpinned]".into(),
-            }
-        };
-        // Drop legacy `[alias] ` prefix from namespaced soft-fail path if present.
-        let rest = t.description.as_str();
-        let rest = if rest.starts_with('[') && !rest.starts_with("[locus:") {
-            if let Some(idx) = rest.find("] ") {
-                &rest[idx + 2..]
-            } else {
-                rest
-            }
-        } else {
-            rest
-        };
-        t.description = format!("{tag} {rest}");
-    }
-}
-
-/// Policy-aware presentation shaping of the provider tool catalog.
-///
-/// Per tool: resolve the owning binding and the bare `provider.tool` name
-/// (stripping the `alias__` namespace prefix so policy globs see the exact
-/// string the call gate evaluates), then delegate to
-/// [`locus_core::adapters::shape_catalog_tool`]:
-/// - destructive tools of a `read_only = true` provider scope are omitted;
-/// - `require_approval`-gated tools get a description marker.
-///
-/// Presentation only — call-time enforcement is untouched, and a hidden tool
-/// invoked anyway still hits the same call-time denial. Control (`locus_*`)
-/// tools never pass through here.
-fn shape_provider_catalog(
-    tools: Vec<AdapterTool>,
-    session: &Session,
-    bindings: &[(String, Binding)],
-) -> Vec<AdapterTool> {
-    let mut out = Vec::with_capacity(tools.len());
-    for mut t in tools {
-        // Resolve (binding, bare name) without holding a borrow on `t`.
-        let resolved: Option<(&Binding, String)> = if session.is_namespaced() {
-            split_namespaced_tool(&t.name).and_then(|(alias, bare)| {
-                bindings
-                    .iter()
-                    .find(|(a, _)| a == alias)
-                    .map(|(_, b)| (b, bare.to_string()))
-            })
-        } else {
-            bindings.first().map(|(_, b)| (b, t.name.clone()))
-        };
-        let keep = match resolved {
-            Some((binding, bare)) => {
-                locus_core::adapters::shape_catalog_tool(binding, &bare, &mut t)
-            }
-            // Unresolvable owner (should not happen): leave listing untouched —
-            // shaping is presentation-only and never a gate.
-            None => true,
-        };
-        if keep {
-            out.push(t);
-        }
-    }
-    out
-}
-
-/// Unpinned / frozen / invalid seal ⇒ only locus_* control tools.
-/// Healthy pin ⇒ control + provider tools (synthetic + upstream MCP when declared).
-/// Namespaced multi-bind prefixes tools as `alias__tool`.
-fn handle_tools_list(scope: &RequestScope) -> std::result::Result<Value, Value> {
-    if let Some(broker) = SWARM_BROKER.get() {
-        let s = store().map_err(|_| rpc_error(-32000, "swarm store unavailable".into()))?;
-        // Even control tools disappear when the grant/session is unhealthy.
-        // The existing catalog builder still enforces every binding policy and
-        // anchor check; the graph is an additional intersection, never a union.
-        let catalog = if swarm_scope_healthy(&s, scope) {
-            handle_binding_tools_list(scope)?
-        } else {
-            json!({"tools": []})
-        };
-        return broker
-            .filter_catalog(&s, scope.tenant.as_ref(), catalog)
-            .map_err(|_| rpc_error(-32000, "swarm audit unavailable".into()));
-    }
-    handle_binding_tools_list(scope)
-}
-
-fn swarm_scope_healthy(s: &Store, scope: &RequestScope) -> bool {
-    scope
-        .tenant
-        .as_ref()
-        .is_some_and(|t| tenant_grant_recheck(s, t).is_ok())
-        && scope_drift(s, scope).is_ok_and(|drift| drift.ok)
-        && scope.anchor.get().is_none_or(|a| {
-            anchor_matches_current(&a, scope_identity_observation(s, scope).as_ref())
-        })
-}
-
-fn handle_binding_tools_list(scope: &RequestScope) -> std::result::Result<Value, Value> {
-    // Advisory auto-pin probe when still unpinned (once per process; never
-    // grants authority). Tenant scopes never touch the global pin.
-    if scope.tenant.is_none() {
-        let _ = maybe_mcp_auto_pin();
-    }
-
-    let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
-    // Heartbeat on every tools/list: freeze session if binding material drifted.
-    let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
-
-    // Control tools always. `locus_providers` when a pin exists (even frozen).
-    let mut tools: Vec<AdapterTool> = control_tools(drift.pinned);
-    let pin_alias = drift.binding_alias.clone();
-
-    // Anchor check BEFORE the drift early-return so the catalog reflects the
-    // anchored identity even when a cross-process re-pin staled the executor
-    // grant (drift unhealthy but identity fields populated).
-    let session_anchor = scope.anchor.get();
-    if let (Some(anchored), true) = (&session_anchor, drift.pinned) {
-        if let Some(current) = anchor::drift_observation(&drift) {
-            if !anchored.same_primary_identity(&current) {
-                return Ok(tools_list_payload(
-                    control_tools(true),
-                    Some(anchored.binding_alias.as_str()),
-                ));
-            }
-        }
-    }
-
-    // Privileged provider catalog only when runtime is healthy (pinned, seal ok,
-    // unfrozen, unexpired, binding matches). Fail closed otherwise.
-    if !drift.ok {
-        debug_assert!(tools.iter().all(|t| t.name.starts_with("locus_")));
-        return Ok(tools_list_payload(tools, pin_alias.as_deref()));
-    }
-
-    let pinned = resolve_scope_session(scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
-    if let Some((ref session, ref bindings)) = pinned {
-        // Belt + suspenders: frozen session never lists provider tools.
-        if session.is_frozen() {
-            return Ok(tools_list_payload(
-                tools,
-                Some(session.binding_alias.as_str()),
-            ));
-        }
-        // Anchor observe on the healthy catalog path: establish on the first
-        // healthy pinned observation; on mismatch collapse to control tools
-        // tagged with the ANCHORED alias (fail closed, session-local).
-        let obs = anchor::observation(session, bindings);
-        match scope.anchor.observe(&obs, true) {
-            Some(AnchorDecision::Mismatch { anchored }) => {
-                if scope.anchor.note_mismatch(&anchored, &obs) {
-                    audit_anchor_event(
-                        "mcp.anchor_mismatch",
-                        &anchored.binding_alias,
-                        json!({
-                            "anchored": anchor::identity_json(&anchored),
-                            "current": anchor::identity_json(&obs),
-                            "underlying_issues": [],
-                        }),
-                    );
-                }
-                return Ok(tools_list_payload(
-                    tools,
-                    Some(anchored.binding_alias.as_str()),
-                ));
-            }
-            Some(AnchorDecision::Established) => {
-                audit_anchor_event(
-                    "mcp.anchor_established",
-                    &obs.binding_alias,
-                    json!({ "anchor": anchor::identity_json(&obs) }),
-                );
-            }
-            Some(AnchorDecision::Repinned) => {
-                audit_anchor_event(
-                    "mcp.anchor_repin",
-                    &obs.binding_alias,
-                    json!({ "anchor": anchor::identity_json(&obs) }),
-                );
-            }
-            Some(AnchorDecision::Match) | None => {}
-        }
-        tools.extend(peers::catalog(scope, bindings));
-        let mgr = worker_manager()
-            .lock()
-            .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
-        // Discovery is side-effect free: merge synthetic tools and schemas from
-        // workers that were already started by an authorized call. Never spawn
-        // a credential-bearing child from tools/list.
-        tools.extend(shape_provider_catalog(
-            mgr.tools_for_session(session, bindings),
-            session,
-            bindings,
-        ));
-        return Ok(tools_list_payload(
-            tools,
-            Some(session.binding_alias.as_str()),
-        ));
-    }
-    Ok(tools_list_payload(tools, pin_alias.as_deref()))
-}
-
-/// Control tools publish closed schemas (`additionalProperties: false`); hold
-/// calls to them before dispatch. An unknown `locus_*` name, a non-object
-/// `arguments`, or a key the schema does not declare is a JSON-RPC -32602,
-/// the same answer an unknown provider tool gets. Value checks (blank or
-/// non-string `alias`, ...) stay in the tools so they can name the next step.
-fn check_control_args(name: &str, args: &Value) -> std::result::Result<(), Value> {
-    let tools = control_tools(true);
-    let Some(tool) = tools.iter().find(|t| t.name == name) else {
-        // A mistyped control name (`locus_whoam`) names the tool it was
-        // probably meant to be, so the agent retries instead of listing.
-        let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-        let hint = locus_core::nearest_alias(name, &names)
-            .map(|n| format!(" Did you mean `{n}`?"))
-            .unwrap_or_default();
-        return Err(rpc_error(
-            -32602,
-            format!("unknown tool `{name}`: control tools are listed by tools/list.{hint}"),
-        ));
-    };
-    let Some(obj) = args.as_object() else {
-        return Err(rpc_error(
-            -32602,
-            format!("invalid arguments for `{name}`: expected a JSON object"),
-        ));
-    };
-    let declared = tool
-        .input_schema
-        .get("properties")
-        .and_then(Value::as_object);
-    let mut undeclared: Vec<&str> = obj
-        .keys()
-        .map(String::as_str)
-        .filter(|k| !declared.is_some_and(|d| d.contains_key(*k)))
-        .collect();
-    if undeclared.is_empty() {
-        return Ok(());
-    }
-    undeclared.sort_unstable();
-    let mut allowed: Vec<&str> = declared
-        .map(|d| d.keys().map(String::as_str).collect())
-        .unwrap_or_default();
-    allowed.sort_unstable();
-    let allowed_owned: Vec<String> = allowed.iter().map(|k| k.to_string()).collect();
-    let suggestions: Vec<String> = undeclared
-        .iter()
-        .filter_map(|k| {
-            locus_core::nearest_alias(k, &allowed_owned).map(|near| format!("`{k}` -> `{near}`"))
-        })
-        .collect();
-    let hint = if suggestions.is_empty() {
-        String::new()
-    } else {
-        format!(" Did you mean {}?", suggestions.join(", "))
-    };
-    Err(rpc_error(
-        -32602,
-        format!(
-            "invalid arguments for `{name}`: undeclared argument(s) [{}]; the schema allows [{}] (additionalProperties: false).{hint}",
-            undeclared.join(", "),
-            allowed.join(", ")
-        ),
-    ))
-}
-
-fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Result<Value, Value> {
-    let name = params
-        .get("name")
-        .and_then(|n| n.as_str())
-        .ok_or_else(|| rpc_error(-32602, "missing tool name".into()))?;
-    if let Some(broker) = SWARM_BROKER.get() {
-        let s = store().map_err(|_| rpc_error(-32000, "swarm store unavailable".into()))?;
-        let healthy = swarm_scope_healthy(&s, scope);
-        let allowed = broker
-            .authorize_call(&s, scope.tenant.as_ref(), name, healthy)
-            .map_err(|_| rpc_error(-32000, "swarm audit unavailable".into()))?;
-        if !allowed {
-            return Err(rpc_error(
-                -32003,
-                "tool unavailable for this swarm agent".into(),
-            ));
-        }
-    }
-    let args = match params.get("arguments") {
-        None | Some(Value::Null) => json!({}),
-        Some(v) => v.clone(),
-    };
-
-    // Control tools (allowed even when frozen — whoami/status/heartbeat report freeze)
-    if name.starts_with("locus_") {
-        check_control_args(name, &args)?;
-        return call_control(name, &args, scope);
-    }
-
-    // Every provider tool is `provider.tool` (namespaced: `alias__provider.tool`),
-    // so a dotless name is unknown to every binding. Say so before the runtime
-    // health checks: the answer needs no pin and reveals nothing about one.
-    if !name.contains('.') {
-        return Err(rpc_error(
-            -32602,
-            format!(
-                "unknown tool `{name}`: provider tools are named `provider.tool` and control tools `locus_*`; see tools/list"
-            ),
-        ));
-    }
-
-    // Provider tools require a healthy pin
-    let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
-
-    // Continuous drift check — freezes session if binding file mutated.
-    let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
-
-    // Tenant grant death (revoked / expired / swept) outranks every other
-    // refusal — never a silent identity fallback.
-    if let Some(t) = &scope.tenant {
-        if let Some(issue) = drift
-            .issues
-            .iter()
-            .find(|i| i.starts_with("grant_"))
-            .cloned()
-        {
-            return Ok(tool_text(
-                json!({
-                    "error": issue,
-                    "grant_id": t.grant_id,
-                    "safe_next": format!("locus mcp mint --binding {}", t.binding_alias),
-                    "hint": "this tenant grant is no longer valid; the operator must mint a fresh token",
-                }),
-                true,
-            ));
-        }
-    }
-
-    // Anchored-identity check BEFORE the drift early-returns: a cross-process
-    // re-pin stales the executor grant, so drift is already unhealthy — the
-    // wrong-account refusal (`pin_changed`) must outrank `runtime_unhealthy`.
-    // RuntimeDrift carries identity fields even when unhealthy; drift.issues
-    // ride along as underlying_issues so the authority-plane facts stay
-    // visible. Establishment never happens here (unhealthy observations).
-    let session_anchor = scope.anchor.get();
-    if let (Some(anchored), true) = (&session_anchor, drift.pinned) {
-        if let Some(current) = anchor::drift_observation(&drift) {
-            if !anchored.same_primary_identity(&current) {
-                return Ok(pin_changed_refusal(
-                    &scope.anchor,
-                    anchored,
-                    &current,
-                    &drift.issues,
-                ));
-            }
-        }
-    }
-
-    // Fail closed on any unhealthy runtime (invalid seal, freeze, expiry, drift).
-    if !drift.ok {
-        if !drift.pinned {
-            let mut body = json!({
-                "error": "not_pinned",
-                "issues": drift.issues,
-                "hint": "Human must run: locus enter <alias> (or `locus pin <alias>`). Agents: locus_enter_hint / locus_request_pin."
-            });
-            attach_anchor_context(&mut body, session_anchor.as_ref());
-            return Ok(tool_text(body, true));
-        }
-        if !drift.seal_ok {
-            return Ok(tool_text(
-                json!({
-                    "error": "invalid_seal",
-                    "issues": drift.issues,
-                    "hint": "Session seal is invalid. Human must re-pin: `locus leave` then `locus pin <alias>`.",
-                }),
-                true,
-            ));
-        }
-        if drift.frozen {
-            return Ok(tool_text(
-                json!({
-                    "error": "session_frozen: re-pin",
-                    "reason": drift.issues,
-                    "hint": "Binding changed under the active pin. Human must run `locus leave` then `locus pin <alias>`.",
-                }),
-                true,
-            ));
-        }
-        if drift.expired {
-            if let Some(t) = &scope.tenant {
-                return Ok(tool_text(
-                    json!({
-                        "error": "grant_expired",
-                        "grant_id": t.grant_id,
-                        "issues": drift.issues,
-                        "safe_next": format!("locus mcp mint --binding {}", t.binding_alias),
-                        "hint": "grant TTL elapsed; the operator must mint a fresh tenant token",
-                    }),
-                    true,
-                ));
-            }
-            return Ok(tool_text(
-                json!({
-                    "error": "session_expired",
-                    "issues": drift.issues,
-                    "hint": "Pin TTL expired. Human must re-pin: `locus pin <alias>`.",
-                }),
-                true,
-            ));
-        }
-        return Ok(tool_text(
-            json!({
-                "error": "runtime_unhealthy",
-                "hint": runtime_unhealthy_hint(&drift.issues),
-                "issues": drift.issues,
-            }),
-            true,
-        ));
-    }
-
-    let pinned = resolve_scope_session(scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
-    let Some((session, bindings)) = pinned else {
-        let mut body = json!({
-            "error": "not_pinned",
-            "hint": "Human must run: locus pin <alias>. Agents: call locus_request_pin or locus_enter_hint."
-        });
-        attach_anchor_context(&mut body, session_anchor.as_ref());
-        return Ok(tool_text(body, true));
-    };
-
-    if session.is_frozen() {
-        return Ok(tool_text(
-            json!({
-                "error": "session_frozen: re-pin",
-                "reason": session.frozen_reason,
-                "hint": "Human must re-pin after binding drift."
-            }),
-            true,
-        ));
-    }
-
-    // Healthy-path anchor observe against the SAME loaded (session, bindings)
-    // handed to the provider gate below (window identical to today's drift
-    // window; no store mutation). Establish on first healthy observation;
-    // same-identity re-pin (`locus enter <same>`) re-anchors silently;
-    // different identity fails closed with `pin_changed`.
-    let obs = anchor::observation(&session, &bindings);
-    match scope.anchor.observe(&obs, true) {
-        Some(AnchorDecision::Established) => {
-            audit_anchor_event(
-                "mcp.anchor_established",
-                &obs.binding_alias,
-                json!({ "anchor": anchor::identity_json(&obs) }),
-            );
-        }
-        Some(AnchorDecision::Repinned) => {
-            audit_anchor_event(
-                "mcp.anchor_repin",
-                &obs.binding_alias,
-                json!({ "anchor": anchor::identity_json(&obs) }),
-            );
-        }
-        Some(AnchorDecision::Mismatch { anchored }) => {
-            return Ok(pin_changed_refusal(&scope.anchor, &anchored, &obs, &[]));
-        }
-        Some(AnchorDecision::Match) | None => {}
-    }
-
-    if name.starts_with("locus.peers.") {
-        return peers::call(scope, &session, &bindings, name, &args);
-    }
-
-    // Resolve target binding + un-prefixed tool name for namespaced sessions.
-    let (binding, tool_name): (&Binding, &str) = if session.is_namespaced() {
-        match split_namespaced_tool(name) {
-            Some((alias, rest)) => {
-                let b = bindings
-                    .iter()
-                    .find(|(a, _)| a == alias)
-                    .map(|(_, b)| b)
-                    .ok_or_else(|| {
-                        rpc_error(
-                            -32602,
-                            format!("unknown namespace alias `{alias}` for tool `{name}`"),
-                        )
-                    })?;
-                // Alias must be in this session
-                if !session.all_aliases().iter().any(|a| a == alias) {
-                    return Ok(tool_text(
-                        json!({
-                            "error": "namespace_not_in_session",
-                            "alias": alias,
-                            "tool": name,
-                        }),
-                        true,
-                    ));
-                }
-                (b, rest)
-            }
-            None => {
-                return Ok(tool_text(
-                    json!({
-                        "error": "namespaced_tool_required",
-                        "detail": "This session is namespaced; call tools as `alias__tool` (e.g. acme__github.scope).",
-                        "tool": name,
-                        "namespaces": session.all_aliases(),
-                    }),
-                    true,
-                ));
-            }
-        }
-    } else {
-        let b = primary_binding(&bindings)
-            .ok_or_else(|| rpc_error(-32000, "pinned session has no bindings".into()))?;
-        (b, name)
-    };
-
-    let principal_owned = session.principal.clone();
-    let gate = ApprovalGate {
-        store: &s,
-        session_id: &session.session_id,
-        principal: principal_owned.as_deref(),
-    };
-
-    // Signed community admission precedes credentials, worker startup and routing.
-    let args = if let Some(provider) = binding
-        .providers
-        .iter()
-        .find(|provider| tool_name.starts_with(&format!("{}.", provider.provider)))
-    {
-        match provider.community_tool_args(&binding.policy, tool_name, &args) {
-            Ok(scoped) => scoped,
-            Err(error) => {
-                return Ok(tool_text(
-                    json!({"error":"community_admission_denied", "detail":error.to_string(), "tool":name}),
-                    true,
-                ))
-            }
-        }
-    } else {
-        args
-    };
-
-    let synthetic = tools_for_binding(binding);
-    let is_synthetic = synthetic.iter().any(|t| t.name == tool_name);
-
-    if is_synthetic {
-        match call_tool_gated(binding, tool_name, &args, Some(gate)) {
-            Ok(r) => {
-                let ticket = if r.ok {
-                    s.mint_capability_ticket(&session.session_id, &binding.id, tool_name)
-                        .ok()
-                } else {
-                    None
-                };
-                let ticket_id = ticket.as_ref().map(|t| t.ticket_id.as_str());
-                audit_tool_block(&s, &binding.alias, tool_name, &r.content);
-                audit_tool_call(
-                    &s,
-                    scope,
-                    &binding.alias,
-                    tool_name,
-                    &session.session_id,
-                    ticket_id,
-                    r.ok,
-                );
-                Ok(tool_text(r.content, !r.ok))
-            }
-            Err(e) => Ok(tool_text(
-                scope_or_err(&s, &binding.alias, tool_name, &args, e),
-                true,
-            )),
-        }
-    } else {
-        // Upstream (or unknown) tool: policy + worker fan-out.
-        match enforce_policy(binding, tool_name, &args, Some(gate)) {
-            Ok(Some(blocked)) => {
-                audit_tool_block(&s, &binding.alias, tool_name, &blocked.content);
-                Ok(tool_text(blocked.content, true))
-            }
-            Ok(None) => {
-                let Some(provider) = tool_name.split('.').next().filter(|p| !p.is_empty()) else {
-                    return Ok(tool_text(
-                        json!({ "error": "invalid_tool_name", "tool": name }),
-                        true,
-                    ));
-                };
-                let mut mgr = worker_manager()
-                    .lock()
-                    .map_err(|_| rpc_error(-32000, "worker manager lock poisoned".into()))?;
-                if let Err(e) = mgr.ensure_provider(&session, binding, provider) {
-                    return Ok(tool_text(
-                        json!({
-                            "error": "worker_ensure_failed",
-                            "detail": e.to_string(),
-                            "tool": name,
-                        }),
-                        true,
-                    ));
-                }
-                let ticket = s
-                    .mint_capability_ticket(&session.session_id, &binding.id, tool_name)
-                    .ok();
-                let ticket_id = ticket.as_ref().map(|t| t.ticket_id.as_str());
-                match mgr.call_tool(&session, binding, tool_name, &args) {
-                    Ok(r) => {
-                        audit_tool_call(
-                            &s,
-                            scope,
-                            &binding.alias,
-                            tool_name,
-                            &session.session_id,
-                            ticket_id,
-                            r.ok,
-                        );
-                        Ok(tool_text(r.content, !r.ok))
-                    }
-                    Err(e) => Ok(tool_text(
-                        json!({ "error": e.to_string(), "tool": name }),
-                        true,
-                    )),
-                }
-            }
-            Err(e) => Ok(tool_text(json!({ "error": e.to_string() }), true)),
-        }
-    }
-}
-
-/// Audit successful tools/call path with optional capability `ticket_id` (not a secret).
-/// Multi-tenant requests additionally stamp grant_id + http_session_id.
-fn audit_tool_call(
-    s: &Store,
-    scope: &RequestScope,
-    alias: &str,
-    tool: &str,
-    session_id: &str,
-    ticket_id: Option<&str>,
-    ok: bool,
-) {
-    let mut detail = json!({
-        "tool": tool,
-        "session_id": session_id,
-        "ticket_id": ticket_id,
-        "ok": ok,
-    });
-    if let Some(t) = &scope.tenant {
-        detail["grant_id"] = json!(t.grant_id);
-        if let AnchorScope::Http(id) = &scope.anchor {
-            detail["http_session_id"] = json!(id);
-        }
-    }
-    let _ = s.audit("mcp.tools_call", alias, Some(detail));
-}
-
-fn audit_tool_block(s: &Store, alias: &str, tool: &str, content: &Value) {
-    // Never log raw tool args — digests + meta only (secrets stay out of audit).
-    if let Some(err) = content.get("error").and_then(|v| v.as_str()) {
-        if err == "requires_approval" {
-            let _ = s.audit(
-                "mcp.require_approval",
-                alias,
-                Some(json!({
-                    "tool": tool,
-                    "status": "pending",
-                    "approval_id": content.get("approval_id"),
-                    "args_digest": content.get("args_digest"),
-                    "dual_control": content.get("dual_control"),
-                    "grants": content.get("grants"),
-                    "required_grants": content.get("required_grants"),
-                    "approval_authority": content.get("approval_authority"),
-                    "authoritative_path_enabled": content.get("authoritative_path_enabled"),
-                    "detail": content.get("detail"),
-                })),
-            );
-        }
-    }
-}
-
-fn scope_or_err(
-    s: &Store,
-    alias: &str,
-    tool: &str,
-    args: &Value,
-    e: locus_core::LocusError,
-) -> Value {
-    let msg = e.to_string();
-    if msg.contains("scope freeze") {
-        // Digest only — raw args may contain secrets or PII
-        let _ = s.audit(
-            "mcp.scope_freeze",
-            alias,
-            Some(json!({
-                "tool": tool,
-                "error": msg,
-                "args_digest": locus_core::args_digest(args),
-            })),
-        );
-    }
-    json!({ "error": msg })
-}
-
-fn call_control(
-    name: &str,
-    args: &Value,
-    scope: &RequestScope,
-) -> std::result::Result<Value, Value> {
-    // The control schemas are closed (additionalProperties: false); a
-    // misspelled or mistyped argument is a tool error the model can correct,
-    // never silently ignored.
-    if let Err(e) = validate_control_args(name, args) {
-        return Ok(tool_text(
-            json!({
-                "error": e.to_string(),
-                "hint": format!("Retry `{name}` with only the arguments in its tools/list inputSchema."),
-            }),
-            true,
-        ));
-    }
-    let s = store().map_err(|e| rpc_error(-32000, e.to_string()))?;
-    // Heartbeat: detect drift and freeze when identity control tools are polled.
-    if matches!(
-        name,
-        "locus_whoami"
-            | "locus_status"
-            | "locus_providers"
-            | "locus_heartbeat"
-            | "locus_safe_next"
-            | "locus_verify_session"
-    ) {
-        let _ = scope_drift(&s, scope);
-    }
-    // Additive `mcp_anchor` block for identity-reporting control tools —
-    // omitted entirely when this MCP session has no anchor (keeps unpinned
-    // response shapes untouched). (report, current_matches_anchor).
-    let anchor_report: Option<(Value, bool)> = if matches!(
-        name,
-        "locus_whoami"
-            | "locus_status"
-            | "locus_heartbeat"
-            | "locus_safe_next"
-            | "locus_verify_session"
-    ) {
-        scope.anchor.get().map(|a| {
-            let who = scope_whoami(&s, scope).ok();
-            let current = scope_identity_observation(&s, scope);
-            mcp_anchor_report(&a, who.as_ref(), current.as_ref())
-        })
-    } else {
-        None
-    };
-    let attach_report = |mut body: Value| -> Value {
-        if let Some((report, _)) = &anchor_report {
-            body["mcp_anchor"] = report.clone();
-        }
-        body
-    };
-    // Anchored-identity mismatch while a *different* pin is globally active
-    // (not merely unpinned) — drives safe_next / verify_session overrides.
-    let anchor_mismatch_active = anchor_report
-        .as_ref()
-        .map(|(report, matches)| {
-            !matches
-                && report
-                    .get("current_alias")
-                    .map(|v| !v.is_null())
-                    .unwrap_or(false)
-        })
-        .unwrap_or(false);
-    match name {
-        "locus_safe_next" => {
-            if let Some(t) = &scope.tenant {
-                // Tenant-scoped: derived from this grant's drift only — never
-                // the operator store's global safe_next.
-                let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
-                let dead = drift
-                    .issues
-                    .iter()
-                    .find(|i| i.starts_with("grant_"))
-                    .cloned();
-                let (action, command, ready) = match (&dead, drift.ok) {
-                    (Some(issue), _) => (
-                        issue.clone(),
-                        Some(format!("locus mcp mint --binding {}", t.binding_alias)),
-                        false,
-                    ),
-                    (None, true) => ("proceed".to_string(), None, true),
-                    (None, false) => (
-                        "remint_grant".to_string(),
-                        Some(format!("locus mcp mint --binding {}", t.binding_alias)),
-                        false,
-                    ),
-                };
-                let body = attach_report(json!({
-                    "scope": "tenant",
-                    "grant_id": t.grant_id,
-                    "ready": ready,
-                    "action": action,
-                    "command": command,
-                    "issues": drift.issues,
-                }));
-                return Ok(tool_text(body, !ready));
-            }
-            let next =
-                compute_safe_next(&s, &cwd()).map_err(|e| rpc_error(-32000, e.to_string()))?;
-            let mut body = attach_report(serde_json::to_value(&next).unwrap_or(json!({})));
-            let mut is_err = !next.ready;
-            if anchor_mismatch_active {
-                // Session-local override: the only safe next action is to
-                // re-initialize this client (or restore the anchored pin).
-                let anchored_alias = anchor_report
-                    .as_ref()
-                    .and_then(|(r, _)| r["anchored_alias"].as_str())
-                    .unwrap_or("")
-                    .to_string();
-                body["action"] = json!("reinitialize_client");
-                body["ready"] = json!(false);
-                body["command"] = json!(format!("locus enter {anchored_alias}"));
-                is_err = true;
-            } else if let Some(issues) = scope_drift(&s, scope)
-                .ok()
-                .map(|d| d.issues)
-                .filter(|issues| !next.ready && has_executor_authority_issue(issues))
-            {
-                // Plain client entry: the pin is unobservable from this
-                // process. `locus doctor` (operator capability) reports
-                // healthy, so pointing there loops; name the real fix.
-                body["action"] = json!("launch_supervised");
-                body["command"] = json!("locus mcp --supervised");
-                body["message"] = json!(EXECUTOR_AUTHORITY_HINT);
-                body["issues"] = json!(issues);
-                is_err = true;
-            }
-            // Informational: isError only when not ready so agents notice the gate.
-            Ok(tool_text(body, is_err))
-        }
-        "locus_whoami" => match scope_whoami(&s, scope) {
-            Ok(w) => {
-                let mut body = serde_json::to_value(w).unwrap_or(json!({}));
-                if let Some(t) = &scope.tenant {
-                    body["grant_id"] = json!(t.grant_id);
-                }
-                Ok(tool_text(attach_report(body), false))
-            }
-            Err(e) => Ok(tool_text(attach_report(whoami_error_body(&e)), true)),
-        },
-        "locus_status" => {
-            if let Some(t) = &scope.tenant {
-                let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
-                let body = attach_report(json!({
-                    "pinned": drift.pinned,
-                    "scope": "tenant",
-                    "grant_id": t.grant_id,
-                    "binding": drift.binding_alias,
-                    "tenant": drift.tenant_session,
-                    "session_id": drift.session_id,
-                    "seal_ok": drift.seal_ok,
-                    "expired": drift.expired,
-                    "frozen": drift.frozen,
-                    "issues": drift.issues,
-                }));
-                return Ok(tool_text(body, false));
-            }
-            let active = s
-                .active_session()
-                .map_err(|e| rpc_error(-32000, e.to_string()))?;
-            match active {
-                None => Ok(tool_text(
-                    attach_report(json!({ "pinned": false, "status": "unpinned" })),
-                    false,
-                )),
-                Some(session) => {
-                    let key = s.seal_key().map_err(|e| rpc_error(-32000, e.to_string()))?;
-                    let seal_ok = session.verify_seal(&key).is_ok();
-                    // The HMAC seal alone does not make a pin usable: its
-                    // authority anchor (broker) may be retired or unobservable
-                    // from this process. Report the same runtime verdict the
-                    // provider gate uses so `pinned: true, seal_ok: true`
-                    // never reads as "ready" when every provider call refuses.
-                    let drift = scope_drift(&s, scope).ok();
-                    let ok = drift.as_ref().is_some_and(|d| d.ok);
-                    let issues = drift.as_ref().map(|d| d.issues.clone()).unwrap_or_default();
-                    let hint = if ok {
-                        None
-                    } else if has_executor_authority_issue(&issues) {
-                        Some(EXECUTOR_AUTHORITY_HINT)
-                    } else {
-                        Some("pin present but not usable — call locus_heartbeat / locus_safe_next; a human may need to re-pin (`locus enter <alias>`; if enter is refused, `locus leave --force` first)")
-                    };
-                    Ok(tool_text(
-                        attach_report(json!({
-                            "pinned": true,
-                            "ok": ok,
-                            "binding": session.binding_alias,
-                            "tenant": session.tenant,
-                            "session_id": session.session_id,
-                            "seal_ok": seal_ok,
-                            "authority_anchor_ok": drift.as_ref().is_some_and(|d| d.authority_anchor_ok),
-                            "expired": session.is_expired(),
-                            "frozen": session.frozen,
-                            "frozen_reason": session.frozen_reason,
-                            "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
-                            "namespaces": session.all_aliases(),
-                            "issues": issues,
-                            "hint": hint,
-                        })),
-                        !ok,
-                    ))
-                }
-            }
-        }
-        "locus_heartbeat" => {
-            // Doctor-lite: full RuntimeDrift + operator hint. Never secrets.
-            let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
-            let hint = if drift.ok {
-                None
-            } else if !drift.pinned {
-                Some("not pinned — human: `locus enter <alias>` (or `locus pin <alias>`)")
-            } else if drift.frozen {
-                Some("session frozen after drift — human: `locus leave` then `locus pin <alias>`")
-            } else if !drift.seal_ok {
-                Some("invalid seal — human must re-pin")
-            } else if drift.expired {
-                Some("pin TTL expired — human must re-pin")
-            } else if has_executor_authority_issue(&drift.issues) {
-                Some(EXECUTOR_AUTHORITY_HINT)
-            } else {
-                Some("runtime unhealthy — run `locus doctor`")
-            };
-            let body = attach_report(json!({
-                "ok": drift.ok,
-                "pinned": drift.pinned,
-                "seal_ok": drift.seal_ok,
-                "frozen": drift.frozen,
-                "expired": drift.expired,
-                "binding": drift.binding_alias,
-                "tenant": drift.tenant_session,
-                "binding_id_match": drift.binding_id_match,
-                "tenant_match": drift.tenant_match,
-                "providers_match": drift.providers_match,
-                "issues": drift.issues,
-                "providers": drift.providers,
-                "hint": hint,
-                "runtime": drift,
-            }));
-            // Informational probe — isError only when unhealthy so agents notice.
-            Ok(tool_text(body, !drift.ok))
-        }
-        "locus_enter_hint" if scope.tenant.is_some() => Ok(tool_text(
-            json!({
-                "error": "tenant_fixed_by_grant",
-                "hint": "this session's tenant is fixed by its operator-minted grant; a different binding needs a new grant token (`locus mcp mint`)",
-            }),
-            true,
-        )),
-        "locus_enter_hint" => {
-            let alias = args
-                .get("alias")
-                .and_then(|a| a.as_str())
-                .map(str::trim)
-                .filter(|a| !a.is_empty());
-            let (enter_cmd, pin_cmd) = match alias {
-                Some(a) => (format!("locus enter {a}"), format!("locus pin {a}")),
-                None => ("locus enter".into(), "locus pin".into()),
-            };
-            let exists = alias.map(|a| s.load_binding(a).is_ok());
-            if let Some(a) = alias {
-                let _ = s.audit(
-                    "mcp.enter_hint",
-                    a,
-                    Some(json!({ "binding_exists": exists })),
-                );
-            }
-            if let (Some(a), Some(false)) = (alias, exists) {
-                let (message, suggestion) = unknown_binding_message(&s, a);
-                return Ok(tool_text(
-                    json!({
-                        "agents_cannot_pin": true,
-                        "alias": a,
-                        "binding_exists": false,
-                        "did_you_mean": suggestion,
-                        "message": message,
-                    }),
-                    true,
-                ));
-            }
-            let message = match alias {
-                Some(_) => format!(
-                    "Agents cannot pin. Ask the human to run `{enter_cmd}` (or `{pin_cmd}`) in a terminal, then continue."
-                ),
-                None => "Agents cannot pin. Ask the human to run `locus enter <alias>` (or `locus pin <alias>`) in a terminal.".into(),
-            };
-            Ok(tool_text(
-                json!({
-                    "agents_cannot_pin": true,
-                    "command": enter_cmd,
-                    "pin_command": pin_cmd,
-                    "alias": alias,
-                    "binding_exists": exists,
-                    "message": message,
-                }),
-                false,
-            ))
-        }
-        "locus_list_bindings" => {
-            // Tenant scopes see only their own grant's aliases (never the
-            // operator's full binding roster).
-            let list = resource_bindings_json(scope)?;
-            Ok(tool_text(list, false))
-        }
-        "locus_request_pin" if scope.tenant.is_some() => {
-            let t = scope.tenant.as_ref().expect("guarded");
-            let _ = s.audit(
-                "mcp.request_pin",
-                &t.binding_alias,
-                Some(json!({ "refused": "tenant_fixed_by_grant", "grant_id": t.grant_id })),
-            );
-            Ok(tool_text(
-                json!({
-                    "error": "tenant_fixed_by_grant",
-                    "grant_id": t.grant_id,
-                    "hint": "this session's tenant is fixed by its operator-minted grant; the operator must mint a new grant token for a different binding (`locus mcp mint --binding <alias>`)",
-                }),
-                true,
-            ))
-        }
-        "locus_request_pin" => {
-            let alias = args
-                .get("alias")
-                .and_then(|a| a.as_str())
-                .map(str::trim)
-                .unwrap_or("");
-            if alias.is_empty() {
-                return Ok(tool_text(
-                    json!({
-                        "error": "alias required",
-                        "hint": "pass {\"alias\": \"<binding alias>\"}; locus_list_bindings lists the configured aliases",
-                    }),
-                    true,
-                ));
-            }
-            // Verify binding exists
-            let exists = s.load_binding(alias).is_ok();
-            let _ = s.audit("mcp.request_pin", alias, Some(json!({ "exists": exists })));
-            if !exists {
-                // Audited above for forensics, but there is nothing to pin:
-                // no request is pending and no `locus enter` would succeed.
-                let (message, suggestion) = unknown_binding_message(&s, alias);
-                return Ok(tool_text(
-                    json!({
-                        "requested": alias,
-                        "binding_exists": false,
-                        "did_you_mean": suggestion,
-                        "message": message,
-                    }),
-                    true,
-                ));
-            }
-            Ok(tool_text(
-                json!({
-                    "requested": alias,
-                    "binding_exists": exists,
-                    "message": format!(
-                        "Pin request recorded for `{alias}`. Agents cannot pin themselves. \
-                         Human: run `locus enter {alias}` (or `locus pin {alias}`) in the terminal, then continue."
-                    ),
-                    "command": format!("locus enter {alias}"),
-                    "pin_command": format!("locus pin {alias}"),
-                }),
-                false,
-            ))
-        }
-        "locus_providers" => match scope_whoami(&s, scope) {
-            Ok(w) => Ok(tool_text(json!({ "providers": w.providers }), false)),
-            // Same body as locus_whoami so an unobservable pin names the
-            // supervised launch instead of a bare error string.
-            Err(e) => Ok(tool_text(whoami_error_body(&e), true)),
-        },
-        "locus_verify_claim" => {
-            let text = args
-                .get("text")
-                .or_else(|| args.get("claim"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|t| !t.is_empty());
-            let Some(text) = text else {
-                return Ok(tool_text(
-                    json!({ "error": "text (or claim) required — free-text assertion to score" }),
-                    true,
-                ));
-            };
-            let who = scope_whoami(&s, scope).ok();
-            let result = verify_claim(text, who.as_ref());
-            let binding = who
-                .as_ref()
-                .map(|w| w.binding_alias.as_str())
-                .unwrap_or("-");
-            let _ = s.audit(
-                "mcp.verify_claim",
-                binding,
-                Some(json!({
-                    "confidence": result.confidence.as_str(),
-                    "needs_tool": result.needs_tool,
-                    "signals": result.signals,
-                    // Truncate claim in audit — never store huge blobs.
-                    "claim_len": result.claim.len(),
-                    "claim_preview": result.claim.chars().take(120).collect::<String>(),
-                })),
-            );
-            Ok(tool_text(
-                serde_json::to_value(&result).unwrap_or(json!({})),
-                false,
-            ))
-        }
-        "locus_verify_session" => {
-            if let Some(t) = &scope.tenant {
-                // Tenant-scoped pack: this grant's drift + whoami only. The
-                // full operator pack (global doctor / global pin) must never
-                // reach a tenant session.
-                let drift = scope_drift(&s, scope).map_err(|e| rpc_error(-32000, e.to_string()))?;
-                let who = scope_whoami(&s, scope).ok();
-                let session_ok = drift.ok && who.is_some();
-                let body = attach_report(json!({
-                    "scope": "tenant",
-                    "grant_id": t.grant_id,
-                    "session_ok": session_ok,
-                    "whoami": who,
-                    "runtime": drift,
-                    "safe_next": {
-                        "action": if session_ok { "proceed" } else { "remint_grant" },
-                        "ready": session_ok,
-                        "command": if session_ok { Value::Null } else {
-                            json!(format!("locus mcp mint --binding {}", t.binding_alias))
-                        },
-                    },
-                }));
-                let _ = s.audit(
-                    "mcp.verify_session",
-                    &t.binding_alias,
-                    Some(json!({
-                        "session_ok": session_ok,
-                        "grant_id": t.grant_id,
-                        "scope": "tenant",
-                    })),
-                );
-                return Ok(tool_text(body, false));
-            }
-            // Same pack as `locus verify session --json`. Available unpinned.
-            // isError only on hard store failures — agents/hub gate on session_ok.
-            let external =
-                gather_doctor_external(&s, cwd()).map_err(|e| rpc_error(-32000, e.to_string()))?;
-            let pack = verify_session(&s, &cwd(), external)
-                .map_err(|e| rpc_error(-32000, e.to_string()))?;
-            let binding = pack
-                .whoami
-                .as_ref()
-                .map(|w| w.binding_alias.as_str())
-                .unwrap_or("-");
-            let _ = s.audit(
-                "mcp.verify_session",
-                binding,
-                Some(json!({
-                    // Keys aligned with the CLI's `verify.session` audit event.
-                    "session_ok": pack.session_ok,
-                    "safe_next": pack.safe_next.action,
-                    "doctor_verdict": pack.doctor.verdict,
-                    "doctor_ok": pack.doctor.ok,
-                    "has_whoami": pack.whoami.is_some(),
-                })),
-            );
-            let mut body = attach_report(serde_json::to_value(&pack).unwrap_or(json!({})));
-            if anchor_mismatch_active {
-                // Hub gating: an anchored-identity mismatch is a per-session
-                // failure even when the global pin itself is healthy. The hub
-                // gates on session_ok — force it false; isError stays false
-                // (the pack itself returned fine).
-                let anchored_alias = anchor_report
-                    .as_ref()
-                    .and_then(|(r, _)| r["anchored_alias"].as_str())
-                    .unwrap_or("")
-                    .to_string();
-                body["session_ok"] = json!(false);
-                body["mcp_anchor_mismatch"] = json!(true);
-                body["safe_next"]["action"] = json!("reinitialize_client");
-                body["safe_next"]["ready"] = json!(false);
-                body["safe_next"]["command"] = json!(format!("locus enter {anchored_alias}"));
-            }
-            Ok(tool_text(body, false))
-        }
-        other => Ok(tool_text(
-            json!({ "error": format!("unknown control tool: {other}") }),
-            true,
-        )),
-    }
-}
-
-fn tool_text(value: Value, is_error: bool) -> Value {
-    // Compact JSON only — pretty-print embeds raw newlines that break NDJSON stdio.
-    let text = match &value {
-        Value::String(s) => s.clone(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
-    };
-    json!({
-        "content": [{ "type": "text", "text": text }],
-        "isError": is_error
-    })
-}
-
-#[cfg(test)]
-mod whoami_error_tests {
-    use super::*;
-
-    #[test]
-    fn whoami_error_without_executor_authority_does_not_claim_unpinned() {
-        let body = whoami_error_body(&locus_core::LocusError::ExecutorAuthorityUnavailable(
-            "this process requires a supervised executor capability".into(),
-        ));
-        assert!(body["pinned"].is_null());
-        assert_eq!(body["status"], "executor_authority_unavailable");
-        let hint = body["hint"].as_str().unwrap();
-        assert!(hint.contains("locus mcp --supervised"));
-        assert!(!hint.contains("Run `locus pin"));
-
-        let other = whoami_error_body(&locus_core::LocusError::NotPinned);
-        assert_eq!(other["pinned"], false);
-        assert!(other["hint"].as_str().unwrap().contains("locus pin"));
-    }
-}
-
 #[cfg(test)]
 mod multi_tenant_tests {
     use super::*;
@@ -5165,137 +3936,6 @@ mod http_session_tests {
 }
 
 #[cfg(test)]
-mod catalog_shaping_tests {
-    use super::*;
-    use chrono::Duration as ChronoDuration;
-    use locus_core::adapters::REQUIRES_APPROVAL_MARKER;
-    use locus_core::binding::{BindingBody, Policy, ProviderBinding, Scope};
-    use locus_core::seal::SealKey;
-    use locus_core::session::{namespace_tool, PinSource, SessionMode};
-
-    /// Production-shaped fixture: supabase pinned read_only with approval
-    /// gates on deletes and prod deploys (mirrors the cmp pin).
-    fn cmp_binding() -> Binding {
-        Binding::from_body(BindingBody {
-            id: "bnd_cmp".into(),
-            alias: "cmp".into(),
-            tenant: "cmp-co".into(),
-            principal: None,
-            description: None,
-            policy: Policy {
-                require_approval: vec!["*.delete*".into(), "vercel.deploy.*".into()],
-                ..Policy::default()
-            },
-            providers: vec![
-                ProviderBinding {
-                    provider: "supabase".into(),
-                    account: "cmp".into(),
-                    credential_ref: "phm:SUPABASE_CMP".into(),
-                    scope: Scope {
-                        project_ref: Some("proj_cmp".into()),
-                        read_only: Some(true),
-                        ..Scope::default()
-                    },
-                    upstream: None,
-                },
-                ProviderBinding {
-                    provider: "vercel".into(),
-                    account: "cmp-vc".into(),
-                    credential_ref: "phm:VERCEL_CMP".into(),
-                    scope: Scope {
-                        team_id: Some("team_cmp".into()),
-                        ..Scope::default()
-                    },
-                    upstream: None,
-                },
-            ],
-        })
-    }
-
-    fn session(mode: SessionMode) -> Session {
-        let namespaced = mode == SessionMode::Namespaced;
-        let s = Session::new(
-            "bnd_cmp",
-            "cmp",
-            "cmp-co",
-            None,
-            PinSource::Explicit,
-            Some("test".into()),
-            ChronoDuration::hours(1),
-            "/tmp/unused-worker-home".into(),
-            &SealKey::generate(),
-        )
-        .with_mode(mode);
-        if namespaced {
-            s.with_namespaces(vec!["other".into()], vec!["fp".into()])
-        } else {
-            s
-        }
-    }
-
-    #[test]
-    fn exclusive_catalog_hides_read_only_destructive_and_annotates_gated() {
-        let b = cmp_binding();
-        let s = session(SessionMode::Exclusive);
-        let shaped =
-            shape_provider_catalog(tools_for_binding(&b), &s, &[("cmp".to_string(), b.clone())]);
-        // read_only supabase: destructive tool omitted, reads survive.
-        assert!(!shaped.iter().any(|t| t.name == "supabase.table.delete"));
-        assert!(shaped.iter().any(|t| t.name == "supabase.scope"));
-        // vercel not read_only: destructive tool listed, approval-annotated
-        // (matches the `vercel.deploy.*` glob exactly as call-time does).
-        let deploy = shaped
-            .iter()
-            .find(|t| t.name == "vercel.deploy.prod")
-            .expect("vercel deploy stays listed");
-        assert!(deploy.description.contains(REQUIRES_APPROVAL_MARKER));
-        // Ungated read tool never annotated.
-        let scope_tool = shaped.iter().find(|t| t.name == "vercel.scope").unwrap();
-        assert!(!scope_tool.description.contains(REQUIRES_APPROVAL_MARKER));
-    }
-
-    #[test]
-    fn namespaced_catalog_strips_prefix_before_policy_match() {
-        let b = cmp_binding();
-        let s = session(SessionMode::Namespaced);
-        assert!(s.is_namespaced());
-        let mut tools = tools_for_binding(&b);
-        for t in &mut tools {
-            t.name = namespace_tool("cmp", &t.name);
-        }
-        let shaped = shape_provider_catalog(tools, &s, &[("cmp".to_string(), b.clone())]);
-        // Hidden under the alias prefix too.
-        assert!(!shaped
-            .iter()
-            .any(|t| t.name == "cmp__supabase.table.delete"));
-        assert!(shaped.iter().any(|t| t.name == "cmp__supabase.scope"));
-        // `vercel.deploy.*` must match the BARE name (it would never match
-        // the `cmp__`-prefixed spelling) — proves prefix stripping.
-        let deploy = shaped
-            .iter()
-            .find(|t| t.name == "cmp__vercel.deploy.prod")
-            .expect("namespaced vercel deploy stays listed");
-        assert!(deploy.description.contains(REQUIRES_APPROVAL_MARKER));
-    }
-
-    #[test]
-    fn shaping_without_binding_leaves_tools_untouched() {
-        // Presentation shaping is never a gate: unresolvable owners pass
-        // through unchanged (control catalogs never enter this path at all).
-        let b = cmp_binding();
-        let s = session(SessionMode::Exclusive);
-        let tools = tools_for_binding(&b);
-        let n = tools.len();
-        let shaped = shape_provider_catalog(tools.clone(), &s, &[]);
-        assert_eq!(shaped.len(), n);
-        for (orig, out) in tools.iter().zip(shaped.iter()) {
-            assert_eq!(orig.name, out.name);
-            assert_eq!(orig.description, out.description);
-        }
-    }
-}
-
-#[cfg(test)]
 mod lifecycle_hint_tests {
     use super::*;
 
@@ -5315,40 +3955,6 @@ mod lifecycle_hint_tests {
             negotiate_protocol_version(&json!({})),
             SUPPORTED_PROTOCOL_VERSIONS[0]
         );
-    }
-
-    #[test]
-    fn mistyped_control_tool_and_argument_name_the_nearest_match() {
-        let err = check_control_args("locus_whoam", &json!({})).unwrap_err();
-        let msg = err["message"].as_str().unwrap();
-        assert!(msg.starts_with("unknown tool `locus_whoam`"), "{msg}");
-        assert!(msg.ends_with("Did you mean `locus_whoami`?"), "{msg}");
-
-        let err = check_control_args("locus_nonsense_tool", &json!({})).unwrap_err();
-        assert!(
-            !err["message"].as_str().unwrap().contains("Did you mean"),
-            "{err}"
-        );
-
-        let err = check_control_args("locus_request_pin", &json!({"aliass": "acme"})).unwrap_err();
-        let msg = err["message"].as_str().unwrap();
-        assert_eq!(err["code"], json!(-32602), "{err}");
-        assert!(msg.contains("undeclared argument(s) [aliass]"), "{msg}");
-        assert!(msg.ends_with("Did you mean `aliass` -> `alias`?"), "{msg}");
-    }
-
-    #[test]
-    fn dotless_tool_name_is_unknown_before_runtime_health() {
-        for name in ["nonexistent_tool", "acme__bogus", "githubscope"] {
-            let err = handle_tools_call(
-                &json!({ "name": name, "arguments": {} }),
-                &RequestScope::process(),
-            )
-            .unwrap_err();
-            assert_eq!(err["code"], json!(-32602), "{name}: {err}");
-            let msg = err["message"].as_str().unwrap();
-            assert!(msg.starts_with(&format!("unknown tool `{name}`")), "{msg}");
-        }
     }
 
     #[test]
