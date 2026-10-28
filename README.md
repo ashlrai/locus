@@ -297,6 +297,7 @@ locus binding list|show|add|rm|migrate-credential-refs
 locus capability status|persist|unpersist  # where control authority lives
 locus autopin suggest [--apply]       # learned per-repo binding from pin history
 locus workspace --default <alias> [--allow a,b] [--require-pin]
+locus autopin suggest [--json] [--apply]  # learn a default from local pin history
 locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2)
 locus doctor --fix [--apply]          # preview safe repairs; --apply makes them, backing up first
 locus watch [--once] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
