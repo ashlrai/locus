@@ -27,8 +27,8 @@
         "Enforce the workspace allowed_bindings and expected binding at dispatch; reject wrong-workspace authority without agent force or re-pin."
       ],
       "validation": [
-        "cargo test -p locus-cli --test handshake_conformance",
-        "cargo test -p locus-cli --test agent_contract"
+        "cargo test -p locus-cli --test integration handshake_conformance::",
+        "cargo test -p locus-cli --test integration agent_contract::"
       ]
     },
     {
@@ -87,7 +87,7 @@
         "Mock missing, expired, revoked and cross-tenant responses; preserve existing unsupported behavior until both sides explicitly negotiate a supported protocol."
       ],
       "validation": [
-        "cargo test -p locus-cli --test phantom_credential_contract",
+        "cargo test -p locus-cli --test integration phantom_credential_contract::",
         "cargo test -p locus-core credential"
       ]
     },
@@ -118,8 +118,8 @@
         "Retain trusted exec compatibility and accurately document its weaker boundary; unsupported CLIs fail closed on the restricted surface."
       ],
       "validation": [
-        "cargo test -p locus-cli --test exec_for",
-        "cargo test -p locus-cli --test exec_expect",
+        "cargo test -p locus-cli --test integration exec_for::",
+        "cargo test -p locus-cli --test integration exec_expect::",
         "cargo test -p locus-core --test isolation"
       ]
     },
