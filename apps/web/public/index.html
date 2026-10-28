@@ -3,10 +3,53 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Locus — AI-native identity plane</title>
-  <meta name="description" content="AI-native identity plane for coding agents. Pin a client — CLI, MCP, and the local dashboard are hard-scoped to that binding. Wrong account, impossible." />
+  <title>Locus · AI-native identity plane</title>
+  <meta name="description" content="AI-native identity plane for coding agents. Pin a client: CLI, MCP, and the local dashboard are hard-scoped to that binding. Wrong account, impossible." />
   <meta name="theme-color" content="#0a0a0a" />
-  <link rel="canonical" href="https://github.com/ashlrai/locus" />
+  <link rel="canonical" href="https://locus.dev/" />
+  <meta property="og:title" content="Locus · AI-native identity plane" />
+  <meta property="og:description" content="Pin a binding and every CLI command, MCP tool and agent session is sealed to that tenant until a human re-pins. Wrong account, impossible." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://locus.dev/" />
+  <meta property="og:image" content="https://locus.dev/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Locus · AI-native identity plane" />
+  <meta name="twitter:description" content="Pin a binding and every CLI command, MCP tool and agent session is sealed to that tenant until a human re-pins. Wrong account, impossible." />
+  <meta name="twitter:image" content="https://locus.dev/og.png" />
+  <!-- disc:json-ld -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Locus",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": [
+    "macOS",
+    "Linux",
+    "Windows"
+  ],
+  "softwareVersion": "0.5.2",
+  "description": "Your coding agent can't act as the wrong account.",
+  "url": "https://locus.dev/",
+  "codeRepository": "https://github.com/ashlrai/locus",
+  "downloadUrl": "https://github.com/ashlrai/locus/releases",
+  "license": "https://opensource.org/licenses/MIT",
+  "author": {
+    "@type": "Organization",
+    "name": "AshlrAI",
+    "url": "https://github.com/ashlrai"
+  },
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  },
+  "screenshot": "https://locus.dev/og.png"
+}
+</script>
+  <!-- /disc:json-ld -->
   <style>
     :root {
       --bg: #0a0a0a;
@@ -216,6 +259,7 @@
 
     .sec-label {
       font-family: var(--mono);
+      font-weight: 400;
       font-size: 0.68rem;
       letter-spacing: 0.12em;
       text-transform: uppercase;
@@ -429,10 +473,10 @@
     </nav>
 
     <header>
-      <p class="eyebrow">AI-native identity plane · v0.2</p>
+      <p class="eyebrow">AI-native identity plane · <!-- disc:version -->v0.5.2<!-- /disc:version --></p>
       <h1>Wrong account,<br /><span class="dim">impossible.</span></h1>
       <p class="lede">
-        Pin a client — every CLI command, MCP tool, and the <strong>local dashboard</strong>
+        Pin a client: every CLI command, MCP tool, and the <strong>local dashboard</strong>
         is hard-scoped to that binding until you re-pin. Agents inherit a sealed session,
         not ambient <code style="font-family:var(--mono);font-size:0.88em">gh auth</code>.
       </p>
@@ -448,7 +492,7 @@
         <div class="label">Phantom · phm.dev</div>
         <h2>Can this secret enter the model?</h2>
         <p>
-          <a href="https://phm.dev">Phantom</a> protects secrets <em>in context</em> —
+          <a href="https://phm.dev">Phantom</a> protects secrets <em>in context</em>:
           vault + proxy so AI never sees real keys.
         </p>
       </article>
@@ -463,7 +507,7 @@
     </div>
 
     <section id="install">
-      <div class="sec-label">Install</div>
+      <h2 class="sec-label">Install</h2>
       <div class="term">
         <div class="install-tabs" role="tablist">
           <button type="button" class="active" data-tab="cargo" role="tab">cargo</button>
@@ -482,11 +526,12 @@
         </div>
         <div class="term-block" id="tab-npx">
           <pre><span class="cmt"># downloads a release binary (falls back to cargo)</span>
+<span class="cmd">npm install -g locus-cli @ashlrai/locus-mcp</span>
 <span class="cmd">npx locus-cli --help</span>
-<span class="cmd">npx locus-mcp</span>  <span class="cmt"># MCP server for Claude Code / Cursor</span></pre>
+<span class="cmd">npx @ashlrai/locus-mcp</span>  <span class="cmt"># MCP server for Claude Code / Cursor</span></pre>
         </div>
         <div class="term-block" id="tab-brew">
-          <pre><span class="cmt"># when the tap is published</span>
+          <pre><span class="cmt"># tap live - installs locus + locus-mcp</span>
 <span class="cmd">brew install ashlrai/tap/locus</span></pre>
         </div>
       </div>
@@ -494,7 +539,7 @@
     </section>
 
     <section>
-      <div class="sec-label">Quick start · v0.2</div>
+      <h2 class="sec-label">Quick start</h2>
       <div class="term">
         <div class="term-bar">
           <span class="c"></span><span class="c"></span><span class="c"></span>
@@ -518,13 +563,13 @@
     </section>
 
     <section id="surfaces">
-      <div class="sec-label">0.2 surfaces</div>
+      <h2 class="sec-label">Surfaces</h2>
       <div class="flow">
         <div class="flow-step">
           <div class="flow-n">UI</div>
           <div>
             <h3>Local dashboard</h3>
-            <p><code>locus dashboard</code> / <code>locus serve</code> — pin, whoami, approvals, doctor, audit on loopback. No secrets.</p>
+            <p><code>locus dashboard</code> / <code>locus serve</code>: pin, whoami, approvals, doctor, audit on loopback. No secrets.</p>
           </div>
         </div>
         <div class="flow-step">
@@ -538,7 +583,7 @@
           <div class="flow-n">AUD</div>
           <div>
             <h3>Forensics pack</h3>
-            <p><code>locus forensics export</code> — shareable pin + doctor + audit snapshot (CredentialRefs only).</p>
+            <p><code>locus forensics export</code>: shareable pin + doctor + audit snapshot (CredentialRefs only).</p>
           </div>
         </div>
         <div class="flow-step">
@@ -552,14 +597,14 @@
           <div class="flow-n">VRF</div>
           <div>
             <h3>Verify claim</h3>
-            <p><code>locus verify claim --text "…"</code> / MCP <code>locus_verify_claim</code> — heuristic confidence + <code>needs_tool</code> before acting on numbers, URLs, or versions.</p>
+            <p><code>locus verify claim --text "…"</code> / MCP <code>locus_verify_claim</code>: heuristic confidence + <code>needs_tool</code> before acting on numbers, URLs, or versions.</p>
           </div>
         </div>
       </div>
     </section>
 
     <section id="arch">
-      <div class="sec-label">Architecture</div>
+      <h2 class="sec-label">Architecture</h2>
       <div class="arch" aria-label="Architecture diagram">
 <span class="hl">locus enter acme</span>
         <span class="dim">│</span>
@@ -576,13 +621,13 @@
     </section>
 
     <section>
-      <div class="sec-label">How it works</div>
+      <h2 class="sec-label">How it works</h2>
       <div class="flow">
         <div class="flow-step">
           <div class="flow-n">01</div>
           <div>
             <h3>Bind tenant × providers × policy</h3>
-            <p>A binding is principal, tenant, credential refs, and freeze scopes — never raw secrets.</p>
+            <p>A binding is principal, tenant, credential refs, and freeze scopes; never raw secrets.</p>
           </div>
         </div>
         <div class="flow-step">
@@ -615,6 +660,8 @@
       </div>
       <div>
         <a href="https://github.com/ashlrai/locus">github.com/ashlrai/locus</a>
+        &nbsp;·&nbsp;
+        <a href="/llms.txt">llms.txt</a>
         &nbsp;·&nbsp;
         <a href="https://phm.dev">phm.dev</a>
         &nbsp;·&nbsp;

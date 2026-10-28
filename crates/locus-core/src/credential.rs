@@ -119,7 +119,10 @@ pub struct CredentialMetadata {
 pub fn credential_metadata(raw: &str) -> CredentialMetadata {
     let parsed = CredentialRef::parse(raw);
     CredentialMetadata {
-        present: !raw.trim().is_empty(),
+        // A reference by itself does not mean its credential can be used.
+        // Resolve only to establish availability; the zeroizing value is
+        // dropped here and is never included in metadata.
+        present: resolve(&parsed).is_ok(),
         source: parsed.source().to_string(),
     }
 }
@@ -569,8 +572,24 @@ mod tests {
         let metadata = credential_metadata("phm:TOP_SECRET_CANARY");
         let json = serde_json::to_string(&metadata).unwrap();
         assert_eq!(metadata.source, "phantom");
-        assert!(metadata.present);
+        assert!(!metadata.present);
         assert!(!json.contains("TOP_SECRET_CANARY"));
+    }
+
+    #[test]
+    fn metadata_present_tracks_environment_resolution() {
+        const VAR: &str = "LOCUS_TEST_METADATA_CREDENTIAL";
+        std::env::remove_var(VAR);
+        let missing = credential_metadata(&format!("env:{VAR}"));
+        assert_eq!(missing.source, "environment");
+        assert!(!missing.present);
+
+        std::env::set_var(VAR, "metadata-test-value");
+        let available = credential_metadata(&format!("env:{VAR}"));
+        std::env::remove_var(VAR);
+        assert!(available.present);
+        let json = serde_json::to_string(&available).unwrap();
+        assert!(!json.contains("metadata-test-value"));
     }
 
     #[test]
