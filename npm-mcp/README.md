@@ -22,6 +22,13 @@ On first run the wrapper downloads the release binary into `~/.locus/bin`, or fa
 cargo install --git https://github.com/ashlrai/locus locus-mcp --locked
 ```
 
+The wrapper never replaces a newer `~/.locus/bin/locus-mcp` with its older
+release. When the cached binary reports (or its sidecar records) a newer
+version than this package, the wrapper keeps and runs it; the same applies
+when the cached version cannot be determined. To intentionally replace it,
+run the wrapper with a leading `--force`, for example `locus-mcp --force`.
+npm's own `--force` is not an override.
+
 ## Setup (Claude Code / Cursor)
 
 ```bash
