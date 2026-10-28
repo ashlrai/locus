@@ -392,7 +392,7 @@ fi
 # DOGFOOD READY attests the checked-out source, never a stale installed binary.
 command -v cargo >/dev/null 2>&1 || die "cargo is required to build exact dogfood binaries"
 log "building exact workspace binaries"
-(cd "$ROOT" && cargo build -q -p locus-cli -p locus-mcp)
+(cd "$ROOT" && cargo build -q -p locus-cli)   # locus-cli ships both binaries
 LOCUS_BIN="$ROOT/target/debug/locus"
 MCP_BIN="$ROOT/target/debug/locus-mcp"
 [[ -x "$LOCUS_BIN" ]] || die "missing exact locus binary at $LOCUS_BIN"

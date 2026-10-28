@@ -23,8 +23,7 @@ Install both binaries and put them on `PATH`:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --path crates/locus-cli    # installs both binaries
 which locus locus-mcp
 ```
 

@@ -13,7 +13,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 
 cargo run -p locus-cli -- --help
-cargo run -p locus-mcp --   # stdio MCP; do not print logs on stdout
+cargo run -p locus-cli --bin locus-mcp --   # stdio MCP; do not print logs on stdout
 ```
 
 A client-launched `locus-mcp` serves control tools only. Provider tools for the
@@ -47,7 +47,7 @@ Only if enter is refused (expired pin, bad seal), run `locus leave --force` firs
 |-------|------|
 | **locus-core** | Binding, Session, Seal (HMAC), Policy, Store (`~/.locus`), isolation env, CredentialRef resolve, adapters, workers |
 | **locus-cli** | Human control plane. Daily use: `enter`, `switch`, `pin`, `leave`, `renew`, `whoami`, `status`, `exec`, `run`, `binding`. Setup: `init`, `quickstart`, `onboard`, `setup`, `agent`, `doctor`, `hook`, `mcp`, `workspace`, and more. `locus --help` is the full grouped list |
-| **locus-mcp** | Stdio MCP multiplexor — tools = control + **pinned binding only** |
+| **locus-mcp** | MCP multiplexor library: tools = control + **pinned binding only**. The `locus-mcp` binary ships inside `locus-cli` (`src/bin/locus-mcp.rs`), so one `cargo install locus-cli` produces both binaries |
 
 Planes (see [docs/architecture.md](./docs/architecture.md)):
 
@@ -81,7 +81,7 @@ Clients → data plane (locus-mcp / exec)
 | `crates/locus-core/src/seal.rs` | Session HMAC |
 | `crates/locus-core/src/adapters/mod.rs` | `ProviderAdapter`, freeze helpers, dispatch |
 | `crates/locus-core/src/workspace.rs` | `.locus.toml` walk + allowlist |
-| `crates/locus-mcp/src/main.rs` | MCP tool catalog + call gate |
+| `crates/locus-mcp/src/lib.rs` | MCP tool catalog + call gate (binary: `locus-cli` `src/bin/locus-mcp.rs`) |
 | `DESIGN.md` | Full architecture + threat model |
 | `AGENTS.md` | Agent-oriented rules and never-commit secrets |
 

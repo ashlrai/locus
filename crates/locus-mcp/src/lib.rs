@@ -365,7 +365,7 @@ struct RunMode {
     swarm: Option<PathBuf>,
 }
 
-fn main() {
+pub fn main() {
     if let Some(result) = locus_core::run_authority_anchor_server_if_requested() {
         if let Err(error) = result {
             eprintln!("authority anchor error: {error}");
@@ -4642,7 +4642,7 @@ mod multi_tenant_tests {
     /// `scope_whoami` / `scope_drift` instead, then update these counts.
     #[test]
     fn global_identity_reads_stay_in_scope_helpers() {
-        let src = include_str!("main.rs");
+        let src = include_str!("lib.rs");
         let bindings_needle = format!("{}{}", "active_session_", "bindings()");
         let drift_needle = format!("{}{}", "check_drift_", "and_freeze()");
         let whoami_needle = format!("{}{}", "s.", "whoami()");

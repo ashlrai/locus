@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **One `cargo install` builds both binaries (#168).** The `locus-cli` package now ships both `locus` and `locus-mcp`: the server code moved into `crates/locus-mcp` as a library crate and `locus-cli` gained a thin `locus-mcp` binary that calls `locus_mcp::main()`. `cargo install --git ... locus-cli --locked` (or `cargo install --path crates/locus-cli`) produces both binaries in a single build session, so `locus-core` compiles once instead of once per installed package. `cargo install locus-mcp` no longer works; the `locus-mcp` crate has no binary target. The `locus-mcp` binary itself is unchanged: same name, same transports, same client configuration.
+
 ## [0.5.2] - 2026-10-26
 
 Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).

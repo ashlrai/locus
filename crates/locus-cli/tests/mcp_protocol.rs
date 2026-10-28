@@ -78,7 +78,7 @@ impl McpClient {
         }
         let mut child = cmd
             .spawn()
-            .expect("spawn locus-mcp — run `cargo build -p locus-mcp` first");
+            .expect("spawn locus-mcp (run `cargo build -p locus-cli` first)");
         let stdin = child.stdin.take().expect("stdin");
         let stdout = BufReader::new(child.stdout.take().expect("stdout"));
         Self {

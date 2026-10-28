@@ -5051,7 +5051,7 @@ fn cmd_mcp(supervised: bool, mcp_bin: Option<String>) -> Result<()> {
         validate_explicit_mcp_bin(&bin)?;
     } else if bare && find_on_path(&bin).is_none() {
         bail!(
-            "locus-mcp not found next to locus or on PATH — install with: cargo install --path crates/locus-mcp"
+            "locus-mcp not found next to locus or on PATH. Install both binaries with: cargo install --path crates/locus-cli"
         );
     }
 

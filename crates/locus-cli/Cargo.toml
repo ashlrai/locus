@@ -12,8 +12,17 @@ repository.workspace = true
 name = "locus"
 path = "src/main.rs"
 
+# The locus-cli package installs both binaries: `cargo install locus-cli`
+# builds `locus` and `locus-mcp` in one pass so `locus-core` compiles once
+# (issue #168). The server lives in the `locus-mcp` library crate; the binary
+# here is a thin shim into `locus_mcp::main()`.
+[[bin]]
+name = "locus-mcp"
+path = "src/bin/locus-mcp.rs"
+
 [dependencies]
 locus-core = { workspace = true }
+locus-mcp = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 anyhow = { workspace = true }

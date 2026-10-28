@@ -73,17 +73,16 @@ npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
 # Cargo 1.83 fails earlier: idna_adapter in the lockfile needs edition 2024.
 # rust-toolchain.toml pins stable inside a checkout and does not apply to
 # `cargo install --git` run outside the repo.
-# Measured on one Linux box: 179 s for both binaries.
+# One package installs both binaries.
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
+cargo install --git https://github.com/ashlrai/locus locus-cli --locked
 ```
 
 Local checkout:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --path crates/locus-cli    # installs locus + locus-mcp
 ```
 
 Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).

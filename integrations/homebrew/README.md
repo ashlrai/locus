@@ -20,7 +20,7 @@ Until the first tag + formula publish, install from source:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
+cargo install --git https://github.com/ashlrai/locus locus-cli --locked   # installs both binaries
 ```
 
 Or test the local formula (requires a matching tag / valid `sha256`, or use `--HEAD`):
@@ -89,7 +89,7 @@ On every tagged release (`vX.Y.Z`):
 
 | Mode | What it does |
 |------|----------------|
-| **Source (default)** | `depends_on "rust" => :build`; `cargo install` of `locus-cli` + `locus-mcp` |
+| **Source (default)** | `depends_on "rust" => :build`; one `cargo install` of `locus-cli` (ships both binaries) |
 | **HEAD** | `brew install --HEAD` builds from `main` |
 | **Prebuilt (optional)** | Downloads release tarballs; installs both binaries |
 

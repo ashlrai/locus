@@ -4,13 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "MCP multiplexor for Locus — tools hard-scoped to the active pin"
+description = "MCP multiplexor for Locus: tools hard-scoped to the active pin. Library crate; the `locus-mcp` binary ships inside `locus-cli` so one install builds both binaries (issue #168)."
 authors.workspace = true
 repository.workspace = true
-
-[[bin]]
-name = "locus-mcp"
-path = "src/main.rs"
 
 [dependencies]
 locus-core = { workspace = true }

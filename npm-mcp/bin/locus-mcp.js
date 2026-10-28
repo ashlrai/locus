@@ -32,7 +32,9 @@ const crypto = require("crypto");
 const VERSION = "0.5.2";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus-mcp";
-const CARGO_PACKAGE = "locus-mcp";
+// locus-cli ships both binaries (locus + locus-mcp) since #168; the locus-mcp
+// crate is now the server library and installs no binary itself.
+const CARGO_PACKAGE = "locus-cli";
 // `cargo install` takes the crate as a positional argument; it has no --package flag.
 const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} ${CARGO_PACKAGE} --locked`;
 const CACHE_DIR = join(

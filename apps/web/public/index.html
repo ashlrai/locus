@@ -473,12 +473,12 @@
         <div class="term-block active" id="tab-cargo">
           <pre><span class="cmt"># release binaries into ~/.cargo/bin</span>
 <span class="cmd">export PATH="$HOME/.cargo/bin:$PATH"</span>
+<span class="cmt"># one package installs both binaries: locus + locus-mcp</span>
 <span class="cmd">cargo install --git https://github.com/ashlrai/locus \
-  locus-cli locus-mcp --locked</span>
+  locus-cli --locked</span>
 
 <span class="cmt"># or from a local checkout</span>
-<span class="cmd">cargo install --path crates/locus-cli</span>
-<span class="cmd">cargo install --path crates/locus-mcp</span></pre>
+<span class="cmd">cargo install --path crates/locus-cli</span></pre>
         </div>
         <div class="term-block" id="tab-npx">
           <pre><span class="cmt"># downloads a release binary (falls back to cargo)</span>

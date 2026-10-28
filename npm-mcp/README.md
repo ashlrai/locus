@@ -13,7 +13,7 @@ npx @ashlrai/locus-mcp
 On first run the wrapper downloads the release binary into `~/.locus/bin`, or falls back to:
 
 ```bash
-cargo install --git https://github.com/ashlrai/locus locus-mcp --locked
+cargo install --git https://github.com/ashlrai/locus locus-cli --locked   # installs both binaries
 ```
 
 ## Setup (Claude Code / Cursor)
@@ -21,7 +21,7 @@ cargo install --git https://github.com/ashlrai/locus locus-mcp --locked
 ```bash
 # Install CLI + MCP
 npm install -g locus-cli @ashlrai/locus-mcp
-# or: cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
+# or: cargo install --git https://github.com/ashlrai/locus locus-cli --locked
 
 eval "$(locus hook bash)"      # exports LOCUS_CONTROL_CAPABILITY
 locus pin acme

@@ -21,7 +21,7 @@ cd locus
 export PATH="$HOME/.cargo/bin:$PATH"
 
 cargo build --workspace
-cargo build --release -p locus-cli -p locus-mcp
+cargo build --release -p locus-cli   # builds both binaries: locus + locus-mcp
 ```
 
 Binaries land at:
@@ -32,8 +32,7 @@ Binaries land at:
 Install locally:
 
 ```bash
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --path crates/locus-cli   # installs locus + locus-mcp
 ```
 
 ## Test
@@ -72,8 +71,8 @@ cargo fmt --all
 | Path | Role |
 |------|------|
 | `crates/locus-core` | Bindings, sessions, seal, policy, store, adapters |
-| `crates/locus-cli` | `locus` binary — pin, exec, binding, setup |
-| `crates/locus-mcp` | Stdio MCP multiplexor hard-scoped to the active pin |
+| `crates/locus-cli` | `locus` + `locus-mcp` binaries; pin, exec, binding, setup |
+| `crates/locus-mcp` | MCP multiplexor library hard-scoped to the active pin |
 | `DESIGN.md` | Architecture, threat model, adapter model |
 | `PLAN.md` | Phased roadmap |
 | `docs/` | Contributor-facing how-tos |

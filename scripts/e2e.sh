@@ -48,7 +48,7 @@ help_mentions() {
 # ── 1. Build release binaries ────────────────────────────────────────────────
 log "1. build release binaries"
 need cargo
-cargo build --release -p locus-cli -p locus-mcp --locked
+cargo build --release -p locus-cli --locked   # locus-cli ships both binaries
 [[ -x "$LOCUS_BIN" ]] || die "missing $LOCUS_BIN"
 [[ -x "$MCP_BIN" ]] || die "missing $MCP_BIN"
 ok "locus + locus-mcp release binaries"

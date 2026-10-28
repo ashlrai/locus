@@ -913,7 +913,7 @@ if [[ -z "$MT_SKIP" ]] && ! locus mcp mint --help >/dev/null 2>&1; then
   MT_SKIP="locus mcp subcommand unavailable (older CLI)"
 fi
 if [[ -z "$MT_SKIP" ]] && ! command -v locus-mcp >/dev/null 2>&1; then
-  (cd "$ROOT" && cargo build -q -p locus-mcp) || true
+  (cd "$ROOT" && cargo build -q -p locus-cli --bin locus-mcp) || true
 fi
 if [[ -z "$MT_SKIP" ]] && ! command -v locus-mcp >/dev/null 2>&1; then
   MT_SKIP="locus-mcp binary not available"

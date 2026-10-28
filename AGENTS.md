@@ -25,7 +25,7 @@ Codename directory may still be `mmcp`; product name is **Locus**.
 export PATH="$HOME/.cargo/bin:$PATH"
 
 cargo build --workspace
-cargo build --release -p locus-cli -p locus-mcp
+cargo build --release -p locus-cli   # builds both binaries: locus + locus-mcp
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
@@ -36,8 +36,7 @@ Binaries: `./target/release/locus`, `./target/release/locus-mcp`.
 Local install:
 
 ```bash
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --path crates/locus-cli   # installs locus + locus-mcp
 ```
 
 CI enforces fmt + clippy `-D warnings` + test + release build (see `.github/workflows/ci.yml`).
@@ -66,7 +65,7 @@ locus exec -- env | grep LOCUS_
 |------|------|
 | `crates/locus-core` | Binding, session, seal, policy, store, isolation, adapters, workers |
 | `crates/locus-cli` | `locus` — enter, pin, leave, whoami, exec, run, binding, onboard, setup, mcp, doctor, … (`locus --help` lists every command by group) |
-| `crates/locus-mcp` | Stdio MCP server hard-scoped to active pin |
+| `crates/locus-mcp` | MCP server library; the `locus-mcp` binary ships with `locus-cli` |
 | `docs/` | Operational how-tos (MCP, adapters, workers, architecture, firm mode) |
 | `examples/` | Sample bindings + `.locus.toml` |
 | `DESIGN.md` | Full architecture + threat model |
@@ -110,7 +109,7 @@ These are load-bearing. Prefer a failing test over a soft allow.
 11. **MCP stdout is sacred** — `locus-mcp` speaks JSON-RPC on stdout; no logs there (breaks the protocol).
 12. **Workspace allowlist** — `.locus.toml` `allowed_bindings` blocks wrong-tenant pins unless `--force` (audited).
 
-Test surface lives primarily in `locus-core` unit tests + `crates/locus-core/tests/isolation.rs` + `crates/locus-mcp/tests/mcp_protocol.rs`.
+Test surface lives primarily in `locus-core` unit tests + `crates/locus-core/tests/isolation.rs` + `crates/locus-cli/tests/mcp_protocol.rs`.
 
 ## Coding rules
 
