@@ -5,6 +5,12 @@ use serde_json::{json, Value};
 
 pub struct AnthropicAdapter;
 
+impl AnthropicAdapter {
+    /// Value for the `anthropic-version` header when adding upstream API calls.
+    /// The current adapter serves local results and makes no upstream requests.
+    pub const API_VERSION: &'static str = "2023-06-01";
+}
+
 /// Scope mapping (per-tenant model-API spend isolation):
 /// `scope.account_id` freezes the Anthropic organization id and
 /// `scope.project_ref` freezes the workspace id. Both are enforced here and by
