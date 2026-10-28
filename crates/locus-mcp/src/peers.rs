@@ -2,6 +2,7 @@
 //! by the operator at startup, never from initialize metadata or message args.
 use super::*;
 use locus_core::peers::{Peer, PeerRegistry, Registration};
+use locus_core::{AdapterTool, ApprovalGate};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::io::Read;

@@ -18,12 +18,22 @@ pub(crate) struct WatchedChild {
 }
 
 impl WatchedChild {
+    /// Watch a child owned elsewhere (the process guard holds the lease).
+    pub(crate) fn watch_shared(child: Arc<Mutex<Child>>, cap: u64) -> Result<Self> {
+        Self::spawn_thread(child, cap, INTERVAL)
+    }
+
+    #[cfg(test)]
     pub(crate) fn start(child: Child, cap: u64) -> Result<Self> {
         Self::with_interval(child, cap, INTERVAL)
     }
 
+    #[cfg(test)]
     fn with_interval(child: Child, cap: u64, interval: Duration) -> Result<Self> {
-        let child = Arc::new(Mutex::new(child));
+        Self::spawn_thread(Arc::new(Mutex::new(child)), cap, interval)
+    }
+
+    fn spawn_thread(child: Arc<Mutex<Child>>, cap: u64, interval: Duration) -> Result<Self> {
         let exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (stop, receiver) = mpsc::channel();
         let watched = child.clone();
