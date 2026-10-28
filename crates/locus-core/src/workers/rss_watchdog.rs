@@ -10,19 +10,55 @@ use std::time::Duration;
 pub(crate) const DEFAULT_CAP: u64 = 1024 * 1024 * 1024;
 const INTERVAL: Duration = Duration::from_secs(2);
 
-pub(crate) struct WatchedChild {
-    child: Arc<Mutex<Child>>,
+/// Process handle the watchdog can supervise: sample by PID, poll for exit,
+/// and terminate. `Child` covers tests; `GuardedChild` additionally releases
+/// the process-group lease and reports liveness without reaping.
+pub(crate) trait SupervisedChild: Send + 'static {
+    fn id(&self) -> u32;
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>>;
+    fn kill(&mut self) -> std::io::Result<()>;
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus>;
+    /// Liveness probe for restart accounting; must not block.
+    fn is_running(&mut self) -> Result<bool>;
+    /// Owner-initiated teardown. `GuardedChild` releases the process-group
+    /// lease first so cooperative servers see stdin EOF before any SIGKILL.
+    fn shutdown(&mut self) {
+        let _ = self.kill();
+        let _ = self.wait();
+    }
+}
+
+impl SupervisedChild for Child {
+    fn id(&self) -> u32 {
+        Child::id(self)
+    }
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        Child::try_wait(self)
+    }
+    fn kill(&mut self) -> std::io::Result<()> {
+        Child::kill(self)
+    }
+    fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        Child::wait(self)
+    }
+    fn is_running(&mut self) -> Result<bool> {
+        Ok(self.try_wait()?.is_none())
+    }
+}
+
+pub(crate) struct WatchedChild<C: SupervisedChild> {
+    child: Arc<Mutex<C>>,
     stop: mpsc::Sender<()>,
     thread: Option<JoinHandle<()>>,
     exceeded: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl WatchedChild {
-    pub(crate) fn start(child: Child, cap: u64) -> Result<Self> {
+impl<C: SupervisedChild> WatchedChild<C> {
+    pub(crate) fn start(child: C, cap: u64) -> Result<Self> {
         Self::with_interval(child, cap, INTERVAL)
     }
 
-    fn with_interval(child: Child, cap: u64, interval: Duration) -> Result<Self> {
+    fn with_interval(child: C, cap: u64, interval: Duration) -> Result<Self> {
         let child = Arc::new(Mutex::new(child));
         let exceeded = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (stop, receiver) = mpsc::channel();
@@ -79,17 +115,24 @@ impl WatchedChild {
     pub(crate) fn exceeded(&self) -> bool {
         self.exceeded.load(std::sync::atomic::Ordering::Acquire)
     }
+
+    /// Forward the inner handle's non-destructive liveness check.
+    pub(crate) fn is_running(&self) -> Result<bool> {
+        self.child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_running()
+    }
 }
 
-impl Drop for WatchedChild {
+impl<C: SupervisedChild> Drop for WatchedChild<C> {
     fn drop(&mut self) {
         let _ = self.stop.send(());
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
         let mut child = self.child.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = child.kill();
-        let _ = child.wait();
+        child.shutdown();
     }
 }
 

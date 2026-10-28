@@ -20,6 +20,35 @@ When spawning:
 4. Private `GH_CONFIG_DIR` / AWS config paths under the session worker home.
 5. Optional **sandbox** (below) when `LOCUS_WORKER_SANDBOX=1` or `upstream.sandbox = true`.
 
+## Stdio worker lifetime
+
+On Unix, every spawned upstream has a private process group and a separate
+lifetime guardian. Closing the MCP client input tears down the static worker
+manager. Backend teardown or drop closes upstream stdin first; owner death also
+closes the pipe. The guardian checks its original parent and the lifetime lease,
+allows 250 ms for EOF handling, then kills remaining processes in the group.
+This also covers a killed owner, failed handshakes, and ordinary launcher children.
+It is process cleanup, not containment of a hostile program that deliberately
+detaches into another session. Platforms without the guardian and bounded pipe
+I/O support refuse upstream launch.
+
+Requests have a ten-second I/O deadline, including blocked writes and partial
+frames. Frames are limited to 8 MiB and framing headers to 16 KiB. A transport
+failure closes stdin and invalidates that connection. Child stderr is discarded
+rather than retained in an unread pipe or forwarded with possible credentials.
+
+A later request may replace a failed worker, but **tool calls are never replayed**.
+Three failed launches or unexpected exits exhaust the manager's budget for that
+session/provider (and binding in namespaced sessions). Successful handshakes and
+teardown do not reset it; healthy idle recycling does not consume it. A human
+must establish a new sealed session after exhaustion.
+
+Upstream environments carry `LOCUS_MCP_UPSTREAM_CHILD=1`. Native `locus-mcp`
+rejects that marker before serving or launching another worker, including when
+started through a shell or package launcher. Direct `locus-mcp` upstream commands
+are rejected before spawn. This marker is a recursion guard, not an authorization
+capability; clearing it never grants access to a binding.
+
 ## Worker sandbox (best-effort / platform backends)
 
 Blast radius for a malicious upstream is still **one binding’s credentials**. Sandbox is additive isolation, **not** a multi-tenant VM or full seccomp profile. When enabled, Locus selects a platform backend and records it in `LOCUS_WORKER_SANDBOX_BACKEND`. **Never invent false security:** read the backend tag — `path` is not equivalent to Seatbelt or bubblewrap.
