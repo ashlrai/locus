@@ -84,13 +84,19 @@ pub fn namespace_upstream_tool(provider: &str, tool_name: &str) -> String {
 
 /// Strip `provider.` prefix for upstream fan-out (case-insensitive provider).
 pub fn strip_provider_prefix(provider: &str, tool: &str) -> String {
-    let prefix = format!("{}.", provider.to_ascii_lowercase());
-    let lower = tool.to_ascii_lowercase();
-    if lower.starts_with(&prefix) {
-        tool[prefix.len()..].to_string()
-    } else {
-        tool.to_string()
+    strip_provider_prefix_ref(provider, tool).to_owned()
+}
+
+fn strip_provider_prefix_ref<'a>(provider: &str, tool: &'a str) -> &'a str {
+    if tool
+        .get(..provider.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(provider))
+    {
+        if let Some(name) = tool[provider.len()..].strip_prefix('.') {
+            return name;
+        }
     }
+    tool
 }
 
 /// First path segment before `.` — used as provider key for routing.
@@ -111,6 +117,7 @@ pub struct CompositeWorkerManager {
     /// Live MCP backends for providers that declared `upstream`.
     mcp: BTreeMap<WorkerKey, McpStdioBackend>,
     slots: BTreeMap<WorkerKey, WorkerSlot>,
+    rss_restarts: BTreeMap<WorkerKey, u8>,
     /// Last use time per slot (for idle reap). Not serialized.
     last_used: BTreeMap<WorkerKey, Instant>,
     /// When set, `ensure*` / `call_tool` paths may reap idle workers first.
@@ -136,6 +143,7 @@ impl CompositeWorkerManager {
             synthetic: SyntheticBackend,
             mcp: BTreeMap::new(),
             slots: BTreeMap::new(),
+            rss_restarts: BTreeMap::new(),
             last_used: BTreeMap::new(),
             idle_timeout: idle_timeout_from_env(),
             multi_session: false,
@@ -179,7 +187,11 @@ impl CompositeWorkerManager {
     }
 
     fn touch(&mut self, key: &WorkerKey) {
-        self.last_used.insert(key.clone(), Instant::now());
+        if let Some(last_used) = self.last_used.get_mut(key) {
+            *last_used = Instant::now();
+        } else {
+            self.last_used.insert(key.clone(), Instant::now());
+        }
     }
 
     /// Tear down slots whose last use exceeds `timeout` (or configured idle).
@@ -454,23 +466,20 @@ impl CompositeWorkerManager {
             .clone();
         self.touch(&key);
 
-        // Prefer synthetic when the tool is owned by an in-process adapter.
-        let synthetic_names: Vec<String> = adapters::tools_for_binding(binding)
-            .into_iter()
-            .filter(|t| t.provider.eq_ignore_ascii_case(provider))
-            .map(|t| t.name)
-            .collect();
-
-        if synthetic_names.iter().any(|n| n == tool) {
-            return self.synthetic.call_tool(&slot, binding, tool, args);
-        }
-
         if let Some(backend) = self.mcp.get(&key) {
-            let upstream_name = strip_provider_prefix(provider, tool);
-            return backend.call_tool(&slot, binding, &upstream_name, &scoped_args);
+            // Catalog ownership only matters when an upstream could shadow it.
+            // Avoid retaining a second collection of allocated tool names.
+            if adapters::tools_for_binding(binding)
+                .into_iter()
+                .any(|t| t.provider.eq_ignore_ascii_case(provider) && t.name == tool)
+            {
+                return self.synthetic.call_tool(&slot, binding, tool, args);
+            }
+            let upstream_name = strip_provider_prefix_ref(provider, tool);
+            return backend.call_tool(&slot, binding, upstream_name, &scoped_args);
         }
 
-        // No upstream — fall through to synthetic (may still error unknown tool).
+        // No upstream: synthetic dispatch still rejects unknown tools.
         self.synthetic.call_tool(&slot, binding, tool, args)
     }
 }
@@ -504,6 +513,22 @@ impl WorkerManager for CompositeWorkerManager {
             }
         }
         let key = Self::worker_key(session, binding, provider);
+        if !self.slots.contains_key(&key) && self.rss_restarts.get(&key).is_some_and(|n| *n >= 3) {
+            return Err(LocusError::msg("child RSS restart budget exhausted"));
+        }
+        if self
+            .mcp
+            .get(&key)
+            .is_some_and(McpStdioBackend::rss_exceeded)
+        {
+            let attempts = self.rss_restarts.get(&key).copied().unwrap_or(0);
+            if attempts >= 3 {
+                return Err(LocusError::msg("child RSS restart budget exhausted"));
+            }
+            // Recovery happens only at ensure, never by replaying tools/call.
+            self.teardown(&key)?;
+            self.rss_restarts.insert(key.clone(), attempts);
+        }
         if let Some(existing) = self.slots.get(&key) {
             if matches!(
                 existing.state,
@@ -542,9 +567,20 @@ impl WorkerManager for CompositeWorkerManager {
         std::fs::create_dir_all(&work_dir)?;
 
         let slot = if let Some(spec) = pb.upstream.as_ref().filter(|u| u.is_declared()) {
+            if let Some(attempts) = self.rss_restarts.get_mut(&key) {
+                *attempts += 1;
+            }
             let cfg = mcp_config_from_upstream(spec)?;
             let backend = McpStdioBackend::new(cfg);
-            let slot = backend.ensure(session, binding, pb, &work_dir)?;
+            let slot = match backend.ensure(session, binding, pb, &work_dir) {
+                Ok(slot) => slot,
+                Err(error) => {
+                    if matches!(error, LocusError::ChildRssStopped) {
+                        self.rss_restarts.entry(key.clone()).or_insert(0);
+                    }
+                    return Err(error);
+                }
+            };
             self.mcp.insert(key.clone(), backend);
             slot
         } else {
@@ -572,6 +608,7 @@ impl WorkerManager for CompositeWorkerManager {
     }
 
     fn teardown(&mut self, key: &WorkerKey) -> Result<()> {
+        self.rss_restarts.remove(key);
         self.last_used.remove(key);
         if let Some(slot) = self.slots.remove(key) {
             if let Some(backend) = self.mcp.remove(key) {
@@ -587,6 +624,8 @@ impl WorkerManager for CompositeWorkerManager {
     }
 
     fn teardown_session(&mut self, session_id: &str) -> Result<()> {
+        self.rss_restarts
+            .retain(|key, _| key.session_id != session_id);
         let keys: Vec<WorkerKey> = self
             .slots
             .keys()
@@ -725,6 +764,60 @@ for line in sys.stdin:
             provider_from_tool_name("supabase.table.delete"),
             Some("supabase")
         );
+    }
+
+    #[test]
+    fn prefix_matching_preserves_tool_bytes() {
+        for (provider, tool, expected) in [
+            ("GitHub", "GITHUB.Repos.List", "Repos.List"),
+            ("github", "githubx.ping", "githubx.ping"),
+            ("git.hub", "Git.Hub.ping", "ping"),
+            ("", ".ping", "ping"),
+            ("github", "github", "github"),
+            ("github", "github.", ""),
+            ("github", "github.雪", "雪"),
+            ("github", "雪.ping", "雪.ping"),
+        ] {
+            let stripped = strip_provider_prefix_ref(provider, tool);
+            assert_eq!(stripped, expected);
+            assert_eq!(strip_provider_prefix(provider, tool), expected);
+            assert_eq!(
+                stripped.as_ptr(),
+                tool.as_ptr().wrapping_add(tool.len() - expected.len())
+            );
+        }
+    }
+
+    #[test]
+    fn synthetic_dispatch_rejects_unknown_and_unbound_tools() {
+        let dir = tempdir().unwrap();
+        let session = session_at(dir.path().to_str().unwrap());
+        let binding = binding_mixed(false);
+        let mut manager = CompositeWorkerManager::with_idle_timeout(None);
+        manager.ensure_binding(&session, &binding).unwrap();
+        let key = CompositeWorkerManager::worker_key(&session, &binding, "github");
+        manager
+            .last_used
+            .insert(key.clone(), Instant::now() - Duration::from_secs(60));
+        let before = manager.last_used[&key];
+        let args = serde_json::json!({});
+        assert!(
+            manager
+                .call_tool(&session, &binding, "github.scope", &args)
+                .unwrap()
+                .ok
+        );
+        assert!(manager.last_used[&key] > before);
+        assert!(
+            !manager
+                .call_tool(&session, &binding, "github.unknown", &args)
+                .unwrap()
+                .ok
+        );
+        assert!(manager
+            .call_tool(&session, &binding, "unbound.scope", &args)
+            .is_err());
+        assert_eq!(manager.list().len(), 2);
     }
 
     #[test]
@@ -1373,6 +1466,87 @@ for line in sys.stdin:
                 "{id}: {err}"
             );
         }
+    }
+
+    #[test]
+    fn failed_rss_recovery_launches_consume_budget() {
+        let dir = tempdir().unwrap();
+        let session = session_at(dir.path().to_str().unwrap());
+        let mut binding = binding_mixed(true);
+        binding.providers[1].upstream = Some(UpstreamSpec::new("/FAKE-nonexistent-locus-worker"));
+        let mut manager = CompositeWorkerManager::new();
+        let key = CompositeWorkerManager::worker_key(&session, &binding, "github");
+        // A watchdog-stopped initial handshake leaves a recovery marker.
+        manager.rss_restarts.insert(key.clone(), 0);
+        for expected in 1..=3 {
+            assert!(manager.ensure(&session, &binding, "github").is_err());
+            assert_eq!(manager.rss_restarts.get(&key), Some(&expected));
+        }
+        assert!(manager
+            .ensure(&session, &binding, "github")
+            .unwrap_err()
+            .to_string()
+            .contains("restart budget exhausted"));
+        manager.teardown_session(&session.session_id).unwrap();
+        assert!(manager.rss_restarts.is_empty());
+    }
+
+    #[test]
+    fn rss_watchdog_restarts_are_bounded() {
+        if !crate::test_support::run_in_isolated_process(
+            module_path!(),
+            "rss_watchdog_restarts_are_bounded",
+        ) {
+            return;
+        }
+        let dir = tempdir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        std::env::set_var("LOCUS_WORKER_SANDBOX", "0");
+        std::fs::write(
+            dir.path().join(".locus.toml"),
+            "child_rss_cap_bytes = 33554432\n",
+        )
+        .unwrap();
+        let home = dir.path().join("worker");
+        std::fs::create_dir_all(&home).unwrap();
+        let session = session_at(home.to_str().unwrap());
+        let mut binding = binding_mixed(true);
+        // Allocate only after tools/list so each generation completes handshake.
+        let script = mock_script().replace(
+            "    elif method==\"tools/call\":",
+            "        memory = bytearray(96 * 1024 * 1024)\n    elif method==\"tools/call\":",
+        );
+        binding.providers[1].upstream =
+            Some(UpstreamSpec::new("python3").with_args(["-u", "-c", &script]));
+        let mut manager = CompositeWorkerManager::new();
+        for _ in 0..4 {
+            let slot = manager.ensure(&session, &binding, "github").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !manager.mcp.get(&slot.key).unwrap().rss_exceeded() {
+                assert!(
+                    Instant::now() < deadline,
+                    "RSS watchdog did not stop allocating child"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            // Failed calls cannot replay or automatically restart a child.
+            assert!(manager
+                .call_tool(&session, &binding, "github.ping", &serde_json::json!({}))
+                .is_err());
+        }
+        for _ in 0..2 {
+            assert!(manager
+                .ensure(&session, &binding, "github")
+                .unwrap_err()
+                .to_string()
+                .contains("restart budget exhausted"));
+        }
+        assert_eq!(
+            manager.rss_restarts.values().copied().collect::<Vec<_>>(),
+            vec![3]
+        );
+        manager.teardown_session(&session.session_id).unwrap();
+        assert!(manager.rss_restarts.is_empty());
     }
 
     #[test]

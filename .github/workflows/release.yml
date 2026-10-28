@@ -10,6 +10,11 @@ on:
     paths:
       - ".github/workflows/release.yml"
 
+# A PR dry run cancels its superseded run; tag pushes never cancel.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: write
 
@@ -17,7 +22,35 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  full-suite-evidence:
+    # Release gate: the full suite (macOS and Windows included) must have
+    # passed in a manual workflow_dispatch run of CI on this exact sha.
+    name: Full suite green on release sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      actions: read
+    steps:
+      - name: Require a successful workflow_dispatch CI run on this sha
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          CI_WORKFLOW: ci.yml
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # PR dry runs never publish, so they need no full-suite evidence.
+          if [ "$EVENT" = "pull_request" ]; then echo "PR dry run: evidence not required"; exit 0; fi
+          n="$(gh api "repos/${REPO}/actions/workflows/${CI_WORKFLOW}/runs?event=workflow_dispatch&head_sha=${SHA}&status=success&per_page=1" --jq '.total_count')"
+          if [ "${n:-0}" -lt 1 ]; then
+            echo "::error::No successful workflow_dispatch run of ${CI_WORKFLOW} on ${SHA}. Run 'gh workflow run ${CI_WORKFLOW} --ref <this ref>', wait for green, then release."
+            exit 1
+          fi
+          echo "full suite green on ${SHA} (${n} run(s))"
+
   build:
+    needs: [full-suite-evidence]
     # The PR dry run builds Linux only: the macOS job becomes a no-op on
     # ubuntu so it never queues behind the shared macOS runners.
     name: Build ${{ matrix.name }}${{ github.event_name == 'pull_request' && matrix.release_only && ' (release only)' || '' }}

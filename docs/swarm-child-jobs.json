@@ -1,0 +1,292 @@
+{
+  "version": 1,
+  "parent": "RQ-PLAN-LOCUS",
+  "baseline": "c3ced98",
+  "jobs": [
+    {
+      "id": "RQ-LOCUS-01",
+      "title": "Version the swarm dispatch and readiness contract",
+      "repo": "locus",
+      "pool": "codex-personal",
+      "tier": "frontier",
+      "priority": "P0",
+      "depends_on": [],
+      "external_dependencies": [],
+      "evidence": [
+        "docs/swarm-broker.md",
+        "docs/ashlr-handshake.md",
+        "crates/locus-cli/src/handshake.rs",
+        "integrations/phantom/locus.ts"
+      ],
+      "gap": "Grant-scoped MCP exists, but router job identity, requested tools, binding expectations and readiness need one explicit versioned dispatch contract.",
+      "deliverable": "Add a values-free dispatch request/response schema and compatibility fixtures for the router; separate metadata readiness from provider execution readiness.",
+      "acceptance": [
+        "Bind job ID, agent ID, public grant ID, expected binding and exact tool set without accepting identity from untrusted MCP metadata.",
+        "Unknown versions, absent authority, stale reports and scope mismatch refuse dispatch with stable codes and no credential-bearing worker spawn.",
+        "Document trusted operator versus agent responsibilities and schema upgrade behavior; retain existing handshake compatibility.",
+        "Enforce the workspace allowed_bindings and expected binding at dispatch; reject wrong-workspace authority without agent force or re-pin."
+      ],
+      "validation": [
+        "cargo test -p locus-cli --test handshake_conformance",
+        "cargo test -p locus-cli --test agent_contract"
+      ]
+    },
+    {
+      "id": "RQ-LOCUS-02",
+      "title": "Preflight graph intent against live authority",
+      "repo": "locus",
+      "pool": "codex-personal",
+      "tier": "frontier",
+      "priority": "P0",
+      "depends_on": [
+        "RQ-LOCUS-01"
+      ],
+      "external_dependencies": [],
+      "evidence": [
+        "crates/locus-core/src/swarm.rs",
+        "crates/locus-cli/src/swarm_serve.rs",
+        "crates/locus-mcp/tests/http_swarm.rs"
+      ],
+      "gap": "Startup checks live grants and loads an immutable graph; operators need actionable validation of requested versus effective tools before dispatch.",
+      "deliverable": "Add a credential-free graph preflight with structured per-node readiness and a stable graph digest for dispatch correlation.",
+      "acceptance": [
+        "Validate every graph grant, sealed session and exact requested tool against the live catalog without resolving credentials.",
+        "Report absent tools as blockers for requested execution, while retaining empty-graph and empty-tool deny-all semantics.",
+        "Reject duplicate, wildcard, oversized and unknown-field input; do not echo attacker-controlled payloads or mint authority.",
+        "Make clear that editing a manifest does not revoke a running snapshot; operator revoke plus restart remains the supported workflow."
+      ],
+      "validation": [
+        "cargo test -p locus-core swarm::tests",
+        "cargo test -p locus-cli swarm_serve::tests",
+        "cargo test -p locus-mcp --test http_swarm"
+      ]
+    },
+    {
+      "id": "RQ-LOCUS-03",
+      "title": "Specify the tenant-scoped Phantom execution bridge",
+      "repo": "locus",
+      "pool": "codex-personal",
+      "tier": "frontier",
+      "priority": "P0",
+      "depends_on": [
+        "RQ-LOCUS-01"
+      ],
+      "external_dependencies": [
+        "Phantom Secrets owner must review and implement a scoped value-blind execution endpoint; no endpoint or release is assumed available."
+      ],
+      "evidence": [
+        "docs/credential-compatibility.md",
+        "crates/locus-core/src/credential.rs",
+        "crates/locus-cli/tests/phantom_credential_contract.rs"
+      ],
+      "gap": "phm: references are metadata only and currently refuse resolution; no supported scoped value-blind bridge exists.",
+      "deliverable": "Land a reviewed bridge protocol, mock conformance harness and explicit availability negotiation; keep production resolution disabled until the Phantom counterpart passes.",
+      "acceptance": [
+        "Bind credential reference, tenant, provider, operation and expiry to independently authenticated authority; reject substitution and replay.",
+        "Never invoke or capture phantom reveal, return secret bytes to the model, or translate unavailable phm: references to ambient env credentials.",
+        "Mock missing, expired, revoked and cross-tenant responses; preserve existing unsupported behavior until both sides explicitly negotiate a supported protocol."
+      ],
+      "validation": [
+        "cargo test -p locus-cli --test phantom_credential_contract",
+        "cargo test -p locus-core credential"
+      ]
+    },
+    {
+      "id": "RQ-LOCUS-04",
+      "title": "Add an explicit grant-scoped CLI execution contract",
+      "repo": "locus",
+      "pool": "codex-personal",
+      "tier": "frontier",
+      "priority": "P0",
+      "depends_on": [
+        "RQ-LOCUS-01"
+      ],
+      "external_dependencies": [],
+      "evidence": [
+        "docs/cli-routing.md",
+        "crates/locus-core/src/adapters/cli.rs",
+        "crates/locus-cli/tests/exec_for.rs",
+        "crates/locus-cli/tests/exec_expect.rs"
+      ],
+      "gap": "exec --for isolates one provider but does not validate arbitrary native flags, sandbox the executable, or inherit MCP tool policy.",
+      "deliverable": "Introduce a separate restricted CLI operation surface for swarm jobs with exact executable and operation mappings, independent of ordinary trusted exec.",
+      "acceptance": [
+        "Derive identity from operator-issued job authority; agents cannot pin, choose another binding or gain executor/control capabilities.",
+        "Allow only reviewed adapter operations; reject shells, wrappers, response files, endpoint/config overrides and unknown flags before spawn.",
+        "Enforce frozen scopes and external approval before destructive execution; do not treat local approval labels as authorization.",
+        "Use a fresh private HOME, selected-provider credentials only, bounded redacted output and preserved child status; prove wrong-tenant credentials never enter the child.",
+        "Retain trusted exec compatibility and accurately document its weaker boundary; unsupported CLIs fail closed on the restricted surface."
+      ],
+      "validation": [
+        "cargo test -p locus-cli --test exec_for",
+        "cargo test -p locus-cli --test exec_expect",
+        "cargo test -p locus-core --test isolation"
+      ]
+    },
+    {
+      "id": "RQ-LOCUS-05",
+      "title": "Close job lifecycle and authority cleanup",
+      "repo": "locus",
+      "pool": "codex-personal",
+      "tier": "frontier",
+      "priority": "P0",
+      "depends_on": [
+        "RQ-LOCUS-02",
+        "RQ-LOCUS-04"
+      ],
+      "external_dependencies": [],
+      "evidence": [
+        "crates/locus-mcp/src/grant.rs",
+        "crates/locus-core/src/store.rs",
+        "crates/locus-core/src/workers/mod.rs",
+        "crates/locus-mcp/tests/http_multi_tenant.rs",
+        "crates/locus-mcp/tests/stdio_lifecycle.rs"
+      ],
+      "gap": "Grant revocation closes subsequent requests; the swarm docs explicitly allow already-authorized calls to finish. Job cancellation needs a precise lifecycle across MCP and restricted CLI.",
+      "deliverable": "Define and implement idempotent dispatch, completion, cancellation and crash cleanup for job-owned grants, sessions and process trees.",
+      "acceptance": [
+        "Retries cannot create duplicate active authority; cleanup affects only resources owned by the target job.",
+        "Revoke before cleanup so new calls refuse; specify which in-flight operations can be interrupted and never promise rollback of remote effects.",
+        "Expiry, operator revoke, parent death and broker restart leave no reusable job authority or orphan credential-bearing workers.",
+        "Prove cancelling agent A does not terminate agent B, including same-tenant and cross-tenant cases."
+      ],
+      "validation": [
+        "cargo test -p locus-mcp --test http_multi_tenant",
+        "cargo test -p locus-mcp --test stdio_lifecycle",
+        "cargo test -p locus-mcp --test http_swarm"
+      ]
+    },
+    {
+      "id": "RQ-LOCUS-06",
+      "title": "Bound broker resources per agent",
+      "repo": "locus",
+      "pool": "codex-personal",
+      "tier": "frontier",
+      "priority": "P1",
+      "depends_on": [
+        "RQ-LOCUS-02"
+      ],
+      "external_dependencies": [],
+      "evidence": [
+        "crates/locus-core/src/workers/stdio_client.rs",
+        "crates/locus-core/src/budget.rs",
+        "crates/locus-mcp/tests/http_swarm.rs",
+        "docs/session-budget.md"
+      ],
+      "gap": "Manifest and transport limits exist; swarm fairness and overload behavior need explicit per-agent execution limits rather than assuming session spend budgets cover them.",
+      "deliverable": "Add bounded per-agent concurrency, queue length, request duration and output size with stable overload errors and operator limits.",
+      "acceptance": [
+        "A noisy grant cannot exhaust every execution slot; global and per-agent limits are enforced atomically.",
+        "Timeout and disconnect cleanup releases capacity without retrying non-idempotent operations or dropping policy checks.",
+        "Use deterministic blocked-worker tests to prove fairness, cancellation and bounded output; report measured latency and limits without inventing an SLO."
+      ],
+      "validation": [
+        "cargo test -p locus-mcp --test http_swarm",
+        "cargo test -p locus-core --test session_budget"
+      ]
+    },
+    {
+      "id": "RQ-LOCUS-07",
+      "title": "Correlate dispatch decisions with execution outcomes",
+      "repo": "locus",
+      "pool": "codex-personal",
+      "tier": "frontier",
+      "priority": "P1",
+      "depends_on": [
+        "RQ-LOCUS-01",
+        "RQ-LOCUS-04"
+      ],
+      "external_dependencies": [],
+      "evidence": [
+        "docs/observability.md",
+        "crates/locus-core/src/events.rs",
+        "crates/locus-core/src/forensics.rs",
+        "crates/locus-mcp/tests/http_swarm.rs"
+      ],
+      "gap": "Swarm audit records graph decisions and public grant IDs; graph allowed is not proof of successful execution and router job correlation needs a shared contract.",
+      "deliverable": "Add values-free job/request correlation and terminal outcome records across MCP and restricted CLI, plus an operator diagnostic view.",
+      "acceptance": [
+        "Distinguish graph admission, policy/approval refusal, worker start, completion, timeout and cancellation; stable IDs join records without raw arguments.",
+        "Never log bearers, credential values, arbitrary command output or secret-bearing arguments; scan synthetic sentinels across stdout, stderr and audit exports.",
+        "Audit admission failure remains fail closed; post-execution audit failure reports uncertainty and never replays a destructive operation.",
+        "Diagnostics state when operator re-pin, grant replacement or Phantom availability is required without performing authority changes."
+      ],
+      "validation": [
+        "cargo test -p locus-mcp --test http_swarm",
+        "cargo test -p locus-core events"
+      ]
+    },
+    {
+      "id": "RQ-LOCUS-08",
+      "title": "Integrate router dispatch with the broker contract",
+      "repo": "locus",
+      "pool": "codex-personal",
+      "tier": "frontier",
+      "priority": "P0",
+      "depends_on": [
+        "RQ-LOCUS-02",
+        "RQ-LOCUS-03",
+        "RQ-LOCUS-04",
+        "RQ-LOCUS-05"
+      ],
+      "external_dependencies": [
+        "Ashlr router owner must adopt and validate the dispatch contract in its own repository.",
+        "Phantom Secrets bridge implementation and compatibility evidence from RQ-LOCUS-03 are required for Phantom-backed production dispatch."
+      ],
+      "evidence": [
+        "integrations/phantom/locus.ts",
+        "integrations/phantom/fleet-preflight.md",
+        "docs/hub-integration.md",
+        "scripts/hub-integration-test.sh"
+      ],
+      "gap": "Existing hub helpers have optional warn/off modes and ephemeral sessions; mandatory brokered swarm dispatch needs a distinct enforced integration and downstream adoption.",
+      "deliverable": "Ship a Locus-owned router integration harness and updated drop-in; hand off the production router change with exact request/response fixtures.",
+      "acceptance": [
+        "New brokered swarm dispatch blocks when readiness, requested tools or authority is unavailable; warn/off modes never authorize this new path.",
+        "Provision one operator-authorized grant per agent, register only intended broker/Secrets endpoints, and never fall back to ambient provider MCPs or native CLIs.",
+        "Handle cancellation and retry through the lifecycle contract; no shared active-pin races or bearer values in job payloads/logs.",
+        "Run two concurrent synthetic jobs with disjoint tools; swapping job/grant/session identifiers refuses before side effects.",
+        "Document env-backed fixture operation separately from Phantom-backed production readiness; missing Phantom bridge blocks the latter."
+      ],
+      "validation": [
+        "bash scripts/hub-integration-test.sh",
+        "cargo test -p locus-mcp --test http_swarm"
+      ]
+    },
+    {
+      "id": "RQ-LOCUS-09",
+      "title": "Prove end-to-end isolation and stage operator rollout",
+      "repo": "locus",
+      "pool": "codex-personal",
+      "tier": "frontier",
+      "priority": "P0",
+      "depends_on": [
+        "RQ-LOCUS-05",
+        "RQ-LOCUS-06",
+        "RQ-LOCUS-07",
+        "RQ-LOCUS-08"
+      ],
+      "external_dependencies": [],
+      "evidence": [
+        "scripts/dogfood-multi-account.sh",
+        "docs/dogfood-multi-account.md",
+        "crates/locus-core/tests/invariants.rs",
+        "crates/locus-mcp/tests/http_swarm.rs"
+      ],
+      "gap": "Existing protocol and isolation suites cover important gates; the complete router-to-MCP/restricted-CLI lifecycle needs one reproducible evidence pack.",
+      "deliverable": "Add an isolated offline swarm conformance scenario and operator rollout/rollback runbook with explicit release gates.",
+      "acceptance": [
+        "Use temporary HOME and LOCUS_HOME, synthetic credentials and fake upstreams; require no network account, real pin or live secret.",
+        "Cover two tenants and two same-tenant agents, forged selectors, stale graph, revoked/expired authority, broker crash, worker timeout, audit failure and unavailable Phantom.",
+        "Assert denied operations produce zero fake-provider side effects and no secret sentinels in model-visible output, logs or audits.",
+        "Gate rollout on all conformance checks plus downstream router/Phantom evidence; start with operator-owned read-only canary then explicitly approved mutation.",
+        "Rollback revokes affected grants, stops owned workers and restores the known-good broker config; never falls back to unbrokered access."
+      ],
+      "validation": [
+        "cargo test --workspace",
+        "cargo fmt --all -- --check",
+        "cargo clippy --workspace --all-targets -- -D warnings"
+      ]
+    }
+  ]
+}

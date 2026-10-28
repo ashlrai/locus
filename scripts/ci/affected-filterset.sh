@@ -18,7 +18,9 @@ for p in meta["packages"]:
     d = os.path.relpath(os.path.dirname(p["manifest_path"]), root)
     crates[d] = p["name"]
 files = """$files""".split()
-global_triggers = ("Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml",
+# Root/package metadata are include_str inputs to the registry manifest tests.
+global_triggers = ("Cargo.toml", "Cargo.lock", "server.json", "npm-mcp/package.json",
+                   "rust-toolchain", "rust-toolchain.toml",
                    ".cargo/", ".config/nextest", ".github/", "deny.toml", "clippy.toml", "rustfmt.toml")
 hit = set()
 for f in files:
