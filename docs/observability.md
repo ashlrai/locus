@@ -102,7 +102,10 @@ locus events export --last 200
 locus events export --binding acme --out acme.jsonl
 ```
 
-Envelope schema `locus.audit.v1`:
+Envelope schema `locus.audit.v1` (versioned wire contract:
+[`schema/locus-events.v1.schema.json`](../schema/locus-events.v1.schema.json),
+`$defs.audit`; the same file covers `locus.session_tick` and `watch` ticks so a
+hub router can validate every locus event kind off one `$id`):
 
 ```json
 {

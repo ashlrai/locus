@@ -414,6 +414,8 @@ Each tick is a JSON-RPC `notifications/message` with values-free `data`:
 
 `X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets. Ticks run the same external probes as `locus doctor` (Phantom on PATH, unresolved `phm:` refs), so `session_ok: true` is a real verdict on a healthy pin — not a conservative constant.
 
+Wire contract: `params.data` validates against [`schema/locus-events.v1.schema.json`](../schema/locus-events.v1.schema.json) `$defs.sessionTick` (tenant ticks add `scope`/`grant_id`/`issues`).
+
 Cross-process `Mcp-Session-Id` resume is **on** when workers share the same `LOCUS_HOME` (or `LOCUS_MCP_SESSION_DIR`). Multi-tenant remote multiplexor remains open.
 
 **Hard rules:**

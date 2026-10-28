@@ -9,7 +9,7 @@ Notes and types for wiring **Phantom** (or any agent orchestrator) to Locus with
 | Fleet preflight | [`fleet-preflight.md`](./fleet-preflight.md) — exact steps before agent dispatch |
 | MCP gateway patch | [`mcp-gateway-snippet.md`](./mcp-gateway-snippet.md) |
 | Doctor check | [`doctor-check.md`](./doctor-check.md) |
-| Schemas | [`schema/agent-report.schema.json`](../../schema/agent-report.schema.json), [`schema/doctor.schema.json`](../../schema/doctor.schema.json), [`schema/hub-gate.schema.json`](../../schema/hub-gate.schema.json) |
+| Schemas | [`schema/agent-report.schema.json`](../../schema/agent-report.schema.json), [`schema/doctor.schema.json`](../../schema/doctor.schema.json), [`schema/hub-gate.schema.json`](../../schema/hub-gate.schema.json), [`schema/locus-events.v1.schema.json`](../../schema/locus-events.v1.schema.json) (audit / session_tick / watch events for the router) |
 | Northstar | [`GOALS.md`](../../GOALS.md) · `locus goal status` |
 
 ---
