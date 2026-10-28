@@ -502,7 +502,8 @@ mod tests {
             assert_eq!(r.content["binding"], json!("gh"));
             assert_eq!(r.content["frozen_selectors"], json!(["orgs", "repos"]));
             assert_eq!(r.content["credential"]["source"], json!("phantom"));
-            assert_eq!(r.content["credential"]["present"], json!(true));
+            // phm: refs stay unavailable until a scoped credential bridge exists.
+            assert_eq!(r.content["credential"]["present"], json!(false));
             // The credential locator name never crosses into tool output.
             let raw = serde_json::to_string(&r.content).unwrap();
             assert!(

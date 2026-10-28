@@ -504,8 +504,8 @@ impl WorkerManager for CompositeWorkerManager {
                 && (crate::credential::inject_keys_for_binding_provider(pb)?.is_empty()
                     || crate::credential::resolve(&crate::credential::CredentialRef::validate(
                         &pb.credential_ref,
-                    )?)?
-                    .is_empty())
+                    )?)
+                    .is_err())
             {
                 return Err(LocusError::msg(
                     "community worker requires a supported available credential mapping",

@@ -175,10 +175,12 @@ fn inv_pin_switch_no_prior_credential_refs() {
         .unwrap();
     let w1 = store.whoami().unwrap();
     assert_eq!(w1.binding_alias, "acme");
+    // phm: refs are retained but unresolvable until a scoped bridge exists,
+    // so whoami must report them as not present.
     assert!(w1
         .providers
         .iter()
-        .all(|p| p.credential.present && p.credential.source == "phantom"));
+        .all(|p| !p.credential.present && p.credential.source == "phantom"));
     let whoami1 = serde_json::to_string(&w1).unwrap();
     assert!(!whoami1.contains("SUPABASE_ACME"));
     assert!(!whoami1.contains("VERCEL_ACME"));
@@ -196,7 +198,7 @@ fn inv_pin_switch_no_prior_credential_refs() {
     let w2 = store.whoami().unwrap();
     assert_eq!(w2.binding_alias, "personal");
     for p in &w2.providers {
-        assert!(p.credential.present);
+        assert!(!p.credential.present);
         assert_eq!(p.credential.source, "phantom");
     }
     let whoami2 = serde_json::to_string(&w2).unwrap();
@@ -254,7 +256,7 @@ fn prop_pin_exclusive_refs_for_random_aliases() {
         let sibling_proj = format!("proj_{b}");
         let sibling_team = format!("team_{b}");
         for p in &w.providers {
-            prop_assert!(p.credential.present);
+            prop_assert!(!p.credential.present);
             prop_assert_eq!(p.credential.source.as_str(), "phantom");
             prop_assert!(p.project_ref.as_deref() != Some(sibling_proj.as_str()));
         }
