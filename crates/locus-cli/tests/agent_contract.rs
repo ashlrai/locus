@@ -199,6 +199,14 @@ fn docs_exit_code_table_and_schema_catalogue_match_the_binary() {
         table,
         "docs/agent-contract.md exit-code table drifted"
     );
+    let stable_docs = read_repo("docs/exit-codes.md");
+    let begin = stable_docs.find("<!-- exit-codes:begin -->\n").unwrap() + 26;
+    let end = stable_docs.find("<!-- exit-codes:end -->").unwrap();
+    assert_eq!(
+        &stable_docs[begin..end],
+        table,
+        "docs/exit-codes.md exit-code table drifted"
+    );
 
     for s in contract["schemas"].as_array().unwrap() {
         let id = s["schema"].as_str().unwrap();
@@ -235,6 +243,10 @@ fn contract_exit_codes_are_the_documented_values() {
         (1, "failure"),
         (2, "unsafe"),
         (2, "usage"),
+        (3, "refused"),
+        (4, "repin_required"),
+        (5, "expired"),
+        (6, "misconfig"),
         (126, "cannot_execute"),
         (127, "not_found"),
         (141, "stdout_closed"),
@@ -996,7 +1008,7 @@ fn registry_index_add_dry_run_does_not_fetch_and_redacts_the_url() {
         !text.contains("PLANSECRET") && !text.contains("PLANFRAG"),
         "{text}"
     );
-    assert_eq!(v["url"], "https://127.0.0.1:9/index.json (redacted)", "{v}");
+    assert_eq!(v["url"], "https://127.0.0.1:9/index.json?<redacted>", "{v}");
     assert_eq!(v["name"], "probe");
     assert_eq!(env.snapshot(), before, "a plan wrote something");
     // Credentials or a fragment in the URL are refused before planning

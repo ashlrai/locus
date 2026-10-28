@@ -198,6 +198,65 @@ pub fn apply(
 mod tests {
     use super::*;
 
+    use proptest::prelude::*;
+
+    proptest! {
+        // Exercise arbitrary subsets, rather than only an all-or-nothing list.
+        // All values are synthetic; no process environment or real credentials
+        // are read by these properties.
+        #[test]
+        fn ambient_provider_values_require_exact_allowlisting(
+            suffix in "[A-Z][A-Z0-9_]{0,20}".prop_filter(
+                "private AWS config paths are reserved, not inheritable names",
+                |s| s != "CONFIG_FILE" && s != "SHARED_CREDENTIALS_FILE",
+            ),
+            placeholder in "[a-zA-Z0-9_-]{1,64}",
+            allowed in prop::array::uniform4(any::<bool>()),
+        ) {
+            let names = [
+                "GH_TOKEN".to_string(),
+                format!("AWS_{suffix}"),
+                format!("SUPABASE_{suffix}"),
+                "VERCEL_TOKEN".to_string(),
+            ];
+            let value = format!("phm_{placeholder}");
+            let parent = names.iter().map(|n| (n.clone(), value.clone())).collect();
+            let allowlist = names.iter().zip(allowed).filter(|(_, yes)| *yes)
+                .map(|(n, _)| n.clone()).collect::<Vec<_>>();
+            let mut vars = BTreeMap::new();
+            let mut scrubbed = names.to_vec();
+            let issues = apply(&allowlist, &[], &parent, &mut vars, &mut scrubbed);
+            prop_assert!(issues.is_empty());
+            for (name, yes) in names.iter().zip(allowed) {
+                prop_assert_eq!(vars.get(name), yes.then_some(&value));
+                prop_assert_eq!(scrubbed.contains(name), !yes);
+            }
+        }
+
+        #[test]
+        fn allowlisting_never_replaces_pinned_credentials_or_admits_raw_secrets(
+            raw in "[a-zA-Z0-9]{1,64}",
+            pinned in "[a-zA-Z0-9]{1,64}",
+            selected in 0usize..4,
+        ) {
+            let names = ["GH_TOKEN", "AWS_SECRET_ACCESS_KEY", "SUPABASE_ACCESS_TOKEN", "VERCEL_TOKEN"]
+                .map(str::to_string);
+            let raw = format!("synthetic_{raw}");
+            let pinned = format!("pinned_{pinned}");
+            let parent = names.iter().map(|n| (n.clone(), raw.clone())).collect();
+            let mut vars = BTreeMap::from([(names[selected].clone(), pinned.clone())]);
+            let mut scrubbed = names.to_vec();
+            let issues = apply(&names, &[], &parent, &mut vars, &mut scrubbed);
+            prop_assert_eq!(vars.len(), 1);
+            prop_assert_eq!(vars.get(&names[selected]), Some(&pinned));
+            prop_assert_eq!(issues.len(), names.len() - 1);
+            for issue in issues {
+                prop_assert_eq!(issue.code, "inherit-env-secret-refused");
+            }
+            prop_assert_eq!(scrubbed, names.to_vec());
+        }
+    }
+
     #[test]
     fn names_are_exact() {
         for ok in ["PHANTOM_PROXY_PORT", "OPENAI_API_KEY", "_X", "a1"] {

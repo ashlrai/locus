@@ -18,6 +18,9 @@ pub struct WorkspaceConfig {
     /// Refuse agent/CLI work without an active pin.
     #[serde(default)]
     pub require_pin: bool,
+    /// Per-child resident memory cap in bytes (absent = 1 GiB). Zero is invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_rss_cap_bytes: Option<std::num::NonZeroU64>,
 }
 
 fn default_version() -> u32 {
@@ -377,5 +380,26 @@ require_pin = true
 
         let err = find_workspace(&nested).unwrap_err().to_string();
         assert!(err.contains("unreadable"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod rss_config_tests {
+    use super::*;
+    #[test]
+    fn rss_cap_roundtrips_and_rejects_zero_or_invalid_values() {
+        assert_eq!(
+            WorkspaceConfig::parse("").unwrap().child_rss_cap_bytes,
+            None
+        );
+        let config = WorkspaceConfig::parse("child_rss_cap_bytes = 16777216").unwrap();
+        assert_eq!(config.child_rss_cap_bytes.unwrap().get(), 16777216);
+        assert_eq!(
+            WorkspaceConfig::parse(&config.to_toml().unwrap()).unwrap(),
+            config
+        );
+        for invalid in ["0", "-1", "1.5", "\"unlimited\""] {
+            assert!(WorkspaceConfig::parse(&format!("child_rss_cap_bytes = {invalid}")).is_err());
+        }
     }
 }
