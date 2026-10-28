@@ -4,18 +4,12 @@
 # by hand.
 name: npm wrapper macOS smoke
 
+# Runs with the scheduled full suite (6 AM and 6 PM ET) and on dispatch, off
+# PRs, the merge queue and main pushes, so they only wait on CI Gate.
 on:
-  pull_request:
-    paths:
-      - "npm/**"
-      - "npm-mcp/**"
-      - ".github/workflows/npm-wrapper-macos.yml"
-  push:
-    branches: [main]
-    paths:
-      - "npm/**"
-      - "npm-mcp/**"
-      - ".github/workflows/npm-wrapper-macos.yml"
+  schedule:
+    - cron: "59 10 * * *"
+    - cron: "59 22 * * *"
   workflow_dispatch:
 
 permissions:
@@ -28,6 +22,7 @@ concurrency:
 jobs:
   smoke:
     name: npm pack + install + locus --version (macOS)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: macos-latest
     timeout-minutes: 30
     steps:

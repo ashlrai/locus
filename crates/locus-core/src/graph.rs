@@ -389,6 +389,7 @@ mod tests {
                 default_binding: Some("acme".into()),
                 allowed_bindings: vec!["acme".into(), "acme-ro".into()],
                 require_pin: true,
+                child_rss_cap_bytes: None,
             },
         };
         let env = GraphEnvelope::build(

@@ -1,0 +1,24 @@
+[
+  {
+    "grant_id": "0123456789abcdef",
+    "binding": "fixture-personal",
+    "tenant": "fixture-tenant-a",
+    "expires_at": "2030-01-01T00:00:00Z",
+    "label": null,
+    "expired": false,
+    "revoked": false,
+    "session_id": "ses_0123456789abcdef01234567",
+    "live_http_sessions": 0
+  },
+  {
+    "grant_id": "fedcba9876543210",
+    "binding": "fixture-work",
+    "tenant": "fixture-tenant-b",
+    "expires_at": "2020-01-01T00:00:00+00:00",
+    "label": "fixture-job",
+    "expired": true,
+    "revoked": true,
+    "session_id": "ses_fedcba9876543210fedcba98",
+    "live_http_sessions": 2
+  }
+]

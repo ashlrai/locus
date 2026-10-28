@@ -1,5 +1,15 @@
 # Locus
 
+<!-- fresh:begin badge -->
+[![Release 0.5.2](https://img.shields.io/badge/release-v0.5.2-blue)](https://github.com/ashlrai/locus/releases/tag/v0.5.2)
+<!-- fresh:end -->
+
+<!-- fresh:begin release -->
+Latest release: [v0.5.2](https://github.com/ashlrai/locus/releases/tag/v0.5.2) (2026-10-26).
+
+`locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
+<!-- fresh:end -->
+
 [![CI](https://github.com/ashlrai/locus/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
 [![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?label=npm%20locus-cli)](https://www.npmjs.com/package/locus-cli)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
@@ -59,6 +69,30 @@ Use explicit environment (`env:`) references for supported credential resolution
 
 ## Install options
 
+The shell installer downloads **both `locus` and `locus-mcp`**, verifies the
+archive against its required SHA-256 sidecar, and installs into `~/.local/bin`
+without sudo. It supports macOS (Apple Silicon / Intel) and Linux x86_64
+(glibc); requires Bash, curl, tar, and `sha256sum` or `shasum`.
+
+```bash
+# Download, inspect, then install the latest release
+installer_script=$(mktemp)
+curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/ashlrai/locus/main/scripts/install.sh -o "$installer_script"
+less "$installer_script"
+bash "$installer_script"
+export PATH="$HOME/.local/bin:$PATH"
+
+# Or select a release and a writable destination
+bash "$installer_script" --version v0.5.1 --bin-dir "$HOME/bin"
+```
+
+The installer never edits shell profiles; add the install directory to your
+shell's `PATH` to keep it available in new terminals. Re-run to upgrade.
+Missing or mismatched checksums stop installation before replacing binaries.
+Checksums detect corrupted downloads; they are not publisher signatures.
+For Linux ARM or other platforms, use a source install below.
+
 ```bash
 # Homebrew (tap live) — installs locus + locus-mcp
 brew install ashlrai/tap/locus
@@ -106,7 +140,7 @@ locus init --with-samples
 locus enter personal && locus whoami
 
 # Switch client — previous identity is gone from the process env
-locus enter acme && locus whoami
+locus switch acme && locus whoami
 
 # Local identity dashboard (loopback UI + API)
 locus dashboard                  # http://127.0.0.1:8750
@@ -248,23 +282,28 @@ scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 ```
 locus init [--with-samples] · quickstart
 locus onboard [--detect-only] [--yes] [--reset]  # guided refs-only tenant setup
-locus pin [alias] [--force] [--client claude] [--ns a,b]
+locus client add                      # guided client binding (flags for every prompt)
+locus pin [alias] [--force] [--client claude] [--ns a,b] [--ttl 2h]
 locus enter <alias>                   # firm workflow pin
-locus leave
+locus switch <alias>                  # one-shot leave + enter
+locus leave · renew                   # clear pin; extend expiry (opt-in per binding)
 locus whoami [--json]
 locus status [--oneline] [--json]
 locus exec -- <command> [args...]
 locus exec --expect <alias> -- <cmd>  # refuse (exit 1, child never starts) unless <alias> is pinned
 locus exec --for gh -- gh pr list    # inject only the pinned GitHub credential
 locus run -b <alias> -- <command>     # one-shot; global pin unchanged
-locus binding list|show|add|rm
+locus binding list|show|add|rm|migrate-credential-refs
+locus capability status|persist|unpersist  # where control authority lives
+locus autopin suggest [--apply]       # learned per-repo binding from pin history
 locus workspace --default <alias> [--allow a,b] [--require-pin]
+locus autopin suggest [--json] [--apply]  # learn a default from local pin history
 locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2)
 locus doctor --fix [--apply]          # preview safe repairs; --apply makes them, backing up first
 locus watch [--once] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
 locus dashboard · serve               # local identity UI + API (127.0.0.1)
 locus forensics export                # shareable pack (no secrets)
-locus verify claim|session            # verification plane: claim score · session pack
+locus verify session · claim --text "…"  # verification plane: session pack · claim score
 locus approve list|grant|status|wait|deny  # require_approval / dual-control
 locus notify status|on|off            # desktop banners OFF by default
 locus events --last N · events export # audit tail / fleet pulse / OTLP
@@ -273,13 +312,15 @@ locus ci mint|env|run                 # short-lived sealed sessions for pipeline
 locus engagement init|close           # client engagement lifecycle (binding + workspace)
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
-locus adapter search|install|uninstall  # community adapters (executable code; see docs/adapters.md)
+locus adapter search|install|uninstall · registry export|verify-manifest  # community + release adapters
 locus hook zsh|bash|fish
-locus setup --client claude|cursor|codex|grok|gemini
+locus setup --client claude|cursor|codex|grok|gemini|generic
 locus mcp [--supervised]              # run the stdio MCP server; --supervised serves pinned provider tools
+locus mcp mint|list|revoke            # multi-tenant grant tokens
 locus agent report|setup|doctor       # AI-native readiness (hub JSON)
 locus goal status                     # northstar progress from GOALS.md
-locus completion zsh|bash|fish        # shell completions
+locus completion zsh|bash|fish|elvish|powershell  # shell completions
+locus version                         # build version (also: locus --version)
 locus topic <name>                    # dashboard · forensics · serve · goal · verify · …
 ```
 
@@ -347,6 +388,10 @@ cargo build --release
 # doctor, events, enter/run, notify, graph, ci, heartbeat, dashboard health,
 # forensics, goal status — feature-detected)
 ./scripts/e2e.sh
+
+# README quickstart rehearsal: replays the extracted 30-second start in a
+# throwaway HOME (--dry-run prints the plan without running it)
+./scripts/check-readme-quickstart.sh
 ```
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test/lint and how to add adapters. Agent-oriented rules: [AGENTS.md](./AGENTS.md). Short IDE guide: [CLAUDE.md](./CLAUDE.md).
@@ -375,6 +420,7 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [apps/dashboard/](./apps/dashboard) | Local identity dashboard UI |
 | [GOALS.md](./GOALS.md) | Northstar goal loop |
 | [scripts/e2e.sh](./scripts/e2e.sh) | End-to-end shell suite |
+| [scripts/check-readme-quickstart.sh](./scripts/check-readme-quickstart.sh) | README quickstart replay in a throwaway HOME |
 | [docs/architecture.md](./docs/architecture.md) | System diagram (DESIGN distilled) |
 | [docs/BENCHMARKS.md](./docs/BENCHMARKS.md) | Install and core-op timings, peers, method |
 | [docs/FIRST-RUN.md](./docs/FIRST-RUN.md) | First-run log and agent-use audit |

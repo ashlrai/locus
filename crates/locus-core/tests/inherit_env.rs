@@ -38,7 +38,8 @@ fn binding() -> Binding {
 }
 
 fn session(b: &Binding) -> Session {
-    Session::new(
+    let key = SealKey::generate();
+    let session = Session::new(
         &b.id,
         &b.alias,
         &b.tenant,
@@ -47,8 +48,10 @@ fn session(b: &Binding) -> Session {
         None,
         Duration::hours(1),
         "/tmp/locus-inherit-test".into(),
-        &SealKey::generate(),
-    )
+        &key,
+    );
+    session.verify_seal(&key).unwrap();
+    session
 }
 
 fn names(n: &[&str]) -> Vec<String> {
@@ -193,6 +196,80 @@ fn inherit_env_end_to_end() {
     );
     assert_eq!(iso.secrets_failed.len(), 1);
     assert_eq!(iso.secrets_failed[0].code, "inherit-env-invalid");
+
+    // 7. Every subset of provider names is checked against a sealed session.
+    // Safe placeholders may cross only under their exact configured name;
+    // the pinned Supabase credential always takes precedence.
+    let ambient = [
+        "GH_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_PROFILE",
+        "AWS_REGION",
+        "SUPABASE_ACCESS_TOKEN",
+        "SUPABASE_PROJECT_REF",
+        "VERCEL_TOKEN",
+    ];
+    for name in ambient {
+        std::env::set_var(name, "phm_ambient_provider_fixture");
+    }
+    for mask in 0..(1usize << ambient.len()) {
+        let allowlist: Vec<_> = ambient
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| mask & (1 << i) != 0)
+            .map(|(_, name)| *name)
+            .collect();
+        store
+            .save_config(&cfg(&allowlist, GatewayConfig::default()))
+            .unwrap();
+        let iso = build_isolated_env_opts(&s, &b, true);
+        assert!(iso.secrets_failed.is_empty());
+        for (i, name) in ambient.iter().enumerate() {
+            let expected = if *name == "SUPABASE_ACCESS_TOKEN" {
+                Some(BOUND)
+            } else if mask & (1 << i) != 0 {
+                Some("phm_ambient_provider_fixture")
+            } else {
+                None
+            };
+            assert_eq!(
+                iso.vars.get(*name).map(String::as_str),
+                expected,
+                "{name}, subset {mask}"
+            );
+        }
+    }
+    // Even an exact allowlist cannot authorize ambient raw credentials.
+    let secret_names = [
+        "GH_TOKEN",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "SUPABASE_ACCESS_TOKEN",
+        "VERCEL_TOKEN",
+    ];
+    for name in secret_names {
+        std::env::set_var(name, "AKIA_SYNTHETIC_AMBIENT_CANARY");
+    }
+    store
+        .save_config(&cfg(&secret_names, GatewayConfig::default()))
+        .unwrap();
+    let iso = build_isolated_env_opts(&s, &b, true);
+    assert_eq!(iso.secrets_failed.len(), secret_names.len() - 1);
+    for name in secret_names {
+        if name == "SUPABASE_ACCESS_TOKEN" {
+            assert_eq!(iso.vars.get(name).map(String::as_str), Some(BOUND));
+        } else {
+            assert!(!iso.vars.contains_key(name), "{name}");
+        }
+    }
+    assert!(!iso.vars.values().any(|v| v.contains("AMBIENT_CANARY")));
+    assert!(!format!("{:?}", iso.secrets_failed).contains("AMBIENT_CANARY"));
+    for name in ambient {
+        std::env::remove_var(name);
+    }
 
     for k in [
         "LOCUS_HOME",
