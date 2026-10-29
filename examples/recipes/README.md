@@ -22,6 +22,8 @@ in order: it does not provide a way to select a recipe by name. An unknown
 name as the first argument (for example, `node examples/recipes/run.mjs acme`)
 prints usage to stderr and exits `1` before running checks. Arguments after a
 valid `--locus <absolute-path>` are currently ignored, including recipe names.
+Run with `--help` or `-h` to print the invocation and exit without running
+any checks.
 
 Output from a real run (Sep 29, 2026, main and the v0.5.0 release):
 
@@ -34,8 +36,8 @@ PASS locus ci run -b acme: a short-lived CI session with the same scrubbing
 COMPLETE: locus recipes (4 checks)
 ```
 
-Exit `0` = all checks passed, `1` = invalid invocation or a check failed,
-`2` = binary not found (incomplete). A failed check stops the remaining checks;
+Exit `0` = all checks passed or help displayed, `1` = invalid invocation or a
+check failed, `2` = binary not found (incomplete). A failed check stops the remaining checks;
 the runner prints `FAIL` for a check failure or `SKIP` and `INCOMPLETE` if the
 binary is missing. Only a successful run prints `COMPLETE`.
 
