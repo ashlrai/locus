@@ -426,11 +426,18 @@ fn whoami_reports_a_set_binding_credential_without_exposing_it() {
         "--non-interactive",
     ]);
     assert!(out.status.success(), "binding add failed");
-    assert!(env.run(&["enter", "credential-test"]).status.success());
+    // A credential available when the session is pinned must not be cached
+    // as present for a later whoami process that cannot resolve it.
+    let cap = env.cap().unwrap();
+    let entered = env.run_with(&["enter", "credential-test"], Some(&cap), &[(VAR, CANARY)]);
+    assert!(entered.status.success(), "enter failed");
+    for stream in [&entered.stdout, &entered.stderr] {
+        assert!(!stream.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()));
+    }
     let cap = env.cap().unwrap();
 
-    // Set the credential only in the whoami process, after the pin was made.
-    // An unrelated credential must not count as the binding's credential.
+    // Each whoami process resolves the credential afresh. An unrelated
+    // credential must not count as the binding's credential.
     for (value, expected) in [(None, false), (Some(CANARY), true), (None, false)] {
         for json in [true, false] {
             let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
