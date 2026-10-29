@@ -452,6 +452,44 @@ node scripts/check-readme-links.mjs
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test/lint and how to add adapters. Agent-oriented rules: [AGENTS.md](./AGENTS.md). Short IDE guide: [CLAUDE.md](./CLAUDE.md).
 
+### Investigating repeated `locus-core` compilation
+
+[Issue #168](https://github.com/ashlrai/locus/issues/168) reports that a single
+`cargo install --git` of both binaries compiled `locus-core` twice. From the
+repository root, reproduce it with a fresh target directory and install root:
+
+```bash
+investigation_dir=$(mktemp -d)
+cargo install --git "file://$(pwd)" locus-cli locus-mcp --locked \
+  --root "$investigation_dir/install" --target-dir "$investigation_dir/target" \
+  --message-format=json > "$investigation_dir/artifacts.jsonl" 2> "$investigation_dir/cargo.log"
+grep -E 'Compiling locus-core|Finished `release`' "$investigation_dir/cargo.log"
+python3 - "$investigation_dir/artifacts.jsonl" <<'PY'
+import json, pathlib, sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    for line in stream:
+        message = json.loads(line)
+        if message.get("reason") == "compiler-artifact" and message["target"]["name"] == "locus_core":
+            print({"package_id": message["package_id"], "kind": message["target"]["kind"],
+                   "profile": message["profile"], "features": message["features"],
+                   "filenames": [pathlib.Path(f).name for f in message["filenames"]],
+                   "fresh": message["fresh"]})
+PY
+```
+
+This installs the checkout's committed `HEAD`, not uncommitted changes. Record
+the commit, platform, and `cargo --version` / `rustc --version` when comparing
+runs. The original Linux report used commit `e969d9c4`: the CLI finished first,
+then Cargo compiled the core again for MCP. A later macOS run at `7233ae79ceff`
+with Cargo and rustc 1.95.0 found two non-fresh core artifacts with matching
+package, target, profile and features but different filenames. On macOS arm64
+at `0842e3aa6899` with the same toolchain, the install again logged a second
+core compilation after the CLI finished. `fresh: false`
+means Cargo built the artifact in that invocation; a repeated name alone does
+not establish identical compiler work. The reason for the distinct artifact
+identities remains unconfirmed. See [the detailed investigation](./CONTRIBUTING.md#investigating-repeated-compilation-during-install)
+for comparison guidance and the cautions around verbose logs.
+
 ### Landing page & dashboard
 
 | App | Role |
