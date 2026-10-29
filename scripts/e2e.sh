@@ -1382,6 +1382,28 @@ SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
 SECURITY_WS="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-ws.XXXXXX")"
 LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" init >/dev/null
 
+# Issue #175: identical retries are no-ops, but conflicting content must
+# still be rejected without changing the existing binding.
+LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" binding add conflict-probe \
+  --tenant conflict-probe --provider github --account original \
+  --credential-ref env:CONFLICT_PROBE_TOKEN --non-interactive >/dev/null
+cp "$SECURITY_HOME/bindings/conflict-probe.toml" "$SECURITY_HOME/conflict-probe.original"
+LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" binding add conflict-probe \
+  --tenant conflict-probe --provider github --account original \
+  --credential-ref env:CONFLICT_PROBE_TOKEN --non-interactive >/dev/null
+cmp -s "$SECURITY_HOME/conflict-probe.original" "$SECURITY_HOME/bindings/conflict-probe.toml" \
+  || die "identical binding retry changed existing file"
+if conflict_out="$(LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" binding add conflict-probe \
+  --tenant conflict-probe --provider github --account different \
+  --credential-ref env:CONFLICT_PROBE_TOKEN --non-interactive 2>&1)"; then
+  die "conflicting binding add unexpectedly succeeded"
+fi
+[[ "$conflict_out" == *"binding 'conflict-probe' already exists"* ]] \
+  || die "conflicting binding add did not report the existing alias"
+cmp -s "$SECURITY_HOME/conflict-probe.original" "$SECURITY_HOME/bindings/conflict-probe.toml" \
+  || die "conflicting binding add changed existing file"
+ok "binding add rejects conflicting content and preserves the existing file"
+
 set +e
 test_out="$(LOCUS_HOME="$SECURITY_HOME" LOCUS_ALLOW_TEST_CREDS=1 "$LOCUS_BIN" binding add release-test \
   --tenant release-test --provider github --account release-test \
