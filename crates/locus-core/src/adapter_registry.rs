@@ -1784,6 +1784,31 @@ name = "Empty"
     }
 
     #[test]
+    fn unsigned_manifest_matches_replacement_catalog_without_authenticating_it() {
+        let original = build_release_manifest_from(&small_catalog(), "0.4.0");
+        let mut replacement_catalog = small_catalog();
+        replacement_catalog.providers[0].name = "Modified adapter".into();
+        let replacement = build_release_manifest_from(&replacement_catalog, "0.4.0");
+
+        // A manifest exported by the replacement agrees with its own catalog,
+        // but no signature authenticates either one.
+        let matched = verify_release_manifest_against(&replacement, &replacement, &[], true);
+        assert_eq!(matched.signature, EntryVerifyStatus::Unsigned);
+        assert!(matched.drift.is_empty());
+        assert!(matched.ok);
+
+        // Comparing the same manifest with the original catalog exposes drift.
+        let drifted = verify_release_manifest_against(&replacement, &original, &[], true);
+        assert_eq!(drifted.signature, EntryVerifyStatus::Unsigned);
+        assert!(!drifted.drift.is_empty());
+        assert!(!drifted.ok);
+
+        let rejected = verify_release_manifest_against(&replacement, &replacement, &[], false);
+        assert_eq!(rejected.signature, EntryVerifyStatus::Unsigned);
+        assert!(!rejected.ok);
+    }
+
+    #[test]
     fn release_manifest_bad_signature_fails_even_with_allow_unsigned() {
         let (signing, _trust) = gen_ed25519();
         let current = build_release_manifest_from(&small_catalog(), "0.4.0");

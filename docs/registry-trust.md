@@ -55,6 +55,25 @@ sidecars are separate checks, and an unauthenticated checksum does not establish
 publisher identity. For provenance, use an operator-signed manifest and a
 public key obtained through a trusted channel, as described below.
 
+### Tampering example
+
+Suppose an attacker replaces the release binary with one that changes an
+adapter's behavior and its compiled catalog, then supplies an unsigned manifest
+exported from that replacement binary. Running the replacement binary's
+`verify-manifest` with `--allow-unsigned` can succeed: its reported
+`signature unsigned` and `drift none` mean only that the supplied manifest
+matches the catalog the running binary reports under the comparison rules.
+No signature was verified, and the result does not establish who supplied
+either artifact or whether the executable contains the expected code. The
+attacker can also alter executable behavior while retaining the original catalog,
+so matching the original manifest would still not detect that change.
+
+By contrast, if a separately trusted, unmodified binary checks the attacker's
+changed catalog manifest, it reports drift and fails. A trusted operator's
+signature can authenticate the manifest's canonical catalog material, but it
+does not hash or authenticate the executable; assess the binary's provenance
+independently even when the manifest is signed.
+
 ## What it is
 
 `locus adapter registry export` emits a canonical JSON manifest of the
