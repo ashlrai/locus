@@ -42,9 +42,17 @@ locus quickstart                        # sample bindings, pin, whoami, doctor
 eval "$(locus hook zsh)"                # or bash; exports the control capability
 locus enter personal                    # pin from this shell (it supervises the pin)
 locus whoami                            # who your agents are acting as, right now
-locus exec --expect personal -- echo ok # runs: personal is pinned
+env LOCUS_SUPABASE_PERSONAL=sample LOCUS_GH_TOKEN_PERSONAL=sample LOCUS_VERCEL_TOKEN_PERSONAL=sample locus exec --expect personal -- echo ok # runs: personal is pinned
 locus exec --expect acme -- echo ok     # refused, exit 1, child never starts (pin_mismatch)
 ```
+
+On a fresh Locus home, the `env` values are synthetic and apply only to the local
+`echo` smoke test; they satisfy the generated sample binding's credential
+references without making provider calls. Existing bindings are not replaced by
+quickstart and may require different credentials. For real provider work,
+supply real credentials outside agent context and replace the sample scopes.
+Missing credentials still produce warnings. See the [sample exec
+walkthrough](examples/sample-exec-q8.md).
 
 What the two extra steps are for:
 

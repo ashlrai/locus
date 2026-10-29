@@ -134,3 +134,18 @@ fn readme_quickstart_fails_on_a_stale_step() {
         text(&out)
     );
 }
+
+/// Missing sample credentials must make the warning-free smoke check fail.
+#[test]
+fn readme_quickstart_fails_when_sample_credentials_are_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mangled = dir.path().join("README.md");
+    let body = std::fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let assignment = "LOCUS_GH_TOKEN_PERSONAL=sample ";
+    assert!(body.contains(assignment), "sample assignment missing");
+    std::fs::write(&mangled, body.replacen(assignment, "", 1)).unwrap();
+
+    let out = run(&[], Some(&mangled));
+    assert!(!out.status.success(), "missing credential was accepted");
+    assert!(text(&out).contains("sample exec emitted a warning"));
+}
