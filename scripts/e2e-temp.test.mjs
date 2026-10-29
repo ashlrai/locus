@@ -49,10 +49,16 @@ for (const [label, temp] of [['unset', undefined], ['empty', '']]) {
     const capture = join(fixture.root, 'template');
     mkdirSync(scratch);
     const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
-    // Record the requested template but keep the created directory in the fixture.
+    // Record the home template and keep that directory in the fixture; pass
+    // later temporary-directory requests through unchanged.
     writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
-printf '%s' "$2" > "$PROBE_CAPTURE"
-exec "$REAL_MKTEMP" -d "$PROBE_SCRATCH/locus-e2e.XXXXXX"
+case "$2" in
+  */locus-e2e.XXXXXX)
+    printf '%s' "$2" > "$PROBE_CAPTURE"
+    exec "$REAL_MKTEMP" -d "$PROBE_SCRATCH/locus-e2e.XXXXXX"
+    ;;
+esac
+exec "$REAL_MKTEMP" "$@"
 `, { mode: 0o755 });
     const result = run(fixture, temp, {
       REAL_MKTEMP: realMktemp, PROBE_CAPTURE: capture, PROBE_SCRATCH: scratch,
@@ -73,5 +79,30 @@ test('a nonexistent TMPDIR fails before creating an isolated home', (t) => {
   assert.notEqual(result.status, 0);
   assert.equal(result.signal, null);
   assert.match(result.stderr, /mktemp/);
+  assert.match(result.stderr, /could not create temporary locus-e2e home/);
   assert.deepEqual(readdirSync(fixture.root), ['bin']);
+});
+
+test('a silent mktemp failure stops before using an inherited LOCUS_HOME', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'scratch');
+  const inheritedHome = join(fixture.root, 'existing-home');
+  const marker = join(fixture.root, 'locus-ran');
+  mkdirSync(scratch);
+  mkdirSync(inheritedHome);
+  writeFileSync(join(inheritedHome, 'keep'), 'unrelated');
+  writeFileSync(join(fixture.bin, 'mktemp'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  writeFileSync(fixture.locus, `#!/bin/sh\n: > "$LOCUS_MARKER"\nexit 1\n`, { mode: 0o755 });
+
+  const result = run(fixture, scratch, { LOCUS_HOME: inheritedHome, LOCUS_MARKER: marker });
+
+  assert.equal(result.error, undefined);
+  assert.ok(Number.isInteger(result.status) && result.status !== 0);
+  assert.equal(result.signal, null);
+  assert.match(result.stderr, /could not create temporary locus-e2e home/);
+  assert.doesNotMatch(result.stdout, /2\. LOCUS_HOME=|isolated home ready/);
+  assert.deepEqual(readdirSync(inheritedHome), ['keep']);
+  assert.equal(readFileSync(join(inheritedHome, 'keep'), 'utf8'), 'unrelated');
+  assert.deepEqual(readdirSync(scratch), []);
+  assert.deepEqual(readdirSync(fixture.root).sort(), ['bin', 'existing-home', 'scratch']);
 });

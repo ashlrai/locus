@@ -63,8 +63,10 @@ cargo build --release -p locus-cli -p locus-mcp --locked
 ok "locus + locus-mcp release binaries"
 
 # ── 2. Isolated LOCUS_HOME ───────────────────────────────────────────────────
+if ! LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")"; then
+  die "could not create temporary locus-e2e home"
+fi
 export LOCUS_HOME
-LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")"
 log "2. LOCUS_HOME=$LOCUS_HOME"
 # Optional background PIDs (HTTP MCP, etc.) cleaned on any exit path.
 HTTP_MCP_PID=""
