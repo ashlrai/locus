@@ -6688,14 +6688,13 @@ fn resolve_add_answers_interactive(s: &Store, args: &BindingAddArgs) -> Result<A
                          the control-tool namespace — choose a different alias"
                     ));
                 }
-                if known.iter().any(|k| k == v) {
-                    return Err(format!(
-                        "alias '{v}' already exists — edit it (locus binding show {v}) or pick another"
-                    ));
-                }
                 Ok(())
             })?;
-            if let Some(best) = locus_core::nearest_alias(&v, &known) {
+            // An exact alias can be a no-op; compare the completed binding
+            // before deciding whether replacement needs confirmation.
+            if let Some(best) =
+                locus_core::nearest_alias(&v, &known).filter(|_| !known.iter().any(|k| k == &v))
+            {
                 // Soft nudge only — never a hard block (short aliases collide easily).
                 if !prompt_confirm(
                     &format!("similar alias '{best}' already exists — continue with '{v}'?"),

@@ -263,6 +263,115 @@ fn binding_add_is_a_noop_when_the_file_already_matches() {
 
 #[cfg(unix)]
 #[test]
+fn prompted_existing_alias_is_compared_before_replacement() {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+    use std::process::Stdio;
+
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let flags = [
+        "--tenant",
+        "same",
+        "--provider",
+        "github",
+        "--account",
+        "acct",
+        "--credential-ref",
+        "env:SAME_TOKEN",
+        "--org",
+        "example",
+        "--repos",
+        "example/repo",
+        "--read-only",
+        "--default-ttl",
+        "2h",
+    ];
+    let mut initial = vec!["binding", "add", "same", "--non-interactive"];
+    initial.extend(flags);
+    assert!(locus(home.path(), cwd.path(), Some(CAP), &initial)
+        .status
+        .success());
+    let path = home.path().join("bindings/same.toml");
+    let original = std::fs::read(&path).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+    let prompted = |command: &str, account: &str, input: &[u8]| {
+        let (mut master, mut slave) = (-1, -1);
+        // Both descriptors are owned immediately after openpty succeeds.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
+        cmd.args([
+            command,
+            "add",
+            "--tenant",
+            "same",
+            "--provider",
+            "github",
+            "--account",
+            account,
+            "--credential-ref",
+            "env:SAME_TOKEN",
+            "--org",
+            "example",
+            "--repos",
+            "example/repo",
+            "--read-only",
+            "--default-ttl",
+            "2h",
+        ])
+        .env("LOCUS_HOME", home.path())
+        .env("LOCUS_CONTROL_CAPABILITY", CAP)
+        .env("NO_COLOR", "1")
+        .env_remove("LOCUS_SESSION_ID")
+        .env_remove("LOCUS_NON_INTERACTIVE")
+        .current_dir(cwd.path())
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let child = cmd.spawn().unwrap();
+        master.write_all(input).unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    for command in ["binding", "client"] {
+        let out = prompted(command, "acct", b"same\n\x04");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("already matches; nothing written"));
+    }
+    let refused = prompted("binding", "other", b"same\n\x04");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("already exists"));
+    let different = prompted("client", "other", b"same\nn\n\x04");
+    assert!(!different.status.success());
+    assert!(String::from_utf8_lossy(&different.stdout).contains("replace it?"));
+    assert!(String::from_utf8_lossy(&different.stderr).contains("aborted"));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn binding_add_never_writes_through_a_dangling_symlink() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
