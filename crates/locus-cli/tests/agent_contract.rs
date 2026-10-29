@@ -357,6 +357,54 @@ fn pinned_identity_and_status_json() {
 }
 
 #[test]
+fn whoami_json_reports_environment_credential_availability() {
+    const VAR: &str = "LOCUS_GH_TOKEN_PERSONAL";
+    const CANARY: &str = "synthetic-whoami-credential-canary";
+    let env = Env::new();
+    env.quickstart();
+    let cap = env.cap().unwrap();
+
+    // Each invocation gets its own controlled environment, without mutating
+    // the test process or inheriting an operator's credential.
+    let whoami = |value: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
+        cmd.args(["whoami", "--json"])
+            .env_clear()
+            .env("HOME", env.user())
+            .env("LOCUS_HOME", env.home())
+            .env("LOCUS_CONTROL_CAPABILITY", &cap)
+            .current_dir(env.project());
+        if let Some(value) = value {
+            cmd.env(VAR, value);
+        }
+        let out = cmd.output().expect("locus runs");
+        assert!(out.status.success());
+        assert!(!out
+            .stdout
+            .windows(CANARY.len())
+            .any(|w| w == CANARY.as_bytes()));
+        assert!(!out
+            .stderr
+            .windows(CANARY.len())
+            .any(|w| w == CANARY.as_bytes()));
+        let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let provider = result["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["provider"] == "github")
+            .unwrap();
+        assert_eq!(provider["credential"]["source"], "environment");
+        assert!(!String::from_utf8_lossy(&out.stdout).contains(VAR));
+        provider["credential"]["present"].as_bool().unwrap()
+    };
+
+    assert!(!whoami(None));
+    assert!(whoami(Some(CANARY)));
+    assert!(!whoami(None));
+}
+
+#[test]
 fn setup_and_settings_status_json() {
     let env = Env::new();
     env.quickstart();

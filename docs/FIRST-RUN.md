@@ -68,7 +68,7 @@ Published npm `0.5.1` ELF, `LOCUS_HOME` under `/tmp`, stdin not a terminal (`std
 | `graph export` with no `LOCUS_GRAPH_PASSPHRASE` | 1 | 0.002 s | passphrase required for non-interactive export |
 | `init --with-samples --json` a second time | 0 | 0.024 s | `ok` true, `samples` true, `config_written` false |
 
-`whoami --json` reports `credential.present: true` when the credential ref string is non-empty. The following `exec` still warned that `SUPABASE_ACCESS_TOKEN`, the GitHub token variables, and `VERCEL_TOKEN` were unset. `present` means the ref is stored. It does not mean the variable is set in the environment. The field was not renamed.
+In that 0.5.1 run, `whoami --json` reported `credential.present: true` for a stored ref even though the variable was unset. The current implementation reports whether the credential can be resolved in the `whoami` process: an unset `env:` variable reports `false`. Phantom refs currently report `false` because the scoped credential bridge is unavailable. Neither the ref name nor its value is included in the result.
 
 ### Dry-run and idempotent setup
 
