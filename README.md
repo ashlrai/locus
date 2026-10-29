@@ -125,17 +125,36 @@ npm install -g locus-cli @ashlrai/locus-mcp
 npx locus-cli --help
 npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
 
-# cargo (Linux without Homebrew, or any source install): rustc 1.89 or newer
-# (workspace rust-version). Cargo 1.85 to 1.88 stops with "requires rustc 1.89".
-# Cargo 1.83 fails earlier: idna_adapter in the lockfile needs edition 2024.
-# rust-toolchain.toml pins stable inside a checkout and does not apply to
-# `cargo install --git` run outside the repo.
-# Measured on one Linux box: 179 s for both binaries.
+```
+
+### Install from source
+
+Source installs, including npm's Cargo fallback, require **Rust 1.89 or newer**
+and a matching Cargo toolchain, as specified by the workspace's `rust-version`.
+With Rust 1.83, installation fails before compiling Locus because the locked
+`idna_adapter` dependency uses the 2024 edition, which that Cargo cannot parse
+([issue #167](https://github.com/ashlrai/locus/issues/167)). Cargo 1.85 through
+1.88 can parse it but reject the workspace's minimum Rust version.
+
+Check the active toolchain before installing:
+
+```bash
+rustc --version
+cargo --version
+```
+
+If necessary, update and select a supported toolchain with `rustup update stable`
+and `rustup default stable`. A checkout's `rust-toolchain.toml` selects stable
+inside the checkout, but it does not select the toolchain for `cargo install
+--git` run elsewhere. Check the versions in the directory where you install.
+
+```bash
+# Install both binaries from Git (measured on one Linux box: 179 s)
 export PATH="$HOME/.cargo/bin:$PATH"
 cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
 ```
 
-Local checkout:
+Or install from a local checkout:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
