@@ -139,6 +139,20 @@ for (const entry of ["wrapper", "install", "download"]) {
   });
 }
 
+test("a cache one patch newer survives both wrapper and postinstall", (t) => {
+  const [major, minor, patch] = version.split("-")[0].split(".").map(Number);
+  const newer = `${major}.${minor}.${patch + 1}`;
+  for (const entry of ["wrapper", "install"]) {
+    const f = fixture(t, { installed: newer, sidecar: newer });
+    const result = f.run(entry, ["--version"]);
+    assert.equal(result.status, entry === "install" ? 0 : 1, result.stderr);
+    assert.ok((result.stderr + result.stdout).includes(`installed v${newer} is newer`));
+    assert.equal(readFileSync(f.binary, "utf8"), "original binary");
+    assert.equal(readFileSync(`${f.binary}.version`, "utf8"), `${newer}\n`);
+    assert.equal(f.trace(), "");
+  }
+});
+
 for (const sidecar of [undefined, "0.1.0", "invalid"]) {
   test(`newer executable is protected with sidecar ${sidecar}`, (t) => {
     const f = fixture(t, { sidecar });

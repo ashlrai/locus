@@ -15,6 +15,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Troubleshooting
 
+- **npm wrapper downgrade scenario ([#177](https://github.com/ashlrai/locus/issues/177)).**
+  The published `locus-cli@0.5.2` wrapper treats a cached version different
+  from its own as stale, even if the cached binary is newer. Its POSIX
+  postinstall can overwrite `~/.locus/bin/locus` with v0.5.2; on first use
+  the wrapper can instead remove the mismatched cache before downloading, so
+  a failed download can also leave the cache missing. This affects the older
+  published wrapper; the current checkout's wrapper preserves a newer or
+  unversioned cache and refuses to run without an explicit leading `--force`.
+  npm installation itself still succeeds when that refusal occurs.
+
+  To reproduce the published behavior on macOS (arm64 or x64) or Linux x64
+  with Node, npm, tar and network access, use a disposable home and a stand-in
+  for a newer v0.5.3 binary (v0.5.2 is downloaded from the release):
+
+  ```bash
+  demo=$(mktemp -d)
+  mkdir -p "$demo/home/.locus/bin"
+  HOME="$demo/home" npm install --ignore-scripts --prefix "$demo/package" locus-cli@0.5.2
+  printf '#!/bin/sh\necho locus 0.5.3\n' > "$demo/home/.locus/bin/locus"
+  chmod +x "$demo/home/.locus/bin/locus"
+  printf '0.5.3\n' > "$demo/home/.locus/bin/locus.version"
+  "$demo/home/.locus/bin/locus" --version
+  HOME="$demo/home" LOCUS_NPM_NO_LINK= node "$demo/package/node_modules/locus-cli/install.js"
+  "$demo/home/.locus/bin/locus" --version
+  ```
+
+  The two outputs are `locus 0.5.3` and `locus 0.5.2` if the release
+  download succeeds. Remove the disposable directory afterwards. The npm
+  wrapper in this checkout is unreleased; do not assume the published package
+  has the same behavior.
+
 - **Fresh quickstart and doctor WARN ([#172](https://github.com/ashlrai/locus/issues/172)).**
   In the recorded first run with published npm 0.5.1, `locus quickstart` exited
   0, but a subsequent `locus doctor` exited 1 with `WARN` and
