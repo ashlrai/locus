@@ -13,6 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Troubleshooting
+
+- **Fresh quickstart and doctor WARN ([#172](https://github.com/ashlrai/locus/issues/172)).**
+  In the recorded first run with published npm 0.5.1, `locus quickstart` exited
+  0, but a subsequent `locus doctor` exited 1 with `WARN` and
+  `phantom_missing` when Phantom was not on PATH. To diagnose this, inspect
+  `locus doctor --json` and its findings; the recorded first run also verified
+  the pin separately with `locus whoami`. Address any other findings rather
+  than treating every doctor failure as this warning. No workaround for the
+  affected doctor's exit status was verified in that first run. See
+  [the first-run record](docs/FIRST-RUN.md).
+
 ### Changed
 
 - **`locus binding add` is idempotent when the file already matches (#175).**

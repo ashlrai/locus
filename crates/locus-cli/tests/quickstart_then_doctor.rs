@@ -59,6 +59,16 @@ fn quickstart_then_doctor_succeeds_with_visible_advisories() {
                     "missing advisory {code}: {report}"
                 );
             }
+            let phantom_finding = report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|finding| finding["code"] == "phantom_missing")
+                .unwrap();
+            assert!(phantom_finding["message"]
+                .as_str()
+                .unwrap()
+                .contains("phantom not on PATH"));
         } else {
             let text = String::from_utf8(out.stdout).unwrap();
             assert!(text.contains("WARN"), "{text}");
