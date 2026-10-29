@@ -79,6 +79,42 @@ ok "isolated home ready"
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
 
+# Issue #172: a first-run diagnostic keeps setup advice visible without
+# treating the optional Phantom installation or an unexported capability as
+# a failed command. Isolate both the working directory and the environment.
+log "2a. doctor immediately after fresh quickstart"
+FRESH_DIR="$LOCUS_HOME/fresh-quickstart"
+mkdir -p "$FRESH_DIR/home" "$FRESH_DIR/project"
+fresh_locus() (
+  cd "$FRESH_DIR/project"
+  env -i HOME="$FRESH_DIR/home" LOCUS_HOME="$FRESH_DIR/home/.locus" \
+    PATH=/nonexistent SHELL=/bin/bash NO_COLOR=1 "$LOCUS_BIN" "$@"
+)
+fresh_locus quickstart >"$FRESH_DIR/quickstart.out" 2>"$FRESH_DIR/quickstart.err" \
+  || die "fresh quickstart failed"
+fresh_locus doctor >"$FRESH_DIR/doctor.out" 2>"$FRESH_DIR/doctor.err" \
+  || die "doctor after fresh quickstart should exit 0"
+grep -q 'WARN' "$FRESH_DIR/doctor.out" || die "fresh doctor missing WARN verdict"
+grep -q 'phantom not on PATH' "$FRESH_DIR/doctor.out" \
+  || die "fresh doctor missing Phantom advisory"
+grep -Fq 'locus hook bash' "$FRESH_DIR/doctor.out" \
+  || die "fresh doctor missing capability setup guidance"
+fresh_locus doctor --json >"$FRESH_DIR/doctor.json" 2>"$FRESH_DIR/doctor-json.err" \
+  || die "JSON doctor after fresh quickstart should exit 0"
+python3 - "$FRESH_DIR/doctor.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as report_file:
+    report = json.load(report_file)
+assert report["verdict"] == "WARN"
+assert report["status"] == "warn"
+assert report["ok"] is False
+findings = {finding["code"]: finding for finding in report["findings"]}
+for code in ("phantom_missing", "control_capability_not_exported"):
+    assert findings[code]["severity"] == "warn", f"missing warning: {code}"
+assert "phantom not on PATH" in findings["phantom_missing"]["message"]
+PY
+ok "fresh quickstart doctor exits 0 and reports setup advisories"
+
 # NDJSON MCP helper: print JSON-RPC lines to locus-mcp, collect responses.
 # Args: one or more JSON objects (as strings). Prints response JSON lines on stdout.
 mcp_rpc() {
