@@ -250,10 +250,9 @@ sandbox_attestation() {
 # (→ 401) inside its own throwaway LOCUS_HOME. Never touches the dogfood pin,
 # the dogfood home, or the operator's real ~/.locus. Values-free output.
 mt_grant_probe() {
-  local probe_root
-  probe_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-mt-dogfood.XXXXXX")"
-
   (
+    # EXIT traps run after function locals have gone out of scope on exit.
+    probe_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-mt-dogfood.XXXXXX")" || exit 1
     mt_pid=""
     mt_cleanup() {
       if [[ -n "$mt_pid" ]]; then
@@ -270,15 +269,17 @@ mt_grant_probe() {
     # .locus.toml allowlist would deny `mt-probe` at mint time (pin enforces
     # the cwd-derived allowlist). cd into the throwaway root so the probe never
     # depends on where the operator invoked the script.
-    cd "$probe_root"
+    cd "$probe_root" || exit 1
 
-    locus init >/dev/null
+    # The caller checks this function with ||, so Bash does not apply errexit
+    # inside it. Stop explicitly on failures before continuing the lifecycle.
+    locus init >/dev/null || exit 1
     locus binding add mt-probe \
       --tenant mt-probe \
       --provider github \
       --account mt-probe \
       --credential-ref env:LOCUS_DOGFOOD_MT_UNUSED \
-      --org mt-probe >/dev/null
+      --org mt-probe >/dev/null || exit 1
 
     local mint grant_id token
     mint="$(locus mcp mint -b mt-probe --ttl 15m --label dogfood-mt --json)" || {
@@ -357,7 +358,7 @@ mt_grant_probe() {
     }
 
     # Revoke → uniform 401 for the same token.
-    locus mcp revoke "$grant_id" >/dev/null
+    locus mcp revoke "$grant_id" >/dev/null || exit 1
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
       -X POST "${base}/mcp" \
       -H "Authorization: Bearer ${http_token}" \
@@ -379,6 +380,11 @@ mt_grant_probe() {
     }
   )
 }
+
+# Allow the probe functions to be exercised without running the dogfood flow.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
 
 if ! command -v jq >/dev/null 2>&1; then
   die "jq is required"
