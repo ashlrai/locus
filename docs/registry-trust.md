@@ -1,8 +1,21 @@
-# Adapter registry release manifests (signed)
+# Adapter registry release manifests
 
 > Companion to the [Adapter SDK](./adapter-sdk.md) "Signed registry roadmap".
 > This page covers the **release manifest**: a per-release, signable snapshot of
 > the built-in adapter set.
+
+## Current release status
+
+The release workflow exports and attaches an **unsigned** adapter registry
+manifest, `locus-adapters-<tag>.json`. CI signing is **not active**: the
+workflow's signing step is a TODO, and no registry signing secret is
+provisioned. The archive SHA-256 sidecars provide integrity checks, not
+publisher authentication or a signature for the manifest.
+
+By default, `verify-manifest` rejects the unsigned release asset. Passing
+`--allow-unsigned` checks for drift against the running binary but does not
+establish the manifest's provenance. An operator can separately sign and
+distribute a manifest; that optional process is not the CI release process.
 
 ## What it is
 
@@ -21,11 +34,12 @@
       "tools": ["github.check_repo", "github.scope", "github.whoami"],
       "digest": "sha256:…"
     }
-  ],
-  "signature": "ed25519:…",
-  "signed_by": "root"
+  ]
 }
 ```
+
+This illustrates the unsigned release asset. An operator-signed manifest
+also includes `signature` and `signed_by` fields.
 
 - `version` is the Locus workspace (crate) version the adapter shipped in.
 - `digest` is `sha256` over the entry's **canonical material** — id, name,
@@ -40,8 +54,8 @@
 
 | Party | Holds | Does |
 |-------|-------|------|
-| **Operator** (registry root) | ed25519 **private** seed (offline, never in git/CI) | Signs the manifest at release time, distributes `locus-adapters-<tag>.json` |
-| **Consumer** (any Locus install) | ed25519 **public** key, pinned in the local trust store | Verifies signature + asserts the running binary matches the manifest |
+| **Operator** (registry root) | ed25519 **private** seed | Can sign a manifest locally and distribute it out of band |
+| **Consumer** (any Locus install) | ed25519 **public** key, pinned in the local trust store | Can verify an operator-signed manifest and compare it with the running binary |
 | **CI** | nothing | Attaches the **unsigned** canonical manifest as a release asset (no signing secret is provisioned; see the `TODO(registry-signing)` block in `.github/workflows/release.yml`) |
 
 Trust keys are the same store used by `locus adapter verify`
@@ -57,7 +71,7 @@ would hold the forging secret — `verify-manifest` reports such signatures as
 
 ## Commands
 
-### Operator: sign at release time
+### Operator: optionally sign and distribute a manifest
 
 ```bash
 # Signing key: base64 (or 64-hex) of the 32-byte ed25519 seed, in a local file.
@@ -75,11 +89,9 @@ fallback to unsigned output. Without `--sign` the export is the same canonical
 JSON, just unsigned (what CI attaches to each GitHub release as
 `locus-adapters-<tag>.json`).
 
-Publish the matching public key once:
+Distribute the matching public key through a trusted channel; consumers pin it once:
 
 ```bash
-locus adapter registry export --sign --key … # signed manifest to distribute
-# consumers pin:
 locus adapter trust add --id root --ed25519-pub '<base64-pubkey>'
 ```
 
@@ -92,7 +104,7 @@ locus adapter verify-manifest locus-adapters-v0.5.0.json [--json]
 
 ## What `verify-manifest` proves
 
-Both checks must pass (fail closed):
+For a signed manifest, both checks must pass (fail closed):
 
 1. **Provenance** — the manifest's detached signature verifies against a key
    pinned in the local trust store, and `signed_by` names that key. Unsigned,
