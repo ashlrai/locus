@@ -100,6 +100,21 @@ class PeerMeasurementInstructionsTest(unittest.TestCase):
         self.assertIn('work="$(cd "$work" && pwd -P)"', text)
         self.assertIn('direnv allow "$work/direnv/.envrc"', text)
 
+    def test_setup_uses_the_same_fixture_and_checks_each_child(self):
+        text = DOC.read_text().split("## Comparing launchers for issue #170", 1)[1]
+        self.assertIn("--credential-ref env:LOCUS_BENCH_FIXTURE", text)
+        self.assertIn("export LOCUS_BENCH_FIXTURE=fixture", text)
+        self.assertIn("export RESEND_API_KEY=fixture", text)
+        self.assertIn("printf 'RESEND_API_KEY=fixture\\n'", text)
+        checks = [line for line in text.splitlines()
+                  if "/bin/sh -c 'test " in line]
+        self.assertEqual(len(checks), 3)
+        self.assertTrue(all("test \"$RESEND_API_KEY\" = fixture" in line
+                            for line in checks))
+        self.assertTrue(checks[0].startswith('"$locus" exec --strict-creds -- '))
+        self.assertTrue(checks[1].startswith('direnv exec '))
+        self.assertTrue(checks[2].startswith('sops exec-env '))
+
     def run_measurement(self, failing=None):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -126,7 +141,7 @@ class PeerMeasurementInstructionsTest(unittest.TestCase):
         result, calls = self.run_measurement()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(len(calls), 36 * 3)
-        self.assertEqual(calls.count("locus:exec --no-resolve -- /usr/bin/true"), 36)
+        self.assertEqual(calls.count("locus:exec --strict-creds -- /usr/bin/true"), 36)
         self.assertEqual(calls.count("direnv:exec fixture-dir /usr/bin/true"), 36)
         self.assertEqual(calls.count("sops:exec-env fixture.env /usr/bin/true"), 36)
         for name in ("direct", "locus", "direnv", "sops"):

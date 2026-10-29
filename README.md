@@ -556,22 +556,27 @@ for comparison guidance and the cautions around verbose logs.
 For [issue #170](https://github.com/ashlrai/locus/issues/170), run the complete
 [same-host comparison](./docs/exec-latency.md#comparing-launchers-for-issue-170)
 from the repository root in one Bash process on an idle Unix host. It builds
-Locus in release mode, uses a fresh temporary home, a live sample pin and
+Locus in release mode, uses a fresh temporary home, a live synthetic pin and
 disposable direnv and age/sops fixtures. No real credentials are needed.
 Setup is outside the timed region; the four commands launch the same child:
 
 ```bash
 /usr/bin/true
-"$locus" exec --no-resolve -- /usr/bin/true
+"$locus" exec --strict-creds -- /usr/bin/true
 direnv exec "$work/direnv" /usr/bin/true
 sops exec-env "$work/encrypted.env" /usr/bin/true
 ```
 
-The linked procedure defines these paths and runs four discarded warmup rounds
+Each launcher supplies the same synthetic `RESEND_API_KEY` to the child; the
+direct baseline supplies none. The procedure checks injection without printing
+the value. It defines these paths and runs four discarded warmup rounds
 followed by 32 measured rounds per command, rotating the starting order. It
 aborts on any failed command and reports min, median and max wall time. Repeat
-the whole procedure with fresh homes and record each result, commit, OS and
-architecture, filesystem, host load, build profile, and versions of Locus,
+the whole procedure at least three times with fresh homes and record each run’s
+min/median/max in milliseconds for all four commands, including the sample count.
+Report the range of run medians for each command and compare within-run medians;
+do not treat differences smaller than run-to-run variation as conclusive. Record
+the commit, OS and architecture, filesystem, host load, build profile, and versions of Locus,
 Rust, Cargo, Python, direnv, sops and age. For example, record `git rev-parse
 HEAD`, `uname -srm`, `rustc --version`, `cargo --version`, `python3 --version`,
 `direnv --version`, `sops --version`, `age-keygen --version`, and the built
@@ -583,10 +588,10 @@ The historical comparison in [benchmarks](./docs/BENCHMARKS.md) used Linux
 and 20 measured runs, so its results are not the same experiment as the
 procedure above.
 These launchers provide different guarantees: Locus verifies a pin, isolates the
-child and writes an audit record; direnv loads an allowed `.envrc`; sops
-decrypts a synthetic dotenv file. Locus's `--no-resolve` excludes credential
-resolution. Timing includes process startup and filesystem effects, but not
-terminal rendering or provider API latency.
+child, resolves an environment reference and writes an audit record; direnv
+loads an allowed `.envrc`; sops decrypts a synthetic dotenv file. The comparison
+does not measure provider API calls or real secret-manager resolution. Timing
+includes process startup and filesystem effects, but not terminal rendering.
 
 ### Landing page & dashboard
 
