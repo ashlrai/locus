@@ -656,13 +656,24 @@ impl Store {
     // ── Bindings ──────────────────────────────────────────────────────────
 
     pub fn save_binding(&self, binding: &Binding) -> Result<PathBuf> {
-        self.write_binding(binding, true)
+        self.write_binding(binding, true).map(|(path, _)| path)
     }
 
     /// [`Store::save_binding`] that refuses, under the bindings lock, to
     /// replace an existing binding unless `replace` is set, so a check made
     /// before the write cannot be raced by another writer.
     pub fn create_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
+        self.create_binding_with_outcome(binding, replace)
+            .map(|(path, _)| path)
+    }
+
+    /// Create a binding and report whether its file was written, determined
+    /// while holding the bindings lock.
+    pub fn create_binding_with_outcome(
+        &self,
+        binding: &Binding,
+        replace: bool,
+    ) -> Result<(PathBuf, bool)> {
         self.write_binding(binding, replace)
     }
 
@@ -686,7 +697,7 @@ impl Store {
         Ok(existing.to_toml()? == binding.to_toml()?)
     }
 
-    fn write_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
+    fn write_binding(&self, binding: &Binding, replace: bool) -> Result<(PathBuf, bool)> {
         self.require_local_control("save binding")?;
         binding.validate()?;
         // Double-check alias cannot escape bindings/ (also enforced in validate)
@@ -723,7 +734,7 @@ impl Store {
                 })?;
                 let existing = parse_binding_safely(&existing, &binding.alias)?;
                 if existing.to_toml()? == binding.to_toml()? {
-                    return Ok(path);
+                    return Ok((path, false));
                 }
                 return Err(LocusError::msg(format!(
                     "binding '{}' already exists; nothing written",
@@ -734,7 +745,7 @@ impl Store {
         }
         fs::write(&path, binding.to_toml()?)?;
         self.audit("binding.save", &binding.alias, None)?;
-        Ok(path)
+        Ok((path, true))
     }
 
     pub fn load_binding(&self, alias_or_id: &str) -> Result<Binding> {
@@ -5976,15 +5987,19 @@ credential_ref = "ghp_UNSAFE/CANARY"
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let binding = sample_binding("acme", "acme-corp", "p1");
-        let path = store.create_binding(&binding, false).unwrap();
+        let (path, changed) = store.create_binding_with_outcome(&binding, false).unwrap();
+        assert!(changed);
+        // Equivalent hand-edited TOML must retain its formatting and comments.
+        let contents = format!("# retained comment\n{}", fs::read_to_string(&path).unwrap());
+        fs::write(&path, &contents).unwrap();
         let before = fs::metadata(&path).unwrap().modified().unwrap();
-        let contents = fs::read(&path).unwrap();
 
-        let returned = store.create_binding(&binding, false).unwrap();
+        let (returned, changed) = store.create_binding_with_outcome(&binding, false).unwrap();
 
+        assert!(!changed);
         assert_eq!(returned, path);
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
-        assert_eq!(fs::read(&path).unwrap(), contents);
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
     }
 
     #[test]
