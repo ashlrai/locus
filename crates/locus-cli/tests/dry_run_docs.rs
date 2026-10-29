@@ -98,6 +98,27 @@ fn documented_init_preview_never_creates_home() {
 }
 
 #[test]
+fn readme_init_preview_produces_a_plan_without_creating_home() {
+    let home = tempfile::tempdir().unwrap();
+    let section = include_str!("../../../README.md")
+        .split("### Previewing mutations\n")
+        .nth(1)
+        .expect("README dry-run section");
+    let example = section
+        .lines()
+        .find_map(|line| line.strip_prefix("locus init "))
+        .expect("README init preview");
+    let mut args = vec!["init"];
+    args.extend(example.split_whitespace());
+    let output = locus(&args, home.path());
+    assert!(output.status.success(), "README init preview failed");
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["schema"], "locus.plan.v1");
+    assert_eq!(plan["dry_run"], true);
+    assert!(!home.path().join("locus").exists());
+}
+
+#[test]
 fn documented_print_only_setup_forms_keep_their_output() {
     let home = tempfile::tempdir().unwrap();
     for args in [

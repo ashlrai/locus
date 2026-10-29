@@ -469,6 +469,35 @@ locus version                         # build version (also: locus --version)
 locus topic <name>                    # dashboard · forensics · serve · goal · verify · …
 ```
 
+### Previewing mutations
+
+[Issue #171](https://github.com/ashlrai/locus/issues/171) proposed a dry-run
+feature for mutating commands: validate what can be checked without changing
+state, then describe the intended changes without applying them. A preview
+should not create, modify, or delete files, change a pin or binding, mint or
+revoke credentials or grants, or perform provider mutations.
+
+This checkout implements `--dry-run` plans for supported CLI mutations. For
+example, this previews initialization without creating the Locus home:
+
+```sh
+locus init --dry-run --json
+```
+
+The JSON plan uses the `locus.plan.v1` schema. A successful preview is not an
+authorization or a guarantee that the real command will succeed: it does not
+authenticate the control capability or resolve credentials, and some checks
+require the real operation. Most plans require an initialized home and may
+still fail validation. Run the command without `--dry-run` to apply it, subject
+to the usual security checks.
+
+This is not a universal preview: `exec`, `run`, `ci run`, and server commands
+cannot be planned, and the flag does not preview child commands, provider
+operations, or MCP tool calls. Read-only commands accept and ignore the flag;
+their normal behavior can still create the Locus home or freeze a drifted pin.
+See the [dry-run guide](docs/README.md#previewing-changes-with---dry-run) for
+supported command forms, exceptions, and limitations.
+
 **Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
 
 **Northstar / hub:** [GOALS.md](./GOALS.md) · [docs/hub-integration.md](./docs/hub-integration.md) · [integrations/phantom/](./integrations/phantom/)
