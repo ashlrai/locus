@@ -250,6 +250,41 @@ eval "$(locus hook zsh)"
 # also exports the persisted LOCUS_CONTROL_CAPABILITY when the shell lacks one
 ```
 
+### Previewing mutations with `--dry-run`
+
+[Issue #171](https://github.com/ashlrai/locus/issues/171) covers previews for
+mutating CLI commands. The following command forms support a plan in this
+checkout; supply their normal required arguments:
+
+| Area | Command forms |
+| --- | --- |
+| Setup and sessions | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew` |
+| Bindings and workspaces | `engagement init`, `engagement close`, `graph export`, `graph import`, `binding add`, `binding rm`, `binding migrate-credential-refs`, `client add`, `autopin suggest --apply` |
+| Capabilities and grants | `capability persist`, `capability unpersist`, `ci mint`, `ci env`, `mcp mint`, `mcp revoke` |
+| Setup and adapters | `agent setup`, `doctor --fix`, `adapter install`, `adapter uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add`, `adapter registry index remove` |
+| Approvals and audit | `approve grant`, `approve deny`, `notify on`, `notify off`, `events export`, `forensics export` |
+
+For example, `locus init --dry-run --json` previews initialization. The
+acceptance criteria for a plan are:
+
+- Perform read-only preflight checks and describe the proposed changes; JSON
+  plans use the `locus.plan.v1` schema.
+- Leave persistent state unchanged, including the Locus home, session and
+  binding data, workspace and client configuration, and export files. Do not
+  start a child or server, resolve credentials, or perform provider mutations.
+- Report failed preconditions without applying changes. A successful preview
+  does not authenticate the control capability or guarantee that a later real
+  command will be authorized or succeed.
+
+`setup --print` and `setup --client generic` remain print-only, even with the
+flag. `doctor --fix --apply --dry-run`, `agent setup --apply --dry-run`, and
+`pin --rewrite-configs --dry-run` are rejected. `exec`, `run`, `ci run`, the
+`mcp` server, `serve`, and `dashboard` cannot produce plans; child commands,
+provider operations, and MCP tool calls are outside this preview's scope.
+Read-only commands accept and ignore the flag, so their normal behavior can
+still create a Locus home or freeze a drifted session. See the [dry-run command
+matrix](docs/dry-run-matrix-q8.md) for all forms and limitations.
+
 ---
 
 ## Measured: wrong-client credential reachability
