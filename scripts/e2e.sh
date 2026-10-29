@@ -184,6 +184,50 @@ for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME", "PERSONAL"
 '
 ok "pin acme + whoami exclusive"
 
+# Issue #181: a repo with no matching candidates must return a clear, read-only
+# result, even when a history key and entries already exist for another repo.
+log "3a. autopin suggest with no candidates"
+(
+  export LOCUS_HOME="$LOCUS_HOME/autopin-empty-home"
+  export LOCUS_PIN_HISTORY=1
+  repo="$LOCUS_HOME/repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" remote add origin https://example.invalid/locus-history.git
+  cd "$repo"
+  locus init --with-samples >/dev/null
+  locus pin personal >/dev/null
+  [[ -f "$LOCUS_HOME/history.key" && -s "$LOCUS_HOME/pin-history.jsonl" ]] \
+    || die "autopin fixture did not create pin history"
+  git remote set-url origin https://example.invalid/locus-no-history.git
+  printf 'default_binding = "personal"\n' > .locus.toml
+  cp .locus.toml "$LOCUS_HOME/workspace-before"
+  cp "$LOCUS_HOME/sessions/active.json" "$LOCUS_HOME/active-before"
+  cp -R "$LOCUS_HOME/bindings" "$LOCUS_HOME/bindings-before"
+
+  human="$(locus autopin suggest)" || die "autopin suggest failed with no candidates"
+  [[ "$human" == "no pin history for this repo yet; nothing to suggest" ]] \
+    || die "autopin suggest did not clearly report empty history"
+  result="$(locus autopin suggest --json)" || die "autopin suggest --json failed with no candidates"
+  printf '%s' "$result" | python3 -c '
+import json, sys
+v = json.load(sys.stdin)
+r = v["report"]
+assert v["schema"] == "locus.autopin.suggest.v1"
+assert r["history_enabled"] is True and r["repo_detected"] is True
+assert r["matched_entries"] == 0 and r["candidates"] == []
+assert r["suggestion"] is None and r["reason"] == "no_history"
+assert v["applied"] is False and v["written"] is None
+' || die "autopin suggest returned an invalid empty result"
+  diff -rq "$LOCUS_HOME/bindings-before" "$LOCUS_HOME/bindings" >/dev/null \
+    || die "autopin suggest changed bindings"
+  cmp -s "$LOCUS_HOME/active-before" "$LOCUS_HOME/sessions/active.json" \
+    || die "autopin suggest changed the active pin"
+  cmp -s "$LOCUS_HOME/workspace-before" .locus.toml \
+    || die "autopin suggest changed the workspace binding"
+)
+ok "autopin suggest returns empty candidates without binding changes"
+
 # ── 4. workspace allowlist blocks personal without --force ───────────────────
 log "4. workspace allowlist block personal without --force"
 WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"
