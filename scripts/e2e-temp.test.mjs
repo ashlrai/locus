@@ -49,10 +49,15 @@ for (const [label, temp] of [['unset', undefined], ['empty', '']]) {
     const capture = join(fixture.root, 'template');
     mkdirSync(scratch);
     const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
-    // Record the requested template but keep the created directory in the fixture.
+    // Redirect only the main home; security probes must use their own TMPDIR.
     writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
-printf '%s' "$2" > "$PROBE_CAPTURE"
-exec "$REAL_MKTEMP" -d "$PROBE_SCRATCH/locus-e2e.XXXXXX"
+case "$2" in
+  */locus-e2e.XXXXXX)
+    printf '%s' "$2" > "$PROBE_CAPTURE"
+    exec "$REAL_MKTEMP" -d "$PROBE_SCRATCH/locus-e2e.XXXXXX"
+    ;;
+esac
+exec "$REAL_MKTEMP" "$@"
 `, { mode: 0o755 });
     const result = run(fixture, temp, {
       REAL_MKTEMP: realMktemp, PROBE_CAPTURE: capture, PROBE_SCRATCH: scratch,
