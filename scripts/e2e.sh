@@ -188,6 +188,37 @@ export LOCUS_SUPABASE_ACME="e2e-sample-acme-sb-canary"
 export LOCUS_GH_TOKEN_ACME="e2e-sample-acme-gh-canary"
 export LOCUS_VERCEL_TOKEN_ACME="e2e-sample-acme-vc-canary"
 locus init --with-samples >/dev/null
+
+# Issue #175: repeating the same add succeeds without rewriting the binding.
+binding_add_args=(--json binding add e2e-idempotent --tenant e2e-idempotent
+  --provider github --account e2e-idempotent --credential-ref env:LOCUS_GH_TOKEN_PERSONAL
+  --non-interactive)
+binding_test_home="$LOCUS_HOME/e2e-binding-add"
+LOCUS_HOME="$binding_test_home" locus "${binding_add_args[@]}" >/dev/null || die "initial binding add failed"
+binding_file="$binding_test_home/bindings/e2e-idempotent.toml"
+binding_snapshot="$binding_test_home/e2e-idempotent.snapshot"
+cp "$binding_file" "$binding_snapshot"
+# An old timestamp makes a rewrite observable even on coarse-resolution filesystems.
+binding_mtime="$(python3 - "$binding_file" <<'PY'
+import os, sys
+path = sys.argv[1]
+os.utime(path, (946684800, 946684800))
+print(os.stat(path).st_mtime_ns)
+PY
+)"
+retry_json="$(LOCUS_HOME="$binding_test_home" locus "${binding_add_args[@]}")" || die "identical binding add failed"
+printf '%s' "$retry_json" | python3 -c '
+import json, sys
+result = json.load(sys.stdin)
+assert result.get("ok") is True and result.get("changed") is False
+' || die "identical binding add did not report an unchanged binding"
+cmp -s "$binding_snapshot" "$binding_file" || die "identical binding add changed file contents"
+python3 - "$binding_file" "$binding_mtime" <<'PY' || die "identical binding add changed file modification time"
+import os, sys
+assert os.stat(sys.argv[1]).st_mtime_ns == int(sys.argv[2])
+PY
+ok "identical binding add succeeds without changing contents or modification time"
+
 locus pin personal >/dev/null
 who_personal="$(locus whoami --json)"
 echo "$who_personal" | python3 -c '
