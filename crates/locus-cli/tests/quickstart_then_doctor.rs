@@ -96,6 +96,31 @@ fn quickstart_then_doctor_succeeds_with_visible_advisories() {
 }
 
 #[test]
+fn changelog_preserves_the_published_first_run_observation() {
+    let changelog = include_str!("../../../CHANGELOG.md");
+    let note = changelog
+        .split_once("**Fresh quickstart and doctor WARN (")
+        .expect("first-run issue has a changelog entry")
+        .1
+        .split_once("\n\n")
+        .unwrap()
+        .0;
+    for detail in [
+        "issues/172",
+        "fresh home",
+        "non-interactive stdin",
+        "Phantom absent from PATH",
+        "published npm 0.5.1",
+        "`locus quickstart` exit 0",
+        "`locus doctor` exiting 1",
+        "`WARN`",
+        "`phantom_missing`",
+    ] {
+        assert!(note.contains(detail), "missing first-run detail: {detail}");
+    }
+}
+
+#[test]
 fn quickstart_then_doctor_still_fails_for_invalid_workspace_policy() {
     let operator = Operator::new();
     operator.quickstart();
