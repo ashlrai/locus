@@ -60,6 +60,48 @@ What the two extra steps are for:
 - **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. `locus enter personal` works straight after `quickstart`, including when quickstart ran in a shell that has already exited (fixed in #156, regression test `crates/locus-cli/tests/quickstart_then_enter.rs`).
 - **Recovery.** If a command says `human re-pin required` (for example `no current broker endpoint` after the pinning shell exited), load the hook in the new shell (`eval "$(locus hook zsh)"` or `bash`) and run `locus enter personal`: enter replaces a pin whose broker died. If enter is refused, check the error; for a wedged session such as an expired pin or a bad seal, run `locus leave --force` in that same hooked shell, then `locus enter personal`. `--force` deletes session state only and never mints anything. See [broker recovery](docs/broker-recovery-q8.md) for prerequisites and refusal cases.
 
+### Fresh quickstart doctor warning
+
+[Issue #172](https://github.com/ashlrai/locus/issues/172) recorded a fresh
+quickstart on npm 0.5.1: `quickstart` succeeded, but a subsequent `doctor`
+returned exit 1 with `WARN` when Phantom was absent. To reproduce the isolated
+setup with an installed `locus` binary, run the following in Bash. It uses a
+temporary home and an empty project, hides optional executables from `PATH`,
+and starts each Locus command with a clean environment:
+
+```bash
+cli_bin="$(command -v locus)"
+work="$(mktemp -d)"
+mkdir -p "$work/home" "$work/project"
+cd "$work/project"
+env -i HOME="$work/home" PATH=/nonexistent SHELL=/bin/bash NO_COLOR=1 "$cli_bin" quickstart > /dev/null
+printf 'quickstart exit: %s\n' "$?"
+env -i HOME="$work/home" PATH=/nonexistent SHELL=/bin/bash NO_COLOR=1 "$cli_bin" doctor > "$work/doctor.out"
+doctor_status=$?
+grep -E 'verdict   WARN|\[phantom_missing\]' "$work/doctor.out"
+printf 'doctor exit: %s\n' "$doctor_status"
+```
+
+On the pre-fix 0.5.1 source, quickstart exited 0 and the selected doctor output
+was (other findings omitted):
+
+<!-- fresh-doctor-output:begin -->
+```text
+  verdict   WARN
+  ! [phantom_missing] phantom not on PATH (install Phantom Secrets for Phantom credential references)
+```
+<!-- fresh-doctor-output:end -->
+
+Doctor exited 1. Since the fix included in 0.5.2, the same setup still reports
+the warning but exits 0 when findings are only setup advisories. The JSON
+report still has `verdict: "WARN"` and `ok: false`; exit 0 does not mean all
+setup is complete. Inspect the full `locus doctor --json` report for other
+findings: actionable warnings can still exit 1, and unsafe conditions exit 2.
+Phantom is optional unless using its credential references; its scoped bridge
+is not available in this checkout. To export the persisted control capability
+in your normal shell, use the hook described above. See the [first-run
+record](docs/FIRST-RUN.md) for the original observation.
+
 ## Connect your agent (MCP)
 
 `locus agent setup --apply` writes the configs for every client it finds. By hand:
