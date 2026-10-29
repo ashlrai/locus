@@ -27,8 +27,8 @@ by the operator, not bypassed by an agent.
 
 For an intact local-control session whose broker is unavailable or whose
 broker generation is stale, `enter` can replace the active pin directly after
-authenticating the control capability. An authentic expired local-control pin
-can also be replaced. Replacement is audited as `session.replace_stale`.
+authenticating the control capability. Replacement is audited as
+`session.replace_stale`.
 `whoami` checks the resulting identity; keep the operator shell alive while
 using its broker. Normal binding and workspace allowlist checks still apply.
 An explicitly selected `LOCUS_SESSION_ID` uses the strict authority check and
@@ -36,9 +36,9 @@ does not take the active-pin replacement path.
 
 ## If enter is refused
 
-Read the error before taking further action. A bad or legacy seal or an
-unreadable active session cannot be replaced by `enter`. When the active
-session is wedged and teardown is appropriate, a human can run:
+Read the error before taking further action. The current CLI refuses `enter`
+for an expired pin, a bad or legacy seal, or an unreadable active session.
+When the active session is wedged and teardown is appropriate, a human can run:
 
 ```bash
 locus leave --force
@@ -58,8 +58,6 @@ operator acknowledgement of unverified teardown. It does not override a live
 broker's refusal or a mismatching persisted capability; a subsequent `enter`
 still requires the normal authorization checks.
 
-Recovery hints may prescribe force-first for an expired pin, although the
-current replacement gate accepts an authentic expired local-control session.
 Treat a hint as guidance for the diagnosed error and stop if an authorization
-check refuses the operation. See [policy](policy.md) and
-[onboarding](onboarding.md) for control capability and workspace details.
+check refuses the operation. See [onboarding](onboarding.md) for control
+capability and workspace details.

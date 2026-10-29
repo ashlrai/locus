@@ -43,6 +43,75 @@ fn changelog_dead_broker_recipes_match_the_current_hint() {
     }
 }
 
+/// Run the operator guide's actual Bash commands against a dead broker and
+/// against a damaged seal. This keeps the documentation aligned with the CLI.
+#[test]
+fn documented_broker_recovery_commands_work_in_order() {
+    let guide = include_str!("../../../docs/broker-recovery-q8.md");
+    let commands = |heading: &str| {
+        guide
+            .split_once(heading)
+            .expect("recovery section exists")
+            .1
+            .split_once("```bash\n")
+            .expect("recovery commands exist")
+            .1
+            .split_once("\n```")
+            .expect("recovery code block ends")
+            .0
+            .replace("<alias>", "personal")
+    };
+    let enter_first = commands("## Enter first");
+    let fallback = commands("## If enter is refused");
+    assert!(!enter_first.contains("leave --force"));
+    assert!(
+        fallback.find("locus leave --force").unwrap()
+            < fallback.find("locus enter personal").unwrap()
+    );
+
+    for damaged in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let _cap = pin_in_exited_shell(home.path(), cwd.path());
+        if damaged {
+            edit_active(home.path(), false, |s| s.seal = "deadbeef".into());
+        }
+        let bin_dir = Path::new(env!("CARGO_BIN_EXE_locus")).parent().unwrap();
+        let path = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        // Preserve the hooked shell between enter and the conditional manual
+        // fallback, just as the guide instructs the operator to do.
+        let script = if damaged {
+            let (attempt, _) = enter_first.rsplit_once('\n').expect("whoami follows enter");
+            format!("set -e\nif {attempt}; then exit 1; fi\n{fallback}\nexit $?")
+        } else {
+            format!("set -e\n{enter_first}\nexit $?")
+        };
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .env("PATH", path)
+            .env("LOCUS_HOME", home.path())
+            .env("SHELL", "/bin/bash")
+            .env_remove("LOCUS_CONTROL_CAPABILITY")
+            .env_remove("LOCUS_SESSION_ID")
+            .current_dir(cwd.path())
+            .output()
+            .expect("bash runs");
+        assert!(
+            out.status.success(),
+            "documented recovery failed: {}",
+            stderr(&out)
+        );
+        let audit = std::fs::read_to_string(home.path().join("audit/events.jsonl")).unwrap();
+        assert_eq!(audit.contains("session.force_leave"), damaged);
+        assert_eq!(replace_stale_audits(home.path()), usize::from(!damaged));
+    }
+}
+
 fn locus(home: &Path, cwd: &Path, cap: &str, args: &[&str]) -> Output {
     locus_cmd(home, cwd, cap, args)
         .output()
