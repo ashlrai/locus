@@ -551,6 +551,43 @@ not establish identical compiler work. The reason for the distinct artifact
 identities remains unconfirmed. See [the detailed investigation](./CONTRIBUTING.md#investigating-repeated-compilation-during-install)
 for comparison guidance and the cautions around verbose logs.
 
+### Comparing exec launch latency
+
+For [issue #170](https://github.com/ashlrai/locus/issues/170), run the complete
+[same-host comparison](./docs/exec-latency.md#comparing-launchers-for-issue-170)
+from the repository root in one Bash process on an idle Unix host. It builds
+Locus in release mode, uses a fresh temporary home, a live sample pin and
+disposable direnv and age/sops fixtures. No real credentials are needed.
+Setup is outside the timed region; the four commands launch the same child:
+
+```bash
+/usr/bin/true
+"$locus" exec --no-resolve -- /usr/bin/true
+direnv exec "$work/direnv" /usr/bin/true
+sops exec-env "$work/encrypted.env" /usr/bin/true
+```
+
+The linked procedure defines these paths and runs four discarded warmup rounds
+followed by 32 measured rounds per command, rotating the starting order. It
+aborts on any failed command and reports min, median and max wall time. Repeat
+the whole procedure with fresh homes and record each result, commit, OS and
+architecture, filesystem, host load, build profile, and versions of Locus,
+Rust, Cargo, Python, direnv, sops and age. For example, record `git rev-parse
+HEAD`, `uname -srm`, `rustc --version`, `cargo --version`, `python3 --version`,
+`direnv --version`, `sops --version`, `age-keygen --version`, and the built
+`locus --version`; disable the sops version check as in the linked setup.
+
+The historical comparison in [benchmarks](./docs/BENCHMARKS.md) used Linux
+6.12 x86_64, 4 vCPU, 15.6 GiB RAM, rustc 1.99.1, Locus commit `e969d9c4`
+(release build), direnv 2.38.2, sops 3.13.3 and age 1.3.2. It used one warmup
+and 20 measured runs, so its results are not the same experiment as the
+procedure above.
+These launchers provide different guarantees: Locus verifies a pin, isolates the
+child and writes an audit record; direnv loads an allowed `.envrc`; sops
+decrypts a synthetic dotenv file. Locus's `--no-resolve` excludes credential
+resolution. Timing includes process startup and filesystem effects, but not
+terminal rendering or provider API latency.
+
 ### Landing page & dashboard
 
 | App | Role |
