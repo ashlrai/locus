@@ -37,10 +37,23 @@ test("help describes the invocation without running recipes", () => {
 });
 
 test("a recipe name is not a selector and returns usage", () => {
-  const r = spawnSync(process.execPath, [join(here, "run.mjs"), "unknown-recipe"], { encoding: "utf8", timeout: 120_000 });
-  assert.equal(r.status, 1);
-  assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]/m);
-  assert.doesNotMatch(r.stdout, /^(PASS|COMPLETE)/m);
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-unknown-"));
+  try {
+    // Reject the argument before creating a recipe workspace or finding locus.
+    const unavailableTmp = join(root, "not-a-directory");
+    writeFileSync(unavailableTmp, "");
+    const r = spawnSync(process.execPath, [join(here, "run.mjs"), "unknown-recipe"], {
+      env: { ...process.env, PATH: "", TMPDIR: unavailableTmp, TMP: unavailableTmp, TEMP: unavailableTmp },
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    assert.ifError(r.error);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
+    assert.equal(r.stdout, "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("an unrecognized option returns usage without running a recipe", () => {
