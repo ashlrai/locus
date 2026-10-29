@@ -58,6 +58,37 @@ wrapper consumes this leading flag; flags after a command, such as `locus leave
 place of the wrapper, reinstall the npm package to restore the JavaScript wrapper
 before using either override.
 
+## Shell installer requirements (issue #169)
+
+The proposed shell installation path is separate from the npm wrapper above.
+This checkout includes `scripts/install.sh`; see the [source install options](https://github.com/ashlrai/locus#install-options)
+for how to inspect and run it. The requirements below describe that path, not
+a change to `npm install`, its cache selection, or its Cargo fallback.
+
+The installer should select the release archive from the host OS and machine
+architecture (`uname -s` and `uname -m`):
+
+| Host | Release archive |
+| --- | --- |
+| macOS arm64 / aarch64 | `locus-aarch64-apple-darwin.tar.gz` |
+| macOS x86_64 / amd64 | `locus-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 / amd64, glibc | `locus-x86_64-unknown-linux-gnu.tar.gz` |
+
+These are the release assets for the supported platforms; Linux arm64,
+Windows, other architectures, and Linux systems without a compatible glibc
+are not supported by this prebuilt path. `uname` does not establish libc
+compatibility, so selecting the Linux archive does not guarantee it will run
+on a musl-based system. Use a source installation on unsupported platforms.
+
+For a requested version (or a latest release resolved once to a version), the
+installer should download that version's matching archive and `.sha256`
+sidecar, verify the checksum before unpacking, and install both `locus` and
+`locus-mcp`. It should fail with a useful error for an unsupported OS or
+architecture, missing tools or assets, failed downloads, an invalid or
+mismatched checksum, or an invalid archive; it should not silently select a
+different platform or fall back to Cargo. Validation failures must leave existing
+binaries intact. A checksum detects corruption; it is not a publisher signature.
+
 ## Quick start
 
 ```bash
