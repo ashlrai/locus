@@ -13,6 +13,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Reproduce cargo-install timings ([#168](https://github.com/ashlrai/locus/issues/168)).**
+  From a checkout, compare one install of both packages with two separate
+  installs. This uses the same committed revision, lockfile, release profile,
+  toolchain, and a fresh target and install root for each case; it installs no
+  binaries into the usual Cargo bin directory. `/usr/bin/time -p` reports wall
+  time as `real` in each log; add the two separate-install times for their total.
+
+  ```bash
+  set -e
+  revision=$(git rev-parse HEAD)
+  repo="file://$(pwd -P)"
+  work=$(mktemp -d)
+  /usr/bin/time -p cargo install --git "$repo" --rev "$revision" --locked \
+    locus-cli locus-mcp --root "$work/combined-install" \
+    --target-dir "$work/combined-target" --message-format=json \
+    > "$work/combined.jsonl" 2> "$work/combined.log"
+  /usr/bin/time -p cargo install --git "$repo" --rev "$revision" --locked \
+    locus-cli --root "$work/separate-install" \
+    --target-dir "$work/separate-target" --message-format=json \
+    > "$work/cli.jsonl" 2> "$work/cli.log"
+  /usr/bin/time -p cargo install --git "$repo" --rev "$revision" --locked \
+    locus-mcp --root "$work/separate-install" \
+    --target-dir "$work/separate-target" --message-format=json \
+    > "$work/mcp.jsonl" 2> "$work/mcp.log"
+  grep -E 'Compiling locus-core|Finished `release`|^real ' "$work/"*.log
+  ```
+
+  The second separate install intentionally shares its target directory with
+  the first; neither case reuses the other's build artifacts. The Git source is
+  committed `HEAD`, so uncommitted edits are excluded. Record the revision,
+  OS/architecture, `cargo --version`, `rustc --version`, and cache/network
+  conditions. Run both orders and repeat with new directories: Cargo's download
+  cache and the OS cache can make later runs warmer, and timings include install
+  and source/dependency fetching as well as compilation. Inspect `Compiling
+  locus-core` lines and their order; use the JSON artifact inspection in
+  [CONTRIBUTING.md](CONTRIBUTING.md#investigating-repeated-compilation-during-install)
+  on each `.jsonl` file to compare package, target, profile, features, filenames,
+  and `fresh` status. Two non-fresh records indicate two builds, but matching
+  displayed fields alone do not establish identical compiler work or its cause.
+  This recipe makes no speedup claim without measurements.
+
 ### Troubleshooting
 
 - **Fresh quickstart and doctor WARN ([#172](https://github.com/ashlrai/locus/issues/172)).**
