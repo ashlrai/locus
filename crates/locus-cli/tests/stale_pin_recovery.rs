@@ -30,6 +30,9 @@ fn changelog_dead_broker_recipes_match_the_current_hint() {
         .split("\n- ")
         .next()
         .unwrap();
+    assert!(entry.contains("recorded v0.5.1 first run"));
+    assert!(entry.contains("incorrectly put `locus leave --force` before `locus enter <alias>`"));
+    assert!(entry.contains("although entering directly succeeded"));
     assert!(entry.contains(&current), "entry must contain {current}");
     assert!(entry.contains("expired pin, invalid or legacy seal, or unreadable session"));
     assert!(entry.contains("`locus leave --force` and then `locus enter <alias>`"));
