@@ -199,6 +199,29 @@ assert w.get("seal_ok") is True, w
 '
 ok "pin personal + whoami"
 
+# README's sample exec happy path should run without credential warnings when
+# the sample references are available. Keep stderr separate from child stdout.
+sample_exec_stderr="$LOCUS_HOME/sample-exec.stderr"
+sample_exec_stdout="$(locus exec --expect personal -- echo ok 2>"$sample_exec_stderr")" \
+  || die "sample exec failed"
+[[ "$sample_exec_stdout" == "ok" ]] || die "sample exec did not run the child"
+if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
+  die "sample exec emitted an unset-variable warning"
+fi
+ok "sample exec succeeds without unset-variable warnings"
+
+# Missing references must still be visible; do not hide real credential errors
+# just to make the configured sample path quiet.
+sample_exec_stdout="$(env -u LOCUS_SUPABASE_PERSONAL -u LOCUS_GH_TOKEN_PERSONAL \
+  -u LOCUS_VERCEL_TOKEN_PERSONAL "$LOCUS_BIN" exec --expect personal -- echo ok \
+  2>"$sample_exec_stderr")" || die "sample exec with missing credentials failed"
+[[ "$sample_exec_stdout" == "ok" ]] || die "sample exec with missing credentials did not run the child"
+for provider in supabase github vercel; do
+  grep -Eq "warn.*unresolved credential.*provider=${provider}.*source=environment" "$sample_exec_stderr" \
+    || die "sample exec omitted unresolved credential warning for $provider"
+done
+ok "sample exec reports missing credentials"
+
 locus pin acme >/dev/null
 who_acme="$(locus whoami --json)"
 echo "$who_acme" | python3 -c '
@@ -323,7 +346,6 @@ export AWS_PROFILE="ambient-aws-must-not-leak"
 export UNLISTED_SECRET_CANARY="arbitrary-parent-secret-must-not-leak"
 
 locus pin envtest >/dev/null
-exec_env="$(locus exec -- env 2>/dev/null || true)"
 # locus exec prints a progress line on stderr; capture only child env
 exec_env="$(locus exec -- env 2>/dev/null)"
 
