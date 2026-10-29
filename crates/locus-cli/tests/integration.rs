@@ -14,6 +14,8 @@ mod doc_facts;
 mod doctor_fix_cli;
 #[path = "doctor_fix_phm_names.rs"]
 mod doctor_fix_phm_names;
+#[path = "dry_run_docs.rs"]
+mod dry_run_docs;
 #[path = "exec_exit_codes.rs"]
 mod exec_exit_codes;
 #[path = "exec_expect.rs"]

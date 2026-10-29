@@ -467,6 +467,7 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [scripts/e2e.sh](./scripts/e2e.sh) | End-to-end shell suite |
 | [scripts/check-readme-quickstart.sh](./scripts/check-readme-quickstart.sh) | README quickstart replay in a throwaway HOME |
 | [scripts/check-readme-links.mjs](./scripts/check-readme-links.mjs) | README link / anchor / image resolution check (`--external` for remote) |
+| [docs/README.md](./docs/README.md) | CLI dry-run support and limitations |
 | [docs/architecture.md](./docs/architecture.md) | System diagram (DESIGN distilled) |
 | [docs/BENCHMARKS.md](./docs/BENCHMARKS.md) | Install and core-op timings, peers, method |
 | [docs/FIRST-RUN.md](./docs/FIRST-RUN.md) | First-run log and agent-use audit |
