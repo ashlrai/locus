@@ -27,7 +27,7 @@ const locusHome = join(home, ".locus");
 mkdirSync(join(locusHome, "bindings"), { recursive: true });
 
 // Two bindings whose GitHub credential comes from env: refs (the CI/test
-// scheme). Real setups use phm:NAME refs resolved through Phantom.
+// scheme). phm:NAME refs fail closed until a scoped bridge is available.
 function binding(alias, tenant, envVar) {
   return `[binding]
 id = "bnd_${alias}"
