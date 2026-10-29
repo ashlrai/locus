@@ -62,8 +62,9 @@ die()  { printf '  FAIL %s\n' "$*" >&2; exit 1; }
 
 # Extract the fenced bash block under "## 30-second start": lines between the
 # first ```bash fence after the heading and its closing ```. Keep only lines
-# that invoke locus or eval the shell hook (install lines are skipped), with
-# the trailing "# ..." comment kept for expectation parsing.
+# that invoke locus, including an env-prefixed smoke command, or eval the shell
+# hook (install lines are skipped), with the trailing comment kept for
+# expectation parsing.
 extract_steps() {
   awk '
     /^## 30-second start/ { in_sec = 1; next }
@@ -71,7 +72,17 @@ extract_steps() {
     in_blk && /^```/       { exit }
     in_blk                 { print }
   ' "$README" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
-    | grep -E '^(locus |eval "\$\(locus )'
+    | grep -E '^(locus |env LOCUS_.* locus |eval "\$\(locus )'
+}
+
+# Do not echo inline environment assignments when reporting a step.
+display_step() {
+  local cmd="$1"
+  if [[ "$cmd" == env\ LOCUS_*\ locus\ * ]]; then
+    printf 'locus %s' "${cmd#* locus }"
+  else
+    printf '%s' "$cmd"
+  fi
 }
 
 # Expected exit code from a step's README comment: "exit N" is explicit;
@@ -100,7 +111,7 @@ if [[ $DRY -eq 1 ]]; then
   echo "  home   : fresh mktemp dir (removed on exit)"
   for s in "${STEPS[@]}"; do
     cmd="${s%%#*}"; cmd="${cmd%"${cmd##*[![:space:]]}"}"
-    printf '  step   %-52s expect exit=%s\n' "$cmd" "$(expect_for "${s#*#}")"
+    printf '  step   %-52s expect exit=%s\n' "$(display_step "$cmd")" "$(expect_for "${s#*#}")"
   done
   cat <<'EOF'
   plus   quickstart --dry-run prints locus.plan.v1 and writes nothing
@@ -133,21 +144,27 @@ step_out="$WORK/step.out"
 run_step() {
   local line="$1"
   local cmd="${line%%#*}"; cmd="${cmd%"${cmd##*[![:space:]]}"}"
-  local comment="" expect rc
+  local comment="" expect rc display
+  display="$(display_step "$cmd")"
   [[ "$line" == *'#'* ]] && comment="${line#*#}"
   expect="$(expect_for "$comment")"
   eval "$cmd" >"$step_out" 2>&1
   rc=$?
   case "$expect" in
     nonzero)
-      [[ $rc -ne 0 ]] || die "\`$cmd\` unexpectedly succeeded (README documents a refusal)" ;;
+      [[ $rc -ne 0 ]] || die "\`$display\` unexpectedly succeeded (README documents a refusal)" ;;
     *)
       [[ $rc -eq "$expect" ]] || {
-        sed 's/^/      | /' "$step_out" >&2
-        die "\`$cmd\` exited $rc, README documents $expect"
+        die "\`$display\` exited $rc, README documents $expect"
       } ;;
   esac
-  ok "$cmd"
+  if [[ "$display" == 'locus exec --expect personal '* ]]; then
+    grep -qx 'ok' "$step_out" || die "sample exec did not print ok"
+    if grep -Eqi 'warn|unset' "$step_out"; then
+      die "sample exec emitted a warning"
+    fi
+  fi
+  ok "$display"
 }
 
 for s in "${STEPS[@]}"; do run_step "$s"; done
