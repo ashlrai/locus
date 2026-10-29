@@ -18,26 +18,45 @@ npm install -g locus-cli
 npx locus-cli --help
 ```
 
-On first run the wrapper:
+Requires Node ≥ 16. Without an override, the wrapper selects a binary as follows:
 
-1. Downloads the matching GitHub release binary into `~/.locus/bin`, or
-2. Falls back to `cargo install --git https://github.com/ashlrai/locus locus-cli --locked`. On platforms
-   without a prebuilt release binary (today: Linux arm64 and Windows) it says so
-   and goes straight to this step, which can take several minutes.
+1. It checks `~/.locus/bin/locus` first. A binary matching the wrapper's packaged
+   version is reused. A newer binary, or one whose version cannot be determined,
+   is preserved and the wrapper refuses to run; it does not fall through to
+   another installation. An older cached binary can be upgraded.
+2. If the cache is absent or older, it checks for an existing native binary on
+   `PATH` (or in `~/.cargo/bin`). It reuses one matching or newer than the
+   packaged version; an older or unversioned candidate is not selected.
+3. Otherwise it downloads the GitHub release matching the wrapper's packaged
+   version into `~/.locus/bin`. If the download fails, or there is no prebuilt
+   release for the platform (currently Linux arm64 and Windows), it builds
+   with `cargo install --git https://github.com/ashlrai/locus locus-cli --locked`.
+   This fallback requires [Rust](https://rustup.rs) and can take several minutes.
 
-Requires Node ≥ 16. Cargo fallback needs [Rust](https://rustup.rs).
-The fallback builds in a temporary private install root and installs the result
-in `~/.locus/bin`; it does not replace binaries in Cargo's install directory.
-It compares the built binary's actual version with the cache before replacement.
+Versions are compared using SemVer precedence, so prereleases precede their
+stable release and build metadata does not affect ordering. The wrapper probes
+the binary with `--version` first and uses its adjacent `.version` file only if
+the probe fails or is unrecognized. It checks again before replacing a cache
+entry. The Cargo fallback builds from the Git repository's default branch, not
+the npm package's release tag, and compares the built binary's actual version
+with the cache. It uses a temporary private install root; it does not replace
+binaries in Cargo's install directory. If the built version is unknown, it will
+not replace an existing cache entry without an override.
 
-The wrapper refuses to overwrite a newer `~/.locus/bin/locus` with its older
-release, including during npm postinstall. It also preserves an existing binary
-whose version cannot be determined. The refusal reports both versions when known.
-To intentionally replace that binary, run the wrapper with a leading `--force`,
-for example `locus --force --version`, or run `node install.js --force` from the
-installed `locus-cli` package directory. The wrapper consumes this leading flag;
-flags after a command, such as `locus leave --force`, belong to the native CLI
-and never authorize a downgrade. npm's own `--force` is not an override.
+On supported POSIX platforms npm postinstall may download and link the matching
+release immediately. It also preserves a newer or unversioned cached binary and
+finishes npm installation successfully, reporting the refusal. The CLI release
+archive can include `locus-mcp`; that companion is installed best-effort and a
+newer or unversioned cached companion is preserved independently.
+
+To intentionally replace a protected cache entry, run the JavaScript wrapper
+with a leading `--force`, for example `locus --force --version`, or run
+`node install.js --force` from the installed `locus-cli` package directory. The
+wrapper consumes this leading flag; flags after a command, such as `locus leave
+--force`, belong to the native CLI and never authorize a downgrade. npm's own
+`--force` is not an override. If the native binary has already been linked in
+place of the wrapper, reinstall the npm package to restore the JavaScript wrapper
+before using either override.
 
 ## Quick start
 
