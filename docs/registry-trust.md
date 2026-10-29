@@ -20,16 +20,40 @@ distribute a manifest; that optional process is not the CI release process.
 Publishing a registry root and signing manifests in CI remain future plans,
 not guarantees of current releases. See the [roadmap](./adapter-sdk.md#signed-registry-roadmap).
 
-To check the current release asset for drift, use the corresponding Locus
-binary and explicitly opt in to unsigned verification:
+## Local verification of an unsigned release manifest
 
-```bash
-locus adapter verify-manifest locus-adapters-v0.5.0.json --allow-unsigned
-```
+1. Obtain the release's `locus-adapters-<tag>.json` and the corresponding
+   Locus binary. Use the same release version for both; the command compares
+   the manifest with the catalog compiled into **the binary you run**. Assess
+   their sources independently before relying on either artifact.
+2. Run the verifier locally, explicitly opting in to an unsigned manifest:
 
-A successful result compares the supplied manifest with the catalog embedded
-in that binary. It authenticates neither the manifest nor the binary; obtain and
-assess both through a trusted distribution channel.
+   ```bash
+   locus adapter verify-manifest locus-adapters-v0.5.2.json --allow-unsigned
+   ```
+
+   Replace `v0.5.2` with the actual release tag and use a quoted filename if
+   needed. The command reads the file locally; it does not download artifacts.
+   Add `--json` for a machine-readable report. A matching unsigned manifest
+   reports `signature unsigned`, `drift none`, and exits successfully. Without
+   `--allow-unsigned`, it fails even when the catalog matches.
+3. Investigate any nonzero exit and the reported findings. Parsing rejects
+   invalid JSON, an unsupported schema, empty or duplicate adapter IDs, and
+   fields containing ambiguous canonical-material separators. The drift check
+   compares the Locus version, adapter IDs, names, adapter versions, tool lists,
+   and per-entry digests with the running binary. It reports added, missing, or
+   changed entries. The comparison rules are described below. A nonempty bad
+   signature still fails with `--allow-unsigned`; the flag does not waive drift
+   or parsing errors.
+
+This establishes catalog agreement only. An unsigned manifest cannot authenticate
+its publisher, origin, or integrity against tampering, and agreement cannot
+authenticate the binary or establish that it came from a particular release.
+The entry digests compare catalog metadata; they are not hashes of the binary
+or release archives and do not verify executable code. Archive SHA-256
+sidecars are separate checks, and an unauthenticated checksum does not establish
+publisher identity. For provenance, use an operator-signed manifest and a
+public key obtained through a trusted channel, as described below.
 
 ## What it is
 

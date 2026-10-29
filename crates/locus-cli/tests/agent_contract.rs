@@ -530,6 +530,97 @@ fn unsigned_release_manifest_requires_explicit_drift_only_verification() {
 }
 
 #[test]
+fn unsigned_release_manifest_checks_structure_and_catalog_fields() {
+    let env = Env::new();
+    let path = env.project().join("release.json");
+    let path_arg = path.to_str().unwrap();
+    assert!(env
+        .run(&["adapter", "registry", "export", "--out", path_arg])
+        .status
+        .success());
+    let original: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let verify = |manifest: &Value| {
+        std::fs::write(&path, serde_json::to_vec(manifest).unwrap()).unwrap();
+        env.run(&[
+            "adapter",
+            "verify-manifest",
+            path_arg,
+            "--allow-unsigned",
+            "--json",
+        ])
+    };
+
+    for (field, replacement, finding) in [
+        ("name", Value::from("Changed name"), "name drift"),
+        ("version", Value::from("0.0.0"), "version drift"),
+        ("tools", serde_json::json!(["changed.tool"]), "tool drift"),
+        ("digest", Value::from("sha256:changed"), "digest drift"),
+        ("id", Value::from("changed-adapter"), "not in this binary"),
+    ] {
+        let mut changed = original.clone();
+        changed["adapters"][0][field] = replacement;
+        let out = verify(&changed);
+        assert_eq!(out.status.code(), Some(1), "field {field}");
+        let report = doc(&out, "locus.adapter.verify_manifest.v1");
+        assert_eq!(report["signature"], "unsigned");
+        assert_eq!(report["ok"], false);
+        assert!(
+            report["drift"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item.as_str().unwrap().contains(finding)),
+            "field {field}"
+        );
+    }
+
+    let mut missing = original.clone();
+    missing["adapters"].as_array_mut().unwrap().remove(0);
+    let out = verify(&missing);
+    assert_eq!(out.status.code(), Some(1));
+    let report = doc(&out, "locus.adapter.verify_manifest.v1");
+    assert!(report["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.as_str().unwrap().contains("missing from manifest")));
+
+    let mut invalid_schema = original.clone();
+    invalid_schema["schema"] = Value::from("unsupported");
+    let mut empty_id = original.clone();
+    empty_id["adapters"][0]["id"] = Value::from("  ");
+    let mut duplicate_id = original.clone();
+    let first = duplicate_id["adapters"][0].clone();
+    duplicate_id["adapters"].as_array_mut().unwrap().push(first);
+    let mut ambiguous = original.clone();
+    ambiguous["adapters"][0]["name"] = Value::from("ambiguous|name");
+    for (invalid, expected) in [
+        (&invalid_schema, "schema must be"),
+        (&empty_id, "empty id"),
+        (&duplicate_id, "duplicate adapter id"),
+        (&ambiguous, "separator"),
+    ] {
+        let out = verify(invalid);
+        let error = error_doc(&out, 1, "failure");
+        assert!(error["error"].as_str().unwrap().contains(expected));
+    }
+
+    std::fs::write(&path, "{invalid json").unwrap();
+    let out = env.run(&[
+        "adapter",
+        "verify-manifest",
+        path_arg,
+        "--allow-unsigned",
+        "--json",
+    ]);
+    let error = error_doc(&out, 1, "failure");
+    assert!(error["error"]
+        .as_str()
+        .unwrap()
+        .contains("release manifest parse error"));
+}
+
+#[test]
 fn usage_errors_exit_2_with_the_error_envelope() {
     let env = Env::new();
     let out = env.run(&["whoami", "--json", "--no-such-flag"]);
