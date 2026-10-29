@@ -6,16 +6,30 @@
 
 ## Current release status
 
-The release workflow exports and attaches an **unsigned** adapter registry
-manifest, `locus-adapters-<tag>.json`. CI signing is **not active**: the
-workflow's signing step is a TODO, and no registry signing secret is
-provisioned. The archive SHA-256 sidecars provide integrity checks, not
-publisher authentication or a signature for the manifest.
+The release workflow runs `locus adapter registry export` without `--sign`
+and attaches the resulting **unsigned** `locus-adapters-<tag>.json` to a
+tag-push release. CI signing is **not active**: the workflow describes it as
+a TODO contingent on provisioning a registry signing key and publishing its
+public key. The archive SHA-256 sidecars check the archives for integrity;
+they do not authenticate their publisher or sign the manifest.
 
 By default, `verify-manifest` rejects the unsigned release asset. Passing
 `--allow-unsigned` checks for drift against the running binary but does not
 establish the manifest's provenance. An operator can separately sign and
 distribute a manifest; that optional process is not the CI release process.
+Publishing a registry root and signing manifests in CI remain future plans,
+not guarantees of current releases. See the [roadmap](./adapter-sdk.md#signed-registry-roadmap).
+
+To check the current release asset for drift, use the corresponding Locus
+binary and explicitly opt in to unsigned verification:
+
+```bash
+locus adapter verify-manifest locus-adapters-v0.5.0.json --allow-unsigned
+```
+
+A successful result compares the supplied manifest with the catalog embedded
+in that binary. It authenticates neither the manifest nor the binary; obtain and
+assess both through a trusted distribution channel.
 
 ## What it is
 
@@ -106,20 +120,22 @@ locus adapter verify-manifest locus-adapters-v0.5.0.json [--json]
 
 For a signed manifest, both checks must pass (fail closed):
 
-1. **Provenance** — the manifest's detached signature verifies against a key
-   pinned in the local trust store, and `signed_by` names that key. Unsigned,
-   unknown-key, invalid, and malformed signatures all fail.
+1. **Provenance** — the signature stored in the manifest verifies its canonical
+   material against a key pinned in the local trust store, and `signed_by`
+   names that key. Unsigned, unknown-key, invalid, and malformed signatures
+   all fail.
 2. **No drift** — the running binary's built-in adapter set matches the
-   manifest **exactly**: same Locus version, same adapter ids, names, tool
-   lists, and per-adapter `sha256` digests. An adapter added, removed, or
-   changed on either side fails with a per-finding drift report.
+   manifest: same Locus version, adapter ids, names, adapter versions, tool
+   lists, and per-adapter `sha256` digests. Comparison trims surrounding
+   whitespace, matches adapter ids case-insensitively, and ignores tool order.
+   Added, removed, or changed entries fail with a per-finding drift report.
 
-Together: *"the adapter surface this binary exposes is exactly the set the
+Together: *"the adapter catalog in this binary matches the set the
 registry root signed for this release."*
 
-`--allow-unsigned` relaxes **only** the missing-signature case (useful for
-drift-checking the unsigned CI asset). A signature that is present but
-untrusted or invalid still fails, even with the flag.
+`--allow-unsigned` relaxes **only** the unsigned case (a missing, null, empty,
+or whitespace-only signature). Any nonempty signature that is malformed,
+untrusted, or invalid still fails, even with the flag. Drift always fails.
 
 ## Non-goals
 
