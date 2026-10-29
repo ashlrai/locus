@@ -58,7 +58,38 @@ What the two extra steps are for:
 
 - **Control capability.** Control commands (`enter`, `pin`, `leave`, `exec`) need `LOCUS_CONTROL_CAPABILITY` in the shell. `locus quickstart` mints it and saves it at `~/.locus/control_capability` (0600, respects `LOCUS_HOME`); `eval "$(locus hook zsh)"` exports it without printing it. Without it, `locus exec` stops with `LOCUS_CONTROL_CAPABILITY is required for control-plane authority`. `locus capability status` shows the posture without the value.
 - **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. `locus enter personal` works straight after `quickstart`, including when quickstart ran in a shell that has already exited (fixed in #156, regression test `crates/locus-cli/tests/quickstart_then_enter.rs`).
-- **Recovery.** If a command says `human re-pin required` (for example `no current broker endpoint` after the pinning shell exited), load the hook in the new shell (`eval "$(locus hook zsh)"` or `bash`) and run `locus enter personal`: enter replaces a pin whose broker died. If enter is refused, check the error; for a wedged session such as an expired pin or a bad seal, run `locus leave --force` in that same hooked shell, then `locus enter personal`. `--force` deletes session state only and never mints anything. See [broker recovery](docs/broker-recovery-q8.md) for prerequisites and refusal cases.
+- **Recovery.** If the pinning shell exits, follow the [dead-broker recovery steps](#recovering-after-the-broker-exits) in a new operator shell.
+
+### Recovering after the broker exits
+
+If a command reports `human re-pin required` or `no current broker endpoint`,
+open a new operator shell, change to the intended workspace, and use the same
+Locus home as the affected session. Load the hook and try entering the intended
+binding first; an intact pin whose broker died can be replaced directly:
+
+```bash
+cd /path/to/workspace
+eval "$(locus hook bash)"             # use zsh for a zsh shell
+locus enter personal                  # replace personal with your binding alias
+locus whoami
+```
+
+If `enter` is refused, read the error before continuing. For a wedged session,
+such as an expired pin, invalid seal, or unreadable session, a human can clear
+it and re-enter in the same hooked shell:
+
+```bash
+locus leave --force
+locus enter personal
+locus whoami
+```
+
+Forced leave requires the control capability, verified against the live broker
+or persisted operator capability; it deletes session state only and never
+mints a pin. Do not use it to bypass a capability or workspace refusal. See
+the [broker recovery guide](docs/broker-recovery-q8.md) for prerequisites and
+exceptional refusal cases. Keep the shell that enters the pin alive while using
+its broker.
 
 ### Fresh quickstart doctor warning
 
