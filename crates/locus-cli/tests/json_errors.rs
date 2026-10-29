@@ -192,7 +192,11 @@ fn binding_add_is_a_noop_when_the_file_already_matches() {
     );
     let v: Value = serde_json::from_str(&String::from_utf8_lossy(&first.stdout)).unwrap();
     assert_eq!(v["changed"], true, "{v}");
-    let original = std::fs::read_to_string(&toml).unwrap();
+    // Preserve a valid hand-edited representation, not just the canonical
+    // output that a rewrite might reproduce byte-for-byte.
+    let mut original = b"# Retain this operator comment.\n\n".to_vec();
+    original.extend(std::fs::read(&toml).unwrap());
+    std::fs::write(&toml, &original).unwrap();
     let modified = std::fs::metadata(&toml).unwrap().modified().unwrap();
 
     let second = add(&[]);
@@ -204,7 +208,7 @@ fn binding_add_is_a_noop_when_the_file_already_matches() {
     let v: Value = serde_json::from_str(&String::from_utf8_lossy(&second.stdout)).unwrap();
     assert_eq!(v["ok"], true, "{v}");
     assert_eq!(v["changed"], false, "{v}");
-    assert_eq!(std::fs::read_to_string(&toml).unwrap(), original);
+    assert_eq!(std::fs::read(&toml).unwrap(), original);
     assert_eq!(
         std::fs::metadata(&toml).unwrap().modified().unwrap(),
         modified
@@ -240,6 +244,7 @@ fn binding_add_is_a_noop_when_the_file_already_matches() {
         "{}",
         String::from_utf8_lossy(&human.stdout)
     );
+    assert_eq!(std::fs::read(&toml).unwrap(), original);
 
     // A dry run plans zero changes and says why.
     let dry = add(&["--dry-run"]);
@@ -258,7 +263,7 @@ fn binding_add_is_a_noop_when_the_file_already_matches() {
             .any(|n| n.as_str().unwrap().contains("already matches")),
         "{plan}"
     );
-    assert_eq!(std::fs::read_to_string(&toml).unwrap(), original);
+    assert_eq!(std::fs::read(&toml).unwrap(), original);
 }
 
 #[cfg(unix)]
