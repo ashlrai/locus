@@ -24,6 +24,9 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+# Keep the documented prerequisites and verification commands covered by this suite.
+node --test "$ROOT/integrations/phantom/readme.test.mjs"
+
 if ! locus agent report --help >/dev/null 2>&1; then
   echo "building locus with agent report…"
   (cd "$ROOT" && cargo build -q -p locus-cli)
