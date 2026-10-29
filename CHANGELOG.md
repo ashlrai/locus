@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Rust version check.** The minimum supported Rust version is 1.89.0, as
+  declared by the workspace and inherited by all three crates. To reproduce
+  the check for this checkout and its lockfile, install the toolchain with
+  `rustup toolchain install 1.89.0 --profile minimal`, then run
+  `cargo +1.89.0 check --workspace --locked` from the repository root. The
+  repository's `rust-toolchain.toml` selects stable by default; the explicit
+  `+1.89.0` selects the minimum for this check.
+
 - **`locus binding add` is idempotent when the file already matches (#175).**
   Re-adding an alias whose saved binding is equivalent now exits 0 without
   writing (`"changed": false` in `--json`; `already matches; nothing written`
