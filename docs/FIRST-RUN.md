@@ -25,6 +25,21 @@ A second quickstart printed `already pinned` and exited 0. `locus doctor` after 
 
 After the pinning shell exited, `locus whoami` reported `no current broker endpoint` and `human re-pin required`, and suggested `locus leave --force; locus enter personal`. `locus enter personal` in a new shell with the hook exported, without `leave --force`, exited 0, and supervised `tools/list` then returned 18 tools. An expired pin still needs `--force` (`crates/locus-core/src/recovery.rs`).
 
+With the current CLI, the human operator can recover in a new Bash shell using the same `LOCUS_HOME` and binding alias:
+
+```bash
+eval "$(locus hook bash)"
+locus enter personal
+```
+
+This creates a fresh pin and broker; it does not revive the exited shell's broker. If the session is expired or its seal is invalid, `enter` is refused. After checking the error, the operator can clear the unusable session and make a fresh pin:
+
+```bash
+locus leave --force && locus enter personal
+```
+
+Use the hook for your shell and substitute your binding alias. The control capability is required; a missing or incorrect capability is not fixed by forced leave. Follow the CLI's specific guidance for other refusals, such as a session without a persisted verifier.
+
 ## Agent-use audit
 
 Published npm `0.5.1` ELF, `LOCUS_HOME` under `/tmp`, stdin not a terminal (`stdin_tty no` in the log). Commands that can prompt were wrapped in `timeout 5`. None of them returned 124. The other commands were not wrapped, and the slowest of those was quickstart and enter at 0.118 s.

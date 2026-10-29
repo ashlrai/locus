@@ -512,6 +512,37 @@ fn dead_pin_with_tampered_seal_is_refused() {
 
     let out = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "acme"]);
     assert_refused_untouched(&out, home.path(), &before, "tampered seal");
+    assert!(
+        stderr(&out).contains("locus leave --force; locus enter"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn expired_pin_requires_force_before_a_fresh_pin() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+    edit_active(home.path(), true, |s| {
+        s.expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
+    });
+    let before = active_bytes(home.path());
+    let out = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "personal"]);
+    assert_refused_untouched(&out, home.path(), &before, "expired pin");
+    let status = locus(home.path(), cwd.path(), &cap, &["status"]);
+    let diagnostic = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        diagnostic.contains("locus leave --force; locus enter personal"),
+        "{diagnostic}"
+    );
+    let leave = locus(home.path(), cwd.path(), &cap, &["leave", "--force"]);
+    assert!(leave.status.success(), "{}", stderr(&leave));
+    let enter = locus(home.path(), cwd.path(), &cap, &["enter", "personal"]);
+    assert!(enter.status.success(), "{}", stderr(&enter));
+    assert!(locus(home.path(), cwd.path(), &cap, &["whoami"])
+        .status
+        .success());
 }
 
 /// (3b) A dead pin whose sealed authority is not local control is refused,
