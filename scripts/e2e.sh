@@ -115,6 +115,41 @@ assert "phantom not on PATH" in findings["phantom_missing"]["message"]
 PY
 ok "fresh quickstart doctor exits 0 and reports setup advisories"
 
+# Issue #175: repeat the same add without rewriting the binding, and keep
+# rejecting a different binding at the same alias without --force.
+log "2b. binding add is idempotent"
+ADD_HOME="$LOCUS_HOME/binding-add-test"
+add_binding() {
+  LOCUS_HOME="$ADD_HOME" "$LOCUS_BIN" --json binding add e2e-add \
+    --tenant e2e-add --provider github --account "$1" \
+    --credential-ref env:E2E_ADD_TOKEN --non-interactive
+}
+add_binding acct >"$LOCUS_HOME/add-first.json" || die "first binding add failed"
+cp "$ADD_HOME/bindings/e2e-add.toml" "$LOCUS_HOME/add-original.toml"
+python3 - "$ADD_HOME/bindings/e2e-add.toml" <<'PYTEST'
+import os, sys
+os.utime(sys.argv[1], ns=(1_000_000_000, 1_000_000_000))
+PYTEST
+add_binding acct >"$LOCUS_HOME/add-second.json" || die "identical binding add failed"
+cmp -s "$LOCUS_HOME/add-original.toml" "$ADD_HOME/bindings/e2e-add.toml" \
+  || die "identical binding add changed file contents"
+python3 - "$LOCUS_HOME/add-first.json" "$LOCUS_HOME/add-second.json" "$ADD_HOME/bindings/e2e-add.toml" <<'PYTEST'
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    first = json.load(f)
+with open(sys.argv[2], encoding="utf-8") as f:
+    second = json.load(f)
+assert first["ok"] is True and first["changed"] is True
+assert second["ok"] is True and second["changed"] is False
+assert os.stat(sys.argv[3]).st_mtime_ns == 1_000_000_000
+PYTEST
+if add_binding other >"$LOCUS_HOME/add-conflict.out" 2>"$LOCUS_HOME/add-conflict.err"; then
+  die "different binding add replaced an existing alias"
+fi
+cmp -s "$LOCUS_HOME/add-original.toml" "$ADD_HOME/bindings/e2e-add.toml" \
+  || die "conflicting binding add changed file contents"
+ok "binding add repeats without a write and rejects conflicts"
+
 # NDJSON MCP helper: print JSON-RPC lines to locus-mcp, collect responses.
 # Args: one or more JSON objects (as strings). Prints response JSON lines on stdout.
 mcp_rpc() {

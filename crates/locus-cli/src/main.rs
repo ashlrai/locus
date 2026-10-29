@@ -7034,15 +7034,15 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
 
     // Re-checked under the bindings lock: another writer may have created
     // the alias since `exists` was read (or while the prompt waited).
-    let path = s.create_binding(&b, exists && !identical || args.force)?;
+    let (path, changed) = s.create_binding_with_outcome(&b, exists && !identical || args.force)?;
     if json {
         println!(
             "{}",
-            serde_json::json!({ "ok": true, "path": path.display().to_string(), "changed": !identical })
+            serde_json::json!({ "ok": true, "path": path.display().to_string(), "changed": changed })
         );
         return Ok(());
     }
-    if identical {
+    if !changed {
         println!(
             "{} binding '{}' already matches; nothing written",
             "ok".green().bold(),
