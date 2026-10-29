@@ -13,6 +13,10 @@ test('repository README: every link resolves', async () => {
   assert.deepEqual(await checkMarkdown(README), { failures: [], warnings: [] });
 });
 
+test('contributor guide: every link resolves', async () => {
+  assert.deepEqual(await checkMarkdown(join(repository, 'CONTRIBUTING.md')), { failures: [], warnings: [] });
+});
+
 test('CLI exits 0 on the repository README', () => {
   const run = spawnSync(process.execPath, [CLI], { encoding: 'utf8' });
   assert.equal(run.status, 0, run.stderr);
