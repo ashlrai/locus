@@ -2,12 +2,50 @@
 // preloaded transport/process doubles prevent network access or real cargo installs.
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
-const { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const test = require("node:test");
 const { compareVersions } = require("../bin/locus.js");
 const version = require("../package.json").version;
+
+test("an older wrapper preserves a newer executable even with an old sidecar (#177)", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "locus-real-downgrade-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const bin = join(home, ".locus", "bin");
+  const wrapperDir = join(home, "package", "bin");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(wrapperDir, { recursive: true });
+  const binary = join(bin, process.platform === "win32" ? "locus.exe" : "locus");
+  const wrapper = join(wrapperDir, "locus.js");
+  // Node is a real executable whose --version output is accepted by the wrapper.
+  // The package requires Node >=16, so its version is newer than this wrapper.
+  assert.equal(compareVersions(process.version, version), 1);
+  copyFileSync(process.execPath, binary);
+  chmodSync(binary, 0o755);
+  copyFileSync(join(__dirname, "..", "bin", "locus.js"), wrapper);
+  writeFileSync(`${binary}.version`, "0.1.0\n");
+  const original = readFileSync(binary);
+  const attempts = join(home, "attempts");
+  const preload = join(home, "block-external.js");
+  writeFileSync(preload, `
+    const fs = require("node:fs");
+    const block = () => { fs.writeFileSync(${JSON.stringify(attempts)}, "attempted"); throw new Error("unexpected external action"); };
+    require("node:https").get = block;
+    require("node:child_process").spawnSync = block;
+  `);
+  const result = spawnSync(process.execPath, ["--require", preload, wrapper, "--help"], {
+    env: { HOME: home, USERPROFILE: home, PATH: "", LOCUS_NPM_NO_LINK: "1" },
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /Refusing to replace.*newer/);
+  assert.ok(result.stderr.includes(process.version.slice(1)));
+  assert.deepEqual(readFileSync(binary), original);
+  assert.equal(readFileSync(`${binary}.version`, "utf8"), "0.1.0\n");
+  assert.equal(existsSync(attempts), false, "must not search PATH, download, or run cargo");
+});
 
 test("version comparison follows SemVer rather than string or substring order", () => {
   for (const [left, right, expected] of [
