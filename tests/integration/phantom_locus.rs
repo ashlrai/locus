@@ -134,9 +134,17 @@ fn walk(d: &Path) -> io::Result<Vec<PathBuf>> {
 
 /// Read every discovered file; an incomplete scan is an error.
 fn scan(root: &Path, canary: &str) -> io::Result<bool> {
+    scan_with(root, canary, &mut |path| fs::read(path))
+}
+
+fn scan_with(
+    root: &Path,
+    canary: &str,
+    read: &mut impl FnMut(&Path) -> io::Result<Vec<u8>>,
+) -> io::Result<bool> {
     let mut found = false;
     for path in walk(root)? {
-        let bytes = fs::read(&path).map_err(|e| scan_err(&path, e))?;
+        let bytes = read(&path).map_err(|e| scan_err(&path, e))?;
         found |= String::from_utf8_lossy(&bytes).contains(canary);
     }
     Ok(found)
@@ -304,9 +312,12 @@ fn phantom_and_locus_compose_without_leaking_the_canary() {
     assert!(!argv.contains(&canary), "canary in a phantom argv");
     assert!(!w.outputs.contains(&canary), "canary in a command output");
     let roots = [w.home.join(".locus"), w.proj.clone()];
-    assert!(roots
-        .iter()
-        .any(|root| walk(root).is_ok_and(|files| !files.is_empty())));
+    let mut has_files = false;
+    for root in &roots {
+        let files = walk(root).unwrap_or_else(|e| panic!("canary scan failed: {e}"));
+        has_files |= !files.is_empty();
+    }
+    assert!(has_files, "canary scan found no files");
     for root in roots {
         assert!(
             !scan(&root, &canary).unwrap_or_else(|e| panic!("canary scan failed: {e}")),
@@ -374,5 +385,24 @@ fn canary_scan_fails_on_unreadable_file() {
         eprintln!("note: privileged runner; mode-000 file stayed readable");
     }
     fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(scan(tmp.path(), "fixture").unwrap());
+}
+
+#[test]
+fn canary_scan_reports_a_denied_read_on_any_runner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("denied");
+    fs::write(&file, b"fixture").unwrap();
+
+    let err = scan_with(tmp.path(), "fixture", &mut |path| {
+        assert_eq!(path, file);
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+    })
+    .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    assert!(
+        err.to_string().contains(&file.display().to_string()),
+        "{err}"
+    );
     assert!(scan(tmp.path(), "fixture").unwrap());
 }
