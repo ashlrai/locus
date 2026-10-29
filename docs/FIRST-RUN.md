@@ -72,6 +72,10 @@ In that 0.5.1 run, `whoami --json` reported `credential.present: true` for a sto
 
 ### Dry-run and idempotent setup
 
+These are historical observations from the 0.5.1 audit, not the current CLI
+contract. The global flag has since expanded; see the [current dry-run
+matrix](dry-run-matrix-q8.md) for supported commands and limitations.
+
 `--help` lists `--dry-run` for `binding add` and `agent setup` only, among the commands checked: `init`, `quickstart`, `enter`, `pin`, `leave`, `binding rm`, `binding add`, `workspace`, `setup`, `agent setup`, `doctor`, `adapter install`, `engagement init`, `graph export`, `onboard`.
 
 | Command | Exit | Result |

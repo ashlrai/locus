@@ -21,10 +21,13 @@ and exit codes.
 
 A plan runs read-only preflight checks and writes no state. With `--json` it
 returns a `locus.plan.v1` object; existing commands may also retain legacy
-fields. A successful plan does not guarantee the real operation will succeed:
+fields. The print-only forms `setup --print` and `setup --client generic`
+print configuration instead of a plan, including when the flag is present. A
+successful plan does not guarantee the real operation will succeed:
 it does not authenticate the control capability or start its authority broker.
 Most plans require an initialized Locus home; `init`, `quickstart`, `agent
-setup`, and `binding add` can preview creation against an uninitialized home.
+setup`, `binding add`, `client add`, and `doctor --fix` can preview against
+an uninitialized home, subject to their options and inputs.
 Preconditions such as a missing binding or workspace allowlist still fail.
 
 For commands in the accepted, ignored rows, the flag does not create a plan or
@@ -46,6 +49,6 @@ security measure.
 - `pin --rewrite-configs --dry-run` is rejected; rewriting client configs
   cannot be combined with a preview.
 
-These are CLI guarantees, not a general dry-run mode for arbitrary provider
-operations or MCP tools. A plan does not resolve credentials or authorize a
-later execution. Do not use it as proof that a real mutation is authorized.
+Other mutating operations lack a Locus dry-run option, including commands
+launched as children, provider operations, and MCP tool calls. A plan does not
+resolve credentials or authorize a later execution. Do not use it as proof that a real mutation is authorized.

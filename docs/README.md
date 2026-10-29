@@ -30,7 +30,9 @@ not complete invocations; some require additional arguments.
 `doctor --fix` already previews repairs without the flag; `--apply` performs
 them. Similarly, `binding migrate-credential-refs` previews by default and
 requires `--write` to persist. The global flag produces the plan schema even
-when a command has its own default preview.
+when a command has its own default preview. `setup --print` and `setup
+--client generic` are print-only forms: even with `--dry-run`, they print the
+configuration instead of a plan.
 
 ### Limits and unsupported operations
 
@@ -56,8 +58,10 @@ when a command has its own default preview.
   normal behavior. Opening a store can create the Locus home, and session
   inspection can freeze a drifted pin as a fail-closed security measure. See the
   [full command matrix](dry-run-matrix-q8.md) for the read-only forms.
-- This flag does not provide a dry-run mode for arbitrary provider operations
-  or MCP tools.
+- Other mutating operations do not have a Locus dry-run option. In particular,
+  the child commands launched by `exec`, `run`, or `ci run`, provider operations,
+  and MCP tool calls are not previewed by this flag. Any dry-run facility for
+  those operations must be provided by the child or provider itself.
 
 See the [agent contract](agent-contract.md#--dry-run) for plan details and exit
 codes, and [doctor repairs](doctor-fix.md) for its default preview.
