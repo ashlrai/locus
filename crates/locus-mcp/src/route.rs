@@ -97,3 +97,85 @@ pub(crate) fn check_upstream(binding: &Binding, provider: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use locus_core::binding::UpstreamSpec;
+    use locus_core::{PinSource, SealKey, SessionMode};
+
+    fn fixture() -> (Binding, Session) {
+        let binding = Binding::parse_toml(
+            "[binding]\nid='bnd_route'\nalias='route'\ntenant='example'\n\
+             [[binding.providers]]\nprovider='github'\naccount='example'\n\
+             credential_ref='env:ROUTE_FIXTURE'\n\
+             [binding.providers.upstream]\ncommand='synthetic-worker-not-launched'\n",
+        )
+        .unwrap();
+        let session = Session::new(
+            &binding.id,
+            &binding.alias,
+            &binding.tenant,
+            None,
+            PinSource::Explicit,
+            None,
+            chrono::Duration::minutes(5),
+            String::new(),
+            &SealKey::from_bytes([7; 32]),
+        );
+        (binding, session)
+    }
+
+    #[test]
+    fn routes_require_one_exclusive_binding_and_a_pinned_upstream() {
+        let (mut binding, session) = fixture();
+        let bindings = vec![(binding.alias.clone(), binding.clone())];
+        let mut routes = Routes::default();
+        assert!(routes.validate(&session, &[]).is_ok());
+        routes.insert("github").unwrap();
+        assert!(routes.validate(&session, &bindings).is_ok());
+        assert!(routes.validate(&session, &[]).is_err());
+        assert!(routes
+            .validate(&session, &[bindings[0].clone(), bindings[0].clone()])
+            .is_err());
+        let namespaced = session
+            .clone()
+            .with_mode(SessionMode::Namespaced)
+            .with_namespaces(vec!["other".into()], vec![]);
+        assert!(routes.validate(&namespaced, &bindings).is_err());
+        binding.providers[0].upstream = None;
+        let unconfigured = [("route".into(), binding)];
+        assert!(routes.validate(&session, &unconfigured).is_err());
+        routes.insert("supabase").unwrap();
+        assert!(routes.validate(&session, &bindings).is_err());
+    }
+
+    #[test]
+    fn recursive_commands_and_current_executable_aliases_are_refused() {
+        let (mut binding, _) = fixture();
+        assert!(check_upstream(&binding, "missing").is_ok());
+        for (command, args, allowed) in [
+            ("/trusted/locus-mcp", vec![], false),
+            ("locus-mcp.exe", vec![], false),
+            ("locus", vec!["mcp"], false),
+            ("locus.exe", vec!["--verbose", "mcp"], false),
+            ("locus", vec!["whoami"], true),
+            ("synthetic-worker-not-launched", vec!["mcp"], true),
+        ] {
+            let mut spec = UpstreamSpec::new(command);
+            spec.args = args.into_iter().map(str::to_owned).collect();
+            binding.providers[0].upstream = Some(spec);
+            assert_eq!(check_upstream(&binding, "github").is_ok(), allowed);
+        }
+        #[cfg(unix)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let link = dir.path().join("worker-link");
+            std::os::unix::fs::symlink(std::env::current_exe().unwrap(), &link).unwrap();
+            binding.providers[0].upstream = Some(UpstreamSpec::new(link.to_str().unwrap()));
+            assert!(check_upstream(&binding, "github").is_err());
+        }
+        binding.providers[0].upstream = None;
+        assert!(check_upstream(&binding, "github").is_ok());
+    }
+}
