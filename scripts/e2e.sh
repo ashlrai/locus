@@ -318,6 +318,51 @@ assert v["applied"] is False and v["written"] is None
 )
 ok "autopin suggest returns empty candidates without binding changes"
 
+# A secondary remote must not borrow another repository's pin history when
+# origin identifies a different repository. First prove the history can win.
+log "3b. autopin suggest ignores spoofed non-origin remote"
+(
+  export LOCUS_HOME="$LOCUS_HOME/autopin-spoof-home"
+  export LOCUS_PIN_HISTORY=1
+  repo="$LOCUS_HOME/repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" remote add origin https://example.invalid/trusted.git
+  cd "$repo"
+  locus init --with-samples >/dev/null
+  for _ in 1 2 3; do
+    locus pin personal >/dev/null
+  done
+  result="$(locus autopin suggest --json)" || die "trusted history suggestion failed"
+  printf '%s' "$result" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["report"]
+assert r["reason"] == "suggested" and r["suggestion"] == "personal"
+assert r["candidates"][0]["pins"] >= 3
+' || die "trusted history fixture did not produce a suggestion"
+
+  git remote rename origin upstream
+  git remote add origin https://example.invalid/unrelated.git
+  printf 'default_binding = "acme"\n' > .locus.toml
+  cp .locus.toml "$LOCUS_HOME/workspace-before"
+  result="$(locus autopin suggest --json)" || die "spoofed remote suggestion failed"
+  printf '%s' "$result" | python3 -c '
+import json, sys
+v = json.load(sys.stdin)
+r = v["report"]
+assert r["history_enabled"] is True and r["repo_detected"] is True
+assert r["reason"] == "no_history" and r["matched_entries"] == 0
+assert r["suggestion"] is None and r["candidates"] == []
+assert v["applied"] is False and v["written"] is None
+' || die "secondary remote borrowed another repo's history"
+  if locus autopin suggest --apply >/dev/null 2>&1; then
+    die "autopin applied a suggestion from a secondary remote"
+  fi
+  cmp -s "$LOCUS_HOME/workspace-before" .locus.toml \
+    || die "spoofed remote changed the workspace binding"
+)
+ok "autopin suggest ignores non-origin history and refuses to apply it"
+
 # ── 4. workspace allowlist blocks personal without --force ───────────────────
 log "4. workspace allowlist block personal without --force"
 WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"
