@@ -2,6 +2,26 @@
 
 Notes and types for wiring **Phantom** (or any agent orchestrator) to Locus without forking this repo.
 
+## Prerequisites
+
+- Install the `locus` CLI and `locus-mcp` from this checkout, or build them as
+  described below, and make them available to the orchestrator on its `PATH`.
+  The hub must also discover and register its own Phantom MCP server; the
+  Locus helper only registers Locus.
+- A human must configure and pin an appropriate binding before interactive
+  use. The broker for that pin must remain alive. For jobs,
+  `withLocusSession` mints and validates an ephemeral session against the live
+  authority broker; pass the complete validated `env` from its callback to
+  children. A session ID by itself is not executor authority. Agents cannot
+  re-pin. See [fleet preflight](./fleet-preflight.md) and
+  [supervised MCP launch](../../docs/mcp.md#provider-tools-need-a-supervised-launch).
+- This checkout resolves supported `env:VAR` credential references supplied by
+  a trusted operator. `phm:NAME` references are preserved but currently fail
+  closed when resolved; installing Phantom does not provide a credential bridge.
+  Do not capture or bypass Phantom reveal. See
+  [credential compatibility](../../docs/credential-compatibility.md) for the
+  unreleased checkout and published-version distinction.
+
 | Artifact | Path |
 |----------|------|
 | Full contract | [`docs/hub-integration.md`](../../docs/hub-integration.md) |
@@ -62,7 +82,12 @@ Example MCP config fragment:
 }
 ```
 
-Optional env for CI children: `LOCUS_SESSION_ID` (from `locus ci mint --json`).
+This example registers the control-plane server. For provider tools, register
+`locus mcp --supervised` as described in [MCP setup](../../docs/mcp.md#supervised-launch-provider-tools).
+The JSON placeholder requires expansion by the client or replacement with the
+actual path; JSON itself does not expand variables. For CI children, use the
+validated session environment returned by `withLocusSession`, not just the
+session ID.
 
 Pre-mutate enforce at hub spawn sites (env `LOCUS_ENFORCE` wins over `~/.ashlr/config.json` → `locus.enforce` then `locus.firm`; hub #254 / #258):
 
@@ -296,15 +321,28 @@ const line = locusDoctorLine(); // { id, ok, detail, fix? }
 
 ---
 
-## Smoke
+## Verification
 
-From the Locus repo:
+From the repository root, install the stable Rust toolchain with Cargo, `jq`,
+Node.js with `--experimental-strip-types` support (Node 22.6 or later), and
+`curl`. The scripts use Bash and local temporary directories. Build both debug
+binaries first so the checks exercise this checkout rather than an older
+installation:
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
+cargo build -p locus-cli -p locus-mcp
 ./scripts/hub-smoke.sh
 ./scripts/hub-integration-test.sh
 ```
+
+The first script checks CLI and agent-report contracts; the second exercises
+the TypeScript helpers and the multi-tenant MCP lifecycle. The scripts create
+and remove their own `LOCUS_HOME`, sample binding and project; they do not need
+a real pin, credentials or Phantom installation. `curl` and both current
+binaries are needed to run the multi-tenant checks: the script otherwise
+reports a skip for that section. Treat a skip or failure as incomplete
+verification. No values from minted sessions should be logged or copied into
+agent context.
 
 ---
 
