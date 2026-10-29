@@ -94,10 +94,11 @@ threshold is implied.
 This measures the same `/usr/bin/true` child through all three launchers, plus
 the direct child as a baseline. It compares **launch paths**, not equivalent
 security guarantees: Locus verifies a live pin, isolates the child and writes an
-audit record without resolving credentials; direnv evaluates an allowed `.envrc`;
-sops decrypts an age-encrypted dotenv file. The latter two inject the same one
-synthetic variable, which the child does not inspect. Setup, encryption,
-approval and pinning are outside the timed region. No network or real credentials
+audit record and resolves a synthetic `env:` credential; direnv evaluates an
+allowed `.envrc`; sops decrypts an age-encrypted dotenv file. Each launcher
+injects the same synthetic `RESEND_API_KEY` value into the child; the direct
+baseline does not inject it. The timed child does not inspect the value. Setup,
+encryption, approval and pinning are outside the timed region. No network or real credentials
 are needed after the prerequisites are installed.
 
 Prerequisites: Bash, Python 3, a Rust toolchain, `direnv`, `sops`, `age-keygen`,
@@ -112,6 +113,7 @@ repo="$PWD"
 while IFS= read -r name; do unset "$name"; done < <(compgen -A variable LOCUS_ || true)
 while IFS= read -r name; do unset "$name"; done < <(compgen -A variable SOPS_ || true)
 while IFS= read -r name; do unset "$name"; done < <(compgen -A variable DIRENV_ || true)
+unset RESEND_API_KEY
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH" CARGO_TARGET_DIR="$repo/target"
@@ -126,17 +128,24 @@ mkdir -p "$HOME" "$work/direnv"
 cargo build --locked --release -p locus-cli
 locus="$repo/target/release/locus"
 cd "$work"
-"$locus" init --with-samples
+"$locus" init
 eval "$("$locus" hook bash)"
-"$locus" pin personal
-printf 'export BENCH_SYNTHETIC=fixture\n' > "$work/direnv/.envrc"
+"$locus" binding add bench --tenant bench --provider resend --account bench \
+  --credential-ref env:LOCUS_BENCH_FIXTURE --non-interactive
+export LOCUS_BENCH_FIXTURE=fixture
+"$locus" pin bench
+printf 'export RESEND_API_KEY=fixture\n' > "$work/direnv/.envrc"
 direnv allow "$work/direnv/.envrc"
-printf 'BENCH_SYNTHETIC=fixture\n' > "$work/plain.env"
+printf 'RESEND_API_KEY=fixture\n' > "$work/plain.env"
 age-keygen -o "$SOPS_AGE_KEY_FILE" 2>/dev/null
 recipient="$(age-keygen -y "$SOPS_AGE_KEY_FILE")"
 sops --encrypt --age "$recipient" --input-type dotenv --output-type dotenv \
   "$work/plain.env" > "$work/encrypted.env"
 rm "$work/plain.env"
+# Check the same synthetic value reaches each child without printing it.
+"$locus" exec --strict-creds -- /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
+direnv exec "$work/direnv" /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
+sops exec-env "$work/encrypted.env" /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
 python3 - "$locus" "$work/direnv" "$work/encrypted.env" <<'PY'
 import statistics
 import subprocess
@@ -146,7 +155,7 @@ import time
 locus, directory, encrypted = sys.argv[1:]
 commands = {
     "direct": ["/usr/bin/true"],
-    "locus": [locus, "exec", "--no-resolve", "--", "/usr/bin/true"],
+    "locus": [locus, "exec", "--strict-creds", "--", "/usr/bin/true"],
     "direnv": ["direnv", "exec", directory, "/usr/bin/true"],
     "sops": ["sops", "exec-env", encrypted, "/usr/bin/true"],
 }
