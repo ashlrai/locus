@@ -23,7 +23,7 @@ A second quickstart printed `already pinned` and exited 0. `locus doctor` after 
 
 ### Dead broker
 
-After the pinning shell exited, `locus whoami` reported `no current broker endpoint` and `human re-pin required`, and suggested `locus leave --force; locus enter personal`. `locus enter personal` in a new shell with the hook exported, without `leave --force`, exited 0, and supervised `tools/list` then returned 18 tools. An expired pin still needs `--force` (`crates/locus-core/src/recovery.rs`).
+After the pinning shell exited, `locus whoami` reported `no current broker endpoint` and `human re-pin required`, and suggested `locus leave --force; locus enter personal`. `locus enter personal` in a new shell with the hook exported, without `leave --force`, exited 0, and supervised `tools/list` then returned 18 tools. This was the hint printed by the audited 0.5.1 build; the current CLI prints an enter-first hint.
 
 With the current CLI, the human operator can recover in a new Bash shell using the same `LOCUS_HOME` and binding alias:
 
@@ -38,7 +38,7 @@ This creates a fresh pin and broker; it does not revive the exited shell's broke
 locus leave --force && locus enter personal
 ```
 
-Use the hook for your shell and substitute your binding alias. The control capability is required; a missing or incorrect capability is not fixed by forced leave. Follow the CLI's specific guidance for other refusals, such as a session without a persisted verifier.
+Use the hook for your shell and substitute your binding alias. The control capability is required; a missing or incorrect capability is not fixed by forced leave. Follow the CLI's specific guidance for other refusals, such as a session without a persisted verifier. See [broker recovery](broker-recovery-q8.md) for the full procedure.
 
 ## Agent-use audit
 
