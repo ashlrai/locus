@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Dead-broker recovery (#166).** The enter-first hint now describes forced teardown as a separate manual step for an invalid or unreadable pin, so an unrelated `enter` failure cannot trigger it automatically. For bash the hint is `eval "$(locus hook bash)"; locus enter <alias> # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter <alias>`.
+
 - **`locus binding add` is idempotent when the file already matches (#175).**
   Re-adding an alias whose saved binding is equivalent now exits 0 without
   writing (`"changed": false` in `--json`; `already matches; nothing written`

@@ -2,19 +2,32 @@
 //! the sealed pin can no longer be verified. Every surface must fail closed
 //! AND name the human recovery. A dead broker with an intact seal is replaced
 //! by `locus enter` directly (#156), so the hint is enter first:
-//! `eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }`.
+//! `eval "$(locus hook bash)"; locus enter <alias>`, with a separate manual fallback.
 
 use std::path::Path;
 use std::process::{Command, Output};
 
-const RECOVERY_TAIL: &str = "|| { locus leave --force && locus enter";
+const RECOVERY_TAIL: &str =
+    "# If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter";
 const DEAD_BROKER_RECOVERY: &str =
-    "eval \"$(locus hook bash)\"; locus enter personal || { locus leave --force && locus enter personal; }";
+    "eval \"$(locus hook bash)\"; locus enter personal # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter personal";
 
 #[test]
 fn changelog_dead_broker_recipes_match_the_current_hint() {
     let changelog = include_str!("../../../CHANGELOG.md");
-    let recipe = locus_core::recovery::dead_broker_recovery_for_shell(None, "bash");
+    let current = locus_core::recovery::dead_broker_recovery_for_shell(None, "bash");
+    let unreleased = changelog
+        .split_once("## [Unreleased]")
+        .unwrap()
+        .1
+        .split("## [0.5.2]")
+        .next()
+        .unwrap();
+    assert!(
+        unreleased.contains(&current),
+        "unreleased changelog must contain {current}"
+    );
+    let recipe = "eval \"$(locus hook bash)\"; locus enter <alias> || { locus leave --force && locus enter <alias>; }";
     for heading in [
         "**Dead-broker recovery hint says `locus enter` first.**",
         "**Control commands name the stale-pin recovery.**",
@@ -26,7 +39,7 @@ fn changelog_dead_broker_recipes_match_the_current_hint() {
             .split("\n- ")
             .next()
             .unwrap();
-        assert!(entry.contains(&recipe), "{heading} must contain {recipe}");
+        assert!(entry.contains(recipe), "{heading} must contain {recipe}");
     }
 }
 
@@ -146,10 +159,7 @@ fn stale_pin_surfaces_name_the_recovery() {
         .as_str()
         .unwrap()
         .contains("human re-pin required"));
-    assert!(v["recovery"]
-        .as_str()
-        .unwrap()
-        .ends_with("locus enter personal; }"));
+    assert_eq!(v["recovery"].as_str(), Some(DEAD_BROKER_RECOVERY));
 
     // agent report: human and JSON both carry the re-pin recovery.
     let report = locus(home.path(), cwd.path(), &cap, &["agent", "report"]);
@@ -168,7 +178,7 @@ fn stale_pin_surfaces_name_the_recovery() {
     let v: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
     assert_eq!(v["ready"], false);
     let recovery = v["recovery"].as_str().expect("recovery in JSON");
-    assert!(recovery.ends_with("locus enter personal; }"));
+    assert_eq!(recovery, DEAD_BROKER_RECOVERY);
     assert_eq!(v["next_steps"][0], recovery);
 
     // The bash prompt hook shows the invalid pin instead of "unpinned".
@@ -312,7 +322,7 @@ fn stale_pin_recovery_never_names_a_missing_binding() {
         );
         assert!(
             err.contains(
-                "locus enter personal || { locus leave --force && locus enter personal; }"
+                "locus enter personal # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter personal"
             ),
             "{args:?} must name the stale pin's binding: {err}"
         );
@@ -323,7 +333,7 @@ fn stale_pin_recovery_never_names_a_missing_binding() {
 /// Follow the printed dead-broker hint verbatim in a fresh bash with no
 /// capability exported: the hook exports it, `locus enter` replaces the dead
 /// pin on its own (audited `session.replace_stale`), and the forced-leave
-/// fallback never runs.
+/// fallback remains a comment and never runs.
 #[test]
 fn printed_dead_broker_hint_works_verbatim() {
     let home = tempfile::tempdir().unwrap();
@@ -348,7 +358,7 @@ fn printed_dead_broker_hint_works_verbatim() {
     );
     let out = Command::new("bash")
         .arg("-c")
-        .arg(format!("set -e; {hint}; locus whoami; exit $?"))
+        .arg(format!("set -e\n{hint}\nlocus whoami\nexit $?"))
         .env("PATH", path)
         .env("LOCUS_HOME", home.path())
         .env("SHELL", "/bin/bash")
@@ -370,6 +380,52 @@ fn printed_dead_broker_hint_works_verbatim() {
         !audit.contains("operator forced leave"),
         "the --force fallback must not run when enter succeeds"
     );
+}
+
+/// An unrelated enter failure must not force-clear the old session when the
+/// operator runs the printed line. In this case the binding disappears after
+/// the hint was generated.
+#[test]
+fn printed_dead_broker_hint_does_not_force_leave_on_enter_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+    let whoami = locus(home.path(), cwd.path(), &cap, &["whoami"]);
+    let err = stderr(&whoami);
+    let hint = err
+        .lines()
+        .find_map(|l| l.split_once("recover (operator shell; control capability required): "))
+        .map(|(_, h)| h.trim())
+        .expect("recovery line");
+    assert_eq!(hint, DEAD_BROKER_RECOVERY);
+    let active_path = home.path().join("sessions/active.json");
+    let before = std::fs::read(&active_path).unwrap();
+    std::fs::remove_file(home.path().join("bindings/personal.toml")).unwrap();
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_locus")).parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(hint)
+        .env("PATH", path)
+        .env("LOCUS_HOME", home.path())
+        .env("SHELL", "/bin/bash")
+        .env_remove("LOCUS_CONTROL_CAPABILITY")
+        .env_remove("LOCUS_SESSION_ID")
+        .current_dir(cwd.path())
+        .output()
+        .expect("bash runs");
+    assert!(!out.status.success(), "missing binding must fail");
+    assert_eq!(
+        std::fs::read(active_path).unwrap(),
+        before,
+        "failed enter must not clear the pin"
+    );
+    let audit = std::fs::read_to_string(home.path().join("audit/events.jsonl")).unwrap_or_default();
+    assert!(!audit.contains("operator forced leave"));
 }
 
 /// `locus mcp --supervised` cannot grant executor capability over a dead

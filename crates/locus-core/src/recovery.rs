@@ -9,10 +9,10 @@
 //!
 //! - Dead broker (authority anchor unavailable or mismatched, seal intact):
 //!   `locus enter` replaces the dead pin directly, so the hint is the hook
-//!   plus `locus enter`, with `locus leave --force` only as a fallback:
+//!   plus `locus enter`, with a separate manual fallback for a refused pin:
 //!
 //!   ```text
-//!   eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }
+//!   eval "$(locus hook bash)"; locus enter <alias> # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter <alias>
 //!   ```
 //!
 //! - Everything else that enter still refuses (expired TTL, invalid or legacy
@@ -73,18 +73,15 @@ pub fn stale_pin_recovery_for_shell(alias: Option<&str>, shell: &str) -> String 
 /// One-line recovery for a pin whose broker died (authority anchor
 /// unavailable or mismatched) while its seal still verifies. Since #156,
 /// `locus enter <alias>` replaces such a pin on its own (audited as
-/// `session.replace_stale`); `locus leave --force` runs only if enter is
-/// refused. The line is valid shell for `shell`, so it can be run verbatim.
+/// `session.replace_stale`). The fallback is a shell comment so an unrelated
+/// enter failure cannot automatically trigger forced teardown. The line is
+/// valid shell for `shell`, so it can be run verbatim.
 pub fn dead_broker_recovery_for_shell(alias: Option<&str>, shell: &str) -> String {
     let alias = alias.filter(|a| is_plain_alias(a)).unwrap_or("<alias>");
-    let hook = hook_eval_command(shell);
-    if shell == "fish" {
-        format!(
-            "{hook}; locus enter {alias}; or begin; locus leave --force; and locus enter {alias}; end"
-        )
-    } else {
-        format!("{hook}; locus enter {alias} || {{ locus leave --force && locus enter {alias}; }}")
-    }
+    format!(
+        "{}; locus enter {alias} # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter {alias}",
+        hook_eval_command(shell)
+    )
 }
 
 /// [`dead_broker_recovery_for_shell`] for the user's `$SHELL`.
@@ -174,18 +171,15 @@ mod tests {
     fn dead_broker_recovery_names_enter_first() {
         assert_eq!(
             dead_broker_recovery_for_shell(Some("personal"), "bash"),
-            "eval \"$(locus hook bash)\"; locus enter personal || \
-             { locus leave --force && locus enter personal; }"
+            "eval \"$(locus hook bash)\"; locus enter personal # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter personal"
         );
         assert_eq!(
             dead_broker_recovery_for_shell(None, "fish"),
-            "locus hook fish | source; locus enter <alias>; or begin; \
-             locus leave --force; and locus enter <alias>; end"
+            "locus hook fish | source; locus enter <alias> # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter <alias>"
         );
         assert_eq!(
             dead_broker_recovery_for_shell(Some("$(id)"), "zsh"),
-            "eval \"$(locus hook zsh)\"; locus enter <alias> || \
-             { locus leave --force && locus enter <alias>; }"
+            "eval \"$(locus hook zsh)\"; locus enter <alias> # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter <alias>"
         );
     }
 

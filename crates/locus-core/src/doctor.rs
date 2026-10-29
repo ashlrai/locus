@@ -1630,7 +1630,7 @@ mod tests {
         assert!(
             finding
                 .message
-                .contains("locus enter acme || { locus leave --force && locus enter acme; }"),
+                .contains("locus enter acme # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter acme"),
             "recovery hint missing: {}",
             finding.message
         );
