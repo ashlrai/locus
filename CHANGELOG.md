@@ -35,7 +35,7 @@ Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run
 
 ### Fixed
 
-- **Dead-broker recovery hint says `locus enter` first.** When a pin's broker died with the shell that pinned it (`no current broker endpoint`, anchor unavailable or mismatched, seal intact), `locus enter <alias>` has replaced the pin directly since #156, but every surface still printed `locus leave --force` first. `whoami`, `status`, control commands, `doctor`, `agent report` and the MCP hint now print `eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }`. Expired pins, invalid or legacy seals and unreadable session files, which enter still refuses, keep the `locus leave --force; locus enter <alias>` recipe. New test `printed_dead_broker_hint_works_verbatim` runs the printed line as is.
+- **Dead-broker recovery hint says `locus enter` first.** When a pin's broker died with the shell that pinned it (`no current broker endpoint`, anchor unavailable or mismatched, seal intact), `locus enter <alias>` has replaced the pin directly since #156, but every surface still printed `locus leave --force` first. `whoami`, `status`, control commands, `doctor`, `agent report` and the MCP hint now print `eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }`. Invalid or legacy seals and unreadable session files, which enter still refuses, keep the `locus leave --force; locus enter <alias>` recipe. Expired pins can now be replaced directly as described above. New test `printed_dead_broker_hint_works_verbatim` runs the printed line as is.
 - **`locus mcp --supervised` names the same recovery on its fallback line.** A dead pin under `--supervised` printed `human re-pin required` with no recipe at all: the error is reported by `mcp` itself and never reached the top-level stale-pin hatch. The fallback line now carries the enter-first recipe, and the recipe selection in `wedged_session_recovery` / `stale_pin_recovery_fallback` shares `recovery::recovery_for_error` instead of duplicating the dead-broker check. New test `supervised_mcp_fallback_on_dead_pin_names_the_recovery` (#166).
 
 ### Changed
@@ -322,9 +322,11 @@ Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run
 
 - **Control commands name the stale-pin recovery.** After the pinning shell
   exits, `locus workspace`, `binding add`, `notify`, `init` and other control
-  commands failed closed with only "human re-pin required". They now print the
-  same `eval "$(locus hook bash)"; locus leave --force; locus enter <alias>`
-  recovery that `enter`, `leave` and `status` already did. Still fails closed.
+  commands failed closed with only "human re-pin required". They gained the
+  same recovery hint as `enter`, `leave` and `status`, while still failing
+  closed. For a dead broker, the current hint (#166) is
+  `eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }`:
+  try enter first, using forced leave only if it is refused.
 - **`locus doctor` reports a malformed binding file instead of aborting.** One
   unparseable `bindings/*.toml` made `doctor` (and `doctor --json`) exit 1 with
   a bare error and no report. It now completes, flags an UNSAFE
