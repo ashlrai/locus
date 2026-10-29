@@ -609,6 +609,19 @@ mod tests {
         assert!(!json.contains("metadata-test-value"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn metadata_reports_non_unicode_environment_credential_as_unavailable() {
+        use std::os::unix::ffi::OsStringExt;
+
+        const VAR: &str = "LOCUS_TEST_METADATA_NON_UNICODE";
+        std::env::set_var(VAR, std::ffi::OsString::from_vec(vec![0xff]));
+        let metadata = credential_metadata(&format!("env:{VAR}"));
+        std::env::remove_var(VAR);
+        assert_eq!(metadata.source, "environment");
+        assert!(!metadata.present);
+    }
+
     #[test]
     fn resolve_env_and_test() {
         std::env::set_var("LOCUS_TEST_SECRET_XYZ", "s3cret");
