@@ -499,6 +499,26 @@ fn unsigned_release_manifest_requires_explicit_drift_only_verification() {
     assert_eq!(report["signature"], "unsigned");
     assert_eq!(report["ok"], true);
 
+    // Empty signatures are unsigned; a nonempty malformed signature must not
+    // be accepted by the drift-only opt-in.
+    manifest["signature"] = Value::String("  ".into());
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let empty = verify();
+    assert_eq!(empty.status.code(), Some(0));
+    assert_eq!(
+        doc(&empty, "locus.adapter.verify_manifest.v1")["signature"],
+        "unsigned"
+    );
+
+    manifest["signature"] = Value::String("not-a-signature".into());
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let malformed = verify();
+    assert_eq!(malformed.status.code(), Some(1));
+    let report = doc(&malformed, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "malformed");
+    assert_eq!(report["ok"], false);
+
+    manifest.as_object_mut().unwrap().remove("signature");
     manifest["locus_version"] = Value::String("0.0.0-drift".into());
     std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     let drifted = verify();
