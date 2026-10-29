@@ -165,6 +165,73 @@ fn thin_and_tied_evidence_suggest_nothing() {
 }
 
 #[test]
+fn unmatched_history_does_not_suggest_or_change_workspace() {
+    let (home, repo, cap) = setup(&[("acme", 5)]);
+    let baseline = locus(
+        home.path(),
+        repo.path(),
+        None,
+        &[],
+        &["autopin", "suggest", "--json"],
+    );
+    assert!(baseline.status.success(), "{baseline:?}");
+    assert_eq!(json(&baseline)["report"]["suggestion"], "acme");
+
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args([
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.invalid/unrelated.git"
+        ])
+        .status()
+        .unwrap()
+        .success());
+    let file = repo.path().join(".locus.toml");
+    let original = "version = 1\ndefault_binding = \"personal\"\nrequire_pin = true\n";
+    std::fs::write(&file, original).unwrap();
+    let history = std::fs::read(home.path().join(pin_history::FILE_NAME)).unwrap();
+
+    let human = locus(home.path(), repo.path(), None, &[], &["autopin", "suggest"]);
+    assert!(human.status.success(), "{human:?}");
+    assert!(text(&human).contains("no pin history for this repo yet; nothing to suggest"));
+    let output = locus(
+        home.path(),
+        repo.path(),
+        None,
+        &[],
+        &["autopin", "suggest", "--json"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let v = json(&output);
+    assert_eq!(v["report"]["reason"], "no_history");
+    assert_eq!(v["report"]["matched_entries"], 0);
+    assert_eq!(v["report"]["candidates"], serde_json::json!([]));
+    assert!(v["report"]["suggestion"].is_null());
+    assert_eq!(v["applied"], false);
+    assert!(v["written"].is_null());
+
+    for args in [
+        &["autopin", "suggest", "--apply", "--dry-run"][..],
+        &["autopin", "suggest", "--apply"][..],
+    ] {
+        let output = locus(home.path(), repo.path(), Some(&cap), &[], args);
+        assert!(
+            !output.status.success(),
+            "unmatched history applied: {output:?}"
+        );
+        assert!(text(&output).contains("no_history"), "{output:?}");
+    }
+    assert_eq!(std::fs::read_to_string(file).unwrap(), original);
+    assert_eq!(
+        std::fs::read(home.path().join(pin_history::FILE_NAME)).unwrap(),
+        history
+    );
+}
+
+#[test]
 fn disabled_history_suggests_nothing() {
     let (home, repo, _) = setup(&[("acme", 5)]);
     let o = locus(
