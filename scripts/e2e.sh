@@ -184,6 +184,53 @@ for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME", "PERSONAL"
 '
 ok "pin acme + whoami exclusive"
 
+# Regression for #181: repeated history must produce one candidate per binding,
+# and suggesting without --apply must not write bindings or workspace config.
+log "3a. autopin suggest deduplicates candidates without writes"
+WS_AUTOPIN_HOME="$LOCUS_HOME/autopin-home"
+WS_AUTOPIN_REPO="$LOCUS_HOME/autopin-repo"
+WS_AUTOPIN_SNAPSHOT="$LOCUS_HOME/autopin-bindings-before"
+(
+  export LOCUS_HOME="$WS_AUTOPIN_HOME"
+  export LOCUS_PIN_HISTORY=1
+  mkdir -p "$LOCUS_HOME" "$WS_AUTOPIN_REPO"
+  git -C "$WS_AUTOPIN_REPO" init -q
+  git -C "$WS_AUTOPIN_REPO" remote add origin https://example.com/locus-e2e/autopin.git
+  cd "$WS_AUTOPIN_REPO"
+  locus init --with-samples >/dev/null
+  for alias in acme acme acme acme personal personal; do
+    locus pin "$alias" >/dev/null
+  done
+  cp -R "$LOCUS_HOME/bindings" "$WS_AUTOPIN_SNAPSHOT"
+  [[ ! -e .locus.toml ]] || die "autopin fixture unexpectedly has workspace config"
+
+  suggest_json="$(locus autopin suggest --json)"
+  printf '%s' "$suggest_json" | python3 -c '
+import json, sys
+result = json.load(sys.stdin)
+report = result["report"]
+candidates = report["candidates"]
+aliases = [candidate["alias"] for candidate in candidates]
+assert len(aliases) == len(set(aliases)), "duplicate candidate aliases"
+assert set(aliases) == {"acme", "personal"}, "expected both candidate aliases"
+assert {c["alias"]: c["pins"] for c in candidates} == {"acme": 4, "personal": 2}
+assert report["suggestion"] == "acme" and report["reason"] == "suggested"
+assert result["applied"] is False and result["written"] is None
+'
+  suggest_text="$(locus autopin suggest)"
+  printf '%s\n' "$suggest_text" | python3 -c '
+import re, sys
+output = sys.stdin.read()
+for alias in ("acme", "personal"):
+    assert len(re.findall(r"^\s*" + alias + r"\s+pins\s", output, re.MULTILINE)) == 1, alias
+assert "suggested binding: acme" in output
+'
+  diff -r "$WS_AUTOPIN_SNAPSHOT" "$LOCUS_HOME/bindings" >/dev/null \
+    || die "autopin suggest changed binding files"
+  [[ ! -e .locus.toml ]] || die "autopin suggest wrote workspace config"
+)
+ok "autopin suggest aggregates duplicate candidates without writing bindings"
+
 # ── 4. workspace allowlist blocks personal without --force ───────────────────
 log "4. workspace allowlist block personal without --force"
 WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"
