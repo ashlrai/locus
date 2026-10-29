@@ -21,6 +21,14 @@ test("a recipe name is not a selector and returns usage", () => {
   assert.doesNotMatch(r.stdout, /^(PASS|COMPLETE)/m);
 });
 
+test("an unrecognized option returns usage without running a recipe", () => {
+  const r = spawnSync(process.execPath, [join(here, "run.mjs"), "--unknown-option"], { encoding: "utf8", timeout: 120_000 });
+  assert.ifError(r.error);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]/m);
+  assert.equal(r.stdout, "");
+});
+
 test("arguments after an absolute --locus path are ignored", () => {
   const r = spawnSync(process.execPath, [join(here, "run.mjs"), "--locus", join(repo, "target", "does-not-exist", `locus${exe}`), "unknown-recipe"], { encoding: "utf8", timeout: 120_000 });
   assert.equal(r.status, 2);
