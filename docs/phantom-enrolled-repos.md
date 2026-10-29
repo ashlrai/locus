@@ -6,52 +6,35 @@ questions must be answered before any provider command runs:
 
 | Question | Owner |
 |---|---|
-| Can this secret value enter the model's context? | Phantom Secrets (`phm:` refs, `phantom reveal` only into child env) |
+| Can this secret value enter the model's context? | Phantom Secrets (operator-controlled secret supply) |
 | Is this command acting as the right GitHub / Vercel / Supabase / Cloudflare account? | **Locus** |
 
 MCP and CLI **account auth** lives in Locus, not in Phantom Secrets. Phantom
 Secrets stores the token; Locus decides which token a session may use.
 
-> **Current status: `phm:` refs do not resolve with Phantom Secrets 0.7.9.**
-> Locus resolves `phm:NAME` by running `phantom reveal --yes NAME`, and
-> Phantom Secrets 0.7.9 refuses `--yes` (plaintext reveal needs a trusted
-> interactive terminal). A `phm:` binding still pins and lists its provider
-> tools, but `locus exec` / `locus run` start the worker with the provider
-> variables (`GH_TOKEN`, ...) unset and print
-> `warn unresolved credentials: provider=github source=phantom code=unavailable`;
-> `--strict-creds` fails before the child runs, and `locus doctor` reports
-> `WARN` with `[unresolved_phm]`. Do not work around this by capturing
-> `phantom reveal` output. Until a reviewed Phantom/Locus handoff ships, use
-> `env:` refs for provider work and supply the value from your
-> operator-controlled environment:
->
-> ```bash
-> locus binding add personal --tenant personal --provider github \
->   --account masonwyatt23 --credential-ref env:LOCUS_PERSONAL_GH_TOKEN --non-interactive
-> export LOCUS_PERSONAL_GH_TOKEN=...   # from your own secret store, outside agent context
-> locus pin personal && locus exec -- gh auth status
-> ```
->
-> The `phm:` steps below describe the intended composition and keep working
-> for pinning, scope freeze and doctor checks.
+> **Source checkout status: `phm:` resolution is unavailable.**
+> Published Locus v0.5.0 has the incompatible legacy reveal adapter. This
+> checkout fails closed before invoking Phantom for a `phm:` reference.
+> Metadata, pinning and scope checks remain available, but provider execution
+> needs supported credentials. See [credential compatibility](./credential-compatibility.md).
+> Never capture `phantom reveal` output to work around the missing bridge.
+> Use `env:` references and supply values outside agent context.
 
 ## 1. One binding per owner scope
 
 Phantom repos belong to one owner scope: `personal`, `company`, or
 `client:<name>`. Create one Locus binding per scope and provider. Credential
-refs are Phantom names, never raw tokens.
+refs use explicit `env:` names, never raw tokens. Supply their values from an
+operator-controlled environment before running provider commands. `phm:`
+references remain readable for migration but cannot resolve in this checkout.
 
 ```bash
-phantom add GH_TOKEN_PERSONAL      # value prompted, never echoed
-phantom add GH_TOKEN_ASHLR
-phantom add GH_TOKEN_ACME
-
 locus binding add personal --tenant personal --provider github \
-  --account masonwyatt23 --credential-ref phm:GH_TOKEN_PERSONAL --non-interactive
+  --account masonwyatt23 --credential-ref env:GH_TOKEN_PERSONAL --non-interactive
 locus binding add ashlr --tenant ashlr --provider github \
-  --account ashlrai --credential-ref phm:GH_TOKEN_ASHLR --org ashlrai --non-interactive
+  --account ashlrai --credential-ref env:GH_TOKEN_ASHLR --org ashlrai --non-interactive
 locus binding add client-acme --tenant acme --provider vercel \
-  --account acme-prod --credential-ref phm:VERCEL_TOKEN_ACME --team-id team_xxx --non-interactive
+  --account acme-prod --credential-ref env:VERCEL_TOKEN_ACME --team-id team_xxx --non-interactive
 ```
 
 Use `--dry-run` first to print the binding TOML without writing it.
@@ -74,8 +57,10 @@ A malformed or unreadable `.locus.toml` fails closed.
 - One-shot commands: `locus run -b ashlr -- gh pr list` (global pin unchanged).
 - Interactive agent sessions: `locus pin` in the repo, then start the agent.
 - MCP clients: `locus setup --client claude|cursor|codex|grok|gemini` wires
-  `locus-mcp`; it exposes only the pinned binding's tools and never returns
-  credential refs or secret values. Agents can request a pin
+  `locus-mcp` for control tools. For the pinned binding's provider tools,
+  register `locus mcp --supervised` from the hooked, pinned shell and restart
+  the client after a re-pin. Neither launch returns secret values. Agents can
+  request a pin
   (`locus_request_pin`) but cannot pin themselves.
 - CI / fleet workers: `locus ci mint|env|run` for short-lived sealed sessions
   that never touch `active.json`.
