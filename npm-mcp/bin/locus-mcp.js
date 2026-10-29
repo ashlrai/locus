@@ -5,7 +5,7 @@
  *
  * 1. Prefer a cached download under ~/.locus/bin
  * 2. Else download the matching GitHub release asset (locus-<target>.tar.gz)
- * 3. Else fall back to `cargo install --git` and use ~/.cargo/bin/locus-mcp
+ * 3. Else build with cargo in an isolated install root
  *
  * The wrapper never replaces a newer cached binary with its older release:
  * a cached locus-mcp that reports (or whose sidecar records) a newer version
@@ -198,13 +198,15 @@ function isCachedBinaryStale(binaryPath) {
   return version !== null && compareVersions(version, VERSION) < 0;
 }
 
-function assertCanReplace(binaryPath, { force = false } = {}) {
+function assertCanReplace(binaryPath, { force = false } = {}, replacementVersion = VERSION) {
   if (force || !existsSync(binaryPath)) return;
   const version = readBinaryVersion(binaryPath);
-  if (version === null || compareVersions(version, VERSION) > 0) {
+  if (version === null || replacementVersion === null || compareVersions(version, replacementVersion) > 0) {
     const reason = version === null
       ? "its installed version could not be determined"
-      : `installed v${version} is newer than npm's v${VERSION}`;
+      : replacementVersion === null
+        ? "the replacement version could not be determined"
+        : `installed v${version} is newer than ${replacementVersion === VERSION ? "npm's" : "the replacement's"} v${replacementVersion}`;
     const error = new Error(
       `Refusing to replace ${binaryPath}: ${reason}. ` +
       "Kept the installed binary. To allow replacement, pass --force before the locus-mcp command."
@@ -214,9 +216,10 @@ function assertCanReplace(binaryPath, { force = false } = {}) {
   }
 }
 
-function writeVersionSidecar(binaryPath) {
+function writeVersionSidecar(binaryPath, version = VERSION) {
   try {
-    writeFileSync(getVersionSidecarPath(binaryPath), `${VERSION}\n`, "utf8");
+    if (version === null) unlinkSync(getVersionSidecarPath(binaryPath));
+    else writeFileSync(getVersionSidecarPath(binaryPath), `${version}\n`, "utf8");
   } catch {
     // best-effort
   }
@@ -331,31 +334,43 @@ function tryExistingOnPath() {
   return null;
 }
 
-function installViaCargo() {
+function installViaCargo(binaryPath, options) {
   console.error(`Falling back to: ${INSTALL_FROM_SOURCE}`);
   const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
-  const result = spawnSync(
-    cargo,
-    [
-      "install",
-      "--git",
-      `https://github.com/${REPO}`,
-      CARGO_PACKAGE,
-      "--locked",
-      "--force",
-    ],
-    { stdio: "inherit", env: process.env }
-  );
-  if (result.status !== 0) {
-    throw new Error(
-      `cargo install failed (exit ${result.status}). Install Rust from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
+  mkdirSync(CACHE_DIR, { recursive: true });
+  const root = mkdtempSync(join(CACHE_DIR, ".cargo-install-"));
+  try {
+    const result = spawnSync(
+      cargo,
+      [
+        "install",
+        "--git",
+        `https://github.com/${REPO}`,
+        CARGO_PACKAGE,
+        "--locked",
+        "--root",
+        root,
+      ],
+      { stdio: "inherit", env: process.env }
     );
+    if (result.status !== 0) {
+      throw new Error(
+        `cargo install failed (exit ${result.status}). Install Rust from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
+      );
+    }
+    const path = join(root, "bin", getBinaryFilename());
+    if (!existsSync(path)) {
+      throw new Error(`cargo install succeeded but ${path} not found`);
+    }
+    const version = readBinaryVersion(path);
+    assertCanReplace(binaryPath, options, version);
+    copyFileSync(path, binaryPath);
+    if (process.platform !== "win32") chmodSync(binaryPath, 0o755);
+    writeVersionSidecar(binaryPath, version);
+    return binaryPath;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
-  const path = cargoBinPath();
-  if (!existsSync(path)) {
-    throw new Error(`cargo install succeeded but ${path} not found`);
-  }
-  return path;
 }
 
 async function downloadReleaseBinary(binaryPath, options) {
@@ -452,7 +467,7 @@ async function ensureBinary(options = {}) {
   if (target && !hasPrebuiltBinary(target)) {
     console.error(cargoFallbackMessage(process, "no-prebuilt"));
     try {
-      return installViaCargo();
+      return installViaCargo(binaryPath, options);
     } catch (cargoErr) {
       console.error(cargoErr.message);
       process.exit(1);
@@ -467,7 +482,7 @@ async function ensureBinary(options = {}) {
     console.error(`Failed to download locus-mcp: ${err.message}`);
     console.error(cargoFallbackMessage(process, "download-failed"));
     try {
-      return installViaCargo();
+      return installViaCargo(binaryPath, options);
     } catch (cargoErr) {
       console.error(cargoErr.message);
       process.exit(1);
