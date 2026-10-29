@@ -11,6 +11,25 @@ const RECOVERY_TAIL: &str = "|| { locus leave --force && locus enter";
 const DEAD_BROKER_RECOVERY: &str =
     "eval \"$(locus hook bash)\"; locus enter personal || { locus leave --force && locus enter personal; }";
 
+#[test]
+fn changelog_dead_broker_recipes_match_the_current_hint() {
+    let changelog = include_str!("../../../CHANGELOG.md");
+    let recipe = locus_core::recovery::dead_broker_recovery_for_shell(None, "bash");
+    for heading in [
+        "**Dead-broker recovery hint says `locus enter` first.**",
+        "**Control commands name the stale-pin recovery.**",
+    ] {
+        let entry = changelog
+            .split_once(heading)
+            .expect("changelog entry exists")
+            .1
+            .split("\n- ")
+            .next()
+            .unwrap();
+        assert!(entry.contains(&recipe), "{heading} must contain {recipe}");
+    }
+}
+
 fn locus(home: &Path, cwd: &Path, cap: &str, args: &[&str]) -> Output {
     locus_cmd(home, cwd, cap, args)
         .output()
