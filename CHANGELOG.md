@@ -15,6 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **Execution latency report ([#170](https://github.com/ashlrai/locus/issues/170)).**
+  The issue reports `locus exec -- true` as 3–5x slower than
+  `direnv exec <dir> true` and `sops exec-env <file> true`. This is the
+  issue's report, not a verified benchmark or a claim about current releases.
+  See the [historical measurements](docs/BENCHMARKS.md#core-operation-latency)
+  and the [same-host comparison procedure](docs/exec-latency.md#comparing-launchers-for-issue-170).
+
 - **Reproduce cargo-install timings ([#168](https://github.com/ashlrai/locus/issues/168)).**
   From a checkout, compare one install of both packages with two separate
   installs. This uses the same committed revision, lockfile, release profile,

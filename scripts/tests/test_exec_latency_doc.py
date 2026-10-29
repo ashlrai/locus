@@ -60,6 +60,16 @@ class MeasurementInstructionsTest(unittest.TestCase):
 
 
 class PeerMeasurementInstructionsTest(unittest.TestCase):
+    def test_changelog_attributes_the_report_and_links_the_comparison(self):
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        note = changelog.split("**Execution latency report", 1)[1].split("\n\n", 1)[0]
+        for expected in ("issues/170", "`locus exec -- true`", "3–5x",
+                         "`direnv exec <dir> true`", "`sops exec-env <file> true`",
+                         "issue's report, not a verified benchmark",
+                         "docs/BENCHMARKS.md#core-operation-latency",
+                         "docs/exec-latency.md#comparing-launchers-for-issue-170"):
+            self.assertIn(expected, note)
+
     def test_readme_commands_match_the_timed_launchers(self):
         readme = (ROOT / "README.md").read_text()
         section = readme.split("### Comparing exec launch latency\n", 1)[1]
