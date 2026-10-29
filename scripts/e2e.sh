@@ -318,6 +318,62 @@ assert v["applied"] is False and v["written"] is None
 )
 ok "autopin suggest returns empty candidates without binding changes"
 
+# Issue #171: preview workspace creation and overwrite without touching the
+# project. Keep snapshots and command output outside the project tree.
+log "3b. workspace dry-run reports changes without writing"
+(
+  project="$LOCUS_HOME/dry-run-project"
+  snapshot="$LOCUS_HOME/dry-run-project-before"
+  mkdir -p "$project/nested"
+  project="$(cd "$project" && pwd -P)"
+  printf 'project fixture\n' > "$project/nested/existing.txt"
+  cd "$project"
+  cp -R "$project" "$snapshot"
+  args=(workspace --default acme --allow acme,personal --require-pin)
+  human="$(locus --dry-run "${args[@]}")" || die "workspace create dry-run failed"
+  [[ "$human" == *"dry-run: locus workspace"* && "$human" == *"create"* \
+     && "$human" == *"$project/.locus.toml"* && "$human" == *"nothing written"* ]] \
+    || die "workspace create dry-run did not report its planned action"
+  result="$(locus --json --dry-run "${args[@]}")" || die "workspace JSON create dry-run failed"
+  printf '%s' "$result" | python3 -c '
+import json, sys
+plan = json.load(sys.stdin)
+assert plan["schema"] == "locus.plan.v1" and plan["ok"] and plan["dry_run"]
+assert plan["command"] == "locus workspace"
+assert plan["changes"] == [{"action": "create", "target": sys.argv[1], "detail": "default_binding=acme"}]
+assert plan["default_binding"] == "acme"
+assert plan["allowed_bindings"] == ["acme", "personal"] and plan["require_pin"] is True
+' "$project/.locus.toml" || die "workspace create plan is incorrect"
+  diff -rq "$snapshot" "$project" >/dev/null || die "workspace create dry-run changed project files"
+
+  # Verify the same command really writes its intended configuration.
+  locus "${args[@]}" >/dev/null || die "workspace creation positive control failed"
+  [[ -f .locus.toml ]] || die "workspace creation did not write its target"
+  grep -Fq 'default_binding = "acme"' .locus.toml || die "workspace creation wrote the wrong default"
+  rm -rf "$snapshot"
+  cp -R "$project" "$snapshot"
+  python3 - .locus.toml <<'PY'
+import os, sys
+os.utime(sys.argv[1], (946684800, 946684800))
+PY
+  before_mtime="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_mtime_ns)' .locus.toml)"
+  result="$(locus --json --dry-run workspace --default personal --force)" \
+    || die "workspace overwrite dry-run failed"
+  printf '%s' "$result" | python3 -c '
+import json, sys
+plan = json.load(sys.stdin)
+assert plan["schema"] == "locus.plan.v1" and plan["ok"] and plan["dry_run"]
+assert plan["changes"] == [{"action": "overwrite", "target": sys.argv[1], "detail": "default_binding=personal"}]
+assert plan["default_binding"] == "personal" and plan["allowed_bindings"] == ["personal"]
+' "$project/.locus.toml" || die "workspace overwrite plan is incorrect"
+  diff -rq "$snapshot" "$project" >/dev/null || die "workspace overwrite dry-run changed project files"
+  python3 - .locus.toml "$before_mtime" <<'PY' || die "workspace overwrite dry-run rewrote its target"
+import os, sys
+assert os.stat(sys.argv[1]).st_mtime_ns == int(sys.argv[2])
+PY
+)
+ok "workspace dry-run previews creation and overwrite without changing project files"
+
 # ── 4. workspace allowlist blocks personal without --force ───────────────────
 log "4. workspace allowlist block personal without --force"
 WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"
