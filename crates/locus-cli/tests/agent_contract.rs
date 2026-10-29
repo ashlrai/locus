@@ -405,6 +405,68 @@ fn whoami_json_reports_environment_credential_availability() {
 }
 
 #[test]
+fn whoami_reports_a_set_binding_credential_without_exposing_it() {
+    const VAR: &str = "LOCUS_TEST_WHOAMI_CUSTOM_CREDENTIAL";
+    const CANARY: &str = "synthetic-custom-credential-canary";
+    let env = Env::new();
+    env.quickstart();
+
+    let out = env.run(&[
+        "binding",
+        "add",
+        "credential-test",
+        "--tenant",
+        "test-tenant",
+        "--provider",
+        "github",
+        "--account",
+        "test-account",
+        "--credential-ref",
+        "env:LOCUS_TEST_WHOAMI_CUSTOM_CREDENTIAL",
+        "--non-interactive",
+    ]);
+    assert!(out.status.success(), "binding add failed");
+    assert!(env.run(&["enter", "credential-test"]).status.success());
+    let cap = env.cap().unwrap();
+
+    // Set the credential only in the whoami process, after the pin was made.
+    // An unrelated credential must not count as the binding's credential.
+    for (value, expected) in [(None, false), (Some(CANARY), true), (None, false)] {
+        for json in [true, false] {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
+            cmd.arg("whoami")
+                .env_clear()
+                .env("HOME", env.user())
+                .env("LOCUS_HOME", env.home())
+                .env("LOCUS_CONTROL_CAPABILITY", &cap)
+                .env("LOCUS_TEST_WHOAMI_UNRELATED_CREDENTIAL", CANARY)
+                .current_dir(env.project());
+            if json {
+                cmd.arg("--json");
+            }
+            if let Some(value) = value {
+                cmd.env(VAR, value);
+            }
+            let out = cmd.output().expect("locus runs");
+            assert!(out.status.success(), "whoami failed");
+            for stream in [&out.stdout, &out.stderr] {
+                assert!(!stream.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()));
+                assert!(!stream.windows(VAR.len()).any(|w| w == VAR.as_bytes()));
+            }
+            if json {
+                let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+                assert_eq!(result["binding_alias"], "credential-test");
+                let providers = result["providers"].as_array().unwrap();
+                assert_eq!(providers.len(), 1);
+                assert_eq!(providers[0]["provider"], "github");
+                assert_eq!(providers[0]["credential"]["source"], "environment");
+                assert_eq!(providers[0]["credential"]["present"], expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn setup_and_settings_status_json() {
     let env = Env::new();
     env.quickstart();
