@@ -25,7 +25,7 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 # Keep the documented prerequisites and verification commands covered by this suite.
-node --test "$ROOT/integrations/phantom/readme.test.mjs"
+node --test "$ROOT/integrations/phantom/readme.test.mjs" "$ROOT/scripts/hub-integration-test.test.mjs"
 
 if ! locus agent report --help >/dev/null 2>&1; then
   echo "building locus with agent report…"
@@ -35,19 +35,21 @@ if [[ ! -x "${ROOT}/target/debug/locus" ]]; then
   (cd "$ROOT" && cargo build -q -p locus-cli)
 fi
 
-SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
-SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
+SMOKE_HOME=""
+SMOKE_PROJ=""
 MT_SRV_PID=""
 cleanup() {
   [[ -n "$MT_SRV_PID" ]] && kill "$MT_SRV_PID" 2>/dev/null || true
   rm -rf "$SMOKE_HOME" "$SMOKE_PROJ"
 }
 trap cleanup EXIT
+SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
+SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
 
 export LOCUS_HOME="$SMOKE_HOME"
 unset LOCUS_SESSION_ID || true
 
-echo "== hub-integration-test LOCUS_HOME=$LOCUS_HOME =="
+echo "== hub-integration-test =="
 echo "locus: $(command -v locus) ($(locus --version 2>/dev/null || true))"
 
 locus init --with-samples >/dev/null
