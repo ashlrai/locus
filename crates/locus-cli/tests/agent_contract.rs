@@ -419,6 +419,49 @@ fn setup_and_settings_status_json() {
 }
 
 #[test]
+fn unsigned_release_manifest_requires_explicit_drift_only_verification() {
+    let env = Env::new();
+    let path = env.project().join("release.json");
+    let path_arg = path.to_str().unwrap();
+    let export = env.run(&["adapter", "registry", "export", "--out", path_arg]);
+    assert!(export.status.success(), "{}", stderr(&export));
+
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(manifest.get("signature").is_none());
+    assert!(manifest.get("signed_by").is_none());
+
+    let rejected = env.run(&["adapter", "verify-manifest", path_arg, "--json"]);
+    assert_eq!(rejected.status.code(), Some(1));
+    let report = doc(&rejected, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["ok"], false);
+
+    let verify = || {
+        env.run(&[
+            "adapter",
+            "verify-manifest",
+            path_arg,
+            "--allow-unsigned",
+            "--json",
+        ])
+    };
+    let matching = verify();
+    assert_eq!(matching.status.code(), Some(0));
+    let report = doc(&matching, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["ok"], true);
+
+    manifest["locus_version"] = Value::String("0.0.0-drift".into());
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let drifted = verify();
+    assert_eq!(drifted.status.code(), Some(1));
+    let report = doc(&drifted, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["ok"], false);
+    assert!(!report["drift"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn usage_errors_exit_2_with_the_error_envelope() {
     let env = Env::new();
     let out = env.run(&["whoami", "--json", "--no-such-flag"]);
