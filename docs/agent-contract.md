@@ -123,7 +123,7 @@ a new command does not compile until it picks one.
 
 | Class | Behaviour | Commands |
 | --- | --- | --- |
-| Plans | Runs the read-only validation of the real command, prints a `locus.plan.v1` plan, writes nothing | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew`, `engagement init/close`, `graph export/import`, `binding add/rm/migrate-credential-refs`, `client add`, `autopin suggest --apply`, `capability persist/unpersist`, `ci mint/env`, `mcp mint/revoke`, `agent setup`, `doctor --fix`, `adapter install/uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add/remove`, `approve grant/deny`, `notify on/off`, `events export`, `forensics export` |
+| Plans | Performs read-only preflight checks, prints a `locus.plan.v1` plan, writes nothing (see print-only setup exception below) | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew`, `engagement init/close`, `graph export/import`, `binding add/rm/migrate-credential-refs`, `client add`, `autopin suggest --apply`, `capability persist/unpersist`, `ci mint/env`, `mcp mint/revoke`, `agent setup`, `doctor --fix`, `adapter install/uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add/remove`, `approve grant/deny`, `notify on/off`, `events export`, `forensics export` |
 | Read-only | Accepted and ignored: the command runs exactly as without the flag (see below) | `whoami`, `status`, `doctor`, `watch`, `hook`, `goal`, `verify`, `upstream`, `completion`, `topic`, `version`, `events`, `agent doctor/report`, `binding list/show`, `graph list`, `capability status`, `notify status`, `approve list/status/wait`, `mcp list`, `autopin suggest`, `adapter search/list/verify/verify-manifest`, `adapter trust list`, `adapter registry index list` |
 | Unsupported | Not accepted, exactly as before the global flag: `exec --dry-run -- …` fails exec's own argument check (exit 1); every other placement, and the other commands, are a clap usage error (exit 2, `unexpected argument '--dry-run' found`) | `exec`, `run`, `ci run`, `mcp` (server), `serve`, `dashboard` |
 
@@ -133,6 +133,10 @@ first use, and `whoami`, `status`, `doctor`, `agent doctor/report`,
 `verify session` and `watch` still freeze the active pin when its binding
 drifted. The drift freeze is a fail-closed security control, so `--dry-run`
 never suppresses it.
+
+`setup --print` and `setup --client generic` print configuration instead of a
+plan, even with `--dry-run`. Other mutating operations, including child commands,
+provider operations and MCP tool calls, have no Locus dry-run option.
 
 What a plan does and does not check:
 
@@ -144,8 +148,8 @@ What a plan does and does not check:
   fixes `--apply` would make.
 - It never opens a store that does not exist yet (opening creates the home
   and its seal key). Against an uninitialized home, `init`, `quickstart`,
-  `agent setup` and `binding add` plan the creation; the others fail with a
-  pointer to `locus init --dry-run`.
+  `agent setup`, `binding add`, `client add` and `doctor --fix` can preview,
+  subject to their options and inputs; most other plans require initialization.
 - It does **not** authenticate the control capability: that would start the
   authority broker, itself a side effect. A plan reports
   `requires_control_capability` and `control_capability_in_env` (presence
