@@ -90,9 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has the same behavior.
 
 - **Fresh quickstart and doctor WARN ([#172](https://github.com/ashlrai/locus/issues/172)).**
-  In the recorded first run with published npm 0.5.1, `locus quickstart` exited
-  0, but a subsequent `locus doctor` exited 1 with `WARN` and
-  `phantom_missing` when Phantom was not on PATH. To diagnose this, inspect
+  On a fresh home with non-interactive stdin and Phantom absent from PATH, the
+  recorded first run of published npm 0.5.1 had `locus quickstart` exit 0,
+  followed by `locus doctor` exiting 1 with `WARN` and `phantom_missing`.
+  This is an observed failure of that published version. To diagnose it, inspect
   `locus doctor --json` and its findings; the recorded first run also verified
   the pin separately with `locus whoami`. Address any other findings rather
   than treating every doctor failure as this warning. No workaround for the
