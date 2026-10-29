@@ -12,10 +12,15 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 const args = process.argv.slice(2);
+const usage = "Usage: node examples/recipes/run.mjs [--locus <absolute-path>]";
+if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
+  console.log(usage);
+  process.exit(0);
+}
 let locus = "locus";
 if (args.length) {
   if (args[0] !== "--locus" || !args[1] || !isAbsolute(args[1])) {
-    console.error("Usage: node examples/recipes/run.mjs [--locus <absolute-path>]");
+    console.error(usage);
     process.exit(1);
   }
   locus = args[1];

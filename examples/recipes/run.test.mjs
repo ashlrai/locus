@@ -1,7 +1,7 @@
 // node --test examples/recipes
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,28 @@ const exe = process.platform === "win32" ? ".exe" : "";
 const candidates = ["release", "debug"].map((p) => join(repo, "target", p, `locus${exe}`));
 const built = candidates.find((p) => existsSync(p));
 const run = (bin, recipe = join(here, "run.mjs")) => spawnSync(process.execPath, [recipe, "--locus", bin], { encoding: "utf8", timeout: 120_000 });
+
+test("help describes the invocation without running recipes", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-help-"));
+  try {
+    // Recipe setup cannot create its temporary directory under a file.
+    const unavailableTmp = join(root, "not-a-directory");
+    writeFileSync(unavailableTmp, "");
+    for (const flag of ["--help", "-h"]) {
+      const r = spawnSync(process.execPath, [join(here, "run.mjs"), flag], {
+        env: { ...process.env, TMPDIR: unavailableTmp, TMP: unavailableTmp, TEMP: unavailableTmp },
+        encoding: "utf8",
+        timeout: 120_000,
+      });
+      assert.ifError(r.error);
+      assert.equal(r.status, 0);
+      assert.match(r.stdout, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
+      assert.equal(r.stderr, "");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a recipe name is not a selector and returns usage", () => {
   const r = spawnSync(process.execPath, [join(here, "run.mjs"), "unknown-recipe"], { encoding: "utf8", timeout: 120_000 });
