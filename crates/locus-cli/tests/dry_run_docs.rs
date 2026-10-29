@@ -39,6 +39,16 @@ fn command_matrix_matches_the_documented_plan_forms() {
     let listed = forms(overview, "|");
     assert!(!listed.is_empty());
     assert_eq!(listed, forms(matrix, "| Plan |"));
+
+    let readme = include_str!("../../../README.md")
+        .split("### Previewing mutations with `--dry-run`")
+        .nth(1)
+        .expect("README dry-run section")
+        .split("\n---")
+        .next()
+        .unwrap();
+    assert_eq!(forms(readme, "|"), listed);
+    assert!(readme.contains("Leave persistent state unchanged"));
 }
 
 #[test]
