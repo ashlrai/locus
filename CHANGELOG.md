@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Troubleshooting
 
+- **Unset environment credential in `whoami` ([#173](https://github.com/ashlrai/locus/issues/173)).**
+  In the recorded first run with published 0.5.1, `locus whoami --json`
+  reported `credential.present: true` for an `env:` reference whose variable
+  was unset; the expected value is `false`. The current implementation reports
+  whether the reference resolves in the `whoami` process, not merely whether
+  it is stored. This is an availability check, not a validity check. See
+  [the first-run record](docs/FIRST-RUN.md).
+
 - **Fresh quickstart and doctor WARN ([#172](https://github.com/ashlrai/locus/issues/172)).**
   In the recorded first run with published npm 0.5.1, `locus quickstart` exited
   0, but a subsequent `locus doctor` exited 1 with `WARN` and

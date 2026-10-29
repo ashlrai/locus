@@ -400,6 +400,8 @@ fn whoami_json_reports_environment_credential_availability() {
     };
 
     assert!(!whoami(None));
+    // An empty but set variable resolves; presence does not validate its value.
+    assert!(whoami(Some("")));
     assert!(whoami(Some(CANARY)));
     assert!(!whoami(None));
 }
