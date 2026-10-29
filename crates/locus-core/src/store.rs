@@ -6,7 +6,7 @@ use crate::approval::{
 };
 use crate::authority_anchor::{self, ValidationMode};
 use crate::autopin::{self, AutoPinTarget};
-use crate::binding::{validate_name_component, Binding, BindingSummary};
+use crate::binding::{validate_name_component, Binding, BindingSummary, ProviderBinding};
 use crate::config::{self, LocusConfig};
 use crate::credential::{credential_metadata, CredentialMetadata};
 use crate::engagement::{
@@ -2657,21 +2657,7 @@ impl Store {
             binding_id: session.binding_id,
             tenant: session.tenant,
             principal: session.principal,
-            providers: binding
-                .providers
-                .iter()
-                .map(|p| ProviderView {
-                    provider: p.provider.clone(),
-                    account: p.account.clone(),
-                    credential: credential_metadata(&p.credential_ref),
-                    project_ref: p.scope.project_ref.clone(),
-                    team_id: p.scope.team_id.clone(),
-                    account_id: p.scope.account_id.clone(),
-                    read_only: p.scope.read_only,
-                    orgs: p.scope.orgs.clone(),
-                    repos: p.scope.repos.clone(),
-                })
-                .collect(),
+            providers: binding.providers.iter().map(ProviderView::from).collect(),
             expires_at: session.expires_at.to_rfc3339(),
             expires_in_secs: (session.expires_at - Utc::now()).num_seconds().max(0),
             worker_home: session.worker_home,
@@ -2835,21 +2821,7 @@ impl Store {
                 drift.providers_match = drift.binding_id_match && drift.tenant_match;
             }
 
-            drift.providers = binding
-                .providers
-                .iter()
-                .map(|p| ProviderView {
-                    provider: p.provider.clone(),
-                    account: p.account.clone(),
-                    credential: credential_metadata(&p.credential_ref),
-                    project_ref: p.scope.project_ref.clone(),
-                    team_id: p.scope.team_id.clone(),
-                    account_id: p.scope.account_id.clone(),
-                    read_only: p.scope.read_only,
-                    orgs: p.scope.orgs.clone(),
-                    repos: p.scope.repos.clone(),
-                })
-                .collect();
+            drift.providers = binding.providers.iter().map(ProviderView::from).collect();
         }
 
         // Namespaced secondary bindings
@@ -4010,6 +3982,22 @@ pub struct ProviderView {
     pub repos: Vec<String>,
 }
 
+impl From<&ProviderBinding> for ProviderView {
+    fn from(provider: &ProviderBinding) -> Self {
+        Self {
+            provider: provider.provider.clone(),
+            account: provider.account.clone(),
+            credential: credential_metadata(&provider.credential_ref),
+            project_ref: provider.scope.project_ref.clone(),
+            team_id: provider.scope.team_id.clone(),
+            account_id: provider.scope.account_id.clone(),
+            read_only: provider.scope.read_only,
+            orgs: provider.scope.orgs.clone(),
+            repos: provider.scope.repos.clone(),
+        }
+    }
+}
+
 /// Which `.locus.toml` `autopin suggest --apply` may write.
 ///
 /// The root is the git toplevel of `cwd`, or `cwd` itself outside a repo.
@@ -4612,11 +4600,24 @@ mod tests {
         let unavailable = store.whoami().unwrap();
         assert!(!unavailable.providers[0].credential.present);
         assert_eq!(unavailable.providers[0].credential.source, "environment");
+        assert!(
+            !store.check_drift_and_freeze().unwrap().providers[0]
+                .credential
+                .present
+        );
 
         std::env::set_var(VAR, "whoami-test-value");
         let available = store.whoami().unwrap();
+        let drift_available = store.check_drift_and_freeze().unwrap();
         std::env::remove_var(VAR);
         assert!(available.providers[0].credential.present);
+        assert!(drift_available.providers[0].credential.present);
+        assert!(!store.whoami().unwrap().providers[0].credential.present);
+        assert!(
+            !store.check_drift_and_freeze().unwrap().providers[0]
+                .credential
+                .present
+        );
         assert!(!serde_json::to_string(&available)
             .unwrap()
             .contains("whoami-test-value"));
