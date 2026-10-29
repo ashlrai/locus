@@ -203,6 +203,124 @@ mod tests {
     use super::*;
     use locus_core::parse_mcp_grant_token;
 
+    fn swarm_fixture() -> (tempfile::TempDir, Store, SwarmBroker, TenantCtx) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let graph = SwarmGraph::from_slice(
+            br#"{"version":1,"nodes":[{"id":"reader","grant_id":"0123456789abcdef","tools":["github.read"]}]}"#,
+        )
+        .unwrap();
+        let tenant = TenantCtx {
+            grant_id: "0123456789abcdef".into(),
+            session_id: "ses_swarm".into(),
+            binding_alias: "example".into(),
+            tenant: "example".into(),
+        };
+        (dir, store, SwarmBroker::new(graph), tenant)
+    }
+
+    #[test]
+    fn swarm_catalog_intersects_live_tools_and_requires_a_known_grant() {
+        let (_dir, store, broker, tenant) = swarm_fixture();
+        let live = json!({"tools":[{"name":"github.read"},{"name":"github.write"},
+            {"name":"locus_whoami"},{"name":7},{}],"cursor":"retained"});
+        let filtered = broker
+            .filter_catalog(&store, Some(&tenant), live.clone())
+            .unwrap();
+        assert_eq!(
+            filtered,
+            json!({"tools":[{"name":"github.read"}],"cursor":"retained"})
+        );
+        let mut unknown = tenant.clone();
+        unknown.grant_id = "fedcba9876543210".into();
+        for ctx in [None, Some(&unknown)] {
+            let filtered = broker.filter_catalog(&store, ctx, live.clone()).unwrap();
+            assert_eq!(filtered["tools"], json!([]));
+        }
+        // A graph grant cannot add a tool absent from the live catalog.
+        assert_eq!(
+            broker
+                .filter_catalog(&store, Some(&tenant), json!({"tools":[]}))
+                .unwrap()["tools"],
+            json!([])
+        );
+        for malformed in [json!({}), json!({"tools":null}), json!({"tools":{}})] {
+            assert!(broker
+                .filter_catalog(&store, Some(&tenant), malformed)
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn swarm_calls_require_health_and_exact_grants_and_redact_denials() {
+        let (_dir, store, broker, tenant) = swarm_fixture();
+        let hostile = "synthetic-private-tool-input";
+        for (ctx, name, healthy, expected) in [
+            (Some(&tenant), "github.read", true, true),
+            (Some(&tenant), "github.read", false, false),
+            (None, "github.read", true, false),
+            (Some(&tenant), "github.read.extra", true, false),
+            (Some(&tenant), hostile, true, false),
+        ] {
+            assert_eq!(
+                broker.authorize_call(&store, ctx, name, healthy).unwrap(),
+                expected
+            );
+        }
+        let audit = std::fs::read_to_string(store.audit_path()).unwrap();
+        assert!(!audit.contains(hostile));
+        let events: Vec<Value> = audit
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.len(), 5);
+        for (index, event) in events.iter().enumerate() {
+            assert_eq!(event["op"], "mcp.swarm.tool_call");
+            assert_eq!(event["detail"]["allowed"], index == 0);
+            assert_eq!(
+                event["detail"]["tool"].as_str(),
+                (index == 0).then_some("github.read")
+            );
+        }
+        assert_eq!(
+            events[4]["detail"]["tool_digest"],
+            args_digest(&json!(hostile))
+        );
+    }
+
+    #[test]
+    fn swarm_audit_failure_blocks_both_discovery_and_execution() {
+        let (_dir, store, broker, tenant) = swarm_fixture();
+        std::fs::create_dir(store.audit_path()).unwrap();
+        assert!(broker
+            .filter_catalog(
+                &store,
+                Some(&tenant),
+                json!({"tools":[{"name":"github.read"}]})
+            )
+            .is_err());
+        assert!(broker
+            .authorize_call(&store, Some(&tenant), "github.read", true)
+            .is_err());
+    }
+
+    #[test]
+    fn absent_and_unknown_tenant_grants_have_uniform_failures() {
+        let (_dir, store, _, _) = swarm_fixture();
+        let unknown = format!("lmt_{}.{}", "f".repeat(16), "a".repeat(64));
+        let invalid = GrantAuthError::Invalid.body();
+        assert_eq!(
+            resolve_tenant_grant(&store, &[]).unwrap_err().body(),
+            invalid
+        );
+        for raw in ["malformed", unknown.as_str()] {
+            let headers = vec![(TENANT_TOKEN_HEADER.into(), raw.into())];
+            let error = resolve_tenant_grant(&store, &headers).unwrap_err();
+            assert_eq!(error.status(), 401);
+            assert_eq!(error.body(), invalid);
+        }
+    }
+
     #[test]
     fn token_parse_shape_is_strict() {
         let good_id = "0123456789abcdef";
