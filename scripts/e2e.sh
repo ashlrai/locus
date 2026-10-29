@@ -76,6 +76,33 @@ e2e_cleanup() {
 trap 'e2e_cleanup' EXIT
 ok "isolated home ready"
 
+create_security_home() {
+  SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
+}
+
+# Exercise the same creation and EXIT cleanup used by the security probes.
+# The subshell owns its test home so its cleanup cannot remove the main home.
+log "2c. security home honors a nondefault TMPDIR"
+security_tmp="$LOCUS_HOME/custom temp"
+mkdir -p "$security_tmp"
+(
+  export TMPDIR="$security_tmp"
+  LOCUS_HOME="$security_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_security_home
+  [[ -d "$SECURITY_HOME" && "${SECURITY_HOME%/*}" == "$TMPDIR" && \
+    "${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
+  printf '%s' "$SECURITY_HOME" >"$security_tmp/security-home-path"
+  touch "$SECURITY_HOME/cleanup-sentinel"
+) || die "security home was not created beneath the supplied TMPDIR"
+security_test_home="$(cat "$security_tmp/security-home-path")"
+[[ ! -e "$security_test_home" && ! -L "$security_test_home" ]] \
+  || die "security home survived exit cleanup"
+[[ -d "$security_tmp" ]] || die "security cleanup removed the supplied TMPDIR"
+ok "security home honors nondefault TMPDIR and is cleaned on exit"
+
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
 
@@ -1458,7 +1485,7 @@ else
 fi
 # ── 24. adversarial release security probes ────────────────────────────────
 log "24. adversarial release credential/workspace probes"
-SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
+create_security_home
 SECURITY_WS="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-ws.XXXXXX")"
 LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" init >/dev/null
 
