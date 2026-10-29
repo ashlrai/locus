@@ -450,3 +450,45 @@ fn canary_scan_unreadable_path_exits_nonzero() {
     assert!(stderr.contains(&file.display().to_string()), "{stderr}");
     assert!(stderr.contains("Permission denied"), "{stderr}");
 }
+
+#[test]
+fn canary_scan_read_error_after_match_exits_nonzero() {
+    const CHILD_ROOT: &str = "LOCUS_CANARY_SCAN_AFTER_MATCH_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT).map(PathBuf::from) {
+        let mut reads = 0;
+        let result = scan_with(&root, "fixture", &mut |path| {
+            reads += 1;
+            if reads == 1 {
+                fs::read(path)
+            } else {
+                Err(io::Error::from_raw_os_error(libc::EACCES))
+            }
+        });
+        assert_canary_absent(&root, result);
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Both files match, so the result is independent of directory ordering.
+    // A scanner that stops on the first match would miss the second read error.
+    fs::write(tmp.path().join("first"), b"fixture").unwrap();
+    fs::write(tmp.path().join("second"), b"fixture").unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "canary_scan_read_error_after_match_exits_nonzero",
+            "--nocapture",
+        ])
+        .env(CHILD_ROOT, tmp.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "incomplete scan succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("canary scan failed"), "{stderr}");
+    assert!(
+        stderr.contains(&tmp.path().display().to_string()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Permission denied"), "{stderr}");
+}
