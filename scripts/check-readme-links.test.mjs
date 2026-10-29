@@ -13,6 +13,36 @@ test('repository README: every link resolves', async () => {
   assert.deepEqual(await checkMarkdown(README), { failures: [], warnings: [] });
 });
 
+test('README install investigation reports only core artifacts and freshness', async () => {
+  const readme = await readFile(README, 'utf8');
+  const script = readme.match(/python3 - "\$investigation_dir\/artifacts\.jsonl" <<'PY'\n([\s\S]*?)\nPY/);
+  assert.ok(script, 'README investigation Python command is missing');
+  const dir = await mkdtemp(join(tmpdir(), 'locus-artifacts-'));
+  try {
+    const path = join(dir, 'artifacts.jsonl');
+    const artifact = (name, fresh, filename) => ({
+      reason: 'compiler-artifact', package_id: 'locus-core 0.5.2',
+      target: { name, kind: ['lib'] }, profile: { opt_level: '3' },
+      features: [], filenames: [filename], fresh,
+    });
+    await writeFile(path, [
+      { reason: 'build-finished' },
+      artifact('other', false, '/tmp/other.rlib'),
+      artifact('locus_core', false, '/tmp/liblocus_core-first.rlib'),
+      artifact('locus_core', true, '/tmp/liblocus_core-second.rlib'),
+    ].map(JSON.stringify).join('\n') + '\n');
+    const run = spawnSync('python3', ['-c', script[1], path], { encoding: 'utf8' });
+    assert.equal(run.status, 0, run.stderr);
+    const lines = run.stdout.trim().split('\n');
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /liblocus_core-first\.rlib.*'fresh': False/);
+    assert.match(lines[1], /liblocus_core-second\.rlib.*'fresh': True/);
+    assert.doesNotMatch(run.stdout, /other\.rlib|\/tmp\//);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test('contributor guide: every link resolves', async () => {
   assert.deepEqual(await checkMarkdown(join(repository, 'CONTRIBUTING.md')), { failures: [], warnings: [] });
 });
