@@ -23,24 +23,22 @@ fn changelog_dead_broker_recipes_match_the_current_hint() {
         .split("## [0.5.2]")
         .next()
         .unwrap();
+    let entry = unreleased
+        .split_once("**Dead-broker recovery (")
+        .expect("unreleased recovery entry exists")
+        .1
+        .split("\n- ")
+        .next()
+        .unwrap();
+    assert!(entry.contains(&current), "entry must contain {current}");
+    assert!(entry.contains("expired pin, invalid or legacy seal, or unreadable session"));
+    assert!(entry.contains("`locus leave --force` and then `locus enter <alias>`"));
+    assert!(entry.contains("Do not force leave for unrelated errors"));
+    let automatic_fallback = "locus enter <alias> || { locus leave --force";
     assert!(
-        unreleased.contains(&current),
-        "unreleased changelog must contain {current}"
+        !changelog.contains(automatic_fallback),
+        "changelog must not recommend automatic forced teardown"
     );
-    let recipe = "eval \"$(locus hook bash)\"; locus enter <alias> || { locus leave --force && locus enter <alias>; }";
-    for heading in [
-        "**Dead-broker recovery hint says `locus enter` first.**",
-        "**Control commands name the stale-pin recovery.**",
-    ] {
-        let entry = changelog
-            .split_once(heading)
-            .expect("changelog entry exists")
-            .1
-            .split("\n- ")
-            .next()
-            .unwrap();
-        assert!(entry.contains(recipe), "{heading} must contain {recipe}");
-    }
 }
 
 /// Run the operator guide's actual Bash commands against a dead broker and
