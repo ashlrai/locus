@@ -183,12 +183,15 @@ assert_preserved() {
     [[ "$(cat "$TEST_CASE/home/.local/bin/locus-mcp")" == 'old mcp' ]] || fail 'old MCP changed'
 }
 
-for platform in linux-x86_64 darwin-arm64 darwin-x86_64; do
+for platform in linux-x86_64 linux-amd64 darwin-arm64 darwin-aarch64 darwin-x86_64 darwin-amd64; do
     new_case
     case "$platform" in
         linux-x86_64) ;;
+        linux-amd64) TEST_ARCH=amd64 ;;
         darwin-arm64) TEST_OS=Darwin; TEST_ARCH=arm64; TEST_TARGET=aarch64-apple-darwin ;;
+        darwin-aarch64) TEST_OS=Darwin; TEST_ARCH=aarch64; TEST_TARGET=aarch64-apple-darwin ;;
         darwin-x86_64) TEST_OS=Darwin; TEST_TARGET=x86_64-apple-darwin ;;
+        darwin-amd64) TEST_OS=Darwin; TEST_ARCH=amd64; TEST_TARGET=x86_64-apple-darwin ;;
     esac
     fixture
     success --version v1.2.3
@@ -259,7 +262,7 @@ for args in help unknown missing-version missing-destination bad-version; do
     ok "handles $args without network"
 done
 
-for platform in Linux-arm64 FreeBSD-x86_64 Darwin-ppc; do
+for platform in Linux-arm64 Linux-aarch64 Windows-x86_64 FreeBSD-x86_64 Darwin-ppc; do
     new_case
     TEST_OS=${platform%-*}; TEST_ARCH=${platform##*-}
     rejection --version v1.2.3
