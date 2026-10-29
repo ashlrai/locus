@@ -8,7 +8,7 @@ What happened when the README install and 30-second commands were followed on a 
 - **cargo.** Needs a current stable rustc. With an older default toolchain (1.83.0) the build failed on `zeroize_derive` 1.5.0 (`edition2024`); `rust-toolchain.toml` does not apply to `cargo install --git`. On stable it built and quickstart worked.
 - **Homebrew.** Not run; `brew` was not on the machine.
 
-The current 30-second commands, on the npm binary, a fresh home, and stdin that was not a terminal:
+The 30-second commands at the time of this audit, on the npm binary, a fresh home, and stdin that was not a terminal:
 
 | Step | Exit | Wall |
 |---|---|---|

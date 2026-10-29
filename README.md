@@ -42,9 +42,14 @@ locus quickstart                        # sample bindings, pin, whoami, doctor
 eval "$(locus hook zsh)"                # or bash; exports the control capability
 locus enter personal                    # pin from this shell (it supervises the pin)
 locus whoami                            # who your agents are acting as, right now
-locus exec --expect personal -- echo ok # runs: personal is pinned
-locus exec --expect acme -- echo ok     # refused, exit 1, child never starts (pin_mismatch)
+locus exec --expect personal --no-resolve -- echo ok # runs: personal is pinned
+locus exec --expect acme --no-resolve -- echo ok     # refused, exit 1, child never starts (pin_mismatch)
 ```
+
+The example uses `--no-resolve` because `echo` needs no provider credentials.
+For provider work, omit it and supply the binding's credential references outside
+the agent context; unresolved credentials are reported, or rejected with
+`--strict-creds`.
 
 What the two extra steps are for:
 

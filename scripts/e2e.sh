@@ -115,6 +115,24 @@ assert "phantom not on PATH" in findings["phantom_missing"]["message"]
 PY
 ok "fresh quickstart doctor exits 0 and reports setup advisories"
 
+# Run the documented example itself in a clean environment with no sample
+# credentials. Keep its temporary home and all output inside the e2e home.
+log "2b. documented sample exec without credentials"
+SAMPLE_DIR="$LOCUS_HOME/sample-exec"
+mkdir -p "$SAMPLE_DIR/home" "$SAMPLE_DIR/tmp"
+awk '/^```bash$/ { in_block = 1; next } /^```$/ { in_block = 0 } in_block { print }' \
+  examples/sample-exec-q8.md >"$SAMPLE_DIR/example.sh"
+env -i HOME="$SAMPLE_DIR/home" TMPDIR="$SAMPLE_DIR/tmp" \
+  PATH="$(dirname "$LOCUS_BIN"):/usr/bin:/bin" NO_COLOR=1 \
+  /bin/bash "$SAMPLE_DIR/example.sh" >"$SAMPLE_DIR/out" 2>"$SAMPLE_DIR/err" \
+  || die "documented sample exec failed"
+grep -Fxq 'sample exec succeeded' "$SAMPLE_DIR/out" \
+  || die "documented sample exec did not run its child"
+if grep -Eiq 'warn|unresolved|not set|unset' "$SAMPLE_DIR/err"; then
+  die "documented sample exec emitted a credential warning"
+fi
+ok "documented sample exec succeeds without unset-credential warnings"
+
 # NDJSON MCP helper: print JSON-RPC lines to locus-mcp, collect responses.
 # Args: one or more JSON objects (as strings). Prints response JSON lines on stdout.
 mcp_rpc() {
@@ -198,6 +216,26 @@ assert w["tenant"] == "personal", w
 assert w.get("seal_ok") is True, w
 '
 ok "pin personal + whoami"
+
+# Credential-bearing exec retains its warning and strict failure behavior.
+without_sample_credentials() {
+  env -u LOCUS_SUPABASE_PERSONAL -u LOCUS_GH_TOKEN_PERSONAL \
+    -u LOCUS_VERCEL_TOKEN_PERSONAL "$LOCUS_BIN" "$@"
+}
+without_sample_credentials exec --expect personal -- /bin/sh -c ':' \
+  >"$LOCUS_HOME/missing-creds.out" 2>"$LOCUS_HOME/missing-creds.err" \
+  || die "ordinary exec with missing sample credentials failed"
+[[ "$(grep -c 'unresolved credential, child runs without it' "$LOCUS_HOME/missing-creds.err")" -eq 3 ]] \
+  || die "ordinary exec did not warn for each missing sample credential"
+if without_sample_credentials exec --strict-creds --expect personal -- /bin/sh -c \
+  'touch "$1"' _ "$LOCUS_HOME/strict-child-started" \
+  >"$LOCUS_HOME/strict-creds.out" 2>"$LOCUS_HOME/strict-creds.err"; then
+  die "strict exec accepted missing sample credentials"
+fi
+grep -Fq 'credential resolve failed (--strict-creds)' "$LOCUS_HOME/strict-creds.err" \
+  || die "strict exec failed for an unexpected reason"
+[[ ! -e "$LOCUS_HOME/strict-child-started" ]] || die "strict exec started its child"
+ok "ordinary exec warns and strict exec refuses missing credentials"
 
 locus pin acme >/dev/null
 who_acme="$(locus whoami --json)"
