@@ -11,7 +11,7 @@ const repo = resolve(here, "..", "..");
 const exe = process.platform === "win32" ? ".exe" : "";
 const candidates = ["release", "debug"].map((p) => join(repo, "target", p, `locus${exe}`));
 const built = candidates.find((p) => existsSync(p));
-const run = (bin) => spawnSync(process.execPath, [join(here, "run.mjs"), "--locus", bin], { encoding: "utf8", timeout: 120_000 });
+const run = (bin, recipe = join(here, "run.mjs")) => spawnSync(process.execPath, [recipe, "--locus", bin], { encoding: "utf8", timeout: 120_000 });
 
 test("recipes pass against the workspace build", { skip: !built && "no target/{release,debug}/locus" }, () => {
   const r = run(built);
@@ -22,5 +22,14 @@ test("recipes pass against the workspace build", { skip: !built && "no target/{r
 test("a missing binary is incomplete, never complete", () => {
   const r = run(join(repo, "target", "does-not-exist", `locus${exe}`));
   assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.doesNotMatch(r.stdout, /^COMPLETE/m);
+});
+
+test("a missing recipe is reported and exits unsuccessfully", () => {
+  const recipe = join(here, "does-not-exist.mjs");
+  const r = run(process.execPath, recipe);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /Cannot find module/);
+  assert.ok(r.stderr.includes(recipe));
   assert.doesNotMatch(r.stdout, /^COMPLETE/m);
 });
