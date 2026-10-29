@@ -81,13 +81,107 @@ retain both min/median/max ranges and the difference of medians. Compare these
 across fresh-home runs to see variation; for changes, repeat both builds on the
 same host with the same procedure and compare their run-to-run medians. Do not
 interpret small differences within that variation as a demonstrated improvement.
-These are not direct comparisons with direnv or sops, which have different work
-and require separate measurements. Process startup, measurement overhead,
+For a same-host comparison with direnv and sops, use the procedure below.
+Process startup, measurement overhead,
 scheduling, filesystem caching and audit sync affect results. Redirecting output
 to `/dev/null` excludes terminal rendering and differs from the inherited output
 in [the historical harness](../scripts/bench_exec.py) and the results below.
 Neither comparison isolates individual internal phases; no fixed pass/fail latency
 threshold is implied.
+
+## Comparing launchers for issue #170
+
+This measures the same `/usr/bin/true` child through all three launchers, plus
+the direct child as a baseline. It compares **launch paths**, not equivalent
+security guarantees: Locus verifies a live pin, isolates the child and writes an
+audit record without resolving credentials; direnv evaluates an allowed `.envrc`;
+sops decrypts an age-encrypted dotenv file. The latter two inject the same one
+synthetic variable, which the child does not inspect. Setup, encryption,
+approval and pinning are outside the timed region. No network or real credentials
+are needed after the prerequisites are installed.
+
+Prerequisites: Bash, Python 3, a Rust toolchain, `direnv`, `sops`, `age-keygen`,
+and `/usr/bin/true` on a Unix-like host. Run the entire block from the repository
+root in one Bash process, on an idle host. It builds the locked release binary,
+uses a fresh temporary home outside the workspace and removes it on exit. The
+generated age identity is disposable; never use a real secret in the fixture.
+
+```bash
+set -euo pipefail
+repo="$PWD"
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable LOCUS_ || true)
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable SOPS_ || true)
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable DIRENV_ || true)
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH" CARGO_TARGET_DIR="$repo/target"
+work="$(mktemp -d "${TMPDIR:-/tmp}/locus-peers.XXXXXXXX")"
+# direnv must allow and execute the same physical path (for example on macOS /tmp).
+work="$(cd "$work" && pwd -P)"
+trap 'rm -rf "$work"' EXIT
+export HOME="$work/home" LOCUS_HOME="$work/locus"
+export SOPS_AGE_KEY_FILE="$work/age-key.txt" SOPS_DISABLE_VERSION_CHECK=1
+export DIRENV_LOG_FORMAT=
+mkdir -p "$HOME" "$work/direnv"
+cargo build --locked --release -p locus-cli
+locus="$repo/target/release/locus"
+cd "$work"
+"$locus" init --with-samples
+eval "$("$locus" hook bash)"
+"$locus" pin personal
+printf 'export BENCH_SYNTHETIC=fixture\n' > "$work/direnv/.envrc"
+direnv allow "$work/direnv/.envrc"
+printf 'BENCH_SYNTHETIC=fixture\n' > "$work/plain.env"
+age-keygen -o "$SOPS_AGE_KEY_FILE" 2>/dev/null
+recipient="$(age-keygen -y "$SOPS_AGE_KEY_FILE")"
+sops --encrypt --age "$recipient" --input-type dotenv --output-type dotenv \
+  "$work/plain.env" > "$work/encrypted.env"
+rm "$work/plain.env"
+python3 - "$locus" "$work/direnv" "$work/encrypted.env" <<'PY'
+import statistics
+import subprocess
+import sys
+import time
+
+locus, directory, encrypted = sys.argv[1:]
+commands = {
+    "direct": ["/usr/bin/true"],
+    "locus": [locus, "exec", "--no-resolve", "--", "/usr/bin/true"],
+    "direnv": ["direnv", "exec", directory, "/usr/bin/true"],
+    "sops": ["sops", "exec-env", encrypted, "/usr/bin/true"],
+}
+samples = {name: [] for name in commands}
+names = list(commands)
+warmups, runs = 4, 32
+for i in range(warmups + runs):
+    # Rotate the first command, including during warmup, to balance order.
+    for name in names[i % len(names):] + names[:i % len(names)]:
+        start = time.perf_counter_ns()
+        result = subprocess.run(commands[name], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elapsed = (time.perf_counter_ns() - start) / 1_000_000
+        if result.returncode != 0:
+            raise SystemExit(f"{name} run {i + 1} failed: exit {result.returncode}; no results")
+        if i >= warmups:
+            samples[name].append(elapsed)
+for name, values in samples.items():
+    print(f"{name}: n={len(values)} min={min(values):.3f} "
+          f"median={statistics.median(values):.3f} max={max(values):.3f} ms")
+PY
+"$locus" leave
+```
+
+All four warmup rounds are discarded; each subsequent round measures every
+command once, with balanced starting order. A nonzero exit aborts without
+printing statistics. To diagnose a failure, run the relevant invocation outside
+the timer with the same temporary setup; never print the key or environment.
+Repeat the complete block in fresh homes and record each run's ranges and medians,
+the commit, tool versions, OS/architecture, filesystem and host load. Output is
+redirected during timing, so terminal rendering is excluded; scheduling, caches,
+audit sync, process startup and filesystem behavior remain included. Compare
+within-run medians and variation across runs, without treating a small difference
+as meaningful if it falls within that variation. These instructions make no
+claim about results on a machine where they have not been measured.
 
 ## Historical measurement
 

@@ -1,5 +1,8 @@
 # Benchmarks
 
+For a repeatable same-host comparison of the three launch paths, see the
+[issue #170 procedure](exec-latency.md#comparing-launchers-for-issue-170).
+
 Measured on 2026-10-26 UTC. One machine, one trial for each install, and 21 runs with the first dropped for each latency series. Every number below comes from those runs or from the public GitHub API on the same date. Method, peers, and the feature notes are in this file. The first-run log and the follow-up issues are in [FIRST-RUN.md](./FIRST-RUN.md).
 
 ## What was compared
