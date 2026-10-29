@@ -405,6 +405,48 @@ fn whoami_json_reports_environment_credential_availability() {
 }
 
 #[test]
+fn whoami_reports_unset_credential_after_pinning_with_one() {
+    const VAR: &str = "LOCUS_GH_TOKEN_PERSONAL";
+    const CANARY: &str = "synthetic-pin-credential-canary";
+    let env = Env::new();
+    let setup = env.run_with(&["quickstart"], None, &[(VAR, CANARY)]);
+    assert!(setup.status.success(), "quickstart failed");
+
+    // The pin was created with a credential, but whoami must inspect its own
+    // environment rather than treating the pin or binding as proof of presence.
+    let out = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .args(["whoami", "--json"])
+        .env("HOME", env.user())
+        .env("LOCUS_HOME", env.home())
+        .env("LOCUS_CONTROL_CAPABILITY", env.cap().unwrap())
+        .env_remove("LOCUS_SESSION_ID")
+        .env_remove(VAR)
+        .current_dir(env.project())
+        .output()
+        .expect("locus runs");
+    assert!(out.status.success(), "whoami failed");
+    assert!(!out
+        .stdout
+        .windows(CANARY.len())
+        .any(|w| w == CANARY.as_bytes()));
+    assert!(!out
+        .stderr
+        .windows(CANARY.len())
+        .any(|w| w == CANARY.as_bytes()));
+    let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["schema"], "locus.whoami.v1");
+    assert_eq!(result["binding_alias"], "personal");
+    let provider = result["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["provider"] == "github")
+        .unwrap();
+    assert_eq!(provider["credential"]["source"], "environment");
+    assert_eq!(provider["credential"]["present"], false);
+}
+
+#[test]
 fn setup_and_settings_status_json() {
     let env = Env::new();
     env.quickstart();
