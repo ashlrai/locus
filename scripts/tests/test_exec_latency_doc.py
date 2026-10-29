@@ -1,7 +1,9 @@
 """Exercise the measurement code published in docs/exec-latency.md."""
 
+import ast
 import os
 import pathlib
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -58,6 +60,31 @@ class MeasurementInstructionsTest(unittest.TestCase):
 
 
 class PeerMeasurementInstructionsTest(unittest.TestCase):
+    def test_readme_commands_match_the_timed_launchers(self):
+        readme = (ROOT / "README.md").read_text()
+        section = readme.split("### Comparing exec launch latency\n", 1)[1]
+        block = section.split("```bash\n", 1)[1].split("\n```", 1)[0]
+        substitutions = {
+            "$locus": "LOCUS_BINARY",
+            "$work/direnv": "DIRENV_DIR",
+            "$work/encrypted.env": "ENCRYPTED_ENV",
+        }
+        documented = []
+        for line in block.splitlines():
+            for source, target in substitutions.items():
+                line = line.replace(source, target)
+            documented.append(shlex.split(line))
+
+        tree = ast.parse(peer_measurement_code())
+        assignment = next(node for node in tree.body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == "commands"
+                                  for target in node.targets))
+        values = {"locus": "LOCUS_BINARY", "directory": "DIRENV_DIR",
+                  "encrypted": "ENCRYPTED_ENV"}
+        timed = [[values[item.id] if isinstance(item, ast.Name) else ast.literal_eval(item)
+                  for item in command.elts] for command in assignment.value.values]
+        self.assertEqual(documented, timed)
+
     def test_setup_allows_envrc_at_the_physical_path(self):
         text = DOC.read_text().split("## Comparing launchers for issue #170", 1)[1]
         self.assertIn('work="$(cd "$work" && pwd -P)"', text)
