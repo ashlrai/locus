@@ -109,7 +109,8 @@ impl CredentialRef {
     }
 }
 
-/// Agent-safe credential metadata. The reference name/value is intentionally absent.
+/// Agent-safe credential metadata. `present` reports resolution in this process,
+/// not merely whether a reference is stored. The reference name/value is absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialMetadata {
     pub present: bool,
