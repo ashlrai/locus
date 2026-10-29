@@ -438,6 +438,9 @@ cargo build --release
 # forensics, goal status — feature-detected)
 ./scripts/e2e.sh
 
+# Full e2e with a custom TMPDIR; also checks workspace cleanup on exit
+./scripts/tests/e2e-tmpdir.sh
+
 # README quickstart rehearsal: replays the extracted 30-second start in a
 # throwaway HOME (--dry-run prints the plan without running it)
 ./scripts/check-readme-quickstart.sh
