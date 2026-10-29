@@ -140,8 +140,8 @@ pub struct AgentReport {
     pub next_steps: Vec<String>,
     /// Human-only recovery when a pin exists but can no longer be verified
     /// (its broker died with the pinning shell, stale generation, bad seal,
-    /// expiry). Dead broker: `eval "$(locus hook bash)"; locus enter <alias> ||
-    /// { locus leave --force && locus enter <alias>; }`. Bad seal or expiry:
+    /// expiry). Dead broker: hook and enter first, with manual forced recovery
+    /// only if enter refuses an invalid or unreadable pin. Bad seal or expiry:
     /// `eval "$(locus hook bash)"; locus leave --force; locus enter <alias>`.
     /// Agents cannot run it; they surface it to the human.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1276,11 +1276,7 @@ mod tests {
         let recovery = report.recovery.clone().expect("stale pin has a recovery");
         // Dead broker with an intact HMAC seal: enter first, force only as fallback.
         assert!(
-            recovery
-                .ends_with("; locus enter acme || { locus leave --force && locus enter acme; }")
-                || recovery.ends_with(
-                    "; locus enter acme; or begin; locus leave --force; and locus enter acme; end"
-                ),
+            recovery.ends_with("; locus enter acme # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter acme"),
             "{recovery}"
         );
         assert!(recovery.contains("locus hook"), "{recovery}");
