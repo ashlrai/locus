@@ -150,6 +150,14 @@ fn scan_with(
     Ok(found)
 }
 
+fn assert_canary_absent(root: &Path, result: io::Result<bool>) {
+    assert!(
+        !result.unwrap_or_else(|e| panic!("canary scan failed: {e}")),
+        "canary found under {}",
+        root.display()
+    );
+}
+
 fn setup(phantom: &Path) -> World {
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
@@ -319,11 +327,7 @@ fn phantom_and_locus_compose_without_leaking_the_canary() {
     }
     assert!(has_files, "canary scan found no files");
     for root in roots {
-        assert!(
-            !scan(&root, &canary).unwrap_or_else(|e| panic!("canary scan failed: {e}")),
-            "canary found under {}",
-            root.display()
-        );
+        assert_canary_absent(&root, scan(&root, &canary));
     }
 }
 
@@ -405,4 +409,44 @@ fn canary_scan_reports_a_denied_read_on_any_runner() {
         "{err}"
     );
     assert!(scan(tmp.path(), "fixture").unwrap());
+}
+
+#[test]
+fn canary_scan_unreadable_path_exits_nonzero() {
+    const CHILD_PATH: &str = "LOCUS_CANARY_SCAN_REGRESSION_PATH";
+    if let Some(path) = std::env::var_os(CHILD_PATH).map(PathBuf::from) {
+        let root = path.parent().unwrap();
+        // Privileged runners may read mode-000 files. Inject the same OS error
+        // in that case so the exit-status regression still runs everywhere.
+        let result = if fs::read(&path).is_err() {
+            scan(root, "fixture")
+        } else {
+            scan_with(root, "fixture", &mut |_| {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            })
+        };
+        assert_canary_absent(root, result);
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("unreadable");
+    fs::write(&file, b"fixture").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "canary_scan_unreadable_path_exits_nonzero",
+            "--nocapture",
+        ])
+        .env(CHILD_PATH, &file)
+        .output()
+        .unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(!output.status.success(), "incomplete scan succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("canary scan failed"), "{stderr}");
+    assert!(stderr.contains(&file.display().to_string()), "{stderr}");
+    assert!(stderr.contains("Permission denied"), "{stderr}");
 }
