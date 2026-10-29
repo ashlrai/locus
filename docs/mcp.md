@@ -390,6 +390,31 @@ the probe never guesses.
 - Protocol versions: negotiates `2025-06-18`, `2025-03-26`, or `2024-11-05` (echoes the client's requested version when supported, else answers `2025-06-18`)  
 - `initialize.instructions` carries crisp agent rules (whoami / `locus_safe_next` first, cannot pin, scope freeze, live operator-controlled pin state, resources)
 
+## Process lifecycle
+
+`locus-mcp` is session-scoped: it must not outlive the process that launched
+it. Whichever shutdown path fires first ends the server:
+
+- **stdin EOF** (stdio transport) — the read loop ends when the pipe's last
+  write end closes. This is the normal client-disconnect path.
+- **Parent death** — a watchdog records the parent pid at startup and exits
+  the server when that process exits: kqueue `EVFILT_PROC`/`NOTE_EXIT` on
+  macOS (event-driven), a `getppid()` poll elsewhere (reparenting always
+  changes the observed ppid; unlike `PR_SET_PDEATHSIG` a poll cannot fire on
+  a parent's *thread* exit while the process lives). Applies to both the
+  stdio and HTTP transports.
+
+The watchdog exists because stdin EOF is not guaranteed: `locus mcp` and the
+npm wrapper launch the server with **inherited** stdio, and the HTTP broker
+runs with stdin null, so a killed launcher — or any parent that is not the
+sole stdin writer — never delivers EOF. The orphaned server used to stay
+blocked in `read()` forever, still holding the executor grant and its
+upstream workers.
+
+A server that is already reparented at startup (launchd, systemd, or a
+double-forked daemon — `ppid == 1`) has no supervising process to watch, so
+the watchdog stays disarmed and daemon lifetime is unchanged.
+
 ## HTTP transport (CI / remote agents)
 
 Stdio remains the default for Claude Code and Cursor. For CI runners and agents that prefer HTTP, enable the **streamable-HTTP-lite** server (JSON-RPC over HTTP with streamable Accept negotiation + multi-message SSE for large results):

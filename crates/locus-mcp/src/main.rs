@@ -23,6 +23,7 @@
 mod anchor;
 mod grant;
 mod http_session;
+mod lifecycle;
 mod peers;
 mod route;
 
@@ -439,6 +440,10 @@ fn run() -> Result<()> {
         // validation authority (unchanged legacy behavior).
         locus_core::restrict_validation_to_executor();
     }
+    // An orphaned server keeps serving the pinned identity — stdin EOF alone
+    // cannot end a launch whose stdin outlives the launcher (inherited stdio,
+    // HTTP transport). Anchor lifetime on the parent process instead.
+    lifecycle::arm_parent_watchdog();
     match mode.http_addr {
         Some(addr) => run_http(addr),
         None => run_stdio(),
