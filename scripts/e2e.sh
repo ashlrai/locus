@@ -184,6 +184,23 @@ for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME", "PERSONAL"
 '
 ok "pin acme + whoami exclusive"
 
+# An unset env: reference must report absent without affecting other providers.
+(
+  unset LOCUS_GH_TOKEN_ACME
+  locus whoami --json | python3 -c '
+import json, sys
+w = json.load(sys.stdin)
+assert w["binding_alias"] == "acme"
+providers = {p["provider"]: p for p in w["providers"]}
+assert providers["github"]["credential"] == {"present": False, "source": "environment"}
+for name in ("supabase", "vercel"):
+    assert providers[name]["credential"] == {"present": True, "source": "environment"}
+assert all("credential_ref" not in p for p in providers.values())
+assert "LOCUS_GH_TOKEN_ACME" not in json.dumps(w)
+'
+)
+ok "whoami reports unset environment credential as absent"
+
 # ── 4. workspace allowlist blocks personal without --force ───────────────────
 log "4. workspace allowlist block personal without --force"
 WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"
