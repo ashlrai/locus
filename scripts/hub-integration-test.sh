@@ -9,6 +9,7 @@
 #
 # Requires: locus (or cargo build), jq, node
 # Safe: never touches ~/.locus; never prints secret values.
+# Cleanup regression: node --test scripts/hub-integration-test.test.mjs
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,14 +36,17 @@ if [[ ! -x "${ROOT}/target/debug/locus" ]]; then
   (cd "$ROOT" && cargo build -q -p locus-cli)
 fi
 
-SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
-SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
+SMOKE_HOME=""
+SMOKE_PROJ=""
 MT_SRV_PID=""
 cleanup() {
   [[ -n "$MT_SRV_PID" ]] && kill "$MT_SRV_PID" 2>/dev/null || true
-  rm -rf "$SMOKE_HOME" "$SMOKE_PROJ"
+  rm -rf -- "$SMOKE_HOME" "$SMOKE_PROJ"
 }
 trap cleanup EXIT
+
+SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
+SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
 
 export LOCUS_HOME="$SMOKE_HOME"
 unset LOCUS_SESSION_ID || true
