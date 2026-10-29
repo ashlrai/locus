@@ -35,11 +35,20 @@ if [[ ! -x "${ROOT}/target/debug/locus" ]]; then
   (cd "$ROOT" && cargo build -q -p locus-cli)
 fi
 
+SMOKE_HOME=""
+SMOKE_PROJ=""
+SMOKE_ERR=""
+cleanup() {
+  [[ -z "$SMOKE_HOME" ]] || rm -rf -- "$SMOKE_HOME"
+  [[ -z "$SMOKE_PROJ" ]] || rm -rf -- "$SMOKE_PROJ"
+  [[ -z "$SMOKE_ERR" ]] || rm -f -- "$SMOKE_ERR"
+}
+trap cleanup EXIT
 SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-smoke.XXXXXX")"
 SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-proj.XXXXXX")"
 SMOKE_ERR="$(mktemp "${TMPDIR:-/tmp}/locus-hub-smoke-err.XXXXXX")"
-cleanup() { rm -rf "$SMOKE_HOME" "$SMOKE_PROJ" "$SMOKE_ERR"; }
-trap cleanup EXIT
+
+bash "$ROOT/scripts/test-hub-smoke-cleanup.sh"
 
 export LOCUS_HOME="$SMOKE_HOME"
 unset LOCUS_SESSION_ID || true
