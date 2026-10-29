@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Troubleshooting
 
+- **Source installation with Rust 1.83 ([#167](https://github.com/ashlrai/locus/issues/167)).**
+  The recorded `cargo install --git` of `locus-cli` and `locus-mcp` failed
+  with the default Rust 1.83.0 toolchain while Cargo parsed the
+  `zeroize_derive` dependency's 2024 edition. The workspace now declares
+  `rust-version = "1.89"`; source installs need Rust and Cargo 1.89 or newer.
+  Cargo 1.83 can fail parsing an edition 2024 dependency before reporting that
+  minimum. `rust-toolchain.toml` does not select a toolchain for an install
+  run outside the checkout. See [the first-run record](docs/FIRST-RUN.md).
+
 - **Fresh quickstart and doctor WARN ([#172](https://github.com/ashlrai/locus/issues/172)).**
   In the recorded first run with published npm 0.5.1, `locus quickstart` exited
   0, but a subsequent `locus doctor` exited 1 with `WARN` and
