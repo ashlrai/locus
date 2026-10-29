@@ -80,7 +80,7 @@ e2e_cleanup() {
     wait "$MT_MCP_PID" 2>/dev/null || true
     MT_MCP_PID=""
   fi
-  rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"
+  rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"
 }
 trap 'e2e_cleanup' EXIT
 ok "isolated home ready"
