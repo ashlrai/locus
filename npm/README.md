@@ -26,6 +26,9 @@ On first run the wrapper:
    and goes straight to this step, which can take several minutes.
 
 Requires Node ≥ 16. Cargo fallback needs [Rust](https://rustup.rs).
+The fallback builds in a temporary private install root and installs the result
+in `~/.locus/bin`; it does not replace binaries in Cargo's install directory.
+It compares the built binary's actual version with the cache before replacement.
 
 The wrapper refuses to overwrite a newer `~/.locus/bin/locus` with its older
 release, including during npm postinstall. It also preserves an existing binary
