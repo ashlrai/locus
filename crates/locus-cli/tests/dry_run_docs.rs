@@ -42,6 +42,56 @@ fn command_matrix_matches_the_documented_plan_forms() {
 }
 
 #[test]
+fn changelog_issue_171_matches_the_cli_and_plan_matrix() {
+    let changelog = include_str!("../../../CHANGELOG.md");
+    let note = changelog
+        .split("- **Dry-run scope ([#171]")
+        .nth(1)
+        .expect("issue 171 changelog note")
+        .split("\n\n")
+        .next()
+        .unwrap();
+    let start = note.find("`exec`").expect("unsupported command list");
+    let end = note.find(". Provider operations").expect("server list end");
+    let unsupported = &note[start..end];
+    let documented: BTreeSet<_> = unsupported
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect();
+    let home = tempfile::tempdir().unwrap();
+    let output = locus(&["topic", "agent-contract", "--json"], home.path());
+    assert!(output.status.success());
+    let contract: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let actual: BTreeSet<_> = contract["dry_run"]["unsupported"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(documented, actual);
+
+    let matrix = forms(
+        include_str!("../../../docs/dry-run-matrix-q8.md"),
+        "| Plan |",
+    );
+    for form in [
+        "init",
+        "pin",
+        "binding add",
+        "agent setup",
+        "adapter install",
+        "events export",
+        "mcp mint",
+        "mcp revoke",
+    ] {
+        assert!(note.contains(&format!("`{form}`")), "missing {form}");
+        assert!(matrix.contains(form), "{form} is not in the plan matrix");
+    }
+}
+
+#[test]
 fn documented_plan_commands_expose_dry_run_in_help() {
     let doc = include_str!("../../../docs/README.md");
     let table = doc
