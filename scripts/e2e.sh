@@ -1469,6 +1469,12 @@ fi
 log "24. adversarial release credential/workspace probes"
 SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
 SECURITY_WS="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-ws.XXXXXX")"
+case "$SECURITY_WS" in
+  "${TMPDIR:-/tmp}"/locus-security-ws.*) ;;
+  *) die "security workspace was created outside the temporary directory" ;;
+esac
+[[ -d "$SECURITY_WS" ]] || die "security workspace was not created"
+ok "security workspace created beneath temporary directory"
 LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" init >/dev/null
 
 # Issue #175: identical retries are no-ops, but conflicting content must
@@ -2330,6 +2336,11 @@ print("mcp list grants=%d revoked_a_rows=%d live_acme=%d" % (len(rows), len(a_ro
     ok "multi-tenant locus-mcp torn down cleanly"
   fi
 fi
+
+e2e_cleanup
+[[ ! -e "$SECURITY_WS" && ! -L "$SECURITY_WS" ]] \
+  || die "security workspace was not cleaned up"
+ok "security workspace cleaned up"
 
 printf '\n========================================\n'
 printf 'e2e PASS  (%d checks, %d skipped)\n' "$pass" "$skip"
