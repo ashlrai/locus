@@ -599,6 +599,48 @@ fn unsigned_release_manifest_requires_explicit_drift_only_verification() {
 }
 
 #[test]
+fn manifest_signer_claim_does_not_authenticate_an_unsigned_or_untrusted_manifest() {
+    let env = Env::new();
+    let path = env.project().join("release.json");
+    let path_arg = path.to_str().unwrap();
+    assert!(env
+        .run(&["adapter", "registry", "export", "--out", path_arg])
+        .status
+        .success());
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["signed_by"] = Value::from("claimed-root");
+    let verify = |manifest: &Value| {
+        std::fs::write(&path, serde_json::to_vec(manifest).unwrap()).unwrap();
+        env.run_with(
+            &[
+                "adapter",
+                "verify-manifest",
+                path_arg,
+                "--allow-unsigned",
+                "--json",
+            ],
+            None,
+            &[("LOCUS_ADAPTER_TRUST_KEYS", "")],
+        )
+    };
+
+    let unsigned = verify(&manifest);
+    assert_eq!(unsigned.status.code(), Some(0));
+    let report = doc(&unsigned, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["signed_by"], "claimed-root");
+    assert_eq!(report["ok"], true);
+
+    // A well-formed signature from an unknown key is not excused by the opt-in.
+    manifest["signature"] = Value::from(format!("ed25519:{}==", "A".repeat(86)));
+    let untrusted = verify(&manifest);
+    assert_eq!(untrusted.status.code(), Some(1));
+    let report = doc(&untrusted, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unknown_key");
+    assert_eq!(report["ok"], false);
+}
+
+#[test]
 fn unsigned_release_manifest_checks_structure_and_catalog_fields() {
     let env = Env::new();
     let path = env.project().join("release.json");
