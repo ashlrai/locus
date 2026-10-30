@@ -25,7 +25,7 @@ whose first key is `schema`. Key on it:
 - The rest of the object is the command's existing payload. Older fields such
   as `schema_version`, `kind` and `version` stay for older readers.
 - No document carries a secret, a control-capability value or a credential.
-  `locus status` and `locus watch` print one line; the others are pretty JSON.
+  `locus status`, `locus watch`, and `locus fleet-feed` print one line; the others are pretty JSON.
 - MCP tool payloads and the dashboard `/api/*` responses are not stamped.
 
 | Command | Schema |
@@ -33,6 +33,7 @@ whose first key is `schema`. Key on it:
 | `locus doctor` | `locus.doctor.v1` |
 | `locus doctor --fix [--apply]` | `locus.doctor.fix.v1` |
 | `locus whoami` | `locus.whoami.v1` |
+| `locus fleet-feed` (always JSON) | `locus.fleet_feed.v1` |
 | `locus status` | `locus.status.v1` |
 | `locus verify session` | `locus.verify.session.v1` |
 | `locus verify claim` | `locus.verify.claim.v1` |
@@ -55,6 +56,15 @@ whose first key is `schema`. Key on it:
 List commands (`binding list`, `events`, `approve list`, `mcp list`,
 `graph list`, `upstream list`) print a bare JSON array, unchanged, and are not
 stamped: wrapping them would break existing readers.
+
+`locus fleet-feed` emits one read-only workbench resource observation with
+`kind: "locus_session"`, `state: "pinned" | "unpinned" | "unhealthy"`, and
+`session_ok` (true only for a verified, unexpired, unfrozen pin with an existing
+binding). Missing authority, malformed sessions, and invalid selected sessions
+are unhealthy. The feed contains no identity strings, credentials, seals, paths,
+or raw errors. Exit zero means the observation was emitted, including unhealthy
+observations; consumers must gate readiness on `session_ok`. Breaking changes
+require a new schema version; additive fields retain v1.
 
 ### Errors
 

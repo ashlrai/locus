@@ -22,6 +22,8 @@ mod exec_exit_codes;
 mod exec_expect;
 #[path = "exec_for.rs"]
 mod exec_for;
+#[path = "fleet_feed_q8.rs"]
+mod fleet_feed_q8;
 #[path = "handshake_conformance.rs"]
 mod handshake_conformance;
 #[path = "json_errors.rs"]
