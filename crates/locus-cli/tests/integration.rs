@@ -48,6 +48,8 @@ mod setup_gemini;
 mod setup_supervised_hint;
 #[path = "stale_pin_recovery.rs"]
 mod stale_pin_recovery;
+#[path = "status_doctor_output.rs"]
+mod status_doctor_output;
 #[path = "status_pin_expiry.rs"]
 mod status_pin_expiry;
 #[path = "stdout_closed.rs"]
