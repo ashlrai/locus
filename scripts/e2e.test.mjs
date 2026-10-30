@@ -11,6 +11,37 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(root, 'scripts', 'e2e.sh');
 const locus = join(root, 'target', 'release', 'locus');
 
+test('binding add regression detects changes to an existing matching file', { timeout: 1_800_000 }, (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-binding-test-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const wrapper = join(fixture, 'locus');
+  const marker = join(fixture, 'first-add');
+  writeFileSync(wrapper, `#!/bin/bash
+if [[ "\${1:-}" == --json && "\${2:-}" == binding && "\${3:-}" == add && "\${4:-}" == e2e-add ]]; then
+  '${locus.replaceAll("'", "'\\''")}' "$@" || exit $?
+  if [[ -e '${marker.replaceAll("'", "'\\''")}' ]]; then
+    printf '\\n# injected rewrite\\n' >> "$LOCUS_HOME/bindings/e2e-add.toml"
+  else
+    : > '${marker.replaceAll("'", "'\\''")}'
+  fi
+  exit 0
+fi
+exec '${locus.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    cwd: root,
+    env: { ...process.env, LOCUS_BIN: wrapper },
+    encoding: 'utf8',
+    timeout: 1_800_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+  assert.equal(result.status, 1, 'e2e should reject a changed binding file');
+  assert.match(result.stderr, /FAIL identical binding add changed file contents/);
+  assert.doesNotMatch(result.stdout, /ok  binding add repeats without a write and rejects conflicts/);
+});
+
 for (const failImport of [false, true]) {
   test(`graph fallback uses TMPDIR and cleans up ${failImport ? 'after import failure' : 'after import'}`, { timeout: 1_800_000 }, (t) => {
     const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-test-'));

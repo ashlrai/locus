@@ -181,6 +181,9 @@ add_binding() {
     --credential-ref env:E2E_ADD_TOKEN --non-interactive
 }
 add_binding acct >"$LOCUS_HOME/add-first.json" || die "first binding add failed"
+# A matching binding may contain user-authored TOML that serialization would
+# discard. Compare the original bytes, including this comment, after the retry.
+printf '\n# Preserve this user-authored comment.\n' >>"$ADD_HOME/bindings/e2e-add.toml"
 cp "$ADD_HOME/bindings/e2e-add.toml" "$LOCUS_HOME/add-original.toml"
 python3 - "$ADD_HOME/bindings/e2e-add.toml" <<'PYTEST'
 import os, sys
