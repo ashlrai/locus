@@ -14,6 +14,8 @@ mod autopin_learned_guard;
 mod autopin_suggest;
 #[path = "doc_facts.rs"]
 mod doc_facts;
+#[path = "doctor_after_quickstart.rs"]
+mod doctor_after_quickstart;
 #[path = "doctor_fix_cli.rs"]
 mod doctor_fix_cli;
 #[path = "doctor_fix_phm_names.rs"]
