@@ -693,6 +693,90 @@ includes process startup and filesystem effects, but not terminal rendering.
 Results depend on the host and conditions recorded above; they are observations,
 not latency or relative-performance guarantees.
 
+#### Run a Locus and direnv comparison locally
+
+For a smaller comparison that needs neither sops nor age, run this complete
+block from the repository root on an idle Unix host. It requires Bash, Python 3,
+Rust/Cargo, `direnv`, and `/usr/bin/true`. Cargo may need network access for
+locked dependencies. The block builds the release CLI, creates a disposable home
+and binding, and removes the temporary files on exit. It does not use real
+credentials or change your existing pin. Keep the block in one Bash process so
+its broker remains alive. `direnv allow` applies only to the temporary fixture.
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+repo="$PWD"
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable LOCUS_ || true)
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable DIRENV_ || true)
+unset RESEND_API_KEY
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH" CARGO_TARGET_DIR="$repo/target"
+work="$(mktemp -d "${TMPDIR:-/tmp}/locus-direnv.XXXXXXXX")"
+work="$(cd "$work" && pwd -P)" # direnv allow and exec must use the same path
+trap 'rm -rf "$work"' EXIT
+export HOME="$work/home" LOCUS_HOME="$work/locus" DIRENV_LOG_FORMAT=
+mkdir -p "$HOME" "$work/direnv"
+cargo build --locked --release -p locus-cli
+locus="$repo/target/release/locus"
+cd "$work"
+"$locus" init
+eval "$("$locus" hook bash)"
+"$locus" binding add bench --tenant bench --provider resend --account bench \
+  --credential-ref env:LOCUS_BENCH_FIXTURE --non-interactive
+export LOCUS_BENCH_FIXTURE=fixture
+"$locus" pin bench
+printf 'export RESEND_API_KEY=fixture\n' > "$work/direnv/.envrc"
+direnv allow "$work/direnv/.envrc"
+# Verify the synthetic value reaches both children without displaying it.
+"$locus" exec --strict-creds -- /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
+direnv exec "$work/direnv" /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
+python3 - "$locus" "$work/direnv" <<'PYBENCH'
+import statistics
+import subprocess
+import sys
+import time
+
+locus, directory = sys.argv[1:]
+commands = {
+    "locus": [locus, "exec", "--strict-creds", "--", "/usr/bin/true"],
+    "direnv": ["direnv", "exec", directory, "/usr/bin/true"],
+}
+samples = {name: [] for name in commands}
+names = list(commands)
+warmups, runs = 4, 32
+for i in range(warmups + runs):
+    for name in names[i % len(names):] + names[:i % len(names)]:
+        start = time.perf_counter_ns()
+        result = subprocess.run(commands[name], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elapsed = (time.perf_counter_ns() - start) / 1_000_000
+        if result.returncode != 0:
+            raise SystemExit(f"{name} run {i + 1} failed: exit {result.returncode}; no results")
+        if i >= warmups:
+            samples[name].append(elapsed)
+for name, values in samples.items():
+    print(f"{name}: n={len(values)} min={min(values):.3f} "
+          f"median={statistics.median(values):.3f} max={max(values):.3f} ms")
+PYBENCH
+"$locus" leave
+BASH
+```
+
+Both timed commands launch `/usr/bin/true` with the same synthetic
+`RESEND_API_KEY`; setup, pinning, and the checks are untimed. Four warmup rounds
+are discarded, followed by 32 measured rounds per launcher, alternating order.
+The script aborts without statistics on a failed invocation and reports sample
+count and minimum, median, and maximum wall time in milliseconds. Repeat the
+whole block at least three times with fresh homes; record each result and the
+range of run medians, along with the commit, OS and architecture, filesystem,
+host load, release profile, and tool versions. Compare medians within each run
+and account for run-to-run variation. The child workload and injected value are
+the same, but the launchers perform different security and setup work as noted
+above; these measurements do not establish equivalent isolation or predict
+performance on another machine.
+
 ### Landing page & dashboard
 
 | App | Role |
