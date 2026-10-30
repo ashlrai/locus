@@ -352,6 +352,18 @@ if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
 fi
 ok "sample exec succeeds without unset-variable warnings"
 
+# Exercise the standalone sample's child as documented, including its check
+# that the isolated environment carries the pinned binding.
+sample_exec_stdout="$(locus exec --expect personal -- sh -c \
+  'test "$LOCUS_BINDING" = personal && echo "sample exec succeeded"' \
+  2>"$sample_exec_stderr")" || die "sample walkthrough exec failed"
+[[ "$sample_exec_stdout" == "sample exec succeeded" ]] \
+  || die "sample walkthrough exec produced unexpected output"
+if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
+  die "sample walkthrough exec emitted an unset-variable warning"
+fi
+ok "sample walkthrough exec succeeds without unset-variable warnings"
+
 # Missing references must still be visible; do not hide real credential errors
 # just to make the configured sample path quiet.
 sample_exec_stdout="$(env -u LOCUS_SUPABASE_PERSONAL -u LOCUS_GH_TOKEN_PERSONAL \
@@ -1025,8 +1037,23 @@ else
   fi
   ok "touchid mock cancel fails closed"
 
+  # JSON mode must reject interactive confirmation before recording anything.
+  if LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json >/dev/null 2>&1; then
+    die "JSON mode accepted a touchid grant"
+  fi
+  locus approve status "$dual_id" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert len(r.get("grants") or []) == 0, r
+assert r.get("authoritative_grants") == 0, r
+'
+  ok "JSON mode refuses touchid without recording a grant"
+
   # A caller-controlled successful mock can only record advisory evidence.
-  g1="$(LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json 2>/dev/null || true)"
+  # The mock avoids a real prompt; inspect the resulting record via status JSON.
+  LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid >/dev/null \
+    || die "mock touchid grant failed"
+  g1="$(locus approve status "$dual_id" --json)"
   echo "$g1" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
