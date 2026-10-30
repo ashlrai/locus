@@ -34,6 +34,7 @@ whose first key is `schema`. Key on it:
 | `locus doctor --fix [--apply]` | `locus.doctor.fix.v1` |
 | `locus whoami` | `locus.whoami.v1` |
 | `locus fleet-feed` (always JSON) | `locus.fleet_feed.v1` |
+| `locus fleet-denials` (always JSON) | `locus.fleet_denials.v1` |
 | `locus status` | `locus.status.v1` |
 | `locus verify session` | `locus.verify.session.v1` |
 | `locus verify claim` | `locus.verify.claim.v1` |
@@ -215,3 +216,10 @@ confirmations take their safe default (`adapter uninstall` without `--yes`
 declines), and `graph export/import` require `LOCUS_GRAPH_PASSPHRASE`.
 Destructive commands keep their explicit flags (`binding rm --yes`,
 `adapter install --yes`) whether or not a terminal is present.
+
+`fleet-denials` projects only fixed denial kinds and numeric audit positions. It
+scans the latest 100 parsed records by default; `--cursor N` scans up to 100
+records after N. Persist `next_cursor`, and continue while `has_more` is true.
+Corrupt lines are skipped. Cursors assume an append-only log; restart without a
+cursor after replacing or truncating the log. This local observation grants no
+execution authority and includes no audit strings or credential values.
