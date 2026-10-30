@@ -25,8 +25,9 @@ test('source installation documents the workspace toolchain and how to verify it
   const install = readme.split('### Install from source')[1]?.split('\n## ')[0];
   assert.ok(install, 'source installation section must exist');
   assert.ok(install.includes(`Rust ${version} or newer`), 'documented minimum must match the workspace');
-  assert.match(install, /rustc --version/);
-  assert.match(install, /cargo --version/);
+  assert.match(install, /minimum supported Rust version \(MSRV\)/);
+  assert.match(install, /\[workspace manifest\]\(\.\/Cargo\.toml\)/);
+  assert.match(install, /```bash\s+rustc --version\s+cargo --version\s+```/);
   assert.match(install, /Rust 1\.83[\s\S]*idna_adapter[\s\S]*2024 edition/);
   assert.match(install, /cargo install\s+--git/);
 });
