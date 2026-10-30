@@ -27,7 +27,6 @@
 //   node apps/web/discoverability.mjs           rewrite all assets in place
 //   node apps/web/discoverability.mjs --check   exit 1 when any asset is stale
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -150,11 +149,13 @@ export function installCommands(root = REPO_ROOT) {
 // README H1 + first descriptive paragraph.
 export function readmeInfo(root = REPO_ROOT) {
   const readme = read(root, 'README.md');
-  const title = readme.match(/^#\s+(.+)$/m)?.[1];
+  // Disjoint body branches preserve greedy whitespace (including blank lines)
+  // without retrying every split of a long whitespace-only heading.
+  const title = readme.match(/^#\s+(\S.*|[^\S\r\n\u2028\u2029])$/m)?.[1];
   if (!title) throw new Error('README.md has no H1');
   const tagline = readme.match(/\*\*(Your coding agent[^*]+)\*\*/)?.[1]
     ?? 'AI-native identity plane for coding agents.';
-  const h2s = [...readme.matchAll(/^##\s+(.+)$/gm)].map((m) => clean(m[1]));
+  const h2s = [...readme.matchAll(/^##\s+(\S.*|[^\S\r\n\u2028\u2029])$/gm)].map((m) => clean(m[1]));
   return { title: clean(title), tagline: clean(tagline), sections: h2s };
 }
 
@@ -166,8 +167,9 @@ export function docsIndex(root = REPO_ROOT) {
   if (!files.length) throw new Error('no markdown files under docs/');
   return files.map((file) => {
     const text = read(root, `docs/${file}`);
-    const headings = [...text.matchAll(/^(#{1,3})\s+(.+)$/gm)]
-      .map((m) => ({ level: m[1].length, text: clean(m[2].replace(/[`[\]*_]/g, '').replace(/#+$/g, '').trim()) }))
+    const headings = [...text.matchAll(/^(#{1,3})\s+(\S.*|[^\S\r\n\u2028\u2029])$/gm)]
+      // Start only at the maximal hash run, avoiding retries at every hash.
+      .map((m) => ({ level: m[1].length, text: clean(m[2].replace(/[`[\]*_]/g, '').replace(/(?<!#)#+$/g, '').trim()) }))
       .filter((h) => h.text);
     const title = headings.find((h) => h.level === 1)?.text ?? file.replace(/\.md$/i, '');
     return { file, title, headings: headings.filter((h) => h.level > 1) };
@@ -176,7 +178,8 @@ export function docsIndex(root = REPO_ROOT) {
 
 export function securityContact(root = REPO_ROOT) {
   const sec = read(root, 'SECURITY.md');
-  const email = sec.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0];
+  // A failed local-part run cannot succeed from any of its suffixes.
+  const email = sec.match(/(?<![a-z0-9._%+-])[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0];
   if (!email) throw new Error('SECURITY.md names no contact email');
   return email;
 }
@@ -539,7 +542,7 @@ export function buildOutputs(root = REPO_ROOT, inputs = buildInputs(root)) {
     'llms.txt': llmsTxt(inputs),
     'llms-full.txt': llmsFull(inputs),
     'sitemap.xml': sitemapXml(inputs),
-    'robots.txt': robotsTxt(inputs),
+    'robots.txt': robotsTxt(),
     'capabilities.json': capabilitiesJson(inputs),
     'server.json': serverJson(inputs),
     '.well-known/security.txt': securityTxt(inputs),
