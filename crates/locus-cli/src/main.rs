@@ -20,6 +20,7 @@ mod dry_run;
 mod exec_perf;
 mod exit;
 mod fleet_feed;
+mod fleet_preflight;
 mod handshake;
 mod json_out;
 mod phantom_preflight;
@@ -351,6 +352,9 @@ enum Commands {
     /// Credential-free JSON pin and session health for workbench resource nodes
     #[command(next_help_heading = "Daily use")]
     FleetFeed,
+
+    /// Read-only JSON launch readiness for unattended `locus exec -- gh`
+    FleetPreflight,
 
     /// Short status line for prompts / CI
     #[command(next_help_heading = "Daily use")]
@@ -1496,6 +1500,7 @@ fn run() -> Result<()> {
         Commands::Graph(sub) => cmd_graph(sub, json, dry_run),
         Commands::Whoami => cmd_whoami(json),
         Commands::FleetFeed => fleet_feed::run(),
+        Commands::FleetPreflight => fleet_preflight::run(),
         Commands::Autopin(AutopinCmd::Suggest { apply }) => {
             cmd_autopin_suggest(apply, json, dry_run)
         }
@@ -1694,7 +1699,8 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
             Some(McpCmd::Mint { .. } | McpCmd::Revoke { .. }) => Plans,
         },
         Commands::Adapter(sub) => adapter_dry_run_support(sub),
-        Commands::FleetFeed
+        Commands::FleetPreflight
+        | Commands::FleetFeed
         | Commands::Whoami
         | Commands::Autopin(AutopinCmd::Suggest { apply: false })
         | Commands::Status { .. }
