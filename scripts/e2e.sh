@@ -124,7 +124,7 @@ mkdir -p "$FRESH_DIR/home" "$FRESH_DIR/project"
 fresh_locus() (
   cd "$FRESH_DIR/project"
   env -i HOME="$FRESH_DIR/home" LOCUS_HOME="$FRESH_DIR/home/.locus" \
-    PATH=/nonexistent SHELL=/bin/bash NO_COLOR=1 "$LOCUS_BIN" "$@"
+    PATH=/nonexistent SHELL=/bin/bash NO_COLOR=1 "$LOCUS_BIN" "$@" </dev/null
 )
 fresh_locus quickstart >"$FRESH_DIR/quickstart.out" 2>"$FRESH_DIR/quickstart.err" \
   || die "fresh quickstart failed"
@@ -148,8 +148,28 @@ findings = {finding["code"]: finding for finding in report["findings"]}
 for code in ("phantom_missing", "control_capability_not_exported"):
     assert findings[code]["severity"] == "warn", f"missing warning: {code}"
 assert "phantom not on PATH" in findings["phantom_missing"]["message"]
+assert "locus hook bash" in findings["control_capability_not_exported"]["message"]
 PY
 ok "fresh quickstart doctor exits 0 and reports setup advisories"
+
+# The advisory-only success must not hide an unsafe workspace policy.
+printf 'invalid = [\n' >"$FRESH_DIR/project/.locus.toml"
+if fresh_locus doctor --json >"$FRESH_DIR/unsafe.json" 2>"$FRESH_DIR/unsafe.err"; then
+  die "doctor accepted an invalid workspace policy after quickstart"
+else
+  doctor_status=$?
+fi
+[[ "$doctor_status" -eq 2 ]] || die "invalid workspace policy should make doctor exit 2"
+python3 - "$FRESH_DIR/unsafe.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as report_file:
+    report = json.load(report_file)
+assert report["verdict"] == "UNSAFE"
+assert report["ok"] is False
+assert any(f["code"] == "workspace_policy_invalid" and f["severity"] == "unsafe"
+           for f in report["findings"])
+PY
+ok "fresh quickstart doctor rejects an invalid workspace policy"
 
 # Issue #175: repeat the same add without rewriting the binding, and keep
 # rejecting a different binding at the same alias without --force.
