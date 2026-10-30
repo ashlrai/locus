@@ -495,17 +495,8 @@ impl Store {
             return authority_anchor::authorize_control(&self.home).map(|()| None);
         };
         let session = &resolved.session;
-        // Expired (authentic, local-control) pin: it is replaced like an
-        // absent one, after the same two capability checks. Audited as
-        // `session.replace_stale` with reason `session expired at ...`.
-        if self.is_expired_authentic(session)? {
-            authority_anchor::authorize_control_teardown(&self.home, false)?;
-            authority_anchor::authorize_control(&self.home)?;
-            return Ok(Some((
-                session.session_id.clone(),
-                format!("session expired at {}", session.expires_at.to_rfc3339()),
-            )));
-        }
+        // Expiry is not a dead-broker recovery case. Preserve the pin until
+        // the operator explicitly clears it with `locus leave --force`.
         session.verify_seal(&self.seal_key()?)?;
         if session.authority != SessionAuthority::LocalControl {
             return Err(LocusError::msg(format!(
@@ -533,7 +524,7 @@ impl Store {
 
     /// True only for a session whose seal verifies (current version,
     /// local-control authority) and whose TTL has passed. Such a pin grants
-    /// nothing and may be cleared or replaced as if absent.
+    /// nothing and may be cleared as if absent. Replacement still checks expiry.
     fn is_expired_authentic(&self, session: &Session) -> Result<bool> {
         Ok(session.is_expired()
             && session.authority == SessionAuthority::LocalControl
@@ -6881,10 +6872,10 @@ allowed_bindings = ["acme"]
         store
             .save_binding(&sample_binding("acme", "acme-corp", "p1"))
             .unwrap();
-        let s = store
-            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::seconds(1)))
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        store.pin("acme", dir.path(), None, false).unwrap();
+        expire_active_in_place(&store);
+        let s: Session =
+            serde_json::from_slice(&fs::read(store.active_session_path()).unwrap()).unwrap();
         let key = store.seal_key().unwrap();
         let err = s.verify(&key).unwrap_err();
         assert!(matches!(err, LocusError::SessionExpired(_)));
@@ -6894,9 +6885,10 @@ allowed_bindings = ["acme"]
         let msg = err.to_string();
         assert!(msg.contains("locus leave --force"), "{msg}");
         assert!(msg.contains("locus enter"), "{msg}");
-        // An expired pin is now treated as absent: a plain pin replaces it.
-        store.pin("acme", dir.path(), None, false).unwrap();
-        assert!(store.require_active().is_ok());
+        assert!(matches!(
+            store.pin("acme", dir.path(), None, false),
+            Err(LocusError::SessionExpired(_))
+        ));
     }
 
     fn renewable_binding(lifetime: Option<&str>) -> Binding {
@@ -6935,18 +6927,24 @@ allowed_bindings = ["acme"]
     }
 
     #[test]
-    fn enter_over_expired_session_replaces_it() {
+    fn enter_over_expired_session_requires_explicit_teardown() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         store.save_binding(&renewable_binding(None)).unwrap();
         let old = store.pin("acme", dir.path(), None, false).unwrap();
         expire_active_in_place(&store);
+        let before = fs::read(store.active_session_path()).unwrap();
+        assert!(matches!(
+            store.pin("acme", dir.path(), None, false),
+            Err(LocusError::SessionExpired(_))
+        ));
+        assert_eq!(fs::read(store.active_session_path()).unwrap(), before);
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(!audit.contains("session.replace_stale"));
+        store.force_leave("operator forced leave", false).unwrap();
         let new = store.pin("acme", dir.path(), None, false).unwrap();
         assert_ne!(old.session_id, new.session_id);
         assert!(store.require_active().is_ok());
-        let audit = fs::read_to_string(store.audit_path()).unwrap();
-        assert!(audit.contains("session.replace_stale"), "{audit}");
-        assert!(audit.contains("session expired at"), "{audit}");
     }
 
     #[test]
