@@ -2,7 +2,7 @@
 // Run: node --test npm/test
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
-const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const test = require("node:test");
@@ -42,6 +42,61 @@ for (const [name, file] of Object.entries(wrappers)) {
     assert.match(msg, /several minutes/);
     assert.match(msg, /rustup\.rs/);
     assert.match(mod.cargoFallbackMessage({ platform: "darwin", arch: "arm64" }, "download-failed"), /^Could not download the prebuilt/);
+  });
+
+  test(`${name}: setup preserves a newer installed binary`, () => {
+    const home = mkdtempSync(join(tmpdir(), "locus-newer-"));
+    try {
+      const packageDir = join(root, name === "locus" ? "npm" : "npm-mcp");
+      const pkg = join(home, "package");
+      mkdirSync(join(pkg, "bin"), { recursive: true });
+      copyFileSync(join(packageDir, "install.js"), join(pkg, "install.js"));
+      copyFileSync(file, join(pkg, "bin", `${name}.js`));
+      const binary = join(home, ".locus", "bin", name);
+      mkdirSync(join(home, ".locus", "bin"), { recursive: true });
+      const [major, minor, patch] = require(join(packageDir, "package.json")).version.split(".").map(Number);
+      const newer = `${major}.${minor}.${patch + 1}`;
+      const original = `installed ${name} fixture\n`;
+      writeFileSync(binary, original);
+      writeFileSync(`${binary}.version`, `${newer}\n`);
+      const attempts = join(home, "external-attempt");
+      const preload = join(home, "preload.js");
+      writeFileSync(preload, `
+        const fs = require("node:fs");
+        const cp = require("node:child_process");
+        Object.defineProperty(process, "platform", { value: "linux" });
+        Object.defineProperty(process, "arch", { value: "x64" });
+        const block = () => { fs.writeFileSync(${JSON.stringify(attempts)}, "attempted"); throw new Error("unexpected external action"); };
+        cp.spawnSync = block;
+        require("node:https").get = block;
+        cp.execFileSync = (command, args) => {
+          if (command !== ${JSON.stringify(binary)}) return block();
+          if (args.length === 1 && args[0] === "--version") return Buffer.from(${JSON.stringify(`${name} ${newer}\n`)});
+          if (${JSON.stringify(name)} !== "locus-mcp" || args[0] !== "fixture-argument") return block();
+          process.stdout.write("ran installed binary\\n");
+          return Buffer.alloc(0);
+        };
+      `);
+      const run = (script, args = []) => spawnSync(process.execPath, ["--require", preload, script, ...args], {
+        env: { HOME: home, USERPROFILE: home, PATH: "" },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      const setup = run(join(pkg, "install.js"));
+      assert.equal(setup.status, 0, setup.stderr);
+      assert.match(setup.stdout, name === "locus" ? /Refusing to replace.*newer/ : /binary already installed/);
+      assert.equal(readFileSync(binary, "utf8"), original);
+      assert.equal(readFileSync(`${binary}.version`, "utf8"), `${newer}\n`);
+      const result = run(join(pkg, "bin", `${name}.js`), ["fixture-argument"]);
+      assert.equal(result.status, name === "locus" ? 1 : 0, result.stderr);
+      if (name === "locus") assert.match(result.stderr, /Refusing to replace.*newer/);
+      else assert.equal(result.stdout, "ran installed binary\n");
+      assert.equal(readFileSync(binary, "utf8"), original);
+      assert.equal(readFileSync(`${binary}.version`, "utf8"), `${newer}\n`);
+      assert.equal(existsSync(attempts), false, "must not download or invoke cargo");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test(`${name}: with no installed binary, runs its executable from the release bundle`, () => {
