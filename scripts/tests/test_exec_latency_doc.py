@@ -60,6 +60,24 @@ class MeasurementInstructionsTest(unittest.TestCase):
 
 
 class PeerMeasurementInstructionsTest(unittest.TestCase):
+    def test_readme_qualifies_the_open_investigation_and_comparison(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        section = readme.split("### Comparing exec launch latency\n", 1)[1].split(
+            "\n### ", 1
+        )[0]
+        for expected in (
+            "Open performance investigation [issue #170]",
+            "issues/170",
+            "issue's report, not a verified benchmark or a guarantee",
+            "four discarded warmup rounds",
+            "32 measured rounds per command",
+            "Locus resolved no secrets",
+            "different guarantees",
+            "does not measure provider API calls or real secret-manager resolution",
+            "not latency or relative-performance guarantees",
+        ):
+            self.assertIn(expected, section)
+
     def test_changelog_attributes_the_report_and_links_the_comparison(self):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         note = changelog.split("**Execution latency report", 1)[1].split("\n\n", 1)[0]

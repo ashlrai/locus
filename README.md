@@ -648,7 +648,10 @@ for comparison guidance and the cautions around verbose logs.
 
 ### Comparing exec launch latency
 
-For [issue #170](https://github.com/ashlrai/locus/issues/170), run the complete
+Open performance investigation [issue #170](https://github.com/ashlrai/locus/issues/170)
+reports `locus exec -- true` as 3–5x slower than direnv and sops. That is the
+issue's report, not a verified benchmark or a guarantee about current releases.
+To investigate, run the complete
 [same-host comparison](./docs/exec-latency.md#comparing-launchers-for-issue-170)
 from the repository root in one Bash process on an idle Unix host. It builds
 Locus in release mode, uses a fresh temporary home, a live synthetic pin and
@@ -680,13 +683,15 @@ HEAD`, `uname -srm`, `rustc --version`, `cargo --version`, `python3 --version`,
 The historical comparison in [benchmarks](./docs/BENCHMARKS.md) used Linux
 6.12 x86_64, 4 vCPU, 15.6 GiB RAM, rustc 1.99.1, Locus commit `e969d9c4`
 (release build), direnv 2.38.2, sops 3.13.3 and age 1.3.2. It used one warmup
-and 20 measured runs, so its results are not the same experiment as the
-procedure above.
+and 20 measured runs; Locus resolved no secrets and warned about missing sample
+credentials. Its results are not the same experiment as the procedure above.
 These launchers provide different guarantees: Locus verifies a pin, isolates the
 child, resolves an environment reference and writes an audit record; direnv
 loads an allowed `.envrc`; sops decrypts a synthetic dotenv file. The comparison
 does not measure provider API calls or real secret-manager resolution. Timing
 includes process startup and filesystem effects, but not terminal rendering.
+Results depend on the host and conditions recorded above; they are observations,
+not latency or relative-performance guarantees.
 
 ### Landing page & dashboard
 
