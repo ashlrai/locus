@@ -683,30 +683,80 @@ fn dead_pin_with_tampered_seal_is_refused() {
     );
 }
 
+/// Expiry removes the old pin's authority, but an authenticated operator may
+/// enter directly. Exercise the CLI boundary as well as the store unit tests.
 #[test]
-fn expired_pin_requires_force_before_a_fresh_pin() {
+fn expired_pin_is_replaced_directly_and_audited() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
     let cap = pin_in_exited_shell(home.path(), cwd.path());
     edit_active(home.path(), true, |s| {
+        s.pinned_at = chrono::Utc::now() - chrono::Duration::hours(2);
         s.expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
     });
     let before = active_bytes(home.path());
-    let out = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "personal"]);
-    assert_refused_untouched(&out, home.path(), &before, "expired pin");
-    let status = locus(home.path(), cwd.path(), &cap, &["status"]);
-    let diagnostic = String::from_utf8_lossy(&status.stdout);
-    assert!(
-        diagnostic.contains("locus leave --force; locus enter personal"),
-        "{diagnostic}"
-    );
-    let leave = locus(home.path(), cwd.path(), &cap, &["leave", "--force"]);
-    assert!(leave.status.success(), "{}", stderr(&leave));
+    let old: locus_core::session::Session = serde_json::from_slice(&before).unwrap();
+    // An expired session itself still grants no authority.
+    assert!(!locus(home.path(), cwd.path(), &cap, &["whoami"])
+        .status
+        .success());
+    assert_eq!(active_bytes(home.path()), before);
+    assert_eq!(replace_stale_audits(home.path()), 0);
+
     let enter = locus(home.path(), cwd.path(), &cap, &["enter", "personal"]);
     assert!(enter.status.success(), "{}", stderr(&enter));
+    let new: locus_core::session::Session =
+        serde_json::from_slice(&active_bytes(home.path())).unwrap();
+    assert_ne!(new.session_id, old.session_id);
+    assert_eq!(new.binding_id, old.binding_id);
+    assert!(!new.is_expired());
     assert!(locus(home.path(), cwd.path(), &cap, &["whoami"])
         .status
         .success());
+    assert_eq!(replace_stale_audits(home.path()), 1);
+    let audit = std::fs::read_to_string(home.path().join("audit/events.jsonl")).unwrap();
+    let replacement: serde_json::Value = audit
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+        .find(|event| event["op"] == "session.replace_stale")
+        .unwrap();
+    assert!(replacement.to_string().contains(&old.session_id));
+    assert!(replacement.to_string().contains("session expired at"));
+    assert!(!audit.contains("operator forced leave"));
+}
+
+/// The expired-pin shortcut must still authenticate the operator and the seal;
+/// it cannot replace delegated or explicitly selected sessions.
+#[test]
+fn expired_pin_replacement_keeps_authentication_gates() {
+    for case in ["wrong capability", "tampered seal", "delegated", "explicit"] {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let cap = pin_in_exited_shell(home.path(), cwd.path());
+        edit_active(home.path(), true, |s| {
+            s.pinned_at = chrono::Utc::now() - chrono::Duration::hours(2);
+            s.expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
+            if case == "delegated" {
+                s.authority = locus_core::session::SessionAuthority::Delegated;
+            }
+        });
+        if case == "tampered seal" {
+            edit_active(home.path(), false, |s| s.seal = "deadbeef".into());
+        }
+        let before = active_bytes(home.path());
+        let session: locus_core::session::Session = serde_json::from_slice(&before).unwrap();
+        let presented = if case == "wrong capability" {
+            "not-the-operator-capability"
+        } else {
+            &cap
+        };
+        let mut command = locus_cmd(home.path(), cwd.path(), presented, &["enter", "personal"]);
+        if case == "explicit" {
+            command.env("LOCUS_SESSION_ID", &session.session_id);
+        }
+        let out = command.output().unwrap();
+        assert_refused_untouched(&out, home.path(), &before, case);
+    }
 }
 
 /// (3b) A dead pin whose sealed authority is not local control is refused,
