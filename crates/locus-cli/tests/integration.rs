@@ -74,6 +74,8 @@ mod status_pin_expiry;
 mod stdout_closed;
 #[path = "verify_session_stream_contract.rs"]
 mod verify_session_stream_contract;
+#[path = "whoami_credential_present.rs"]
+mod whoami_credential_present;
 
 #[test]
 fn all_cli_integration_files_are_registered() {
