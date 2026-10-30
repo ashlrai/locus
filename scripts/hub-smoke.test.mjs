@@ -1,7 +1,7 @@
 // Run: node --test scripts/hub-smoke.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,16 @@ import { test } from 'node:test';
 
 const script = join(dirname(fileURLToPath(import.meta.url)), 'hub-smoke.sh');
 const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+
+test('header documents the local smoke command and prerequisites', () => {
+  const header = readFileSync(script, 'utf8').split('set -euo pipefail', 1)[0];
+  assert.match(header, /repository root[^\n]*\.\/scripts\/hub-smoke\.sh/);
+  for (const prerequisite of ['Bash', 'jq', 'Rust', 'Cargo', 'mktemp', '/dev/urandom']) {
+    assert.ok(header.includes(prerequisite), `missing prerequisite: ${prerequisite}`);
+  }
+  assert.match(header, /writable temporary storage and target\//);
+  assert.match(header, /throwaway LOCUS_HOME/);
+});
 
 function smokeCommandGuard(root) {
   const guard = join(root, 'guard.sh');

@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # hub-smoke.sh — validate Phantom CLI contracts against a throwaway LOCUS_HOME.
 #
-# Requires: locus (or cargo build), jq
-# Safe: never touches ~/.locus; never prints secret values.
+# From the repository root, run: ./scripts/hub-smoke.sh
+# Prerequisites: Bash, jq, Rust and Cargo (the workspace's supported toolchain),
+# standard Unix utilities including mktemp, od, tr, grep and head, /dev/urandom,
+# and writable temporary storage and target/ directory. Cargo builds locus-cli
+# if the local debug binary is absent, even when locus is already on PATH.
+# The script uses a throwaway LOCUS_HOME; no real binding or credentials needed.
 #
 # Resilience notes (CI):
 #   After heavy cargo tests, the first authority-broker spawn can race a tight
