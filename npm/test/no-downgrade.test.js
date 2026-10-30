@@ -2,7 +2,7 @@
 // preloaded transport/process doubles prevent network access or real cargo installs.
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
-const { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const test = require("node:test");
@@ -21,8 +21,16 @@ test("an older wrapper preserves a newer executable even with an old sidecar (#1
   // Node is a real executable whose --version output is accepted by the wrapper.
   // The package requires Node >=16, so its version is newer than this wrapper.
   assert.equal(compareVersions(process.version, version), 1);
-  copyFileSync(process.execPath, binary);
-  chmodSync(binary, 0o755);
+  // Link rather than copy: shared builds (e.g. Homebrew) resolve @rpath
+  // entries such as libnode.dylib relative to the real executable, so a copied
+  // node cannot answer --version outside its prefix and the probe falls back
+  // to the stale sidecar. Fall back to a copy where symlinks are unavailable.
+  try {
+    symlinkSync(process.execPath, binary);
+  } catch {
+    copyFileSync(process.execPath, binary);
+    chmodSync(binary, 0o755);
+  }
   copyFileSync(join(__dirname, "..", "bin", "locus.js"), wrapper);
   writeFileSync(`${binary}.version`, "0.1.0\n");
   const original = readFileSync(binary);
