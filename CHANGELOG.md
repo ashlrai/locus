@@ -25,9 +25,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reproduce cargo-install timings ([#168](https://github.com/ashlrai/locus/issues/168)).**
   The first-run report observed `locus-core` compiling twice during a single
   `cargo install --git` of `locus-cli` and `locus-mcp`: it compiled again
-  during the `locus-mcp` install after `locus-cli` finished. The cause and
-  whether this represents identical compiler work remain unverified; no fix
-  is claimed. See [the benchmark record](docs/BENCHMARKS.md).
+  during the `locus-mcp` install after `locus-cli` finished. This remains an
+  unresolved issue: the cause and whether this represents identical compiler
+  work remain unverified; no fix is claimed. See [the benchmark record](docs/BENCHMARKS.md).
 
   From a checkout, compare one install of both packages with two separate
   installs. This uses the same committed revision, lockfile, release profile,
