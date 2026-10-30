@@ -13,6 +13,23 @@ test('repository README: every link resolves', async () => {
   assert.deepEqual(await checkMarkdown(README), { failures: [], warnings: [] });
 });
 
+test('README distinguishes the proposed shell installer from current options', async () => {
+  const readme = await readFile(README, 'utf8');
+  const install = readme.split('## Install options\n')[1].split('\n## ', 1)[0];
+  const [current, proposal] = install.split('### Proposed shell installer\n');
+  assert.ok(proposal, 'installer proposal is missing');
+  assert.match(current, /brew install ashlrai\/tap\/locus/);
+  assert.match(current, /npm install -g locus-cli @ashlrai\/locus-mcp/);
+  assert.match(proposal, /Issue #169/);
+  assert.match(proposal, /does not establish that a published one-command installation path/);
+  assert.match(proposal, /locus-<target>\.tar\.gz/);
+  assert.match(proposal, /\.sha256/);
+  assert.match(proposal, /Missing or mismatched checksums must stop/);
+  assert.match(proposal, /macOS Apple Silicon and\s+Intel, and Linux x86_64 with glibc/);
+  assert.match(proposal, /unsupported platforms, including Linux\s+ARM/);
+  assert.match(proposal, /### Install from source/);
+});
+
 test('README install investigation reports only core artifacts and freshness', async () => {
   const readme = await readFile(README, 'utf8');
   const script = readme.match(/python3 - "\$investigation_dir\/artifacts\.jsonl" <<'PY'\n([\s\S]*?)\nPY/);

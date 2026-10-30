@@ -165,29 +165,7 @@ Use explicit environment (`env:`) references for supported credential resolution
 
 ## Install options
 
-The shell installer downloads **both `locus` and `locus-mcp`**, verifies the
-archive against its required SHA-256 sidecar, and installs into `~/.local/bin`
-without sudo. It supports macOS (Apple Silicon / Intel) and Linux x86_64
-(glibc); requires Bash, curl, tar, and `sha256sum` or `shasum`.
-
-```bash
-# Download, inspect, then install the latest release
-installer_script=$(mktemp)
-curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/ashlrai/locus/main/scripts/install.sh -o "$installer_script"
-less "$installer_script"
-bash "$installer_script"
-export PATH="$HOME/.local/bin:$PATH"
-
-# Or select a release and a writable destination
-bash "$installer_script" --version v0.5.1 --bin-dir "$HOME/bin"
-```
-
-The installer never edits shell profiles; add the install directory to your
-shell's `PATH` to keep it available in new terminals. Re-run to upgrade.
-Missing or mismatched checksums stop installation before replacing binaries.
-Checksums detect corrupted downloads; they are not publisher signatures.
-For Linux ARM or other platforms, use a source install below.
+Homebrew, npm, and Cargo are the current installation options:
 
 ```bash
 # Homebrew (tap live) — installs locus + locus-mcp
@@ -199,6 +177,25 @@ npx locus-cli --help
 npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
 
 ```
+
+### Proposed shell installer
+
+[Issue #169](https://github.com/ashlrai/locus/issues/169) proposes a
+one-command installation path for machines without npm or Rust. The repository
+contains an [installer implementation](./scripts/install.sh), but this proposal
+does not establish that a published one-command installation path or matching
+assets are available for every release. Use the current options above or the
+source install below in the meantime.
+
+The intended installer selects a platform-specific `locus-<target>.tar.gz`
+release archive and its required `.sha256` sidecar, verifies the archive, and
+installs both `locus` and `locus-mcp`. Missing or mismatched checksums must stop
+installation before binaries are replaced; checksums detect corruption but are
+not publisher signatures. The implementation targets macOS Apple Silicon and
+Intel, and Linux x86_64 with glibc. On unsupported platforms, including Linux
+ARM, try a source install. It requires Bash, curl, tar, and `sha256sum` or `shasum`;
+its default destination is `~/.local/bin`, without sudo or shell profile edits.
+Users must add the destination to their `PATH` themselves.
 
 ### Install from source
 
