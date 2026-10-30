@@ -601,8 +601,7 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
         // seal whose authority anchor, backing, or expiry failed.
         let message = if runtime.seal_ok {
             "active pin unverified: session seal is intact but its authority anchor, backing, \
-             or expiry check failed (see the accompanying finding) — re-pin from the operator \
-             shell; clear a wedged pin with `locus leave --force`"
+             or expiry check failed — see the accompanying findings for details"
         } else {
             "active pin seal invalid (session file may be tampered) — \
              clear it with `locus leave --force`, then re-pin"

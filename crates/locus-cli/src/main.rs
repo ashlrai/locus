@@ -3334,8 +3334,8 @@ fn namespaced_pin_aliases(alias: Option<&str>, ns_raw: &str) -> Result<Vec<Strin
 /// When `leave` / `status` / `doctor` / `exec` fail closed on the ACTIVE
 /// session — invalid or legacy seal, unavailable/stale authority anchor
 /// (e.g. the pinning shell exited and took the broker with it), unparseable
-/// session file — the operator has no built-in way out except hand-deleting
-/// `sessions/active.json`. Name the supported teardown + re-pin instead.
+/// session file — name the appropriate recovery. A dead broker permits
+/// direct re-entry; invalid, expired, or unreadable pins require teardown.
 /// Message only: the error itself still fails closed.
 fn wedged_session_recovery(err: anyhow::Error) -> anyhow::Error {
     wedged_session_recovery_for(err, None)
