@@ -124,6 +124,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   otherwise), and a `--dry-run` on it plans zero changes. A different body for
   the same alias still refuses without `--force`, and `--force` still replaces.
 
+- **Rust 1.89 floor named on every install path ([#167](https://github.com/ashlrai/locus/issues/167)).**
+  The npm wrapper cargo-fallback messages, the npm READMEs and the Homebrew
+  notes now state the same `rust-version` the workspace declares, and
+  `crates/locus-core/tests/rust_version.rs` keeps `cargo metadata`, member
+  crate manifests and the documented install requirements in agreement with it.
+
 ## [0.5.2] - 2026-10-26
 
 Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).

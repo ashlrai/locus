@@ -22,9 +22,11 @@ On first run the wrapper downloads the release binary into `~/.locus/bin`, or fa
 cargo install --git https://github.com/ashlrai/locus locus-mcp --locked
 ```
 
-The wrapper builds in a temporary private Cargo install root, then compares the
-built version with the cache before installing it into `~/.locus/bin`. Existing
-Cargo-installed binaries are left untouched.
+The Cargo fallback requires Rust 1.89 or newer ([rustup](https://rustup.rs)) —
+the workspace's `rust-version`. The wrapper builds in a temporary private
+Cargo install root, then compares the built version with the cache before
+installing it into `~/.locus/bin`. Existing Cargo-installed binaries are left
+untouched.
 
 The wrapper never replaces a newer `~/.locus/bin/locus-mcp` with its older
 release. When the cached binary reports (or its sidecar records) a newer
