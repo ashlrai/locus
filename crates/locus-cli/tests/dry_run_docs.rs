@@ -152,3 +152,43 @@ fn unsupported_exec_preview_does_not_start_the_child() {
     assert_eq!(output.status.code(), Some(1));
     assert!(!marker.exists());
 }
+
+#[test]
+fn readme_identifies_unplannable_commands_that_reject_the_flag() {
+    let readme = include_str!("../../../README.md")
+        .split("### Previewing mutations with `--dry-run`")
+        .nth(1)
+        .expect("README dry-run section")
+        .split("\n---")
+        .next()
+        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    for (name, args) in [
+        ("exec", &["exec", "--", "true"][..]),
+        ("run", &["run", "-b", "example", "--", "true"][..]),
+        ("ci run", &["ci", "run", "-b", "example", "--", "true"][..]),
+        ("mcp", &["mcp"][..]),
+        ("serve", &["serve"][..]),
+        ("dashboard", &["dashboard", "--no-open"][..]),
+    ] {
+        assert!(readme.contains(&format!("`{name}`")), "missing {name}");
+        let mut preview = vec!["--dry-run"];
+        preview.extend_from_slice(args);
+        let output = locus(&preview, home.path());
+        assert_eq!(output.status.code(), Some(2), "{name} accepted --dry-run");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected argument '--dry-run'"));
+    }
+}
+
+#[test]
+fn fleet_read_only_commands_are_in_the_full_matrix_and_help() {
+    let matrix = include_str!("../../../docs/dry-run-matrix-q8.md");
+    let read_only = forms(matrix, "| Accepted, ignored |");
+    let home = tempfile::tempdir().unwrap();
+    for name in ["fleet-preflight", "fleet-feed", "fleet-denials"] {
+        assert!(read_only.contains(name), "missing {name}");
+        let output = locus(&[name, "--help"], home.path());
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("--dry-run"));
+    }
+}

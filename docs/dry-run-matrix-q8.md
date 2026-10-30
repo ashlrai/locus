@@ -15,7 +15,7 @@ and exit codes.
 | Plan | `autopin suggest --apply`, `capability persist`, `capability unpersist`, `ci mint`, `ci env`, `mcp mint`, `mcp revoke` |
 | Plan | `agent setup`, `doctor --fix`, `adapter install`, `adapter uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add`, `adapter registry index remove` |
 | Plan | `approve grant`, `approve deny`, `notify on`, `notify off`, `events export`, `forensics export` |
-| Accepted, ignored | `whoami`, `status`, `doctor` (without `--fix`), `watch`, `hook`, `goal`, `verify`, `upstream`, `completion`, `topic`, `version`, `events` (without `export`) |
+| Accepted, ignored | `whoami`, `status`, `doctor` (without `--fix`), `watch`, `hook`, `goal`, `verify`, `upstream`, `completion`, `topic`, `version`, `fleet-preflight`, `fleet-feed`, `fleet-denials`, `events` (without `export`) |
 | Accepted, ignored | `agent doctor`, `agent report`, `binding list`, `binding show`, `graph list`, `capability status`, `notify status`, `approve list`, `approve status`, `approve wait`, `mcp list`, `autopin suggest` (without `--apply`) |
 | Accepted, ignored | `adapter search`, `adapter list`, `adapter verify`, `adapter verify-manifest`, `adapter trust list`, `adapter registry index list` |
 
