@@ -16,6 +16,8 @@ mod doctor_fix_cli;
 mod doctor_fix_phm_names;
 #[path = "dry_run_docs.rs"]
 mod dry_run_docs;
+#[path = "dry_run_no_side_effects.rs"]
+mod dry_run_no_side_effects;
 #[path = "exec_exit_codes.rs"]
 mod exec_exit_codes;
 #[path = "exec_expect.rs"]

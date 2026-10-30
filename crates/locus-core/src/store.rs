@@ -669,9 +669,9 @@ impl Store {
     }
 
     /// Check for an equivalent existing binding without following symlinks.
-    /// The bindings lock keeps the file stable during the comparison.
+    /// Normal reads hold the bindings lock; preview snapshots never create it.
     pub fn binding_matches(&self, binding: &Binding) -> Result<bool> {
-        let _lock = crate::credential_migration::lock_bindings(self)?;
+        let _lock = self.lock_bindings_for_read()?;
         let path = self.bindings_dir().join(format!("{}.toml", binding.alias));
         ensure_under_dir(&self.bindings_dir(), &path)?;
         let metadata = match fs::symlink_metadata(&path) {
@@ -751,7 +751,7 @@ impl Store {
             )));
         }
         // Prefer alias filename (alias charset validated on save; still constrain join)
-        let bindings_lock = crate::credential_migration::lock_bindings(self)?;
+        let bindings_lock = self.lock_bindings_for_read()?;
         let by_alias = self.bindings_dir().join(format!("{alias_or_id}.toml"));
         if by_alias.exists() {
             ensure_under_dir(&self.bindings_dir(), &by_alias)?;
@@ -772,7 +772,7 @@ impl Store {
     }
 
     pub fn list_bindings(&self) -> Result<Vec<BindingSummary>> {
-        let _lock = crate::credential_migration::lock_bindings(self)?;
+        let _lock = self.lock_bindings_for_read()?;
         let mut out = Vec::new();
         let dir = self.bindings_dir();
         if !dir.exists() {
@@ -797,6 +797,16 @@ impl Store {
             out.push(BindingSummary::from(&binding));
         }
         Ok(out)
+    }
+
+    pub(crate) fn lock_bindings_for_read(&self) -> Result<Option<fs::File>> {
+        if self.existing_only {
+            // Advisory previews may race the first lock's creation. Apply
+            // revalidates under its normal creating lock before any mutation.
+            crate::credential_migration::lock_bindings_existing(self)
+        } else {
+            crate::credential_migration::lock_bindings(self).map(Some)
+        }
     }
 
     /// Explicitly convert conservative legacy bare Phantom names to `phm:NAME`.
