@@ -301,6 +301,24 @@ assert w.get("seal_ok") is True, w
 '
 ok "pin personal + whoami"
 
+# An unset credential must be reported as absent without affecting the other
+# providers or exposing credential references in the agent-facing response.
+who_missing="$(env -u LOCUS_GH_TOKEN_PERSONAL "$LOCUS_BIN" whoami --json)" \
+  || die "whoami with an unset credential failed"
+printf '%s' "$who_missing" | python3 -c '
+import json, sys
+w = json.load(sys.stdin)
+assert w["binding_alias"] == "personal" and w["seal_ok"] is True
+providers = {p["provider"]: p for p in w["providers"]}
+assert set(providers) == {"github", "supabase", "vercel"}
+for name, provider in providers.items():
+    assert "credential_ref" not in provider
+    assert provider["credential"] == {
+        "present": name != "github", "source": "environment"
+    }, f"unexpected credential metadata for {name}"
+' || die "whoami reported incorrect credential presence"
+ok "whoami reports an unset credential as absent"
+
 # README's sample exec happy path should run without credential warnings when
 # the sample references are available. Keep stderr separate from child stdout.
 sample_exec_stderr="$LOCUS_HOME/sample-exec.stderr"
