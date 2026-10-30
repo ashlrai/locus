@@ -304,7 +304,9 @@ ok "pin personal + whoami"
 # README's sample exec happy path should run without credential warnings when
 # the sample references are available. Keep stderr separate from child stdout.
 sample_exec_stderr="$LOCUS_HOME/sample-exec.stderr"
-sample_exec_stdout="$(locus exec --expect personal -- echo ok 2>"$sample_exec_stderr")" \
+sample_exec_stdout="$(env LOCUS_SUPABASE_PERSONAL=sample LOCUS_GH_TOKEN_PERSONAL=sample \
+  LOCUS_VERCEL_TOKEN_PERSONAL=sample "$LOCUS_BIN" exec --expect personal -- echo ok \
+  2>"$sample_exec_stderr")" \
   || die "sample exec failed"
 [[ "$sample_exec_stdout" == "ok" ]] || die "sample exec did not run the child"
 if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
