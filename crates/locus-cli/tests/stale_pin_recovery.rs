@@ -683,26 +683,35 @@ fn dead_pin_with_tampered_seal_is_refused() {
     );
 }
 
-/// Expiry removes the old pin's authority, but an authenticated operator may
-/// enter directly. Exercise the CLI boundary as well as the store unit tests.
+/// Expired pins require explicit teardown even with an authentic seal and
+/// the correct operator capability. Backdate the fixture instead of sleeping.
 #[test]
-fn expired_pin_is_replaced_directly_and_audited() {
+fn expired_pin_requires_force_before_a_fresh_pin() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
     let cap = pin_in_exited_shell(home.path(), cwd.path());
     edit_active(home.path(), true, |s| {
-        s.pinned_at = chrono::Utc::now() - chrono::Duration::hours(2);
-        s.expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        let now = chrono::Utc::now();
+        s.pinned_at = now - chrono::Duration::hours(2);
+        s.expires_at = now - chrono::Duration::hours(1);
     });
     let before = active_bytes(home.path());
     let old: locus_core::session::Session = serde_json::from_slice(&before).unwrap();
-    // An expired session itself still grants no authority.
+    assert!(old.is_expired());
     assert!(!locus(home.path(), cwd.path(), &cap, &["whoami"])
         .status
         .success());
-    assert_eq!(active_bytes(home.path()), before);
-    assert_eq!(replace_stale_audits(home.path()), 0);
-
+    let out = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "personal"]);
+    assert_refused_untouched(&out, home.path(), &before, "expired pin");
+    assert!(stderr(&out).contains("session expired"), "{}", stderr(&out));
+    let status = locus(home.path(), cwd.path(), &cap, &["status"]);
+    let diagnostic = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        diagnostic.contains("locus leave --force; locus enter personal"),
+        "{diagnostic}"
+    );
+    let leave = locus(home.path(), cwd.path(), &cap, &["leave", "--force"]);
+    assert!(leave.status.success(), "{}", stderr(&leave));
     let enter = locus(home.path(), cwd.path(), &cap, &["enter", "personal"]);
     assert!(enter.status.success(), "{}", stderr(&enter));
     let new: locus_core::session::Session =
@@ -713,19 +722,12 @@ fn expired_pin_is_replaced_directly_and_audited() {
     assert!(locus(home.path(), cwd.path(), &cap, &["whoami"])
         .status
         .success());
-    assert_eq!(replace_stale_audits(home.path()), 1);
+    assert_eq!(replace_stale_audits(home.path()), 0);
     let audit = std::fs::read_to_string(home.path().join("audit/events.jsonl")).unwrap();
-    let replacement: serde_json::Value = audit
-        .lines()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
-        .find(|event| event["op"] == "session.replace_stale")
-        .unwrap();
-    assert!(replacement.to_string().contains(&old.session_id));
-    assert!(replacement.to_string().contains("session expired at"));
-    assert!(!audit.contains("operator forced leave"));
+    assert!(audit.contains("session.force_leave"));
 }
 
-/// The expired-pin shortcut must still authenticate the operator and the seal;
+/// Expired pins must still refuse an invalid operator or seal;
 /// it cannot replace delegated or explicitly selected sessions.
 #[test]
 fn expired_pin_replacement_keeps_authentication_gates() {

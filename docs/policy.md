@@ -74,10 +74,10 @@ emits a `pin_expiring` **Warn** finding in the final 5 minutes.
 
 #### Expired pins
 
-An expired pin grants nothing. The store can clear or replace an authentic
-expired local-control session, but the current CLI refuses `locus enter` for
-an expired active pin and directs the operator to `locus leave --force` before
-entering again. The control capability is still required. See [broker
+An expired pin grants nothing. The store can clear an authentic expired
+local-control session, but refuses replacement until it is cleared. The CLI
+refuses `locus enter` for an expired active pin and directs the operator to
+`locus leave --force` before entering again. The control capability is still required. See [broker
 recovery](broker-recovery-q8.md) for the full procedure.
 
 #### Self-renew (`locus renew`, opt-in)
