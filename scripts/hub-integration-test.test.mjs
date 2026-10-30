@@ -76,6 +76,8 @@ test('integration smoke handles spaces in temporary home and project paths', (t)
   assert.match(paths[1].slice(scratch.length + 1), /^locus-hub-int-proj\.[^/]+$/);
   assert.ok(result.stdout.includes(`registerLocusInMcpConfig merge write (${paths[1]}/hub-merged.mcp.json)`));
   assert.match(result.stdout, /^ok\s+mt: live drop-in slice /m);
+  assert.match(result.stdout, /^ok\s+canary scan detects a canary under a spaced path$/m);
+  assert.match(result.stdout, /^ok\s+ambient canary absent under /m);
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
@@ -141,4 +143,35 @@ exec bash "$1"
   assert.equal(readFileSync(entered, 'utf8').trim(), project);
   assert.equal(existsSync(project), false, 'the populated project directory must be removed');
   assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+test('the canary scan reports failure for a canary under a spaced path', () => {
+  // Stub prerequisites; the stub locus leaks the injected ambient canary into
+  // a directory whose name contains spaces, the same way a real leak would.
+  const harness = `
+node() { :; }
+jq() { :; }
+locus() {
+  case " ${'$'}* " in *" mcp "*) return 1 ;; esac
+  [[ -n "${'$'}{LOCUS_HOME:-}" ]] || return 0
+  mkdir -p "${'$'}LOCUS_HOME/space dir"
+  printf 'placeholder\\n' > "${'$'}LOCUS_HOME/plain file"
+  printf '%s\\n' "${'$'}HUB_INT_AMBIENT_CANARY" > "${'$'}LOCUS_HOME/space dir/leaked file"
+}
+export -f node jq locus
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'canary-scan-test', script], {
+    env: { ...process.env, HUB_INT_AMBIENT_CANARY: 'hub-int-test-sentinel-canary' },
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'a leaked canary must fail the run');
+  assert.match(result.stdout, /^ok\s+canary scan detects a canary under a spaced path$/m);
+  assert.match(result.stdout, /^FAIL\s+ambient canary leaked to disk under /m);
+  assert.match(result.stderr, /space dir\/leaked file/);
+  assert.match(result.stdout, /^== hub-integration-test FAILED ==$/m);
 });
