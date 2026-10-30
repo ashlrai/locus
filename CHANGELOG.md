@@ -120,6 +120,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **npm wrapper upgrades ([#177](https://github.com/ashlrai/locus/issues/177)).**
+  In this unreleased checkout, both wrappers compare versions using SemVer
+  precedence, probing the binary with `--version` before falling back to its
+  adjacent `.version` file. By default, an equal cached version is reused; an
+  older one can be upgraded. With a newer or unversioned cache, `locus-cli`
+  preserves the binary and refuses to run before checking PATH, while
+  `@ashlrai/locus-mcp` preserves and runs it. Without a protected cache,
+  a matching or newer native PATH (or Cargo bin) candidate can be reused;
+  otherwise the wrapper downloads its packaged release or falls back to a
+  Cargo build from the repository's default branch. The Cargo build's actual
+  version is checked against an existing cache before replacement.
+
+  A leading wrapper `--force` permits replacing a protected cache; npm's own
+  `--force` and flags after a native command do not. CLI postinstall may
+  download and link a release on supported POSIX platforms, but a protected
+  cache is preserved and npm installation still succeeds. MCP postinstall
+  defers installation to first use. If the CLI wrapper has already been
+  linked to the native binary, reinstall the npm package to restore the wrapper
+  before using its override. See the [CLI wrapper guide](npm/README.md) and
+  [MCP wrapper guide](npm-mcp/README.md); the published v0.5.2 CLI wrapper
+  has the different behavior described in the troubleshooting note above.
+
 - **Dead-broker recovery ([#166](https://github.com/ashlrai/locus/issues/166)).** If the pinning shell exits, its broker can disappear while the sealed pin remains. In the recorded v0.5.1 first run, the hint incorrectly put `locus leave --force` before `locus enter <alias>` for this case, although entering directly succeeded. In a new operator shell using the same `LOCUS_HOME`, load the control capability with the shell hook and first run `locus enter <alias>`; an intact local-control pin with a dead broker can be replaced directly. For Bash the current hint is `eval "$(locus hook bash)"; locus enter <alias> # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter <alias>`.
   Inspect a refusal before taking further action: for an expired pin, invalid or legacy seal, or unreadable session, the current CLI refuses enter. When teardown is appropriate, a human can run `locus leave --force` and then `locus enter <alias>`. Do not force leave for unrelated errors such as a wrong capability or workspace refusal. Verify the new pin with `locus whoami` and keep the operator shell alive. An explicit `LOCUS_SESSION_ID` uses the strict authority check. See the [recovery guide](docs/broker-recovery-q8.md).
 
