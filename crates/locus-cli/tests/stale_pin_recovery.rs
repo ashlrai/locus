@@ -307,6 +307,20 @@ fn stale_pin_surfaces_name_the_recovery() {
 }
 
 #[test]
+fn doctor_displays_enter_before_force_leave_for_dead_broker() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+    let doctor = locus(home.path(), cwd.path(), &cap, &["doctor"]);
+    let output = String::from_utf8_lossy(&doctor.stdout);
+    assert!(!doctor.status.success());
+    let enter = output.find("locus enter personal").expect("enter hint");
+    let force = output.find("locus leave --force").expect("force fallback");
+    assert!(enter < force, "doctor must show enter first: {output}");
+    assert!(output.contains(DEAD_BROKER_RECOVERY));
+}
+
+#[test]
 fn status_without_capability_is_unverified_not_ok() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
