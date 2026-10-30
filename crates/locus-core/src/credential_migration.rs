@@ -596,12 +596,30 @@ pub(crate) fn lock_bindings(store: &Store) -> Result<File> {
     lock_path_exclusive(&store.bindings_dir().join(".credential-migrations.lock"))
 }
 
+/// Preview reads never create a lock, but still validate and acquire one
+/// when present. Only absence is allowed; unsafe or unreadable locks fail closed.
+pub(crate) fn lock_bindings_existing(store: &Store) -> Result<Option<File>> {
+    let path = store.bindings_dir().join(".credential-migrations.lock");
+    match open_lock(&path, false) {
+        Ok(file) => acquire_lock(file).map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 fn lock_path_exclusive(path: &Path) -> Result<File> {
+    acquire_lock(open_lock(path, true)?)
+}
+
+fn open_lock(path: &Path, create: bool) -> std::io::Result<File> {
     let mut options = OpenOptions::new();
-    options.create(true).read(true).write(true);
+    options.create(create).read(true).write(true);
     #[cfg(unix)]
     options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    let file = options.open(path)?;
+    options.open(path)
+}
+
+fn acquire_lock(file: File) -> Result<File> {
     require_regular_single_link(&file)
         .map_err(|_| LocusError::msg("credential migration lock is unsafe"))?;
     file.lock()?;
