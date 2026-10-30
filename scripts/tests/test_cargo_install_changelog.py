@@ -21,13 +21,16 @@ def recipe():
 class CargoInstallRecipeTest(unittest.TestCase):
     def test_note_records_reported_observation_without_claiming_a_fix(self):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        entry = changelog.split("**Reproduce cargo-install timings", 1)[1]
+        unreleased = changelog.split("## [Unreleased]", 1)[1].split("## [0.5.2]", 1)[0]
+        entry = unreleased.split("**Reproduce cargo-install timings", 1)[1]
         note = entry.split("```bash", 1)[0]
         self.assertIn("issues/168", note)
         self.assertIn("`cargo install --git`", note)
         self.assertIn("`locus-core` compiling twice", note)
         self.assertIn("`locus-cli` and `locus-mcp`", note)
-        self.assertIn("no fix\n  is claimed", note)
+        self.assertIn("during the `locus-mcp` install after `locus-cli` finished", note)
+        self.assertIn("unresolved issue", note)
+        self.assertIn("no fix is claimed", note)
 
     def run_recipe(self, fail_at=None):
         with tempfile.TemporaryDirectory() as directory:
