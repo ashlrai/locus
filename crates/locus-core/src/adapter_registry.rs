@@ -1854,6 +1854,43 @@ name = "Empty"
     }
 
     #[test]
+    fn canonical_material_is_not_signature_verification() {
+        let (signing, trust) = gen_ed25519();
+        let current = build_release_manifest_from(&small_catalog(), "0.4.0");
+        let mut signed = current.clone();
+        sign_release_manifest(&mut signed, &trust.id, &signing);
+
+        // Reformatting JSON and reordering catalog lists preserves the signed
+        // material, while the verifier still has to check the signature.
+        let mut reordered = signed.clone();
+        reordered.adapters.reverse();
+        reordered.adapters[0].tools.reverse();
+        let compact = serde_json::to_string(&reordered).unwrap();
+        let parsed = parse_release_manifest(&compact).unwrap();
+        assert_ne!(compact, release_manifest_json(&signed).unwrap());
+        assert_eq!(
+            canonical_release_manifest_material(&signed),
+            canonical_release_manifest_material(&parsed)
+        );
+        let report = verify_release_manifest_against(&parsed, &current, &[trust], false);
+        assert_eq!(report.signature, EntryVerifyStatus::Valid);
+        assert!(report.ok, "{report:?}");
+
+        // The same canonical material without a signature is not authenticated.
+        let mut unsigned = parsed;
+        unsigned.signature = None;
+        unsigned.signed_by = None;
+        assert_eq!(
+            canonical_release_manifest_material(&signed),
+            canonical_release_manifest_material(&unsigned)
+        );
+        let report = verify_release_manifest_against(&unsigned, &current, &[], false);
+        assert_eq!(report.signature, EntryVerifyStatus::Unsigned);
+        assert!(report.drift.is_empty());
+        assert!(!report.ok);
+    }
+
+    #[test]
     fn release_manifest_json_roundtrip() {
         let (signing, trust) = gen_ed25519();
         let mut m = build_release_manifest().expect("builtin release manifest");

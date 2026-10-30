@@ -12,6 +12,9 @@ tag-push release. CI signing is **not active**: the workflow describes it as
 a TODO contingent on provisioning a registry signing key and publishing its
 public key. The archive SHA-256 sidecars check the archives for integrity;
 they do not authenticate their publisher or sign the manifest.
+The release workflow does not run `verify-manifest` on the exported asset.
+Tests of the verifier are not verification of that release asset. The release
+workflow's PR dry run exports the manifest but does not publish a release.
 
 By default, `verify-manifest` rejects the unsigned release asset. Passing
 `--allow-unsigned` checks for drift against the running binary but does not
@@ -76,7 +79,7 @@ independently even when the manifest is signed.
 
 ## What it is
 
-`locus adapter registry export` emits a canonical JSON manifest of the
+`locus adapter registry export` emits a deterministic JSON manifest of the
 **built-in** adapter catalog compiled into the binary:
 
 ```json
@@ -101,11 +104,29 @@ also includes `signature` and `signed_by` fields.
 - `version` is the Locus workspace (crate) version the adapter shipped in.
 - `digest` is `sha256` over the entry's **canonical material** — id, name,
   status, synthetic flag, capabilities, frozen selectors, tools, and
-  destructive tools — so it detects any behavioral catalog change, not just
-  tool renames.
+  destructive tools. It covers those catalog fields, not the adapter's
+  implementation or every possible change to its behavior.
 - Adapters and tool lists are sorted; exporting twice from the same binary is
-  byte-identical. `signature`/`signed_by` are excluded from the signed
-  material, so signing does not perturb it.
+  byte-identical.
+
+### Canonicalization is not signature verification
+
+The JSON is an interchange format; its raw bytes are not the signature input.
+For signing and verification, Locus constructs separate canonical material: a
+versioned header containing the schema, Locus version, and adapter count,
+followed by sorted adapter lines containing the id, name, version, sorted
+tools, and entry digest. The `signature` and `signed_by` fields are excluded.
+This deterministic representation lets equivalent ordering and JSON formatting
+produce the same signing material; constructing it does not authenticate the
+material or verify a signature.
+
+Signature verification is a separate operation: `verify-manifest` resolves
+the declared `signed_by` key from the trust store and checks the Ed25519
+signature over that canonical material. The key id selects a key; it is not
+itself part of the signed material. A valid result therefore depends on the
+consumer having independently trusted the selected public key. Exporting an
+unsigned manifest, calculating its entry digests, or getting `drift none` with
+`--allow-unsigned` does not perform this signature check.
 
 ## Trust model
 
@@ -113,7 +134,7 @@ also includes `signature` and `signed_by` fields.
 |-------|-------|------|
 | **Operator** (registry root) | ed25519 **private** seed | Can sign a manifest locally and distribute it out of band |
 | **Consumer** (any Locus install) | ed25519 **public** key, pinned in the local trust store | Can verify an operator-signed manifest and compare it with the running binary |
-| **CI** | nothing | Attaches the **unsigned** canonical manifest as a release asset (no signing secret is provisioned; see the `TODO(registry-signing)` block in `.github/workflows/release.yml`) |
+| **CI** | nothing | Exports the **unsigned** manifest and attaches it on tag-push releases; it does not verify its signature (see the `TODO(registry-signing)` block in `.github/workflows/release.yml`) |
 
 Trust keys are the same store used by `locus adapter verify`
 (merged, env wins on same id):
@@ -142,8 +163,8 @@ locus adapter registry export --sign --out locus-adapters-v0.5.0.json
 ```
 
 `--sign` **refuses** to export when no key is available — there is no silent
-fallback to unsigned output. Without `--sign` the export is the same canonical
-JSON, just unsigned (what CI attaches to each GitHub release as
+fallback to unsigned output. Without `--sign` the export is unsigned (what CI
+attaches to each tag-push GitHub release as
 `locus-adapters-<tag>.json`).
 
 Distribute the matching public key through a trusted channel; consumers pin it once:
