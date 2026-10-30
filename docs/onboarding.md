@@ -237,6 +237,19 @@ runs a mint → verify → revoke probe against a throwaway home.
 | `mcp_registered.grok` is `false` | Re-run `locus agent setup --apply --client grok` (writes `~/.grok/config.toml`); for a nonstandard path set `LOCUS_GROK_MCP_CONFIG` |
 | `phm:` refs unresolved | Unsupported scoped Secrets integration; supply an explicit `env:VAR` reference. Doctor never reveals or probes named secrets |
 
+For unattended fleet launch checks, run `locus fleet-preflight` (JSON by
+default; `--json` is also accepted). Schema `locus.fleet_preflight.v1` exposes
+`exec_ready`, a fixed `reason`, and a `human_command` when blocked. Exit zero
+means the observation succeeded; scripts must inspect `exec_ready`. For an unpinned
+home, `locus enter` uses the workspace default or opt-in autopin; without
+either, the human must choose an alias from `locus binding list`.
+The check reads existing state, verifies seal, live broker, expiry and drift,
+and checks credential availability and the local `gh` executable. It never
+pins, freezes, grants authority, starts gh, or contacts GitHub. Readiness is a
+snapshot of local launch prerequisites; it cannot guarantee upstream token
+validity, network access, or the outcome of a particular gh operation.
+
+
 ## Related
 
 - [docs/mcp.md](./mcp.md) — client wiring details, auto-pin signals, HTTP transport
