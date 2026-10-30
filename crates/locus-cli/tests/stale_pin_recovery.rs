@@ -44,6 +44,50 @@ fn changelog_dead_broker_recipes_match_the_current_hint() {
     );
 }
 
+#[test]
+fn readme_recovery_explains_force_options_consistent_with_cli_help() {
+    let readme = include_str!("../../../README.md");
+    let recovery = readme
+        .split_once("### Recovering after the broker exits")
+        .unwrap()
+        .1
+        .split_once("### Fresh quickstart doctor warning")
+        .unwrap()
+        .0
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(recovery.contains("invalid or legacy seal"));
+    assert!(recovery.contains("`locus enter --force` is a different option: it allows bindings outside the workspace allowlist"));
+    assert!(recovery.contains(
+        "only when neither a live broker nor a persisted operator capability is available"
+    ));
+    assert!(recovery
+        .contains("cannot override a live broker's refusal or a mismatching persisted capability"));
+    assert!(recovery.contains("A subsequent `enter` still requires normal authorization"));
+
+    let help = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .args(["leave", "--help"])
+        .output()
+        .expect("locus leave help runs");
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("--force"));
+    assert!(help.contains("--no-verifier"));
+    assert!(help.contains("without capability verification"));
+    assert!(help
+        .contains("Never overrides a live broker's refusal or a mismatching persisted capability"));
+
+    let enter_help = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .args(["enter", "--help"])
+        .output()
+        .expect("locus enter help runs");
+    assert!(enter_help.status.success());
+    let enter_help = String::from_utf8(enter_help.stdout).unwrap();
+    assert!(enter_help.contains("Allow bindings outside workspace allowlist"));
+}
+
 /// Run the operator guide's and README's Bash commands against a dead broker
 /// and a damaged seal, keeping both recovery recipes aligned with the CLI.
 #[test]
