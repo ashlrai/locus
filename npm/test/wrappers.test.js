@@ -44,6 +44,68 @@ for (const [name, file] of Object.entries(wrappers)) {
     assert.match(mod.cargoFallbackMessage({ platform: "darwin", arch: "arm64" }, "download-failed"), /^Could not download the prebuilt/);
   });
 
+  test(`${name}: with no installed binary, runs its executable from the release bundle`, () => {
+    const home = mkdtempSync(join(tmpdir(), "locus-bundle-"));
+    try {
+      const binary = join(home, ".locus", "bin", name);
+      const preload = join(home, "release-fixture.js");
+      writeFileSync(preload, `
+        const assert = require("node:assert/strict");
+        const crypto = require("node:crypto");
+        const fs = require("node:fs");
+        const path = require("node:path");
+        const cp = require("node:child_process");
+        const { EventEmitter } = require("node:events");
+        Object.defineProperty(process, "platform", { value: "linux" });
+        Object.defineProperty(process, "arch", { value: "x64" });
+        const archive = Buffer.from("release archive fixture");
+        cp.spawnSync = (command) => {
+          assert.equal(command, "which", "must not invoke cargo");
+          return { status: 1, stdout: "" };
+        };
+        cp.execFileSync = (command, args) => {
+          if (command === "tar") {
+            const directory = path.join(args[args.indexOf("-C") + 1], "locus-x86_64-unknown-linux-gnu");
+            fs.mkdirSync(directory);
+            fs.writeFileSync(path.join(directory, "locus"), "bundled locus");
+            fs.writeFileSync(path.join(directory, "locus-mcp"), "bundled locus-mcp");
+            return Buffer.alloc(0);
+          }
+          assert.equal(command, ${JSON.stringify(binary)});
+          assert.deepEqual(args, ["fixture-argument"]);
+          assert.equal(fs.readFileSync(command, "utf8"), ${JSON.stringify(`bundled ${name}`)});
+          process.stdout.write("selected bundle member\\n");
+          return Buffer.alloc(0);
+        };
+        require("node:https").get = (url, callback) => {
+          const request = new EventEmitter();
+          process.nextTick(() => {
+            const response = new EventEmitter();
+            response.statusCode = 200;
+            response.headers = {};
+            callback(response);
+            response.emit("data", url.endsWith(".sha256")
+              ? Buffer.from(crypto.createHash("sha256").update(archive).digest("hex") + "  " + path.basename(url.slice(0, -7)) + "\\n")
+              : archive);
+            response.emit("end");
+          });
+          return request;
+        };
+      `);
+      const result = spawnSync(process.execPath, ["--require", preload, file, "fixture-argument"], {
+        env: { HOME: home, USERPROFILE: home, PATH: "", LOCUS_NPM_NO_LINK: "1" },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.signal, null);
+      assert.equal(result.stdout, "selected bundle member\n");
+      assert.equal(readFileSync(binary, "utf8"), `bundled ${name}`);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test(`${name}: on a platform without a prebuilt binary it explains the cargo fallback before trying it (no network)`, () => {
     const home = mkdtempSync(join(tmpdir(), "locus-wrapper-"));
     try {
