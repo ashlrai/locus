@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -30,14 +30,53 @@ test('README install investigation reports only core artifacts and freshness', a
       artifact('other', false, '/tmp/other.rlib'),
       artifact('locus_core', false, '/tmp/liblocus_core-first.rlib'),
       artifact('locus_core', true, '/tmp/liblocus_core-second.rlib'),
-    ].map(JSON.stringify).join('\n') + '\n');
+    ].map(JSON.stringify).join('\n') + '\nnon-JSON output\n42\n');
     const run = spawnSync('python3', ['-c', script[1], path], { encoding: 'utf8' });
     assert.equal(run.status, 0, run.stderr);
+    assert.match(run.stderr, /Skipped 2 non-object or non-JSON line/);
     const lines = run.stdout.trim().split('\n');
     assert.equal(lines.length, 2);
     assert.match(lines[0], /liblocus_core-first\.rlib.*'fresh': False/);
     assert.match(lines[1], /liblocus_core-second\.rlib.*'fresh': True/);
     assert.doesNotMatch(run.stdout, /other\.rlib|\/tmp\//);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('README install investigation stops on failure and captures successful evidence', async () => {
+  const readme = await readFile(README, 'utf8');
+  const section = readme.split('### Investigating repeated `locus-core` compilation')[1];
+  const recipe = section?.match(/```bash\n([\s\S]*?)\n```/)?.[1];
+  assert.ok(recipe, 'README investigation recipe is missing');
+  const dir = await mkdtemp(join(tmpdir(), 'locus-recipe-'));
+  try {
+    const cargo = join(dir, 'cargo');
+    await writeFile(cargo, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'cargo test fixture\n'; exit 0; fi
+printf '%s\n' "$@" > "$CALL_LOG"
+if [ "\${FAIL_INSTALL:-}" = 1 ]; then echo 'fixture failure' >&2; exit 7; fi
+printf '%s\n' '{"reason":"compiler-artifact","package_id":"locus-core fixture","target":{"name":"locus_core","kind":["lib"]},"profile":{},"features":[],"filenames":["/tmp/core.rlib"],"fresh":false}'
+printf 'Compiling locus-core\nFinished \`release\`\n' >&2
+`);
+    await chmod(cargo, 0o755);
+    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir, CALL_LOG: join(dir, 'args') };
+    const run = (extra = {}) => spawnSync('bash', ['-c', recipe], {
+      cwd: repository, env: { ...env, ...extra }, encoding: 'utf8',
+    });
+    const success = run();
+    assert.equal(success.status, 0, success.stderr);
+    assert.match(success.stdout, /Compiling locus-core/);
+    assert.match(success.stdout, /'fresh': False/);
+    const args = (await readFile(env.CALL_LOG, 'utf8')).trim().split('\n');
+    for (const arg of ['--rev', '--locked', '--target-dir', '--root', '--message-format=json', 'locus-cli', 'locus-mcp']) {
+      assert.ok(args.includes(arg), `missing ${arg}`);
+    }
+    assert.match(args[args.indexOf('--rev') + 1], /^[a-f0-9]{40}$/);
+    const failed = run({ FAIL_INSTALL: '1' });
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /Install failed/);
+    assert.doesNotMatch(failed.stdout, /'fresh':/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
