@@ -46,7 +46,7 @@ Only if enter is refused (expired pin, bad seal), run `locus leave --force` firs
 | Crate | Role |
 |-------|------|
 | **locus-core** | Binding, Session, Seal (HMAC), Policy, Store (`~/.locus`), isolation env, CredentialRef resolve, adapters, workers |
-| **locus-cli** | Human control plane. Daily use: `enter`, `switch`, `pin`, `leave`, `renew`, `whoami`, `fleet-feed`, `status`, `exec`, `run`, `binding`. Setup: `init`, `quickstart`, `onboard`, `setup`, `agent`, `doctor`, `hook`, `mcp`, `workspace`, and more. `locus --help` is the full grouped list |
+| **locus-cli** | Human control plane. Daily use: `enter`, `switch`, `pin`, `leave`, `renew`, `whoami`, `fleet-feed`, `fleet-denials`, `fleet-preflight`, `status`, `exec`, `run`, `binding`. Setup: `init`, `quickstart`, `onboard`, `setup`, `agent`, `doctor`, `hook`, `mcp`, `workspace`, and more. `locus --help` is the full grouped list |
 | **locus-mcp** | Stdio MCP multiplexor — tools = control + **pinned binding only** |
 
 Planes (see [docs/architecture.md](./docs/architecture.md)):

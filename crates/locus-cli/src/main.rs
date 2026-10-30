@@ -19,6 +19,7 @@ mod dry_run;
 #[cfg(all(test, unix))]
 mod exec_perf;
 mod exit;
+mod fleet_denials;
 mod fleet_feed;
 mod fleet_preflight;
 mod handshake;
@@ -68,7 +69,7 @@ Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
   Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard\n  \
-  Daily use     enter · switch · pin · leave · renew · whoami · fleet-feed · status · exec · run · binding\n  \
+  Daily use     enter · switch · pin · leave · renew · whoami · fleet-feed · fleet-denials · fleet-preflight · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
   Audit         events · forensics\n  \
@@ -352,6 +353,13 @@ enum Commands {
     /// Credential-free JSON pin and session health for workbench resource nodes
     #[command(next_help_heading = "Daily use")]
     FleetFeed,
+
+    /// Value-free JSON denials from the latest 100 audit records; poll with cursor
+    FleetDenials {
+        /// Number of parsed audit records already consumed (reset after log replacement)
+        #[arg(long)]
+        cursor: Option<usize>,
+    },
 
     /// Read-only JSON launch readiness for unattended `locus exec -- gh`
     FleetPreflight,
@@ -1500,6 +1508,7 @@ fn run() -> Result<()> {
         Commands::Graph(sub) => cmd_graph(sub, json, dry_run),
         Commands::Whoami => cmd_whoami(json),
         Commands::FleetFeed => fleet_feed::run(),
+        Commands::FleetDenials { cursor } => fleet_denials::run(cursor),
         Commands::FleetPreflight => fleet_preflight::run(),
         Commands::Autopin(AutopinCmd::Suggest { apply }) => {
             cmd_autopin_suggest(apply, json, dry_run)
@@ -1701,6 +1710,7 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
         Commands::Adapter(sub) => adapter_dry_run_support(sub),
         Commands::FleetPreflight
         | Commands::FleetFeed
+        | Commands::FleetDenials { .. }
         | Commands::Whoami
         | Commands::Autopin(AutopinCmd::Suggest { apply: false })
         | Commands::Status { .. }

@@ -287,7 +287,7 @@ impl Store {
     }
 
     pub fn audit_path(&self) -> PathBuf {
-        self.home.join("audit").join("events.jsonl")
+        audit_events_path(&self.home)
     }
 
     /// Load `$LOCUS_HOME/config.toml` (defaults if missing).
@@ -4160,6 +4160,12 @@ fn write_default_binding_with_sync(
         let _ = fs::remove_file(&tmp);
     }
     res.map_err(Into::into)
+}
+
+/// `audit/events.jsonl` under `home` — free function so read-only observers
+/// resolve the log without opening (initializing) a `Store`.
+pub fn audit_events_path(home: &Path) -> PathBuf {
+    home.join("audit").join("events.jsonl")
 }
 
 pub fn locus_home() -> Result<PathBuf> {
