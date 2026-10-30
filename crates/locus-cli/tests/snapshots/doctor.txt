@@ -1,0 +1,17 @@
+doctor locus 0.5.2
+  verdict   WARN
+  home      <HOME>/locus
+  bindings  0
+  seal      ok
+  pin       none
+  runtime   not_pinned
+  approvals ok  pending=0 dual_control_waiting=0 approved=0 untrusted=0 expired_authenticated=0 denied=0
+  phantom   missing
+  autopin   no config.toml
+            config.toml not present (defaults: manual pin)
+  workspace none
+  audit     total=0  recent_scope_freeze=0  recent_deny=0
+  near_miss last_24h=0  (scope_freeze=0 require_approval=0)
+  ! [no_bindings] no bindings configured (locus init --with-samples)
+  ! [phantom_missing] phantom not on PATH (install Phantom Secrets for Phantom credential references)
+  ! [control_capability_missing] LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY="$(openssl rand -hex 32)"; then persist for new shells with eval "$(locus hook bash)"

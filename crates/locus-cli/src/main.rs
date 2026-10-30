@@ -11,6 +11,8 @@
 #[macro_use]
 mod stdout;
 
+mod cmd_doctor;
+mod cmd_status;
 mod config_rewrite;
 mod cred_diag;
 mod dry_run;
@@ -1491,7 +1493,7 @@ fn run() -> Result<()> {
         Commands::Autopin(AutopinCmd::Suggest { apply }) => {
             cmd_autopin_suggest(apply, json, dry_run)
         }
-        Commands::Status { oneline } => cmd_status(oneline, json),
+        Commands::Status { oneline } => cmd_status::run(oneline, json),
         Commands::Agent(sub) => cmd_agent(sub, json, dry_run),
         Commands::Goal(sub) => cmd_goal(sub, json),
         Commands::Verify(sub) => cmd_verify(sub, json),
@@ -1542,7 +1544,7 @@ fn run() -> Result<()> {
             force,
         } => cmd_workspace(default, allow, require_pin, force, json, dry_run),
         Commands::Doctor { fix: true, apply } => cmd_doctor_fix(json, apply, dry_run),
-        Commands::Doctor { .. } => cmd_doctor(json),
+        Commands::Doctor { .. } => cmd_doctor::run(json),
         Commands::Watch {
             interval,
             once,
@@ -3886,136 +3888,6 @@ fn cmd_whoami(json: bool) -> Result<()> {
             bits.join("  ").dimmed(),
             format!("credential={}", p.credential.source).dimmed()
         );
-    }
-    Ok(())
-}
-
-fn cmd_status(oneline: bool, json: bool) -> Result<()> {
-    let s = store()?;
-    let _ = s.check_drift_and_freeze();
-    let require_pin = find_workspace(&cwd())?
-        .map(|(_, cfg)| cfg.require_pin)
-        .unwrap_or(false);
-    match s
-        .active_session()
-        .map_err(|e| wedged_session_recovery(anyhow::Error::new(e)))?
-    {
-        None => {
-            if json {
-                json_out::print_line(
-                    json_out::STATUS,
-                    &json!({
-                        "pinned": false,
-                        "require_pin": require_pin,
-                    }),
-                )?;
-            } else if oneline {
-                // Hook-friendly tokens:
-                //   unpinned | require_pin | frozen | invalid | alias:tenant
-                if require_pin {
-                    println!("require_pin");
-                } else {
-                    println!("unpinned");
-                }
-            } else {
-                if require_pin {
-                    println!(
-                        "{} unpinned — workspace require_pin: run `locus enter <alias>`",
-                        "!".red().bold()
-                    );
-                } else {
-                    println!(
-                        "{} unpinned — run `locus enter <alias>`",
-                        "!".yellow().bold()
-                    );
-                }
-            }
-        }
-        Some(session) => {
-            let key = s.seal_key()?;
-            let seal_ok = session.verify_seal(&key).is_ok();
-            let frozen = session.frozen;
-            let check = status_pin_check(&s, &session, seal_ok);
-            let ok = seal_ok && check.usable && !frozen && !session.is_expired();
-            if json {
-                json_out::print_line(
-                    json_out::STATUS,
-                    &json!({
-                        "pinned": true,
-                        "binding": session.binding_alias,
-                        "tenant": session.tenant,
-                        "session_id": session.session_id,
-                        "seal_ok": seal_ok,
-                        "frozen": frozen,
-                        "frozen_reason": session.frozen_reason,
-                        "expired": session.is_expired(),
-                        "require_pin": require_pin,
-                        "mode": if session.is_namespaced() { "namespaced" } else { "exclusive" },
-                        "namespaces": session.all_aliases(),
-                        "authority_verified": check.verified,
-                        "expires_at": session.expires_at.to_rfc3339(),
-                        "expires_in_secs": (session.expires_at - chrono::Utc::now()).num_seconds().max(0),
-                        "ok": ok,
-                        "error": check.error,
-                        "recovery": check.recovery,
-                    }),
-                )?;
-            } else if oneline {
-                if frozen {
-                    println!("frozen");
-                } else if !ok {
-                    println!("invalid");
-                } else {
-                    println!("{}:{}", session.binding_alias, session.tenant);
-                }
-            } else {
-                let mark = if frozen {
-                    "FROZEN".red()
-                } else if ok && !check.verified {
-                    "UNVERIFIED".yellow()
-                } else if ok {
-                    "ok".green()
-                } else {
-                    "INVALID".red()
-                };
-                println!(
-                    "{} {} ({})  {}",
-                    mark,
-                    session.binding_alias.cyan().bold(),
-                    session.tenant,
-                    session.session_id.dimmed()
-                );
-                if !frozen {
-                    let left = (session.expires_at - chrono::Utc::now()).num_seconds();
-                    let line = format!("  expires  {}", pin_time_left(left));
-                    if left < PIN_EXPIRY_WARN_SECS {
-                        println!(
-                            "{}  {}",
-                            line.yellow(),
-                            format!("(renew: locus enter {})", session.binding_alias).dimmed()
-                        );
-                    } else {
-                        println!("{}", line.dimmed());
-                    }
-                }
-                if frozen {
-                    println!(
-                        "  session_frozen: re-pin ({})",
-                        session.frozen_reason.as_deref().unwrap_or("binding_drift")
-                    );
-                }
-                if let Some(error) = &check.error {
-                    let label = if ok { "note " } else { "error" };
-                    println!("  {label}    {error}");
-                }
-                if let Some(recovery) = &check.recovery {
-                    println!("  recover  {}", recovery.cyan());
-                }
-            }
-            if !ok {
-                exit::ExitCode::Unsafe.exit();
-            }
-        }
     }
     Ok(())
 }
@@ -7429,47 +7301,6 @@ fn add_doctor_envelope(value: &mut serde_json::Value, preflight_refused: bool) {
     obj.insert("status".into(), status.into());
     obj.insert("native_status".into(), native.into());
     obj.insert("checks".into(), checks.into());
-}
-
-fn cmd_doctor(json: bool) -> Result<()> {
-    let s = store()?;
-
-    // Continuous whoami: freeze session if binding material drifted under pin.
-    // Best-effort — a wedged session must not abort doctor itself;
-    // build_doctor_report re-runs this and classifies the wedge as a
-    // stale_session finding with the `locus leave --force` recovery.
-    let _ = s.check_drift_and_freeze();
-
-    let report = gather_doctor_report(&s)?;
-
-    // Opt-in (LOCUS_PHANTOM_PREFLIGHT=1 or strict): Phantom's value-free agent
-    // preflight. Verdict and check ids only; a refusal lifts SAFE to exit 1.
-    let preflight = phantom_preflight::evaluate(
-        phantom_preflight::mode_from(std::env::var("LOCUS_PHANTOM_PREFLIGHT").ok().as_deref()),
-        phantom_preflight::run_phantom,
-    );
-
-    if json {
-        let mut value = serde_json::to_value(&report)?;
-        if let (Some(p), Some(obj)) = (&preflight, value.as_object_mut()) {
-            obj.insert("phantom_preflight".into(), serde_json::to_value(p)?);
-        }
-        let refused = preflight.as_ref().is_some_and(|p| p.refuse);
-        add_doctor_envelope(&mut value, refused);
-        json_out::print(json_out::DOCTOR, &value)?;
-    } else {
-        print_doctor_human(&report);
-        if let Some(p) = &preflight {
-            match &p.message {
-                Some(m) => println!("{m}"),
-                None => println!("phantom preflight: ready"),
-            }
-        }
-    }
-
-    let refused = preflight.as_ref().is_some_and(|p| p.refuse);
-    doctor_exit_code(&report, refused).exit_unless_success();
-    Ok(())
 }
 
 /// First-run setup advice stays visible without failing a diagnostic command.
