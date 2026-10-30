@@ -66,6 +66,8 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     if (failImport) {
       assert.ok(/graph import failed/.test(result.stderr), 'expected graph import failure');
     } else {
+      assert.match(result.stdout, /ok  sample exec succeeds without unset-variable warnings/);
+      assert.match(result.stdout, /ok  sample exec reports missing credentials/);
       assert.ok(/ok  graph export\/import into fresh LOCUS_HOME/.test(result.stdout), 'fresh import did not pass');
       assert.ok(/e2e PASS/.test(result.stdout), 'e2e did not pass');
       const summary = result.stdout.match(/e2e PASS  \((\d+) checks, (\d+) skipped\)/);
@@ -74,3 +76,27 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     }
   });
 }
+
+test('sample exec regression rejects an unset-variable warning', { timeout: 1_800_000 }, (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-warning-test-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const wrapper = join(fixture, 'locus');
+  writeFileSync(wrapper, `#!/bin/bash
+if [[ "$*" == 'exec --expect personal -- echo ok' ]]; then
+  printf '%s\\n' 'warning: synthetic unset-variable warning' >&2
+fi
+exec '${locus.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    cwd: root,
+    env: { ...process.env, LOCUS_BIN: wrapper },
+    encoding: 'utf8',
+    timeout: 1_800_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+  assert.equal(result.status, 1, 'e2e should reject the injected warning');
+  assert.match(result.stderr, /FAIL sample exec emitted an unset-variable warning/);
+  assert.doesNotMatch(result.stdout, /ok  sample exec succeeds without unset-variable warnings/);
+});
