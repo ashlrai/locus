@@ -2176,7 +2176,8 @@ impl Store {
         authority_anchor::authorize_control(&self.home)?;
         let (report, file) = self.autopin_suggestion_plan(cwd)?;
         let alias = report.suggestion.as_deref().expect("validated suggestion");
-        write_default_binding(&file, alias)?;
+        let binding = self.load_binding(alias)?;
+        write_default_binding(&file, &binding)?;
         Ok((report, file))
     }
 
@@ -4103,8 +4104,8 @@ fn read_locus_toml_nofollow(file: &Path) -> Result<Option<(String, fs::Permissio
 }
 
 /// Atomically set `default_binding` in a `.locus.toml`, keeping other keys.
-fn write_default_binding(file: &Path, alias: &str) -> Result<()> {
-    write_default_binding_with_sync(file, alias, |dir| {
+fn write_default_binding(file: &Path, binding: &Binding) -> Result<()> {
+    write_default_binding_with_sync(file, binding, |dir| {
         #[cfg(unix)]
         fs::File::open(dir)?.sync_all()?;
         #[cfg(not(unix))]
@@ -4115,11 +4116,23 @@ fn write_default_binding(file: &Path, alias: &str) -> Result<()> {
 
 fn write_default_binding_with_sync(
     file: &Path,
-    alias: &str,
+    binding: &Binding,
     sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
 ) -> Result<()> {
     use std::io::Write;
     let existing = read_locus_toml_nofollow(file)?;
+    // Recheck the policy from the exact read used to build the update: a
+    // policy changed since planning must not allow a blocked winner through.
+    if let Some((text, _)) = &existing {
+        let cfg = WorkspaceConfig::parse(text)?;
+        if !cfg.allows(&binding.alias) && !cfg.allows(&binding.id) {
+            return Err(LocusError::binding_not_allowed(
+                &binding.alias,
+                file,
+                &cfg.allowed_bindings,
+            ));
+        }
+    }
     let mut table = match &existing {
         Some((text, _)) => toml::from_str::<toml::Table>(text)
             .map_err(|e| LocusError::msg(format!("{}: {e}", file.display())))?,
@@ -4131,7 +4144,7 @@ fn write_default_binding_with_sync(
     };
     table.insert(
         "default_binding".into(),
-        toml::Value::String(alias.to_string()),
+        toml::Value::String(binding.alias.clone()),
     );
     let text = toml::to_string_pretty(&table)
         .map_err(|e| LocusError::msg(format!("serialize .locus.toml: {e}")))?;
@@ -4299,6 +4312,22 @@ mod tests {
         assert!(!s.active_session_path().exists());
     }
 
+    #[test]
+    fn default_binding_writer_rechecks_workspace_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".locus.toml");
+        let policy = "allowed_bindings = [\"personal\"]\nrequire_pin = true\n";
+        fs::write(&file, policy).unwrap();
+        let binding = sample_binding("acme", "acme-corp", "proj_acme");
+        let err = super::write_default_binding(&file, &binding).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::LocusError::BindingNotAllowed { .. }
+        ));
+        assert_eq!(fs::read_to_string(&file).unwrap(), policy);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn default_binding_syncs_parent_after_rename_and_reports_sync_failure() {
@@ -4306,7 +4335,8 @@ mod tests {
         let file = dir.path().join(".locus.toml");
         fs::write(&file, "default_binding = \"old\"\nrequire_pin = true\n").unwrap();
         let mut synced = false;
-        super::write_default_binding_with_sync(&file, "acme", |parent| {
+        let binding = sample_binding("acme", "acme-corp", "proj_acme");
+        super::write_default_binding_with_sync(&file, &binding, |parent| {
             assert_eq!(parent, dir.path());
             let cfg = WorkspaceConfig::parse(&fs::read_to_string(&file)?).unwrap();
             assert_eq!(cfg.default_binding.as_deref(), Some("acme"));
@@ -4321,7 +4351,8 @@ mod tests {
 
         // The rename has happened if directory fsync fails. Surface the I/O
         // error instead of claiming that the update is durably committed.
-        let err = super::write_default_binding_with_sync(&file, "personal", |_| {
+        let binding = sample_binding("personal", "personal", "proj_personal");
+        let err = super::write_default_binding_with_sync(&file, &binding, |_| {
             Err(std::io::Error::other("directory sync failed"))
         })
         .unwrap_err();
@@ -4343,7 +4374,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink"), "{err}");
-        let err = super::write_default_binding(&link, "acme")
+        let binding = sample_binding("acme", "acme-corp", "proj_acme");
+        let err = super::write_default_binding(&link, &binding)
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink"), "{err}");
