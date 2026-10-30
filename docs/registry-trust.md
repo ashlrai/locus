@@ -20,6 +20,12 @@ distribute a manifest; that optional process is not the CI release process.
 Publishing a registry root and signing manifests in CI remain future plans,
 not guarantees of current releases. See the [roadmap](./adapter-sdk.md#signed-registry-roadmap).
 
+The attachment is catalog metadata, not a signed provenance statement. Its
+filename names the tag, but the manifest does not bind a Git tag or commit,
+build process, archive, or executable hash. A version string is not proof of
+any of those relationships. An attacker able to replace both an archive and
+its checksum sidecar can make the checksum check pass.
+
 ## Local verification of an unsigned release manifest
 
 1. Obtain the release's `locus-adapters-<tag>.json` and the corresponding
@@ -101,8 +107,9 @@ also includes `signature` and `signed_by` fields.
 - `version` is the Locus workspace (crate) version the adapter shipped in.
 - `digest` is `sha256` over the entry's **canonical material** — id, name,
   status, synthetic flag, capabilities, frozen selectors, tools, and
-  destructive tools — so it detects any behavioral catalog change, not just
-  tool renames.
+  destructive tools. It detects changes to that catalog metadata when compared
+  with a trusted catalog; it does not hash adapter implementation or detect
+  behavior changes that leave the metadata unchanged.
 - Adapters and tool lists are sorted; exporting twice from the same binary is
   byte-identical. `signature`/`signed_by` are excluded from the signed
   material, so signing does not perturb it.
@@ -163,22 +170,31 @@ locus adapter verify-manifest locus-adapters-v0.5.0.json [--json]
 
 For a signed manifest, both checks must pass (fail closed):
 
-1. **Provenance** — the signature stored in the manifest verifies its canonical
-   material against a key pinned in the local trust store, and `signed_by`
-   names that key. Unsigned, unknown-key, invalid, and malformed signatures
-   all fail.
+1. **Catalog signature** — the signature stored in the manifest verifies its
+   canonical material against the key selected by `signed_by` in the local
+   trust store. This authenticates that material to the holder of that key;
+   the consumer must establish separately who controls the key and what they
+   are authorized to sign. Unsigned, unknown-key, invalid, and malformed
+   signatures all fail.
 2. **No drift** — the running binary's built-in adapter set matches the
    manifest: same Locus version, adapter ids, names, adapter versions, tool
    lists, and per-adapter `sha256` digests. Comparison trims surrounding
    whitespace, matches adapter ids case-insensitively, and ignores tool order.
    Added, removed, or changed entries fail with a per-finding drift report.
 
-Together: *"the adapter catalog in this binary matches the set the
-registry root signed for this release."*
+Together these checks show that the catalog reported by the running binary
+matches the catalog material signed by the holder of the locally trusted key.
+They do not prove that the binary is authentic, that the signer built it, or
+that the manifest belongs to a particular tag or archive. The signature also
+does not establish freshness: a previously signed matching catalog can be
+replayed. Establish the binary's provenance and the key's identity through
+independent trusted channels.
 
 `--allow-unsigned` relaxes **only** the unsigned case (a missing, null, empty,
 or whitespace-only signature). Any nonempty signature that is malformed,
 untrusted, or invalid still fails, even with the flag. Drift always fails.
+An unsigned manifest may still contain a `signed_by` value; the reported name
+is only a claim unless the signature status is `valid`.
 
 ## Non-goals
 
