@@ -683,12 +683,11 @@ includes process startup and filesystem effects, but not terminal rendering.
 Results depend on the host and conditions recorded above; they are observations,
 not latency or relative-performance guarantees.
 
-#### Run a Locus and direnv comparison locally
+#### Run the comparison locally
 
-For a smaller comparison that needs neither sops nor age, run this complete
-block from the repository root on an idle Unix host. It requires Bash, Python 3,
-Rust/Cargo, `direnv`, and `/usr/bin/true`. Cargo may need network access for
-locked dependencies. The block builds the release CLI, creates a disposable home
+Run this complete block from the repository root on an idle Unix host. It requires
+Bash, Python 3, Rust/Cargo, `direnv`, `sops`, `age-keygen`, and `/usr/bin/true`.
+Cargo may need network access for locked dependencies. The block builds the release CLI, creates a disposable home
 and binding, and removes the temporary files on exit. It does not use real
 credentials or change your existing pin. Keep the block in one Bash process so
 its broker remains alive. `direnv allow` applies only to the temporary fixture.
@@ -699,14 +698,16 @@ set -euo pipefail
 repo="$PWD"
 while IFS= read -r name; do unset "$name"; done < <(compgen -A variable LOCUS_ || true)
 while IFS= read -r name; do unset "$name"; done < <(compgen -A variable DIRENV_ || true)
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable SOPS_ || true)
 unset RESEND_API_KEY
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH" CARGO_TARGET_DIR="$repo/target"
-work="$(mktemp -d "${TMPDIR:-/tmp}/locus-direnv.XXXXXXXX")"
+work="$(mktemp -d "${TMPDIR:-/tmp}/locus-peers.XXXXXXXX")"
 work="$(cd "$work" && pwd -P)" # direnv allow and exec must use the same path
 trap 'rm -rf "$work"' EXIT
 export HOME="$work/home" LOCUS_HOME="$work/locus" DIRENV_LOG_FORMAT=
+export SOPS_AGE_KEY_FILE="$work/age-key.txt" SOPS_DISABLE_VERSION_CHECK=1
 mkdir -p "$HOME" "$work/direnv"
 cargo build --locked --release -p locus-cli
 locus="$repo/target/release/locus"
@@ -719,19 +720,28 @@ export LOCUS_BENCH_FIXTURE=fixture
 "$locus" pin bench
 printf 'export RESEND_API_KEY=fixture\n' > "$work/direnv/.envrc"
 direnv allow "$work/direnv/.envrc"
-# Verify the synthetic value reaches both children without displaying it.
+printf 'RESEND_API_KEY=fixture\n' > "$work/plain.env"
+age-keygen -o "$SOPS_AGE_KEY_FILE" 2>/dev/null
+recipient="$(age-keygen -y "$SOPS_AGE_KEY_FILE")"
+sops --encrypt --age "$recipient" --input-type dotenv --output-type dotenv \
+  "$work/plain.env" > "$work/encrypted.env"
+rm "$work/plain.env"
+# Verify the synthetic value reaches each child without displaying it.
 "$locus" exec --strict-creds -- /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
 direnv exec "$work/direnv" /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
-python3 - "$locus" "$work/direnv" <<'PYBENCH'
+sops exec-env "$work/encrypted.env" 'test "$RESEND_API_KEY" = fixture'
+python3 - "$locus" "$work/direnv" "$work/encrypted.env" <<'PYBENCH'
 import statistics
 import subprocess
 import sys
 import time
 
-locus, directory = sys.argv[1:]
+locus, directory, encrypted = sys.argv[1:]
 commands = {
+    "direct": ["/usr/bin/true"],
     "locus": [locus, "exec", "--strict-creds", "--", "/usr/bin/true"],
     "direnv": ["direnv", "exec", directory, "/usr/bin/true"],
+    "sops": ["sops", "exec-env", encrypted, "/usr/bin/true"],
 }
 samples = {name: [] for name in commands}
 names = list(commands)
@@ -754,15 +764,16 @@ PYBENCH
 BASH
 ```
 
-Both timed commands launch `/usr/bin/true` with the same synthetic
-`RESEND_API_KEY`; setup, pinning, and the checks are untimed. Four warmup rounds
-are discarded, followed by 32 measured rounds per launcher, alternating order.
+All three launchers run `/usr/bin/true` with the same synthetic `RESEND_API_KEY`;
+the direct baseline supplies none. Setup, pinning, encryption, and checks are
+untimed. Four warmup rounds are discarded, followed by 32 measured rounds per
+command, rotating the starting order.
 The script aborts without statistics on a failed invocation and reports sample
 count and minimum, median, and maximum wall time in milliseconds. Repeat the
 whole block at least three times with fresh homes; record each result and the
 range of run medians, along with the commit, OS and architecture, filesystem,
 host load, release profile, and tool versions. Compare medians within each run
-and account for run-to-run variation. The child workload and injected value are
+and account for run-to-run variation. The child workload and launcher-injected value are
 the same, but the launchers perform different security and setup work as noted
 above; these measurements do not establish equivalent isolation or predict
 performance on another machine.
