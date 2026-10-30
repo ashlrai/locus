@@ -31,7 +31,8 @@ Requires Node ≥ 16. Without an override, the wrapper selects a binary as follo
    version into `~/.locus/bin`. If the download fails, or there is no prebuilt
    release for the platform (currently Linux arm64 and Windows), it builds
    with `cargo install --git https://github.com/ashlrai/locus locus-cli --locked`.
-   This fallback requires [Rust](https://rustup.rs) and can take several minutes.
+   This fallback requires Rust 1.89 or newer ([rustup](https://rustup.rs)) — the
+   workspace's `rust-version` — and can take several minutes.
 
 Versions are compared using SemVer precedence, so prereleases precede their
 stable release and build metadata does not affect ordering. The wrapper probes

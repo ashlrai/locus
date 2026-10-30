@@ -34,6 +34,9 @@ const VERSION = "0.5.2";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus-mcp";
 const CARGO_PACKAGE = "locus-mcp";
+// Minimum Rust for the cargo fallback; must equal the workspace `rust-version`
+// in the repo's Cargo.toml (crates/locus-core/tests/rust_version.rs checks it).
+const MIN_RUST_VERSION = "1.89";
 // `cargo install` takes the crate as a positional argument; it has no --package flag.
 const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} ${CARGO_PACKAGE} --locked`;
 const CACHE_DIR = join(
@@ -72,7 +75,7 @@ function cargoFallbackMessage(runtime = process, reason = "no-prebuilt") {
       : `Could not download the prebuilt locus-mcp v${VERSION} binary for ${platform}`;
   return (
     `${why}; building from source with cargo instead. ` +
-    `This can take several minutes and needs Rust (https://rustup.rs).`
+    `This can take several minutes and needs Rust ${MIN_RUST_VERSION} or newer (https://rustup.rs).`
   );
 }
 
@@ -355,7 +358,7 @@ function installViaCargo(binaryPath, options) {
     );
     if (result.status !== 0) {
       throw new Error(
-        `cargo install failed (exit ${result.status}). Install Rust from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
+        `cargo install failed (exit ${result.status}). Install Rust ${MIN_RUST_VERSION} or newer from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
       );
     }
     const path = join(root, "bin", getBinaryFilename());
