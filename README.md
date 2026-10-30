@@ -295,8 +295,7 @@ checkout; supply their normal required arguments:
 | Setup and adapters | `agent setup`, `doctor --fix`, `adapter install`, `adapter uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add`, `adapter registry index remove` |
 | Approvals and audit | `approve grant`, `approve deny`, `notify on`, `notify off`, `events export`, `forensics export` |
 
-For example, `locus init --dry-run --json` previews initialization. The
-acceptance criteria for a plan are:
+For example, `locus init --dry-run --json` previews initialization. A plan should:
 
 - Perform read-only preflight checks and describe the proposed changes; JSON
   plans use the `locus.plan.v1` schema.
@@ -307,11 +306,20 @@ acceptance criteria for a plan are:
   does not authenticate the control capability or guarantee that a later real
   command will be authorized or succeed.
 
-`setup --print` and `setup --client generic` remain print-only, even with the
-flag. `doctor --fix --apply --dry-run`, `agent setup --apply --dry-run`, and
+`doctor --fix` previews repairs by default; `--apply` writes them. Likewise,
+`binding migrate-credential-refs` previews by default and `--write` persists
+changes. `setup --print` and `setup --client generic` remain print-only, even
+with the flag. Adapter install and registry index add previews do not fetch or
+verify remote content.
+
+`doctor --fix --apply --dry-run`, `agent setup --apply --dry-run`, and
 `pin --rewrite-configs --dry-run` are rejected. `exec`, `run`, `ci run`, the
-`mcp` server, `serve`, and `dashboard` cannot produce plans; child commands,
-provider operations, and MCP tool calls are outside this preview's scope.
+`mcp` server (without a subcommand), `serve`, and `dashboard` cannot produce
+plans. `locus exec --dry-run -- <command>` exits 1; other placements and the
+other listed commands reject the flag with exit 2. Arguments after `--` belong
+to the child. Child commands, provider operations, and MCP tool calls are
+outside this preview's scope.
+
 Read-only commands accept and ignore the flag, so their normal behavior can
 still create a Locus home or freeze a drifted session. See the [dry-run command
 matrix](docs/dry-run-matrix-q8.md) for all forms and limitations.
@@ -502,32 +510,14 @@ locus topic <name>                    # dashboard · forensics · serve · goal 
 
 ### Previewing mutations
 
-[Issue #171](https://github.com/ashlrai/locus/issues/171) proposed a dry-run
-feature for mutating commands: validate what can be checked without changing
-state, then describe the intended changes without applying them. A preview
-should not create, modify, or delete files, change a pin or binding, mint or
-revoke credentials or grants, or perform provider mutations.
-
-This checkout implements `--dry-run` plans for supported CLI mutations. For
-example, this previews initialization without creating the Locus home:
+Use `--dry-run` to preview supported mutations, for example:
 
 ```sh
 locus init --dry-run --json
 ```
 
-The JSON plan uses the `locus.plan.v1` schema. A successful preview is not an
-authorization or a guarantee that the real command will succeed: it does not
-authenticate the control capability or resolve credentials, and some checks
-require the real operation. Most plans require an initialized home and may
-still fail validation. Run the command without `--dry-run` to apply it, subject
-to the usual security checks.
-
-This is not a universal preview: `exec`, `run`, `ci run`, and server commands
-cannot be planned, and the flag does not preview child commands, provider
-operations, or MCP tool calls. Read-only commands accept and ignore the flag;
-their normal behavior can still create the Locus home or freeze a drifted pin.
-See the [dry-run guide](docs/README.md#previewing-changes-with---dry-run) for
-supported command forms, exceptions, and limitations.
+See [previewing mutations with `--dry-run`](#previewing-mutations-with---dry-run)
+for the complete command list, exceptions, and limits.
 
 **Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
 

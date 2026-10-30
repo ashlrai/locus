@@ -12557,11 +12557,83 @@ mod pin_time_left_tests {
 mod agent_contract_tests {
     use super::{dry_run_support, error_exit_code, Cli, DryRunSupport, UsageError};
     use clap::Parser;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn class(argv: &[&str]) -> DryRunSupport {
         let mut full = vec!["locus"];
         full.extend_from_slice(argv);
         dry_run_support(&Cli::try_parse_from(full).expect("parses").command)
+    }
+
+    #[test]
+    fn readme_plan_forms_match_the_cli_classifier() {
+        // Arguments after each documented form satisfy clap without executing
+        // the command or requiring credentials, a store, or network access.
+        let examples: BTreeMap<&str, &[&str]> = BTreeMap::from([
+            ("init", &[][..]),
+            ("quickstart", &[]),
+            ("onboard", &[]),
+            ("setup", &[]),
+            ("workspace", &["--default", "example"]),
+            ("enter", &[]),
+            ("switch", &["example"]),
+            ("pin", &[]),
+            ("leave", &[]),
+            ("renew", &[]),
+            ("engagement init", &["example", "--tenant", "example"]),
+            ("engagement close", &["example"]),
+            ("graph export", &[]),
+            ("graph import", &["example.locusgraph"]),
+            ("binding add", &[]),
+            ("binding rm", &["example"]),
+            ("binding migrate-credential-refs", &["example"]),
+            ("client add", &[]),
+            ("autopin suggest --apply", &[]),
+            ("capability persist", &[]),
+            ("capability unpersist", &[]),
+            ("ci mint", &["-b", "example"]),
+            ("ci env", &["-b", "example"]),
+            ("mcp mint", &["-b", "example"]),
+            ("mcp revoke", &["--all"]),
+            ("agent setup", &[]),
+            ("doctor --fix", &[]),
+            ("adapter install", &["example"]),
+            ("adapter uninstall", &["example"]),
+            (
+                "adapter trust add",
+                &["--id", "example", "--ed25519-pub", "example"],
+            ),
+            ("adapter registry export", &[]),
+            (
+                "adapter registry index add",
+                &["https://example.invalid/index"],
+            ),
+            ("adapter registry index remove", &["example"]),
+            ("approve grant", &["example"]),
+            ("approve deny", &["example"]),
+            ("notify on", &[]),
+            ("notify off", &[]),
+            ("events export", &[]),
+            ("forensics export", &[]),
+        ]);
+        let table = include_str!("../../../README.md")
+            .split("| Area | Command forms |")
+            .nth(1)
+            .expect("README dry-run command table")
+            .split("\n\n")
+            .next()
+            .unwrap();
+        let documented: BTreeSet<&str> = table
+            .lines()
+            .filter(|line| line.starts_with('|'))
+            .flat_map(|line| line.split('`').skip(1).step_by(2))
+            .collect();
+        assert_eq!(documented, examples.keys().copied().collect());
+        for (form, suffix) in examples {
+            let mut args: Vec<_> = form.split_whitespace().collect();
+            args.extend_from_slice(suffix);
+            assert_eq!(class(&args), DryRunSupport::Plans, "{form}");
+        }
     }
 
     #[test]
