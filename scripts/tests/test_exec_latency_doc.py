@@ -179,5 +179,71 @@ class PeerMeasurementInstructionsTest(unittest.TestCase):
                 self.assertEqual(result.stdout, "")
 
 
+class ReadmeComparisonTest(unittest.TestCase):
+    def comparison(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        return readme.split("#### Run a Locus and direnv comparison locally\n", 1)[1].split(
+            "\n### ", 1
+        )[0]
+
+    def run_measurement(self, failing=None):
+        code = self.comparison().split(
+            "python3 - \"$locus\" \"$work/direnv\" <<'PYBENCH'\n", 1
+        )[1].split("\nPYBENCH\n", 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for name in ("locus", "direnv"):
+                fake = root / name
+                fake.write_text(
+                    "#!/bin/sh\n"
+                    f"printf '%s:%s\\n' '{name}' \"$*\" >> calls\n"
+                    f"exit {7 if name == failing else 0}\n"
+                )
+                fake.chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = str(root) + os.pathsep + env.get("PATH", "")
+            result = subprocess.run(
+                [sys.executable, "-", str(root / "locus"), "fixture-dir"],
+                input=code, text=True, capture_output=True, cwd=root, env=env,
+            )
+            return result, (root / "calls").read_text().splitlines()
+
+    def test_setup_uses_a_live_disposable_pin_and_checks_the_same_fixture(self):
+        section = self.comparison()
+        for expected in (
+            "bash <<'BASH'", 'work="$(cd "$work" && pwd -P)"',
+            'export HOME="$work/home" LOCUS_HOME="$work/locus"',
+            "--credential-ref env:LOCUS_BENCH_FIXTURE",
+            "export LOCUS_BENCH_FIXTURE=fixture",
+            "export RESEND_API_KEY=fixture", '"$locus" pin bench',
+            'direnv allow "$work/direnv/.envrc"',
+            """"$locus" exec --strict-creds -- /bin/sh -c 'test "$RESEND_API_KEY" = fixture'""",
+            """direnv exec "$work/direnv" /bin/sh -c 'test "$RESEND_API_KEY" = fixture'""",
+            "Four warmup rounds", "32 measured rounds per launcher",
+            "minimum, median, and maximum wall time in milliseconds",
+        ):
+            self.assertIn(expected, section)
+
+    def test_balanced_runs_and_reported_statistics(self):
+        result, calls = self.run_measurement()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(calls), 72)
+        self.assertEqual(calls.count("locus:exec --strict-creds -- /usr/bin/true"), 36)
+        self.assertEqual(calls.count("direnv:exec fixture-dir /usr/bin/true"), 36)
+        self.assertEqual([line.split(":", 1)[0] for line in calls[:8]],
+                         ["locus", "direnv", "direnv", "locus"] * 2)
+        for name in ("locus", "direnv"):
+            self.assertRegex(result.stdout, rf"{name}: n=32 min=\d+\.\d{{3}} "
+                             r"median=\d+\.\d{3} max=\d+\.\d{3} ms")
+
+    def test_failed_launcher_never_reports_statistics(self):
+        for name in ("locus", "direnv"):
+            with self.subTest(name=name):
+                result, _ = self.run_measurement(failing=name)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(f"{name} run 1 failed: exit 7; no results", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+
 if __name__ == "__main__":
     unittest.main()
