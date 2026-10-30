@@ -202,8 +202,9 @@ npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
 
 ### Install from source
 
-Source installs, including npm's Cargo fallback, require **Rust 1.89 or newer**
-and a matching Cargo toolchain, as specified by the workspace's `rust-version`.
+The minimum supported Rust version (MSRV) for source installs, including npm's
+Cargo fallback, is **Rust 1.89 or newer**, with a matching Cargo toolchain. The
+[workspace manifest](./Cargo.toml) declares this as `rust-version` for all crates.
 With Rust 1.83, installation fails before compiling Locus because the locked
 `idna_adapter` dependency uses the 2024 edition, which that Cargo cannot parse
 ([issue #167](https://github.com/ashlrai/locus/issues/167)). Cargo 1.85 through
