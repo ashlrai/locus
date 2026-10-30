@@ -87,7 +87,10 @@ else
     printf '%s\n' "$REPORT" | jq -c '{status,ready,required_servers,mcp_command,status_oneline}' 2>/dev/null || true
   fi
 
-  # Secret and credential-locator hygiene
+  # Secret and credential-locator hygiene for the report text. The separate
+  # filesystem canary scan in tests/integration/phantom_locus.rs fails the
+  # test if a path cannot be listed, statted, or read. An incomplete scan
+  # cannot prove the canary absent: an unreadable path could hide a leak.
   if printf '%s' "$REPORT" | grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|"credential_ref"|phm:|env:|test:'; then
     bad "possible secret or credential locator material in agent report"
   else
