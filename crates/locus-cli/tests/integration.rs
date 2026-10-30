@@ -32,6 +32,8 @@ mod fleet_preflight_q8;
 mod handshake_conformance;
 #[path = "json_errors.rs"]
 mod json_errors;
+#[path = "json_tty.rs"]
+mod json_tty;
 #[path = "mcp_supervised.rs"]
 mod mcp_supervised;
 #[path = "onboard_marketplace.rs"]

@@ -10307,6 +10307,12 @@ fn cmd_approve(sub: ApproveCmd, json: bool, dry_run: bool) -> Result<()> {
             // Same bounds as minted sessions / MCP grants: zero, negative or
             // over-24h fails closed before the record is touched.
             let ttl_dur = ttl.as_deref().map(parse_mint_ttl).transpose()?;
+            if touchid && json {
+                return Err(UsageError(
+                    "--json never prompts; --touchid requires an interactive invocation".into(),
+                )
+                .into());
+            }
             if touchid {
                 // Confirm *before* mutating the approval record (fail closed).
                 let preview = s.load_approval(&id)?;
