@@ -26,6 +26,26 @@ build process, archive, or executable hash. A version string is not proof of
 any of those relationships. An attacker able to replace both an archive and
 its checksum sidecar can make the checksum check pass.
 
+### Artifact coverage
+
+The release job builds a CLI from the checked-out source and exports one
+manifest from its embedded `adapters/manifest.toml` catalog. The manifest
+describes that catalog and the workspace version, rather than enumerating
+release files or target platforms. Its adapter rows contain the ID, name,
+workspace version, tool names, and a digest of the entry metadata listed below.
+The digest does not include the catalog entry's description or its per-entry
+signature and signer. Those fields are not compared by `verify-manifest`.
+
+The manifest contains no hashes for the platform archives, their `.sha256`
+sidecars, the `locus` and `locus-mcp` executables inside them, or the README
+and license when packaged alongside them. It also does not cover the npm packages
+published by the release workflow. The archive sidecars separately hash the
+final archive bytes; they are not referenced or verified by the manifest.
+`verify-manifest` reads the JSON and compares it with the catalog in the CLI
+that runs the command, without opening any of those release artifacts. Even a
+successful unsigned comparison therefore establishes only catalog agreement
+under the comparison rules, not artifact integrity or provenance.
+
 ## Local verification of an unsigned release manifest
 
 1. Obtain the release's `locus-adapters-<tag>.json` and the corresponding
