@@ -332,6 +332,22 @@ fn phantom_and_locus_compose_without_leaking_the_canary() {
 }
 
 #[test]
+fn canary_scan_accepts_a_readable_clean_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("nested/empty")).unwrap();
+    fs::write(root.join("root-file"), b"ordinary contents\n").unwrap();
+    fs::write(root.join("nested/binary-file"), b"\xffordinary\0contents").unwrap();
+
+    let result = scan(root, "fixture-canary");
+    assert!(
+        matches!(&result, Ok(false)),
+        "clean tree must scan without a match"
+    );
+    assert_canary_absent(root, result);
+}
+
+#[test]
 fn canary_scan_walk_lists_regular_files_only() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
