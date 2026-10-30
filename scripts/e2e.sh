@@ -339,6 +339,23 @@ for name, provider in providers.items():
 ' || die "whoami reported incorrect credential presence"
 ok "whoami reports an unset credential as absent"
 
+# An empty env value resolves successfully for whoami's presence metadata.
+who_empty="$(env LOCUS_GH_TOKEN_PERSONAL= "$LOCUS_BIN" whoami --json)" \
+  || die "whoami with an empty credential failed"
+printf '%s' "$who_empty" | python3 -c '
+import json, sys
+w = json.load(sys.stdin)
+assert w["binding_alias"] == "personal" and w["seal_ok"] is True
+providers = {p["provider"]: p for p in w["providers"]}
+assert set(providers) == {"github", "supabase", "vercel"}
+for name, provider in providers.items():
+    assert "credential_ref" not in provider
+    assert provider["credential"] == {
+        "present": True, "source": "environment"
+    }, f"unexpected credential metadata for {name}"
+' || die "whoami reported incorrect credential presence for an empty value"
+ok "whoami reports an empty environment credential as present"
+
 # README's sample exec happy path should run without credential warnings when
 # the sample references are available. Keep stderr separate from child stdout.
 sample_exec_stderr="$LOCUS_HOME/sample-exec.stderr"
@@ -1026,7 +1043,9 @@ else
   ok "touchid mock cancel fails closed"
 
   # A caller-controlled successful mock can only record advisory evidence.
-  g1="$(LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json 2>/dev/null || true)"
+  LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid >/dev/null \
+    || die "mocked confirmation did not record the advisory grant"
+  g1="$(locus approve status "$dual_id" --json)"
   echo "$g1" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
