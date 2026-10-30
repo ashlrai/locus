@@ -65,7 +65,8 @@ What the two extra steps are for:
 If a command reports `human re-pin required` or `no current broker endpoint`,
 open a new operator shell, change to the intended workspace, and use the same
 Locus home as the affected session. Load the hook and try entering the intended
-binding first; an intact pin whose broker died can be replaced directly:
+binding first; an intact local-control active pin whose broker died can be
+replaced directly when no session ID is explicitly selected:
 
 ```bash
 cd /path/to/workspace
@@ -74,9 +75,12 @@ locus enter personal                  # replace personal with your binding alias
 locus whoami
 ```
 
+`locus enter --force` is a different option: it allows bindings outside the
+workspace allowlist and is not needed to replace an intact dead-broker pin.
+
 If `enter` is refused, read the error before continuing. For a wedged session,
-such as an expired pin, invalid seal, or unreadable session, a human can clear
-it and re-enter in the same hooked shell:
+such as an expired pin, invalid or legacy seal, or unreadable session, a human
+can clear it and re-enter in the same hooked shell:
 
 ```bash
 locus leave --force
@@ -86,10 +90,14 @@ locus whoami
 
 Forced leave requires the control capability, verified against the live broker
 or persisted operator capability; it deletes session state only and never
-mints a pin. Do not use it to bypass a capability or workspace refusal. See
-the [broker recovery guide](docs/broker-recovery-q8.md) for prerequisites and
-exceptional refusal cases. Keep the shell that enters the pin alive while using
-its broker.
+mints a pin. Do not use it to bypass a capability or workspace refusal. The
+exceptional `locus leave --force --no-verifier` acknowledges teardown without
+capability verification only when neither a live broker nor a persisted
+operator capability is available. It cannot override a live broker's refusal
+or a mismatching persisted capability. A subsequent `enter` still requires
+normal authorization. See `locus leave --help` and the
+[broker recovery guide](docs/broker-recovery-q8.md) for details. Keep the shell
+that enters the pin alive while using its broker.
 
 ### Fresh quickstart doctor warning
 
