@@ -145,7 +145,7 @@ rm "$work/plain.env"
 # Check the same synthetic value reaches each child without printing it.
 "$locus" exec --strict-creds -- /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
 direnv exec "$work/direnv" /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
-sops exec-env "$work/encrypted.env" /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
+sops exec-env "$work/encrypted.env" 'test "$RESEND_API_KEY" = fixture'
 python3 - "$locus" "$work/direnv" "$work/encrypted.env" <<'PY'
 import statistics
 import subprocess
