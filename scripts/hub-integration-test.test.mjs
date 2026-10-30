@@ -25,24 +25,31 @@ function runWithTempDir(t, failProject = false, scratchParts = ['custom tmp']) {
   const bin = join(root, 'bin');
   const scratch = join(root, ...scratchParts);
   const record = join(root, 'created');
+  const projectAttempt = join(root, 'project-attempt');
   mkdirSync(bin);
   mkdirSync(scratch, { recursive: true });
   writeFileSync(join(scratch, 'keep'), 'sentinel');
   writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
-if [[ "${'$'}{FAIL_PROJECT:-}" == 1 && "${'$'}{*: -1}" == */locus-hub-int-proj.XXXXXX ]]; then exit 1; fi
+if [[ "${'$'}{FAIL_PROJECT:-}" == 1 && "${'$'}{*: -1}" == */locus-hub-int-proj.XXXXXX ]]; then
+  [[ -f "$(cat "${'$'}MKTEMP_RECORD")/home-sentinel" ]] || exit 74
+  : > "${'$'}PROJECT_ATTEMPT"
+  exit 73
+fi
 path="$("${'$'}REAL_MKTEMP" "${'$'}@")" || exit
 [[ -d "${'$'}path" ]] || exit 1
+if [[ "${'$'}{FAIL_PROJECT:-}" == 1 ]]; then : > "${'$'}path/home-sentinel"; fi
 printf '%s\\n' "${'$'}path" >> "${'$'}MKTEMP_RECORD"
 printf '%s\\n' "${'$'}path"
 `, { mode: 0o755 });
   const result = spawnSync('bash', [script], {
     env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
-      REAL_MKTEMP: realMktemp, MKTEMP_RECORD: record, FAIL_PROJECT: failProject ? '1' : '0' },
+      REAL_MKTEMP: realMktemp, MKTEMP_RECORD: record, PROJECT_ATTEMPT: projectAttempt,
+      FAIL_PROJECT: failProject ? '1' : '0' },
     encoding: 'utf8',
     maxBuffer: 4 * 1024 * 1024,
   });
   const paths = readFileSync(record, 'utf8').trim().split('\n');
-  return { result, scratch, paths };
+  return { result, scratch, paths, projectAttempt };
 }
 
 test('integration smoke uses and cleans a nondefault TMPDIR', (t) => {
@@ -74,11 +81,13 @@ test('integration smoke handles spaces in temporary home and project paths', (t)
 });
 
 test('failed project allocation cleans the temporary home', (t) => {
-  const { result, scratch, paths } = runWithTempDir(t, true);
+  const { result, scratch, paths, projectAttempt } = runWithTempDir(t, true);
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
-  assert.notEqual(result.status, 0);
+  assert.equal(result.status, 73, 'the injected project allocation failure must propagate');
+  assert.equal(existsSync(projectAttempt), true, 'project allocation must be attempted');
   assert.equal(paths.length, 1);
+  assert.equal(existsSync(paths[0]), false, 'the populated temporary home must be removed');
   assert.match(paths[0], new RegExp(`^${scratch}/locus-hub-int\\.[^/]+$`));
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
