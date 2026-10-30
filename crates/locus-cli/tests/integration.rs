@@ -2,6 +2,8 @@
 
 #[path = "agent_contract.rs"]
 mod agent_contract;
+#[path = "agent_contract_recut.rs"]
+mod agent_contract_recut;
 #[path = "agent_input_contracts.rs"]
 mod agent_input_contracts;
 #[path = "ashlr_handshake.rs"]
