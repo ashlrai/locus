@@ -860,6 +860,56 @@ echo "$pinned_names" | grep -q 'github.scope' || die "pinned missing github.scop
 echo "$pinned_names" | grep -q 'vercel.scope' || die "pinned missing vercel.scope"
 ok "pinned tools/list includes provider tools"
 
+# Agent-facing whoami surfaces must report the same credential truth as the
+# CLI: locus exec launches locus-mcp with a scrubbed env, so the credential
+# source variables referenced by the pinned binding are unset for the MCP
+# process itself — every env: reference resolves as absent and must surface
+# as credential.present=false without leaking ref names or values.
+mcp_whoami_out="$(
+  mcp_rpc \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"locus_whoami","arguments":{}}}' \
+    '{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"locus://session"}}'
+)"
+printf '%s' "$mcp_whoami_out" | python3 -c '
+import json, sys
+results = {}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if "id" in msg and "result" in msg:
+        results[msg["id"]] = msg["result"]
+call = results.get(2)
+assert call is not None and call.get("isError") is False, call
+who = json.loads(call["content"][0]["text"])
+resource = results.get(3)
+assert resource is not None, "missing locus://session read result"
+contents = resource.get("contents") or []
+assert contents and contents[0].get("uri") == "locus://session", resource
+session = json.loads(contents[0]["text"])
+for body in (who, session):
+    assert body["binding_alias"] == "acme", body
+    assert body["tenant"] == "acme-corp", body
+    assert body["seal_ok"] is True, body
+    providers = {p["provider"]: p for p in body["providers"]}
+    assert set(providers) == {"github", "supabase", "vercel"}, body
+    for name, provider in providers.items():
+        assert "credential_ref" not in provider, provider
+        assert provider["credential"] == {"present": False, "source": "environment"}, \
+            f"unexpected credential metadata for {name}"
+    serialized = json.dumps(body)
+    for canary in ("credential_ref", "GH_TOKEN_ACME", "VERCEL_TOKEN_ACME",
+                   "SUPABASE_ACME", "e2e-sample-", "phm:", "env:"):
+        assert canary not in serialized, (canary, body)
+' || die "MCP whoami surfaces reported incorrect credential presence"
+ok "MCP locus_whoami + locus://session report unset credentials as absent"
+
 # ── 7. Freeze deny project_ref ───────────────────────────────────────────────
 log "7. freeze deny project_ref"
 freeze_out="$(
@@ -1025,8 +1075,20 @@ else
   fi
   ok "touchid mock cancel fails closed"
 
+  # --json never prompts: --touchid is interactive-only, so the combination
+  # is refused before confirmation or record mutation — even under the mock.
+  if LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json \
+    >"$LOCUS_HOME/touchid-json.out" 2>&1; then
+    die "--touchid --json should refuse (never prompts)"
+  fi
+  grep -q 'requires an interactive invocation' "$LOCUS_HOME/touchid-json.out" \
+    || die "--touchid --json refusal missing contract message"
+  ok "--touchid --json refuses before prompting"
+
   # A caller-controlled successful mock can only record advisory evidence.
-  g1="$(LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json 2>/dev/null || true)"
+  LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid >/dev/null \
+    || die "touchid mock grant failed"
+  g1="$(locus approve status "$dual_id" --json 2>/dev/null)"
   echo "$g1" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
