@@ -6,6 +6,8 @@ mod agent_contract;
 mod agent_input_contracts;
 #[path = "ashlr_handshake.rs"]
 mod ashlr_handshake;
+#[path = "autopin_learned_guard.rs"]
+mod autopin_learned_guard;
 #[path = "autopin_suggest.rs"]
 mod autopin_suggest;
 #[path = "doc_facts.rs"]
