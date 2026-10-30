@@ -50,6 +50,13 @@ pub mod verify;
 pub mod workers;
 pub mod workspace;
 
+// PR CI runs the core `sandbox` filter. Share the actual Phantom/Locus scan
+// regressions here so unreadable paths stay fatal before merge, without a
+// Phantom installation or a production dependency from core to the CLI.
+#[cfg(test)]
+#[path = "../../locus-cli/tests/fail_closed_unreadable.rs"]
+mod sandbox_fail_closed_unreadable;
+
 #[cfg(test)]
 pub(crate) mod test_support;
 
