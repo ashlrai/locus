@@ -9,6 +9,15 @@ import { test } from 'node:test';
 const script = join(dirname(fileURLToPath(import.meta.url)), 'hub-integration-test.sh');
 const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
 
+test('the report hygiene comment points to the filesystem canary test', () => {
+  const source = readFileSync(script, 'utf8');
+  const reference = source.match(/filesystem canary scan in (tests\/integration\/phantom_locus\.rs)/);
+  assert.ok(reference, 'document the separate filesystem canary scan');
+  const target = join(dirname(script), '..', reference[1]);
+  assert.ok(existsSync(target), 'the documented canary test must exist');
+  assert.match(readFileSync(target, 'utf8'), /fn canary_scan_unreadable_path_exits_nonzero\(/);
+});
+
 function runWithTempDir(t, failProject = false, scratchParts = ['custom tmp']) {
   // Keep paths short enough for the live authority broker's Unix socket.
   const root = mkdtempSync('/tmp/lhi-');
