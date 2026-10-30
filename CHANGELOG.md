@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **Shell installer proposal ([#169](https://github.com/ashlrai/locus/issues/169)).**
+  The issue proposes a one-command shell installer that downloads and verifies
+  a release archive, allowing installation on machines without npm or Rust.
+  This note records the proposal; it does not assert release availability.
+
 - **Execution latency report ([#170](https://github.com/ashlrai/locus/issues/170)).**
   The issue reports `locus exec -- true` as 3–5x slower than
   `direnv exec <dir> true` and `sops exec-env <file> true`. This is the
