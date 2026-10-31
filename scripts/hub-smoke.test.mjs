@@ -143,6 +143,48 @@ printf '%s\\n' "$path"
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
 });
 
+test('a TMPDIR with spaces is cleaned after partial setup failure', (t) => {
+  const root = mkdtempSync('/tmp/lhs-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  const scratch = join(root, 'temporary resources with spaces');
+  const record = join(root, 'created');
+  mkdirSync(bin);
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  const guard = smokeCommandGuard(root);
+  writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+case "$*" in
+  *locus-hub-smoke-err.XXXXXX) exit 1 ;;
+esac
+path="$("$REAL_MKTEMP" "$@")" || exit
+[[ -d "$path" ]] || exit 1
+printf '%s\\n' "$path" >> "$MKTEMP_RECORD"
+printf '%s\\n' "$path"
+`, { mode: 0o755 });
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, ...guard, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
+      REAL_MKTEMP: realMktemp, MKTEMP_RECORD: record },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /error: hub-smoke could not create temporary error file/);
+  assert.equal(result.stdout, '');
+  assert.equal(existsSync(guard.SMOKE_COMMAND_MARKER), false);
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2);
+  for (const [index, prefix] of ['locus-hub-smoke.', 'locus-hub-proj.'].entries()) {
+    assert.equal(dirname(paths[index]), scratch);
+    assert.ok(paths[index].slice(scratch.length + 1).startsWith(prefix));
+    assert.equal(existsSync(paths[index]), false, `${prefix} must be removed`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+});
+
 for (const invalidDir of ['missing', 'file']) {
   test(`${invalidDir} TMPDIR fails clearly before starting the smoke test`, (t) => {
     const root = mkdtempSync(join(tmpdir(), 'hub-smoke-test-'));
