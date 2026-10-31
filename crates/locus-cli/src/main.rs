@@ -3329,6 +3329,8 @@ fn namespaced_pin_aliases(alias: Option<&str>, ns_raw: &str) -> Result<Vec<Strin
     Ok(aliases)
 }
 
+const RECOVERY_HINT_PREFIX: &str = "recover (operator shell; control capability required): ";
+
 /// Route wedged-session control errors to the recovery hatch.
 ///
 /// When `leave` / `status` / `doctor` / `exec` fail closed on the ACTIVE
@@ -3349,7 +3351,7 @@ fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyho
     if let Some(stale_err) = wedged {
         let alias = recovery_alias(alias);
         let recipe = locus_core::recovery::recovery_for_error(stale_err, alias.as_deref());
-        anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
+        anyhow!("{err:#}\n  {RECOVERY_HINT_PREFIX}{recipe}")
     } else {
         err
     }
@@ -3377,6 +3379,13 @@ fn recovery_alias(requested: Option<&str>) -> Option<String> {
 /// authority error (never a bare JSON error, which can come from anywhere).
 /// Message only: the error itself still fails closed.
 fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
+    stale_pin_recovery_fallback_with_alias(err, || store().ok().and_then(|s| active_alias_hint(&s)))
+}
+
+fn stale_pin_recovery_fallback_with_alias(
+    err: anyhow::Error,
+    alias_hint: impl FnOnce() -> Option<String>,
+) -> anyhow::Error {
     let stale = err.chain().find_map(|cause| {
         cause.downcast_ref::<locus_core::LocusError>().filter(|e| {
             locus_core::recovery::is_stale_pin_error(e)
@@ -3386,14 +3395,59 @@ fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
     let Some(stale_err) = stale else {
         return err;
     };
-    if format!("{err:#}").contains("locus leave --force") {
+    if format!("{err:#}").contains(RECOVERY_HINT_PREFIX) {
         return err;
     }
-    let Some(alias) = store().ok().and_then(|s| active_alias_hint(&s)) else {
+    let Some(alias) = alias_hint() else {
         return err;
     };
     let recipe = locus_core::recovery::recovery_for_error(stale_err, Some(&alias));
-    anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
+    anyhow!("{err:#}\n  {RECOVERY_HINT_PREFIX}{recipe}")
+}
+
+#[cfg(test)]
+mod stale_pin_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn dead_broker_error_mentioning_force_still_gets_enter_first_hint() {
+        let err = anyhow::Error::new(locus_core::LocusError::AuthorityAnchorUnavailable(
+            "previous advice mentioned locus leave --force".into(),
+        ));
+        let message = format!(
+            "{:#}",
+            stale_pin_recovery_fallback_with_alias(err, || Some("personal".into()))
+        );
+        let hint = message.split_once(RECOVERY_HINT_PREFIX).unwrap().1;
+        assert!(
+            hint.find("locus enter personal").unwrap() < hint.find("locus leave --force").unwrap()
+        );
+        assert!(hint.contains("If enter refuses an invalid or unreadable pin"));
+    }
+
+    #[test]
+    fn expired_pin_gets_force_first_hint_even_if_error_mentions_force() {
+        let err = anyhow::Error::new(locus_core::LocusError::SessionExpired("yesterday".into()));
+        let message = format!(
+            "{:#}",
+            stale_pin_recovery_fallback_with_alias(err, || Some("personal".into()))
+        );
+        let hint = message.split_once(RECOVERY_HINT_PREFIX).unwrap().1;
+        assert!(
+            hint.find("locus leave --force").unwrap() < hint.find("locus enter personal").unwrap()
+        );
+    }
+
+    #[test]
+    fn existing_hint_is_not_duplicated() {
+        let err = anyhow::Error::new(locus_core::LocusError::AuthorityAnchorMismatch)
+            .context(format!("{RECOVERY_HINT_PREFIX}already supplied"));
+        let message = format!(
+            "{:#}",
+            stale_pin_recovery_fallback_with_alias(err, || panic!("hint already present"))
+        );
+        assert_eq!(message.matches(RECOVERY_HINT_PREFIX).count(), 1);
+    }
 }
 
 /// Alias of the active session file, for recovery hints only (never trusted
