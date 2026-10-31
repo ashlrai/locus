@@ -78,6 +78,30 @@ test('output guide covers the script messages and check names', () => {
   }
 });
 
+test('resource map covers temporary allocations and their lifecycle', () => {
+  const source = readFileSync(script, 'utf8');
+  const doc = readFileSync(join(dirname(script), '../docs/hub-smoke-resource-map.md'), 'utf8');
+  const allocations = [...source.matchAll(/if ! (SMOKE_\w+)="\$\(mktemp(?: -d)? "\$\{TMPDIR:-\/tmp\}\/([^"]+)"\)"/g)];
+  assert.equal(allocations.length, 3, 'review the map when temporary allocations change');
+  for (const [, variable, template] of allocations) {
+    const row = doc.split('\n').find((line) => line.startsWith(`| \`${variable}\``));
+    assert.ok(row, `missing resource row: ${variable}`);
+    assert.ok(row.includes(template), `missing template: ${template}`);
+    assert.equal(row.split('|').length, 6, `${variable} needs creation, use and cleanup cells`);
+    assert.ok(source.includes(`"$${variable}"`), `${variable} must be used by the script`);
+  }
+  for (const marker of ['cleanup() { rm -rf -- "$SMOKE_HOME" "$SMOKE_PROJ" "$SMOKE_ERR"; }',
+    'trap cleanup EXIT', 'locus init --with-samples', 'locus pin personal',
+    'locus leave', '> .mcp.json', 'locus mcp mint --binding personal', 'locus mcp revoke']) {
+    assert.ok(source.includes(marker), `script lifecycle changed: ${marker}`);
+  }
+  for (const item of ['Sample bindings', 'Authority broker and Unix socket', 'Active pin',
+    '`.mcp.json`', 'MCP grant, delegated session and bearer token', 'Control capability',
+    'uncatchable kill', 'asynchronous', '`target/`']) {
+    assert.ok(doc.includes(item), `missing lifecycle coverage: ${item}`);
+  }
+});
+
 function smokeCommandGuard(root) {
   const guard = join(root, 'guard.sh');
   const marker = join(root, 'smoke-command-ran');
