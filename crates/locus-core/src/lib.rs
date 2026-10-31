@@ -16,6 +16,7 @@ pub mod approval;
 mod authority_anchor;
 pub mod autopin;
 pub mod autopin_suggest;
+mod autopin_write;
 pub mod binding;
 pub mod budget;
 pub mod config;
