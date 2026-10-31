@@ -2,12 +2,14 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import net from 'node:net';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 const script = join(dirname(fileURLToPath(import.meta.url)), 'hub-integration-test.sh');
 const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+const realCurl = execFileSync('which', ['curl'], { encoding: 'utf8' }).trim();
 
 test('the report hygiene comment points to the filesystem canary test', () => {
   const source = readFileSync(script, 'utf8');
@@ -238,4 +240,132 @@ exec bash "$1"
   assert.match(result.stdout, /^FAIL\s+ambient canary leaked to disk under /m);
   assert.match(result.stderr, /space dir\/leaked file/);
   assert.match(result.stdout, /^== hub-integration-test FAILED ==$/m);
+});
+
+test('a mid-run failure reaps the live multi-tenant server and both isolated directories', async (t) => {
+  const root = mkdtempSync('/tmp/lhi-mt-fail-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  const scratch = join(root, 'scratch');
+  const record = join(root, 'created');
+  const urlRecord = join(root, 'urls');
+  mkdirSync(bin);
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  writeFileSync(join(scratch, '.locus-hub-int-scan.unrelated'), 'hidden sentinel');
+  writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+path="$("$REAL_MKTEMP" "$@")" || exit
+[[ -d "$path" ]] || exit 1
+touch "$path/cleanup-sentinel" || exit 1
+printf '%s\\n' "$path" >> "$MKTEMP_RECORD"
+printf '%s\\n' "$path"
+`, { mode: 0o755 });
+  // Proxy real curl, recording loopback URLs, but drop the first grant-scoped
+  // tools/call so the script aborts while the MT server and session are live.
+  writeFileSync(join(bin, 'curl'), `#!/usr/bin/env bash
+for a in "$@"; do
+  case "$a" in http://127.0.0.1:*) printf '%s\\n' "$a" >> "$MT_URL_RECORD" ;; esac
+done
+case " $* " in *locus_whoami*) exit 7 ;; esac
+exec "$REAL_CURL" "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
+      REAL_MKTEMP: realMktemp, REAL_CURL: realCurl,
+      MKTEMP_RECORD: record, MT_URL_RECORD: urlRecord },
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.doesNotMatch(result.stdout, /^skip\s/m, 'the multi-tenant smoke must run');
+  assert.match(result.stdout, /^ok\s+mt: server healthy on 127\.0\.0\.1:/m);
+  assert.match(result.stdout, /^ok\s+mt: initialize minted grant-bound Mcp-Session-Id$/m);
+  assert.doesNotMatch(result.stdout, /mt: tools\/call locus_whoami/, 'the injected failure must hit at the whoami call');
+  assert.equal(result.status, 7, 'the injected transport failure must propagate');
+
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2);
+  assert.match(paths[0], new RegExp(`^${scratch}/locus-hub-int\\.[^/]+$`));
+  assert.match(paths[1], new RegExp(`^${scratch}/locus-hub-int-proj\\.[^/]+$`));
+  for (const path of paths) {
+    assert.equal(existsSync(path), false, `populated temporary directory must be removed: ${path}`);
+  }
+  assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
+
+  // The trap must kill the server too: its recorded port refuses connections.
+  const urls = readFileSync(urlRecord, 'utf8').trim().split('\n').filter(Boolean);
+  assert.ok(urls.length > 0, 'the multi-tenant server must have been contacted');
+  const { hostname, port } = new URL(urls[0]);
+  let alive = true;
+  for (let i = 0; i < 30 && alive; i++) {
+    alive = await new Promise((resolve) => {
+      const sock = net.connect({ host: hostname, port: Number(port) });
+      sock.once('connect', () => { sock.destroy(); resolve(true); });
+      sock.once('error', () => resolve(false));
+      sock.setTimeout(500, () => { sock.destroy(); resolve(false); });
+    });
+    if (alive) await new Promise((r) => setTimeout(r, 100));
+  }
+  if (alive) spawnSync('pkill', ['-f', `locus-mcp --http ${hostname}:${port}`]);
+  assert.equal(alive, false, 'the live multi-tenant server must be killed by the cleanup trap');
+});
+
+test('a failed check still removes both isolated directories on exit', (t) => {
+  const root = mkdtempSync('/tmp/lhi-check-fail-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  const scratch = join(root, 'scratch with spaces');
+  const record = join(root, 'created');
+  mkdirSync(bin);
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+path="$("$REAL_MKTEMP" "$@")" || exit
+[[ -d "$path" ]] || exit 1
+touch "$path/cleanup-sentinel" || exit 1
+printf '%s\\n' "$path" >> "$MKTEMP_RECORD"
+printf '%s\\n' "$path"
+`, { mode: 0o755 });
+
+  // Real commands, except status --oneline reports frozen so a check fails;
+  // the run finishes every section then exits 1 through the fail flag.
+  const harness = `
+locus() {
+  if [[ "$1" == status && "$2" == --oneline ]]; then
+    printf 'frozen\\n'
+    return 0
+  fi
+  command locus "$@"
+}
+export -f locus
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'fail-check-test', script], {
+    env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
+      REAL_MKTEMP: realMktemp, MKTEMP_RECORD: record },
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.match(result.stdout, /^FAIL\s+status --oneline expected alias:tenant, got: frozen$/m);
+  assert.match(result.stdout, /^FAIL\s+expected unpinned after leave, got: frozen$/m);
+  assert.match(result.stdout, /^ok\s+mt: live drop-in slice /m, 'later sections must still run to completion');
+  assert.match(result.stdout, /^== hub-integration-test FAILED ==$/m);
+  assert.equal(result.status, 1, 'the failed check must exit through the fail flag');
+
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2);
+  assert.ok(paths.every((path) => dirname(path) === scratch && path.includes(' ')));
+  assert.match(paths[0].slice(scratch.length + 1), /^locus-hub-int\.[^/]+$/);
+  assert.match(paths[1].slice(scratch.length + 1), /^locus-hub-int-proj\.[^/]+$/);
+  for (const path of paths) {
+    assert.equal(existsSync(path), false, `populated temporary directory must be removed: ${path}`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
 });

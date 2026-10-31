@@ -867,10 +867,6 @@ for (const k of ["allowDispatch", "blockers", "report"]) {
 }
 console.log("ok    live: hub-gate shape {allowDispatch,blockers,report}");
 NODE
-live_ec=$?
-if [[ "$live_ec" -ne 0 ]]; then
-  fail=1
-fi
 
 # ---------------------------------------------------------------------------
 # 5. registerLocusInMcpConfig via node fs (mirrors pure merge + write)
