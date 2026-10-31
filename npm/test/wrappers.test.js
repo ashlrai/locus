@@ -348,5 +348,5 @@ test("locus: wrapper drains unread HTTP responses and exits explicitly", () => {
   const download = src.split("function download(")[1].split("\nfunction ")[0];
   assert.equal((download.match(/res\.resume\(\)/g) || []).length, 2, "redirect and non-200 responses must be drained");
   assert.match(src.split("async function main()")[1], /process\.exit\(0\)/);
-  assert.match(readFileSync(join(root, "npm", "install.js"), "utf8"), /process\.exit\(0\)/);
+  assert.match(readFileSync(join(root, "npm", "install.js"), "utf8"), /process\.exit\(process\.exitCode \|\| 0\)/);
 });

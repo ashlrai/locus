@@ -37,9 +37,14 @@ for (const [name, wrapper] of [
           const request = new EventEmitter();
           queueMicrotask(() => {
             const response = new EventEmitter();
-            response.statusCode = 404;
+            response.statusCode = url.endsWith(".sha256") ? 200 : 404;
+            response.headers = {};
             response.resume = () => {};
             callback(response);
+            if (response.statusCode === 200) {
+              response.emit("data", Buffer.from("0".repeat(64) + "  " + path.basename(url.slice(0, -7)) + "\\n"));
+              response.emit("end");
+            }
           });
           return request;
         };

@@ -28,8 +28,14 @@ Requires Node ≥ 16. Without an override, the wrapper selects a binary as follo
    `PATH` (or in `~/.cargo/bin`). It reuses one matching or newer than the
    packaged version; an older or unversioned candidate is not selected.
 3. Otherwise it downloads the GitHub release matching the wrapper's packaged
-   version into `~/.locus/bin`. If the download fails, or there is no prebuilt
-   release for the platform (currently Linux arm64 and Windows), it builds
+   version into `~/.locus/bin` after verifying its SHA-256 sidecar. If the
+   checksum cannot be retrieved or parsed, or does not match, installation stops
+   with an error and does not fall back to Cargo; retry after checking the
+   release sidecar. The CLI's eager postinstall also fails on checksum errors;
+   when eager installation is deferred, the error appears on first use. The
+   sidecar detects corruption, but is not a publisher signature. If another
+   download or extraction error occurs, or there is no prebuilt release for the
+   platform (currently Linux arm64 and Windows), it builds
    with `cargo install --git https://github.com/ashlrai/locus locus-cli --locked`.
    This fallback requires Rust 1.89 or newer ([rustup](https://rustup.rs)) — the
    workspace's `rust-version` — and can take several minutes.

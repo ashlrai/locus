@@ -16,7 +16,12 @@ npm install -g @ashlrai/locus-mcp
 npx @ashlrai/locus-mcp
 ```
 
-On first run the wrapper downloads the release binary into `~/.locus/bin`, or falls back to:
+On first run the wrapper downloads the release binary into `~/.locus/bin` after
+verifying its SHA-256 sidecar. If the checksum cannot be retrieved or parsed, or
+does not match, installation stops with an error and does not fall back to
+Cargo; retry after checking the release sidecar. The sidecar detects corruption,
+but is not a publisher signature. For other download or extraction errors, or
+when there is no prebuilt release for the platform, the wrapper falls back to:
 
 ```bash
 cargo install --git https://github.com/ashlrai/locus locus-mcp --locked
