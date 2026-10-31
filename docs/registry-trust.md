@@ -4,6 +4,9 @@
 > This page covers the **release manifest**: a per-release, signable snapshot of
 > the built-in adapter set.
 
+For a concise consumer walkthrough, see
+[Verifying an adapter registry release manifest](./registry-manifest-verification.md).
+
 ## Current release status
 
 The current release workflow runs `locus adapter registry export` without
