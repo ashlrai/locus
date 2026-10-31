@@ -70,7 +70,12 @@ fn setup(pins: &[(&str, usize)]) -> (tempfile::TempDir, tempfile::TempDir, Strin
         .unwrap()
         .trim()
         .to_string();
-    let key = pin_history::history_key(home.path()).unwrap();
+    seed_history(home.path(), pins);
+    (home, repo, cap)
+}
+
+fn seed_history(home: &Path, pins: &[(&str, usize)]) {
+    let key = pin_history::history_key(home).unwrap();
     let hash = pin_history::keyed_hash(&key, &normalize_remote_url(URL));
     let mut n = 0;
     for (alias, count) in pins {
@@ -84,10 +89,9 @@ fn setup(pins: &[(&str, usize)]) -> (tempfile::TempDir, tempfile::TempDir, Strin
                 workspace_hash: None,
                 remote_hashes: vec![hash.clone()],
             };
-            pin_history::append(home.path(), &e, 2000).unwrap();
+            pin_history::append(home, &e, 2000).unwrap();
         }
     }
-    (home, repo, cap)
 }
 
 fn text(o: &Output) -> String {
@@ -106,6 +110,38 @@ fn assert_no_raw_url(s: &str) {
 
 fn json(o: &Output) -> serde_json::Value {
     serde_json::from_slice(&o.stdout).unwrap_or_else(|e| panic!("bad json {e}: {o:?}"))
+}
+
+#[test]
+fn documented_json_examples_match_cli_output() {
+    let doc = include_str!("../../../docs/autopin-suggest-output.md");
+    for (marker, pins) in [
+        ("suggested-json", &[("acme", 4), ("personal", 1)][..]),
+        ("empty-json", &[][..]),
+        ("thin-json", &[("acme", 2)][..]),
+    ] {
+        let start = format!("<!-- {marker} -->\n```json\n");
+        let example = doc
+            .split_once(&start)
+            .unwrap_or_else(|| panic!("missing example {marker}"))
+            .1
+            .split_once("\n```")
+            .expect("example must have a closing fence")
+            .0;
+        let expected: serde_json::Value = serde_json::from_str(example).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let repo = git_repo();
+        seed_history(home.path(), pins);
+        let output = locus(
+            home.path(),
+            repo.path(),
+            None,
+            &[],
+            &["autopin", "suggest", "--json"],
+        );
+        assert!(output.status.success(), "{marker}: {output:?}");
+        assert_eq!(json(&output), expected, "{marker}");
+    }
 }
 
 #[test]
