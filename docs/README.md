@@ -1,5 +1,7 @@
 # Locus documentation
 
+For autopin implementation changes, use the [autopin review checklist](autopin-review-checklist.md).
+
 ## Previewing changes with `--dry-run`
 
 The CLI in this checkout accepts the global `--dry-run` flag before or after
