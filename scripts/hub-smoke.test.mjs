@@ -205,6 +205,7 @@ test('init failure cleans the used error file and other temporary resources', (t
   const scratch = join(root, 'scratch');
   const guard = join(root, 'guard.sh');
   const marker = join(root, 'init-attempts');
+  const resources = join(root, 'resources');
   const fixtureScript = join(root, 'scripts', 'hub-smoke.sh');
   mkdirSync(scratch);
   mkdirSync(dirname(fixtureScript));
@@ -219,7 +220,10 @@ test('init failure cleans the used error file and other temporary resources', (t
 sleep() { :; }
 locus() {
   if [[ "$1" == init ]]; then
+    [[ -d "$SMOKE_HOME" && "$SMOKE_HOME" == "$TMPDIR"/locus-hub-smoke.* ]] || return 2
+    [[ -d "$SMOKE_PROJ" && "$SMOKE_PROJ" == "$TMPDIR"/locus-hub-proj.* ]] || return 2
     [[ -f "$SMOKE_ERR" && "$SMOKE_ERR" == "$TMPDIR"/locus-hub-smoke-err.* ]] || return 2
+    printf '%s\\n' "$SMOKE_HOME" "$SMOKE_PROJ" "$SMOKE_ERR" > "$RESOURCE_RECORD"
     printf 'attempt\\n' >> "$INIT_MARKER"
     printf 'synthetic init failure\\n' >&2
     return 1
@@ -228,7 +232,7 @@ locus() {
 }
 `);
   const result = spawnSync('bash', [fixtureScript], {
-    env: { ...process.env, BASH_ENV: guard, TMPDIR: scratch, INIT_MARKER: marker },
+    env: { ...process.env, BASH_ENV: guard, TMPDIR: scratch, INIT_MARKER: marker, RESOURCE_RECORD: resources },
     encoding: 'utf8',
     timeout: 15_000,
   });
@@ -242,6 +246,13 @@ locus() {
   assert.doesNotMatch(result.stdout, /== hub-smoke (OK|FAILED) ==/);
   assert.match(result.stderr, /synthetic init failure/);
   assert.equal(readFileSync(marker, 'utf8'), 'attempt\nattempt\nattempt\n');
+  const paths = readFileSync(resources, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 3);
+  assert.equal(new Set(paths).size, 3);
+  for (const path of paths) {
+    assert.equal(dirname(path), scratch);
+    assert.equal(existsSync(path), false, `${path} must be removed after init failure`);
+  }
   assert.deepEqual(readdirSync(scratch), ['unrelated']);
   assert.equal(readFileSync(join(scratch, 'unrelated'), 'utf8'), 'keep');
 });
