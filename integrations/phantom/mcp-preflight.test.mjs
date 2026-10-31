@@ -9,7 +9,7 @@ for (const [name, locus] of [["phantom", phantom], ["ashlr-hub", legacyHub]]) {
     return {
       calls,
       options: {
-        baseUrl: "http://synthetic.invalid/",
+        baseUrl: "https://synthetic.invalid/",
         serverToken: "synthetic-server-token",
         headers: { [locus.TENANT_TOKEN_HEADER]: "synthetic-tenant-token" },
         fetchFn: async (url, init) => {
@@ -33,7 +33,7 @@ for (const [name, locus] of [["phantom", phantom], ["ashlr-hub", legacyHub]]) {
         grantId: "gr_fixture",
       });
       assert.deepEqual(p.calls.map(c => c.url), [
-        "http://synthetic.invalid/health", "http://synthetic.invalid/mcp",
+        "https://synthetic.invalid/health", "https://synthetic.invalid/mcp",
       ]);
       assert.equal(p.calls[0].init.headers, undefined);
       assert.equal(p.calls[1].init.headers.Authorization, "Bearer synthetic-server-token");
