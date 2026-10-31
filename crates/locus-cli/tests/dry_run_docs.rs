@@ -236,3 +236,29 @@ fn manual_verification_procedure_runs_from_the_checkout() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("PASS: help, planned actions"));
 }
+
+#[test]
+fn acceptance_checklist_is_discoverable_and_cites_existing_docs() {
+    let overview = include_str!("../../../docs/README.md");
+    assert!(overview.contains("(dry-run-acceptance.md)"));
+    let checklist = include_str!("../../../docs/dry-run-acceptance.md");
+    for section in [
+        "## Scope and mutation avoidance",
+        "## Useful output",
+        "## Error handling",
+        "## Evidence for review",
+    ] {
+        assert!(checklist.contains(section), "missing {section}");
+    }
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+    for source in [
+        "dry-run-matrix-q8.md",
+        "dry-run-verification.md",
+        "agent-contract.md",
+        "exit-codes.md",
+        "README.md",
+    ] {
+        assert!(checklist.contains(source), "missing citation: {source}");
+        assert!(docs.join(source).is_file(), "missing source: {source}");
+    }
+}
