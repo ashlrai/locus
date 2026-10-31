@@ -37,7 +37,7 @@ fn read_doc(rel: &str) -> String {
     std::fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
-fn locus_output(args: &[&str]) -> String {
+pub(super) fn locus_output(args: &[&str]) -> String {
     let home = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_locus"))
         .args(args)
@@ -57,7 +57,7 @@ fn locus_output(args: &[&str]) -> String {
 
 /// Names (and `[alias: x]` aliases) in the `Commands:` section of a help text,
 /// without clap's implicit `help`.
-fn help_commands(help: &str) -> BTreeSet<String> {
+pub(super) fn help_commands(help: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut in_section = false;
     for line in help.lines() {
@@ -104,7 +104,7 @@ fn help_group(help: &str, group: &str) -> Vec<String> {
 
 /// Text an agent would copy: fenced code blocks and inline backtick spans,
 /// with the 1-based line number each came from.
-fn code_spans(doc: &str) -> Vec<(usize, String)> {
+pub(super) fn code_spans(doc: &str) -> Vec<(usize, String)> {
     let mut spans = Vec::new();
     let mut fenced = false;
     for (i, line) in doc.lines().enumerate() {
