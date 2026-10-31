@@ -1206,13 +1206,20 @@ fn main() {
     if handshake::answer_if_requested(&argv, env!("CARGO_PKG_VERSION")) {
         return;
     }
+    JSON_ERRORS.store(
+        argv_requests_json(argv),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     // A closed stdout (`locus doctor | head -1`) exits 141 instead of panicking.
     match stdout::catch_stdout_closed(run) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             let e = stale_pin_recovery_fallback(e);
             if JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed) {
-                emit_json_error(&e, error_exit_code(&e));
+                if stdout::catch_stdout_closed(|| emit_json_error(&e, error_exit_code(&e))).is_err()
+                {
+                    exit::ExitCode::StdoutClosed.exit();
+                }
             } else {
                 eprintln!("{} {e:#}", "error:".red().bold());
             }
@@ -1334,7 +1341,7 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
     1
 }
 
-/// Set once `--json` is parsed so a failing command reports its error as JSON.
+/// Set from CLI-owned arguments so early failures also report errors as JSON.
 static JSON_ERRORS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Machine-readable form of a top-level CLI error, matching the `ok` field the
@@ -1354,12 +1361,14 @@ fn error_envelope(error: String, code: exit::ExitCode) -> serde_json::Value {
     })
 }
 
-/// Print the JSON error as one line on stderr. Stdout keeps the existing
-/// `--json` stream contract (at most one JSON document, e.g. the
-/// `verify session` pack printed before its non-zero exit); errors stay on
-/// stderr, now parseable instead of a human `error:` line.
+/// Keep diagnostics on stderr and supply a stdout document when the command
+/// failed before emitting its report. Never append a second stdout document.
 fn emit_json_error(e: &anyhow::Error, code: exit::ExitCode) {
-    eprintln!("{}", json_error_payload(e, code));
+    let payload = json_error_payload(e, code);
+    if !stdout::has_written() {
+        println!("{payload}");
+    }
+    eprintln!("{payload}");
 }
 
 /// `--json` given before any `--` (after it, the flag belongs to the child).
@@ -1374,12 +1383,7 @@ fn argv_requests_json<I: IntoIterator<Item = String>>(args: I) -> bool {
 /// prints on stderr. Help and version output are not errors and pass through.
 fn json_parse_error_payload(e: &clap::Error) -> Option<serde_json::Value> {
     use clap::error::ErrorKind;
-    if matches!(
-        e.kind(),
-        ErrorKind::DisplayHelp
-            | ErrorKind::DisplayVersion
-            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-    ) {
+    if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
         return None;
     }
     let text = e.render().to_string();
@@ -1407,6 +1411,7 @@ fn json_parse_error_payload(e: &clap::Error) -> Option<serde_json::Value> {
 fn exit_on_parse_error<I: IntoIterator<Item = String>>(e: clap::Error, args: I) -> ! {
     if argv_requests_json(args) {
         if let Some(payload) = json_parse_error_payload(&e) {
+            println!("{payload}");
             eprintln!("{payload}");
             std::process::exit(e.exit_code());
         }
@@ -1495,7 +1500,6 @@ fn run() -> Result<()> {
         Ok(cli) => cli,
         Err(e) => exit_on_parse_error(e, env::args().skip(1)),
     };
-    JSON_ERRORS.store(cli.json, std::sync::atomic::Ordering::Relaxed);
     let json = cli.json;
     let dry_run = cli.dry_run;
     if dry_run && dry_run_support(&cli.command) == DryRunSupport::Unsupported {
