@@ -1,7 +1,7 @@
 // Run: node --test scripts/hub-smoke.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -86,3 +86,47 @@ exec "$REAL_MKTEMP" "$@"
     assert.deepEqual(readdirSync(scratch), []);
   });
 }
+
+test('init failure cleans the used error file and other temporary resources', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'hub-smoke-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'scratch');
+  const guard = join(root, 'guard.sh');
+  const marker = join(root, 'init-attempts');
+  const fixtureScript = join(root, 'scripts', 'hub-smoke.sh');
+  mkdirSync(scratch);
+  mkdirSync(dirname(fixtureScript));
+  mkdirSync(join(root, 'target', 'debug'), { recursive: true });
+  copyFileSync(script, fixtureScript);
+  // The script checks this path even when locus is supplied by a function.
+  writeFileSync(join(root, 'target', 'debug', 'locus'), '#!/usr/bin/env bash\nexit 1\n', { mode: 0o755 });
+  writeFileSync(join(scratch, 'unrelated'), 'keep');
+  // Intercept even a locally built binary, and fail only after the error file
+  // has been created and opened for the init command's stderr.
+  writeFileSync(guard, `jq() { return 0; }
+sleep() { :; }
+locus() {
+  if [[ "$1" == init ]]; then
+    [[ -f "$SMOKE_ERR" && "$SMOKE_ERR" == "$TMPDIR"/locus-hub-smoke-err.* ]] || return 2
+    printf 'attempt\\n' >> "$INIT_MARKER"
+    printf 'synthetic init failure\\n' >&2
+    return 1
+  fi
+  return 0
+}
+`);
+  const result = spawnSync('bash', [fixtureScript], {
+    env: { ...process.env, BASH_ENV: guard, TMPDIR: scratch, INIT_MARKER: marker },
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /error: hub-smoke init\/pin failed after 3 attempts/);
+  assert.match(result.stderr, /synthetic init failure/);
+  assert.equal(readFileSync(marker, 'utf8'), 'attempt\nattempt\nattempt\n');
+  assert.deepEqual(readdirSync(scratch), ['unrelated']);
+  assert.equal(readFileSync(join(scratch, 'unrelated'), 'utf8'), 'keep');
+});
