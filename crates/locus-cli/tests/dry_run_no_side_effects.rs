@@ -49,6 +49,10 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Entry> {
 }
 
 pub(super) fn preview(root: &Path, args: &[&str], success: bool) {
+    preview_with_path(root, args, success, None);
+}
+
+pub(super) fn preview_with_path(root: &Path, args: &[&str], success: bool, path: Option<&Path>) {
     let profiles = tempfile::tempdir().unwrap();
     for json in [false, true] {
         let before = snapshot(root);
@@ -64,6 +68,9 @@ pub(super) fn preview(root: &Path, args: &[&str], success: bool) {
             .current_dir(root.join("project"))
             .args(["--dry-run"])
             .args(args);
+        if let Some(path) = path {
+            cmd.env("PATH", path);
+        }
         // An instrumented child (cargo llvm-cov) writes a .profraw on exit.
         // env_clear drops LLVM_PROFILE_FILE, so the runtime would fall back
         // to default_*.profraw in the child's cwd — inside the snapshot.
@@ -83,10 +90,17 @@ pub(super) fn preview(root: &Path, args: &[&str], success: bool) {
             "preview changed files or metadata at {changed:?}: {args:?}"
         );
         assert_eq!(output.status.success(), success, "preview status: {args:?}");
+        if success && !json && args == ["onboard"] && path.is_some() {
+            assert!(String::from_utf8_lossy(&output.stdout)
+                .contains("authentication is unknown: not probed"));
+        }
         if success && json {
             let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(plan["schema"], "locus.plan.v1");
             assert_eq!(plan["dry_run"], true);
+            if args == ["onboard"] && path.is_some() {
+                assert_eq!(plan["github_cli_auth"], "unknown_not_probed");
+            }
         }
     }
 }

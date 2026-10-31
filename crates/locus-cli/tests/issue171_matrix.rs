@@ -6,6 +6,8 @@
 use std::fs;
 
 use super::dry_run_no_side_effects::preview;
+#[cfg(unix)]
+use super::dry_run_no_side_effects::preview_with_path;
 
 fn fixture() -> tempfile::TempDir {
     let temp = tempfile::tempdir().unwrap();
@@ -113,4 +115,27 @@ fn adapter_install() {
     // The reserved .invalid index cannot provide a real manifest. A preview
     // must succeed locally without fetching or executing publisher code.
     preview(temp.path(), &["adapter", "install", "issue171"], true);
+}
+
+#[cfg(unix)]
+#[test]
+fn onboard_preview_never_runs_gh() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = fixture();
+    let bin = tempfile::tempdir().unwrap();
+    let gh = bin.path().join("gh");
+    std::fs::write(&gh, "#!/bin/sh\nprintf called > \"$HOME/gh-was-called\"\n").unwrap();
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // Positive control: the fake probe really writes under the fixture HOME.
+    let marker = temp.path().join("user/gh-was-called");
+    let status = std::process::Command::new(&gh)
+        .env("HOME", temp.path().join("user"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(marker.exists());
+    std::fs::remove_file(&marker).unwrap();
+    // Both human and JSON previews retain the full tree/metadata assertion.
+    preview_with_path(temp.path(), &["onboard"], true, Some(bin.path()));
+    assert!(!marker.exists());
 }
