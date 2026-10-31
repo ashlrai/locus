@@ -209,6 +209,7 @@ Users must add the destination to their `PATH` themselves.
 The minimum supported Rust version (MSRV) for source installs, including npm's
 Cargo fallback, is **Rust 1.89 or newer**, with a matching Cargo toolchain. The
 [workspace manifest](./Cargo.toml) declares this as `rust-version` for all crates.
+See the [MSRV guide](./docs/MSRV.md) for verification and upgrade instructions.
 With Rust 1.83, installation fails before compiling Locus because the locked
 `idna_adapter` dependency uses the 2024 edition, which that Cargo cannot parse
 ([issue #167](https://github.com/ashlrai/locus/issues/167)). Cargo 1.85 through
