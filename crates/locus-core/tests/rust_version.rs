@@ -199,3 +199,12 @@ fn contributor_instructions_check_all_targets_on_the_declared_toolchain() {
         "CONTRIBUTING.md must show how to check every target against the declared MSRV and lockfile"
     );
 }
+
+#[test]
+fn msrv_guide_is_linked_and_matches_the_workspace() {
+    let msrv = msrv();
+    assert!(read("README.md").contains("](./docs/MSRV.md)"));
+    let guide = normalized("docs/MSRV.md");
+    assert!(guide.contains(&format!("Rust {msrv} or newer")));
+    assert!(guide.contains("cargo +1.89.0 check --workspace --all-targets --locked"));
+}
