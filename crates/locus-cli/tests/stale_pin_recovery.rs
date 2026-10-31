@@ -2,14 +2,179 @@
 //! the sealed pin can no longer be verified. Every surface must fail closed
 //! AND name the human recovery. A dead broker with an intact seal is replaced
 //! by `locus enter` directly (#156), so the hint is enter first:
-//! `eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }`.
+//! `eval "$(locus hook bash)"; locus enter <alias>`, with a separate manual fallback.
 
 use std::path::Path;
 use std::process::{Command, Output};
 
-const RECOVERY_TAIL: &str = "|| { locus leave --force && locus enter";
+const RECOVERY_TAIL: &str =
+    "# If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter";
 const DEAD_BROKER_RECOVERY: &str =
-    "eval \"$(locus hook bash)\"; locus enter personal || { locus leave --force && locus enter personal; }";
+    "eval \"$(locus hook bash)\"; locus enter personal # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter personal";
+
+#[test]
+fn changelog_dead_broker_recipes_match_the_current_hint() {
+    let changelog = include_str!("../../../CHANGELOG.md");
+    let current = locus_core::recovery::dead_broker_recovery_for_shell(None, "bash");
+    let unreleased = changelog
+        .split_once("## [Unreleased]")
+        .unwrap()
+        .1
+        .split("## [0.5.2]")
+        .next()
+        .unwrap();
+    let entry = unreleased
+        .split_once("**Dead-broker recovery (")
+        .expect("unreleased recovery entry exists")
+        .1
+        .split("\n- ")
+        .next()
+        .unwrap();
+    assert!(entry.contains("recorded v0.5.1 first run"));
+    assert!(entry.contains("incorrectly put `locus leave --force` before `locus enter <alias>`"));
+    assert!(entry.contains("although entering directly succeeded"));
+    assert!(entry.contains(&current), "entry must contain {current}");
+    assert!(entry.contains("expired pin, invalid or legacy seal, or unreadable session"));
+    assert!(entry.contains("`locus leave --force` and then `locus enter <alias>`"));
+    assert!(entry.contains("Do not force leave for unrelated errors"));
+    let automatic_fallback = "locus enter <alias> || { locus leave --force";
+    assert!(
+        !changelog.contains(automatic_fallback),
+        "changelog must not recommend automatic forced teardown"
+    );
+}
+
+#[test]
+fn readme_recovery_explains_force_options_consistent_with_cli_help() {
+    let readme = include_str!("../../../README.md");
+    let recovery = readme
+        .split_once("### Recovering after the broker exits")
+        .unwrap()
+        .1
+        .split_once("### Fresh quickstart doctor warning")
+        .unwrap()
+        .0
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(recovery.contains("invalid or legacy seal"));
+    assert!(recovery.contains("`locus enter --force` is a different option: it allows bindings outside the workspace allowlist"));
+    assert!(recovery.contains(
+        "only when neither a live broker nor a persisted operator capability is available"
+    ));
+    assert!(recovery
+        .contains("cannot override a live broker's refusal or a mismatching persisted capability"));
+    assert!(recovery.contains("A subsequent `enter` still requires normal authorization"));
+
+    let help = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .args(["leave", "--help"])
+        .output()
+        .expect("locus leave help runs");
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("--force"));
+    assert!(help.contains("--no-verifier"));
+    assert!(help.contains("without capability verification"));
+    assert!(help
+        .contains("Never overrides a live broker's refusal or a mismatching persisted capability"));
+
+    let enter_help = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .args(["enter", "--help"])
+        .output()
+        .expect("locus enter help runs");
+    assert!(enter_help.status.success());
+    let enter_help = String::from_utf8(enter_help.stdout).unwrap();
+    assert!(enter_help.contains("Allow bindings outside workspace allowlist"));
+}
+
+/// Run the operator guide's and README's Bash commands against a dead broker
+/// and a damaged seal, keeping both recovery recipes aligned with the CLI.
+#[test]
+fn documented_broker_recovery_commands_work_in_order() {
+    let guide = include_str!("../../../docs/broker-recovery-q8.md");
+    let readme = include_str!("../../../README.md");
+    let commands = |document: &str, heading: &str| {
+        document
+            .split_once(heading)
+            .expect("recovery section exists")
+            .1
+            .split_once("```bash\n")
+            .expect("recovery commands exist")
+            .1
+            .split_once("\n```")
+            .expect("recovery code block ends")
+            .0
+            .replace("<alias>", "personal")
+    };
+    let guide_enter = commands(guide, "## Enter first");
+    let guide_fallback = commands(guide, "## If enter is refused");
+    let readme_section = readme
+        .split_once("### Recovering after the broker exits")
+        .expect("README recovery section exists")
+        .1
+        .split_once("### Fresh quickstart doctor warning")
+        .expect("README recovery section ends")
+        .0;
+    let readme_enter = commands(readme_section, "If a command reports")
+        .replace("cd /path/to/workspace", "cd \"$RECOVERY_WORKSPACE\"");
+    let readme_fallback = commands(readme_section, "If `enter` is refused");
+    assert!(readme_enter.starts_with("cd \"$RECOVERY_WORKSPACE\"\n"));
+
+    for (enter_first, fallback) in [
+        (&guide_enter, &guide_fallback),
+        (&readme_enter, &readme_fallback),
+    ] {
+        assert!(!enter_first.contains("leave --force"));
+        assert!(enter_first.contains("locus enter personal"));
+        assert!(
+            fallback.find("locus leave --force").unwrap()
+                < fallback.find("locus enter personal").unwrap()
+        );
+        for damaged in [false, true] {
+            let home = tempfile::tempdir().unwrap();
+            let cwd = tempfile::tempdir().unwrap();
+            let _cap = pin_in_exited_shell(home.path(), cwd.path());
+            if damaged {
+                edit_active(home.path(), false, |s| s.seal = "deadbeef".into());
+            }
+            let bin_dir = Path::new(env!("CARGO_BIN_EXE_locus")).parent().unwrap();
+            let path = format!(
+                "{}:{}",
+                bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            );
+            // Preserve the hooked shell between enter and the conditional manual
+            // fallback, just as the guide instructs the operator to do.
+            let script = if damaged {
+                let (attempt, _) = enter_first.rsplit_once('\n').expect("whoami follows enter");
+                format!("set -e\nif {attempt}\nthen exit 1; fi\n{fallback}\nexit $?")
+            } else {
+                format!("set -e\n{enter_first}\nexit $?")
+            };
+            let out = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("PATH", path)
+                .env("LOCUS_HOME", home.path())
+                .env("RECOVERY_WORKSPACE", cwd.path())
+                .env("SHELL", "/bin/bash")
+                .env_remove("LOCUS_CONTROL_CAPABILITY")
+                .env_remove("LOCUS_SESSION_ID")
+                .current_dir(cwd.path())
+                .output()
+                .expect("bash runs");
+            assert!(
+                out.status.success(),
+                "documented recovery failed: {}",
+                stderr(&out)
+            );
+            let audit = std::fs::read_to_string(home.path().join("audit/events.jsonl")).unwrap();
+            assert_eq!(audit.contains("session.force_leave"), damaged);
+            assert_eq!(replace_stale_audits(home.path()), usize::from(!damaged));
+        }
+    }
+}
 
 fn locus(home: &Path, cwd: &Path, cap: &str, args: &[&str]) -> Output {
     locus_cmd(home, cwd, cap, args)
@@ -127,10 +292,7 @@ fn stale_pin_surfaces_name_the_recovery() {
         .as_str()
         .unwrap()
         .contains("human re-pin required"));
-    assert!(v["recovery"]
-        .as_str()
-        .unwrap()
-        .ends_with("locus enter personal; }"));
+    assert_eq!(v["recovery"].as_str(), Some(DEAD_BROKER_RECOVERY));
 
     // agent report: human and JSON both carry the re-pin recovery.
     let report = locus(home.path(), cwd.path(), &cap, &["agent", "report"]);
@@ -149,7 +311,7 @@ fn stale_pin_surfaces_name_the_recovery() {
     let v: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
     assert_eq!(v["ready"], false);
     let recovery = v["recovery"].as_str().expect("recovery in JSON");
-    assert!(recovery.ends_with("locus enter personal; }"));
+    assert_eq!(recovery, DEAD_BROKER_RECOVERY);
     assert_eq!(v["next_steps"][0], recovery);
 
     // The bash prompt hook shows the invalid pin instead of "unpinned".
@@ -186,6 +348,20 @@ fn stale_pin_surfaces_name_the_recovery() {
     );
     let v: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
     assert!(v.get("recovery").is_none(), "live pin: no recovery");
+}
+
+#[test]
+fn doctor_displays_enter_before_force_leave_for_dead_broker() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+    let doctor = locus(home.path(), cwd.path(), &cap, &["doctor"]);
+    let output = String::from_utf8_lossy(&doctor.stdout);
+    assert!(!doctor.status.success());
+    let enter = output.find("locus enter personal").expect("enter hint");
+    let force = output.find("locus leave --force").expect("force fallback");
+    assert!(enter < force, "doctor must show enter first: {output}");
+    assert!(output.contains(DEAD_BROKER_RECOVERY));
 }
 
 #[test]
@@ -293,7 +469,7 @@ fn stale_pin_recovery_never_names_a_missing_binding() {
         );
         assert!(
             err.contains(
-                "locus enter personal || { locus leave --force && locus enter personal; }"
+                "locus enter personal # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter personal"
             ),
             "{args:?} must name the stale pin's binding: {err}"
         );
@@ -304,7 +480,7 @@ fn stale_pin_recovery_never_names_a_missing_binding() {
 /// Follow the printed dead-broker hint verbatim in a fresh bash with no
 /// capability exported: the hook exports it, `locus enter` replaces the dead
 /// pin on its own (audited `session.replace_stale`), and the forced-leave
-/// fallback never runs.
+/// fallback remains a comment and never runs.
 #[test]
 fn printed_dead_broker_hint_works_verbatim() {
     let home = tempfile::tempdir().unwrap();
@@ -329,7 +505,7 @@ fn printed_dead_broker_hint_works_verbatim() {
     );
     let out = Command::new("bash")
         .arg("-c")
-        .arg(format!("set -e; {hint}; locus whoami; exit $?"))
+        .arg(format!("set -e\n{hint}\nlocus whoami\nexit $?"))
         .env("PATH", path)
         .env("LOCUS_HOME", home.path())
         .env("SHELL", "/bin/bash")
@@ -351,6 +527,52 @@ fn printed_dead_broker_hint_works_verbatim() {
         !audit.contains("operator forced leave"),
         "the --force fallback must not run when enter succeeds"
     );
+}
+
+/// An unrelated enter failure must not force-clear the old session when the
+/// operator runs the printed line. In this case the binding disappears after
+/// the hint was generated.
+#[test]
+fn printed_dead_broker_hint_does_not_force_leave_on_enter_failure() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+    let whoami = locus(home.path(), cwd.path(), &cap, &["whoami"]);
+    let err = stderr(&whoami);
+    let hint = err
+        .lines()
+        .find_map(|l| l.split_once("recover (operator shell; control capability required): "))
+        .map(|(_, h)| h.trim())
+        .expect("recovery line");
+    assert_eq!(hint, DEAD_BROKER_RECOVERY);
+    let active_path = home.path().join("sessions/active.json");
+    let before = std::fs::read(&active_path).unwrap();
+    std::fs::remove_file(home.path().join("bindings/personal.toml")).unwrap();
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_locus")).parent().unwrap();
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(hint)
+        .env("PATH", path)
+        .env("LOCUS_HOME", home.path())
+        .env("SHELL", "/bin/bash")
+        .env_remove("LOCUS_CONTROL_CAPABILITY")
+        .env_remove("LOCUS_SESSION_ID")
+        .current_dir(cwd.path())
+        .output()
+        .expect("bash runs");
+    assert!(!out.status.success(), "missing binding must fail");
+    assert_eq!(
+        std::fs::read(active_path).unwrap(),
+        before,
+        "failed enter must not clear the pin"
+    );
+    let audit = std::fs::read_to_string(home.path().join("audit/events.jsonl")).unwrap_or_default();
+    assert!(!audit.contains("operator forced leave"));
 }
 
 /// `locus mcp --supervised` cannot grant executor capability over a dead
@@ -512,6 +734,89 @@ fn dead_pin_with_tampered_seal_is_refused() {
 
     let out = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "acme"]);
     assert_refused_untouched(&out, home.path(), &before, "tampered seal");
+    assert!(
+        stderr(&out).contains("locus leave --force; locus enter"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+/// Expired pins require explicit teardown even with an authentic seal and
+/// the correct operator capability. Backdate the fixture instead of sleeping.
+#[test]
+fn expired_pin_requires_force_before_a_fresh_pin() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = pin_in_exited_shell(home.path(), cwd.path());
+    edit_active(home.path(), true, |s| {
+        let now = chrono::Utc::now();
+        s.pinned_at = now - chrono::Duration::hours(2);
+        s.expires_at = now - chrono::Duration::hours(1);
+    });
+    let before = active_bytes(home.path());
+    let old: locus_core::session::Session = serde_json::from_slice(&before).unwrap();
+    assert!(old.is_expired());
+    assert!(!locus(home.path(), cwd.path(), &cap, &["whoami"])
+        .status
+        .success());
+    let out = locus_fail_closed(home.path(), cwd.path(), &cap, &["enter", "personal"]);
+    assert_refused_untouched(&out, home.path(), &before, "expired pin");
+    assert!(stderr(&out).contains("session expired"), "{}", stderr(&out));
+    let status = locus(home.path(), cwd.path(), &cap, &["status"]);
+    let diagnostic = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        diagnostic.contains("locus leave --force; locus enter personal"),
+        "{diagnostic}"
+    );
+    let leave = locus(home.path(), cwd.path(), &cap, &["leave", "--force"]);
+    assert!(leave.status.success(), "{}", stderr(&leave));
+    let enter = locus(home.path(), cwd.path(), &cap, &["enter", "personal"]);
+    assert!(enter.status.success(), "{}", stderr(&enter));
+    let new: locus_core::session::Session =
+        serde_json::from_slice(&active_bytes(home.path())).unwrap();
+    assert_ne!(new.session_id, old.session_id);
+    assert_eq!(new.binding_id, old.binding_id);
+    assert!(!new.is_expired());
+    assert!(locus(home.path(), cwd.path(), &cap, &["whoami"])
+        .status
+        .success());
+    assert_eq!(replace_stale_audits(home.path()), 0);
+    let audit = std::fs::read_to_string(home.path().join("audit/events.jsonl")).unwrap();
+    assert!(audit.contains("session.force_leave"));
+}
+
+/// Expired pins must still refuse an invalid operator or seal;
+/// it cannot replace delegated or explicitly selected sessions.
+#[test]
+fn expired_pin_replacement_keeps_authentication_gates() {
+    for case in ["wrong capability", "tampered seal", "delegated", "explicit"] {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let cap = pin_in_exited_shell(home.path(), cwd.path());
+        edit_active(home.path(), true, |s| {
+            s.pinned_at = chrono::Utc::now() - chrono::Duration::hours(2);
+            s.expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
+            if case == "delegated" {
+                s.authority = locus_core::session::SessionAuthority::Delegated;
+            }
+        });
+        if case == "tampered seal" {
+            edit_active(home.path(), false, |s| s.seal = "deadbeef".into());
+        }
+        let before = active_bytes(home.path());
+        let session: locus_core::session::Session = serde_json::from_slice(&before).unwrap();
+        let presented = if case == "wrong capability" {
+            "not-the-operator-capability"
+        } else {
+            &cap
+        };
+        let mut command = locus_cmd(home.path(), cwd.path(), presented, &["enter", "personal"]);
+        if case == "explicit" {
+            command.env("LOCUS_SESSION_ID", &session.session_id);
+        }
+        let out = command.output().unwrap();
+        assert_refused_untouched(&out, home.path(), &before, case);
+    }
 }
 
 /// (3b) A dead pin whose sealed authority is not local control is refused,

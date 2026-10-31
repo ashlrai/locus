@@ -88,11 +88,12 @@ capability status` shows the current posture without printing the value. See
 [SECURITY.md § Control-plane authority boundary](../SECURITY.md#control-plane-authority-boundary).
 
 The pin is backed by an authority broker that the pinning shell supervises.
-When that shell exits, `whoami` and `enter` report `no current broker
-endpoint ... human re-pin required`. Run `locus enter <alias>` in the new shell
-(enter replaces a pin whose broker died); only if enter is refused (an expired
-pin or a bad seal), run `locus leave --force` first. Pin from the long-lived
-shell you launch your agent from.
+When that shell exits, `whoami` can report `no current broker endpoint ...
+human re-pin required`. Load the shell hook and run `locus enter <alias>` in
+the new shell; enter replaces a pin whose broker died. If enter is refused,
+check the error before clearing a wedged session with `locus leave --force`
+and then entering again. See [broker recovery](broker-recovery-q8.md) for
+details. Pin from the long-lived shell you launch your agent from.
 
 Until a valid pin exists, `tools/list` returns **control tools only** (`locus_whoami`, `locus_safe_next`, `locus_status`, `locus_heartbeat`, `locus_enter_hint`, `locus_list_bindings`, `locus_request_pin`, `locus_verify_claim`, `locus_verify_session`). There is **no** ambient fallthrough to personal accounts. With a pin but launched directly by a client, it adds only `locus_providers`.
 
@@ -184,14 +185,98 @@ in the isolated environment `locus exec --no-resolve` builds:
 refuse bindings with credential-resolving upstreams, because those resolve
 inside locus-mcp's policy-gated workers rather than in the server env. Known
 limit, shared with `locus exec -- locus-mcp`: in that scrubbed environment
-`env:` references cannot resolve, and `phm:` references depend on Phantom
-finding its vault from the worker home. It needs `LOCUS_CONTROL_CAPABILITY` and a live pin in the environment the
+ambient `env:` references cannot resolve, and the supported scoped `phm:`
+bridge is currently unavailable (resolution fails closed). It needs
+`LOCUS_CONTROL_CAPABILITY` and a live pin in the environment the
 client launches it from (start the client from the shell where you ran
 `eval "$(locus hook zsh)"` and `locus pin`). When either is missing it says
 why on stderr and serves control tools only. The grant is bound to the pin at
 launch: after `locus switch` or a re-pin, restart the MCP server. Each launch is
 audited as `session.mcp.supervised` (`phase: grant`, then `phase: exit`).
 Under `locus exec`, `--supervised` passes the parent's grant through.
+
+### One router for multiple provider servers
+
+Register one Locus entry and select the provider MCP servers with repeatable
+`--route PROVIDER` options. `--route` implies `--supervised`:
+
+```json
+{
+  "mcpServers": {
+    "locus": {
+      "command": "/abs/path/to/locus",
+      "args": ["mcp", "--route", "github", "--route", "supabase"]
+    }
+  }
+}
+```
+
+Routes select **existing upstream configurations in the pinned binding**.
+Configure those upstreams before the human pins; changing them afterwards
+invalidates the pin. For example, the binding can contain:
+
+```toml
+[[binding.providers]]
+provider = "github"
+account = "acme-gh"
+credential_ref = "phm:ACME_GITHUB"
+[binding.providers.scope]
+orgs = ["acme"]
+[binding.providers.upstream]
+command = "/opt/acme/bin/github-mcp"
+args = ["stdio"]
+resolve_secrets = true
+
+[[binding.providers]]
+provider = "supabase"
+account = "acme-db"
+credential_ref = "phm:ACME_SUPABASE"
+[binding.providers.scope]
+project_ref = "example-project"
+read_only = true
+[binding.providers.upstream]
+command = "/opt/acme/bin/supabase-mcp"
+resolve_secrets = true
+```
+
+These executable paths and scopes are placeholders. Route flags contain only
+provider names, never commands or credentials. Use Phantom Secrets for secret
+management; this checkout's `phm:` bridge is currently unavailable and fails
+closed. Routing does not enable a bridge or bypass resolution. See
+[credential compatibility](./credential-compatibility.md) for the supported
+credential paths and the supervised environment's limitations.
+
+The server exposes Locus control tools plus selected providers' adapter tools
+and cached upstream tools. Upstream names are qualified (`github.ping`,
+`supabase.ping`), so identical names from different servers cannot collide.
+Adapter tools retain precedence on a name collision within one provider.
+Other providers are excluded from the catalog **and refused at call time**,
+even if they belong to the binding. Without `--route`, the existing all-bound-
+providers behavior is unchanged. Repeated identical routes are deduplicated.
+
+Discovery remains side-effect free: `initialize` and `tools/list` do not start
+provider processes or resolve credentials. The first authorized call to a
+provider's upstream tool starts only that provider's worker; subsequent calls
+reuse it, and later `tools/list` requests include its cached tool schemas.
+Use the upstream's documented tool name for that first call. Policy denies,
+approval requirements, and scope mismatches block before worker startup.
+
+Route mode requires one exclusive pin, with an upstream configured for every
+selected provider. An absent provider or missing upstream produces
+`invalid_route`; it never silently falls back to another server. Without a
+healthy pin and executor authority, only the control plane is available.
+Control tools remain available for recovery. Namespaced pins and
+`--multi-tenant` are not supported with `--route`. Restart after changing the
+launch configuration or re-pinning. A supervised direct invocation can also
+use `locus-mcp --route github --route supabase`.
+
+Upstream workers must never launch another multiplexor. Both `locus mcp` and
+`locus-mcp` refuse the SPAWN-LEAK `LOCUS_MCP_UPSTREAM_CHILD` marker on presence,
+including an empty value. They also recognize `LOCUS_WORKER_PROVIDER` for
+workers launched by older versions. Direct `locus-mcp` / `locus mcp` upstream
+commands (including a symlink resolving to the running server) are rejected
+before spawning. Opaque wrappers are stopped by the child-side marker before
+a nested router can serve; do not clear these markers in upstream wrappers.
 
 ## Wire into Cursor
 
@@ -306,6 +391,31 @@ the probe never guesses.
 - Protocol versions: negotiates `2025-06-18`, `2025-03-26`, or `2024-11-05` (echoes the client's requested version when supported, else answers `2025-06-18`)  
 - `initialize.instructions` carries crisp agent rules (whoami / `locus_safe_next` first, cannot pin, scope freeze, live operator-controlled pin state, resources)
 
+## Process lifecycle
+
+`locus-mcp` is session-scoped: it must not outlive the process that launched
+it. Whichever shutdown path fires first ends the server:
+
+- **stdin EOF** (stdio transport) — the read loop ends when the pipe's last
+  write end closes. This is the normal client-disconnect path.
+- **Parent death** — a watchdog records the parent pid at startup and exits
+  the server when that process exits: kqueue `EVFILT_PROC`/`NOTE_EXIT` on
+  macOS (event-driven), a `getppid()` poll elsewhere (reparenting always
+  changes the observed ppid; unlike `PR_SET_PDEATHSIG` a poll cannot fire on
+  a parent's *thread* exit while the process lives). Applies to both the
+  stdio and HTTP transports.
+
+The watchdog exists because stdin EOF is not guaranteed: `locus mcp` and the
+npm wrapper launch the server with **inherited** stdio, and the HTTP broker
+runs with stdin null, so a killed launcher — or any parent that is not the
+sole stdin writer — never delivers EOF. The orphaned server used to stay
+blocked in `read()` forever, still holding the executor grant and its
+upstream workers.
+
+A server that is already reparented at startup (launchd, systemd, or a
+double-forked daemon — `ppid == 1`) has no supervising process to watch, so
+the watchdog stays disarmed and daemon lifetime is unchanged.
+
 ## HTTP transport (CI / remote agents)
 
 Stdio remains the default for Claude Code and Cursor. For CI runners and agents that prefer HTTP, enable the **streamable-HTTP-lite** server (JSON-RPC over HTTP with streamable Accept negotiation + multi-message SSE for large results):
@@ -408,13 +518,14 @@ Each tick is a JSON-RPC `notifications/message` with values-free `data`:
   "doctor_verdict": "SAFE",
   "safe_next": "ready",
   "pinned": true,
-  "frozen": false
+  "frozen": false,
+  "version": "0.5.2"
 }
 ```
 
-`X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets. Ticks run the same external probes as `locus doctor` (Phantom on PATH, unresolved `phm:` refs), so `session_ok: true` is a real verdict on a healthy pin — not a conservative constant.
+`X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets. Operator ticks run the same external probes as `locus doctor` (Phantom on PATH, unresolved `phm:` refs), so their `session_ok` reflects doctor and safe-next readiness. Tenant ticks instead report the grant-scoped drift result: `doctor_verdict` is synthesized as `SAFE` or `UNSAFE`, and `safe_next` is `proceed` or `remint_grant`.
 
-Wire contract: `params.data` validates against [`schema/locus-events.v1.schema.json`](../schema/locus-events.v1.schema.json) `$defs.sessionTick` (tenant ticks add `scope`/`grant_id`/`issues`).
+Wire contract: `params.data` validates against [`schema/locus-events.v1.schema.json`](../schema/locus-events.v1.schema.json) `$defs.sessionTick` (tenant ticks add `scope`/`grant_id`/`issues`). This closed schema describes the current emitted shape: it requires the emitting binary `version` and rejects unknown fields, so older or future tick shapes may not validate. The binary version is not schema negotiation.
 
 Cross-process `Mcp-Session-Id` resume is **on** when workers share the same `LOCUS_HOME` (or `LOCUS_MCP_SESSION_DIR`). Multi-tenant remote multiplexor remains open.
 

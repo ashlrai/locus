@@ -5,7 +5,7 @@
  *
  * 1. Prefer a cached download under ~/.locus/bin
  * 2. Else download the matching GitHub release asset (locus-<target>.tar.gz)
- * 3. Else fall back to `cargo install --git` and use ~/.cargo/bin/locus
+ * 3. Else build with cargo in an isolated install root
  */
 
 const { execFileSync, spawnSync } = require("child_process");
@@ -26,10 +26,13 @@ const { dirname, join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
-const VERSION = "0.5.2";
+const VERSION = "0.6.0";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus";
 const CARGO_PACKAGE = "locus-cli";
+// Minimum Rust for the cargo fallback; must equal the workspace `rust-version`
+// in the repo's Cargo.toml (crates/locus-core/tests/rust_version.rs checks it).
+const MIN_RUST_VERSION = "1.89";
 // `cargo install` takes the crate as a positional argument; it has no --package flag.
 const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} ${CARGO_PACKAGE} --locked`;
 const CACHE_DIR = join(
@@ -68,7 +71,7 @@ function cargoFallbackMessage(runtime = process, reason = "no-prebuilt") {
       : `Could not download the prebuilt locus v${VERSION} binary for ${platform}`;
   return (
     `${why}; building from source with cargo instead. ` +
-    `This can take several minutes and needs Rust (https://rustup.rs).`
+    `This can take several minutes and needs Rust ${MIN_RUST_VERSION} or newer (https://rustup.rs).`
   );
 }
 
@@ -193,13 +196,15 @@ function isCachedBinaryStale(binaryPath) {
   return version === null || compareVersions(version, VERSION) !== 0;
 }
 
-function assertCanReplace(binaryPath, { force = false } = {}) {
+function assertCanReplace(binaryPath, { force = false } = {}, replacementVersion = VERSION) {
   if (force || !existsSync(binaryPath)) return;
   const version = readBinaryVersion(binaryPath);
-  if (version === null || compareVersions(version, VERSION) > 0) {
+  if (version === null || replacementVersion === null || compareVersions(version, replacementVersion) > 0) {
     const reason = version === null
       ? "its installed version could not be determined"
-      : `installed v${version} is newer than npm's v${VERSION}`;
+      : replacementVersion === null
+        ? "the replacement version could not be determined"
+        : `installed v${version} is newer than ${replacementVersion === VERSION ? "npm's" : "the replacement's"} v${replacementVersion}`;
     const error = new Error(
       `Refusing to replace ${binaryPath}: ${reason}. ` +
       "Kept the installed binary. To allow replacement, pass --force before the locus command (or run node install.js --force in the npm package)."
@@ -209,9 +214,10 @@ function assertCanReplace(binaryPath, { force = false } = {}) {
   }
 }
 
-function writeVersionSidecar(binaryPath) {
+function writeVersionSidecar(binaryPath, version = VERSION) {
   try {
-    writeFileSync(getVersionSidecarPath(binaryPath), `${VERSION}\n`, "utf8");
+    if (version === null) unlinkSync(getVersionSidecarPath(binaryPath));
+    else writeFileSync(getVersionSidecarPath(binaryPath), `${version}\n`, "utf8");
   } catch {
     // best-effort
   }
@@ -356,31 +362,43 @@ function tryExistingOnPath() {
   return null;
 }
 
-function installViaCargo() {
+function installViaCargo(binaryPath, options) {
   console.error(`Falling back to: ${INSTALL_FROM_SOURCE}`);
   const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
-  const result = spawnSync(
-    cargo,
-    [
-      "install",
-      "--git",
-      `https://github.com/${REPO}`,
-      CARGO_PACKAGE,
-      "--locked",
-      "--force",
-    ],
-    { stdio: "inherit", env: process.env }
-  );
-  if (result.status !== 0) {
-    throw new Error(
-      `cargo install failed (exit ${result.status}). Install Rust from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
+  mkdirSync(CACHE_DIR, { recursive: true });
+  const root = mkdtempSync(join(CACHE_DIR, ".cargo-install-"));
+  try {
+    const result = spawnSync(
+      cargo,
+      [
+        "install",
+        "--git",
+        `https://github.com/${REPO}`,
+        CARGO_PACKAGE,
+        "--locked",
+        "--root",
+        root,
+      ],
+      { stdio: "inherit", env: process.env }
     );
+    if (result.status !== 0) {
+      throw new Error(
+        `cargo install failed (exit ${result.status}). Install Rust ${MIN_RUST_VERSION} or newer from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
+      );
+    }
+    const path = join(root, "bin", getBinaryFilename());
+    if (!existsSync(path)) {
+      throw new Error(`cargo install succeeded but ${path} not found`);
+    }
+    const version = readBinaryVersion(path);
+    assertCanReplace(binaryPath, options, version);
+    copyFileSync(path, binaryPath);
+    if (process.platform !== "win32") chmodSync(binaryPath, 0o755);
+    writeVersionSidecar(binaryPath, version);
+    return binaryPath;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
-  const path = cargoBinPath();
-  if (!existsSync(path)) {
-    throw new Error(`cargo install succeeded but ${path} not found`);
-  }
-  return path;
 }
 
 async function downloadReleaseBinary(binaryPath, options) {
@@ -466,7 +484,7 @@ async function ensureBinary(options = {}) {
   if (target && !hasPrebuiltBinary(target)) {
     console.error(cargoFallbackMessage(process, "no-prebuilt"));
     try {
-      return installViaCargo();
+      return installViaCargo(binaryPath, options);
     } catch (cargoErr) {
       console.error(cargoErr.message);
       process.exit(1);
@@ -481,7 +499,7 @@ async function ensureBinary(options = {}) {
     console.error(`Failed to download locus: ${err.message}`);
     console.error(cargoFallbackMessage(process, "download-failed"));
     try {
-      return installViaCargo();
+      return installViaCargo(binaryPath, options);
     } catch (cargoErr) {
       console.error(cargoErr.message);
       process.exit(1);

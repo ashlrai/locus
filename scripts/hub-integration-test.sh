@@ -6,6 +6,8 @@
 #   2. status_oneline parse tokens (pinned + unpinned)
 #   3. hub-gate schema + fleet pure helpers (via node, no deps)
 #   4. registerLocusInMcpConfig / merge pure helpers
+#   5. filesystem canary scan over LOCUS_HOME + the smoke project, with a
+#      detection regression for paths containing spaces
 #
 # Requires: locus (or cargo build), jq, node
 # Safe: never touches ~/.locus; never prints secret values.
@@ -24,6 +26,10 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
+# Keep the documented prerequisites and verification commands covered by this suite.
+node --test "$ROOT/integrations/phantom/readme.test.mjs"
+node --experimental-strip-types --test "$ROOT/integrations/phantom/mcp-config.test.mjs" "$ROOT/integrations/phantom/mcp-atomic-write.test.mjs" "$ROOT/integrations/phantom/mcp-preflight.test.mjs"
+
 if ! locus agent report --help >/dev/null 2>&1; then
   echo "building locus with agent report…"
   (cd "$ROOT" && cargo build -q -p locus-cli)
@@ -32,17 +38,27 @@ if [[ ! -x "${ROOT}/target/debug/locus" ]]; then
   (cd "$ROOT" && cargo build -q -p locus-cli)
 fi
 
-SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
-SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
+SMOKE_HOME=""
+SMOKE_PROJ=""
 MT_SRV_PID=""
 cleanup() {
   [[ -n "$MT_SRV_PID" ]] && kill "$MT_SRV_PID" 2>/dev/null || true
-  rm -rf "$SMOKE_HOME" "$SMOKE_PROJ"
+  rm -f -- "${TMPDIR:-/tmp}"/.locus-hub-int-scan.$$.*
+  rm -rf -- "$SMOKE_HOME" "$SMOKE_PROJ"
 }
 trap cleanup EXIT
 
+SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
+SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
+
 export LOCUS_HOME="$SMOKE_HOME"
 unset LOCUS_SESSION_ID || true
+
+# Per-run ambient canary: exported before any locus/locus-mcp call. Nothing
+# under LOCUS_HOME or the smoke project may contain it on disk at the end —
+# a hit means ambient material leaked. A caller may inject the value to
+# exercise the scan from outside.
+export HUB_INT_AMBIENT_CANARY="${HUB_INT_AMBIENT_CANARY:-hub-int-canary-NOT-A-SECRET-$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')}"
 
 echo "== hub-integration-test LOCUS_HOME=$LOCUS_HOME =="
 echo "locus: $(command -v locus) ($(locus --version 2>/dev/null || true))"
@@ -57,6 +73,52 @@ fail=0
 
 ok() { echo "ok    $1"; }
 bad() { echo "FAIL  $1"; fail=1; }
+
+# scan_for_canary ROOT TOKEN — filesystem canary scan with the same contract
+# as tests/integration/phantom_locus.rs: every regular file under ROOT must
+# be listed and read. A path that cannot be listed or read fails the scan,
+# and so does an empty tree — an incomplete scan cannot prove the canary
+# absent. Exit: 0 absent, 1 incomplete, 2 canary found.
+scan_for_canary() {
+  local root="$1" token="$2" listing path rc count=0 found=""
+  if [[ ! -d $root ]]; then
+    echo "canary scan: $root is not a directory" >&2
+    return 1
+  fi
+  listing="${TMPDIR:-/tmp}/.locus-hub-int-scan.$$.${RANDOM}"
+  if ! find "$root" -type f -print0 >"$listing" 2>/dev/null; then
+    echo "canary scan: cannot list under $root" >&2
+    rm -f -- "$listing"
+    return 1
+  fi
+  while IFS= read -r -d '' path; do
+    count=$((count + 1))
+    if [[ ! -r $path ]]; then
+      echo "canary scan: cannot read $path" >&2
+      rm -f -- "$listing"
+      return 1
+    fi
+    rc=0
+    grep -qF -e "$token" -- "$path" 2>/dev/null || rc=$?
+    if [[ $rc -eq 0 ]]; then
+      found="$path"
+    elif [[ $rc -ne 1 ]]; then
+      echo "canary scan: cannot read $path" >&2
+      rm -f -- "$listing"
+      return 1
+    fi
+  done <"$listing"
+  rm -f -- "$listing"
+  if [[ $count -eq 0 ]]; then
+    echo "canary scan: no files under $root" >&2
+    return 1
+  fi
+  if [[ -n $found ]]; then
+    echo "canary scan: canary found in $found" >&2
+    return 2
+  fi
+  return 0
+}
 
 # ---------------------------------------------------------------------------
 # 1. Agent report: required_servers includes locus + phantom
@@ -81,7 +143,10 @@ else
     printf '%s\n' "$REPORT" | jq -c '{status,ready,required_servers,mcp_command,status_oneline}' 2>/dev/null || true
   fi
 
-  # Secret and credential-locator hygiene
+  # Secret and credential-locator hygiene for the report text. The separate
+  # filesystem canary scan in tests/integration/phantom_locus.rs fails the
+  # test if a path cannot be listed, statted, or read. An incomplete scan
+  # cannot prove the canary absent: an unreadable path could hide a leak.
   if printf '%s' "$REPORT" | grep -EEq 'ghp_|sk-[a-zA-Z0-9]{10,}|xox[baprs]-|"credential_ref"|phm:|env:|test:'; then
     bad "possible secret or credential locator material in agent report"
   else
@@ -802,10 +867,6 @@ for (const k of ["allowDispatch", "blockers", "report"]) {
 }
 console.log("ok    live: hub-gate shape {allowDispatch,blockers,report}");
 NODE
-live_ec=$?
-if [[ "$live_ec" -ne 0 ]]; then
-  fail=1
-fi
 
 # ---------------------------------------------------------------------------
 # 5. registerLocusInMcpConfig via node fs (mirrors pure merge + write)
@@ -1220,6 +1281,41 @@ NODE
   # Drain remaining grants so the scratch store ends clean.
   locus mcp revoke --all >/dev/null 2>&1 || true
 fi
+
+# ---------------------------------------------------------------------------
+# 8. Filesystem canary scan — ambient secret material must never reach disk.
+#    Regression: detection must hold under paths containing spaces; a walk
+#    that word-splits or skips such files would pass a tree hiding a leak.
+# ---------------------------------------------------------------------------
+SPACED_ROOT="$SMOKE_PROJ/canary scan/nested dir"
+mkdir -p "$SPACED_ROOT"
+printf 'ordinary contents\n' >"$SPACED_ROOT/clean file"
+scan_rc=0
+scan_for_canary "$SMOKE_PROJ/canary scan" "$HUB_INT_AMBIENT_CANARY" 2>/dev/null || scan_rc=$?
+if [[ $scan_rc -eq 0 ]]; then
+  ok "canary scan: clean tree under spaced path"
+else
+  bad "canary scan: clean tree under spaced path (rc=$scan_rc)"
+fi
+printf 'leaked %s\n' "$HUB_INT_AMBIENT_CANARY" >"$SPACED_ROOT/planted file"
+scan_rc=0
+scan_for_canary "$SMOKE_PROJ/canary scan" "$HUB_INT_AMBIENT_CANARY" 2>/dev/null || scan_rc=$?
+rm -rf "$SMOKE_PROJ/canary scan"
+if [[ $scan_rc -eq 2 ]]; then
+  ok "canary scan detects a canary under a spaced path"
+else
+  bad "canary scan missed a canary under a spaced path (rc=$scan_rc)"
+fi
+
+for scan_root in "$LOCUS_HOME" "$SMOKE_PROJ"; do
+  scan_rc=0
+  scan_for_canary "$scan_root" "$HUB_INT_AMBIENT_CANARY" || scan_rc=$?
+  case "$scan_rc" in
+    0) ok "ambient canary absent under $scan_root" ;;
+    2) bad "ambient canary leaked to disk under $scan_root" ;;
+    *) bad "canary scan incomplete under $scan_root (rc=$scan_rc)" ;;
+  esac
+done
 
 if [[ "$fail" -ne 0 ]]; then
   echo "== hub-integration-test FAILED =="

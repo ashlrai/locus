@@ -102,9 +102,11 @@ fn supervised_launch_hands_child_executor_capability_and_no_control_authority() 
         !env.contains_key("LOCUS_CONTROL_CAPABILITY"),
         "control authority must never reach the agent-facing server"
     );
+    // The store canonicalizes LOCUS_HOME (macOS: /var → /private/var) and
+    // the child env carries the canonical spelling.
     assert_eq!(
         env.get("LOCUS_HOME").map(String::as_str),
-        Some(home.path().to_str().unwrap())
+        Some(home.path().canonicalize().unwrap().to_str().unwrap())
     );
     assert_eq!(
         env.get("LOCUS_WORKER_HOME"),

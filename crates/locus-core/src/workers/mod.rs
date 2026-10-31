@@ -7,6 +7,7 @@
 
 mod composite;
 mod mcp_stdio;
+mod process_guard;
 mod rss_watchdog;
 mod sandbox;
 mod stdio_client;
@@ -25,6 +26,7 @@ pub use composite::{
     provider_from_tool_name, strip_provider_prefix, CompositeWorkerManager, ENV_WORKER_IDLE_SECS,
 };
 pub use mcp_stdio::{McpStdioBackend, McpStdioConfig};
+pub use process_guard::ProcessGuard;
 pub use sandbox::{
     restricted_worker_path, sandbox_enabled, sandbox_from_env, sandbox_no_network_enabled,
     sandbox_no_network_from_env, ENV_WORKER_SANDBOX, ENV_WORKER_SANDBOXED,

@@ -1,12 +1,45 @@
 # Releasing Locus
 
 Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
-`[workspace.package] version` (currently **0.5.2**). Crates inherit via
+`[workspace.package] version` (currently **0.6.0**, prepared for release). Crates inherit via
 `version.workspace = true`. npm packages under `npm/`, `npm-mcp/`, and
 `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
 `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
 
+## 0.6.0 release candidate — prepared 2026-10-31
+
+This checkout prepares 0.6.0; a version bump is not publication evidence.
+After merging the final candidate, run `ci.yml` with `workflow_dispatch` and
+verify success on the exact final commit SHA before creating its non-forced tag.
+The release workflow requires that evidence. Current manual CI runs Linux
+stable full checks and Linux rustc 1.89 checking, not native macOS/Windows tests.
+The tag workflow builds Linux x64 and macOS arm64/x64 archives, checks their
+SHA256 sidecars, exports an unsigned adapter manifest, creates the GitHub
+Release, then publishes both npm packages through trusted OIDC. Verify every
+stage and both registry versions; a GitHub Release alone does not prove npm
+publication. Only then update `scripts/freshness/published.json` to the verified
+version, run `node scripts/freshness/sync.mjs` and
+`node apps/web/discoverability.mjs`, and publish that reviewed docs
+update. Until then public install pins and release badges retain the previous
+verified release; source manifests describe the candidate. Do not provision credentials or change protections to bypass gates.
+
+Run the focused TypeScript drop-in tests with Node 22.6+ separately from the
+Node 20 full-suite job, and record whether `scripts/e2e.sh` below was run rather
+than inferring its result from the manual CI job. After updating canonical
+versions and the changelog, regenerate and check both `scripts/freshness` and
+`apps/web/discoverability.mjs`. Root `server.json` must match the source candidate;
+the website `apps/web/public/server.json` separately describes the verified
+published package.
+Homebrew's live tap, the live website and MCP registry submission are separate
+channels; verify them independently and never invent checksums before assets exist.
+
 ## Preconditions
+
+The Linux full `ci.yml` job invokes `scripts/e2e.sh` after the release build
+on scheduled and manual runs. The shell suite uses isolated Locus homes and
+synthetic fixtures; its summary includes feature-detected skips. Inspect that
+summary and the exact release SHA before claiming runtime coverage. Adding the
+step alone is not evidence that a hosted run passed.
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"

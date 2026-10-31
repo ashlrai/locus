@@ -1,6 +1,6 @@
 //! Wire contract for the versioned locus event schema (events-schema bet).
 //! Validates events actually emitted by `locus events export` so Phantom's
-//! router can rely on `schema/locus-events.v1.schema.json`. Values-free only.
+//! router can rely on `schema/locus-events.v1.schema.json` for structure.
 
 use locus_core::events::{export_events, EventsExportFormat, EventsExportOptions, FleetPulseEvent};
 use locus_core::store::AuditEvent;
@@ -140,17 +140,92 @@ fn audit_envelope_fails_closed() {
         wrong[key] = json!(7);
         assert!(!audit.is_valid(&wrong), "accepted numeric {key}");
     }
-    // Timestamps must be RFC 3339.
-    for key in ["exported_at", "ts"] {
-        let mut ev = good.clone();
-        ev[key] = json!("tomorrow");
-        assert!(!audit.is_valid(&ev), "accepted bad {key}");
-    }
-    // detail must be an object; unknown keys are rejected.
+    // The exporter supplies an RFC 3339 export timestamp.
     let mut ev = good.clone();
-    ev["detail"] = json!("freeform");
+    ev["exported_at"] = json!("tomorrow");
     assert!(!audit.is_valid(&ev));
+    // Unknown envelope keys are rejected.
     let mut ev = good.clone();
     ev["token"] = json!("secret");
     assert!(!audit.is_valid(&ev), "accepted unknown key");
+}
+
+#[test]
+fn audit_schema_accepts_exported_arbitrary_detail_and_record_strings() {
+    let audit = schema("audit");
+    for detail in [
+        json!("synthetic note"),
+        json!([1, "note"]),
+        json!({"note": "example"}),
+    ] {
+        let event = AuditEvent {
+            ts: "legacy timestamp".into(),
+            op: "Legacy Operation".into(),
+            binding: "acme".into(),
+            detail: Some(detail.clone()),
+        };
+        let output = export_events(&[event], &EventsExportOptions::default()).unwrap();
+        let value: Value = serde_json::from_str(output.trim()).unwrap();
+        assert_eq!(value["detail"], detail);
+        assert!(audit.is_valid(&value), "{value}");
+        assert!(schema("").is_valid(&value), "{value}");
+    }
+}
+
+#[test]
+fn audit_schema_matches_documented_example() {
+    let docs = include_str!("../../../docs/observability.md");
+    let example = docs
+        .split("One envelope per audit event")
+        .nth(1)
+        .unwrap()
+        .split("```json\n")
+        .nth(1)
+        .unwrap()
+        .split("\n```")
+        .next()
+        .unwrap();
+    let value: Value = serde_json::from_str(example).unwrap();
+    assert!(schema("audit").is_valid(&value), "{value}");
+    assert!(schema("").is_valid(&value), "{value}");
+}
+
+#[test]
+fn session_tick_schema_matches_documentation_and_scope_dependencies() {
+    let docs = include_str!("../../../docs/mcp.md");
+    let example = docs
+        .split("Each tick is a JSON-RPC `notifications/message` with values-free `data`:")
+        .nth(1)
+        .unwrap()
+        .split("```json\n")
+        .nth(1)
+        .unwrap()
+        .split("\n```")
+        .next()
+        .unwrap();
+    let operator: Value = serde_json::from_str(example).unwrap();
+    let tick = schema("sessionTick");
+    assert!(tick.is_valid(&operator), "{operator}");
+    assert!(schema("").is_valid(&operator), "{operator}");
+
+    let mut tenant = operator.clone();
+    tenant["scope"] = json!("tenant");
+    tenant["safe_next"] = json!("proceed");
+    tenant["grant_id"] = json!("0123456789abcdef");
+    tenant["issues"] = json!([]);
+    assert!(tick.is_valid(&tenant), "{tenant}");
+    assert!(schema("").is_valid(&tenant), "{tenant}");
+    for key in ["scope", "grant_id", "issues"] {
+        let mut missing = tenant.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        assert!(!tick.is_valid(&missing), "accepted missing {key}: {missing}");
+    }
+    let mut fallback = operator;
+    fallback["whoami"] = Value::Null;
+    fallback["session_ok"] = json!(false);
+    fallback["doctor_verdict"] = json!("UNSAFE");
+    fallback["safe_next"] = json!("init");
+    fallback["pinned"] = json!(false);
+    fallback["hint"] = json!("store unavailable under LOCUS_HOME");
+    assert!(tick.is_valid(&fallback), "{fallback}");
 }

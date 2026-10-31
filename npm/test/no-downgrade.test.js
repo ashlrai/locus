@@ -2,12 +2,58 @@
 // preloaded transport/process doubles prevent network access or real cargo installs.
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
-const { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const test = require("node:test");
 const { compareVersions } = require("../bin/locus.js");
 const version = require("../package.json").version;
+
+test("an older wrapper preserves a newer executable even with an old sidecar (#177)", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "locus-real-downgrade-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const bin = join(home, ".locus", "bin");
+  const wrapperDir = join(home, "package", "bin");
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(wrapperDir, { recursive: true });
+  const binary = join(bin, process.platform === "win32" ? "locus.exe" : "locus");
+  const wrapper = join(wrapperDir, "locus.js");
+  // Node is a real executable whose --version output is accepted by the wrapper.
+  // The package requires Node >=16, so its version is newer than this wrapper.
+  assert.equal(compareVersions(process.version, version), 1);
+  // Link rather than copy: shared builds (e.g. Homebrew) resolve @rpath
+  // entries such as libnode.dylib relative to the real executable, so a copied
+  // node cannot answer --version outside its prefix and the probe falls back
+  // to the stale sidecar. Fall back to a copy where symlinks are unavailable.
+  try {
+    symlinkSync(process.execPath, binary);
+  } catch {
+    copyFileSync(process.execPath, binary);
+    chmodSync(binary, 0o755);
+  }
+  copyFileSync(join(__dirname, "..", "bin", "locus.js"), wrapper);
+  writeFileSync(`${binary}.version`, "0.1.0\n");
+  const original = readFileSync(binary);
+  const attempts = join(home, "attempts");
+  const preload = join(home, "block-external.js");
+  writeFileSync(preload, `
+    const fs = require("node:fs");
+    const block = () => { fs.writeFileSync(${JSON.stringify(attempts)}, "attempted"); throw new Error("unexpected external action"); };
+    require("node:https").get = block;
+    require("node:child_process").spawnSync = block;
+  `);
+  const result = spawnSync(process.execPath, ["--require", preload, wrapper, "--help"], {
+    env: { HOME: home, USERPROFILE: home, PATH: "", LOCUS_NPM_NO_LINK: "1" },
+    encoding: "utf8",
+    timeout: 15_000,
+  });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /Refusing to replace.*newer/);
+  assert.ok(result.stderr.includes(process.version.slice(1)));
+  assert.deepEqual(readFileSync(binary), original);
+  assert.equal(readFileSync(`${binary}.version`, "utf8"), "0.1.0\n");
+  assert.equal(existsSync(attempts), false, "must not search PATH, download, or run cargo");
+});
 
 test("version comparison follows SemVer rather than string or substring order", () => {
   for (const [left, right, expected] of [
@@ -31,7 +77,7 @@ test("version comparison follows SemVer rather than string or substring order", 
   ]) assert.equal(compareVersions(left, right), expected, `${left} vs ${right}`);
 });
 
-function fixture(t, { installed = "99.0.0", sidecar, companion, changedDuringDownload } = {}) {
+function fixture(t, { installed = "99.0.0", sidecar, companion, pathVersion, changedDuringDownload } = {}) {
   const home = mkdtempSync(join(tmpdir(), "locus-downgrade-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const pkg = join(home, "package");
@@ -48,6 +94,11 @@ function fixture(t, { installed = "99.0.0", sidecar, companion, changedDuringDow
     writeFileSync(join(cache, "locus-mcp"), "original companion");
     writeFileSync(join(cache, "locus-mcp.version"), `${companion}\n`);
   }
+  const pathBinary = pathVersion === undefined ? null : join(home, "pathbin", "locus");
+  if (pathBinary) {
+    mkdirSync(join(home, "pathbin"), { recursive: true });
+    writeFileSync(pathBinary, "path binary");
+  }
   const trace = join(home, "trace.log");
   const preload = join(home, "preload.js");
   writeFileSync(preload, `
@@ -58,15 +109,16 @@ function fixture(t, { installed = "99.0.0", sidecar, companion, changedDuringDow
     Object.defineProperty(process, "platform", { value: "linux" });
     Object.defineProperty(process, "arch", { value: "x64" });
     const binary = ${JSON.stringify(binary)};
+    const pathBinary = ${JSON.stringify(pathBinary)};
     const record = (event) => fs.appendFileSync(${JSON.stringify(trace)}, event + "\\n");
     cp.execFileSync = (file, args) => {
-      if (file === binary || file === join(${JSON.stringify(cache)}, "locus-mcp")) {
+      if (file === binary || file === pathBinary || file === join(${JSON.stringify(cache)}, "locus-mcp")) {
         if (args.length === 1 && args[0] === "--version") {
-          const installed = file === binary ? ${JSON.stringify(installed)} : ${JSON.stringify(companion)};
+          const installed = file === binary ? ${JSON.stringify(installed)} : file === pathBinary ? ${JSON.stringify(pathVersion ?? null)} : ${JSON.stringify(companion)};
           if (!installed) throw new Error("version probe failed");
           return Buffer.from("locus " + installed + "\\n");
         }
-        record("native " + JSON.stringify(args));
+        record((file === pathBinary ? "path native " : "native ") + JSON.stringify(args));
         return Buffer.alloc(0);
       }
       if (file === "tar") {
@@ -78,7 +130,7 @@ function fixture(t, { installed = "99.0.0", sidecar, companion, changedDuringDow
       throw new Error("unexpected exec: " + file);
     };
     cp.spawnSync = (file) => {
-      if (file === "which") return { status: 1, stdout: "" };
+      if (file === "which") return pathBinary ? { status: 0, stdout: pathBinary + "\\n" } : { status: 1, stdout: "" };
       record("unexpected spawn " + file);
       return { status: 1 };
     };
@@ -133,6 +185,20 @@ for (const entry of ["wrapper", "install", "download"]) {
   });
 }
 
+test("a cache one patch newer survives both wrapper and postinstall", (t) => {
+  const [major, minor, patch] = version.split("-")[0].split(".").map(Number);
+  const newer = `${major}.${minor}.${patch + 1}`;
+  for (const entry of ["wrapper", "install"]) {
+    const f = fixture(t, { installed: newer, sidecar: newer });
+    const result = f.run(entry, ["--version"]);
+    assert.equal(result.status, entry === "install" ? 0 : 1, result.stderr);
+    assert.ok((result.stderr + result.stdout).includes(`installed v${newer} is newer`));
+    assert.equal(readFileSync(f.binary, "utf8"), "original binary");
+    assert.equal(readFileSync(`${f.binary}.version`, "utf8"), `${newer}\n`);
+    assert.equal(f.trace(), "");
+  }
+});
+
 for (const sidecar of [undefined, "0.1.0", "invalid"]) {
   test(`newer executable is protected with sidecar ${sidecar}`, (t) => {
     const f = fixture(t, { sidecar });
@@ -184,6 +250,35 @@ test("a current binary is reused and native subcommand flags pass through", (t) 
   const result = f.run("wrapper", ["leave", "--force"]);
   assert.equal(result.status, 0, result.stderr);
   assert.equal(f.trace(), 'native ["leave","--force"]\n');
+});
+
+for (const pathVersion of [version, "99.0.0"]) {
+  test(`an older cache yields to a PATH binary at ${pathVersion}`, (t) => {
+    const f = fixture(t, { installed: "0.1.0", pathVersion });
+    const result = f.run("wrapper", ["status"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(f.binary, "utf8"), "original binary");
+    assert.equal(f.trace(), 'path native ["status"]\n');
+  });
+}
+
+for (const pathVersion of ["0.1.0", null]) {
+  test(`an older or unversioned PATH binary (${pathVersion}) is not selected`, (t) => {
+    const f = fixture(t, { installed: false, pathVersion });
+    const result = f.run("wrapper", ["status"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(f.binary, "utf8"), "downloaded binary");
+    assert.match(f.trace(), /download/);
+    assert.doesNotMatch(f.trace(), /path native/);
+  });
+}
+
+test("a protected cache prevents selection of an otherwise eligible PATH binary", (t) => {
+  const f = fixture(t, { installed: "99.0.0", pathVersion: version });
+  const result = f.run("wrapper", ["status"]);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Refusing to replace/);
+  assert.equal(f.trace(), "");
 });
 
 for (const installed of [false, "0.1.0", `${version}-rc.1`]) {

@@ -5,10 +5,11 @@
  *
  * 1. Prefer a cached download under ~/.locus/bin
  * 2. Else download the matching GitHub release asset (locus-<target>.tar.gz)
- * 3. Else fall back to `cargo install --git` and use ~/.cargo/bin/locus-mcp
+ * 3. Else build with cargo in an isolated install root
  *
- * Note: locus-mcp is a long-running stdio MCP server — do not call it with
- * --version for health checks (it has no CLI version flag).
+ * The wrapper never replaces a newer cached binary with its older release:
+ * a cached locus-mcp that reports (or whose sidecar records) a newer version
+ * is kept and used. A leading `--force` is the explicit override.
  */
 
 const { execFileSync, spawnSync } = require("child_process");
@@ -29,10 +30,13 @@ const { join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
-const VERSION = "0.5.2";
+const VERSION = "0.6.0";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus-mcp";
 const CARGO_PACKAGE = "locus-mcp";
+// Minimum Rust for the cargo fallback; must equal the workspace `rust-version`
+// in the repo's Cargo.toml (crates/locus-core/tests/rust_version.rs checks it).
+const MIN_RUST_VERSION = "1.89";
 // `cargo install` takes the crate as a positional argument; it has no --package flag.
 const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} ${CARGO_PACKAGE} --locked`;
 const CACHE_DIR = join(
@@ -71,7 +75,7 @@ function cargoFallbackMessage(runtime = process, reason = "no-prebuilt") {
       : `Could not download the prebuilt locus-mcp v${VERSION} binary for ${platform}`;
   return (
     `${why}; building from source with cargo instead. ` +
-    `This can take several minutes and needs Rust (https://rustup.rs).`
+    `This can take several minutes and needs Rust ${MIN_RUST_VERSION} or newer (https://rustup.rs).`
   );
 }
 
@@ -134,23 +138,91 @@ function parseSha256File(buf, expectedFilename) {
   return null;
 }
 
-function isCachedBinaryStale(binaryPath) {
-  // locus-mcp has no --version CLI — use sidecar only
-  const sidecar = getVersionSidecarPath(binaryPath);
-  if (!existsSync(sidecar)) {
-    // Unknown version: treat as usable if file exists (avoid re-download loop)
-    return false;
+function parseVersion(value) {
+  const match = value.trim().match(
+    /^(?:locus(?:-mcp)?\s+)?v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/
+  );
+  if (!match) return null;
+  const prerelease = match[4] ? match[4].split(".") : [];
+  if (prerelease.some((part) => /^0\d+$/.test(part))) return null;
+  return { core: match.slice(1, 4).map(BigInt), prerelease };
+}
+
+// SemVer precedence: numeric components, prereleases before stable releases,
+// numeric prerelease identifiers before text, and no build-metadata ordering.
+function compareVersions(left, right) {
+  const a = parseVersion(left);
+  const b = parseVersion(right);
+  if (!a || !b) return null;
+  for (let i = 0; i < 3; i++) {
+    if (a.core[i] !== b.core[i]) return a.core[i] > b.core[i] ? 1 : -1;
   }
+  if (!a.prerelease.length || !b.prerelease.length) {
+    return a.prerelease.length === b.prerelease.length ? 0 : a.prerelease.length ? -1 : 1;
+  }
+  for (let i = 0; i < Math.max(a.prerelease.length, b.prerelease.length); i++) {
+    const x = a.prerelease[i];
+    const y = b.prerelease[i];
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (x === y) continue;
+    const xNumeric = /^\d+$/.test(x);
+    const yNumeric = /^\d+$/.test(y);
+    if (xNumeric && yNumeric) return BigInt(x) > BigInt(y) ? 1 : -1;
+    if (xNumeric !== yNumeric) return xNumeric ? -1 : 1;
+    return x > y ? 1 : -1;
+  }
+  return 0;
+}
+
+function readBinaryVersion(binaryPath) {
+  // Probe the executable first: another installer may have replaced it without
+  // updating our sidecar. Never probe a Node shim (it could recurse into us).
   try {
-    return readFileSync(sidecar, "utf8").trim() !== VERSION;
-  } catch {
-    return true;
+    if (!isNodeShim(binaryPath)) {
+      const out = execFileSync(binaryPath, ["--version"], {
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 5000,
+      }).toString().trim();
+      if (parseVersion(out)) return out.replace(/^(?:locus(?:-mcp)?\s+)?v?/, "");
+    }
+  } catch {}
+  try {
+    const version = readFileSync(getVersionSidecarPath(binaryPath), "utf8").trim();
+    if (parseVersion(version)) return version.replace(/^(?:locus(?:-mcp)?\s+)?v?/, "");
+  } catch {}
+  return null;
+}
+
+function isCachedBinaryStale(binaryPath) {
+  // Only a provably older cache is stale. A newer or unversioned binary is
+  // reused as is so a refresh can never downgrade an existing install.
+  const version = readBinaryVersion(binaryPath);
+  return version !== null && compareVersions(version, VERSION) < 0;
+}
+
+function assertCanReplace(binaryPath, { force = false } = {}, replacementVersion = VERSION) {
+  if (force || !existsSync(binaryPath)) return;
+  const version = readBinaryVersion(binaryPath);
+  if (version === null || replacementVersion === null || compareVersions(version, replacementVersion) > 0) {
+    const reason = version === null
+      ? "its installed version could not be determined"
+      : replacementVersion === null
+        ? "the replacement version could not be determined"
+        : `installed v${version} is newer than ${replacementVersion === VERSION ? "npm's" : "the replacement's"} v${replacementVersion}`;
+    const error = new Error(
+      `Refusing to replace ${binaryPath}: ${reason}. ` +
+      "Kept the installed binary. To allow replacement, pass --force before the locus-mcp command."
+    );
+    error.code = "LOCUS_NPM_DOWNGRADE";
+    throw error;
   }
 }
 
-function writeVersionSidecar(binaryPath) {
+function writeVersionSidecar(binaryPath, version = VERSION) {
   try {
-    writeFileSync(getVersionSidecarPath(binaryPath), `${VERSION}\n`, "utf8");
+    if (version === null) unlinkSync(getVersionSidecarPath(binaryPath));
+    else writeFileSync(getVersionSidecarPath(binaryPath), `${version}\n`, "utf8");
   } catch {
     // best-effort
   }
@@ -182,7 +254,7 @@ function findBinaryInDir(dir, binaryFilename) {
   return null;
 }
 
-function extractBinaryFromArchive(archivePath, binaryPath) {
+function extractBinaryFromArchive(archivePath, binaryPath, options) {
   const stagingDir = mkdtempSync(join(CACHE_DIR, ".extract-"));
   const binaryFilename = getBinaryFilename();
 
@@ -209,6 +281,8 @@ function extractBinaryFromArchive(archivePath, binaryPath) {
       throw new Error(`${binaryFilename} not found in ${archivePath}`);
     }
 
+    // Recheck after the download in case another installer updated the cache.
+    assertCanReplace(binaryPath, options);
     copyFileSync(extractedBinaryPath, binaryPath);
     if (process.platform !== "win32") {
       chmodSync(binaryPath, 0o755);
@@ -263,34 +337,47 @@ function tryExistingOnPath() {
   return null;
 }
 
-function installViaCargo() {
+function installViaCargo(binaryPath, options) {
   console.error(`Falling back to: ${INSTALL_FROM_SOURCE}`);
   const cargo = process.platform === "win32" ? "cargo.exe" : "cargo";
-  const result = spawnSync(
-    cargo,
-    [
-      "install",
-      "--git",
-      `https://github.com/${REPO}`,
-      CARGO_PACKAGE,
-      "--locked",
-      "--force",
-    ],
-    { stdio: "inherit", env: process.env }
-  );
-  if (result.status !== 0) {
-    throw new Error(
-      `cargo install failed (exit ${result.status}). Install Rust from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
+  mkdirSync(CACHE_DIR, { recursive: true });
+  const root = mkdtempSync(join(CACHE_DIR, ".cargo-install-"));
+  try {
+    const result = spawnSync(
+      cargo,
+      [
+        "install",
+        "--git",
+        `https://github.com/${REPO}`,
+        CARGO_PACKAGE,
+        "--locked",
+        "--root",
+        root,
+      ],
+      { stdio: "inherit", env: process.env }
     );
+    if (result.status !== 0) {
+      throw new Error(
+        `cargo install failed (exit ${result.status}). Install Rust ${MIN_RUST_VERSION} or newer from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
+      );
+    }
+    const path = join(root, "bin", getBinaryFilename());
+    if (!existsSync(path)) {
+      throw new Error(`cargo install succeeded but ${path} not found`);
+    }
+    const version = readBinaryVersion(path);
+    assertCanReplace(binaryPath, options, version);
+    copyFileSync(path, binaryPath);
+    if (process.platform !== "win32") chmodSync(binaryPath, 0o755);
+    writeVersionSidecar(binaryPath, version);
+    return binaryPath;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
-  const path = cargoBinPath();
-  if (!existsSync(path)) {
-    throw new Error(`cargo install succeeded but ${path} not found`);
-  }
-  return path;
 }
 
-async function downloadReleaseBinary(binaryPath) {
+async function downloadReleaseBinary(binaryPath, options) {
+  assertCanReplace(binaryPath, options);
   const target = getPlatformTarget();
   const isWindows = process.platform === "win32";
   const archiveExt = isWindows ? "zip" : "tar.gz";
@@ -333,7 +420,7 @@ async function downloadReleaseBinary(binaryPath) {
     }
 
     writeFileSync(archivePath, data);
-    extractBinaryFromArchive(archivePath, binaryPath);
+    extractBinaryFromArchive(archivePath, binaryPath, options);
     removeIfExists(archivePath);
     console.error(`Installed locus-mcp to ${binaryPath}`);
     return binaryPath;
@@ -343,21 +430,35 @@ async function downloadReleaseBinary(binaryPath) {
   }
 }
 
-async function ensureBinary() {
+async function ensureBinary(options = {}) {
   const binaryPath = getBinaryPath();
 
-  if (existsSync(binaryPath) && !isCachedBinaryStale(binaryPath)) {
-    return binaryPath;
-  }
-  if (existsSync(binaryPath) && isCachedBinaryStale(binaryPath)) {
-    console.error(`Cached locus-mcp is out of date — refreshing to v${VERSION}...`);
-    removeIfExists(binaryPath);
-    removeIfExists(getVersionSidecarPath(binaryPath));
+  if (existsSync(binaryPath)) {
+    const version = readBinaryVersion(binaryPath);
+    const comparison = version === null ? null : compareVersions(version, VERSION);
+    if (!options.force && (comparison === null || comparison >= 0)) {
+      // A newer or unversioned cache is kept and run: using it is not a
+      // downgrade, and replacing it would be.
+      if (comparison > 0) {
+        console.error(
+          `Cached locus-mcp v${version} is newer than npm's v${VERSION}; keeping it.`
+        );
+      }
+      return binaryPath;
+    }
+    console.error(
+      comparison > 0
+        ? `Replacing cached locus-mcp v${version} with npm's v${VERSION} (--force).`
+        : `Cached locus-mcp is out of date; refreshing to v${VERSION}...`
+    );
   }
 
   const existing = tryExistingOnPath();
   if (existing) {
-    return existing;
+    const version = readBinaryVersion(existing);
+    const comparison = version === null ? null : compareVersions(version, VERSION);
+    // Reuse newer PATH installs, unless the user explicitly requested replacement.
+    if (comparison === 0 || (comparison > 0 && !options.force)) return existing;
   }
 
   let target = null;
@@ -369,7 +470,7 @@ async function ensureBinary() {
   if (target && !hasPrebuiltBinary(target)) {
     console.error(cargoFallbackMessage(process, "no-prebuilt"));
     try {
-      return installViaCargo();
+      return installViaCargo(binaryPath, options);
     } catch (cargoErr) {
       console.error(cargoErr.message);
       process.exit(1);
@@ -377,12 +478,14 @@ async function ensureBinary() {
   }
 
   try {
-    return await downloadReleaseBinary(binaryPath);
+    return await downloadReleaseBinary(binaryPath, options);
   } catch (err) {
+    // A refusal must not turn into a cargo install that bypasses the guard.
+    if (err.code === "LOCUS_NPM_DOWNGRADE") throw err;
     console.error(`Failed to download locus-mcp: ${err.message}`);
     console.error(cargoFallbackMessage(process, "download-failed"));
     try {
-      return installViaCargo();
+      return installViaCargo(binaryPath, options);
     } catch (cargoErr) {
       console.error(cargoErr.message);
       process.exit(1);
@@ -391,8 +494,12 @@ async function ensureBinary() {
 }
 
 async function main() {
-  const binary = await ensureBinary();
   const args = process.argv.slice(2);
+  // Only a leading wrapper flag authorizes replacement; it is consumed here
+  // and never reaches the native server.
+  const force = args[0] === "--force";
+  if (force) args.shift();
+  const binary = await ensureBinary({ force });
 
   try {
     execFileSync(binary, args, { stdio: "inherit" });
@@ -404,10 +511,20 @@ async function main() {
 }
 
 if (require.main === module) {
-  main();
+  main().catch((err) => {
+    console.error(err.message);
+    process.exit(1);
+  });
 }
 
 module.exports = {
+  getBinaryPath,
+  isCachedBinaryStale,
+  compareVersions,
+  readBinaryVersion,
+  assertCanReplace,
+  downloadReleaseBinary,
+  ensureBinary,
   INSTALL_FROM_SOURCE,
   PREBUILT_TARGETS,
   SUPPORTED_TARGETS,

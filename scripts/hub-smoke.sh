@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # hub-smoke.sh — validate Phantom CLI contracts against a throwaway LOCUS_HOME.
 #
-# Requires: locus (or cargo build), jq
-# Safe: never touches ~/.locus; never prints secret values.
+# From the repository root, run: ./scripts/hub-smoke.sh
+# Prerequisites: Bash, jq, Rust and Cargo (the workspace's supported toolchain),
+# standard Unix utilities including mktemp, od, tr, grep and head, /dev/urandom,
+# and writable temporary storage and target/ directory. Cargo builds locus-cli
+# if the local debug binary is absent, even when locus is already on PATH.
+# The script uses a throwaway LOCUS_HOME; no real binding or credentials needed.
 #
 # Resilience notes (CI):
 #   After heavy cargo tests, the first authority-broker spawn can race a tight
@@ -14,6 +18,26 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+SMOKE_HOME=""
+SMOKE_PROJ=""
+SMOKE_ERR=""
+cleanup() { rm -rf -- "$SMOKE_HOME" "$SMOKE_PROJ" "$SMOKE_ERR"; }
+trap cleanup EXIT
+
+if ! SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-smoke.XXXXXX")"; then
+  echo "error: hub-smoke could not create temporary home" >&2
+  exit 1
+fi
+if ! SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-proj.XXXXXX")"; then
+  echo "error: hub-smoke could not create temporary project directory" >&2
+  exit 1
+fi
+if ! SMOKE_ERR="$(mktemp "${TMPDIR:-/tmp}/locus-hub-smoke-err.XXXXXX")"; then
+  echo "error: hub-smoke could not create temporary error file" >&2
+  exit 1
+fi
+
 # Prefer freshly built binaries over an older cargo install.
 export PATH="${ROOT}/target/debug:${ROOT}/target/release:${HOME}/.cargo/bin:${PATH}"
 export LOCUS_CONTROL_CAPABILITY="${LOCUS_CONTROL_CAPABILITY:-$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')}"
@@ -34,12 +58,6 @@ fi
 if [[ ! -x "${ROOT}/target/debug/locus" ]]; then
   (cd "$ROOT" && cargo build -q -p locus-cli)
 fi
-
-SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-smoke.XXXXXX")"
-SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-proj.XXXXXX")"
-SMOKE_ERR="$(mktemp "${TMPDIR:-/tmp}/locus-hub-smoke-err.XXXXXX")"
-cleanup() { rm -rf "$SMOKE_HOME" "$SMOKE_PROJ" "$SMOKE_ERR"; }
-trap cleanup EXIT
 
 export LOCUS_HOME="$SMOKE_HOME"
 unset LOCUS_SESSION_ID || true

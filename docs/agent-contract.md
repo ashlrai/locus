@@ -25,7 +25,7 @@ whose first key is `schema`. Key on it:
 - The rest of the object is the command's existing payload. Older fields such
   as `schema_version`, `kind` and `version` stay for older readers.
 - No document carries a secret, a control-capability value or a credential.
-  `locus status` and `locus watch` print one line; the others are pretty JSON.
+  `locus status`, `locus watch`, and `locus fleet-feed` print one line; the others are pretty JSON.
 - MCP tool payloads and the dashboard `/api/*` responses are not stamped.
 
 | Command | Schema |
@@ -33,6 +33,8 @@ whose first key is `schema`. Key on it:
 | `locus doctor` | `locus.doctor.v1` |
 | `locus doctor --fix [--apply]` | `locus.doctor.fix.v1` |
 | `locus whoami` | `locus.whoami.v1` |
+| `locus fleet-feed` (always JSON) | `locus.fleet_feed.v1` |
+| `locus fleet-denials` (always JSON) | `locus.fleet_denials.v1` |
 | `locus status` | `locus.status.v1` |
 | `locus verify session` | `locus.verify.session.v1` |
 | `locus verify claim` | `locus.verify.claim.v1` |
@@ -44,6 +46,7 @@ whose first key is `schema`. Key on it:
 | `locus notify status` | `locus.notify.status.v1` |
 | `locus approve status` | `locus.approve.status.v1` |
 | `locus autopin suggest` | `locus.autopin.suggest.v1` |
+| `locus offboard --apply` | `locus.offboard.v1` |
 | `locus adapter verify` | `locus.adapter.verify.v1` |
 | `locus adapter verify-manifest` | `locus.adapter.verify_manifest.v1` |
 | `locus version` | `locus.version.v1` |
@@ -56,11 +59,20 @@ List commands (`binding list`, `events`, `approve list`, `mcp list`,
 `graph list`, `upstream list`) print a bare JSON array, unchanged, and are not
 stamped: wrapping them would break existing readers.
 
+`locus fleet-feed` emits one read-only workbench resource observation with
+`kind: "locus_session"`, `state: "pinned" | "unpinned" | "unhealthy"`, and
+`session_ok` (true only for a verified, unexpired, unfrozen pin with an existing
+binding). Missing authority, malformed sessions, and invalid selected sessions
+are unhealthy. The feed contains no identity strings, credentials, seals, paths,
+or raw errors. Exit zero means the observation was emitted, including unhealthy
+observations; consumers must gate readiness on `session_ok`. Breaking changes
+require a new schema version; additive fields retain v1.
+
 ### Errors
 
-Under `--json`, a failing command keeps stdout clean (or prints only its
-report, as `verify session` does before exiting 1) and prints one line on
-stderr:
+Under `--json`, a failing command prints its error document on stdout unless
+it already emitted a report (as `verify session` does before exiting 1).
+The error diagnostic also appears as one JSON line on stderr:
 
 ```json
 {"schema":"locus.error.v1","ok":false,"error":"no active pin …","exit_code":1,"exit_code_name":"failure"}
@@ -83,7 +95,7 @@ onto it: doctor SAFE/WARN/UNSAFE and agent `ready`/`protected`/`unsafe` give
 | 0 | `success` | success; check commands: healthy (doctor SAFE, agent ready, session ok) |
 | 1 | `failure` | command error or refusal; check commands: degraded (doctor WARN, agent protected, session not ok) |
 | 2 | `unsafe` | check commands: unsafe (doctor UNSAFE, agent unsafe, status pin invalid/frozen/expired) |
-| 2 | `usage` | usage error (bad flag/value, --dry-run on a command that cannot plan); no report on stdout |
+| 2 | `usage` | usage error (bad flag/value, --dry-run on a command that cannot plan) |
 | 3 | `refused` | action refused by policy or an authority gate |
 | 4 | `repin_required` | human must establish a fresh pin before retrying |
 | 5 | `expired` | pin, credential, or authorization expired |
@@ -94,9 +106,8 @@ onto it: doctor SAFE/WARN/UNSAFE and agent `ready`/`protected`/`unsafe` give
 <!-- exit-codes:end -->
 
 `unsafe` and `usage` share 2, as clap's usage errors always have. Tell them
-apart by stdout: a check command prints its report before exiting 2, a usage
-error prints nothing on stdout (and `exit_code_name: "usage"` on stderr under
-`--json`).
+apart by schema: a check command prints its report before exiting 2; a usage
+error prints `locus.error.v1` with `exit_code_name: "usage"` under `--json`.
 
 `exec`, `run`, `ci run` and `mcp --supervised` exit with the child's own
 code (`128 + signal` when a signal killed it); only 126 and 127 come from
@@ -113,7 +124,7 @@ Per command:
 | `watch --once` / `--require-ok` | ok | not ok (see `locus watch --help`) | usage |
 | `quickstart` | SAFE or WARN | error | UNSAFE |
 | `doctor --fix --apply` | all fixes applied (or none needed) | a fix was refused or skipped | usage |
-| any `--dry-run` | the plan's read-only preconditions hold | a precondition fails (unknown alias, allowlist, existing file) | `--dry-run` not accepted by the command (see Unsupported), or combined with `--apply` on `doctor --fix` |
+| any `--dry-run` | the plan's read-only preconditions hold | a precondition fails (unknown alias, allowlist, existing file) | `--dry-run` not accepted by the command (see Unsupported), or combined with `--apply` on `doctor --fix` or `offboard` |
 
 ## `--dry-run`
 
@@ -123,8 +134,8 @@ a new command does not compile until it picks one.
 
 | Class | Behaviour | Commands |
 | --- | --- | --- |
-| Plans | Runs the read-only validation of the real command, prints a `locus.plan.v1` plan, writes nothing | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew`, `engagement init/close`, `graph export/import`, `binding add/rm/migrate-credential-refs`, `client add`, `autopin suggest --apply`, `capability persist/unpersist`, `ci mint/env`, `mcp mint/revoke`, `agent setup`, `doctor --fix`, `adapter install/uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add/remove`, `approve grant/deny`, `notify on/off`, `events export`, `forensics export` |
-| Read-only | Accepted and ignored: the command runs exactly as without the flag (see below) | `whoami`, `status`, `doctor`, `watch`, `hook`, `goal`, `verify`, `upstream`, `completion`, `topic`, `version`, `events`, `agent doctor/report`, `binding list/show`, `graph list`, `capability status`, `notify status`, `approve list/status/wait`, `mcp list`, `autopin suggest`, `adapter search/list/verify/verify-manifest`, `adapter trust list`, `adapter registry index list` |
+| Plans | Performs read-only preflight checks, prints a `locus.plan.v1` plan, writes nothing (see print-only setup exception below) | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew`, `engagement init/close`, `graph export/import`, `binding add/rm/migrate-credential-refs`, `client add`, `offboard`, `autopin suggest --apply`, `capability persist/unpersist`, `ci mint/env`, `mcp mint/revoke`, `agent setup`, `doctor --fix`, `adapter install/uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add/remove`, `approve grant/deny`, `notify on/off`, `events export`, `forensics export` |
+| Read-only | Accepted and ignored: the command runs exactly as without the flag (see below) | `whoami`, `status`, `doctor`, `watch`, `hook`, `goal`, `verify`, `upstream`, `completion`, `topic`, `version`, `fleet-preflight`, `fleet-feed`, `fleet-denials`, `events`, `agent doctor/report`, `binding list/show`, `graph list`, `capability status`, `notify status`, `approve list/status/wait`, `mcp list`, `autopin suggest`, `adapter search/list/verify/verify-manifest`, `adapter trust list`, `adapter registry index list` |
 | Unsupported | Not accepted, exactly as before the global flag: `exec --dry-run -- …` fails exec's own argument check (exit 1); every other placement, and the other commands, are a clap usage error (exit 2, `unexpected argument '--dry-run' found`) | `exec`, `run`, `ci run`, `mcp` (server), `serve`, `dashboard` |
 
 Read-only commands make no requested change, but they keep two side effects
@@ -133,6 +144,10 @@ first use, and `whoami`, `status`, `doctor`, `agent doctor/report`,
 `verify session` and `watch` still freeze the active pin when its binding
 drifted. The drift freeze is a fail-closed security control, so `--dry-run`
 never suppresses it.
+
+`setup --print` and `setup --client generic` print configuration instead of a
+plan, even with `--dry-run`. Other mutating operations, including child commands,
+provider operations and MCP tool calls, have no Locus dry-run option.
 
 What a plan does and does not check:
 
@@ -144,8 +159,8 @@ What a plan does and does not check:
   fixes `--apply` would make.
 - It never opens a store that does not exist yet (opening creates the home
   and its seal key). Against an uninitialized home, `init`, `quickstart`,
-  `agent setup` and `binding add` plan the creation; the others fail with a
-  pointer to `locus init --dry-run`.
+  `agent setup`, `binding add`, `client add` and `doctor --fix` can preview,
+  subject to their options and inputs; most other plans require initialization.
 - It does **not** authenticate the control capability: that would start the
   authority broker, itself a side effect. A plan reports
   `requires_control_capability` and `control_capability_in_env` (presence
@@ -154,9 +169,9 @@ What a plan does and does not check:
 - It never prints a secret: no capability, bearer token, MCP grant token or
   resolved credential. `events export --sink webhook` names only the
   webhook's scheme and host.
-- `--apply` with `--dry-run` is a usage error (exit 2) on `doctor --fix`. On
-  `agent setup` it keeps its original exit 1 (`pass only one of --apply or
-  --dry-run`).
+- `--apply` with `--dry-run` is a usage error (exit 2) on `doctor --fix` and
+  `offboard`. On `agent setup` it keeps its original exit 1 (`pass only one
+  of --apply or --dry-run`).
 
 Plan shape:
 
@@ -201,3 +216,10 @@ confirmations take their safe default (`adapter uninstall` without `--yes`
 declines), and `graph export/import` require `LOCUS_GRAPH_PASSPHRASE`.
 Destructive commands keep their explicit flags (`binding rm --yes`,
 `adapter install --yes`) whether or not a terminal is present.
+
+`fleet-denials` projects only fixed denial kinds and numeric audit positions. It
+scans the latest 100 parsed records by default; `--cursor N` scans up to 100
+records after N. Persist `next_cursor`, and continue while `has_more` is true.
+Corrupt lines are skipped. Cursors assume an append-only log; restart without a
+cursor after replacing or truncating the log. This local observation grants no
+execution authority and includes no audit strings or credential values.

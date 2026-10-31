@@ -597,7 +597,8 @@ fn http_mcp_sse_once_session_tick() {
     assert!(data.get("session_ok").is_some(), "{tick}");
     assert!(data.get("doctor_verdict").is_some(), "{tick}");
     assert!(data.get("safe_next").is_some(), "{tick}");
-    assert_eq!(data["pinned"], false); // unpinned test home
+    // Unpinned test home.
+    assert_eq!(data["pinned"], false);
     // Wire contract: emitted tick conforms to the versioned locus event
     // schema Phantom's router consumes.
     let validator = locus_event_schema("sessionTick");

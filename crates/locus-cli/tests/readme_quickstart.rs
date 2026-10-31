@@ -134,3 +134,21 @@ fn readme_quickstart_fails_on_a_stale_step() {
         text(&out)
     );
 }
+
+/// Removing the credential-free option must make the smoke check catch warnings.
+#[test]
+fn readme_quickstart_fails_when_credential_resolution_is_enabled() {
+    let dir = tempfile::tempdir().unwrap();
+    let mangled = dir.path().join("README.md");
+    let body = std::fs::read_to_string(repo_root().join("README.md")).unwrap();
+    let option = "--expect personal --no-resolve";
+    assert!(body.contains(option), "credential-free option missing");
+    std::fs::write(&mangled, body.replacen(option, "--expect personal", 1)).unwrap();
+
+    let out = run(&[], Some(&mangled));
+    assert!(
+        !out.status.success(),
+        "unexpected credential warnings were accepted"
+    );
+    assert!(text(&out).contains("sample exec emitted a warning"));
+}

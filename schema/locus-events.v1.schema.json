@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ashlrai/locus/schema/locus-events.v1.schema.json",
   "title": "LocusEventV1",
-  "description": "Versioned wire schema for events Locus emits and hubs (Phantom's router) consume. One event validates against exactly one $defs member; consumers dispatch on the discriminant (`schema` for audit envelopes, `kind` for heartbeat ticks). Values-free on every surface: ops, digests, aliases, grant/session ids and verdicts only, never credential refs or resolved secrets. Emitted by `locus events export` (JSONL lines and webhook body, $defs.audit), `locus-mcp` GET /mcp/sse `notifications/message` params.data ($defs.sessionTick) and `locus watch --json` NDJSON ($defs.watchTick).",
+  "description": "Versioned wire schema for events Locus emits and hubs (Phantom's router) consume. One event validates against exactly one $defs member; consumers dispatch on the discriminant (`schema` for audit envelopes, `kind` for heartbeat ticks). Validation checks structure, not redaction or absence of sensitive data. Audit detail can contain arbitrary JSON; handle exports accordingly. Emitted by `locus events export` (JSONL lines and JSONL-format webhook bodies, $defs.audit), `locus-mcp` GET /mcp/sse `notifications/message` params.data ($defs.sessionTick) and `locus watch --json` NDJSON ($defs.watchTick).",
   "oneOf": [
     { "$ref": "#/$defs/audit" },
     { "$ref": "#/$defs/sessionTick" },
@@ -11,7 +11,7 @@
   "$defs": {
     "audit": {
       "title": "LocusAuditEventV1",
-      "description": "One line of `locus events export` (fleet pulse JSONL; same body lines POSTed to a configured audit webhook). Envelope around one $LOCUS_HOME/audit/events.jsonl record.",
+      "description": "One line of `locus events export` fleet pulse JSONL; the same lines are POSTed when a webhook uses JSONL format. Envelope around one $LOCUS_HOME/audit/events.jsonl record.",
       "type": "object",
       "additionalProperties": false,
       "required": ["schema", "locus_version", "exported_at", "ts", "op", "binding", "kind"],
@@ -32,21 +32,18 @@
         },
         "ts": {
           "type": "string",
-          "format": "date-time",
-          "description": "RFC 3339 time the audited op was recorded."
+          "description": "Time copied from the audit record; Store-generated records use RFC 3339."
         },
         "op": {
           "type": "string",
-          "pattern": "^[a-z][a-z0-9_.]*$",
-          "description": "Audited op, e.g. session.pin, mcp.scope_freeze, binding.save. Open set; do not dispatch on a closed enum."
+          "description": "Audited op copied from the audit record, e.g. session.pin or binding.save. Open set; do not dispatch on a closed enum."
         },
         "binding": {
           "type": "string",
           "description": "Binding alias the op ran against; empty string for global ops."
         },
         "detail": {
-          "type": "object",
-          "description": "Per-op metadata: digests, ids, counts, tool names only. Never raw args, tokens or credential refs."
+          "description": "Per-op metadata copied from the audit record. Any JSON value; may contain sensitive data. Schema validation does not establish redaction."
         },
         "kind": {
           "const": "audit",
@@ -76,7 +73,7 @@
         },
         "session_ok": {
           "type": "boolean",
-          "description": "True when doctor is ok and safe_next is ready for the described scope."
+          "description": "Operator ticks report doctor and safe-next readiness; tenant ticks report grant-scoped drift health."
         },
         "whoami": {
           "type": ["string", "null"],
@@ -85,7 +82,7 @@
         "doctor_verdict": {
           "type": "string",
           "enum": ["SAFE", "WARN", "UNSAFE"],
-          "description": "Doctor verdict for the described scope."
+          "description": "Operator doctor verdict; tenant SAFE or UNSAFE is synthesized from grant-scoped drift health."
         },
         "safe_next": {
           "type": "string",
@@ -117,7 +114,8 @@
       },
       "dependentRequired": {
         "scope": ["grant_id", "issues"],
-        "grant_id": ["scope"]
+        "grant_id": ["scope"],
+        "issues": ["scope"]
       }
     },
     "watchTick": {

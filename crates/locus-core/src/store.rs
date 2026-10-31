@@ -6,7 +6,10 @@ use crate::approval::{
 };
 use crate::authority_anchor::{self, ValidationMode};
 use crate::autopin::{self, AutoPinTarget};
-use crate::binding::{validate_name_component, Binding, BindingSummary};
+#[cfg(test)]
+use crate::autopin_write::write_default_binding_with_sync;
+use crate::autopin_write::{read_locus_toml_nofollow, write_default_binding};
+use crate::binding::{validate_name_component, Binding, BindingSummary, ProviderBinding};
 use crate::config::{self, LocusConfig};
 use crate::credential::{credential_metadata, CredentialMetadata};
 use crate::engagement::{
@@ -287,7 +290,7 @@ impl Store {
     }
 
     pub fn audit_path(&self) -> PathBuf {
-        self.home.join("audit").join("events.jsonl")
+        audit_events_path(&self.home)
     }
 
     /// Load `$LOCUS_HOME/config.toml` (defaults if missing).
@@ -495,17 +498,8 @@ impl Store {
             return authority_anchor::authorize_control(&self.home).map(|()| None);
         };
         let session = &resolved.session;
-        // Expired (authentic, local-control) pin: it is replaced like an
-        // absent one, after the same two capability checks. Audited as
-        // `session.replace_stale` with reason `session expired at ...`.
-        if self.is_expired_authentic(session)? {
-            authority_anchor::authorize_control_teardown(&self.home, false)?;
-            authority_anchor::authorize_control(&self.home)?;
-            return Ok(Some((
-                session.session_id.clone(),
-                format!("session expired at {}", session.expires_at.to_rfc3339()),
-            )));
-        }
+        // Expiry is not a dead-broker recovery case. Preserve the pin until
+        // the operator explicitly clears it with `locus leave --force`.
         session.verify_seal(&self.seal_key()?)?;
         if session.authority != SessionAuthority::LocalControl {
             return Err(LocusError::msg(format!(
@@ -533,7 +527,7 @@ impl Store {
 
     /// True only for a session whose seal verifies (current version,
     /// local-control authority) and whose TTL has passed. Such a pin grants
-    /// nothing and may be cleared or replaced as if absent.
+    /// nothing and may be cleared as if absent. Replacement still checks expiry.
     fn is_expired_authentic(&self, session: &Session) -> Result<bool> {
         Ok(session.is_expired()
             && session.authority == SessionAuthority::LocalControl
@@ -656,20 +650,31 @@ impl Store {
     // ── Bindings ──────────────────────────────────────────────────────────
 
     pub fn save_binding(&self, binding: &Binding) -> Result<PathBuf> {
-        self.write_binding(binding, true)
+        self.write_binding(binding, true).map(|(path, _)| path)
     }
 
     /// [`Store::save_binding`] that refuses, under the bindings lock, to
     /// replace an existing binding unless `replace` is set, so a check made
     /// before the write cannot be raced by another writer.
     pub fn create_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
+        self.create_binding_with_outcome(binding, replace)
+            .map(|(path, _)| path)
+    }
+
+    /// Create a binding and report whether its file was written, determined
+    /// while holding the bindings lock.
+    pub fn create_binding_with_outcome(
+        &self,
+        binding: &Binding,
+        replace: bool,
+    ) -> Result<(PathBuf, bool)> {
         self.write_binding(binding, replace)
     }
 
     /// Check for an equivalent existing binding without following symlinks.
-    /// The bindings lock keeps the file stable during the comparison.
+    /// Normal reads hold the bindings lock; preview snapshots never create it.
     pub fn binding_matches(&self, binding: &Binding) -> Result<bool> {
-        let _lock = crate::credential_migration::lock_bindings(self)?;
+        let _lock = self.lock_bindings_for_read()?;
         let path = self.bindings_dir().join(format!("{}.toml", binding.alias));
         ensure_under_dir(&self.bindings_dir(), &path)?;
         let metadata = match fs::symlink_metadata(&path) {
@@ -686,7 +691,7 @@ impl Store {
         Ok(existing.to_toml()? == binding.to_toml()?)
     }
 
-    fn write_binding(&self, binding: &Binding, replace: bool) -> Result<PathBuf> {
+    fn write_binding(&self, binding: &Binding, replace: bool) -> Result<(PathBuf, bool)> {
         self.require_local_control("save binding")?;
         binding.validate()?;
         // Double-check alias cannot escape bindings/ (also enforced in validate)
@@ -723,7 +728,7 @@ impl Store {
                 })?;
                 let existing = parse_binding_safely(&existing, &binding.alias)?;
                 if existing.to_toml()? == binding.to_toml()? {
-                    return Ok(path);
+                    return Ok((path, false));
                 }
                 return Err(LocusError::msg(format!(
                     "binding '{}' already exists; nothing written",
@@ -734,7 +739,7 @@ impl Store {
         }
         fs::write(&path, binding.to_toml()?)?;
         self.audit("binding.save", &binding.alias, None)?;
-        Ok(path)
+        Ok((path, true))
     }
 
     pub fn load_binding(&self, alias_or_id: &str) -> Result<Binding> {
@@ -749,7 +754,7 @@ impl Store {
             )));
         }
         // Prefer alias filename (alias charset validated on save; still constrain join)
-        let bindings_lock = crate::credential_migration::lock_bindings(self)?;
+        let bindings_lock = self.lock_bindings_for_read()?;
         let by_alias = self.bindings_dir().join(format!("{alias_or_id}.toml"));
         if by_alias.exists() {
             ensure_under_dir(&self.bindings_dir(), &by_alias)?;
@@ -770,7 +775,7 @@ impl Store {
     }
 
     pub fn list_bindings(&self) -> Result<Vec<BindingSummary>> {
-        let _lock = crate::credential_migration::lock_bindings(self)?;
+        let _lock = self.lock_bindings_for_read()?;
         let mut out = Vec::new();
         let dir = self.bindings_dir();
         if !dir.exists() {
@@ -795,6 +800,16 @@ impl Store {
             out.push(BindingSummary::from(&binding));
         }
         Ok(out)
+    }
+
+    pub(crate) fn lock_bindings_for_read(&self) -> Result<Option<fs::File>> {
+        if self.existing_only {
+            // Advisory previews may race the first lock's creation. Apply
+            // revalidates under its normal creating lock before any mutation.
+            crate::credential_migration::lock_bindings_existing(self)
+        } else {
+            crate::credential_migration::lock_bindings(self).map(Some)
+        }
     }
 
     /// Explicitly convert conservative legacy bare Phantom names to `phm:NAME`.
@@ -1333,7 +1348,7 @@ impl Store {
     /// symlink pointing outside the store must never be followed into a
     /// recursive delete). Removal failures are swallowed: cleanup is
     /// best-effort and must never block a teardown.
-    fn remove_worker_home_if_safe(&self, worker_home: &str) {
+    pub(crate) fn remove_worker_home_if_safe(&self, worker_home: &str) {
         let wh = PathBuf::from(worker_home);
         if !wh.exists() {
             return;
@@ -2164,7 +2179,8 @@ impl Store {
         authority_anchor::authorize_control(&self.home)?;
         let (report, file) = self.autopin_suggestion_plan(cwd)?;
         let alias = report.suggestion.as_deref().expect("validated suggestion");
-        write_default_binding(&file, alias)?;
+        let binding = self.load_binding(alias)?;
+        write_default_binding(&file, &binding)?;
         Ok((report, file))
     }
 
@@ -2646,21 +2662,7 @@ impl Store {
             binding_id: session.binding_id,
             tenant: session.tenant,
             principal: session.principal,
-            providers: binding
-                .providers
-                .iter()
-                .map(|p| ProviderView {
-                    provider: p.provider.clone(),
-                    account: p.account.clone(),
-                    credential: credential_metadata(&p.credential_ref),
-                    project_ref: p.scope.project_ref.clone(),
-                    team_id: p.scope.team_id.clone(),
-                    account_id: p.scope.account_id.clone(),
-                    read_only: p.scope.read_only,
-                    orgs: p.scope.orgs.clone(),
-                    repos: p.scope.repos.clone(),
-                })
-                .collect(),
+            providers: binding.providers.iter().map(ProviderView::from).collect(),
             expires_at: session.expires_at.to_rfc3339(),
             expires_in_secs: (session.expires_at - Utc::now()).num_seconds().max(0),
             worker_home: session.worker_home,
@@ -2824,21 +2826,7 @@ impl Store {
                 drift.providers_match = drift.binding_id_match && drift.tenant_match;
             }
 
-            drift.providers = binding
-                .providers
-                .iter()
-                .map(|p| ProviderView {
-                    provider: p.provider.clone(),
-                    account: p.account.clone(),
-                    credential: credential_metadata(&p.credential_ref),
-                    project_ref: p.scope.project_ref.clone(),
-                    team_id: p.scope.team_id.clone(),
-                    account_id: p.scope.account_id.clone(),
-                    read_only: p.scope.read_only,
-                    orgs: p.scope.orgs.clone(),
-                    repos: p.scope.repos.clone(),
-                })
-                .collect();
+            drift.providers = binding.providers.iter().map(ProviderView::from).collect();
         }
 
         // Namespaced secondary bindings
@@ -3060,30 +3048,32 @@ impl Store {
     // ── Audit ─────────────────────────────────────────────────────────────
 
     pub fn audit(&self, op: &str, binding: &str, detail: Option<serde_json::Value>) -> Result<()> {
-        use std::io::{Read, Seek, SeekFrom, Write};
-        let event = serde_json::json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "op": op,
-            "binding": binding,
-            "detail": detail.map(sanitize_audit_value),
-        });
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(self.audit_path())?;
-        f.lock()?;
-        let len = f.metadata()?.len();
-        if len > 0 {
-            f.seek(SeekFrom::Start(len - 1))?;
-            let mut tail = [0u8; 1];
-            f.read_exact(&mut tail)?;
-            if tail[0] != b'\n' {
-                f.write_all(b"\n")?;
-            }
+        self.audit_line_direct(&audit_event_line(op, binding, detail))
+    }
+
+    /// The same audit record appended through the live authority broker: the
+    /// broker writes the line, acknowledges it, then fsyncs the file on its
+    /// own thread — the fsync never lands on this process's exit path. Any
+    /// broker-side failure falls back to a direct append + fsync, so the
+    /// record and its durability are identical either way.
+    pub fn audit_via_broker(
+        &self,
+        op: &str,
+        binding: &str,
+        detail: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let line = audit_event_line(op, binding, detail);
+        if authority_anchor::audit_line(&self.home, &line).is_ok() {
+            return Ok(());
         }
-        writeln!(f, "{event}")?;
-        f.sync_all()?;
+        self.audit_line_direct(&line)
+    }
+
+    /// Direct append + fsync (the pre-broker path; also the broker's own
+    /// fallback when no broker answers).
+    fn audit_line_direct(&self, line: &str) -> Result<()> {
+        let file = append_audit_line(&self.home, line)?;
+        file.sync_all()?;
         Ok(())
     }
 
@@ -3461,6 +3451,49 @@ impl Store {
     pub fn workspace_for(&self, cwd: &Path) -> Result<Option<(PathBuf, WorkspaceConfig)>> {
         find_workspace(cwd)
     }
+}
+
+/// One finished audit event as a JSON line (no trailing newline): timestamp
+/// plus the sanitized op/binding/detail fields.
+fn audit_event_line(op: &str, binding: &str, detail: Option<serde_json::Value>) -> String {
+    serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "op": op,
+        "binding": binding,
+        "detail": detail.map(sanitize_audit_value),
+    })
+    .to_string()
+}
+
+/// Append one audit line to `audit/events.jsonl` under `home`: create the
+/// file if needed, flock it, terminate a partial trailing line, then write.
+/// Returns the still-locked open file so the caller chooses when to fsync —
+/// `Store::audit` fsyncs inline, while the authority broker fsyncs after it
+/// has answered the append request.
+pub(crate) fn append_audit_line(home: &Path, line: &str) -> Result<fs::File> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let path = audit_events_path(home);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&path)?;
+    f.lock()?;
+    let len = f.metadata()?.len();
+    if len > 0 {
+        f.seek(SeekFrom::Start(len - 1))?;
+        let mut tail = [0u8; 1];
+        f.read_exact(&mut tail)?;
+        if tail[0] != b'\n' {
+            f.write_all(b"\n")?;
+        }
+    }
+    f.write_all(line.as_bytes())?;
+    f.write_all(b"\n")?;
+    Ok(f)
 }
 
 fn sanitize_audit_value(value: serde_json::Value) -> serde_json::Value {
@@ -3999,6 +4032,22 @@ pub struct ProviderView {
     pub repos: Vec<String>,
 }
 
+impl From<&ProviderBinding> for ProviderView {
+    fn from(provider: &ProviderBinding) -> Self {
+        Self {
+            provider: provider.provider.clone(),
+            account: provider.account.clone(),
+            credential: credential_metadata(&provider.credential_ref),
+            project_ref: provider.scope.project_ref.clone(),
+            team_id: provider.scope.team_id.clone(),
+            account_id: provider.scope.account_id.clone(),
+            read_only: provider.scope.read_only,
+            orgs: provider.scope.orgs.clone(),
+            repos: provider.scope.repos.clone(),
+        }
+    }
+}
+
 /// Which `.locus.toml` `autopin suggest --apply` may write.
 ///
 /// The root is the git toplevel of `cwd`, or `cwd` itself outside a repo.
@@ -4066,110 +4115,10 @@ fn git_toplevel(cwd: &Path) -> Result<Option<PathBuf>> {
     Ok(Some(path))
 }
 
-/// Read an existing `.locus.toml` through one `O_NOFOLLOW` fd, checked with
-/// `fstat` to be a regular file, so a symlink swapped in can never be read.
-/// `Ok(None)` when absent.
-fn read_locus_toml_nofollow(file: &Path) -> Result<Option<(String, fs::Permissions)>> {
-    use std::io::Read;
-    let mut o = fs::OpenOptions::new();
-    o.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let mut f = match o.open(file) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        #[cfg(unix)]
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
-            return Err(LocusError::msg(format!(
-                "{} is a symlink; refusing to write through it",
-                file.display()
-            )))
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let metadata = f.metadata()?;
-    if !metadata.is_file() {
-        return Err(LocusError::msg(format!(
-            "{} is not a regular file; refusing to write it",
-            file.display()
-        )));
-    }
-    let mut text = String::new();
-    f.read_to_string(&mut text)?;
-    Ok(Some((text, metadata.permissions())))
-}
-
-/// Atomically set `default_binding` in a `.locus.toml`, keeping other keys.
-fn write_default_binding(file: &Path, alias: &str) -> Result<()> {
-    write_default_binding_with_sync(file, alias, |dir| {
-        #[cfg(unix)]
-        fs::File::open(dir)?.sync_all()?;
-        #[cfg(not(unix))]
-        let _ = dir;
-        Ok(())
-    })
-}
-
-fn write_default_binding_with_sync(
-    file: &Path,
-    alias: &str,
-    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
-) -> Result<()> {
-    use std::io::Write;
-    let existing = read_locus_toml_nofollow(file)?;
-    let mut table = match &existing {
-        Some((text, _)) => toml::from_str::<toml::Table>(text)
-            .map_err(|e| LocusError::msg(format!("{}: {e}", file.display())))?,
-        None => {
-            let mut t = toml::Table::new();
-            t.insert("version".into(), toml::Value::Integer(1));
-            t
-        }
-    };
-    table.insert(
-        "default_binding".into(),
-        toml::Value::String(alias.to_string()),
-    );
-    let text = toml::to_string_pretty(&table)
-        .map_err(|e| LocusError::msg(format!("serialize .locus.toml: {e}")))?;
-    let dir = file
-        .parent()
-        .ok_or_else(|| LocusError::msg("workspace file has no parent"))?;
-    let mut nonce = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut nonce);
-    let tmp = dir.join(format!(".locus.toml.{}.tmp", hex::encode(nonce)));
-    let mut o = fs::OpenOptions::new();
-    o.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::fs::PermissionsExt;
-        let mode = existing
-            .as_ref()
-            .map(|(_, permissions)| permissions.mode() & 0o777)
-            .unwrap_or(0o644);
-        o.mode(mode).custom_flags(libc::O_NOFOLLOW);
-    }
-    let res = (|| -> std::io::Result<()> {
-        let mut f = o.open(&tmp)?;
-        f.write_all(text.as_bytes())?;
-        if let Some((_, permissions)) = existing {
-            // fchmod restores bits removed by umask using the same fd whose
-            // contents are synced below; never chmod through the target path.
-            f.set_permissions(permissions)?;
-        }
-        f.sync_all()?;
-        fs::rename(&tmp, file)?;
-        // File fsync alone does not make its new directory entry durable.
-        sync_parent(dir)
-    })();
-    if res.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    res.map_err(Into::into)
+/// `audit/events.jsonl` under `home` — free function so read-only observers
+/// resolve the log without opening (initializing) a `Store`.
+pub fn audit_events_path(home: &Path) -> PathBuf {
+    home.join("audit").join("events.jsonl")
 }
 
 pub fn locus_home() -> Result<PathBuf> {
@@ -4293,6 +4242,22 @@ mod tests {
         assert!(!s.active_session_path().exists());
     }
 
+    #[test]
+    fn default_binding_writer_rechecks_workspace_allowlist() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(".locus.toml");
+        let policy = "allowed_bindings = [\"personal\"]\nrequire_pin = true\n";
+        fs::write(&file, policy).unwrap();
+        let binding = sample_binding("acme", "acme-corp", "proj_acme");
+        let err = super::write_default_binding(&file, &binding).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::LocusError::BindingNotAllowed { .. }
+        ));
+        assert_eq!(fs::read_to_string(&file).unwrap(), policy);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn default_binding_syncs_parent_after_rename_and_reports_sync_failure() {
@@ -4300,7 +4265,8 @@ mod tests {
         let file = dir.path().join(".locus.toml");
         fs::write(&file, "default_binding = \"old\"\nrequire_pin = true\n").unwrap();
         let mut synced = false;
-        super::write_default_binding_with_sync(&file, "acme", |parent| {
+        let binding = sample_binding("acme", "acme-corp", "proj_acme");
+        super::write_default_binding_with_sync(&file, &binding, |parent| {
             assert_eq!(parent, dir.path());
             let cfg = WorkspaceConfig::parse(&fs::read_to_string(&file)?).unwrap();
             assert_eq!(cfg.default_binding.as_deref(), Some("acme"));
@@ -4315,7 +4281,8 @@ mod tests {
 
         // The rename has happened if directory fsync fails. Surface the I/O
         // error instead of claiming that the update is durably committed.
-        let err = super::write_default_binding_with_sync(&file, "personal", |_| {
+        let binding = sample_binding("personal", "personal", "proj_personal");
+        let err = super::write_default_binding_with_sync(&file, &binding, |_| {
             Err(std::io::Error::other("directory sync failed"))
         })
         .unwrap_err();
@@ -4337,7 +4304,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink"), "{err}");
-        let err = super::write_default_binding(&link, "acme")
+        let binding = sample_binding("acme", "acme-corp", "proj_acme");
+        let err = super::write_default_binding(&link, &binding)
             .unwrap_err()
             .to_string();
         assert!(err.contains("symlink"), "{err}");
@@ -4591,21 +4559,34 @@ mod tests {
 
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        let mut binding = sample_binding("whoami-env", "tenant", "project");
+        let mut binding = sample_binding("whoami_env", "tenant", "project");
         binding.providers[0].credential_ref = format!("env:{VAR}");
         store.save_binding(&binding).unwrap();
         store
-            .pin("whoami-env", dir.path(), Some("test".into()), false)
+            .pin("whoami_env", dir.path(), Some("test".into()), false)
             .unwrap();
 
         let unavailable = store.whoami().unwrap();
         assert!(!unavailable.providers[0].credential.present);
         assert_eq!(unavailable.providers[0].credential.source, "environment");
+        assert!(
+            !store.check_drift_and_freeze().unwrap().providers[0]
+                .credential
+                .present
+        );
 
         std::env::set_var(VAR, "whoami-test-value");
         let available = store.whoami().unwrap();
+        let drift_available = store.check_drift_and_freeze().unwrap();
         std::env::remove_var(VAR);
         assert!(available.providers[0].credential.present);
+        assert!(drift_available.providers[0].credential.present);
+        assert!(!store.whoami().unwrap().providers[0].credential.present);
+        assert!(
+            !store.check_drift_and_freeze().unwrap().providers[0]
+                .credential
+                .present
+        );
         assert!(!serde_json::to_string(&available)
             .unwrap()
             .contains("whoami-test-value"));
@@ -4841,6 +4822,25 @@ credential_ref = "ghp_UNSAFE/CANARY"
             assert!(!audit.contains(canary));
         }
         assert!(audit.contains("<redacted>"));
+    }
+
+    #[test]
+    fn audit_via_broker_falls_back_to_direct_write_without_a_broker() {
+        // No broker owns this home: the append must land identically via the
+        // direct path, and later events must still append after it.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .audit_via_broker("probe", "fallback", Some(serde_json::json!({"exit": 0})))
+            .unwrap();
+        store.audit("probe2", "direct", None).unwrap();
+        let events = store.read_audit_events().unwrap();
+        let ops: Vec<_> = events.iter().map(|event| event.op.as_str()).collect();
+        assert!(ops.contains(&"probe"), "{ops:?}");
+        assert!(ops.contains(&"probe2"), "{ops:?}");
+        let event = events.iter().find(|event| event.op == "probe").unwrap();
+        assert_eq!(event.binding, "fallback");
+        assert_eq!(event.detail.as_ref().unwrap()["exit"], 0);
     }
 
     #[cfg(unix)]
@@ -5976,15 +5976,34 @@ credential_ref = "ghp_UNSAFE/CANARY"
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         let binding = sample_binding("acme", "acme-corp", "p1");
-        let path = store.create_binding(&binding, false).unwrap();
+        let (path, changed) = store.create_binding_with_outcome(&binding, false).unwrap();
+        assert!(changed);
+        // Equivalent hand-edited TOML must retain its formatting and comments.
+        let contents = format!("# retained comment\n{}", fs::read_to_string(&path).unwrap());
+        fs::write(&path, &contents).unwrap();
         let before = fs::metadata(&path).unwrap().modified().unwrap();
-        let contents = fs::read(&path).unwrap();
 
-        let returned = store.create_binding(&binding, false).unwrap();
+        let (returned, changed) = store.create_binding_with_outcome(&binding, false).unwrap();
 
+        assert!(!changed);
         assert_eq!(returned, path);
         assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
-        assert_eq!(fs::read(&path).unwrap(), contents);
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+    }
+
+    #[test]
+    fn binding_matches_is_true_only_for_an_equivalent_binding() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let binding = sample_binding("acme", "acme-corp", "p1");
+
+        // Absent and different are not matches; only the same body is.
+        assert!(!store.binding_matches(&binding).unwrap());
+        store.save_binding(&binding).unwrap();
+        assert!(store.binding_matches(&binding).unwrap());
+        assert!(!store
+            .binding_matches(&sample_binding("acme", "other", "p1"))
+            .unwrap());
     }
 
     #[test]
@@ -6850,10 +6869,10 @@ allowed_bindings = ["acme"]
         store
             .save_binding(&sample_binding("acme", "acme-corp", "p1"))
             .unwrap();
-        let s = store
-            .pin_with_ttl("acme", dir.path(), None, false, Some(Duration::seconds(1)))
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        store.pin("acme", dir.path(), None, false).unwrap();
+        expire_active_in_place(&store);
+        let s: Session =
+            serde_json::from_slice(&fs::read(store.active_session_path()).unwrap()).unwrap();
         let key = store.seal_key().unwrap();
         let err = s.verify(&key).unwrap_err();
         assert!(matches!(err, LocusError::SessionExpired(_)));
@@ -6863,9 +6882,10 @@ allowed_bindings = ["acme"]
         let msg = err.to_string();
         assert!(msg.contains("locus leave --force"), "{msg}");
         assert!(msg.contains("locus enter"), "{msg}");
-        // An expired pin is now treated as absent: a plain pin replaces it.
-        store.pin("acme", dir.path(), None, false).unwrap();
-        assert!(store.require_active().is_ok());
+        assert!(matches!(
+            store.pin("acme", dir.path(), None, false),
+            Err(LocusError::SessionExpired(_))
+        ));
     }
 
     fn renewable_binding(lifetime: Option<&str>) -> Binding {
@@ -6904,18 +6924,24 @@ allowed_bindings = ["acme"]
     }
 
     #[test]
-    fn enter_over_expired_session_replaces_it() {
+    fn enter_over_expired_session_requires_explicit_teardown() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
         store.save_binding(&renewable_binding(None)).unwrap();
         let old = store.pin("acme", dir.path(), None, false).unwrap();
         expire_active_in_place(&store);
+        let before = fs::read(store.active_session_path()).unwrap();
+        assert!(matches!(
+            store.pin("acme", dir.path(), None, false),
+            Err(LocusError::SessionExpired(_))
+        ));
+        assert_eq!(fs::read(store.active_session_path()).unwrap(), before);
+        let audit = fs::read_to_string(store.audit_path()).unwrap();
+        assert!(!audit.contains("session.replace_stale"));
+        store.force_leave("operator forced leave", false).unwrap();
         let new = store.pin("acme", dir.path(), None, false).unwrap();
         assert_ne!(old.session_id, new.session_id);
         assert!(store.require_active().is_ok());
-        let audit = fs::read_to_string(store.audit_path()).unwrap();
-        assert!(audit.contains("session.replace_stale"), "{audit}");
-        assert!(audit.contains("session expired at"), "{audit}");
     }
 
     #[test]

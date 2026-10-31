@@ -107,9 +107,29 @@ impl CredentialRef {
             Self::Unknown { .. } => "unsupported",
         }
     }
+
+    /// Presence probe: whether the credential is usable in this process.
+    ///
+    /// For `env:` refs, check existence and UTF-8 validity (exactly what
+    /// [`resolve`] accepts), then zeroize the environment value's owned copy.
+    pub fn present(&self) -> bool {
+        match self {
+            // A stored Phantom ref alone is never usable — no scoped bridge exists.
+            Self::Phantom { .. } => false,
+            Self::Env { var } => std::env::var_os(var).is_some_and(|value| {
+                let present = value.to_str().is_some();
+                let _value = Zeroizing::new(value.into_encoded_bytes());
+                present
+            }),
+            // Inline plaintext; production binaries reject `test:` at validation.
+            Self::Test { .. } => cfg!(test),
+            Self::Unknown { .. } => false,
+        }
+    }
 }
 
-/// Agent-safe credential metadata. The reference name/value is intentionally absent.
+/// Agent-safe credential metadata. `present` reports whether the credential is
+/// usable in this process. The reference name/value is absent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CredentialMetadata {
     pub present: bool,
@@ -120,9 +140,8 @@ pub fn credential_metadata(raw: &str) -> CredentialMetadata {
     let parsed = CredentialRef::parse(raw);
     CredentialMetadata {
         // A reference by itself does not mean its credential can be used.
-        // Resolve only to establish availability; the zeroizing value is
-        // dropped here and is never included in metadata.
-        present: resolve(&parsed).is_ok(),
+        // Presence is a probe only; the reporting path retains no secret (#173).
+        present: parsed.present(),
         source: parsed.source().to_string(),
     }
 }
@@ -606,6 +625,19 @@ mod tests {
         assert!(available.present);
         let json = serde_json::to_string(&available).unwrap();
         assert!(!json.contains("metadata-test-value"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_reports_non_unicode_environment_credential_as_unavailable() {
+        use std::os::unix::ffi::OsStringExt;
+
+        const VAR: &str = "LOCUS_TEST_METADATA_NON_UNICODE";
+        std::env::set_var(VAR, std::ffi::OsString::from_vec(vec![0xff]));
+        let metadata = credential_metadata(&format!("env:{VAR}"));
+        std::env::remove_var(VAR);
+        assert_eq!(metadata.source, "environment");
+        assert!(!metadata.present);
     }
 
     #[test]

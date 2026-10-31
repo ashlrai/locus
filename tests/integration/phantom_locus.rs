@@ -14,6 +14,10 @@
 #[allow(dead_code)]
 mod conformance;
 
+#[path = "../../crates/locus-cli/tests/fail_closed_unreadable.rs"]
+mod fail_closed_unreadable;
+use fail_closed_unreadable::{assert_canary_absent, scan, scan_with, walk};
+
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -108,28 +112,6 @@ fn write_binding(home: &Path, alias: &str, credential_ref: &str) {
         body,
     )
     .unwrap();
-}
-
-/// Attach the offending path to a canary-scan IO error.
-fn scan_err(p: &Path, e: io::Error) -> io::Error {
-    io::Error::new(e.kind(), format!("{}: {e}", p.display()))
-}
-
-/// Collect regular files under `d` for the canary scan. Fails closed: a path
-/// that cannot be listed or statted is an error, never a silent skip — an
-/// unreadable directory could be hiding the canary.
-fn walk(d: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    for e in fs::read_dir(d).map_err(|e| scan_err(d, e))? {
-        let p = e.map_err(|e| scan_err(d, e))?.path();
-        let m = fs::symlink_metadata(&p).map_err(|e| scan_err(&p, e))?;
-        if m.is_dir() {
-            out.extend(walk(&p)?);
-        } else if m.is_file() {
-            out.push(p);
-        }
-    }
-    Ok(out)
 }
 
 fn setup(phantom: &Path) -> World {
@@ -293,20 +275,32 @@ fn phantom_and_locus_compose_without_leaking_the_canary() {
     );
     assert!(!argv.contains(&canary), "canary in a phantom argv");
     assert!(!w.outputs.contains(&canary), "canary in a command output");
-    let mut files = Vec::new();
-    for root in [w.home.join(".locus"), w.proj.clone()] {
-        files.extend(walk(&root).unwrap_or_else(|e| panic!("canary scan: cannot list {e}")));
+    let roots = [w.home.join(".locus"), w.proj.clone()];
+    let mut has_files = false;
+    for root in &roots {
+        let files = walk(root).unwrap_or_else(|e| panic!("canary scan failed: {e}"));
+        has_files |= !files.is_empty();
     }
-    assert!(!files.is_empty());
-    for f in files {
-        let bytes = fs::read(&f)
-            .unwrap_or_else(|e| panic!("canary scan: cannot read {}: {e}", f.display()));
-        assert!(
-            !String::from_utf8_lossy(&bytes).contains(&canary),
-            "canary found in {}",
-            f.display()
-        );
+    assert!(has_files, "canary scan found no files");
+    for root in roots {
+        assert_canary_absent(&root, scan(&root, &canary));
     }
+}
+
+#[test]
+fn canary_scan_accepts_a_readable_clean_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("nested/empty")).unwrap();
+    fs::write(root.join("root-file"), b"ordinary contents\n").unwrap();
+    fs::write(root.join("nested/binary-file"), b"\xffordinary\0contents").unwrap();
+
+    let result = scan(root, "fixture-canary");
+    assert!(
+        matches!(&result, Ok(false)),
+        "clean tree must scan without a match"
+    );
+    assert_canary_absent(root, result);
 }
 
 #[test]
@@ -351,4 +345,122 @@ fn canary_scan_walk_fails_closed_on_unreadable_paths() {
         (Ok(_), false) => panic!("walk silently skipped an unreadable dir"),
     }
     fs::set_permissions(&denied, fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[test]
+fn canary_scan_fails_on_unreadable_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("unreadable");
+    fs::write(&file, b"fixture").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&file).is_err() {
+        let err = scan(tmp.path(), "fixture").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("unreadable"), "{err}");
+    } else {
+        eprintln!("note: privileged runner; mode-000 file stayed readable");
+    }
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(scan(tmp.path(), "fixture").unwrap());
+}
+
+#[test]
+fn canary_scan_reports_a_denied_read_on_any_runner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("denied");
+    fs::write(&file, b"fixture").unwrap();
+
+    let err = scan_with(tmp.path(), "fixture", &mut |path| {
+        assert_eq!(path, file);
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, "denied"))
+    })
+    .unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+    assert!(
+        err.to_string().contains(&file.display().to_string()),
+        "{err}"
+    );
+    assert!(scan(tmp.path(), "fixture").unwrap());
+}
+
+#[test]
+fn canary_scan_unreadable_path_exits_nonzero() {
+    const CHILD_PATH: &str = "LOCUS_CANARY_SCAN_REGRESSION_PATH";
+    if let Some(path) = std::env::var_os(CHILD_PATH).map(PathBuf::from) {
+        let root = path.parent().unwrap();
+        // Privileged runners may read mode-000 files. Inject the same OS error
+        // in that case so the exit-status regression still runs everywhere.
+        let result = if fs::read(&path).is_err() {
+            scan(root, "fixture")
+        } else {
+            scan_with(root, "fixture", &mut |_| {
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            })
+        };
+        assert_canary_absent(root, result);
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("unreadable");
+    fs::write(&file, b"fixture").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "canary_scan_unreadable_path_exits_nonzero",
+            "--nocapture",
+        ])
+        .env(CHILD_PATH, &file)
+        .output()
+        .unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+
+    assert!(!output.status.success(), "incomplete scan succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("canary scan failed"), "{stderr}");
+    assert!(stderr.contains(&file.display().to_string()), "{stderr}");
+    assert!(stderr.contains("Permission denied"), "{stderr}");
+}
+
+#[test]
+fn canary_scan_read_error_after_match_exits_nonzero() {
+    const CHILD_ROOT: &str = "LOCUS_CANARY_SCAN_AFTER_MATCH_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT).map(PathBuf::from) {
+        let mut reads = 0;
+        let result = scan_with(&root, "fixture", &mut |path| {
+            reads += 1;
+            if reads == 1 {
+                fs::read(path)
+            } else {
+                Err(io::Error::from_raw_os_error(libc::EACCES))
+            }
+        });
+        assert_canary_absent(&root, result);
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Both files match, so the result is independent of directory ordering.
+    // A scanner that stops on the first match would miss the second read error.
+    fs::write(tmp.path().join("first"), b"fixture").unwrap();
+    fs::write(tmp.path().join("second"), b"fixture").unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "canary_scan_read_error_after_match_exits_nonzero",
+            "--nocapture",
+        ])
+        .env(CHILD_ROOT, tmp.path())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success(), "incomplete scan succeeded");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("canary scan failed"), "{stderr}");
+    assert!(
+        stderr.contains(&tmp.path().display().to_string()),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Permission denied"), "{stderr}");
 }

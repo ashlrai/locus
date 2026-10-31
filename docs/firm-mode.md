@@ -298,14 +298,26 @@ locus engagement close acme --archive
 # marks ~/.locus/engagements/acme.json closed_at
 ```
 
-Then finish the human checklist printed by the command:
+Then remove the client's local records with `locus offboard` — it prints a
+`locus.plan.v1` plan by default and only mutates with `--apply`:
 
-1. `locus leave` if still pinned (close does this when the active pin matches).
-2. Binding file is **kept** by default — `locus binding rm acme --yes` only when you intend to drop it.
-3. Rotate/revoke provider tokens that backed `phm:…_ACME` (Phantom + provider consoles). Locus never deletes vault secrets.
-4. Remove client repo access (GH org, Vercel team, Supabase project invites).
-5. Strip or rewrite `.locus.toml` if the repo leaves your custody.
-6. Retain the archive under `~/.locus/archives/` for the engagement window if required.
+```bash
+locus offboard acme            # read-only plan: every record the client owns
+locus offboard acme --apply    # pin drop, binding, approvals, sessions, grants, history
+```
+
+`--apply` drops the active pin (run `locus leave --force` first if it is
+wedged), removes the binding file, approval records, sealed session files,
+MCP grants, engagement meta and the client's pin-history entries. Audit
+events and `~/.locus/archives/` stay as evidence — offboarding removes
+operable state, not history.
+
+Then finish the human checklist:
+
+1. Rotate/revoke provider tokens that backed `phm:…_ACME` (Phantom + provider consoles). Locus never deletes vault secrets.
+2. Remove client repo access (GH org, Vercel team, Supabase project invites).
+3. Strip or rewrite `.locus.toml` if the repo leaves your custody — offboard lists workspace templates still naming the alias but never edits them.
+4. Retain the archive under `~/.locus/archives/` for the engagement window if required.
 
 ## Compose with Phantom
 

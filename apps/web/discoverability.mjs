@@ -27,7 +27,6 @@
 //   node apps/web/discoverability.mjs           rewrite all assets in place
 //   node apps/web/discoverability.mjs --check   exit 1 when any asset is stale
 import {
-  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -66,7 +65,7 @@ export function repoVersion(root = REPO_ROOT) {
   )?.[1];
   if (!cargo) throw new Error('no [workspace.package] version in Cargo.toml');
   const release = read(root, 'CHANGELOG.md').match(
-    /^## \[(\d+\.\d+\.\d+)\]\s*[-\u2013\u2014]\s*(\d{4}-\d{2}-\d{2})/m
+    /^## \[(\d+\.\d+\.\d+(?:-[\w.-]+)?)\]\s*[-\u2013\u2014]\s*(\d{4}-\d{2}-\d{2})/m
   );
   if (!release) throw new Error('no released ## [x.y.z] - date heading in CHANGELOG.md');
   if (release[1] !== cargo) {
@@ -76,7 +75,12 @@ export function repoVersion(root = REPO_ROOT) {
   if (pkg.version !== cargo) {
     throw new Error(`apps/web/package.json version ${pkg.version} != Cargo workspace ${cargo}`);
   }
-  return { version: cargo, date: release[2] };
+  const publishedVersion = JSON.parse(read(root, 'scripts/freshness/published.json')).version;
+  const releases = [...read(root, 'CHANGELOG.md').matchAll(/^## \[(\d+\.\d+\.\d+(?:-[\w.-]+)?)\]\s*[-\u2013\u2014]\s*(\d{4}-\d{2}-\d{2})/gm)];
+  if (typeof publishedVersion !== 'string' || releases.filter(entry => entry[1] === publishedVersion).length !== 1) {
+    throw new Error('published version needs exactly one dated CHANGELOG entry');
+  }
+  return { version: cargo, date: release[2], publishedVersion };
 }
 
 export function mcpTools(root = REPO_ROOT) {
@@ -150,11 +154,13 @@ export function installCommands(root = REPO_ROOT) {
 // README H1 + first descriptive paragraph.
 export function readmeInfo(root = REPO_ROOT) {
   const readme = read(root, 'README.md');
-  const title = readme.match(/^#\s+(.+)$/m)?.[1];
+  // Disjoint body branches preserve greedy whitespace (including blank lines)
+  // without retrying every split of a long whitespace-only heading.
+  const title = readme.match(/^#\s+(\S.*|[^\S\r\n\u2028\u2029])$/m)?.[1];
   if (!title) throw new Error('README.md has no H1');
   const tagline = readme.match(/\*\*(Your coding agent[^*]+)\*\*/)?.[1]
     ?? 'AI-native identity plane for coding agents.';
-  const h2s = [...readme.matchAll(/^##\s+(.+)$/gm)].map((m) => clean(m[1]));
+  const h2s = [...readme.matchAll(/^##\s+(\S.*|[^\S\r\n\u2028\u2029])$/gm)].map((m) => clean(m[1]));
   return { title: clean(title), tagline: clean(tagline), sections: h2s };
 }
 
@@ -166,8 +172,9 @@ export function docsIndex(root = REPO_ROOT) {
   if (!files.length) throw new Error('no markdown files under docs/');
   return files.map((file) => {
     const text = read(root, `docs/${file}`);
-    const headings = [...text.matchAll(/^(#{1,3})\s+(.+)$/gm)]
-      .map((m) => ({ level: m[1].length, text: clean(m[2].replace(/[`[\]*_]/g, '').replace(/#+$/g, '').trim()) }))
+    const headings = [...text.matchAll(/^(#{1,3})\s+(\S.*|[^\S\r\n\u2028\u2029])$/gm)]
+      // Start only at the maximal hash run, avoiding retries at every hash.
+      .map((m) => ({ level: m[1].length, text: clean(m[2].replace(/[`[\]*_]/g, '').replace(/(?<!#)#+$/g, '').trim()) }))
       .filter((h) => h.text);
     const title = headings.find((h) => h.level === 1)?.text ?? file.replace(/\.md$/i, '');
     return { file, title, headings: headings.filter((h) => h.level > 1) };
@@ -176,7 +183,8 @@ export function docsIndex(root = REPO_ROOT) {
 
 export function securityContact(root = REPO_ROOT) {
   const sec = read(root, 'SECURITY.md');
-  const email = sec.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0];
+  // A failed local-part run cannot succeed from any of its suffixes.
+  const email = sec.match(/(?<![a-z0-9._%+-])[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0];
   if (!email) throw new Error('SECURITY.md names no contact email');
   return email;
 }
@@ -278,10 +286,12 @@ function robotsTxt() {
   ].join('\n');
 }
 
-function capabilitiesJson({ version, install, commands, tools }) {
+function capabilitiesJson({ version, publishedVersion, install, commands, tools }) {
   return `${escJson(JSON.stringify({
     name: 'Locus',
     version,
+    versionScope: 'source checkout; commands/tools may not exist in the published package',
+    publishedVersion,
     description: 'AI-native identity plane for coding agents. Pin a binding; every CLI command, MCP tool and agent session is sealed to that tenant until a human re-pins.',
     homepage: SITE + '/',
     repository: REPO,
@@ -310,7 +320,7 @@ function capabilitiesJson({ version, install, commands, tools }) {
   }, null, 2))}\n`;
 }
 
-function serverJson({ version }) {
+function serverJson({ publishedVersion: version }) {
   return `${JSON.stringify({
     $schema: 'https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json',
     name: MCP_NAME,
@@ -499,7 +509,7 @@ export function renderOgPng({ version }) {
 
 const OPEN = /<!--\s*disc:([a-z-]+)\s*-->/g;
 
-function jsonLd({ version, info }) {
+function jsonLd({ publishedVersion: version, info }) {
   const data = {
     '@context': 'https://schema.org',
     '@type': 'SoftwareApplication',
@@ -520,13 +530,17 @@ function jsonLd({ version, info }) {
 }
 
 export function buildInputs(root = REPO_ROOT) {
-  const { version, date } = repoVersion(root);
+  const { version, date, publishedVersion } = repoVersion(root);
   return {
     version,
     date,
+    publishedVersion,
     info: readmeInfo(root),
     docs: docsIndex(root),
-    install: installCommands(root),
+    install: { ...installCommands(root),
+      npm: `npm install -g locus-cli@${publishedVersion} @ashlrai/locus-mcp@${publishedVersion}`,
+      npx: `npx locus-cli@${publishedVersion} --help`,
+    },
     commands: cliCommands(root),
     tools: mcpTools(root),
     email: securityContact(root),
@@ -539,14 +553,14 @@ export function buildOutputs(root = REPO_ROOT, inputs = buildInputs(root)) {
     'llms.txt': llmsTxt(inputs),
     'llms-full.txt': llmsFull(inputs),
     'sitemap.xml': sitemapXml(inputs),
-    'robots.txt': robotsTxt(inputs),
+    'robots.txt': robotsTxt(),
     'capabilities.json': capabilitiesJson(inputs),
     'server.json': serverJson(inputs),
     '.well-known/security.txt': securityTxt(inputs),
   };
-  const binaries = { 'og.png': renderOgPng(inputs) };
+  const binaries = { 'og.png': renderOgPng({ ...inputs, version: inputs.publishedVersion }) };
   const regions = {
-    version: `v${inputs.version}`,
+    version: `v${inputs.publishedVersion}`,
     'json-ld': jsonLd(inputs),
   };
   return { files, binaries, regions };

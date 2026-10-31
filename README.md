@@ -1,21 +1,36 @@
-# Locus
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/ashlrai/locus/main/apps/web/public/og.png" alt="Locus — wrong account, impossible. Identity plane for coding agents." width="720" />
+
+<h1>Locus</h1>
+
+**Your coding agent can't act as the wrong account.**
+
+**The identity plane for coding agents · by [Ashlr](https://ashlr.ai).**
+
+Pin a client, and every CLI command, MCP tool and agent session is sealed to that identity until you re-pin. No more ambient `gh auth`, a shared Supabase token or "whichever Vercel team was last".
+
+[**30-second start**](#30-second-start) ·
+[**Install**](#install-options) ·
+[**Plugs into Phantom**](#how-locus-plugs-into-phantom) ·
+[**Security model**](#security-model) ·
+[**Docs**](#docs)
 
 <!-- fresh:begin badge -->
-[![Release 0.5.2](https://img.shields.io/badge/release-v0.5.2-blue)](https://github.com/ashlrai/locus/releases/tag/v0.5.2)
+[![Release 0.5.2](https://img.shields.io/badge/release-v0.5.2-blue?style=for-the-badge&labelColor=0b0b14)](https://github.com/ashlrai/locus/releases/tag/v0.5.2)
 <!-- fresh:end -->
+[![CI](https://img.shields.io/github/actions/workflow/status/ashlrai/locus/ci.yml?style=for-the-badge&label=CI&logo=github&labelColor=0b0b14)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
+[![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?style=for-the-badge&logo=npm&label=locus-cli&labelColor=0b0b14)](https://www.npmjs.com/package/locus-cli)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge&labelColor=0b0b14)](./LICENSE)
+[![Rust ≥1.89](https://img.shields.io/badge/rust-%E2%89%A51.89-CE412B?style=for-the-badge&logo=rust&labelColor=0b0b14)](./rust-toolchain.toml)
+
+</div>
 
 <!-- fresh:begin release -->
 Latest release: [v0.5.2](https://github.com/ashlrai/locus/releases/tag/v0.5.2) (2026-10-26).
 
 `locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
 <!-- fresh:end -->
-
-[![CI](https://github.com/ashlrai/locus/actions/workflows/ci.yml/badge.svg)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
-[![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?label=npm%20locus-cli)](https://www.npmjs.com/package/locus-cli)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](./rust-toolchain.toml)
-
-**Your coding agent can't act as the wrong account.** Pin a client, and every CLI command, MCP tool and agent session is sealed to that identity until you re-pin. No more ambient `gh auth`, a shared Supabase token or "whichever Vercel team was last".
 
 ![locus quickstart pins a sample binding; locus whoami shows the sealed session and its scoped providers](docs/assets/locus-demo.gif)
 
@@ -27,15 +42,103 @@ locus quickstart                        # sample bindings, pin, whoami, doctor
 eval "$(locus hook zsh)"                # or bash; exports the control capability
 locus enter personal                    # pin from this shell (it supervises the pin)
 locus whoami                            # who your agents are acting as, right now
-locus exec --expect personal -- echo ok # runs: personal is pinned
+locus exec --expect personal --no-resolve -- echo ok # runs: personal is pinned
 locus exec --expect acme -- echo ok     # refused, exit 1, child never starts (pin_mismatch)
 ```
+
+The `echo` smoke test uses `--no-resolve` because it needs no credentials.
+Existing bindings are not replaced by quickstart; `--no-resolve` refuses bindings
+with credential-resolving upstreams. For real provider work, supply credentials
+outside agent context and replace the sample scopes. Missing credentials still
+produce warnings when resolution is enabled. See the [sample exec
+walkthrough](examples/sample-exec-q8.md).
 
 What the two extra steps are for:
 
 - **Control capability.** Control commands (`enter`, `pin`, `leave`, `exec`) need `LOCUS_CONTROL_CAPABILITY` in the shell. `locus quickstart` mints it and saves it at `~/.locus/control_capability` (0600, respects `LOCUS_HOME`); `eval "$(locus hook zsh)"` exports it without printing it. Without it, `locus exec` stops with `LOCUS_CONTROL_CAPABILITY is required for control-plane authority`. `locus capability status` shows the posture without the value.
 - **Broker pin.** A pin is backed by an authority broker that the pinning shell supervises. `locus enter personal` works straight after `quickstart`, including when quickstart ran in a shell that has already exited (fixed in #156, regression test `crates/locus-cli/tests/quickstart_then_enter.rs`).
-- **Recovery.** If a command says `human re-pin required` (for example `no current broker endpoint` after the pinning shell exited), load the hook in the new shell (`eval "$(locus hook zsh)"` or `bash`) and run `locus enter personal`: enter replaces a pin whose broker died. Only if enter is refused (for example an expired pin or a bad seal), run `locus leave --force` in that same hooked shell, then `locus enter personal`. `--force` deletes session state only and never mints anything.
+- **Recovery.** If the pinning shell exits, follow the [dead-broker recovery steps](#recovering-after-the-broker-exits) in a new operator shell.
+
+### Recovering after the broker exits
+
+If a command reports `human re-pin required` or `no current broker endpoint`,
+open a new operator shell, change to the intended workspace, and use the same
+Locus home as the affected session. Load the hook and try entering the intended
+binding first; an intact local-control active pin whose broker died can be
+replaced directly when no session ID is explicitly selected:
+
+```bash
+cd /path/to/workspace
+eval "$(locus hook bash)"             # use zsh for a zsh shell
+locus enter personal                  # replace personal with your binding alias
+locus whoami
+```
+
+`locus enter --force` is a different option: it allows bindings outside the
+workspace allowlist and is not needed to replace an intact dead-broker pin.
+
+If `enter` is refused, read the error before continuing. For a wedged session,
+such as an expired pin, invalid or legacy seal, or unreadable session, a human
+can clear it and re-enter in the same hooked shell:
+
+```bash
+locus leave --force
+locus enter personal
+locus whoami
+```
+
+Forced leave requires the control capability, verified against the live broker
+or persisted operator capability; it deletes session state only and never
+mints a pin. Do not use it to bypass a capability or workspace refusal. The
+exceptional `locus leave --force --no-verifier` acknowledges teardown without
+capability verification only when neither a live broker nor a persisted
+operator capability is available. It cannot override a live broker's refusal
+or a mismatching persisted capability. A subsequent `enter` still requires
+normal authorization. See `locus leave --help` and the
+[broker recovery guide](docs/broker-recovery-q8.md) for details. Keep the shell
+that enters the pin alive while using its broker.
+
+### Fresh quickstart doctor warning
+
+[Issue #172](https://github.com/ashlrai/locus/issues/172) recorded a fresh
+quickstart on npm 0.5.1: `quickstart` succeeded, but a subsequent `doctor`
+returned exit 1 with `WARN` when Phantom was absent. To reproduce the isolated
+setup with an installed `locus` binary, run the following in Bash. It uses a
+temporary home and an empty project, hides optional executables from `PATH`,
+and starts each Locus command with a clean environment:
+
+```bash
+cli_bin="$(command -v locus)"
+work="$(mktemp -d)"
+mkdir -p "$work/home" "$work/project"
+cd "$work/project"
+env -i HOME="$work/home" PATH=/nonexistent SHELL=/bin/bash NO_COLOR=1 "$cli_bin" quickstart > /dev/null
+printf 'quickstart exit: %s\n' "$?"
+env -i HOME="$work/home" PATH=/nonexistent SHELL=/bin/bash NO_COLOR=1 "$cli_bin" doctor > "$work/doctor.out"
+doctor_status=$?
+grep -E 'verdict   WARN|\[phantom_missing\]' "$work/doctor.out"
+printf 'doctor exit: %s\n' "$doctor_status"
+```
+
+On the pre-fix 0.5.1 source, quickstart exited 0 and the selected doctor output
+was (other findings omitted):
+
+<!-- fresh-doctor-output:begin -->
+```text
+  verdict   WARN
+  ! [phantom_missing] phantom not on PATH (install Phantom Secrets for Phantom credential references)
+```
+<!-- fresh-doctor-output:end -->
+
+Doctor exited 1. Since the fix included in 0.5.2, the same setup still reports
+the warning but exits 0 when findings are only setup advisories. The JSON
+report still has `verdict: "WARN"` and `ok: false`; exit 0 does not mean all
+setup is complete. Inspect the full `locus doctor --json` report for other
+findings: actionable warnings can still exit 1, and unsafe conditions exit 2.
+Phantom is optional unless using its credential references; its scoped bridge
+is not available in this checkout. To export the persisted control capability
+in your normal shell, use the hook described above. See the [first-run
+record](docs/FIRST-RUN.md) for the original observation.
 
 ## Connect your agent (MCP)
 
@@ -69,29 +172,7 @@ Use explicit environment (`env:`) references for supported credential resolution
 
 ## Install options
 
-The shell installer downloads **both `locus` and `locus-mcp`**, verifies the
-archive against its required SHA-256 sidecar, and installs into `~/.local/bin`
-without sudo. It supports macOS (Apple Silicon / Intel) and Linux x86_64
-(glibc); requires Bash, curl, tar, and `sha256sum` or `shasum`.
-
-```bash
-# Download, inspect, then install the latest release
-installer_script=$(mktemp)
-curl -q --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
-  https://raw.githubusercontent.com/ashlrai/locus/main/scripts/install.sh -o "$installer_script"
-less "$installer_script"
-bash "$installer_script"
-export PATH="$HOME/.local/bin:$PATH"
-
-# Or select a release and a writable destination
-bash "$installer_script" --version v0.5.1 --bin-dir "$HOME/bin"
-```
-
-The installer never edits shell profiles; add the install directory to your
-shell's `PATH` to keep it available in new terminals. Re-run to upgrade.
-Missing or mismatched checksums stop installation before replacing binaries.
-Checksums detect corrupted downloads; they are not publisher signatures.
-For Linux ARM or other platforms, use a source install below.
+Homebrew, npm, and Cargo are the current installation options:
 
 ```bash
 # Homebrew (tap live) — installs locus + locus-mcp
@@ -102,22 +183,63 @@ npm install -g locus-cli @ashlrai/locus-mcp
 npx locus-cli --help
 npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
 
-# cargo (Linux without Homebrew, or any source install): rustc 1.89 or newer
-# (workspace rust-version). Cargo 1.85 to 1.88 stops with "requires rustc 1.89".
-# Cargo 1.83 fails earlier: idna_adapter in the lockfile needs edition 2024.
-# rust-toolchain.toml pins stable inside a checkout and does not apply to
-# `cargo install --git` run outside the repo.
-# Measured on one Linux box: 179 s for both binaries.
-export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
 ```
 
-Local checkout:
+### Proposed shell installer
+
+[Issue #169](https://github.com/ashlrai/locus/issues/169) proposes a
+one-command installation path for machines without npm or Rust. The repository
+contains an [installer implementation](./scripts/install.sh), but this proposal
+does not establish that a published one-command installation path or matching
+assets are available for every release. Use the current options above or the
+source install below in the meantime.
+
+The intended installer selects a platform-specific `locus-<target>.tar.gz`
+release archive and its required `.sha256` sidecar, verifies the archive, and
+installs both `locus` and `locus-mcp`. Missing or mismatched checksums must stop
+installation before binaries are replaced; checksums detect corruption but are
+not publisher signatures. The implementation targets macOS Apple Silicon and
+Intel, and Linux x86_64 with glibc. On unsupported platforms, including Linux
+ARM, try a source install. It requires Bash, curl, tar, and `sha256sum` or `shasum`;
+its default destination is `~/.local/bin`, without sudo or shell profile edits.
+Users must add the destination to their `PATH` themselves.
+See the [installer platform matrix](./docs/installer-platform-matrix.md) for
+prerequisites, evidence limits, and unresolved platform decisions.
+
+### Install from source
+
+The minimum supported Rust version (MSRV) for source installs, including npm's
+Cargo fallback, is **Rust 1.89 or newer**, with a matching Cargo toolchain. The
+[workspace manifest](./Cargo.toml) declares this as `rust-version` for all crates.
+See the [MSRV guide](./docs/MSRV.md) for verification and upgrade instructions.
+With Rust 1.83, installation fails before compiling Locus because the locked
+`idna_adapter` dependency uses the 2024 edition, which that Cargo cannot parse
+([issue #167](https://github.com/ashlrai/locus/issues/167)). Cargo 1.85 through
+1.88 can parse it but reject the workspace's minimum Rust version.
+
+Check the active toolchain before installing:
+
+```bash
+rustc --version
+cargo --version
+```
+
+If necessary, update and select a supported toolchain with `rustup update stable`
+and `rustup default stable`. A checkout's `rust-toolchain.toml` selects stable
+inside the checkout, but it does not select the toolchain for `cargo install
+--git` run elsewhere. Check the versions in the directory where you install.
+
+```bash
+# Install both binaries from Git
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo install --git https://github.com/ashlrai/locus locus-cli --locked
+```
+
+Or install from a local checkout:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --locked --path crates/locus-cli
 ```
 
 Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
@@ -145,8 +267,8 @@ locus switch acme && locus whoami
 # Local identity dashboard (loopback UI + API)
 locus dashboard                  # http://127.0.0.1:8750
 
-# Run any command with only the pinned binding's surface
-locus exec -- env | grep LOCUS_
+# Check the pinned binding without resolving credentials
+locus exec --no-resolve -- true
 
 # Wire AI clients + hub readiness
 locus agent setup --apply
@@ -165,6 +287,49 @@ eval "$(locus hook zsh)"
 # shows [locus:acme:acme-corp] or [locus:unpinned]
 # also exports the persisted LOCUS_CONTROL_CAPABILITY when the shell lacks one
 ```
+
+### Previewing mutations with `--dry-run`
+
+[Issue #171](https://github.com/ashlrai/locus/issues/171) covers previews for
+mutating CLI commands. The following command forms support a plan in this
+checkout; supply their normal required arguments:
+
+| Area | Command forms |
+| --- | --- |
+| Setup and sessions | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew` |
+| Bindings and workspaces | `engagement init`, `engagement close`, `graph export`, `graph import`, `binding add`, `binding rm`, `binding migrate-credential-refs`, `client add`, `offboard`, `autopin suggest --apply` |
+| Capabilities and grants | `capability persist`, `capability unpersist`, `ci mint`, `ci env`, `mcp mint`, `mcp revoke` |
+| Setup and adapters | `agent setup`, `doctor --fix`, `adapter install`, `adapter uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add`, `adapter registry index remove` |
+| Approvals and audit | `approve grant`, `approve deny`, `notify on`, `notify off`, `events export`, `forensics export` |
+
+For example, `locus init --dry-run --json` previews initialization. A plan should:
+
+- Perform read-only preflight checks and describe the proposed changes; JSON
+  plans use the `locus.plan.v1` schema.
+- Leave persistent state unchanged, including the Locus home, session and
+  binding data, workspace and client configuration, and export files. Do not
+  start a child or server, resolve credentials, or perform provider mutations.
+- Report failed preconditions without applying changes. A successful preview
+  does not authenticate the control capability or guarantee that a later real
+  command will be authorized or succeed.
+
+`doctor --fix` previews repairs by default; `--apply` writes them. Likewise,
+`binding migrate-credential-refs` previews by default and `--write` persists
+changes. `setup --print` and `setup --client generic` remain print-only, even
+with the flag. Adapter install and registry index add previews do not fetch or
+verify remote content.
+
+`doctor --fix --apply --dry-run`, `agent setup --apply --dry-run`, and
+`pin --rewrite-configs --dry-run` are rejected. `exec`, `run`, `ci run`, the
+`mcp` server (without a subcommand), `serve`, and `dashboard` cannot produce
+plans. `locus exec --dry-run -- <command>` exits 1; other placements and the
+other listed commands reject the flag with exit 2. Arguments after `--` belong
+to the child. Child commands, provider operations, and MCP tool calls are
+outside this preview's scope.
+
+Read-only commands accept and ignore the flag, so their normal behavior can
+still create a Locus home or freeze a drifted session. See the [dry-run command
+matrix](docs/dry-run-matrix-q8.md) for all forms and limitations.
 
 ---
 
@@ -232,6 +397,32 @@ MCP identity and provider-scope responses report only credential presence and so
 
 ---
 
+## How Locus plugs into Phantom
+
+Locus and [Phantom Secrets](https://phm.dev/secrets) are the two halves of the Ashlr agent-safety pair — different questions, different planes:
+
+| Plane | Tool | Question it answers |
+|-------|------|---------------------|
+| Secret plane | `phantom` ([phantom-secrets](https://github.com/ashlrai/phantom-secrets)) | *Can this secret enter the model?* Real keys stay in the vault behind `phm_` placeholders; agents get value-blind metadata only. |
+| Identity plane | `locus` (this repo) | *As whom, against which tenant, right now?* Every CLI command and MCP tool is sealed to one pinned binding. |
+
+**Wire both into your client** — the pair is declared as `required_servers` on every `locus agent report`. `locus agent setup --apply` registers `locus`; [Phantom's own setup](https://github.com/ashlrai/phantom-secrets) registers `phantom`:
+
+```json
+{ "mcpServers": {
+    "locus":   { "command": "locus", "args": ["mcp", "--supervised"] },
+    "phantom": { "command": "phantom", "args": ["mcp", "serve"] }
+} }
+```
+
+Do not register raw Supabase / Vercel / GitHub MCP servers with ambient tokens next to Locus — they bypass the pin.
+
+**For orchestrators** (the [Phantom workbench](https://github.com/ashlrai/phantom), or your own hub): shell out to the CLI — do not reimplement pin or seal. `locus agent report --json` is the single entrypoint (exit 0 ready / 1 protected / 2 unsafe); `locus ci mint` hands each job an ephemeral sealed session; `locus mcp mint` issues one revocable tenant grant per job against the multi-tenant HTTP server. Drop-in TypeScript helpers and the full contract live in [integrations/phantom/](./integrations/phantom/) and [docs/hub-integration.md](./docs/hub-integration.md).
+
+**On credentials:** bindings carry `credential_ref` pointers, never secrets. `env:VAR` resolves today — the operator supplies the value and Locus injects it only into the pinned provider's child environment. `phm:NAME` stays readable for metadata and migration, but resolution fails closed until a reviewed, tenant-scoped bridge exists; see [credential compatibility](./docs/credential-compatibility.md). Neither server's tool results ever contain a resolved secret value.
+
+---
+
 ## Core concepts
 
 | Term | Meaning |
@@ -295,10 +486,9 @@ locus exec --for gh -- gh pr list    # inject only the pinned GitHub credential
 locus run -b <alias> -- <command>     # one-shot; global pin unchanged
 locus binding list|show|add|rm|migrate-credential-refs
 locus capability status|persist|unpersist  # where control authority lives
-locus autopin suggest [--apply]       # learned per-repo binding from pin history
+locus autopin suggest [--json] [--apply]  # learned per-repo binding from pin history
 locus workspace --default <alias> [--allow a,b] [--require-pin]
-locus autopin suggest [--json] [--apply]  # learn a default from local pin history
-locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2)
+locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2; advisory-only WARN exits 0)
 locus doctor --fix [--apply]          # preview safe repairs; --apply makes them, backing up first
 locus watch [--once] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
 locus dashboard · serve               # local identity UI + API (127.0.0.1)
@@ -310,9 +500,10 @@ locus events --last N · events export # audit tail / fleet pulse / OTLP
 locus graph list|export|import        # encrypted binding graph share (no secrets)
 locus ci mint|env|run                 # short-lived sealed sessions for pipelines
 locus engagement init|close           # client engagement lifecycle (binding + workspace)
+locus offboard <alias> [--apply]      # plan first; --apply removes the client's local records
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
-locus adapter search|install|uninstall · registry export|verify-manifest  # community + release adapters
+locus adapter search|install|uninstall|verify-manifest · registry export  # community + release adapters
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex|grok|gemini|generic
 locus mcp [--supervised]              # run the stdio MCP server; --supervised serves pinned provider tools
@@ -323,6 +514,17 @@ locus completion zsh|bash|fish|elvish|powershell  # shell completions
 locus version                         # build version (also: locus --version)
 locus topic <name>                    # dashboard · forensics · serve · goal · verify · …
 ```
+
+### Previewing mutations
+
+Use `--dry-run` to preview supported mutations, for example:
+
+```sh
+locus init --dry-run --json
+```
+
+See [previewing mutations with `--dry-run`](#previewing-mutations-with---dry-run)
+for the complete command list, exceptions, and limits.
 
 **Agency kit:** [`examples/agency-starter/`](./examples/agency-starter/) — personal ↔ client A ↔ client B, dual-control, workspaces, offboarding. Guide: [docs/agency-starter.md](./docs/agency-starter.md).
 
@@ -368,8 +570,8 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | **0** Daemon-less control plane, pin/whoami/exec, isolation tests | done |
 | **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | done |
 | **2** Firm UX, doctor pane, run/ns, notify, local `locus graph`, `locus ci` | done (0.1.1) |
-| **2.x / 0.2–0.5** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch`; 0.5 signed registry manifests, hub MT drop-in | **you are here (0.5.2)** |
-| **3** Remote binding graph sync, dual-control packs, offboard, SIEM export | next |
+| **2.x / 0.2–0.5** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch`; 0.5 signed registry manifests, hub MT drop-in | **0.5.2 released; 0.6.0 candidate prepared** |
+| **3** Remote binding graph sync, dual-control packs, ~~offboard~~ (done), SIEM export | next |
 | **4** Adapter SDK, broader prebuilt platforms | later |
 
 See [GOALS.md](./GOALS.md) (living milestones), [PLAN.md](./PLAN.md), and [DESIGN.md](./DESIGN.md).
@@ -389,12 +591,168 @@ cargo build --release
 # forensics, goal status — feature-detected)
 ./scripts/e2e.sh
 
+# Full e2e with a custom TMPDIR; also checks workspace cleanup on exit
+./scripts/tests/e2e-tmpdir.sh
+
 # README quickstart rehearsal: replays the extracted 30-second start in a
 # throwaway HOME (--dry-run prints the plan without running it)
 ./scripts/check-readme-quickstart.sh
+
+# README link check: every markdown link, image and anchor must resolve
+# (--external also HEAD-requests remote URLs; loopback hosts skipped)
+node scripts/check-readme-links.mjs
 ```
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test/lint and how to add adapters. Agent-oriented rules: [AGENTS.md](./AGENTS.md). Short IDE guide: [CLAUDE.md](./CLAUDE.md).
+
+### Building both binaries
+
+The `locus-cli` package builds and installs both `locus` and `locus-mcp` in
+one Cargo invocation, sharing `locus-core`. See [build verification](./docs/build-q8.md)
+for the timing and artifact checks. The standalone `locus-mcp` package remains
+available for server-only installs.
+
+### Comparing exec launch latency
+
+Open performance investigation [issue #170](https://github.com/ashlrai/locus/issues/170)
+reports `locus exec -- true` as 3–5x slower than direnv and sops. That is the
+issue's report, not a verified benchmark or a guarantee about current releases.
+To investigate, run the complete
+[same-host comparison](./docs/exec-latency.md#comparing-launchers-for-issue-170)
+from the repository root in one Bash process on an idle Unix host. It builds
+Locus in release mode, uses a fresh temporary home, a live synthetic pin and
+disposable direnv and age/sops fixtures. No real credentials are needed.
+Setup is outside the timed region; the four commands launch the same child:
+
+```bash
+/usr/bin/true
+"$locus" exec --strict-creds -- /usr/bin/true
+direnv exec "$work/direnv" /usr/bin/true
+sops exec-env "$work/encrypted.env" /usr/bin/true
+```
+
+Each launcher supplies the same synthetic `RESEND_API_KEY` to the child; the
+direct baseline supplies none. The procedure checks injection without printing
+the value. It defines these paths and runs four discarded warmup rounds
+followed by 32 measured rounds per command, rotating the starting order. It
+aborts on any failed command and reports min, median and max wall time. Repeat
+the whole procedure at least three times with fresh homes and record each run’s
+min/median/max in milliseconds for all four commands, including the sample count.
+Report the range of run medians for each command and compare within-run medians;
+do not treat differences smaller than run-to-run variation as conclusive. Record
+the commit, OS and architecture, filesystem, host load, build profile, and versions of Locus,
+Rust, Cargo, Python, direnv, sops and age. For example, record `git rev-parse
+HEAD`, `uname -srm`, `rustc --version`, `cargo --version`, `python3 --version`,
+`direnv --version`, `sops --version`, `age-keygen --version`, and the built
+`locus --version`; disable the sops version check as in the linked setup.
+
+The historical comparison in [benchmarks](./docs/BENCHMARKS.md) used Linux
+6.12 x86_64, 4 vCPU, 15.6 GiB RAM, rustc 1.99.1, Locus commit `e969d9c4`
+(release build), direnv 2.38.2, sops 3.13.3 and age 1.3.2. It used one warmup
+and 20 measured runs; Locus resolved no secrets and warned about missing sample
+credentials. Its results are not the same experiment as the procedure above.
+These launchers provide different guarantees: Locus verifies a pin, isolates the
+child, resolves an environment reference and writes an audit record; direnv
+loads an allowed `.envrc`; sops decrypts a synthetic dotenv file. The comparison
+does not measure provider API calls or real secret-manager resolution. Timing
+includes process startup and filesystem effects, but not terminal rendering.
+Results depend on the host and conditions recorded above; they are observations,
+not latency or relative-performance guarantees.
+
+#### Run the comparison locally
+
+Run this complete block from the repository root on an idle Unix host. It requires
+Bash, Python 3, Rust/Cargo, `direnv`, `sops`, `age-keygen`, and `/usr/bin/true`.
+Cargo may need network access for locked dependencies. The block builds the release CLI, creates a disposable home
+and binding, and removes the temporary files on exit. It does not use real
+credentials or change your existing pin. Keep the block in one Bash process so
+its broker remains alive. `direnv allow` applies only to the temporary fixture.
+
+```bash
+bash <<'BASH'
+set -euo pipefail
+repo="$PWD"
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable LOCUS_ || true)
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable DIRENV_ || true)
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable SOPS_ || true)
+unset RESEND_API_KEY
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH" CARGO_TARGET_DIR="$repo/target"
+work="$(mktemp -d "${TMPDIR:-/tmp}/locus-peers.XXXXXXXX")"
+work="$(cd "$work" && pwd -P)" # direnv allow and exec must use the same path
+trap 'rm -rf "$work"' EXIT
+export HOME="$work/home" LOCUS_HOME="$work/locus" DIRENV_LOG_FORMAT=
+export SOPS_AGE_KEY_FILE="$work/age-key.txt" SOPS_DISABLE_VERSION_CHECK=1
+mkdir -p "$HOME" "$work/direnv"
+cargo build --locked --release -p locus-cli
+locus="$repo/target/release/locus"
+cd "$work"
+"$locus" init
+eval "$("$locus" hook bash)"
+"$locus" binding add bench --tenant bench --provider resend --account bench \
+  --credential-ref env:LOCUS_BENCH_FIXTURE --non-interactive
+export LOCUS_BENCH_FIXTURE=fixture
+"$locus" pin bench
+printf 'export RESEND_API_KEY=fixture\n' > "$work/direnv/.envrc"
+direnv allow "$work/direnv/.envrc"
+printf 'RESEND_API_KEY=fixture\n' > "$work/plain.env"
+age-keygen -o "$SOPS_AGE_KEY_FILE" 2>/dev/null
+recipient="$(age-keygen -y "$SOPS_AGE_KEY_FILE")"
+sops --encrypt --age "$recipient" --input-type dotenv --output-type dotenv \
+  "$work/plain.env" > "$work/encrypted.env"
+rm "$work/plain.env"
+# Verify the synthetic value reaches each child without displaying it.
+"$locus" exec --strict-creds -- /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
+direnv exec "$work/direnv" /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
+sops exec-env "$work/encrypted.env" 'test "$RESEND_API_KEY" = fixture'
+python3 - "$locus" "$work/direnv" "$work/encrypted.env" <<'PYBENCH'
+import statistics
+import subprocess
+import sys
+import time
+
+locus, directory, encrypted = sys.argv[1:]
+commands = {
+    "direct": ["/usr/bin/true"],
+    "locus": [locus, "exec", "--strict-creds", "--", "/usr/bin/true"],
+    "direnv": ["direnv", "exec", directory, "/usr/bin/true"],
+    "sops": ["sops", "exec-env", encrypted, "/usr/bin/true"],
+}
+samples = {name: [] for name in commands}
+names = list(commands)
+warmups, runs = 4, 32
+for i in range(warmups + runs):
+    for name in names[i % len(names):] + names[:i % len(names)]:
+        start = time.perf_counter_ns()
+        result = subprocess.run(commands[name], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elapsed = (time.perf_counter_ns() - start) / 1_000_000
+        if result.returncode != 0:
+            raise SystemExit(f"{name} run {i + 1} failed: exit {result.returncode}; no results")
+        if i >= warmups:
+            samples[name].append(elapsed)
+for name, values in samples.items():
+    print(f"{name}: n={len(values)} min={min(values):.3f} "
+          f"median={statistics.median(values):.3f} max={max(values):.3f} ms")
+PYBENCH
+"$locus" leave
+BASH
+```
+
+All three launchers run `/usr/bin/true` with the same synthetic `RESEND_API_KEY`;
+the direct baseline supplies none. Setup, pinning, encryption, and checks are
+untimed. Four warmup rounds are discarded, followed by 32 measured rounds per
+command, rotating the starting order.
+The script aborts without statistics on a failed invocation and reports sample
+count and minimum, median, and maximum wall time in milliseconds. Repeat the
+whole block at least three times with fresh homes; record each result and the
+range of run medians, along with the commit, OS and architecture, filesystem,
+host load, release profile, and tool versions. Compare medians within each run
+and account for run-to-run variation. The child workload and launcher-injected value are
+the same, but the launchers perform different security and setup work as noted
+above; these measurements do not establish equivalent isolation or predict
+performance on another machine.
 
 ### Landing page & dashboard
 
@@ -420,7 +778,10 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [apps/dashboard/](./apps/dashboard) | Local identity dashboard UI |
 | [GOALS.md](./GOALS.md) | Northstar goal loop |
 | [scripts/e2e.sh](./scripts/e2e.sh) | End-to-end shell suite |
+| [docs/e2e-test-map.md](./docs/e2e-test-map.md) | E2E sections, invocation and coverage limits |
 | [scripts/check-readme-quickstart.sh](./scripts/check-readme-quickstart.sh) | README quickstart replay in a throwaway HOME |
+| [scripts/check-readme-links.mjs](./scripts/check-readme-links.mjs) | README link / anchor / image resolution check (`--external` for remote) |
+| [docs/README.md](./docs/README.md) | CLI dry-run support and limitations |
 | [docs/architecture.md](./docs/architecture.md) | System diagram (DESIGN distilled) |
 | [docs/BENCHMARKS.md](./docs/BENCHMARKS.md) | Install and core-op timings, peers, method |
 | [docs/FIRST-RUN.md](./docs/FIRST-RUN.md) | First-run log and agent-use audit |
@@ -429,6 +790,8 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
 | [examples/agency-starter/](./examples/agency-starter/) | Bindings, workspaces, dual-control, offboarding |
 | [docs/phantom-enrolled-repos.md](./docs/phantom-enrolled-repos.md) | Phantom workbench: personal / company / client scope bindings per enrolled repo |
+| [docs/hub-integration.md](./docs/hub-integration.md) | Phantom ↔ Locus contract: agent report, fleet gate, MCP grants |
+| [integrations/phantom/](./integrations/phantom/) | Drop-in TS helpers + MCP gateway / doctor snippets |
 | [docs/gateway-base-urls.md](./docs/gateway-base-urls.md) | Model gateways (for example a LiteLLM proxy): Locus makes no provider calls, `locus exec` drops unknown env vars, and how to set a gateway URL inside it |
 | [docs/PQ-READINESS.md](./docs/PQ-READINESS.md) | Post-quantum readiness note: what Locus uses today (Ed25519 for adapter manifests, classical only) and what a migration would touch. No quantum-safety claim |
 | [docs/mcp.md](./docs/mcp.md) | `locus-mcp` with Claude Code / Cursor |

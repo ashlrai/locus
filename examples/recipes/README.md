@@ -16,6 +16,15 @@ cargo build --bins                                   # or install a release
 node examples/recipes/run.mjs --locus "$PWD/target/debug/locus"
 ```
 
+Run without `--locus` to find `locus` on `PATH`; when supplied, `--locus`
+requires an absolute binary path. The runner always executes all four checks
+in order: it does not provide a way to select a recipe by name. An unknown
+name as the first argument (for example, `node examples/recipes/run.mjs acme`)
+prints usage to stderr and exits `1` before running checks. Arguments after a
+valid `--locus <absolute-path>` are currently ignored, including recipe names.
+Run with `--help` or `-h` to print the invocation and exit without running
+any checks.
+
 Output from a real run (Sep 29, 2026, main and the v0.5.0 release):
 
 ```text
@@ -27,7 +36,10 @@ PASS locus ci run -b acme: a short-lived CI session with the same scrubbing
 COMPLETE: locus recipes (4 checks)
 ```
 
-Exit `0` = all passed, `1` = a check failed, `2` = binary not found (incomplete).
+Exit `0` = all checks passed or help displayed, `1` = invalid invocation or a
+check failed, `2` = binary not found (incomplete). A failed check stops the remaining checks;
+the runner prints `FAIL` for a check failure or `SKIP` and `INCOMPLETE` if the
+binary is missing. Only a successful run prints `COMPLETE`.
 
 ## 1. Run a command as exactly one client
 
@@ -43,7 +55,7 @@ tenant = "acme-corp"
 [[binding.providers]]
 provider = "github"
 account = "acme-corp"
-credential_ref = "phm:GH_TOKEN_ACME"      # recipe uses env:ACME_GH_TOKEN
+credential_ref = "env:ACME_GH_TOKEN"
 scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 ```
 
@@ -79,7 +91,8 @@ Commit `.locus.toml` so everyone working in the repo gets the same allowlist.
 `locus ci run` mints a sealed session with a TTL, applies the same scrubbing,
 runs the command, and cleans up. It never writes the global `active.json` pin.
 Provide the control capability and credentials as CI secrets
-(`LOCUS_CONTROL_CAPABILITY`, plus `env:` refs or Phantom).
+(`LOCUS_CONTROL_CAPABILITY`, plus values for `env:` refs). `phm:` references
+currently fail closed; see [credential compatibility](../../docs/credential-compatibility.md).
 
 ## Not covered here
 

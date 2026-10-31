@@ -13,13 +13,210 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Shell installer proposal ([#169](https://github.com/ashlrai/locus/issues/169)).**
+  The issue proposes a one-command shell installer that downloads and verifies
+  a release archive, allowing installation on machines without npm or Rust.
+  This note records the proposal; it does not assert release availability.
+
+- **Execution latency report ([#170](https://github.com/ashlrai/locus/issues/170)).**
+  The issue reports `locus exec -- true` as 3–5x slower than
+  `direnv exec <dir> true` and `sops exec-env <file> true`. This is the
+  issue's report, not a verified benchmark or a claim about current releases.
+  See the [historical measurements](docs/BENCHMARKS.md#core-operation-latency)
+  and the [same-host comparison procedure](docs/exec-latency.md#comparing-launchers-for-issue-170).
+
+- **Reproduce cargo-install timings ([#168](https://github.com/ashlrai/locus/issues/168)).**
+  The first-run report observed `locus-core` compiling twice during a single
+  `cargo install --git` of `locus-cli` and `locus-mcp`: it compiled again
+  during the `locus-mcp` install after `locus-cli` finished. This remains an
+  unresolved issue: the cause and whether this represents identical compiler
+  work remain unverified; no fix is claimed. See [the benchmark record](docs/BENCHMARKS.md).
+
+  From a checkout, compare one install of both packages with two separate
+  installs. This uses the same committed revision, lockfile, release profile,
+  toolchain, and a fresh target and install root for each case; it installs no
+  binaries into the usual Cargo bin directory. `/usr/bin/time -p` reports wall
+  time as `real` in each log; add the two separate-install times for their total.
+
+  ```bash
+  set -e
+  revision=$(git rev-parse HEAD)
+  repo="file://$(pwd -P)"
+  work=$(mktemp -d)
+  /usr/bin/time -p cargo install --git "$repo" --rev "$revision" --locked \
+    locus-cli locus-mcp --root "$work/combined-install" \
+    --target-dir "$work/combined-target" --message-format=json \
+    > "$work/combined.jsonl" 2> "$work/combined.log"
+  /usr/bin/time -p cargo install --git "$repo" --rev "$revision" --locked \
+    locus-cli --root "$work/separate-install" \
+    --target-dir "$work/separate-target" --message-format=json \
+    > "$work/cli.jsonl" 2> "$work/cli.log"
+  /usr/bin/time -p cargo install --git "$repo" --rev "$revision" --locked \
+    locus-mcp --root "$work/separate-install" \
+    --target-dir "$work/separate-target" --message-format=json \
+    > "$work/mcp.jsonl" 2> "$work/mcp.log"
+  grep -E 'Compiling locus-core|Finished `release`|^real ' "$work/"*.log
+  ```
+
+  The second separate install intentionally shares its target directory with
+  the first; neither case reuses the other's build artifacts. The Git source is
+  committed `HEAD`, so uncommitted edits are excluded. Record the revision,
+  OS/architecture, `cargo --version`, `rustc --version`, and cache/network
+  conditions. Run both orders and repeat with new directories: Cargo's download
+  cache and the OS cache can make later runs warmer, and timings include install
+  and source/dependency fetching as well as compilation. Inspect `Compiling
+  locus-core` lines and their order; use the JSON artifact inspection in
+  [CONTRIBUTING.md](CONTRIBUTING.md#investigating-repeated-compilation-during-install)
+  on each `.jsonl` file to compare package, target, profile, features, filenames,
+  and `fresh` status. Two non-fresh records indicate two builds, but matching
+  displayed fields alone do not establish identical compiler work or its cause.
+  This recipe makes no speedup claim without measurements.
+
+### Troubleshooting
+
+- **npm wrapper downgrade scenario ([#177](https://github.com/ashlrai/locus/issues/177)).**
+  The published `locus-cli@0.5.2` wrapper treats a cached version different
+  from its own as stale, even if the cached binary is newer. Its POSIX
+  postinstall can overwrite `~/.locus/bin/locus` with v0.5.2; on first use
+  the wrapper can instead remove the mismatched cache before downloading, so
+  a failed download can also leave the cache missing. This affects the older
+  published wrapper; the current checkout's wrapper preserves a newer or
+  unversioned cache and refuses to run without an explicit leading `--force`.
+  npm installation itself still succeeds when that refusal occurs.
+
+  To reproduce the published behavior on macOS (arm64 or x64) or Linux x64
+  with Node, npm, tar and network access, use a disposable home and a stand-in
+  for a newer v0.5.3 binary (v0.5.2 is downloaded from the release):
+
+  ```bash
+  demo=$(mktemp -d)
+  mkdir -p "$demo/home/.locus/bin"
+  HOME="$demo/home" npm install --ignore-scripts --prefix "$demo/package" locus-cli@0.5.2
+  printf '#!/bin/sh\necho locus 0.5.3\n' > "$demo/home/.locus/bin/locus"
+  chmod +x "$demo/home/.locus/bin/locus"
+  printf '0.5.3\n' > "$demo/home/.locus/bin/locus.version"
+  "$demo/home/.locus/bin/locus" --version
+  HOME="$demo/home" LOCUS_NPM_NO_LINK= node "$demo/package/node_modules/locus-cli/install.js"
+  "$demo/home/.locus/bin/locus" --version
+  ```
+
+  The two outputs are `locus 0.5.3` and `locus 0.5.2` if the release
+  download succeeds. Remove the disposable directory afterwards. The npm
+  wrapper in this checkout is unreleased; do not assume the published package
+  has the same behavior.
+
+- **Fresh quickstart and doctor WARN ([#172](https://github.com/ashlrai/locus/issues/172)).**
+  On a fresh home with non-interactive stdin and Phantom absent from PATH, the
+  recorded first run of published npm 0.5.1 had `locus quickstart` exit 0,
+  followed by `locus doctor` exiting 1 with `WARN` and `phantom_missing`.
+  This is an observed failure of that published version. To diagnose it, inspect
+  `locus doctor --json` and its findings; the recorded first run also verified
+  the pin separately with `locus whoami`. Address any other findings rather
+  than treating every doctor failure as this warning. No workaround for the
+  affected doctor's exit status was verified in that first run. See
+  [the first-run record](docs/FIRST-RUN.md).
+
+### Changed
+
+- **npm wrapper upgrades ([#177](https://github.com/ashlrai/locus/issues/177)).**
+  In this unreleased checkout, both wrappers compare versions using SemVer
+  precedence, probing the binary with `--version` before falling back to its
+  adjacent `.version` file. By default, an equal cached version is reused; an
+  older one can be upgraded. With a newer or unversioned cache, `locus-cli`
+  preserves the binary and refuses to run before checking PATH, while
+  `@ashlrai/locus-mcp` preserves and runs it. Without a protected cache,
+  a matching or newer native PATH (or Cargo bin) candidate can be reused;
+  otherwise the wrapper downloads its packaged release or falls back to a
+  Cargo build from the repository's default branch. The Cargo build's actual
+  version is checked against an existing cache before replacement.
+
+  A leading wrapper `--force` permits replacing a protected cache; npm's own
+  `--force` and flags after a native command do not. CLI postinstall may
+  download and link a release on supported POSIX platforms, but a protected
+  cache is preserved and npm installation still succeeds. MCP postinstall
+  defers installation to first use. If the CLI wrapper has already been
+  linked to the native binary, reinstall the npm package to restore the wrapper
+  before using its override. See the [CLI wrapper guide](npm/README.md) and
+  [MCP wrapper guide](npm-mcp/README.md); the published v0.5.2 CLI wrapper
+  has the different behavior described in the troubleshooting note above.
+
+- **Dead-broker recovery ([#166](https://github.com/ashlrai/locus/issues/166)).** If the pinning shell exits, its broker can disappear while the sealed pin remains. In the recorded v0.5.1 first run, the hint incorrectly put `locus leave --force` before `locus enter <alias>` for this case, although entering directly succeeded. In a new operator shell using the same `LOCUS_HOME`, load the control capability with the shell hook and first run `locus enter <alias>`; an intact local-control pin with a dead broker can be replaced directly. For Bash the current hint is `eval "$(locus hook bash)"; locus enter <alias> # If enter refuses an invalid or unreadable pin, run: locus leave --force && locus enter <alias>`.
+  Inspect a refusal before taking further action: for an expired pin, invalid or legacy seal, or unreadable session, the current CLI refuses enter. When teardown is appropriate, a human can run `locus leave --force` and then `locus enter <alias>`. Do not force leave for unrelated errors such as a wrong capability or workspace refusal. Verify the new pin with `locus whoami` and keep the operator shell alive. An explicit `LOCUS_SESSION_ID` uses the strict authority check. See the [recovery guide](docs/broker-recovery-q8.md).
+
+- **`locus binding add` is idempotent when the file already matches (#175).**
+  Re-adding an alias whose saved binding is equivalent now exits 0 without
+  writing (`"changed": false` in `--json`; `already matches; nothing written`
+  otherwise), and a `--dry-run` on it plans zero changes. A different body for
+  the same alias still refuses without `--force`, and `--force` still replaces.
+
+- **Rust 1.89 floor named on every install path ([#167](https://github.com/ashlrai/locus/issues/167)).**
+  The npm wrapper cargo-fallback messages, the npm READMEs and the Homebrew
+  notes now state the same `rust-version` the workspace declares, and
+  `crates/locus-core/tests/rust_version.rs` keeps `cargo metadata`, member
+  crate manifests and the documented install requirements in agreement with it.
+
+## [0.6.0] - 2026-10-31
+
+Highlights: Grant-scoped swarm and local peer relay, stricter binding validation, safer npm cache replacement, and failure-safe MCP configuration registration.
+
+**Release preparation:** October 31 is the candidate preparation date. This source
+section does not assert that the tag, release assets, npm packages, website or
+Homebrew update have been published. Verify the release and package registries
+before installing the new version.
+
+### Added
+
+- `locus offboard` plans local client cleanup by default; explicit `--apply`
+  removes operable local records while preserving audit/archive evidence. It
+  does not revoke provider credentials or remove external repository access.
+- Grant-scoped swarm MCP serving and bounded local peer relay using
+  operator-controlled graph and engine manifests; registration does not confer
+  new execution authority.
+- Credential-free workbench status and launch diagnostics, optional native MCP
+  registration rewrites with backups, and an opt-in versioned strict grant schema.
+
+### Fixed
+
+- Session renewal does not restore a session after concurrent leave or enter.
+  Broker recovery guidance, binding-add idempotence, credential-presence reports
+  and supervised child lifecycle handling have also been improved.
+- npm wrappers preserve newer or unknown-version cached binaries rather than
+  silently downgrading them. Replacement requires an explicit leading `--force`;
+  postinstall success alone does not prove the cached binary was replaced.
+- MCP config registration refuses malformed existing JSON and atomically stages
+  replacements instead of truncating existing config on a failed write.
+- Authenticated swarm preflight now reports the existing `multi_tenant` category,
+  consistent with anonymous grant-layer detection, and retains the grant ID.
+
+### Compatibility and upgrade notes
+
+- Binding, provider, upstream and policy structures reject unknown fields;
+  fix misspelled or unsupported fields rather than bypassing validation.
+  `policy.default` must normalize to `allow` or `deny`.
+- Phantom reference names must match `[A-Z_][A-Z0-9_]*`, at most 256 ASCII
+  characters. Formerly accepted lowercase, dotted or hyphenated names are
+  rejected, not automatically rewritten. `phm:` credential resolution already
+  failed closed in v0.5.2; this release does not activate a Phantom execution
+  bridge. Supported credential resolution remains explicit `env:` references.
+- MCP config replacement refuses symbolic/multiple hard links and nonregular
+  targets and requires a writable parent directory. POSIX owner/group/mode are
+  preserved where supported; custom ACL/xattr preservation, concurrent-writer
+  safety and power-loss durability are not promised. Interrupted staging can
+  leave a temporary sibling at the previous file's mode after metadata restore,
+  not necessarily the initial private mode.
+- Manual CI covers Linux stable and Linux MSRV 1.89. macOS release builds are not
+  native test qualification; no Windows archive or native Windows test claim is
+  made. Check the exact final release SHA's workflow evidence before tagging.
+
 ## [0.5.2] - 2026-10-26
 
 Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
 
 ### Added
 
-- **`locus renew` (opt-in pin self-renew) and expired-pin recovery.** `locus leave` now clears an expired pin and exits 0 with a note (`"expired": true` in `--json`), and `locus enter` replaces an expired pin in place (audited `session.replace_stale`), so nobody has to move `active.json` aside. New `locus renew [--json]` extends a live pin to `min(now + policy.max_ttl, pinned_at + policy.max_session_lifetime)`; it is disabled unless the binding sets the new `policy.max_session_lifetime` (1m to 30d), keeps the session id, binding and original `pinned_at`, and refuses an expired, frozen, tampered or stale-generation pin (`human re-pin required`), a changed binding, CI or run sessions, and any renew that would not extend the pin. Audited as `session.renew`. See [docs/policy.md](docs/policy.md).
+- **`locus renew` (opt-in pin self-renew) and expired-pin recovery.** The store supports clearing an authentic expired pin with `leave` or replacing it in place (audited `session.replace_stale`). The current CLI boundary still refuses `locus enter` for an expired active pin: use `locus leave --force` before entering again, as described in the recovery note above. New `locus renew [--json]` extends a live pin to `min(now + policy.max_ttl, pinned_at + policy.max_session_lifetime)`; it is disabled unless the binding sets the new `policy.max_session_lifetime` (1m to 30d), keeps the session id, binding and original `pinned_at`, and refuses an expired, frozen, tampered or stale-generation pin (`human re-pin required`), a changed binding, CI or run sessions, and any renew that would not extend the pin. Audited as `session.renew`. See [docs/policy.md](docs/policy.md).
 
 - **Agent-ready CLI contract ([docs/agent-contract.md](docs/agent-contract.md)).** Every check and status command's `--json` object now starts with a versioned `schema` id (`locus.doctor.v1`, `locus.whoami.v1`, `locus.status.v1`, `locus.verify.session.v1`, `locus.agent.report.v1`, `locus.watch.v1`, and more); existing fields, including `schema_version`, are unchanged, and the `.vN` suffix moves only on a breaking shape change. `--json` failures print `locus.error.v1` on stderr with `exit_code` and `exit_code_name`. Exit codes come from one `ExitCode` enum (0 success, 1 failure, 2 unsafe or usage, 126/127 child could not start, 141 stdout closed), with the docs table checked against the binary. A global `--dry-run` previews every mutating command (`pin`/`enter`/`switch`/`leave`, `init`, `quickstart`, `binding add/rm`, `workspace`, `ci mint`, `mcp mint/revoke`, `setup`, `agent setup`, `doctor --fix`, `adapter install`, `events export`, …) as a `locus.plan.v1` plan and writes nothing: targets resolve through the real code (`Store::resolve_pin`, `engagement_init_preflight`, `graph_import_preview`), a missing home is never created, and plans never carry a capability, token or webhook path. `exec`, `run`, `ci run`, `mcp`, `serve` and `dashboard` do not take `--dry-run` and fail exactly as before (exec exit 1, the others a clap usage error, exit 2); `agent setup --apply --dry-run` keeps exit 1. Prompts still need only stdin on a terminal; `--json` or `LOCUS_NON_INTERACTIVE=1` now also turn them off. `locus topic agent-contract [--json]` prints the whole contract (`locus.contract.v1`).
 
@@ -27,7 +224,7 @@ Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run
 
 ### Fixed
 
-- **Dead-broker recovery hint says `locus enter` first.** When a pin's broker died with the shell that pinned it (`no current broker endpoint`, anchor unavailable or mismatched, seal intact), `locus enter <alias>` has replaced the pin directly since #156, but every surface still printed `locus leave --force` first. `whoami`, `status`, control commands, `doctor`, `agent report` and the MCP hint now print `eval "$(locus hook bash)"; locus enter <alias> || { locus leave --force && locus enter <alias>; }`. Expired pins, invalid or legacy seals and unreadable session files, which enter still refuses, keep the `locus leave --force; locus enter <alias>` recipe. New test `printed_dead_broker_hint_works_verbatim` runs the printed line as is.
+- **Dead-broker recovery hint says `locus enter` first.** When a pin's broker died with the shell that pinned it (`no current broker endpoint`, anchor unavailable or mismatched, seal intact), `locus enter <alias>` has replaced the pin directly since #156, but every surface still printed `locus leave --force` first. `whoami`, `status`, control commands, `doctor`, `agent report` and the MCP hint switched to an enter-first recipe. The original automatic fallback has since been replaced by a separate manual step; see the unreleased #166 note above. Invalid or legacy seals and unreadable session files, which enter still refuses, need `locus leave --force` before `locus enter <alias>`. Test `printed_dead_broker_hint_works_verbatim` runs the current printed line as is.
 - **`locus mcp --supervised` names the same recovery on its fallback line.** A dead pin under `--supervised` printed `human re-pin required` with no recipe at all: the error is reported by `mcp` itself and never reached the top-level stale-pin hatch. The fallback line now carries the enter-first recipe, and the recipe selection in `wedged_session_recovery` / `stale_pin_recovery_fallback` shares `recovery::recovery_for_error` instead of duplicating the dead-broker check. New test `supervised_mcp_fallback_on_dead_pin_names_the_recovery` (#166).
 
 ### Changed
@@ -314,9 +511,10 @@ Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run
 
 - **Control commands name the stale-pin recovery.** After the pinning shell
   exits, `locus workspace`, `binding add`, `notify`, `init` and other control
-  commands failed closed with only "human re-pin required". They now print the
-  same `eval "$(locus hook bash)"; locus leave --force; locus enter <alias>`
-  recovery that `enter`, `leave` and `status` already did. Still fails closed.
+  commands failed closed with only "human re-pin required". They gained the
+  same recovery hint as `enter`, `leave` and `status`, while still failing
+  closed. For the current dead-broker hint (#166), see the unreleased recovery
+  note above: try enter first and inspect a refusal before forced teardown.
 - **`locus doctor` reports a malformed binding file instead of aborting.** One
   unparseable `bindings/*.toml` made `doctor` (and `doctor --json`) exit 1 with
   a bare error and no report. It now completes, flags an UNSAFE

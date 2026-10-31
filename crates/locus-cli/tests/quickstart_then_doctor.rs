@@ -59,11 +59,64 @@ fn quickstart_then_doctor_succeeds_with_visible_advisories() {
                     "missing advisory {code}: {report}"
                 );
             }
+            let phantom_finding = report["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|finding| finding["code"] == "phantom_missing")
+                .unwrap();
+            assert!(phantom_finding["message"]
+                .as_str()
+                .unwrap()
+                .contains("phantom not on PATH"));
         } else {
             let text = String::from_utf8(out.stdout).unwrap();
-            assert!(text.contains("WARN"), "{text}");
-            assert!(text.contains("phantom not on PATH"), "{text}");
+            // Keep the README's stable output excerpt tied to a real fresh run.
+            let readme = include_str!("../../../README.md");
+            let excerpt = readme
+                .split_once("<!-- fresh-doctor-output:begin -->")
+                .unwrap()
+                .1
+                .split_once("<!-- fresh-doctor-output:end -->")
+                .unwrap()
+                .0;
+            let lines: Vec<_> = excerpt
+                .lines()
+                .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with("```"))
+                .collect();
+            assert_eq!(lines.len(), 2, "README excerpt must include both lines");
+            for line in lines {
+                assert!(
+                    text.lines().any(|actual| actual == line),
+                    "missing documented line {line:?}: {text}"
+                );
+            }
         }
+    }
+}
+
+#[test]
+fn changelog_preserves_the_published_first_run_observation() {
+    let changelog = include_str!("../../../CHANGELOG.md");
+    let note = changelog
+        .split_once("**Fresh quickstart and doctor WARN (")
+        .expect("first-run issue has a changelog entry")
+        .1
+        .split_once("\n\n")
+        .unwrap()
+        .0;
+    for detail in [
+        "issues/172",
+        "fresh home",
+        "non-interactive stdin",
+        "Phantom absent from PATH",
+        "published npm 0.5.1",
+        "`locus quickstart` exit 0",
+        "`locus doctor` exiting 1",
+        "`WARN`",
+        "`phantom_missing`",
+    ] {
+        assert!(note.contains(detail), "missing first-run detail: {detail}");
     }
 }
 

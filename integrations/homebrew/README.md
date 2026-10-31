@@ -16,7 +16,8 @@ brew tap ashlrai/locus
 brew install locus
 ```
 
-Until the first tag + formula publish, install from source:
+Until the first tag + formula publish, install from source (requires Rust 1.89
+or newer, the workspace's `rust-version`):
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"

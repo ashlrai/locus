@@ -7,6 +7,15 @@
 # grants (mint / per-tenant isolation / cross-tenant 403 / revoke) when
 # locus-mcp --multi-tenant is available. Full 0.2+ surface
 # plus adversarial release security probes (~44+ checks).
+#
+# Temporary directories: TMPDIR, when nonempty, must name an existing writable
+# directory; otherwise mktemp uses /tmp. The script creates isolated home and
+# workspace directories there and removes them on shell exit after installing
+# its cleanup trap. An optional graph-import home is removed after a successful
+# import but can remain after a failure or interruption. Abrupt termination or
+# removal errors can also leave temporary directories; inspect and remove any
+# leftover locus-e2e.*, locus-ws.*, locus-security-e2e.*, locus-security-ws.*,
+# or locus-graph-imp.* directories when needed.
 set -euo pipefail
 
 export PATH="${HOME}/.cargo/bin:${PATH}"
@@ -71,13 +80,134 @@ e2e_cleanup() {
     wait "$MT_MCP_PID" 2>/dev/null || true
     MT_MCP_PID=""
   fi
-  rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"
+  rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"
 }
 trap 'e2e_cleanup' EXIT
 ok "isolated home ready"
 
+create_security_home() {
+  SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
+}
+
+# Exercise the same creation and EXIT cleanup used by the security probes.
+# The subshell owns its test home so its cleanup cannot remove the main home.
+log "2c. security home honors a nondefault TMPDIR"
+security_tmp="$LOCUS_HOME/custom temp"
+mkdir -p "$security_tmp"
+(
+  export TMPDIR="$security_tmp"
+  LOCUS_HOME="$security_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_security_home
+  [[ -d "$SECURITY_HOME" && "${SECURITY_HOME%/*}" == "$TMPDIR" && \
+    "${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
+  printf '%s' "$SECURITY_HOME" >"$security_tmp/security-home-path"
+  touch "$SECURITY_HOME/cleanup-sentinel"
+) || die "security home was not created beneath the supplied TMPDIR"
+security_test_home="$(cat "$security_tmp/security-home-path")"
+[[ ! -e "$security_test_home" && ! -L "$security_test_home" ]] \
+  || die "security home survived exit cleanup"
+[[ -d "$security_tmp" ]] || die "security cleanup removed the supplied TMPDIR"
+ok "security home honors nondefault TMPDIR and is cleaned on exit"
+
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
+
+# Issue #172: a first-run diagnostic keeps setup advice visible without
+# treating the optional Phantom installation or an unexported capability as
+# a failed command. Isolate both the working directory and the environment.
+log "2a. doctor immediately after fresh quickstart"
+FRESH_DIR="$LOCUS_HOME/fresh-quickstart"
+mkdir -p "$FRESH_DIR/home" "$FRESH_DIR/project"
+fresh_locus() (
+  cd "$FRESH_DIR/project"
+  env -i HOME="$FRESH_DIR/home" LOCUS_HOME="$FRESH_DIR/home/.locus" \
+    PATH=/nonexistent SHELL=/bin/bash NO_COLOR=1 "$LOCUS_BIN" "$@" </dev/null
+)
+fresh_locus quickstart >"$FRESH_DIR/quickstart.out" 2>"$FRESH_DIR/quickstart.err" \
+  || die "fresh quickstart failed"
+fresh_locus doctor >"$FRESH_DIR/doctor.out" 2>"$FRESH_DIR/doctor.err" \
+  || die "doctor after fresh quickstart should exit 0"
+grep -q 'WARN' "$FRESH_DIR/doctor.out" || die "fresh doctor missing WARN verdict"
+grep -q 'phantom not on PATH' "$FRESH_DIR/doctor.out" \
+  || die "fresh doctor missing Phantom advisory"
+grep -Fq 'locus hook bash' "$FRESH_DIR/doctor.out" \
+  || die "fresh doctor missing capability setup guidance"
+fresh_locus doctor --json >"$FRESH_DIR/doctor.json" 2>"$FRESH_DIR/doctor-json.err" \
+  || die "JSON doctor after fresh quickstart should exit 0"
+python3 - "$FRESH_DIR/doctor.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as report_file:
+    report = json.load(report_file)
+assert report["verdict"] == "WARN"
+assert report["status"] == "warn"
+assert report["ok"] is False
+findings = {finding["code"]: finding for finding in report["findings"]}
+for code in ("phantom_missing", "control_capability_not_exported"):
+    assert findings[code]["severity"] == "warn", f"missing warning: {code}"
+assert "phantom not on PATH" in findings["phantom_missing"]["message"]
+assert "locus hook bash" in findings["control_capability_not_exported"]["message"]
+PY
+ok "fresh quickstart doctor exits 0 and reports setup advisories"
+
+# The advisory-only success must not hide an unsafe workspace policy.
+printf 'invalid = [\n' >"$FRESH_DIR/project/.locus.toml"
+if fresh_locus doctor --json >"$FRESH_DIR/unsafe.json" 2>"$FRESH_DIR/unsafe.err"; then
+  die "doctor accepted an invalid workspace policy after quickstart"
+else
+  doctor_status=$?
+fi
+[[ "$doctor_status" -eq 2 ]] || die "invalid workspace policy should make doctor exit 2"
+python3 - "$FRESH_DIR/unsafe.json" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as report_file:
+    report = json.load(report_file)
+assert report["verdict"] == "UNSAFE"
+assert report["ok"] is False
+assert any(f["code"] == "workspace_policy_invalid" and f["severity"] == "unsafe"
+           for f in report["findings"])
+PY
+ok "fresh quickstart doctor rejects an invalid workspace policy"
+
+# Issue #175: repeat the same add without rewriting the binding, and keep
+# rejecting a different binding at the same alias without --force.
+log "2b. binding add is idempotent"
+ADD_HOME="$LOCUS_HOME/binding-add-test"
+add_binding() {
+  LOCUS_HOME="$ADD_HOME" "$LOCUS_BIN" --json binding add e2e-add \
+    --tenant e2e-add --provider github --account "$1" \
+    --credential-ref env:E2E_ADD_TOKEN --non-interactive
+}
+add_binding acct >"$LOCUS_HOME/add-first.json" || die "first binding add failed"
+# A matching binding may contain user-authored TOML that serialization would
+# discard. Compare the original bytes, including this comment, after the retry.
+printf '\n# Preserve this user-authored comment.\n' >>"$ADD_HOME/bindings/e2e-add.toml"
+cp "$ADD_HOME/bindings/e2e-add.toml" "$LOCUS_HOME/add-original.toml"
+python3 - "$ADD_HOME/bindings/e2e-add.toml" <<'PYTEST'
+import os, sys
+os.utime(sys.argv[1], ns=(1_000_000_000, 1_000_000_000))
+PYTEST
+add_binding acct >"$LOCUS_HOME/add-second.json" || die "identical binding add failed"
+cmp -s "$LOCUS_HOME/add-original.toml" "$ADD_HOME/bindings/e2e-add.toml" \
+  || die "identical binding add changed file contents"
+python3 - "$LOCUS_HOME/add-first.json" "$LOCUS_HOME/add-second.json" "$ADD_HOME/bindings/e2e-add.toml" <<'PYTEST'
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    first = json.load(f)
+with open(sys.argv[2], encoding="utf-8") as f:
+    second = json.load(f)
+assert first["ok"] is True and first["changed"] is True
+assert second["ok"] is True and second["changed"] is False
+assert os.stat(sys.argv[3]).st_mtime_ns == 1_000_000_000
+PYTEST
+if add_binding other >"$LOCUS_HOME/add-conflict.out" 2>"$LOCUS_HOME/add-conflict.err"; then
+  die "different binding add replaced an existing alias"
+fi
+cmp -s "$LOCUS_HOME/add-original.toml" "$ADD_HOME/bindings/e2e-add.toml" \
+  || die "conflicting binding add changed file contents"
+ok "binding add repeats without a write and rejects conflicts"
 
 # NDJSON MCP helper: print JSON-RPC lines to locus-mcp, collect responses.
 # Args: one or more JSON objects (as strings). Prints response JSON lines on stdout.
@@ -152,6 +282,37 @@ export LOCUS_SUPABASE_ACME="e2e-sample-acme-sb-canary"
 export LOCUS_GH_TOKEN_ACME="e2e-sample-acme-gh-canary"
 export LOCUS_VERCEL_TOKEN_ACME="e2e-sample-acme-vc-canary"
 locus init --with-samples >/dev/null
+
+# Issue #175: repeating the same add succeeds without rewriting the binding.
+binding_add_args=(--json binding add e2e-idempotent --tenant e2e-idempotent
+  --provider github --account e2e-idempotent --credential-ref env:LOCUS_GH_TOKEN_PERSONAL
+  --non-interactive)
+binding_test_home="$LOCUS_HOME/e2e-binding-add"
+LOCUS_HOME="$binding_test_home" locus "${binding_add_args[@]}" >/dev/null || die "initial binding add failed"
+binding_file="$binding_test_home/bindings/e2e-idempotent.toml"
+binding_snapshot="$binding_test_home/e2e-idempotent.snapshot"
+cp "$binding_file" "$binding_snapshot"
+# An old timestamp makes a rewrite observable even on coarse-resolution filesystems.
+binding_mtime="$(python3 - "$binding_file" <<'PY'
+import os, sys
+path = sys.argv[1]
+os.utime(path, (946684800, 946684800))
+print(os.stat(path).st_mtime_ns)
+PY
+)"
+retry_json="$(LOCUS_HOME="$binding_test_home" locus "${binding_add_args[@]}")" || die "identical binding add failed"
+printf '%s' "$retry_json" | python3 -c '
+import json, sys
+result = json.load(sys.stdin)
+assert result.get("ok") is True and result.get("changed") is False
+' || die "identical binding add did not report an unchanged binding"
+cmp -s "$binding_snapshot" "$binding_file" || die "identical binding add changed file contents"
+python3 - "$binding_file" "$binding_mtime" <<'PY' || die "identical binding add changed file modification time"
+import os, sys
+assert os.stat(sys.argv[1]).st_mtime_ns == int(sys.argv[2])
+PY
+ok "identical binding add succeeds without changing contents or modification time"
+
 locus pin personal >/dev/null
 who_personal="$(locus whoami --json)"
 echo "$who_personal" | python3 -c '
@@ -162,6 +323,66 @@ assert w["tenant"] == "personal", w
 assert w.get("seal_ok") is True, w
 '
 ok "pin personal + whoami"
+
+# An unset credential must be reported as absent without affecting the other
+# providers or exposing credential references in the agent-facing response.
+who_missing="$(env -u LOCUS_GH_TOKEN_PERSONAL "$LOCUS_BIN" whoami --json)" \
+  || die "whoami with an unset credential failed"
+printf '%s' "$who_missing" | python3 -c '
+import json, sys
+w = json.load(sys.stdin)
+assert w["binding_alias"] == "personal" and w["seal_ok"] is True
+providers = {p["provider"]: p for p in w["providers"]}
+assert set(providers) == {"github", "supabase", "vercel"}
+for name, provider in providers.items():
+    assert "credential_ref" not in provider
+    assert provider["credential"] == {
+        "present": name != "github", "source": "environment"
+    }, f"unexpected credential metadata for {name}"
+' || die "whoami reported incorrect credential presence"
+ok "whoami reports an unset credential as absent"
+
+# An empty env value resolves successfully for whoami's presence metadata.
+who_empty="$(env LOCUS_GH_TOKEN_PERSONAL= "$LOCUS_BIN" whoami --json)" \
+  || die "whoami with an empty credential failed"
+printf '%s' "$who_empty" | python3 -c '
+import json, sys
+w = json.load(sys.stdin)
+assert w["binding_alias"] == "personal" and w["seal_ok"] is True
+providers = {p["provider"]: p for p in w["providers"]}
+assert set(providers) == {"github", "supabase", "vercel"}
+for name, provider in providers.items():
+    assert "credential_ref" not in provider
+    assert provider["credential"] == {
+        "present": True, "source": "environment"
+    }, f"unexpected credential metadata for {name}"
+' || die "whoami reported incorrect credential presence for an empty value"
+ok "whoami reports an empty environment credential as present"
+
+# README's sample exec happy path should run without credential warnings when
+# the sample references are available. Keep stderr separate from child stdout.
+sample_exec_stderr="$LOCUS_HOME/sample-exec.stderr"
+sample_exec_stdout="$(env LOCUS_SUPABASE_PERSONAL=sample LOCUS_GH_TOKEN_PERSONAL=sample \
+  LOCUS_VERCEL_TOKEN_PERSONAL=sample "$LOCUS_BIN" exec --expect personal -- echo ok \
+  2>"$sample_exec_stderr")" \
+  || die "sample exec failed"
+[[ "$sample_exec_stdout" == "ok" ]] || die "sample exec did not run the child"
+if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
+  die "sample exec emitted an unset-variable warning"
+fi
+ok "sample exec succeeds without unset-variable warnings"
+
+# Missing references must still be visible; do not hide real credential errors
+# just to make the configured sample path quiet.
+sample_exec_stdout="$(env -u LOCUS_SUPABASE_PERSONAL -u LOCUS_GH_TOKEN_PERSONAL \
+  -u LOCUS_VERCEL_TOKEN_PERSONAL "$LOCUS_BIN" exec --expect personal -- echo ok \
+  2>"$sample_exec_stderr")" || die "sample exec with missing credentials failed"
+[[ "$sample_exec_stdout" == "ok" ]] || die "sample exec with missing credentials did not run the child"
+for provider in supabase github vercel; do
+  grep -Eq "warn.*unresolved credential.*provider=${provider}.*source=environment" "$sample_exec_stderr" \
+    || die "sample exec omitted unresolved credential warning for $provider"
+done
+ok "sample exec reports missing credentials"
 
 locus pin acme >/dev/null
 who_acme="$(locus whoami --json)"
@@ -183,6 +404,95 @@ for canary in ["GH_TOKEN_ACME", "VERCEL_TOKEN_ACME", "SUPABASE_ACME", "PERSONAL"
     assert canary not in serialized, (canary, w)
 '
 ok "pin acme + whoami exclusive"
+
+# Issue #181: a repo with no matching candidates must return a clear, read-only
+# result, even when a history key and entries already exist for another repo.
+log "3a. autopin suggest with no candidates"
+(
+  export LOCUS_HOME="$LOCUS_HOME/autopin-empty-home"
+  export LOCUS_PIN_HISTORY=1
+  repo="$LOCUS_HOME/repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" remote add origin https://example.invalid/locus-history.git
+  cd "$repo"
+  locus init --with-samples >/dev/null
+  locus pin personal >/dev/null
+  [[ -f "$LOCUS_HOME/history.key" && -s "$LOCUS_HOME/pin-history.jsonl" ]] \
+    || die "autopin fixture did not create pin history"
+  git remote set-url origin https://example.invalid/locus-no-history.git
+  printf 'default_binding = "personal"\n' > .locus.toml
+  cp .locus.toml "$LOCUS_HOME/workspace-before"
+  cp "$LOCUS_HOME/sessions/active.json" "$LOCUS_HOME/active-before"
+  cp -R "$LOCUS_HOME/bindings" "$LOCUS_HOME/bindings-before"
+
+  human="$(locus autopin suggest)" || die "autopin suggest failed with no candidates"
+  [[ "$human" == "no pin history for this repo yet; nothing to suggest" ]] \
+    || die "autopin suggest did not clearly report empty history"
+  result="$(locus autopin suggest --json)" || die "autopin suggest --json failed with no candidates"
+  printf '%s' "$result" | python3 -c '
+import json, sys
+v = json.load(sys.stdin)
+r = v["report"]
+assert v["schema"] == "locus.autopin.suggest.v1"
+assert r["history_enabled"] is True and r["repo_detected"] is True
+assert r["matched_entries"] == 0 and r["candidates"] == []
+assert r["suggestion"] is None and r["reason"] == "no_history"
+assert v["applied"] is False and v["written"] is None
+' || die "autopin suggest returned an invalid empty result"
+  diff -rq "$LOCUS_HOME/bindings-before" "$LOCUS_HOME/bindings" >/dev/null \
+    || die "autopin suggest changed bindings"
+  cmp -s "$LOCUS_HOME/active-before" "$LOCUS_HOME/sessions/active.json" \
+    || die "autopin suggest changed the active pin"
+  cmp -s "$LOCUS_HOME/workspace-before" .locus.toml \
+    || die "autopin suggest changed the workspace binding"
+)
+ok "autopin suggest returns empty candidates without binding changes"
+
+# A secondary remote must not borrow another repository's pin history when
+# origin identifies a different repository. First prove the history can win.
+log "3b. autopin suggest ignores spoofed non-origin remote"
+(
+  export LOCUS_HOME="$LOCUS_HOME/autopin-spoof-home"
+  export LOCUS_PIN_HISTORY=1
+  repo="$LOCUS_HOME/repo"
+  mkdir -p "$repo"
+  git -C "$repo" init -q
+  git -C "$repo" remote add origin https://example.invalid/trusted.git
+  cd "$repo"
+  locus init --with-samples >/dev/null
+  for _ in 1 2 3; do
+    locus pin personal >/dev/null
+  done
+  result="$(locus autopin suggest --json)" || die "trusted history suggestion failed"
+  printf '%s' "$result" | python3 -c '
+import json, sys
+r = json.load(sys.stdin)["report"]
+assert r["reason"] == "suggested" and r["suggestion"] == "personal"
+assert r["candidates"][0]["pins"] >= 3
+' || die "trusted history fixture did not produce a suggestion"
+
+  git remote rename origin upstream
+  git remote add origin https://example.invalid/unrelated.git
+  printf 'default_binding = "acme"\n' > .locus.toml
+  cp .locus.toml "$LOCUS_HOME/workspace-before"
+  result="$(locus autopin suggest --json)" || die "spoofed remote suggestion failed"
+  printf '%s' "$result" | python3 -c '
+import json, sys
+v = json.load(sys.stdin)
+r = v["report"]
+assert r["history_enabled"] is True and r["repo_detected"] is True
+assert r["reason"] == "no_history" and r["matched_entries"] == 0
+assert r["suggestion"] is None and r["candidates"] == []
+assert v["applied"] is False and v["written"] is None
+' || die "secondary remote borrowed another repo's history"
+  if locus autopin suggest --apply >/dev/null 2>&1; then
+    die "autopin applied a suggestion from a secondary remote"
+  fi
+  cmp -s "$LOCUS_HOME/workspace-before" .locus.toml \
+    || die "spoofed remote changed the workspace binding"
+)
+ok "autopin suggest ignores non-origin history and refuses to apply it"
 
 # ── 4. workspace allowlist blocks personal without --force ───────────────────
 log "4. workspace allowlist block personal without --force"
@@ -243,7 +553,6 @@ export AWS_PROFILE="ambient-aws-must-not-leak"
 export UNLISTED_SECRET_CANARY="arbitrary-parent-secret-must-not-leak"
 
 locus pin envtest >/dev/null
-exec_env="$(locus exec -- env 2>/dev/null || true)"
 # locus exec prints a progress line on stderr; capture only child env
 exec_env="$(locus exec -- env 2>/dev/null)"
 
@@ -737,7 +1046,9 @@ else
   ok "touchid mock cancel fails closed"
 
   # A caller-controlled successful mock can only record advisory evidence.
-  g1="$(LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json 2>/dev/null || true)"
+  LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid >/dev/null \
+    || die "mocked confirmation did not record the advisory grant"
+  g1="$(locus approve status "$dual_id" --json)"
   echo "$g1" | python3 -c '
 import json, sys
 r = json.load(sys.stdin)
@@ -1245,9 +1556,31 @@ else
 fi
 # ── 24. adversarial release security probes ────────────────────────────────
 log "24. adversarial release credential/workspace probes"
-SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
+create_security_home
 SECURITY_WS="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-ws.XXXXXX")"
 LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" init >/dev/null
+
+# Issue #175: identical retries are no-ops, but conflicting content must
+# still be rejected without changing the existing binding.
+LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" binding add conflict-probe \
+  --tenant conflict-probe --provider github --account original \
+  --credential-ref env:CONFLICT_PROBE_TOKEN --non-interactive >/dev/null
+cp "$SECURITY_HOME/bindings/conflict-probe.toml" "$SECURITY_HOME/conflict-probe.original"
+LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" binding add conflict-probe \
+  --tenant conflict-probe --provider github --account original \
+  --credential-ref env:CONFLICT_PROBE_TOKEN --non-interactive >/dev/null
+cmp -s "$SECURITY_HOME/conflict-probe.original" "$SECURITY_HOME/bindings/conflict-probe.toml" \
+  || die "identical binding retry changed existing file"
+if conflict_out="$(LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" binding add conflict-probe \
+  --tenant conflict-probe --provider github --account different \
+  --credential-ref env:CONFLICT_PROBE_TOKEN --non-interactive 2>&1)"; then
+  die "conflicting binding add unexpectedly succeeded"
+fi
+[[ "$conflict_out" == *"binding 'conflict-probe' already exists"* ]] \
+  || die "conflicting binding add did not report the existing alias"
+cmp -s "$SECURITY_HOME/conflict-probe.original" "$SECURITY_HOME/bindings/conflict-probe.toml" \
+  || die "conflicting binding add changed existing file"
+ok "binding add rejects conflicting content and preserves the existing file"
 
 set +e
 test_out="$(LOCUS_HOME="$SECURITY_HOME" LOCUS_ALLOW_TEST_CREDS=1 "$LOCUS_BIN" binding add release-test \

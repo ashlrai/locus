@@ -23,7 +23,22 @@ A second quickstart printed `already pinned` and exited 0. `locus doctor` after 
 
 ### Dead broker
 
-After the pinning shell exited, `locus whoami` reported `no current broker endpoint` and `human re-pin required`, and suggested `locus leave --force; locus enter personal`. `locus enter personal` in a new shell with the hook exported, without `leave --force`, exited 0, and supervised `tools/list` then returned 18 tools. An expired pin still needs `--force` (`crates/locus-core/src/recovery.rs`).
+After the pinning shell exited, `locus whoami` reported `no current broker endpoint` and `human re-pin required`, and suggested `locus leave --force; locus enter personal`. `locus enter personal` in a new shell with the hook exported, without `leave --force`, exited 0, and supervised `tools/list` then returned 18 tools. This was the hint printed by the audited 0.5.1 build; the current CLI prints an enter-first hint.
+
+With the current CLI, the human operator can recover in a new Bash shell using the same `LOCUS_HOME` and binding alias:
+
+```bash
+eval "$(locus hook bash)"
+locus enter personal
+```
+
+This creates a fresh pin and broker; it does not revive the exited shell's broker. If the session is expired or its seal is invalid, `enter` is refused. After checking the error, the operator can clear the unusable session and make a fresh pin:
+
+```bash
+locus leave --force && locus enter personal
+```
+
+Use the hook for your shell and substitute your binding alias. The control capability is required; a missing or incorrect capability is not fixed by forced leave. Follow the CLI's specific guidance for other refusals, such as a session without a persisted verifier. See [broker recovery](broker-recovery-q8.md) for the full procedure.
 
 ## Agent-use audit
 
@@ -53,9 +68,13 @@ Published npm `0.5.1` ELF, `LOCUS_HOME` under `/tmp`, stdin not a terminal (`std
 | `graph export` with no `LOCUS_GRAPH_PASSPHRASE` | 1 | 0.002 s | passphrase required for non-interactive export |
 | `init --with-samples --json` a second time | 0 | 0.024 s | `ok` true, `samples` true, `config_written` false |
 
-`whoami --json` reports `credential.present: true` when the credential ref string is non-empty. The following `exec` still warned that `SUPABASE_ACCESS_TOKEN`, the GitHub token variables, and `VERCEL_TOKEN` were unset. `present` means the ref is stored. It does not mean the variable is set in the environment. The field was not renamed.
+In that 0.5.1 run, `whoami --json` reported `credential.present: true` for a stored ref even though the variable was unset. The current implementation reports whether the credential can be resolved in the `whoami` process: an unset `env:` variable reports `false`, while a variable set to an empty string reports `true`. Presence does not guarantee that a credential is valid or usable by a provider. Phantom refs currently report `false` because the scoped credential bridge is unavailable. Neither the ref name nor its value is included in the result.
 
 ### Dry-run and idempotent setup
+
+These are historical observations from the 0.5.1 audit, not the current CLI
+contract. The global flag has since expanded; see the [current dry-run
+matrix](dry-run-matrix-q8.md) for supported commands and limitations.
 
 `--help` lists `--dry-run` for `binding add` and `agent setup` only, among the commands checked: `init`, `quickstart`, `enter`, `pin`, `leave`, `binding rm`, `binding add`, `workspace`, `setup`, `agent setup`, `doctor`, `adapter install`, `engagement init`, `graph export`, `onboard`.
 

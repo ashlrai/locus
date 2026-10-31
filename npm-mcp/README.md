@@ -22,6 +22,19 @@ On first run the wrapper downloads the release binary into `~/.locus/bin`, or fa
 cargo install --git https://github.com/ashlrai/locus locus-mcp --locked
 ```
 
+The Cargo fallback requires Rust 1.89 or newer ([rustup](https://rustup.rs)) —
+the workspace's `rust-version`. The wrapper builds in a temporary private
+Cargo install root, then compares the built version with the cache before
+installing it into `~/.locus/bin`. Existing Cargo-installed binaries are left
+untouched.
+
+The wrapper never replaces a newer `~/.locus/bin/locus-mcp` with its older
+release. When the cached binary reports (or its sidecar records) a newer
+version than this package, the wrapper keeps and runs it; the same applies
+when the cached version cannot be determined. To intentionally replace it,
+run the wrapper with a leading `--force`, for example `locus-mcp --force`.
+npm's own `--force` is not an override.
+
 ## Setup (Claude Code / Cursor)
 
 ```bash
@@ -58,4 +71,5 @@ and launch the client from the shell that pinned. See the repo `docs/mcp.md`.
 ## Related
 
 - CLI: [`locus-cli`](https://www.npmjs.com/package/locus-cli)
+- Pairs with `phantom` (Phantom Secrets) as `required_servers`: https://github.com/ashlrai/locus#how-locus-plugs-into-phantom
 - Docs: https://github.com/ashlrai/locus/blob/main/docs/mcp.md

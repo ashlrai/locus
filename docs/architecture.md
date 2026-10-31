@@ -142,7 +142,7 @@ Adapters are the **only** place provider knowledge lives. Guide: [adapters.md](.
 | **3** | Team binding graph, dual-control packs, offboard, remote audit |
 | **4** | Adapter SDK, CI ephemeral pins, sandbox |
 
-Already shipped from phases 2–4: upstream MCP stdio workers, `locus run`, CI ephemeral pins (`locus ci mint|env|run`), the worker sandbox, and the adapter catalog with signed release manifests ([adapter-sdk.md](./adapter-sdk.md)). Roadmap detail: [PLAN.md](../PLAN.md). Threat model: [DESIGN.md §9](../DESIGN.md), [SECURITY.md](../SECURITY.md).
+Already shipped from phases 2–4: upstream MCP stdio workers, `locus run`, CI ephemeral pins (`locus ci mint|env|run`), the worker sandbox, and the adapter catalog with optional manifest signing ([registry trust](./registry-trust.md)). Current release attachments are unsigned. Roadmap detail: [PLAN.md](../PLAN.md). Threat model: [DESIGN.md §9](../DESIGN.md), [SECURITY.md](../SECURITY.md).
 
 ## Composition
 

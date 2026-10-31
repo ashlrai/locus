@@ -1,5 +1,6 @@
 [package]
 name = "locus-cli"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,9 +13,14 @@ repository.workspace = true
 name = "locus"
 path = "src/main.rs"
 
+[[bin]]
+name = "locus-mcp"
+path = "src/mcp.rs"
+
 [dependencies]
 locus-core = { workspace = true }
 libc = { workspace = true }
+locus-mcp = { path = "../locus-mcp", version = "0.6.0" }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 anyhow = { workspace = true }
@@ -42,3 +48,11 @@ jsonschema = { workspace = true }
 [[test]]
 name = "phantom_locus"
 path = "../../tests/integration/phantom_locus.rs"
+
+[[test]]
+name = "integration"
+path = "tests/integration.rs"
+
+[[test]]
+name = "packaged_binaries"
+path = "tests/packaged_binaries.rs"

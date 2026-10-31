@@ -280,9 +280,9 @@ fn status_and_identity_checks_unpinned() {
         "status prints one line"
     );
 
-    // whoami unpinned is a command error: exit 1, JSON on stderr, stdout clean.
+    // whoami unpinned is a command error: exit 1, JSON on both streams.
     let out = env.run(&["whoami", "--json"]);
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, out.stderr);
     error_doc(&out, 1, "failure");
 
     // verify session: report on stdout, then exit 1 when session_ok is false.
@@ -357,6 +357,123 @@ fn pinned_identity_and_status_json() {
 }
 
 #[test]
+fn whoami_json_reports_environment_credential_availability() {
+    const VAR: &str = "LOCUS_GH_TOKEN_PERSONAL";
+    const CANARY: &str = "synthetic-whoami-credential-canary";
+    let env = Env::new();
+    env.quickstart();
+    let cap = env.cap().unwrap();
+
+    // Each invocation gets its own controlled environment, without mutating
+    // the test process or inheriting an operator's credential.
+    let whoami = |value: Option<&str>| {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
+        cmd.args(["whoami", "--json"])
+            .env_clear()
+            .env("HOME", env.user())
+            .env("LOCUS_HOME", env.home())
+            .env("LOCUS_CONTROL_CAPABILITY", &cap)
+            .current_dir(env.project());
+        if let Some(value) = value {
+            cmd.env(VAR, value);
+        }
+        let out = cmd.output().expect("locus runs");
+        assert!(out.status.success());
+        assert!(!out
+            .stdout
+            .windows(CANARY.len())
+            .any(|w| w == CANARY.as_bytes()));
+        assert!(!out
+            .stderr
+            .windows(CANARY.len())
+            .any(|w| w == CANARY.as_bytes()));
+        let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let provider = result["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["provider"] == "github")
+            .unwrap();
+        assert_eq!(provider["credential"]["source"], "environment");
+        assert!(!String::from_utf8_lossy(&out.stdout).contains(VAR));
+        provider["credential"]["present"].as_bool().unwrap()
+    };
+
+    assert!(!whoami(None));
+    assert!(whoami(Some(CANARY)));
+    assert!(!whoami(None));
+}
+
+#[test]
+fn whoami_reports_a_set_binding_credential_without_exposing_it() {
+    const VAR: &str = "LOCUS_TEST_WHOAMI_CUSTOM_CREDENTIAL";
+    const CANARY: &str = "synthetic-custom-credential-canary";
+    let env = Env::new();
+    env.quickstart();
+
+    let out = env.run(&[
+        "binding",
+        "add",
+        "credential-test",
+        "--tenant",
+        "test-tenant",
+        "--provider",
+        "github",
+        "--account",
+        "test-account",
+        "--credential-ref",
+        "env:LOCUS_TEST_WHOAMI_CUSTOM_CREDENTIAL",
+        "--non-interactive",
+    ]);
+    assert!(out.status.success(), "binding add failed");
+    // A credential available when the session is pinned must not be cached
+    // as present for a later whoami process that cannot resolve it.
+    let cap = env.cap().unwrap();
+    let entered = env.run_with(&["enter", "credential-test"], Some(&cap), &[(VAR, CANARY)]);
+    assert!(entered.status.success(), "enter failed");
+    for stream in [&entered.stdout, &entered.stderr] {
+        assert!(!stream.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()));
+    }
+    let cap = env.cap().unwrap();
+
+    // Each whoami process resolves the credential afresh. An unrelated
+    // credential must not count as the binding's credential.
+    for (value, expected) in [(None, false), (Some(CANARY), true), (None, false)] {
+        for json in [true, false] {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
+            cmd.arg("whoami")
+                .env_clear()
+                .env("HOME", env.user())
+                .env("LOCUS_HOME", env.home())
+                .env("LOCUS_CONTROL_CAPABILITY", &cap)
+                .env("LOCUS_TEST_WHOAMI_UNRELATED_CREDENTIAL", CANARY)
+                .current_dir(env.project());
+            if json {
+                cmd.arg("--json");
+            }
+            if let Some(value) = value {
+                cmd.env(VAR, value);
+            }
+            let out = cmd.output().expect("locus runs");
+            assert!(out.status.success(), "whoami failed");
+            for stream in [&out.stdout, &out.stderr] {
+                assert!(!stream.windows(CANARY.len()).any(|w| w == CANARY.as_bytes()));
+                assert!(!stream.windows(VAR.len()).any(|w| w == VAR.as_bytes()));
+            }
+            if json {
+                let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+                assert_eq!(result["binding_alias"], "credential-test");
+                let providers = result["providers"].as_array().unwrap();
+                assert_eq!(providers.len(), 1);
+                assert_eq!(providers[0]["provider"], "github");
+                assert_eq!(providers[0]["credential"]["source"], "environment");
+                assert_eq!(providers[0]["credential"]["present"], expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn setup_and_settings_status_json() {
     let env = Env::new();
     env.quickstart();
@@ -419,10 +536,267 @@ fn setup_and_settings_status_json() {
 }
 
 #[test]
+fn unsigned_release_manifest_requires_explicit_drift_only_verification() {
+    let env = Env::new();
+    let path = env.project().join("release.json");
+    let path_arg = path.to_str().unwrap();
+    // An available signing-key variable does not make an export signed unless
+    // --sign is explicitly requested, as in the release workflow.
+    let export = env.run_with(
+        &["adapter", "registry", "export", "--out", path_arg],
+        None,
+        &[("LOCUS_REGISTRY_SIGNING_KEY", "invalid-test-key")],
+    );
+    assert!(export.status.success(), "{}", stderr(&export));
+
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert!(manifest.get("signature").is_none());
+    assert!(manifest.get("signed_by").is_none());
+
+    let rejected = env.run(&["adapter", "verify-manifest", path_arg, "--json"]);
+    assert_eq!(rejected.status.code(), Some(1));
+    let report = doc(&rejected, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["ok"], false);
+
+    let verify = || {
+        env.run(&[
+            "adapter",
+            "verify-manifest",
+            path_arg,
+            "--allow-unsigned",
+            "--json",
+        ])
+    };
+    let matching = verify();
+    assert_eq!(matching.status.code(), Some(0));
+    let report = doc(&matching, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["ok"], true);
+    assert!(report.get("drift").is_none());
+
+    // Explicit signing fails closed without a key and creates no artifact.
+    let signed_path = env.project().join("signed.json");
+    let signed = env.run_with(
+        &[
+            "adapter",
+            "registry",
+            "export",
+            "--sign",
+            "--out",
+            signed_path.to_str().unwrap(),
+        ],
+        None,
+        &[("LOCUS_REGISTRY_SIGNING_KEY", "")],
+    );
+    assert!(!signed.status.success());
+    assert!(!signed_path.exists());
+
+    // Empty signatures are unsigned; a nonempty malformed signature must not
+    // be accepted by the drift-only opt-in.
+    manifest["signature"] = Value::String("  ".into());
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let empty = verify();
+    assert_eq!(empty.status.code(), Some(0));
+    assert_eq!(
+        doc(&empty, "locus.adapter.verify_manifest.v1")["signature"],
+        "unsigned"
+    );
+
+    manifest["signature"] = Value::String("not-a-signature".into());
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let malformed = verify();
+    assert_eq!(malformed.status.code(), Some(1));
+    let report = doc(&malformed, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "malformed");
+    assert_eq!(report["ok"], false);
+
+    manifest.as_object_mut().unwrap().remove("signature");
+    manifest["locus_version"] = Value::String("0.0.0-drift".into());
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let drifted = verify();
+    assert_eq!(drifted.status.code(), Some(1));
+    let report = doc(&drifted, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["ok"], false);
+    assert!(!report["drift"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn manifest_signer_claim_does_not_authenticate_an_unsigned_or_untrusted_manifest() {
+    let env = Env::new();
+    let path = env.project().join("release.json");
+    let path_arg = path.to_str().unwrap();
+    assert!(env
+        .run(&["adapter", "registry", "export", "--out", path_arg])
+        .status
+        .success());
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["signed_by"] = Value::from("claimed-root");
+    let verify = |manifest: &Value| {
+        std::fs::write(&path, serde_json::to_vec(manifest).unwrap()).unwrap();
+        env.run_with(
+            &[
+                "adapter",
+                "verify-manifest",
+                path_arg,
+                "--allow-unsigned",
+                "--json",
+            ],
+            None,
+            &[("LOCUS_ADAPTER_TRUST_KEYS", "")],
+        )
+    };
+
+    let unsigned = verify(&manifest);
+    assert_eq!(unsigned.status.code(), Some(0));
+    let report = doc(&unsigned, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["signed_by"], "claimed-root");
+    assert_eq!(report["ok"], true);
+
+    // A well-formed signature from an unknown key is not excused by the opt-in.
+    manifest["signature"] = Value::from(format!("ed25519:{}==", "A".repeat(86)));
+    let untrusted = verify(&manifest);
+    assert_eq!(untrusted.status.code(), Some(1));
+    let report = doc(&untrusted, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unknown_key");
+    assert_eq!(report["ok"], false);
+}
+
+#[test]
+fn unsigned_manifest_comparison_normalizes_catalog_fields_only() {
+    let env = Env::new();
+    let path = env.project().join("release.json");
+    let path_arg = path.to_str().unwrap();
+    assert!(env
+        .run(&["adapter", "registry", "export", "--out", path_arg])
+        .status
+        .success());
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let adapters = manifest["adapters"].as_array_mut().unwrap();
+    adapters.reverse();
+    for adapter in adapters {
+        let id = adapter["id"].as_str().unwrap().to_ascii_uppercase();
+        adapter["id"] = Value::from(format!(" {id} "));
+        for field in ["name", "version", "digest"] {
+            adapter[field] = Value::from(format!(" {} ", adapter[field].as_str().unwrap()));
+        }
+        adapter["tools"].as_array_mut().unwrap().reverse();
+    }
+    // Extra artifact metadata is not part of the manifest comparison.
+    manifest["archive_sha256"] = Value::from("not-checked");
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let out = env.run(&[
+        "adapter",
+        "verify-manifest",
+        path_arg,
+        "--allow-unsigned",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let report = doc(&out, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["ok"], true);
+    assert!(report.get("drift").is_none());
+}
+
+#[test]
+fn unsigned_release_manifest_checks_structure_and_catalog_fields() {
+    let env = Env::new();
+    let path = env.project().join("release.json");
+    let path_arg = path.to_str().unwrap();
+    assert!(env
+        .run(&["adapter", "registry", "export", "--out", path_arg])
+        .status
+        .success());
+    let original: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let verify = |manifest: &Value| {
+        std::fs::write(&path, serde_json::to_vec(manifest).unwrap()).unwrap();
+        env.run(&[
+            "adapter",
+            "verify-manifest",
+            path_arg,
+            "--allow-unsigned",
+            "--json",
+        ])
+    };
+
+    for (field, replacement, finding) in [
+        ("name", Value::from("Changed name"), "name drift"),
+        ("version", Value::from("0.0.0"), "version drift"),
+        ("tools", serde_json::json!(["changed.tool"]), "tool drift"),
+        ("digest", Value::from("sha256:changed"), "digest drift"),
+        ("id", Value::from("changed-adapter"), "not in this binary"),
+    ] {
+        let mut changed = original.clone();
+        changed["adapters"][0][field] = replacement;
+        let out = verify(&changed);
+        assert_eq!(out.status.code(), Some(1), "field {field}");
+        let report = doc(&out, "locus.adapter.verify_manifest.v1");
+        assert_eq!(report["signature"], "unsigned");
+        assert_eq!(report["ok"], false);
+        assert!(
+            report["drift"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item.as_str().unwrap().contains(finding)),
+            "field {field}"
+        );
+    }
+
+    let mut missing = original.clone();
+    missing["adapters"].as_array_mut().unwrap().remove(0);
+    let out = verify(&missing);
+    assert_eq!(out.status.code(), Some(1));
+    let report = doc(&out, "locus.adapter.verify_manifest.v1");
+    assert!(report["drift"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item.as_str().unwrap().contains("missing from manifest")));
+
+    let mut invalid_schema = original.clone();
+    invalid_schema["schema"] = Value::from("unsupported");
+    let mut empty_id = original.clone();
+    empty_id["adapters"][0]["id"] = Value::from("  ");
+    let mut duplicate_id = original.clone();
+    let first = duplicate_id["adapters"][0].clone();
+    duplicate_id["adapters"].as_array_mut().unwrap().push(first);
+    let mut ambiguous = original.clone();
+    ambiguous["adapters"][0]["name"] = Value::from("ambiguous|name");
+    for (invalid, expected) in [
+        (&invalid_schema, "schema must be"),
+        (&empty_id, "empty id"),
+        (&duplicate_id, "duplicate adapter id"),
+        (&ambiguous, "separator"),
+    ] {
+        let out = verify(invalid);
+        let error = error_doc(&out, 1, "failure");
+        assert!(error["error"].as_str().unwrap().contains(expected));
+    }
+
+    std::fs::write(&path, "{invalid json").unwrap();
+    let out = env.run(&[
+        "adapter",
+        "verify-manifest",
+        path_arg,
+        "--allow-unsigned",
+        "--json",
+    ]);
+    let error = error_doc(&out, 1, "failure");
+    assert!(error["error"]
+        .as_str()
+        .unwrap()
+        .contains("release manifest parse error"));
+}
+
+#[test]
 fn usage_errors_exit_2_with_the_error_envelope() {
     let env = Env::new();
     let out = env.run(&["whoami", "--json", "--no-such-flag"]);
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, out.stderr);
     error_doc(&out, 2, "usage");
     // Human usage errors keep clap's prose and exit 2.
     let out = env.run(&["whoami", "--no-such-flag"]);

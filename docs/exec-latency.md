@@ -1,5 +1,199 @@
 # `locus exec` latency
 
+## Reproducing issue #170
+
+This procedure for [issue #170](https://github.com/ashlrai/locus/issues/170)
+measures local process wall time for `locus exec --no-resolve -- /usr/bin/true`
+against `/usr/bin/true` alone. It needs a Rust toolchain, Python 3 and a Unix-like
+host with `/usr/bin/true`; it installs nothing and needs no provider credentials,
+network service, or benchmark dependency. Cargo may need network access to fetch
+locked build dependencies. The sample binding contains placeholder `env:` references;
+`--no-resolve` prevents resolving them. The result covers the local sealed pin,
+authority broker, environment isolation, child launch and audit write, not provider
+API latency or credential resolution.
+
+Run from the repository root in one Bash process. The broker belongs to the shell
+that pins, so do not split setup and measurement across shells. Use a fresh
+throwaway home outside any workspace with a `.locus.toml` allowlist. This is a
+synthetic local test pin, not an instruction to change a real account pin.
+
+```bash
+set -euo pipefail
+repo="$PWD"
+# Discard inherited Locus session, capability, tracing and credential settings.
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable LOCUS_ || true)
+# Keep the existing Rust toolchain available after changing HOME.
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH"
+export CARGO_TARGET_DIR="$repo/target"
+work="$(mktemp -d "${TMPDIR:-/tmp}/locus-q8.XXXXXXXX")"
+export HOME="$work/home" LOCUS_HOME="$work/locus"
+mkdir -p "$HOME"
+cargo build --locked --release -p locus-cli
+locus="$repo/target/release/locus"
+cd "$work"
+"$locus" init --with-samples
+# The hook loads this temporary home's control capability; pin starts the broker.
+eval "$("$locus" hook bash)"
+"$locus" pin personal
+"$locus" exec --no-resolve -- /usr/bin/true
+python3 - "$locus" <<'PY'
+import statistics
+import subprocess
+import sys
+import time
+
+locus = sys.argv[1]
+commands = {
+    "direct": ["/usr/bin/true"],
+    "locus": [locus, "exec", "--no-resolve", "--", "/usr/bin/true"],
+}
+samples = {name: [] for name in commands}
+# Alternate order to reduce ordering bias. Drop the first pair as warm-up.
+for i in range(21):
+    names = list(commands) if i % 2 == 0 else list(reversed(commands))
+    for name in names:
+        start = time.perf_counter_ns()
+        result = subprocess.run(commands[name], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elapsed = (time.perf_counter_ns() - start) / 1_000_000
+        if result.returncode != 0:
+            raise SystemExit(f"{name} run {i + 1} failed: exit {result.returncode}; no result")
+        if i:
+            samples[name].append(elapsed)
+for name, values in samples.items():
+    print(f"{name}: n={len(values)} min={min(values):.3f} "
+          f"median={statistics.median(values):.3f} max={max(values):.3f} ms")
+print(f"difference of medians: {statistics.median(samples['locus']) - statistics.median(samples['direct']):.3f} ms")
+PY
+"$locus" leave
+printf 'Temporary files: %s\n' "$work"
+```
+
+The script aborts on setup or child failure rather than reporting a fast failure as
+performance. Inspect errors from the smoke command before retrying. The temporary
+directory contains local session and audit state; delete it when finished. No
+real `~/.locus` is used. Run on an otherwise idle host, repeat whole fresh-home
+runs, and record the commit (`git rev-parse HEAD`), OS/architecture, Rust version,
+build profile, filesystem, output and whether the host was loaded. For each run,
+retain both min/median/max ranges and the difference of medians. Compare these
+across fresh-home runs to see variation; for changes, repeat both builds on the
+same host with the same procedure and compare their run-to-run medians. Do not
+interpret small differences within that variation as a demonstrated improvement.
+For a same-host comparison with direnv and sops, use the procedure below.
+Process startup, measurement overhead,
+scheduling, filesystem caching and audit sync affect results. Redirecting output
+to `/dev/null` excludes terminal rendering and differs from the inherited output
+in [the historical harness](../scripts/bench_exec.py) and the results below.
+Neither comparison isolates individual internal phases; no fixed pass/fail latency
+threshold is implied.
+
+## Comparing launchers for issue #170
+
+This measures the same `/usr/bin/true` child through all three launchers, plus
+the direct child as a baseline. It compares **launch paths**, not equivalent
+security guarantees: Locus verifies a live pin, isolates the child and writes an
+audit record and resolves a synthetic `env:` credential; direnv evaluates an
+allowed `.envrc`; sops decrypts an age-encrypted dotenv file. Each launcher
+injects the same synthetic `RESEND_API_KEY` value into the child; the direct
+baseline does not inject it. The timed child does not inspect the value. Setup,
+encryption, approval and pinning are outside the timed region. No network or real credentials
+are needed after the prerequisites are installed.
+
+Prerequisites: Bash, Python 3, a Rust toolchain, `direnv`, `sops`, `age-keygen`,
+and `/usr/bin/true` on a Unix-like host. Run the entire block from the repository
+root in one Bash process, on an idle host. It builds the locked release binary,
+uses a fresh temporary home outside the workspace and removes it on exit. The
+generated age identity is disposable; never use a real secret in the fixture.
+
+```bash
+set -euo pipefail
+repo="$PWD"
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable LOCUS_ || true)
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable SOPS_ || true)
+while IFS= read -r name; do unset "$name"; done < <(compgen -A variable DIRENV_ || true)
+unset RESEND_API_KEY
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+export PATH="$CARGO_HOME/bin:$PATH" CARGO_TARGET_DIR="$repo/target"
+work="$(mktemp -d "${TMPDIR:-/tmp}/locus-peers.XXXXXXXX")"
+# direnv must allow and execute the same physical path (for example on macOS /tmp).
+work="$(cd "$work" && pwd -P)"
+trap 'rm -rf "$work"' EXIT
+export HOME="$work/home" LOCUS_HOME="$work/locus"
+export SOPS_AGE_KEY_FILE="$work/age-key.txt" SOPS_DISABLE_VERSION_CHECK=1
+export DIRENV_LOG_FORMAT=
+mkdir -p "$HOME" "$work/direnv"
+cargo build --locked --release -p locus-cli
+locus="$repo/target/release/locus"
+cd "$work"
+"$locus" init
+eval "$("$locus" hook bash)"
+"$locus" binding add bench --tenant bench --provider resend --account bench \
+  --credential-ref env:LOCUS_BENCH_FIXTURE --non-interactive
+export LOCUS_BENCH_FIXTURE=fixture
+"$locus" pin bench
+printf 'export RESEND_API_KEY=fixture\n' > "$work/direnv/.envrc"
+direnv allow "$work/direnv/.envrc"
+printf 'RESEND_API_KEY=fixture\n' > "$work/plain.env"
+age-keygen -o "$SOPS_AGE_KEY_FILE" 2>/dev/null
+recipient="$(age-keygen -y "$SOPS_AGE_KEY_FILE")"
+sops --encrypt --age "$recipient" --input-type dotenv --output-type dotenv \
+  "$work/plain.env" > "$work/encrypted.env"
+rm "$work/plain.env"
+# Check the same synthetic value reaches each child without printing it.
+"$locus" exec --strict-creds -- /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
+direnv exec "$work/direnv" /bin/sh -c 'test "$RESEND_API_KEY" = fixture'
+sops exec-env "$work/encrypted.env" 'test "$RESEND_API_KEY" = fixture'
+python3 - "$locus" "$work/direnv" "$work/encrypted.env" <<'PY'
+import statistics
+import subprocess
+import sys
+import time
+
+locus, directory, encrypted = sys.argv[1:]
+commands = {
+    "direct": ["/usr/bin/true"],
+    "locus": [locus, "exec", "--strict-creds", "--", "/usr/bin/true"],
+    "direnv": ["direnv", "exec", directory, "/usr/bin/true"],
+    "sops": ["sops", "exec-env", encrypted, "/usr/bin/true"],
+}
+samples = {name: [] for name in commands}
+names = list(commands)
+warmups, runs = 4, 32
+for i in range(warmups + runs):
+    # Rotate the first command, including during warmup, to balance order.
+    for name in names[i % len(names):] + names[:i % len(names)]:
+        start = time.perf_counter_ns()
+        result = subprocess.run(commands[name], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elapsed = (time.perf_counter_ns() - start) / 1_000_000
+        if result.returncode != 0:
+            raise SystemExit(f"{name} run {i + 1} failed: exit {result.returncode}; no results")
+        if i >= warmups:
+            samples[name].append(elapsed)
+for name, values in samples.items():
+    print(f"{name}: n={len(values)} min={min(values):.3f} "
+          f"median={statistics.median(values):.3f} max={max(values):.3f} ms")
+PY
+"$locus" leave
+```
+
+All four warmup rounds are discarded; each subsequent round measures every
+command once, with balanced starting order. A nonzero exit aborts without
+printing statistics. To diagnose a failure, run the relevant invocation outside
+the timer with the same temporary setup; never print the key or environment.
+Repeat the complete block in fresh homes and record each run's ranges and medians,
+the commit, tool versions, OS/architecture, filesystem and host load. Output is
+redirected during timing, so terminal rendering is excluded; scheduling, caches,
+audit sync, process startup and filesystem behavior remain included. Compare
+within-run medians and variation across runs, without treating a small difference
+as meaningful if it falls within that variation. These instructions make no
+claim about results on a machine where they have not been measured.
+
+## Historical measurement
+
 Measured on 2026-10-25 ET (2026-10-26 UTC) on one x86_64 Linux machine (kernel 6.12.94+, rustc
 1.99.1, release build). 21 runs, first dropped. Wall clock is
 `time.perf_counter` around the process. `ru_maxrss` comes from `os.wait4`
@@ -66,8 +260,8 @@ operator path the seal and one broker validate happen once, then the grant
 confirmed with `strace`. Drift compares the binding just loaded for this
 exec to the pin fingerprint. A file edit after that load is caught on the
 next exec. A drift that would freeze asks the broker again before it
-writes. `--expect` still refuses before the child starts. The audit `fsync`
-stays on this write.
+writes. `--expect` still refuses before the child starts. A later change
+moved the audit `fsync` off the client path entirely; see below.
 
 `cargo bench -p locus-core --bench exec_authority` prints the median of
 `Store::require_active` in process. It does not fail CI. On this machine
@@ -91,5 +285,37 @@ on this disk (0.251 ms to 1.321 ms in this sample).
 | `scrub_resolve` | 0.056 | 0.047 / 0.086 | Ambient scrub and secret resolution |
 | `executor_grant` | 0.209 | 0.179 / 0.614 | Broker `BeginControl` and `GrantExecutor` |
 | `spawn_wait` | 0.525 | 0.491 / 0.744 | Spawn and wait, including the stderr banner write into the pipe |
-| `audit` | 0.798 | 0.251 / 1.321 | Append the audit line and `fsync` |
+| `audit` | 0.798 | 0.251 / 1.321 | Append the audit line and `fsync` (since moved to the broker; below) |
 | `total` | 2.542 | 1.747 / 3.423 | Process start through the audit mark |
+
+## Broker-delegated audit (issue #170 follow-up)
+
+In the table above `audit` was the largest remaining phase — almost all of
+it the `fsync` (`~0.8ms` on that Linux host; `~4.6ms` on an Apple-silicon
+Mac, where it was ~40% of the traced total). The post-child audit record
+now goes to the authority broker over the same authenticated, bounded
+request channel already used for `Validate` and `GrantExecutor`: the broker
+appends the pre-sanitized line to `audit/events.jsonl` under its own home,
+answers, then `fsync`s on its own thread. The exec process waits only for
+the append acknowledgement — one extra broker round trip (~0.2–1ms) instead
+of a synchronous flush — and the file offset/lock ordering are unchanged.
+The broker rejects lines that are empty, contain a newline, or do not parse
+as a JSON object, so a malformed record cannot corrupt the log. If the
+broker cannot serve the append, the caller falls back to the original
+direct write + `fsync`; audit durability never depends on the broker being
+reachable. Preflight checks are untouched: seal, authority validate, drift
+compare and the executor grant all still gate the child.
+
+Coverage: `Store::audit` keeps the direct path for non-hot call sites and
+is the fallback; `Store::audit_via_broker` is used at the post-child audit
+points in `exec`, `run`, `ci run` and the delegated exec path.
+`store::tests::audit_via_broker_falls_back_to_direct_write_without_a_broker`
+covers the fallback; the `exec_exit_codes`/`exec_for`/`mcp_supervised`
+integration tests cover the live broker append, including the executor
+credential path.
+
+`crates/locus-cli/tests/exec_startup_budget.rs` gates the regression:
+median overhead `median(exec) − median(--version) − median(direct true)`
+must stay under 30ms, and the traced `audit` phase under 4ms. It is an
+ignored release benchmark like `exec_perf::exec_startup_ceiling`; run it on
+an idle host with `LOCUS_EXEC_BENCH_BIN` pointing at a release binary.

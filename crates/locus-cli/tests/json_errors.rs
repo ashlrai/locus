@@ -22,7 +22,7 @@ fn locus(home: &Path, cwd: &Path, cap: Option<&str>, args: &[&str]) -> Output {
 fn assert_json_error(out: &Output, needle: &str) {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
-    assert!(out.stdout.is_empty(), "stdout stays clean on failure");
+    assert_eq!(out.stdout, out.stderr, "stdout carries the JSON error");
     let v: Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|e| panic!("--json failure must print JSON on stderr ({e}): {stderr:?}"));
     assert_eq!(v["ok"], false, "{v}");
@@ -156,6 +156,228 @@ fn binding_add_refuses_to_replace_an_existing_alias_without_force() {
     assert!(stderr.contains("did you mean `dup`?"), "{stderr}");
 }
 
+/// Issue #175: re-running `binding add` with the same values is a no-op that
+/// exits 0 instead of refusing. The file is not rewritten (bytes and mtime
+/// unchanged); both output formats identify the existing binding.
+#[test]
+fn binding_add_is_a_noop_when_the_file_already_matches() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let add = |extra: &[&str]| {
+        let mut args = vec![
+            "--json",
+            "binding",
+            "add",
+            "same",
+            "--tenant",
+            "same",
+            "--provider",
+            "github",
+            "--account",
+            "acct",
+            "--credential-ref",
+            "env:SAME_TOKEN",
+            "--non-interactive",
+        ];
+        args.extend_from_slice(extra);
+        locus(home.path(), cwd.path(), Some(CAP), &args)
+    };
+    let toml = home.path().join("bindings").join("same.toml");
+
+    let first = add(&[]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let v: Value = serde_json::from_str(&String::from_utf8_lossy(&first.stdout)).unwrap();
+    assert_eq!(v["changed"], true, "{v}");
+    // Preserve a valid hand-edited representation, not just the canonical
+    // output that a rewrite might reproduce byte-for-byte.
+    let mut original = b"# Retain this operator comment.\n\n".to_vec();
+    original.extend(std::fs::read(&toml).unwrap());
+    std::fs::write(&toml, &original).unwrap();
+    let modified = std::fs::metadata(&toml).unwrap().modified().unwrap();
+
+    let second = add(&[]);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let v: Value = serde_json::from_str(&String::from_utf8_lossy(&second.stdout)).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    assert_eq!(v["changed"], false, "{v}");
+    let reported = Path::new(v["path"].as_str().expect("binding path"));
+    assert_eq!(reported, toml.canonicalize().unwrap(), "{v}");
+    assert_eq!(std::fs::read(&toml).unwrap(), original);
+    assert_eq!(
+        std::fs::metadata(&toml).unwrap().modified().unwrap(),
+        modified
+    );
+
+    // Human output says the same thing.
+    let human = locus(
+        home.path(),
+        cwd.path(),
+        Some(CAP),
+        &[
+            "binding",
+            "add",
+            "same",
+            "--tenant",
+            "same",
+            "--provider",
+            "github",
+            "--account",
+            "acct",
+            "--credential-ref",
+            "env:SAME_TOKEN",
+            "--non-interactive",
+        ],
+    );
+    assert!(
+        human.status.success(),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&human.stdout)
+            .contains("binding 'same' already matches; nothing written"),
+        "{}",
+        String::from_utf8_lossy(&human.stdout)
+    );
+    assert_eq!(std::fs::read(&toml).unwrap(), original);
+
+    // A dry run plans zero changes and says why.
+    let dry = add(&["--dry-run"]);
+    assert!(
+        dry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dry.stderr)
+    );
+    let plan: Value = serde_json::from_str(&String::from_utf8_lossy(&dry.stdout)).unwrap();
+    assert_eq!(plan["changes"], serde_json::json!([]), "{plan}");
+    assert!(
+        plan["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|n| n.as_str().unwrap().contains("already matches")),
+        "{plan}"
+    );
+    assert_eq!(std::fs::read(&toml).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[test]
+fn prompted_existing_alias_is_compared_before_replacement() {
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
+    use std::process::Stdio;
+
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let flags = [
+        "--tenant",
+        "same",
+        "--provider",
+        "github",
+        "--account",
+        "acct",
+        "--credential-ref",
+        "env:SAME_TOKEN",
+        "--org",
+        "example",
+        "--repos",
+        "example/repo",
+        "--read-only",
+        "--default-ttl",
+        "2h",
+    ];
+    let mut initial = vec!["binding", "add", "same", "--non-interactive"];
+    initial.extend(flags);
+    assert!(locus(home.path(), cwd.path(), Some(CAP), &initial)
+        .status
+        .success());
+    let path = home.path().join("bindings/same.toml");
+    let original = std::fs::read(&path).unwrap();
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+    let prompted = |command: &str, account: &str, input: &[u8]| {
+        let (mut master, mut slave) = (-1, -1);
+        // Both descriptors are owned immediately after openpty succeeds.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let mut master = unsafe { std::fs::File::from_raw_fd(master) };
+        let slave = unsafe { std::fs::File::from_raw_fd(slave) };
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
+        cmd.args([
+            command,
+            "add",
+            "--tenant",
+            "same",
+            "--provider",
+            "github",
+            "--account",
+            account,
+            "--credential-ref",
+            "env:SAME_TOKEN",
+            "--org",
+            "example",
+            "--repos",
+            "example/repo",
+            "--read-only",
+            "--default-ttl",
+            "2h",
+        ])
+        .env("LOCUS_HOME", home.path())
+        .env("LOCUS_CONTROL_CAPABILITY", CAP)
+        .env("NO_COLOR", "1")
+        .env_remove("LOCUS_SESSION_ID")
+        .env_remove("LOCUS_NON_INTERACTIVE")
+        .current_dir(cwd.path())
+        .stdin(Stdio::from(slave))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+        let child = cmd.spawn().unwrap();
+        master.write_all(input).unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    for command in ["binding", "client"] {
+        let out = prompted(command, "acct", b"same\n\x04");
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&out.stdout).contains("already matches; nothing written"));
+    }
+    let refused = prompted("binding", "other", b"same\n\x04");
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("already exists"));
+    let different = prompted("client", "other", b"same\nn\n\x04");
+    assert!(!different.status.success());
+    assert!(String::from_utf8_lossy(&different.stdout).contains("replace it?"));
+    assert!(String::from_utf8_lossy(&different.stderr).contains("aborted"));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().modified().unwrap(),
+        modified
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn binding_add_never_writes_through_a_dangling_symlink() {
@@ -191,4 +413,73 @@ fn binding_add_never_writes_through_a_dangling_symlink() {
     // --force replaces a binding, never the file a link points at.
     assert_json_error(&add(&["--force"]), "symlink");
     assert!(!victim.exists(), "nothing written outside LOCUS_HOME");
+}
+
+#[test]
+fn credential_errors_distinguish_unsupported_and_missing_without_exposing_values() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let canary = format!("SECRET_CANARY_{}", std::process::id());
+    for (alias, reference, expected) in [
+        (
+            "phantom",
+            format!("phm:{canary}"),
+            "Phantom credential integration unsupported",
+        ),
+        (
+            "missing",
+            "env:LOCUS_DIAG_MISSING_VALUE".into(),
+            "environment variable not set",
+        ),
+    ] {
+        let add = locus(
+            home.path(),
+            cwd.path(),
+            Some(CAP),
+            &[
+                "binding",
+                "add",
+                alias,
+                "--tenant",
+                alias,
+                "--provider",
+                "github",
+                "--account",
+                "acct",
+                "--credential-ref",
+                &reference,
+                "--non-interactive",
+            ],
+        );
+        assert!(add.status.success());
+        for json in [false, true] {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
+            if json {
+                cmd.arg("--json");
+            }
+            let out = cmd
+                .args(["run", "-b", alias, "--strict-creds", "--", "/usr/bin/true"])
+                .env("LOCUS_HOME", home.path())
+                .env("LOCUS_CONTROL_CAPABILITY", CAP)
+                .env("LOCUS_DIAG_CANARY", &canary)
+                .env_remove("LOCUS_DIAG_MISSING_VALUE")
+                .env_remove("LOCUS_SESSION_ID")
+                .current_dir(cwd.path())
+                .output()
+                .unwrap();
+            assert!(!out.status.success());
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(!stdout.contains(&canary));
+            assert!(!stderr.contains(&canary));
+            let message = if json {
+                let value: Value = serde_json::from_str(stderr.trim()).unwrap();
+                value["error"].as_str().unwrap().to_owned()
+            } else {
+                stderr.into_owned()
+            };
+            assert!(message.contains(expected));
+            assert!(message.contains("env:VAR"));
+        }
+    }
 }

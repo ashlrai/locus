@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! locus events export [--otlp] [--last N] [--binding acme] [--out file]
+//! locus events export --format ndjson --since <ts>  # SIEM (crate::siem_export)
 //! locus events export --sink webhook [--url URL]   # or LOCUS_AUDIT_WEBHOOK_URL
 //! ```
 //!
@@ -34,6 +35,9 @@ pub enum EventsExportFormat {
     JsonLines,
     /// OTLP-compatible JSON body for Logs (partial Success-compatible shape).
     Otlp,
+    /// SIEM NDJSON — one `locus.siem.v1` event per line with stable field
+    /// names and deep detail redaction ([`crate::siem_export`]).
+    Siem,
 }
 
 /// Options for [`export_events`].
@@ -43,6 +47,9 @@ pub struct EventsExportOptions {
     pub op: Option<String>,
     pub binding: Option<String>,
     pub format: EventsExportFormat,
+    /// Only events at or after this timestamp — RFC3339 or `YYYY-MM-DD`
+    /// (parsed by [`crate::siem_export::parse_since`]).
+    pub since: Option<String>,
     /// Service name attribute (default: `locus`).
     pub service_name: Option<String>,
 }
@@ -102,7 +109,16 @@ impl FleetPulseEvent {
 /// Filter + format audit events for export.
 pub fn export_events(events: &[AuditEvent], opts: &EventsExportOptions) -> crate::Result<String> {
     let last = opts.last.unwrap_or(200).max(1);
-    let filtered = filter_audit_events(events, last, opts.op.as_deref(), opts.binding.as_deref());
+    let since_events;
+    let pool = match &opts.since {
+        Some(raw) => {
+            let since = crate::siem_export::parse_since(raw)?;
+            since_events = crate::siem_export::events_since(events, &since);
+            since_events.as_slice()
+        }
+        None => events,
+    };
+    let filtered = filter_audit_events(pool, last, opts.op.as_deref(), opts.binding.as_deref());
     let exported_at = Utc::now().to_rfc3339();
     match opts.format {
         EventsExportFormat::JsonLines => Ok(to_json_lines(&filtered, &exported_at)),
@@ -111,13 +127,14 @@ pub fn export_events(events: &[AuditEvent], opts: &EventsExportOptions) -> crate
             &exported_at,
             opts.service_name.as_deref().unwrap_or("locus"),
         )),
+        EventsExportFormat::Siem => crate::siem_export::to_ndjson_lines(&filtered, &exported_at),
     }
 }
 
 /// Content-Type for an export body (for webhook POST or file handoff).
 pub fn export_content_type(format: EventsExportFormat) -> &'static str {
     match format {
-        EventsExportFormat::JsonLines => "application/x-ndjson",
+        EventsExportFormat::JsonLines | EventsExportFormat::Siem => "application/x-ndjson",
         EventsExportFormat::Otlp => "application/json",
     }
 }
@@ -156,6 +173,42 @@ pub fn webhook_url_safe_label(url: &str) -> String {
     format!("{scheme}://{hostport}")
 }
 
+/// Lowercase substrings that mark a value as credential material in an export
+/// body or an audit detail string. Shared with [`crate::siem_export`], which
+/// redacts matching detail values before serialization.
+pub(crate) const SECRET_VALUE_MARKERS: &[&str] = &[
+    "sk_live_",
+    "sk_test_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxs-",
+    "-----begin private",
+    "-----begin rsa private",
+    "-----begin openssh private",
+    "-----begin ec private",
+];
+
+/// JSON key literals (quoted, lowercase) that must never hold plaintext
+/// secrets in an export body.
+const SECRET_FIELD_KEYS: &[&str] = &[
+    "\"password\"",
+    "\"api_key\"",
+    "\"apikey\"",
+    "\"secret_key\"",
+    "\"private_key\"",
+    "\"access_token\"",
+    "\"refresh_token\"",
+    "\"authorization\"",
+    "\"client_secret\"",
+    "\"aws_secret_access_key\"",
+];
+
 /// Fail-closed secret scan on an export body. Empty issues = safe to ship.
 ///
 /// Scans for known token prefixes and JSON keys that must never hold plaintext
@@ -164,23 +217,7 @@ pub fn export_body_secret_issues(body: &str) -> Vec<String> {
     let mut issues = Vec::new();
     let lower = body.to_ascii_lowercase();
 
-    for pat in [
-        "sk_live_",
-        "sk_test_",
-        "ghp_",
-        "gho_",
-        "ghu_",
-        "ghs_",
-        "github_pat_",
-        "xoxb-",
-        "xoxp-",
-        "xoxa-",
-        "xoxs-",
-        "-----begin private",
-        "-----begin rsa private",
-        "-----begin openssh private",
-        "-----begin ec private",
-    ] {
+    for pat in SECRET_VALUE_MARKERS {
         if lower.contains(pat) {
             issues.push(format!("forbidden secret pattern: {pat}"));
         }
@@ -190,18 +227,7 @@ pub fn export_body_secret_issues(body: &str) -> Vec<String> {
         issues.push("forbidden secret pattern: AKIA".into());
     }
 
-    for key in [
-        "\"password\"",
-        "\"api_key\"",
-        "\"apikey\"",
-        "\"secret_key\"",
-        "\"private_key\"",
-        "\"access_token\"",
-        "\"refresh_token\"",
-        "\"authorization\"",
-        "\"client_secret\"",
-        "\"aws_secret_access_key\"",
-    ] {
+    for key in SECRET_FIELD_KEYS {
         if lower.contains(key) {
             issues.push(format!("forbidden secret field: {key}"));
         }
@@ -376,7 +402,8 @@ fn severity_for_op(op: &str) -> u8 {
     }
 }
 
-fn severity_text_for_op(op: &str) -> &'static str {
+/// Severity label for an audit op — shared with [`crate::siem_export`].
+pub(crate) fn severity_text_for_op(op: &str) -> &'static str {
     match severity_for_op(op) {
         17 => "ERROR",
         13 => "WARN",

@@ -128,6 +128,7 @@ fn json_carries_expires_at_and_expires_in_secs() {
         &["--json", "status"],
     );
     let v: serde_json::Value = serde_json::from_str(stdout(&o).trim()).expect("json");
+    assert_eq!(v["schema"], "locus.status.v1");
     assert_eq!(v["pinned"], true);
     let secs = v["expires_in_secs"].as_i64().expect("expires_in_secs");
     assert!((480..=600).contains(&secs), "expires_in_secs {secs}");
