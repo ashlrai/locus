@@ -135,7 +135,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/adapters.md](./docs/adapters.
 
 - Do **not** paste secrets into chat, commits, issues, or MCP tool args.
 - Use explicit `env:VAR` references for supported resolution; values must be supplied outside agent context. `phm:NAME` references remain readable but fail closed until a supported scoped bridge exists. Do not invoke or capture `phantom reveal` to emulate one.
-- This checkout’s compatibility change is unreleased; published Locus v0.5.0 still has the incompatible legacy reveal adapter. See [credential compatibility](./docs/credential-compatibility.md).
+- Published Locus v0.5.0 has the incompatible legacy reveal adapter; v0.6.0 fails closed for `phm:` credential resolution. See [credential compatibility](./docs/credential-compatibility.md).
 - `test:VALUE` is available only inside compiled unit tests and is rejected by production binaries.
 - If a secret lands in git history, rotate it; do not only delete the file.
 

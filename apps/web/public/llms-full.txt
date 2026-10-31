@@ -115,6 +115,21 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [Ashlr companion handshake (v1)](https://github.com/ashlrai/locus/blob/main/docs/ashlr-handshake.md)
 
+## docs/autopin-review-checklist.md
+
+- [Autopin review checklist](https://github.com/ashlrai/locus/blob/main/docs/autopin-review-checklist.md)
+  - Boundaries and existing validation
+  - Review and hardening checks
+  - Regression commands
+
+## docs/autopin-suggest-output.md
+
+- [locus autopin suggest output](https://github.com/ashlrai/locus/blob/main/docs/autopin-suggest-output.md)
+  - A suggestion
+  - No suggestion
+  - Reading the report
+  - Applying or previewing
+
 ## docs/BENCHMARKS.md
 
 - [Benchmarks](https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md)
@@ -131,6 +146,10 @@ listed verbatim so an agent can jump straight to the right document.
 - [Recovering a pin after its broker exits](https://github.com/ashlrai/locus/blob/main/docs/broker-recovery-q8.md)
   - Enter first
   - If enter is refused
+
+## docs/build-q8.md
+
+- [Building both executables](https://github.com/ashlrai/locus/blob/main/docs/build-q8.md)
 
 ## docs/cli-routing.md
 
@@ -182,10 +201,36 @@ listed verbatim so an agent can jump straight to the right document.
   - Troubleshooting
   - Operator checklist
 
+## docs/dry-run-acceptance.md
+
+- [Dry-run acceptance checklist](https://github.com/ashlrai/locus/blob/main/docs/dry-run-acceptance.md)
+  - Scope and mutation avoidance
+  - Useful output
+  - Error handling
+  - Evidence for review
+
 ## docs/dry-run-matrix-q8.md
 
 - [Dry-run command matrix](https://github.com/ashlrai/locus/blob/main/docs/dry-run-matrix-q8.md)
   - Unsupported cases
+
+## docs/dry-run-review-matrix.md
+
+- [Dry-run review matrix (help surface)](https://github.com/ashlrai/locus/blob/main/docs/dry-run-review-matrix.md)
+  - Inspected help
+  - Help documents --dry-run
+  - Help does not document --dry-run
+  - Grouping help pages
+  - Aliases
+  - Review notes
+
+## docs/dry-run-verification.md
+
+- [Manual dry-run verification](https://github.com/ashlrai/locus/blob/main/docs/dry-run-verification.md)
+
+## docs/e2e-test-map.md
+
+- [End-to-end test map](https://github.com/ashlrai/locus/blob/main/docs/e2e-test-map.md)
 
 ## docs/exec-latency.md
 
@@ -272,6 +317,48 @@ listed verbatim so an agent can jump straight to the right document.
   - Validation
   - Related docs
 
+## docs/hub-smoke-output.md
+
+- [Hub smoke output](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-output.md)
+  - Setup
+  - JSON and status checks
+  - Grant and file checks
+  - Final result
+
+## docs/hub-smoke-prerequisites.md
+
+- [Hub smoke prerequisites](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-prerequisites.md)
+  - Required tools and access
+  - Environment
+  - Expected outcomes
+
+## docs/hub-smoke-resource-map.md
+
+- [Hub smoke resource map](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-resource-map.md)
+
+## docs/installer-acceptance.md
+
+- [Shell installer acceptance checklist](https://github.com/ashlrai/locus/blob/main/docs/installer-acceptance.md)
+  - Scope and prerequisites
+  - Platform matrix
+  - Installation and upgrade
+  - Verification and failure cases
+  - Evidence
+
+## docs/installer-failure-matrix.md
+
+- [Shell installer failure matrix](https://github.com/ashlrai/locus/blob/main/docs/installer-failure-matrix.md)
+  - Download and verification
+  - Archive inspection and extraction
+  - Destination and replacement
+
+## docs/installer-platform-matrix.md
+
+- [Shell installer platform matrix](https://github.com/ashlrai/locus/blob/main/docs/installer-platform-matrix.md)
+  - Selected release targets
+  - Prerequisites and alternatives
+  - Unresolved decisions and evidence gaps
+
 ## docs/mcp.md
 
 - [locus-mcp - Claude Code, Cursor, and friends](https://github.com/ashlrai/locus/blob/main/docs/mcp.md)
@@ -314,14 +401,19 @@ listed verbatim so an agent can jump straight to the right document.
   - Related
     - Local agent peers
 
+## docs/MSRV.md
+
+- [Minimum supported Rust version](https://github.com/ashlrai/locus/blob/main/docs/MSRV.md)
+
 ## docs/observability.md
 
 - [Observability](https://github.com/ashlrai/locus/blob/main/docs/observability.md)
   - Audit log
   - Near-miss summary
   - Forensics pack
-  - Events export (fleet pulse / OTLP)
+  - Events export (fleet pulse / SIEM / OTLP)
     - JSON lines (default)
+    - SIEM NDJSON
     - OTLP-compatible logs JSON
     - Webhook sink (minimal SIEM / remote append)
   - Doctor as mission control
@@ -401,6 +493,40 @@ listed verbatim so an agent can jump straight to the right document.
 - [Locus documentation](https://github.com/ashlrai/locus/blob/main/docs/README.md)
   - Previewing changes with --dry-run
     - Limits and unsupported operations
+
+## docs/registry-manifest-consumer-checklist.md
+
+- [Release manifest consumer checklist](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer-checklist.md)
+  - 1. Identify the artifact
+  - 2. Obtain artifacts
+  - 3. Run the check
+  - 4. What a pass does not establish (current limits)
+  - 5. Optional: an operator-signed manifest
+
+## docs/registry-manifest-verification-questions.md
+
+- [Adapter registry manifest verification: open questions](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-verification-questions.md)
+  - What can be verified today?
+  - Questions to resolve before relying on release verification
+    - Trust and key lifecycle
+    - What a verified release should bind
+    - Release and consumer operations
+
+## docs/registry-manifest-verification.md
+
+- [Verifying an adapter registry release manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-verification.md)
+  - Check an unsigned manifest
+  - Check an archive separately
+  - Signature verification is a separate check
+
+## docs/registry-trust-faq.md
+
+- [Adapter registry trust FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-faq.md)
+  - Are release manifests signed today?
+  - What can I check with an unsigned manifest?
+  - Do the entry digests or archive checksums prove the release is authentic?
+  - Can an operator sign a manifest now?
+  - What changes at the future CI signing boundary?
 
 ## docs/registry-trust.md
 

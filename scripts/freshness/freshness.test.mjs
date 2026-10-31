@@ -6,6 +6,9 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { repository, run, sources, replaceBlocks } from './engine.mjs';
 
+// Also run the published-package integrity disclosure guard from this entrypoint.
+await import('../../npm/test/published-integrity.test.js');
+
 const config = JSON.parse(await readFile(join(repository, 'scripts/freshness/blocks.json'), 'utf8'));
 const values = { version: '1.2.3', publishedVersion: '1.2.3', cli: '1.2.3', mcp: '1.2.3', date: '2026-01-01', highlights: 'A release.' };
 const expected = {

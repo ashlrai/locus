@@ -4,9 +4,9 @@
 | Component | Version |
 |---|---|
 | Rust workspace (source) | 0.6.0 |
-| npm locus-cli (published) | 0.5.2 |
-| npm @ashlrai/locus-mcp (published) | 0.5.2 |
-| Published release date | 2026-10-26 |
+| npm locus-cli (published) | 0.6.0 |
+| npm @ashlrai/locus-mcp (published) | 0.6.0 |
+| Published release date | 2026-10-31 |
 <!-- fresh:end -->
 
 How the **Phantom workbench** (AshlrAI's agent fleet orchestrator) can compose
