@@ -842,7 +842,7 @@ enum EngagementCmd {
 
 #[derive(Subcommand, Debug)]
 enum EventsAction {
-    /// Export audit events as JSON lines (fleet pulse) or OTLP logs JSON
+    /// Export audit events as JSON lines (fleet pulse), SIEM NDJSON or OTLP logs JSON
     Export {
         /// Max events from the end of the log (`--limit` also accepted)
         #[arg(long, alias = "limit", default_value_t = 200)]
@@ -853,7 +853,13 @@ enum EventsAction {
         /// Filter by binding alias
         #[arg(long)]
         binding: Option<String>,
-        /// Emit OTLP-compatible Logs JSON instead of fleet-pulse JSON lines
+        /// Only events at or after this time — RFC3339 or YYYY-MM-DD
+        #[arg(long, value_name = "TS")]
+        since: Option<String>,
+        /// Output format: `fleet` (default), `ndjson` (SIEM), `otlp`
+        #[arg(long, value_enum, conflicts_with = "otlp")]
+        format: Option<CliEventsExportFormat>,
+        /// Emit OTLP-compatible Logs JSON (alias for `--format otlp`)
         #[arg(long)]
         otlp: bool,
         /// Write to file (default: stdout when sink=local)
@@ -886,6 +892,27 @@ impl From<CliEventsExportSink> for EventsExportSink {
         match s {
             CliEventsExportSink::Local => EventsExportSink::Local,
             CliEventsExportSink::Webhook => EventsExportSink::Webhook,
+        }
+    }
+}
+
+/// CLI mirror of the `events export --format` choices (clap ValueEnum).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+enum CliEventsExportFormat {
+    /// Fleet-pulse JSON lines, schema `locus.audit.v1` (default)
+    Fleet,
+    /// SIEM NDJSON, schema `locus.siem.v1` — stable fields, deep redaction
+    Ndjson,
+    /// OTLP-compatible Logs JSON document (same as `--otlp`)
+    Otlp,
+}
+
+impl From<CliEventsExportFormat> for EventsExportFormat {
+    fn from(f: CliEventsExportFormat) -> Self {
+        match f {
+            CliEventsExportFormat::Fleet => EventsExportFormat::JsonLines,
+            CliEventsExportFormat::Ndjson => EventsExportFormat::Siem,
+            CliEventsExportFormat::Otlp => EventsExportFormat::Otlp,
         }
     }
 }
@@ -1606,6 +1633,8 @@ fn run() -> Result<()> {
                 last,
                 op,
                 binding,
+                since,
+                format,
                 otlp,
                 out,
                 service_name,
@@ -1616,6 +1645,8 @@ fn run() -> Result<()> {
                     last,
                     op,
                     binding,
+                    since,
+                    format: format.map(Into::into),
                     otlp,
                     out,
                     service_name,
@@ -1881,6 +1912,7 @@ fn cmd_topic(name: Option<&str>, json: bool) -> Result<()> {
              Pair with:\n\
                locus events --last N [--op …] [--binding …]\n\
                locus events export [--otlp] [--out file]  # fleet pulse / OTLP logs\n\
+               locus events export --format ndjson --since 2026-08-09T00:00:00Z  # SIEM lines\n\
                locus events export --sink webhook [--url URL]  # SIEM webhook (or LOCUS_AUDIT_WEBHOOK_URL)",
         ),
         (
@@ -9988,7 +10020,7 @@ fn cmd_events(last: usize, op: Option<String>, binding: Option<String>, json: bo
     Ok(())
 }
 
-/// Export audit events as fleet-pulse JSON lines or OTLP logs JSON.
+/// Export audit events as fleet-pulse JSON lines, SIEM NDJSON or OTLP logs JSON.
 ///
 /// `--sink webhook` POSTs the same redacted body (no secrets). Unset URL fails
 /// soft (skip, exit 0). Secret-looking bodies fail closed (error, no POST).
@@ -9997,6 +10029,8 @@ fn cmd_events_export(args: EventsExportArgs, json: bool, dry_run: bool) -> Resul
         last,
         op,
         binding,
+        since,
+        format,
         otlp,
         out,
         service_name,
@@ -10009,11 +10043,11 @@ fn cmd_events_export(args: EventsExportArgs, json: bool, dry_run: bool) -> Resul
         store()?
     };
     let all = s.read_audit_events()?;
-    let format = if otlp {
+    let format = format.unwrap_or(if otlp {
         EventsExportFormat::Otlp
     } else {
         EventsExportFormat::JsonLines
-    };
+    });
     let body = export_events(
         &all,
         &EventsExportOptions {
@@ -10021,6 +10055,7 @@ fn cmd_events_export(args: EventsExportArgs, json: bool, dry_run: bool) -> Resul
             op,
             binding,
             format,
+            since,
             service_name: Some(service_name),
         },
     )?;
@@ -10030,10 +10065,10 @@ fn cmd_events_export(args: EventsExportArgs, json: bool, dry_run: bool) -> Resul
         let detail = format!(
             "{} bytes, {}",
             body.len(),
-            if otlp {
-                "OTLP JSON".to_string()
-            } else {
-                format!("{lines} JSON line(s)")
+            match format {
+                EventsExportFormat::Otlp => "OTLP JSON".to_string(),
+                EventsExportFormat::Siem => format!("{lines} SIEM NDJSON line(s)"),
+                EventsExportFormat::JsonLines => format!("{lines} JSON line(s)"),
             }
         );
         let mut plan = dry_run::Plan::new("locus events export");
@@ -10110,6 +10145,8 @@ struct EventsExportArgs {
     last: usize,
     op: Option<String>,
     binding: Option<String>,
+    since: Option<String>,
+    format: Option<EventsExportFormat>,
     otlp: bool,
     out: Option<PathBuf>,
     service_name: String,
