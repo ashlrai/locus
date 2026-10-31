@@ -665,6 +665,43 @@ fn manifest_signer_claim_does_not_authenticate_an_unsigned_or_untrusted_manifest
 }
 
 #[test]
+fn unsigned_manifest_comparison_normalizes_catalog_fields_only() {
+    let env = Env::new();
+    let path = env.project().join("release.json");
+    let path_arg = path.to_str().unwrap();
+    assert!(env
+        .run(&["adapter", "registry", "export", "--out", path_arg])
+        .status
+        .success());
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let adapters = manifest["adapters"].as_array_mut().unwrap();
+    adapters.reverse();
+    for adapter in adapters {
+        let id = adapter["id"].as_str().unwrap().to_ascii_uppercase();
+        adapter["id"] = Value::from(format!(" {id} "));
+        for field in ["name", "version", "digest"] {
+            adapter[field] = Value::from(format!(" {} ", adapter[field].as_str().unwrap()));
+        }
+        adapter["tools"].as_array_mut().unwrap().reverse();
+    }
+    // Extra artifact metadata is not part of the manifest comparison.
+    manifest["archive_sha256"] = Value::from("not-checked");
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let out = env.run(&[
+        "adapter",
+        "verify-manifest",
+        path_arg,
+        "--allow-unsigned",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let report = doc(&out, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["ok"], true);
+    assert!(report.get("drift").is_none());
+}
+
+#[test]
 fn unsigned_release_manifest_checks_structure_and_catalog_fields() {
     let env = Env::new();
     let path = env.project().join("release.json");
