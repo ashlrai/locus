@@ -26,6 +26,11 @@ unknown markers in registered files fail validation before any file is written.
 Keep historical examples outside these blocks. The checker uses the same
 rendering engine as sync, so there is only one freshness definition.
 
+Package READMEs use the version-neutral `package-install` template because
+they are embedded in immutable npm tarballs. Public documentation can use
+the published-version `install` template without baking an old pin into a
+future package.
+
 ## Source candidate versus published release
 
 `scripts/freshness/published.json` pins the last verified published version.

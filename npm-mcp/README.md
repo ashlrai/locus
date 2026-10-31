@@ -1,10 +1,15 @@
 # @ashlrai/locus-mcp
 
-<!-- fresh:begin install -->
+<!-- fresh:begin package-install -->
 ```bash
-npm install -g locus-cli@0.5.2 @ashlrai/locus-mcp@0.5.2
+npm install -g locus-cli @ashlrai/locus-mcp
 ```
 <!-- fresh:end -->
+
+**Release integrity:** The published v0.6.1 wrapper enforces the fail-closed
+checksum behavior described below. Earlier v0.6.0 wrappers could install
+without verification when a checksum sidecar was missing or unparseable and
+could fall back to Cargo on a checksum mismatch during first use.
 
 MCP multiplexor for [Locus](https://github.com/ashlrai/locus) — tools hard-scoped to the active pin so agents cannot act in the wrong tenant.
 

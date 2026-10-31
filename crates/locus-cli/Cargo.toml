@@ -20,7 +20,7 @@ path = "src/mcp.rs"
 [dependencies]
 locus-core = { workspace = true }
 libc = { workspace = true }
-locus-mcp = { path = "../locus-mcp", version = "0.6.0" }
+locus-mcp = { path = "../locus-mcp", version = "0.6.1" }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 anyhow = { workspace = true }

@@ -30,7 +30,7 @@
     "Linux",
     "Windows"
   ],
-  "softwareVersion": "0.5.2",
+  "softwareVersion": "0.6.1",
   "description": "Your coding agent can't act as the wrong account.",
   "url": "https://locus.dev/",
   "codeRepository": "https://github.com/ashlrai/locus",
@@ -473,7 +473,7 @@
     </nav>
 
     <header>
-      <p class="eyebrow">AI-native identity plane · <!-- disc:version -->v0.5.2<!-- /disc:version --></p>
+      <p class="eyebrow">AI-native identity plane · <!-- disc:version -->v0.6.1<!-- /disc:version --></p>
       <h1>Wrong account,<br /><span class="dim">impossible.</span></h1>
       <p class="lede">
         Pin a client: every CLI command, MCP tool, and the <strong>local dashboard</strong>
@@ -531,10 +531,11 @@
 <span class="cmd">npx @ashlrai/locus-mcp</span>  <span class="cmt"># MCP server for Claude Code / Cursor</span></pre>
         </div>
         <div class="term-block" id="tab-brew">
-          <pre><span class="cmt"># tap live - installs locus + locus-mcp</span>
+          <pre><span class="cmt"># tap is v0.5.0 at the v0.6.1 release; use npm for v0.6.1</span>
 <span class="cmd">brew install ashlrai/tap/locus</span></pre>
         </div>
       </div>
+      <p class="copy-hint">Published v0.6.1 npm wrappers fail closed on missing, unparseable, unreachable or mismatched checksum sidecars without Cargo fallback. Earlier v0.6.0 wrappers could install unverified or fall back to Cargo on mismatch. Checksums detect corruption, not publisher authenticity. <a href="https://github.com/ashlrai/locus/blob/main/npm/README.md">Details</a></p>
       <p class="copy-hint">MIT · open source · github.com/ashlrai/locus</p>
     </section>
 
