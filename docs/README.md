@@ -69,4 +69,5 @@ configuration instead of a plan.
 
 See the [manual verification procedure](dry-run-verification.md) to check plans
 and unchanged state, the [agent contract](agent-contract.md#--dry-run) for plan
-details and exit codes, and [doctor repairs](doctor-fix.md) for its default preview.
+details and exit codes, the [acceptance checklist](dry-run-acceptance.md) for
+review criteria, and [doctor repairs](doctor-fix.md) for its default preview.
