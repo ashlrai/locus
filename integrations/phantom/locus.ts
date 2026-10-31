@@ -96,7 +96,13 @@
  */
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  accessSync, closeSync, constants, existsSync, fchmodSync, fchownSync,
+  fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync,
+  renameSync, unlinkSync, writeFileSync,
+} from "node:fs";
+import type { Stats } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -2184,8 +2190,49 @@ export function mergeLocusIntoMcpConfig(
 }
 
 /**
+ * Stage complete JSON next to its destination, then replace it in one rename.
+ * Preserves POSIX owner/group/mode, not extended ACLs or xattrs. This is not a
+ * concurrent-writer transaction or a guarantee of durability after power loss.
+ */
+function writeMcpConfigAtomically(path: string, text: string, previous?: Stats): void {
+  const dir = dirname(path);
+  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  const staged = join(dir, `.locus-mcp-${randomUUID()}.tmp`);
+  let fd: number | undefined;
+  let committed = false;
+  let opened = false;
+  try {
+    fd = openSync(staged, "wx", 0o600);
+    opened = true;
+    writeFileSync(fd, text, "utf8");
+    if (previous && process.platform !== "win32") {
+      fchownSync(fd, previous.uid, previous.gid);
+      fchmodSync(fd, previous.mode & 0o7777);
+    }
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(staged, path);
+    committed = true;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* retain the original failure */ }
+    }
+    if (opened && !committed) {
+      try { unlinkSync(staged); } catch { /* cleanup is best effort */ }
+    }
+  }
+}
+
+/**
  * Read MCP JSON at `path`, merge locus server, write if changed.
  * Creates parent directories. Safe for project `.mcp.json` / `.cursor/mcp.json`.
+ * Refuses malformed existing JSON or a non-object server map without writing.
+ * Refuses final symlinks, hardlinks and nonregular files (like the guarded
+ * workspace writer in crates/locus-core/src/store.rs). Changed existing files must
+ * be writable. New files are private (0600); POSIX owner/group/mode survive
+ * replacement. Replacement requires a writable parent directory. Extended ACLs/xattrs
+ * and concurrent writers are not supported.
  *
  * @example
  * ```ts
@@ -2199,7 +2246,18 @@ export function registerLocusInMcpConfig(
   if (!path?.trim()) {
     throw new LocusMcpConfigError("path is required");
   }
-  const created = !existsSync(path);
+  let previous: Stats | undefined;
+  try {
+    previous = lstatSync(path);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new LocusMcpConfigError("cannot inspect existing MCP config; left unchanged");
+    }
+  }
+  if (previous && (!previous.isFile() || previous.nlink !== 1)) {
+    throw new LocusMcpConfigError("MCP config must be a single-link regular file, not a symlink; left unchanged");
+  }
+  const created = previous === undefined;
   let raw = "";
   if (!created) {
     try {
@@ -2210,7 +2268,30 @@ export function registerLocusInMcpConfig(
       );
     }
   }
-  const parsed = parseMcpConfigJson(raw);
+  // The forgiving pure parser is useful for previews, but registration must
+  // never replace an unreadable config and silently discard other servers.
+  let parsed: McpConfigJson = { mcpServers: {} };
+  if (!created) {
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      // Parser diagnostics may include configuration content. Do not echo it.
+      throw new LocusMcpConfigError("existing MCP config is not valid JSON; left unchanged");
+    }
+    if (value === null || typeof value !== "object" || Array.isArray(value)) {
+      throw new LocusMcpConfigError("existing MCP config must be an object; left unchanged");
+    }
+    parsed = value as McpConfigJson;
+    if (
+      "mcpServers" in parsed &&
+      (parsed.mcpServers === null ||
+        typeof parsed.mcpServers !== "object" ||
+        Array.isArray(parsed.mcpServers))
+    ) {
+      throw new LocusMcpConfigError("existing mcpServers must be an object; left unchanged");
+    }
+  }
   const merged = mergeLocusIntoMcpConfig(parsed, opts);
 
   if (!merged.changed && !created) {
@@ -2222,12 +2303,13 @@ export function registerLocusInMcpConfig(
     };
   }
 
-  try {
-    const dir = dirname(path);
-    if (dir && dir !== "." && !existsSync(dir)) {
-      mkdirSync(dir, { recursive: true });
+  if (previous) {
+    try { accessSync(path, constants.W_OK); } catch {
+      throw new LocusMcpConfigError("existing MCP config is not writable; left unchanged");
     }
-    writeFileSync(path, `${JSON.stringify(merged.config, null, 2)}\n`, "utf8");
+  }
+  try {
+    writeMcpConfigAtomically(path, `${JSON.stringify(merged.config, null, 2)}\n`, previous);
   } catch (e) {
     throw new LocusMcpConfigError(
       `failed to write ${path}: ${e instanceof Error ? e.message : String(e)}`,
