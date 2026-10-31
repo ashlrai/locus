@@ -1426,7 +1426,13 @@ fn argv_targets_unplannable(args: &[std::ffi::OsString]) -> bool {
         .skip(1)
         .filter_map(|a| a.to_str())
         .filter(|a| !a.starts_with('-'));
-    match words.next() {
+    // `locus help <cmd>` renders <cmd>'s help; inspect <cmd> so the flag is
+    // hidden there exactly as `locus <cmd> --help` hides it.
+    let target = match words.next() {
+        Some("help") => words.next(),
+        other => other,
+    };
+    match target {
         Some("exec" | "run" | "serve" | "dashboard") => true,
         // `mcp` alone is the server; `mcp mint/list/revoke` plan normally.
         Some("mcp") => {
@@ -12868,6 +12874,43 @@ mod agent_contract_tests {
             let mut args: Vec<_> = form.split_whitespace().collect();
             args.extend_from_slice(suffix);
             assert_eq!(class(&args), DryRunSupport::Plans, "{form}");
+        }
+    }
+
+    #[test]
+    fn unplannable_detection_covers_the_help_subcommand() {
+        use super::argv_targets_unplannable;
+        let argv = |tail: &[&str]| -> Vec<std::ffi::OsString> {
+            let mut v = vec![std::ffi::OsString::from("locus")];
+            v.extend(tail.iter().map(std::ffi::OsString::from));
+            v
+        };
+        // `locus help <cmd>` renders <cmd>'s help and must hide the flag for
+        // the same commands `locus <cmd> --help` hides it for.
+        for tail in [
+            &["help", "exec"][..],
+            &["help", "run"][..],
+            &["help", "serve"][..],
+            &["help", "dashboard"][..],
+            &["help", "mcp"][..],
+            &["help", "ci", "run"][..],
+            &["exec"][..],
+            &["ci", "run"][..],
+        ] {
+            assert!(argv_targets_unplannable(&argv(tail)), "{tail:?}");
+        }
+        for tail in [
+            &["help"][..],
+            &["help", "pin"][..],
+            &["help", "ci"][..],
+            &["help", "mcp", "mint"][..],
+            &["help", "mcp", "list"][..],
+            &["help", "topic", "agent-contract"][..],
+            &["pin"][..],
+            &["mcp", "mint"][..],
+            &["ci", "env", "-b", "x"][..],
+        ] {
+            assert!(!argv_targets_unplannable(&argv(tail)), "{tail:?}");
         }
     }
 

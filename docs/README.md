@@ -70,4 +70,6 @@ configuration instead of a plan.
 See the [manual verification procedure](dry-run-verification.md) to check plans
 and unchanged state, the [agent contract](agent-contract.md#--dry-run) for plan
 details and exit codes, the [acceptance checklist](dry-run-acceptance.md) for
-review criteria, and [doctor repairs](doctor-fix.md) for its default preview.
+review criteria, the [help review matrix](dry-run-review-matrix.md) for which
+command forms document the flag, and [doctor repairs](doctor-fix.md) for its
+default preview.
