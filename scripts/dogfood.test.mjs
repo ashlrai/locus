@@ -8,6 +8,59 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 const script = join(dirname(fileURLToPath(import.meta.url)), 'dogfood.sh');
+
+test('isolated dogfood home works with spaces in TMPDIR and is removed on exit', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces');
+  const fixtureRoot = join(root, 'fixture');
+  const bin = join(fixtureRoot, 'target', 'debug');
+  mkdirSync(scratch);
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(fixtureRoot, 'scripts'));
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus'), `#!/bin/bash
+case "$1" in
+  init)
+    printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"
+    [[ "$PWD" == "$LOCUS_HOME/project" ]] || exit 90
+    printf 'usable' > "$LOCUS_HOME/sentinel"
+    ;;
+  binding)
+    [[ "$(cat "$LOCUS_HOME/sentinel")" == usable ]] || exit 91
+    ;;
+  --version) printf 'fixture\\n' ;;
+  quickstart) exit 42 ;;
+  *) exit 92 ;;
+esac
+`, { mode: 0o755 });
+  const probe = join(root, 'probe');
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: {
+      ...process.env,
+      TMPDIR: scratch,
+      PROBE_FILE: probe,
+      DOGFOOD_HOME: '',
+      DOGFOOD_USE_REAL_HOME: '0',
+      DOGFOOD_SELF_TEST: '0',
+    },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 42, 'dogfood should reach the controlled quickstart failure');
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.match(home, /\/locus-dogfood\.[^/]+$/);
+  assert.equal(dirname(home), scratch);
+  assert.equal(existsSync(home), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
 const harness = String.raw`
 source "$1"
 locus() {
