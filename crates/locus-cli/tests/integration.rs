@@ -8,6 +8,8 @@ mod agent_contract_recut;
 mod agent_input_contracts;
 #[path = "ashlr_handshake.rs"]
 mod ashlr_handshake;
+#[path = "autopin_hardening.rs"]
+mod autopin_hardening;
 #[path = "autopin_learned_guard.rs"]
 mod autopin_learned_guard;
 #[path = "autopin_suggest.rs"]
