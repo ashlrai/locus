@@ -148,6 +148,45 @@ fn repeated_matching_adds_are_a_true_noop() {
 }
 
 #[test]
+fn concurrent_identical_adds_write_once() {
+    let f = Fixture::new();
+    json_success(f.run(
+        &[
+            "--json",
+            "binding",
+            "add",
+            "other",
+            "--tenant",
+            "other",
+            "--provider",
+            "github",
+            "--account",
+            "acct",
+            "--credential-ref",
+            "env:OTHER_TOKEN",
+            "--non-interactive",
+        ],
+        true,
+    ));
+    let audit_before = fs::read_to_string(f.audit()).unwrap().lines().count();
+
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| json_success(f.add("binding", &[], true)));
+        let second = scope.spawn(|| json_success(f.add("binding", &[], true)));
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_ne!(first["changed"], second["changed"]);
+    assert_eq!(
+        fs::read_to_string(f.audit()).unwrap().lines().count(),
+        audit_before + 1
+    );
+
+    let before = snapshot(&f.binding());
+    assert_eq!(json_success(f.add("binding", &[], true))["changed"], false);
+    assert_eq!(snapshot(&f.binding()), before);
+}
+
+#[test]
 fn a_different_add_still_requires_force() {
     let f = Fixture::new();
     json_success(f.add("binding", &[], true));

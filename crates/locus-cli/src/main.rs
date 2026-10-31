@@ -6764,6 +6764,14 @@ fn scope_prompts(provider: &str) -> &'static [(&'static str, bool)] {
     }
 }
 
+fn binding_target_exists(path: &std::path::Path) -> Result<bool> {
+    match path.symlink_metadata() {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("cannot inspect {}", path.display())),
+    }
+}
+
 /// Shared handler for `locus binding add` (guided_default=false) and
 /// `locus client add` (guided_default=true). The write path is exactly
 /// `Store::save_binding` — validation, bindings lock, reserved-alias check,
@@ -6892,7 +6900,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
     // credential ref would change under every workspace that names it.
     // symlink_metadata: a dangling symlink is an existing entry too.
     let target = s.bindings_dir().join(format!("{}.toml", answers.alias));
-    let exists = target.symlink_metadata().is_ok();
+    let exists = binding_target_exists(&target)?;
     let identical = exists && !args.force && s.binding_matches(&b)?;
 
     if args.dry_run {
@@ -11522,10 +11530,29 @@ mod alias_ux_tests {
 #[cfg(test)]
 mod ttl_and_client_add_tests {
     use super::{
-        binding_from_answers, human_dur, missing_add_flags, parse_mint_ttl, parse_pin_ttl,
-        resolve_add_answers, scope_prompts, split_repos, AddAnswers, BindingAddArgs,
+        binding_from_answers, binding_target_exists, human_dur, missing_add_flags, parse_mint_ttl,
+        parse_pin_ttl, resolve_add_answers, scope_prompts, split_repos, AddAnswers, BindingAddArgs,
     };
     use locus_core::Store;
+
+    #[test]
+    fn binding_target_check_distinguishes_missing_from_inspection_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        assert!(!binding_target_exists(&file).unwrap());
+        std::fs::write(&file, "fixture").unwrap();
+        assert!(binding_target_exists(&file).unwrap());
+        assert!(binding_target_exists(&file.join("child")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binding_target_check_counts_dangling_symlinks_as_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &link).unwrap();
+        assert!(binding_target_exists(&link).unwrap());
+    }
 
     fn full_args() -> BindingAddArgs {
         BindingAddArgs {
