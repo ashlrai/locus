@@ -2956,8 +2956,8 @@ export interface LocusMtPreflightResult {
   /** True when the server demonstrably runs `--multi-tenant`. */
   multiTenant: boolean;
   /**
-   * - `multi_tenant`: capabilities said `mode=multi_tenant`, OR /mcp answered
-   *   401 `invalid_grant` (only the MT layer emits that body).
+   * - `multi_tenant`: capabilities said `mode=multi_tenant` or `mode=swarm`,
+   *   OR /mcp answered 401 `invalid_grant` (only the MT layer emits that body).
    * - `single_tenant`: capabilities 200 without the MT mode marker.
    * - `unknown`: unreachable / server bearer rejected / unrecognized.
    */
@@ -2976,7 +2976,8 @@ export interface LocusMtPreflightResult {
  * mode detection (GET /mcp capabilities). Never throws; values-free.
  *
  * MT detection is sound both ways: with a tenant token the capabilities body
- * carries `mode: "multi_tenant"` + `grant_id`; without one, only an MT server
+ * carries `mode: "multi_tenant"` or `"swarm"` + `grant_id`; both normalize to
+ * the `multi_tenant` result category. Without one, only an MT server
  * answers /mcp with 401 `invalid_grant` (single-tenant servers return 200
  * capabilities on a valid server bearer).
  */
@@ -3048,7 +3049,7 @@ export async function locusMtPreflight(
 
   if (status === 200) {
     const obj = tenantErrorObject(body);
-    if (obj?.mode === "multi_tenant") {
+    if (obj?.mode === "multi_tenant" || obj?.mode === "swarm") {
       return {
         reachable: true,
         multiTenant: true,
