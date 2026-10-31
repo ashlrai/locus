@@ -79,6 +79,40 @@ fn doctor_exits_zero_after_fresh_quickstart() {
 }
 
 #[test]
+#[cfg(unix)]
+fn doctor_exits_zero_after_quickstart_and_shell_hook() {
+    let operator = Operator::new();
+    let bin = operator.home.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    // The hook uses cat, but Phantom must remain absent regardless of the host.
+    std::os::unix::fs::symlink("/bin/cat", bin.join("cat")).unwrap();
+    // Keep the quickstart broker's parent shell alive, as in the documented
+    // interactive setup, then export the persisted capability via the hook.
+    let out = Command::new("/bin/bash")
+        .arg("-c")
+        .arg("\"$1\" quickstart >/dev/null && eval \"$(\"$1\" hook bash)\" && \"$1\" doctor --json")
+        .arg("locus-test")
+        .arg(env!("CARGO_BIN_EXE_locus"))
+        .env_clear()
+        .env("HOME", operator.home.path())
+        .env("LOCUS_HOME", operator.locus_home())
+        .env("PATH", &bin)
+        .env("NO_COLOR", "1")
+        .current_dir(operator.project.path())
+        .output()
+        .expect("setup shell runs");
+    assert_eq!(out.status.code(), Some(0), "setup and doctor must succeed");
+    let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["verdict"], "WARN");
+    assert_eq!(report["runtime"]["authority_anchor_ok"], true);
+    let findings = report["findings"].as_array().unwrap();
+    assert!(findings.iter().any(|f| f["code"] == "phantom_missing"));
+    assert!(!findings
+        .iter()
+        .any(|f| f["code"] == "control_capability_not_exported"));
+}
+
+#[test]
 fn doctor_still_exits_one_for_a_broken_state() {
     let operator = Operator::new();
     operator.quickstart();
