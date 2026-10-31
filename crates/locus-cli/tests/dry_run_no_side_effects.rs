@@ -62,6 +62,14 @@ fn preview(root: &Path, args: &[&str], success: bool) {
             .current_dir(root.join("project"))
             .args(["--dry-run"])
             .args(args);
+        // An instrumented child (cargo llvm-cov) writes a .profraw on exit.
+        // env_clear drops LLVM_PROFILE_FILE, so the runtime would fall back
+        // to default_*.profraw in the child's cwd — inside the snapshot.
+        let profile = std::env::var_os("LLVM_PROFILE_FILE").map(PathBuf::from);
+        let profile = profile
+            .map(|p| std::path::absolute(&p).unwrap_or(p))
+            .unwrap_or_else(|| std::env::temp_dir().join("locus-test-%p-%m.profraw"));
+        cmd.env("LLVM_PROFILE_FILE", profile);
         if json {
             cmd.arg("--json");
         }
