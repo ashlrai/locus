@@ -218,7 +218,10 @@ fn session_tick_schema_matches_documentation_and_scope_dependencies() {
     for key in ["scope", "grant_id", "issues"] {
         let mut missing = tenant.clone();
         missing.as_object_mut().unwrap().remove(key);
-        assert!(!tick.is_valid(&missing), "accepted missing {key}: {missing}");
+        assert!(
+            !tick.is_valid(&missing),
+            "accepted missing {key}: {missing}"
+        );
     }
     let mut fallback = operator;
     fallback["whoami"] = Value::Null;
