@@ -1,9 +1,9 @@
 # Changelog
 
 <!-- fresh:begin release -->
-Latest release: [v0.6.0](https://github.com/ashlrai/locus/releases/tag/v0.6.0) (2026-10-31).
+Latest release: [v0.6.1](https://github.com/ashlrai/locus/releases/tag/v0.6.1) (2026-10-31).
 
-Grant-scoped swarm and local peer relay, stricter binding validation, safer npm cache replacement, and failure-safe MCP configuration registration.
+Native npm wrapper downloads now fail closed when release checksums cannot be verified.
 <!-- fresh:end -->
 
 All notable changes to this project will be documented in this file.
@@ -156,6 +156,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notes now state the same `rust-version` the workspace declares, and
   `crates/locus-core/tests/rust_version.rs` keeps `cargo metadata`, member
   crate manifests and the documented install requirements in agreement with it.
+
+## [0.6.1] - 2026-10-31
+
+Highlights: Native npm wrapper downloads now fail closed when release checksums cannot be verified.
+
+### Fixed
+
+- Both npm wrappers reject missing, malformed, unreachable or mismatched SHA-256 sidecars before installing or replacing a native binary. Checksum failures do not fall back to Cargo; the CLI eager postinstall fails rather than silently deferring the error. Explicit source installation remains available. The sidecars detect corruption, not publisher authenticity.
 
 ## [0.6.0] - 2026-10-31
 

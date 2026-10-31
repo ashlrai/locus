@@ -63,6 +63,7 @@ Identity is resolved at the gate, not in the prompt. Bindings hold principal, te
 - [Release manifest consumer checklist](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer-checklist.md)
 - [Adapter registry manifest verification: open questions](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-verification-questions.md)
 - [Verifying an adapter registry release manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-verification.md)
+- [Adapter registry signing: open questions](https://github.com/ashlrai/locus/blob/main/docs/registry-signing-open-questions.md)
 - [Adapter registry trust FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-faq.md)
 - [Adapter registry release manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-trust.md)
 - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)

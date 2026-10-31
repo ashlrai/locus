@@ -6,6 +6,8 @@ describes the current format and verification limits; the [v0.5.0 changelog
 entry](../CHANGELOG.md#050--2026-08-16) records the signing capability and
 the unsigned release workflow. The questions below are unresolved; they do
 not announce a signing service, trust root, policy, or release commitment.
+For the producer-side decisions about enabling signing itself, see
+[registry signing open questions](./registry-signing-open-questions.md).
 
 ## What can be verified today?
 

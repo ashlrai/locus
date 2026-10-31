@@ -1,4 +1,4 @@
-// The published 0.6.0 wrappers predate the source-side checksum hardening.
+// The published 0.6.1 wrappers include the checksum hardening absent in 0.6.0.
 const assert = require("node:assert/strict");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
@@ -8,17 +8,17 @@ const root = join(__dirname, "..", "..");
 const read = (path) => readFileSync(join(root, path), "utf8");
 const published = JSON.parse(read("scripts/freshness/published.json")).version;
 
-test("published 0.6.0 checksum limits remain explicit", {
-  skip: published !== "0.6.0" && "applies to the published 0.6.0 wrappers",
+test("published 0.6.1 checksum behavior and 0.6.0 limits remain explicit", {
+  skip: published !== "0.6.1" && "applies to the published 0.6.1 wrappers",
 }, () => {
   for (const path of ["npm/README.md", "npm-mcp/README.md"]) {
     const text = read(path);
-    assert.match(text, /Published v0\.6\.0 integrity limitation/);
-    assert.match(text, /not in the\npublished v0\.6\.0 wrapper/);
-    assert.match(text, /missing or unparseable\nchecksum sidecar can lead to an unverified installation/);
-    assert.match(text, /checksum mismatch during first-use download can trigger a Cargo fallback/);
+    assert.match(text, /published v0\.6\.1 wrapper enforces the fail-closed/);
+    assert.match(text, /Earlier v0\.6\.0 wrappers could install/);
+    assert.match(text, /without verification when a checksum sidecar was missing or unparseable/);
+    assert.match(text, /fall back to Cargo on a checksum mismatch/);
   }
-  assert.match(read("npm/README.md"), /eager postinstall can also report success/);
-  assert.match(read("README.md"), /Checksum fail-closed hardening is in post-v0\.6\.0 source,\nnot yet in a published npm release/);
-  assert.match(read("apps/web/public/index.html"), /Checksum fail-closed hardening is in post-v0\.6\.0 source, not yet in a published npm release/);
+  assert.match(read("npm/README.md"), /eager postinstall could also report success/);
+  assert.match(read("README.md"), /v0\.6\.1 npm wrappers fail closed/);
+  assert.match(read("apps/web/public/index.html"), /v0\.6\.1 npm wrappers fail closed/);
 });

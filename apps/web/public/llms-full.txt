@@ -519,6 +519,21 @@ listed verbatim so an agent can jump straight to the right document.
   - Check an archive separately
   - Signature verification is a separate check
 
+## docs/registry-signing-open-questions.md
+
+- [Adapter registry signing: open questions](https://github.com/ashlrai/locus/blob/main/docs/registry-signing-open-questions.md)
+  - What exists today
+  - What future signing would - and would not - change
+  - Open questions
+    - Signing key custody and provisioning
+    - Registry root publication and trust bootstrap
+    - What a future signature should claim
+    - Freshness, rotation, and revocation
+    - CI integration and release policy
+    - Rollout and consumer migration
+    - Ownership and evidence bar
+  - Scope notes
+
 ## docs/registry-trust-faq.md
 
 - [Adapter registry trust FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-faq.md)

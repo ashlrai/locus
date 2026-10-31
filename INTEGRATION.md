@@ -3,9 +3,9 @@
 <!-- fresh:begin versions -->
 | Component | Version |
 |---|---|
-| Rust workspace (source) | 0.6.0 |
-| npm locus-cli (published) | 0.6.0 |
-| npm @ashlrai/locus-mcp (published) | 0.6.0 |
+| Rust workspace (source) | 0.6.1 |
+| npm locus-cli (published) | 0.6.1 |
+| npm @ashlrai/locus-mcp (published) | 0.6.1 |
 | Published release date | 2026-10-31 |
 <!-- fresh:end -->
 

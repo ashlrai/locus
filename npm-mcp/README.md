@@ -2,15 +2,14 @@
 
 <!-- fresh:begin install -->
 ```bash
-npm install -g locus-cli@0.6.0 @ashlrai/locus-mcp@0.6.0
+npm install -g locus-cli@0.6.1 @ashlrai/locus-mcp@0.6.1
 ```
 <!-- fresh:end -->
 
-**Published v0.6.0 integrity limitation:** The checksum fail-closed behavior
-described below is present in the post-v0.6.0 source checkout, not in the
-published v0.6.0 wrapper pinned above. In v0.6.0, a missing or unparseable
-checksum sidecar can lead to an unverified installation with a warning; a
-checksum mismatch during first-use download can trigger a Cargo fallback.
+**Release integrity:** The published v0.6.1 wrapper enforces the fail-closed
+checksum behavior described below. Earlier v0.6.0 wrappers could install
+without verification when a checksum sidecar was missing or unparseable and
+could fall back to Cargo on a checksum mismatch during first use.
 
 MCP multiplexor for [Locus](https://github.com/ashlrai/locus) — tools hard-scoped to the active pin so agents cannot act in the wrong tenant.
 
