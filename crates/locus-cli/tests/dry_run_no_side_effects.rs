@@ -48,7 +48,7 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Entry> {
     out
 }
 
-fn preview(root: &Path, args: &[&str], success: bool) {
+pub(super) fn preview(root: &Path, args: &[&str], success: bool) {
     let profiles = tempfile::tempdir().unwrap();
     for json in [false, true] {
         let before = snapshot(root);
