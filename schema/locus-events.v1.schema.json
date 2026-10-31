@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ashlrai/locus/schema/locus-events.v1.schema.json",
+  "title": "LocusEventV1",
+  "description": "Versioned wire schema for events Locus emits and hubs (Phantom's router) consume. One event validates against exactly one $defs member; consumers dispatch on the discriminant (`schema` for audit envelopes, `kind` for heartbeat ticks). Validation checks structure, not redaction or absence of sensitive data. Audit detail can contain arbitrary JSON; handle exports accordingly. Emitted by `locus events export` (JSONL lines and JSONL-format webhook bodies, $defs.audit), `locus-mcp` GET /mcp/sse `notifications/message` params.data ($defs.sessionTick) and `locus watch --json` NDJSON ($defs.watchTick).",
+  "oneOf": [
+    { "$ref": "#/$defs/audit" },
+    { "$ref": "#/$defs/sessionTick" },
+    { "$ref": "#/$defs/watchTick" }
+  ],
+  "$defs": {
+    "audit": {
+      "title": "LocusAuditEventV1",
+      "description": "One line of `locus events export` fleet pulse JSONL; the same lines are POSTed when a webhook uses JSONL format. Envelope around one $LOCUS_HOME/audit/events.jsonl record.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "locus_version", "exported_at", "ts", "op", "binding", "kind"],
+      "properties": {
+        "schema": {
+          "const": "locus.audit.v1",
+          "description": "Envelope schema id; router dispatch key."
+        },
+        "locus_version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Emitting locus binary version (semver)."
+        },
+        "exported_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "RFC 3339 export time (same for every line in one export)."
+        },
+        "ts": {
+          "type": "string",
+          "description": "Time copied from the audit record; Store-generated records use RFC 3339."
+        },
+        "op": {
+          "type": "string",
+          "description": "Audited op copied from the audit record, e.g. session.pin or binding.save. Open set; do not dispatch on a closed enum."
+        },
+        "binding": {
+          "type": "string",
+          "description": "Binding alias the op ran against; empty string for global ops."
+        },
+        "detail": {
+          "description": "Per-op metadata copied from the audit record. Any JSON value; may contain sensitive data. Schema validation does not establish redaction."
+        },
+        "kind": {
+          "const": "audit",
+          "description": "Stable kind tag for dashboards."
+        }
+      }
+    },
+    "sessionTick": {
+      "title": "LocusSessionTickV1",
+      "description": "params.data payload of the JSON-RPC notifications/message streamed by `locus-mcp` GET /mcp/sse. Operator ticks omit scope/grant_id/issues; tenant ticks (X-Locus-Tenant-Token) carry all three and describe that grant only.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "session_ok", "whoami", "doctor_verdict", "safe_next", "pinned", "frozen", "version"],
+      "properties": {
+        "kind": {
+          "const": "locus.session_tick",
+          "description": "Router dispatch key."
+        },
+        "scope": {
+          "const": "tenant",
+          "description": "Present only on tenant ticks; absent means operator scope."
+        },
+        "grant_id": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{16}$",
+          "description": "Grant the tick describes (tenant ticks only). Id only, never the token."
+        },
+        "session_ok": {
+          "type": "boolean",
+          "description": "Operator ticks report doctor and safe-next readiness; tenant ticks report grant-scoped drift health."
+        },
+        "whoami": {
+          "type": ["string", "null"],
+          "description": "Binding alias of the verified pin; null when unpinned or unverifiable."
+        },
+        "doctor_verdict": {
+          "type": "string",
+          "enum": ["SAFE", "WARN", "UNSAFE"],
+          "description": "Operator doctor verdict; tenant SAFE or UNSAFE is synthesized from grant-scoped drift health."
+        },
+        "safe_next": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Machine-readable next action (ready, proceed, enter, re_pin, remint_grant, init, doctor_fix, ...). Open set."
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "Whether a pin/grant is present for the described scope."
+        },
+        "frozen": {
+          "type": "boolean",
+          "description": "Whether runtime binding drift is frozen under the live session."
+        },
+        "issues": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Drift issue codes (tenant ticks only; empty when clean)."
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Emitting locus-mcp version (semver)."
+        },
+        "hint": {
+          "type": "string",
+          "description": "Present on the store-unavailable fallback tick."
+        }
+      },
+      "dependentRequired": {
+        "scope": ["grant_id", "issues"],
+        "grant_id": ["scope"],
+        "issues": ["scope"]
+      }
+    },
+    "watchTick": {
+      "title": "LocusWatchTickV1",
+      "description": "One NDJSON line of `locus watch --json` (also `--once`). Compact session heartbeat derived from `locus verify session`.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "session_ok", "doctor_verdict", "safe_next", "pinned", "frozen"],
+      "properties": {
+        "kind": {
+          "const": "watch",
+          "description": "Router dispatch key."
+        },
+        "session_ok": {
+          "type": "boolean",
+          "description": "True when doctor is ok and safe_next is ready."
+        },
+        "whoami": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Verified binding alias; omitted when unpinned or unverifiable."
+        },
+        "doctor_verdict": {
+          "type": "string",
+          "enum": ["SAFE", "WARN", "UNSAFE"],
+          "description": "Doctor verdict."
+        },
+        "safe_next": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Machine-readable next action. Open set."
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "Whether a pin is present (whoami or doctor pin)."
+        },
+        "frozen": {
+          "type": "boolean",
+          "description": "Whether runtime binding drift is frozen under the live session."
+        }
+      }
+    }
+  }
+}

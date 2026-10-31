@@ -337,6 +337,19 @@ fn parse_sse_message_events(body: &str) -> Vec<Value> {
     out
 }
 
+/// $defs member of the versioned locus event schema (see events-schema bet).
+/// Keep local definitions in scope without fetching the published URI.
+fn locus_event_schema(fragment: &str) -> jsonschema::Validator {
+    let mut schema: Value =
+        serde_json::from_str(include_str!("../../../schema/locus-events.v1.schema.json")).unwrap();
+    schema["$ref"] = json!(format!("#/$defs/{fragment}"));
+    schema.as_object_mut().unwrap().remove("oneOf");
+    jsonschema::options()
+        .should_validate_formats(true)
+        .build(&schema)
+        .unwrap()
+}
+
 #[test]
 fn http_tools_call_large_body_streams_multi_sse() {
     let dir = tempdir().unwrap();
@@ -584,8 +597,13 @@ fn http_mcp_sse_once_session_tick() {
     assert!(data.get("session_ok").is_some(), "{tick}");
     assert!(data.get("doctor_verdict").is_some(), "{tick}");
     assert!(data.get("safe_next").is_some(), "{tick}");
-    assert_eq!(data["pinned"], false); // unpinned test home
-                                       // Values-free: no secret material.
+    // Unpinned test home.
+    assert_eq!(data["pinned"], false);
+    // Wire contract: emitted tick conforms to the versioned locus event
+    // schema Phantom's router consumes.
+    let validator = locus_event_schema("sessionTick");
+    assert!(validator.is_valid(data), "{tick}");
+    // Values-free: no secret material.
     let lower = resp_body.to_ascii_lowercase();
     assert!(!lower.contains("phm_"), "{resp_body}");
     assert!(!lower.contains("secret"), "{resp_body}");
