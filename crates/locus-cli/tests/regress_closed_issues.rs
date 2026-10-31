@@ -98,6 +98,7 @@ fn issue_177_older_npm_wrapper_preserves_newer_binary() {
     let status = Command::new("node")
         .args([
             "--test",
+            "--test-reporter=tap",
             "--test-name-pattern",
             "an older wrapper preserves a newer executable",
             "npm/test/no-downgrade.test.js",
