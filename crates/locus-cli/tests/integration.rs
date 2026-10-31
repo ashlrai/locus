@@ -36,6 +36,8 @@ mod exec_exit_codes;
 mod exec_expect;
 #[path = "exec_for.rs"]
 mod exec_for;
+#[path = "exec_startup_budget.rs"]
+mod exec_startup_budget;
 #[path = "fail_closed_unreadable.rs"]
 mod fail_closed_unreadable;
 #[path = "fleet_denials_q8.rs"]

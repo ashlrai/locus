@@ -3045,30 +3045,32 @@ impl Store {
     // ── Audit ─────────────────────────────────────────────────────────────
 
     pub fn audit(&self, op: &str, binding: &str, detail: Option<serde_json::Value>) -> Result<()> {
-        use std::io::{Read, Seek, SeekFrom, Write};
-        let event = serde_json::json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "op": op,
-            "binding": binding,
-            "detail": detail.map(sanitize_audit_value),
-        });
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(self.audit_path())?;
-        f.lock()?;
-        let len = f.metadata()?.len();
-        if len > 0 {
-            f.seek(SeekFrom::Start(len - 1))?;
-            let mut tail = [0u8; 1];
-            f.read_exact(&mut tail)?;
-            if tail[0] != b'\n' {
-                f.write_all(b"\n")?;
-            }
+        self.audit_line_direct(&audit_event_line(op, binding, detail))
+    }
+
+    /// The same audit record appended through the live authority broker: the
+    /// broker writes the line, acknowledges it, then fsyncs the file on its
+    /// own thread — the fsync never lands on this process's exit path. Any
+    /// broker-side failure falls back to a direct append + fsync, so the
+    /// record and its durability are identical either way.
+    pub fn audit_via_broker(
+        &self,
+        op: &str,
+        binding: &str,
+        detail: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let line = audit_event_line(op, binding, detail);
+        if authority_anchor::audit_line(&self.home, &line).is_ok() {
+            return Ok(());
         }
-        writeln!(f, "{event}")?;
-        f.sync_all()?;
+        self.audit_line_direct(&line)
+    }
+
+    /// Direct append + fsync (the pre-broker path; also the broker's own
+    /// fallback when no broker answers).
+    fn audit_line_direct(&self, line: &str) -> Result<()> {
+        let file = append_audit_line(&self.home, line)?;
+        file.sync_all()?;
         Ok(())
     }
 
@@ -3446,6 +3448,49 @@ impl Store {
     pub fn workspace_for(&self, cwd: &Path) -> Result<Option<(PathBuf, WorkspaceConfig)>> {
         find_workspace(cwd)
     }
+}
+
+/// One finished audit event as a JSON line (no trailing newline): timestamp
+/// plus the sanitized op/binding/detail fields.
+fn audit_event_line(op: &str, binding: &str, detail: Option<serde_json::Value>) -> String {
+    serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "op": op,
+        "binding": binding,
+        "detail": detail.map(sanitize_audit_value),
+    })
+    .to_string()
+}
+
+/// Append one audit line to `audit/events.jsonl` under `home`: create the
+/// file if needed, flock it, terminate a partial trailing line, then write.
+/// Returns the still-locked open file so the caller chooses when to fsync —
+/// `Store::audit` fsyncs inline, while the authority broker fsyncs after it
+/// has answered the append request.
+pub(crate) fn append_audit_line(home: &Path, line: &str) -> Result<fs::File> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let path = audit_events_path(home);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&path)?;
+    f.lock()?;
+    let len = f.metadata()?.len();
+    if len > 0 {
+        f.seek(SeekFrom::Start(len - 1))?;
+        let mut tail = [0u8; 1];
+        f.read_exact(&mut tail)?;
+        if tail[0] != b'\n' {
+            f.write_all(b"\n")?;
+        }
+    }
+    f.write_all(line.as_bytes())?;
+    f.write_all(b"\n")?;
+    Ok(f)
 }
 
 fn sanitize_audit_value(value: serde_json::Value) -> serde_json::Value {
@@ -4892,6 +4937,25 @@ credential_ref = "ghp_UNSAFE/CANARY"
             assert!(!audit.contains(canary));
         }
         assert!(audit.contains("<redacted>"));
+    }
+
+    #[test]
+    fn audit_via_broker_falls_back_to_direct_write_without_a_broker() {
+        // No broker owns this home: the append must land identically via the
+        // direct path, and later events must still append after it.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .audit_via_broker("probe", "fallback", Some(serde_json::json!({"exit": 0})))
+            .unwrap();
+        store.audit("probe2", "direct", None).unwrap();
+        let events = store.read_audit_events().unwrap();
+        let ops: Vec<_> = events.iter().map(|event| event.op.as_str()).collect();
+        assert!(ops.contains(&"probe"), "{ops:?}");
+        assert!(ops.contains(&"probe2"), "{ops:?}");
+        let event = events.iter().find(|event| event.op == "probe").unwrap();
+        assert_eq!(event.binding, "fallback");
+        assert_eq!(event.detail.as_ref().unwrap()["exit"], 0);
     }
 
     #[cfg(unix)]

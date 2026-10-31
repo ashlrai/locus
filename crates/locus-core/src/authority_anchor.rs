@@ -151,6 +151,9 @@ enum AnchorRequest {
         generation: u64,
         subject_digest: String,
     },
+    Audit {
+        line: String,
+    },
     Revoke {
         challenge: String,
         session_id: String,
@@ -477,6 +480,32 @@ pub(crate) fn grant_executor(
         })
     } else {
         Err(control_error(response, "executor grant refused"))
+    }
+}
+
+/// Ask the live broker to append one finished audit line to
+/// `audit/events.jsonl`. The response acknowledges that the record is in the
+/// log file; the fsync completes inside the broker after it responds, off the
+/// caller's exit path. Fails when no usable broker endpoint answers — the
+/// caller then appends and fsyncs directly (identical record, identical
+/// durability on the slower path).
+pub(crate) fn audit_line(home: &Path, line: &str) -> Result<()> {
+    let (auth, _mode) = validation_auth()?;
+    let endpoint = read_endpoint(home).map_err(no_current_endpoint)?;
+    let response = request(
+        &endpoint,
+        &AnchorRequest::Audit {
+            line: line.to_string(),
+        },
+        &auth,
+    )?;
+    if response.ok {
+        Ok(())
+    } else {
+        Err(control_error(
+            response,
+            "authority broker refused the audit append",
+        ))
     }
 }
 
@@ -1123,7 +1152,9 @@ fn run_server(
                 let identity = broker_identity.clone();
                 let error_home = home.clone();
                 thread::spawn(move || {
-                    if let Err(error) = serve_connection(connection, &identity, &state, &retired) {
+                    if let Err(error) =
+                        serve_connection(connection, &identity, &state, &retired, &error_home)
+                    {
                         record_broker_error(&error_home, &error);
                     }
                     clients.fetch_sub(1, Ordering::AcqRel);
@@ -1147,6 +1178,7 @@ fn serve_connection(
     broker: &BrokerIdentity,
     state: &Arc<Mutex<AnchorState>>,
     retired: &Arc<AtomicBool>,
+    home: &Path,
 ) -> Result<()> {
     platform::set_deadlines(&connection, IO_TIMEOUT)?;
     let peer = connection_peer_identity(&connection)?;
@@ -1177,15 +1209,65 @@ fn serve_connection(
             &key,
         );
     }
-    let response = handle_request(
-        &mut guard,
-        &peer,
-        &envelope.credential,
-        envelope.request,
-        retired,
-    );
-    drop(guard);
-    write_authenticated_response(&mut connection, &envelope.nonce, response, &key)
+    // An audit append never touches authority state: the broker writes the
+    // record and acknowledges it, then fsyncs the file after responding so
+    // the caller's exit path never waits on the disk flush. The append and
+    // its audit-file flock wait happen with the state lock released so a
+    // blocked audit write cannot stall unrelated authority requests.
+    let mut audit_file = None;
+    let response = if let AnchorRequest::Audit { line } = &envelope.request {
+        let epoch = guard.epoch.clone();
+        drop(guard);
+        match audit_append(home, line) {
+            Ok(file) => {
+                audit_file = Some(file);
+                AnchorResponse {
+                    ok: true,
+                    epoch: Some(epoch),
+                    generation: None,
+                    challenge: None,
+                    executor_capability: None,
+                    error: None,
+                    error_code: None,
+                }
+            }
+            Err(_) => response_error("authority audit append failed"),
+        }
+    } else {
+        let response = handle_request(
+            &mut guard,
+            &peer,
+            &envelope.credential,
+            envelope.request,
+            retired,
+        );
+        drop(guard);
+        response
+    };
+    let written = write_authenticated_response(&mut connection, &envelope.nonce, response, &key);
+    if let Some(file) = audit_file {
+        let _ = file.sync_all();
+    }
+    written
+}
+
+/// Append one audit line on the broker's behalf: one JSON object per line —
+/// non-empty, no embedded newline, parses as an object — so a malformed or
+/// multi-line record can never corrupt the log shape. The returned file
+/// still holds the flock and is fsync'd by [`serve_connection`] after the
+/// response is sent.
+fn audit_append(home: &Path, line: &str) -> Result<fs::File> {
+    let valid = !line.is_empty()
+        && !line.contains('\n')
+        && serde_json::from_str::<serde_json::Value>(line)
+            .map(|value| value.is_object())
+            .unwrap_or(false);
+    if !valid {
+        return Err(LocusError::AuthorityAnchorUnavailable(
+            "invalid audit record".into(),
+        ));
+    }
+    crate::store::append_audit_line(home, line)
 }
 
 fn request_key(state: &AnchorState, credential: &RequestCredential) -> Option<[u8; 32]> {
@@ -1203,7 +1285,7 @@ fn credential_allows_request(credential: &RequestCredential, request: &AnchorReq
         RequestCredential::Executor { .. } => {
             matches!(
                 request,
-                AnchorRequest::Ping | AnchorRequest::Validate { .. }
+                AnchorRequest::Ping | AnchorRequest::Validate { .. } | AnchorRequest::Audit { .. }
             )
         }
     }
@@ -1444,6 +1526,12 @@ fn handle_request(
             }
             retired.store(true, Ordering::Release);
             response_ok(state, None)
+        }
+        // Audit appends are served by `serve_connection` before dispatch —
+        // they never touch authority state. Reachable only if that ordering
+        // changes; fail closed rather than panic.
+        AnchorRequest::Audit { .. } => {
+            response_error("authority audit append is not a state operation")
         }
     }
 }
@@ -2587,6 +2675,80 @@ mod tests {
         .unwrap();
         assert!(!response.ok);
         assert_eq!(response.error_code, Some(AnchorErrorCode::StaleGeneration));
+        retire(dir.path());
+    }
+
+    #[test]
+    fn broker_audit_appends_one_line_and_rejects_malformed_records() {
+        let dir = tempdir().unwrap();
+        let endpoint = broker(dir.path());
+        let lease = issue(dir.path(), "ses_audit", "active", TEST_SUBJECT).unwrap();
+        let capability =
+            grant_executor(dir.path(), &lease, "ses_audit", "active", TEST_SUBJECT).unwrap();
+
+        // The control credential appends one record.
+        let exec_line =
+            "{\"ts\":\"t\",\"op\":\"session.exec\",\"binding\":\"bench\",\"detail\":{\"exit\":0}}"
+                .to_string();
+        let response = request(
+            &endpoint,
+            &AnchorRequest::Audit {
+                line: exec_line.clone(),
+            },
+            &auth(),
+        )
+        .unwrap();
+        assert!(response.ok, "{response:?}");
+
+        // A granted executor credential appends too — the delegated exec's
+        // post-child audit uses its executor capability, not control.
+        let delegated_line =
+            "{\"ts\":\"t\",\"op\":\"delegated.exec\",\"binding\":\"bench\",\"detail\":null}"
+                .to_string();
+        let response = request(
+            &endpoint,
+            &AnchorRequest::Audit {
+                line: delegated_line.clone(),
+            },
+            &executor_auth(&capability),
+        )
+        .unwrap();
+        assert!(response.ok, "{response:?}");
+
+        // Malformed records are refused: empty, an embedded newline (extra
+        // injected line), and non-object JSON.
+        for line in [
+            String::new(),
+            format!("{exec_line}\n{{\"op\":\"forged\"}}"),
+            "[1,2]".to_string(),
+            "not json".to_string(),
+        ] {
+            let response = request(&endpoint, &AnchorRequest::Audit { line }, &auth()).unwrap();
+            assert!(!response.ok, "malformed audit record accepted");
+        }
+
+        // Exactly the two good records landed, byte-identical, in order.
+        let log = fs::read_to_string(crate::store::audit_events_path(dir.path())).unwrap();
+        assert_eq!(
+            log.lines().collect::<Vec<_>>(),
+            [exec_line.as_str(), delegated_line.as_str()]
+        );
+
+        // Executor audit power reaches nothing else: a control operation is
+        // still refused.
+        let forbidden = request(
+            &endpoint,
+            &AnchorRequest::Revoke {
+                challenge: random_hex(32),
+                session_id: "ses_audit".into(),
+                backing_type: "active".into(),
+                epoch: lease.epoch,
+                generation: lease.generation,
+            },
+            &executor_auth(&capability),
+        )
+        .unwrap();
+        assert!(!forbidden.ok);
         retire(dir.path());
     }
 
