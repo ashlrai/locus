@@ -76,6 +76,8 @@ mod setup_client_shapes;
 mod setup_gemini;
 #[path = "setup_supervised_hint.rs"]
 mod setup_supervised_hint;
+#[path = "siem_export.rs"]
+mod siem_export;
 #[path = "stale_pin_recovery.rs"]
 mod stale_pin_recovery;
 #[path = "status_doctor_output.rs"]
