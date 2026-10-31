@@ -230,6 +230,25 @@ assert_binaries "$TEST_CASE/custom bin"
 ok 'normalizes version and supports destination with spaces'
 
 new_case; fixture
+HOME='' TMPDIR="$TEST_CASE/tmp" PATH="$TEST_CASE/bin" \
+    "$BASH_BIN" "$INSTALLER" --version v1.2.3 > "$TEST_CASE/stdout" 2> "$TEST_CASE/stderr" && fail 'unset HOME accepted without destination'
+grep -q 'HOME is unset' "$TEST_CASE/stderr" || fail 'missing HOME guidance'
+[[ ! -e "$TEST_CASE/downloads" ]] || fail 'missing HOME triggered a download'
+HOME='' TMPDIR="$TEST_CASE/tmp" PATH="$TEST_CASE/bin" \
+    "$BASH_BIN" "$INSTALLER" --version v1.2.3 --bin-dir "$TEST_CASE/custom" > "$TEST_CASE/stdout" 2> "$TEST_CASE/stderr" || fail 'explicit destination required HOME'
+assert_binaries "$TEST_CASE/custom"
+assert_clean
+ok 'requires HOME only for the default destination'
+
+new_case; fixture
+HOME="$TEST_CASE/home" TMPDIR="$TEST_CASE/tmp" PATH="$TEST_CASE/bin:$TEST_CASE/home/.local/bin" \
+    "$BASH_BIN" "$INSTALLER" --version v1.2.3 > "$TEST_CASE/stdout" 2> "$TEST_CASE/stderr" || fail 'installation with destination on PATH failed'
+assert_binaries "$TEST_CASE/home/.local/bin"
+assert_clean
+if grep -q 'Add this directory to your PATH' "$TEST_CASE/stdout"; then fail 'unnecessary PATH guidance'; fi
+ok 'omits PATH guidance when destination is already on PATH'
+
+new_case; fixture
 rm "$TEST_CASE/bin/sha256sum"
 success --version v1.2.3
 grep -q '^shasum$' "$TEST_CASE/hash-calls" || fail 'shasum fallback not used'
