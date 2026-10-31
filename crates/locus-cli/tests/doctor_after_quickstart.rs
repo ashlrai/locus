@@ -88,9 +88,11 @@ fn doctor_exits_zero_after_quickstart_and_shell_hook() {
     std::os::unix::fs::symlink("/bin/cat", bin.join("cat")).unwrap();
     // Keep the quickstart broker's parent shell alive, as in the documented
     // interactive setup, then export the persisted capability via the hook.
+    // A trailing shell builtin prevents Bash from exec-replacing that supervisor
+    // with doctor; process-image replacement correctly invalidates the broker.
     let out = Command::new("/bin/bash")
         .arg("-c")
-        .arg("\"$1\" quickstart >/dev/null && eval \"$(\"$1\" hook bash)\" && \"$1\" doctor --json")
+        .arg("\"$1\" quickstart >/dev/null && eval \"$(\"$1\" hook bash)\" && \"$1\" doctor --json; exit $?")
         .arg("locus-test")
         .arg(env!("CARGO_BIN_EXE_locus"))
         .env_clear()
@@ -101,7 +103,11 @@ fn doctor_exits_zero_after_quickstart_and_shell_hook() {
         .current_dir(operator.project.path())
         .output()
         .expect("setup shell runs");
-    assert_eq!(out.status.code(), Some(0), "setup and doctor must succeed");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "setup and doctor must succeed: {out:?}"
+    );
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["verdict"], "WARN");
     assert_eq!(report["runtime"]["authority_anchor_ok"], true);
