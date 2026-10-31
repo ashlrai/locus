@@ -28,6 +28,7 @@ fi
 
 # Keep the documented prerequisites and verification commands covered by this suite.
 node --test "$ROOT/integrations/phantom/readme.test.mjs"
+node --experimental-strip-types --test "$ROOT/integrations/phantom/mcp-config.test.mjs" "$ROOT/integrations/phantom/mcp-atomic-write.test.mjs"
 
 if ! locus agent report --help >/dev/null 2>&1; then
   echo "building locus with agent report…"

@@ -321,6 +321,27 @@ const line = locusDoctorLine(); // { id, ok, detail, fix? }
 
 ---
 
+## MCP config registration safety
+
+`registerLocusInMcpConfig` refuses malformed existing JSON and invalid server
+maps without replacing them. Changed configurations are staged beside the
+original, flushed and closed before a single rename. Existing POSIX owner,
+group and mode are preserved; preservation failure leaves the original intact.
+New configurations use mode `0600` where supported. Unchanged files are not rewritten.
+
+Final symlinks (including dangling links), hardlinks and nonregular files are
+refused rather than silently changing their meaning. This follows the guarded
+workspace-writer policy in `crates/locus-core/src/store.rs`; callers using linked
+configs must choose an appropriate regular destination explicitly. Extended
+ACLs and xattrs are not preserved by this helper; use an appropriate
+metadata-preserving editor for those configurations. This is not a
+concurrent-writer transaction or a power-loss durability guarantee. Catchable
+failures attempt to clean up the staging file; process termination can leave a
+`.locus-mcp-*.tmp` sibling while keeping the original intact. Staging begins
+at `0600`; after the complete write, an existing file's mode is applied before
+replacement. Atomic replacement requires a writable parent directory, unlike
+an in-place write to an already writable file.
+
 ## Verification
 
 From the repository root, install the stable Rust toolchain with Cargo, `jq`,
