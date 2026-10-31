@@ -93,8 +93,17 @@ mod whoami_credential_present;
 
 #[test]
 fn all_cli_integration_files_are_registered() {
-    let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tests = manifest_dir.join("tests");
     let harness = include_str!("integration.rs");
+    let manifest: toml::Value = include_str!("../Cargo.toml").parse().unwrap();
+    let explicit_targets: Vec<_> = manifest["test"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|target| target.get("path").and_then(toml::Value::as_str))
+        .map(|path| manifest_dir.join(path))
+        .collect();
     for entry in std::fs::read_dir(tests).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|ext| ext == "rs")
@@ -104,7 +113,10 @@ fn all_cli_integration_files_are_registered() {
                 "#[path = \"{}\"]",
                 path.file_name().unwrap().to_str().unwrap()
             );
-            assert!(harness.contains(&declaration), "missing {declaration}");
+            assert!(
+                harness.contains(&declaration) || explicit_targets.contains(&path),
+                "missing {declaration} or explicit Cargo test target"
+            );
         }
     }
 }
