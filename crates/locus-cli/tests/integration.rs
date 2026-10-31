@@ -54,6 +54,8 @@ mod json_errors;
 mod json_tty;
 #[path = "mcp_supervised.rs"]
 mod mcp_supervised;
+#[path = "offboard_cmd.rs"]
+mod offboard_cmd;
 #[path = "onboard_marketplace.rs"]
 mod onboard_marketplace;
 #[path = "phantom_credential_contract.rs"]

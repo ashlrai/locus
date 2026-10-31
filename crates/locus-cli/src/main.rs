@@ -68,7 +68,7 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard\n  \
+  Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard · offboard\n  \
   Daily use     enter · switch · pin · leave · renew · whoami · fleet-feed · fleet-denials · fleet-preflight · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
@@ -439,6 +439,23 @@ enum Commands {
     /// Guided client onboarding — walk through adding a client binding
     #[command(next_help_heading = "Setup", subcommand)]
     Client(ClientCmd),
+
+    /// Offboard a client: remove its binding, approvals, pin history and grants
+    ///
+    /// Default prints a `locus.plan.v1` plan of every local record the
+    /// client's alias owns and writes nothing; `--apply` performs the
+    /// removals under the operator control capability. Audit events and
+    /// audit archives are kept (evidence, not operable state); the offboard
+    /// itself is audited as `client.offboard`. Workspace `.locus.toml`
+    /// files and Phantom secrets are never touched.
+    #[command(next_help_heading = "Setup")]
+    Offboard {
+        /// Client binding alias to offboard
+        alias: String,
+        /// Perform the removals (default: print the plan only)
+        #[arg(long)]
+        apply: bool,
+    },
 
     /// Built-in upstream MCP recipes (command/args for common servers)
     ///
@@ -1550,6 +1567,7 @@ fn run() -> Result<()> {
         },
         Commands::Binding(sub) => cmd_binding(sub, json, dry_run),
         Commands::Client(sub) => cmd_client(sub, json, dry_run),
+        Commands::Offboard { alias, apply } => cmd_offboard(&alias, apply, json, dry_run),
         Commands::Upstream(sub) => cmd_upstream(sub, json),
         Commands::Adapter(sub) => cmd_adapter(sub, json, dry_run),
         Commands::Onboard {
@@ -1678,6 +1696,7 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
         | Commands::Binding(BindingCmd::Rm { .. })
         | Commands::Binding(BindingCmd::MigrateCredentialRefs { .. })
         | Commands::Client(_)
+        | Commands::Offboard { .. }
         | Commands::Autopin(AutopinCmd::Suggest { apply: true })
         | Commands::Ci(CiCmd::Mint { .. })
         | Commands::Ci(CiCmd::Env { .. })
@@ -6522,6 +6541,175 @@ fn cmd_client(sub: ClientCmd, json: bool, dry_run: bool) -> Result<()> {
             cmd_binding_add(args, true, json)
         }
     }
+}
+
+/// `locus offboard <alias>`: the default (and `--dry-run`) is a read-only
+/// `locus.plan.v1` plan of every local record the client owns; `--apply`
+/// performs the removals under the control capability.
+fn cmd_offboard(alias: &str, apply: bool, json: bool, dry_run: bool) -> Result<()> {
+    if apply && dry_run {
+        return Err(UsageError("--apply cannot be combined with --dry-run".into()).into());
+    }
+    // `open_existing` for both paths: offboard never bootstraps a home, and
+    // its read-only inventory must not create the migration lock on a run
+    // the capability gate then refuses.
+    let s = dry_run::existing_store()?;
+    if apply {
+        let outcome = locus_core::offboard_apply(&s, alias).map_err(|e| {
+            if matches!(e, LocusError::BindingNotFound(_)) {
+                with_alias_suggestions(&s, e)
+            } else {
+                e.into()
+            }
+        })?;
+        if json {
+            return json_out::print(
+                json_out::OFFBOARD,
+                &serde_json::json!({ "ok": true, "outcome": outcome }),
+            );
+        }
+        return print_offboard_outcome(&outcome);
+    }
+    let inv = locus_core::offboard_inventory(&s, alias)?;
+    if inv.is_empty() {
+        return Err(with_alias_suggestions(
+            &s,
+            LocusError::BindingNotFound(alias.into()),
+        ));
+    }
+    {
+        let mut plan = dry_run::Plan::new(format!("locus offboard {alias} --apply"));
+        if inv.active_pin {
+            plan.change(
+                "unpin",
+                alias,
+                Some("leave the active pin for this client".into()),
+            );
+        }
+        if let Some(binding) = &inv.binding {
+            let detail = match &binding.tenant {
+                Some(tenant) => format!(
+                    "binding {alias} — tenant {tenant}, {} provider(s)",
+                    binding.providers.len()
+                ),
+                None => format!("binding {alias}"),
+            };
+            plan.delete_file(&binding.path, Some(detail));
+        }
+        for grant in &inv.mcp_grants {
+            plan.delete_file(&grant.path, Some(format!("MCP grant {}", grant.grant_id)));
+        }
+        for approval in &inv.approvals {
+            plan.delete_file(
+                &approval.path,
+                Some(format!(
+                    "approval {} — {} {}",
+                    approval.id, approval.tool, approval.status
+                )),
+            );
+        }
+        for session in &inv.sessions {
+            plan.delete_file(
+                &session.path,
+                Some(format!("sealed session {}", session.session_id)),
+            );
+        }
+        if let Some(meta) = &inv.engagement_meta {
+            plan.delete_file(meta, Some(format!("engagement meta for {alias}")));
+        }
+        if !inv.pin_history.is_empty() {
+            plan.change(
+                "update",
+                locus_core::pin_history::path(s.home())
+                    .display()
+                    .to_string(),
+                Some(format!(
+                    "drop {} pin-history entr{} for {alias}",
+                    inv.pin_history.len(),
+                    if inv.pin_history.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                )),
+            );
+        }
+        for template in &inv.kept_workspace_templates {
+            plan.note(format!(
+                "workspace template '{template}' still references {alias}; edit or remove it manually"
+            ));
+        }
+        for archive in &inv.kept_archives {
+            plan.note(format!(
+                "audit archive {} is kept (evidence)",
+                archive.display()
+            ));
+        }
+        plan.note("audit events for this client are kept; the offboard itself is audited");
+        plan.note("nothing is removed without --apply");
+        plan.needs_control()
+            .with("alias", alias)
+            .with("inventory", &inv)
+            .emit(json)
+    }
+}
+
+/// Human summary of an applied offboard — counts, statuses and kept items
+/// only, never a credential reference or grant secret.
+fn print_offboard_outcome(outcome: &locus_core::OffboardOutcome) -> Result<()> {
+    println!(
+        "{} offboarded {}",
+        "ok".green().bold(),
+        outcome.alias.cyan().bold()
+    );
+    if outcome.left_active_pin {
+        println!("   pin       left the active session");
+    }
+    if outcome.removed_binding {
+        println!("   binding   removed");
+    }
+    if outcome.revoked_mcp_grants > 0 {
+        println!("   grants    {} revoked", outcome.revoked_mcp_grants);
+    }
+    if outcome.removed_approvals > 0 {
+        println!("   approvals {} removed", outcome.removed_approvals);
+    }
+    if outcome.removed_sessions > 0 {
+        println!("   sessions  {} removed", outcome.removed_sessions);
+    }
+    if outcome.dropped_pin_history_entries > 0 {
+        println!(
+            "   history   {} pin-history entr{} dropped",
+            outcome.dropped_pin_history_entries,
+            if outcome.dropped_pin_history_entries == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
+    }
+    if outcome.removed_engagement_meta {
+        println!("   engagement meta removed");
+    }
+    for template in &outcome.kept_workspace_templates {
+        println!(
+            "   {} workspace template '{template}' still references {}; edit or remove it manually",
+            "note:".yellow(),
+            outcome.alias
+        );
+    }
+    for archive in &outcome.kept_archives {
+        println!(
+            "   {} audit archive {} is kept (evidence)",
+            "note:".yellow(),
+            archive.display()
+        );
+    }
+    println!(
+        "   {}",
+        "audit events kept; revoke provider access + rotate Phantom secrets manually".dimmed()
+    );
+    Ok(())
 }
 
 /// Resolved answers for a binding-add flow (flags + prompts). Everything
@@ -12597,6 +12785,7 @@ mod agent_contract_tests {
             ("binding rm", &["example"]),
             ("binding migrate-credential-refs", &["example"]),
             ("client add", &[]),
+            ("offboard", &["example"]),
             ("autopin suggest --apply", &[]),
             ("capability persist", &[]),
             ("capability unpersist", &[]),

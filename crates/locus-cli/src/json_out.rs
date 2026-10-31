@@ -28,6 +28,7 @@ pub(crate) const CAPABILITY_STATUS: &str = "locus.capability.status.v1";
 pub(crate) const NOTIFY_STATUS: &str = "locus.notify.status.v1";
 pub(crate) const APPROVE_STATUS: &str = "locus.approve.status.v1";
 pub(crate) const AUTOPIN_SUGGEST: &str = locus_core::autopin_suggest::SCHEMA;
+pub(crate) const OFFBOARD: &str = "locus.offboard.v1";
 pub(crate) const ADAPTER_VERIFY: &str = "locus.adapter.verify.v1";
 pub(crate) const ADAPTER_VERIFY_MANIFEST: &str = "locus.adapter.verify_manifest.v1";
 pub(crate) const VERSION: &str = "locus.version.v1";
@@ -54,6 +55,7 @@ pub(crate) const CATALOGUE: &[(&str, &str)] = &[
     ("locus notify status", NOTIFY_STATUS),
     ("locus approve status", APPROVE_STATUS),
     ("locus autopin suggest", AUTOPIN_SUGGEST),
+    ("locus offboard --apply", OFFBOARD),
     ("locus adapter verify", ADAPTER_VERIFY),
     ("locus adapter verify-manifest", ADAPTER_VERIFY_MANIFEST),
     ("locus version", VERSION),

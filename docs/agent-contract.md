@@ -46,6 +46,7 @@ whose first key is `schema`. Key on it:
 | `locus notify status` | `locus.notify.status.v1` |
 | `locus approve status` | `locus.approve.status.v1` |
 | `locus autopin suggest` | `locus.autopin.suggest.v1` |
+| `locus offboard --apply` | `locus.offboard.v1` |
 | `locus adapter verify` | `locus.adapter.verify.v1` |
 | `locus adapter verify-manifest` | `locus.adapter.verify_manifest.v1` |
 | `locus version` | `locus.version.v1` |
@@ -124,7 +125,7 @@ Per command:
 | `watch --once` / `--require-ok` | ok | not ok (see `locus watch --help`) | usage |
 | `quickstart` | SAFE or WARN | error | UNSAFE |
 | `doctor --fix --apply` | all fixes applied (or none needed) | a fix was refused or skipped | usage |
-| any `--dry-run` | the plan's read-only preconditions hold | a precondition fails (unknown alias, allowlist, existing file) | `--dry-run` not accepted by the command (see Unsupported), or combined with `--apply` on `doctor --fix` |
+| any `--dry-run` | the plan's read-only preconditions hold | a precondition fails (unknown alias, allowlist, existing file) | `--dry-run` not accepted by the command (see Unsupported), or combined with `--apply` on `doctor --fix` or `offboard` |
 
 ## `--dry-run`
 
@@ -134,7 +135,7 @@ a new command does not compile until it picks one.
 
 | Class | Behaviour | Commands |
 | --- | --- | --- |
-| Plans | Performs read-only preflight checks, prints a `locus.plan.v1` plan, writes nothing (see print-only setup exception below) | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew`, `engagement init/close`, `graph export/import`, `binding add/rm/migrate-credential-refs`, `client add`, `autopin suggest --apply`, `capability persist/unpersist`, `ci mint/env`, `mcp mint/revoke`, `agent setup`, `doctor --fix`, `adapter install/uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add/remove`, `approve grant/deny`, `notify on/off`, `events export`, `forensics export` |
+| Plans | Performs read-only preflight checks, prints a `locus.plan.v1` plan, writes nothing (see print-only setup exception below) | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew`, `engagement init/close`, `graph export/import`, `binding add/rm/migrate-credential-refs`, `client add`, `offboard`, `autopin suggest --apply`, `capability persist/unpersist`, `ci mint/env`, `mcp mint/revoke`, `agent setup`, `doctor --fix`, `adapter install/uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add/remove`, `approve grant/deny`, `notify on/off`, `events export`, `forensics export` |
 | Read-only | Accepted and ignored: the command runs exactly as without the flag (see below) | `whoami`, `status`, `doctor`, `watch`, `hook`, `goal`, `verify`, `upstream`, `completion`, `topic`, `version`, `events`, `agent doctor/report`, `binding list/show`, `graph list`, `capability status`, `notify status`, `approve list/status/wait`, `mcp list`, `autopin suggest`, `adapter search/list/verify/verify-manifest`, `adapter trust list`, `adapter registry index list` |
 | Unsupported | Not accepted, exactly as before the global flag: `exec --dry-run -- …` fails exec's own argument check (exit 1); every other placement, and the other commands, are a clap usage error (exit 2, `unexpected argument '--dry-run' found`) | `exec`, `run`, `ci run`, `mcp` (server), `serve`, `dashboard` |
 
@@ -169,9 +170,9 @@ What a plan does and does not check:
 - It never prints a secret: no capability, bearer token, MCP grant token or
   resolved credential. `events export --sink webhook` names only the
   webhook's scheme and host.
-- `--apply` with `--dry-run` is a usage error (exit 2) on `doctor --fix`. On
-  `agent setup` it keeps its original exit 1 (`pass only one of --apply or
-  --dry-run`).
+- `--apply` with `--dry-run` is a usage error (exit 2) on `doctor --fix` and
+  `offboard`. On `agent setup` it keeps its original exit 1 (`pass only one
+  of --apply or --dry-run`).
 
 Plan shape:
 

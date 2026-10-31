@@ -1345,7 +1345,7 @@ impl Store {
     /// symlink pointing outside the store must never be followed into a
     /// recursive delete). Removal failures are swallowed: cleanup is
     /// best-effort and must never block a teardown.
-    fn remove_worker_home_if_safe(&self, worker_home: &str) {
+    pub(crate) fn remove_worker_home_if_safe(&self, worker_home: &str) {
         let wh = PathBuf::from(worker_home);
         if !wh.exists() {
             return;
