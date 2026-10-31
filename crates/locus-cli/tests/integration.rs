@@ -68,6 +68,8 @@ mod pin_rewrite_configs;
 mod quickstart_then_doctor;
 #[path = "quickstart_then_enter.rs"]
 mod quickstart_then_enter;
+#[path = "readme_commands.rs"]
+mod readme_commands;
 #[path = "readme_quickstart.rs"]
 mod readme_quickstart;
 #[path = "registry_trust_faq.rs"]

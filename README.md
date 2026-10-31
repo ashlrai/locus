@@ -501,7 +501,7 @@ locus engagement init|close           # client engagement lifecycle (binding + w
 locus offboard <alias> [--apply]      # plan first; --apply removes the client's local records
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
-locus adapter search|install|uninstall · registry export|verify-manifest  # community + release adapters
+locus adapter search|install|uninstall|verify-manifest · registry export  # community + release adapters
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex|grok|gemini|generic
 locus mcp [--supervised]              # run the stdio MCP server; --supervised serves pinned provider tools
