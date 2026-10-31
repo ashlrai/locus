@@ -31,6 +31,51 @@ jq() { : > "$SMOKE_COMMAND_MARKER"; return 1; }
   return { BASH_ENV: guard, SMOKE_COMMAND_MARKER: marker };
 }
 
+test('successful smoke cleans all resources under a custom TMPDIR', (t) => {
+  // The authority broker uses a Unix socket, so keep the temporary path short.
+  const root = mkdtempSync('/tmp/lhs-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  const scratch = join(root, 'custom tmp');
+  const record = join(root, 'created');
+  mkdirSync(bin);
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+path="$("$REAL_MKTEMP" "$@")" || exit
+case "$path" in
+  "$TMPDIR"/locus-hub-smoke.*|"$TMPDIR"/locus-hub-proj.*|"$TMPDIR"/locus-hub-smoke-err.*)
+    printf '%s\\n' "$path" >> "$MKTEMP_RECORD" ;;
+esac
+printf '%s\\n' "$path"
+`, { mode: 0o755 });
+  const env = { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
+    REAL_MKTEMP: realMktemp, MKTEMP_RECORD: record };
+  delete env.BASH_ENV;
+  const result = spawnSync('bash', [script], {
+    env,
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'smoke must succeed');
+  assert.match(result.stdout, /^== hub-smoke OK ==$/m);
+  assert.doesNotMatch(result.stdout, /^skip\s/m, 'all smoke checks must run');
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 3);
+  for (const [path, prefix] of paths.map((path, i) => [path, [
+    'locus-hub-smoke.', 'locus-hub-proj.', 'locus-hub-smoke-err.',
+  ][i]])) {
+    assert.equal(dirname(path), scratch);
+    assert.ok(path.slice(scratch.length + 1).startsWith(prefix));
+    assert.equal(existsSync(path), false, `${prefix} must be removed`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+});
+
 for (const invalidDir of ['missing', 'file']) {
   test(`${invalidDir} TMPDIR fails clearly before starting the smoke test`, (t) => {
     const root = mkdtempSync(join(tmpdir(), 'hub-smoke-test-'));
