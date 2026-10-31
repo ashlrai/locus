@@ -49,11 +49,13 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Entry> {
 }
 
 fn preview(root: &Path, args: &[&str], success: bool) {
+    let profiles = tempfile::tempdir().unwrap();
     for json in [false, true] {
         let before = snapshot(root);
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
         cmd.env_clear()
             .env("HOME", root.join("user"))
+            .env("USERPROFILE", root.join("user"))
             .env("LOCUS_HOME", root.join("locus"))
             .env("NO_COLOR", "1")
             .env("LOCUS_NON_INTERACTIVE", "1")
@@ -65,11 +67,7 @@ fn preview(root: &Path, args: &[&str], success: bool) {
         // An instrumented child (cargo llvm-cov) writes a .profraw on exit.
         // env_clear drops LLVM_PROFILE_FILE, so the runtime would fall back
         // to default_*.profraw in the child's cwd — inside the snapshot.
-        let profile = std::env::var_os("LLVM_PROFILE_FILE").map(PathBuf::from);
-        let profile = profile
-            .map(|p| std::path::absolute(&p).unwrap_or(p))
-            .unwrap_or_else(|| std::env::temp_dir().join("locus-test-%p-%m.profraw"));
-        cmd.env("LLVM_PROFILE_FILE", profile);
+        super::coverage_home_isolation::preserve_profile_output(&mut cmd, profiles.path());
         if json {
             cmd.arg("--json");
         }

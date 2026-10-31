@@ -4,6 +4,7 @@ use std::process::{Command, Output};
 struct Fixture {
     home: tempfile::TempDir,
     project: tempfile::TempDir,
+    profiles: tempfile::TempDir,
 }
 
 impl Fixture {
@@ -11,6 +12,7 @@ impl Fixture {
         Self {
             home: tempfile::tempdir().unwrap(),
             project: tempfile::tempdir().unwrap(),
+            profiles: tempfile::tempdir().unwrap(),
         }
     }
 
@@ -19,10 +21,12 @@ impl Fixture {
         cmd.args(args)
             .env_clear()
             .env("HOME", self.home.path())
+            .env("USERPROFILE", self.home.path())
             .env("LOCUS_HOME", self.home.path().join("locus"))
             .env("PATH", "/nonexistent")
             .env("NO_COLOR", "1")
             .current_dir(self.project.path());
+        super::coverage_home_isolation::preserve_profile_output(&mut cmd, self.profiles.path());
         cmd
     }
 

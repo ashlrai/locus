@@ -16,6 +16,8 @@ mod autopin_learned_guard;
 mod autopin_suggest;
 #[path = "binding_add_idempotent.rs"]
 mod binding_add_idempotent;
+#[path = "coverage_home_isolation.rs"]
+mod coverage_home_isolation;
 #[path = "dead_broker_hint.rs"]
 mod dead_broker_hint;
 #[path = "doc_facts.rs"]
@@ -95,6 +97,8 @@ mod whoami_credential_present;
 fn all_cli_integration_files_are_registered() {
     let tests = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
     let harness = include_str!("integration.rs");
+    let manifest: toml::Value = toml::from_str(include_str!("../Cargo.toml")).unwrap();
+    let standalone_tests = manifest["test"].as_array().unwrap();
     for entry in std::fs::read_dir(tests).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|ext| ext == "rs")
@@ -104,7 +108,14 @@ fn all_cli_integration_files_are_registered() {
                 "#[path = \"{}\"]",
                 path.file_name().unwrap().to_str().unwrap()
             );
-            assert!(harness.contains(&declaration), "missing {declaration}");
+            let target_path = format!("tests/{}", path.file_name().unwrap().to_str().unwrap());
+            let standalone = standalone_tests
+                .iter()
+                .any(|target| target["path"].as_str() == Some(target_path.as_str()));
+            assert!(
+                harness.contains(&declaration) || standalone,
+                "missing {declaration} or explicit Cargo test target"
+            );
         }
     }
 }
