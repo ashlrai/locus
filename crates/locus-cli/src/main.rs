@@ -2582,7 +2582,8 @@ fn write_sample_bindings(s: &Store) -> Result<()> {
 # CredentialRefs are explicit env:VAR pointers. Never put raw tokens here.
 # Supply those variables outside agent context before supervised execution.
 # phm: references currently require an unavailable scoped bridge.
-# Then: locus enter personal && locus whoami && locus doctor
+# Try a credential-free smoke: locus exec --no-resolve -- true
+# Then configure credentials and scopes before provider work.
 
 [binding]
 id = "bnd_personal"
@@ -2969,7 +2970,7 @@ fn cmd_enter(
     println!(
         "   {}  ·  {}  ·  {}",
         "locus whoami".dimmed(),
-        "locus exec -- <cmd>".dimmed(),
+        "locus exec --no-resolve -- true".dimmed(),
         "locus leave".dimmed()
     );
     Ok(())
@@ -3300,7 +3301,7 @@ fn cmd_pin(
         println!("   providers {}", providers_n);
         println!();
         println!("   {}", "locus whoami".dimmed());
-        println!("   {}", "locus exec -- <cmd>".dimmed());
+        println!("   {}", "locus exec --no-resolve -- true".dimmed());
         if session.is_namespaced() {
             println!(
                 "   {}",

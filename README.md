@@ -265,8 +265,8 @@ locus switch acme && locus whoami
 # Local identity dashboard (loopback UI + API)
 locus dashboard                  # http://127.0.0.1:8750
 
-# Run any command with only the pinned binding's surface
-locus exec -- env | grep LOCUS_
+# Check the pinned binding without resolving credentials
+locus exec --no-resolve -- true
 
 # Wire AI clients + hub readiness
 locus agent setup --apply
