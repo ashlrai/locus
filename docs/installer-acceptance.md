@@ -57,6 +57,9 @@ Test with the native tools and actual release binaries on each platform; mocked
 
 ## Verification and failure cases
 
+See the [failure matrix](installer-failure-matrix.md) for expected diagnostics,
+installation state, and unresolved coverage.
+
 Use disposable directories and controlled fixtures; never corrupt real release
 assets or an existing installation. For failures before replacement, seed both
 destination binaries and verify their bytes remain unchanged.
