@@ -775,6 +775,7 @@ Deploy notes (Vercel / Cloudflare Pages): [apps/web/README.md](./apps/web/README
 | [apps/dashboard/](./apps/dashboard) | Local identity dashboard UI |
 | [GOALS.md](./GOALS.md) | Northstar goal loop |
 | [scripts/e2e.sh](./scripts/e2e.sh) | End-to-end shell suite |
+| [docs/e2e-test-map.md](./docs/e2e-test-map.md) | E2E sections, invocation and coverage limits |
 | [scripts/check-readme-quickstart.sh](./scripts/check-readme-quickstart.sh) | README quickstart replay in a throwaway HOME |
 | [scripts/check-readme-links.mjs](./scripts/check-readme-links.mjs) | README link / anchor / image resolution check (`--external` for remote) |
 | [docs/README.md](./docs/README.md) | CLI dry-run support and limitations |
