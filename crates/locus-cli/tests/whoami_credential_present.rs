@@ -143,4 +143,11 @@ fn set_env_reports_present_true_without_echoing_the_value() {
         !stdout.contains(PROBE_VALUE),
         "whoami echoes the credential value: {stdout}"
     );
+
+    // Presence follows the current process environment, including an empty
+    // value (which the resolver accepts), rather than caching an earlier probe.
+    let (_, empty) = whoami_json(home.path(), cwd.path(), &cap, &[(SUPABASE_VAR, "")]);
+    assert_eq!(credential(&empty, "supabase")["present"], true);
+    let (_, unset) = whoami_json(home.path(), cwd.path(), &cap, &[]);
+    assert_eq!(credential(&unset, "supabase")["present"], false);
 }
