@@ -11,7 +11,7 @@ new code and name.
 | 0 | `success` | success; check commands: healthy (doctor SAFE, agent ready, session ok) |
 | 1 | `failure` | command error or refusal; check commands: degraded (doctor WARN, agent protected, session not ok) |
 | 2 | `unsafe` | check commands: unsafe (doctor UNSAFE, agent unsafe, status pin invalid/frozen/expired) |
-| 2 | `usage` | usage error (bad flag/value, --dry-run on a command that cannot plan); no report on stdout |
+| 2 | `usage` | usage error (bad flag/value, --dry-run on a command that cannot plan) |
 | 3 | `refused` | action refused by policy or an authority gate |
 | 4 | `repin_required` | human must establish a fresh pin before retrying |
 | 5 | `expired` | pin, credential, or authorization expired |
@@ -25,8 +25,8 @@ The named outcomes 3–6 are reserved for command paths that identify these
 conditions specifically. Existing generic command errors continue to return
 1, and check commands continue to use 0/1/2. In particular, `unsafe` and
 `usage` share code 2: check commands print their report before exiting, while
-usage errors print no report on stdout. Under `--json`, usage errors include
-`exit_code_name: "usage"` on stderr.
+under `--json`, usage errors print a `locus.error.v1` envelope on stdout and
+stderr with `exit_code_name: "usage"`.
 
 `exec`, `run`, `ci run`, and `mcp --supervised` pass through the child status
 when it starts (`128 + signal` when killed by a signal). Codes 126 and 127

@@ -70,9 +70,9 @@ require a new schema version; additive fields retain v1.
 
 ### Errors
 
-Under `--json`, a failing command keeps stdout clean (or prints only its
-report, as `verify session` does before exiting 1) and prints one line on
-stderr:
+Under `--json`, a failing command prints its error document on stdout unless
+it already emitted a report (as `verify session` does before exiting 1).
+The error diagnostic also appears as one JSON line on stderr:
 
 ```json
 {"schema":"locus.error.v1","ok":false,"error":"no active pin …","exit_code":1,"exit_code_name":"failure"}
@@ -95,7 +95,7 @@ onto it: doctor SAFE/WARN/UNSAFE and agent `ready`/`protected`/`unsafe` give
 | 0 | `success` | success; check commands: healthy (doctor SAFE, agent ready, session ok) |
 | 1 | `failure` | command error or refusal; check commands: degraded (doctor WARN, agent protected, session not ok) |
 | 2 | `unsafe` | check commands: unsafe (doctor UNSAFE, agent unsafe, status pin invalid/frozen/expired) |
-| 2 | `usage` | usage error (bad flag/value, --dry-run on a command that cannot plan); no report on stdout |
+| 2 | `usage` | usage error (bad flag/value, --dry-run on a command that cannot plan) |
 | 3 | `refused` | action refused by policy or an authority gate |
 | 4 | `repin_required` | human must establish a fresh pin before retrying |
 | 5 | `expired` | pin, credential, or authorization expired |
@@ -106,9 +106,8 @@ onto it: doctor SAFE/WARN/UNSAFE and agent `ready`/`protected`/`unsafe` give
 <!-- exit-codes:end -->
 
 `unsafe` and `usage` share 2, as clap's usage errors always have. Tell them
-apart by stdout: a check command prints its report before exiting 2, a usage
-error prints nothing on stdout (and `exit_code_name: "usage"` on stderr under
-`--json`).
+apart by schema: a check command prints its report before exiting 2; a usage
+error prints `locus.error.v1` with `exit_code_name: "usage"` under `--json`.
 
 `exec`, `run`, `ci run` and `mcp --supervised` exit with the child's own
 code (`128 + signal` when a signal killed it); only 126 and 127 come from

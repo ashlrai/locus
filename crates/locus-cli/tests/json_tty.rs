@@ -62,7 +62,7 @@ fn run(home: &Path, args: &[&str], code: i32) -> Value {
         assert!(out.stderr.is_empty(), "{out:?}");
         serde_json::from_slice(&out.stdout).unwrap()
     } else {
-        assert!(out.stdout.is_empty(), "{out:?}");
+        assert_eq!(out.stdout, out.stderr, "{out:?}");
         let report: Value = serde_json::from_slice(&out.stderr).unwrap();
         assert_eq!(report["ok"], false);
         assert_eq!(report["schema"], "locus.error.v1");

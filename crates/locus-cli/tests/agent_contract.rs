@@ -280,9 +280,9 @@ fn status_and_identity_checks_unpinned() {
         "status prints one line"
     );
 
-    // whoami unpinned is a command error: exit 1, JSON on stderr, stdout clean.
+    // whoami unpinned is a command error: exit 1, JSON on both streams.
     let out = env.run(&["whoami", "--json"]);
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, out.stderr);
     error_doc(&out, 1, "failure");
 
     // verify session: report on stdout, then exit 1 when session_ok is false.
@@ -796,7 +796,7 @@ fn unsigned_release_manifest_checks_structure_and_catalog_fields() {
 fn usage_errors_exit_2_with_the_error_envelope() {
     let env = Env::new();
     let out = env.run(&["whoami", "--json", "--no-such-flag"]);
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, out.stderr);
     error_doc(&out, 2, "usage");
     // Human usage errors keep clap's prose and exit 2.
     let out = env.run(&["whoami", "--no-such-flag"]);

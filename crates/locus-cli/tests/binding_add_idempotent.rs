@@ -80,7 +80,10 @@ fn json_success(output: Output) -> Value {
 
 fn json_error(output: &Output, needle: &str) {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert!(output.stdout.is_empty(), "stdout stays clean on failure");
+    assert_eq!(
+        output.stdout, output.stderr,
+        "stdout carries the JSON error"
+    );
     let v: Value = serde_json::from_slice(&output.stderr)
         .unwrap_or_else(|e| panic!("--json failure must print JSON on stderr ({e})"));
     assert_eq!(v["ok"], false, "{v}");

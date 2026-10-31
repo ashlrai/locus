@@ -54,6 +54,8 @@ mod handshake_conformance;
 mod issue171_matrix;
 #[path = "json_errors.rs"]
 mod json_errors;
+#[path = "json_failure_q8.rs"]
+mod json_failure_q8;
 #[path = "json_tty.rs"]
 mod json_tty;
 #[path = "mcp_supervised.rs"]
