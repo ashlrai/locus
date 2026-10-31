@@ -517,8 +517,10 @@ pub(super) fn plan_onboard(detect_only: bool, reset: bool, json: bool) -> Result
     let user_home = env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| s.home().to_path_buf());
-    let candidates = locus_core::detect_ambient_candidates(&user_home, &cwd());
+    let candidates = locus_core::onboard::detect_ambient_candidates_read_only(&user_home, &cwd());
     let mut plan = dry_run::Plan::new("locus onboard");
+    plan.note("GitHub CLI authentication is unknown: not probed in preview (external commands may have side effects)");
+    plan.with("github_cli_auth", "unknown_not_probed");
     plan.with(
         "candidates",
         candidates

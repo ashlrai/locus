@@ -49,6 +49,10 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, Entry> {
 }
 
 fn preview(root: &Path, args: &[&str], success: bool) {
+    preview_with_path(root, args, success, None);
+}
+
+fn preview_with_path(root: &Path, args: &[&str], success: bool, path: Option<&Path>) {
     for json in [false, true] {
         let before = snapshot(root);
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_locus"));
@@ -62,6 +66,9 @@ fn preview(root: &Path, args: &[&str], success: bool) {
             .current_dir(root.join("project"))
             .args(["--dry-run"])
             .args(args);
+        if let Some(path) = path {
+            cmd.env("PATH", path);
+        }
         // An instrumented child (cargo llvm-cov) writes a .profraw on exit.
         // env_clear drops LLVM_PROFILE_FILE, so the runtime would fall back
         // to default_*.profraw in the child's cwd — inside the snapshot.
@@ -85,10 +92,17 @@ fn preview(root: &Path, args: &[&str], success: bool) {
             "preview changed files or metadata at {changed:?}: {args:?}"
         );
         assert_eq!(output.status.success(), success, "preview status: {args:?}");
+        if success && !json && args == ["onboard"] && path.is_some() {
+            assert!(String::from_utf8_lossy(&output.stdout)
+                .contains("authentication is unknown: not probed"));
+        }
         if success && json {
             let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(plan["schema"], "locus.plan.v1");
             assert_eq!(plan["dry_run"], true);
+            if args == ["onboard"] && path.is_some() {
+                assert_eq!(plan["github_cli_auth"], "unknown_not_probed");
+            }
         }
     }
 }
@@ -168,4 +182,31 @@ credential_ref = "env:PREVIEW_FIXTURE"
             }
         }
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn onboard_preview_never_runs_gh() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::create_dir(root.join("user")).unwrap();
+    fs::create_dir(root.join("project")).unwrap();
+    let _store = locus_core::Store::open(root.join("locus")).unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let gh = bin.path().join("gh");
+    fs::write(&gh, "#!/bin/sh\nprintf called > \"$HOME/gh-was-called\"\n").unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o700)).unwrap();
+    // Positive control: the fake probe really writes under the fixture HOME.
+    let marker = root.join("user/gh-was-called");
+    let status = Command::new(&gh)
+        .env("HOME", root.join("user"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert!(marker.exists());
+    fs::remove_file(&marker).unwrap();
+    // Both human and JSON previews retain the full tree/metadata assertion.
+    preview_with_path(root, &["onboard"], true, Some(bin.path()));
+    assert!(!marker.exists());
 }

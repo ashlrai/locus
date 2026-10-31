@@ -52,3 +52,6 @@ security measure.
 Other mutating operations lack a Locus dry-run option, including commands
 launched as children, provider operations, and MCP tool calls. A plan does not
 resolve credentials or authorize a later execution. Do not use it as proof that a real mutation is authorized.
+
+Onboarding preview omits the GitHub CLI probe: running an external status
+command can mutate local state. The normal interactive flow still probes it.
