@@ -58,7 +58,8 @@ configuration instead of a plan.
 - Read-only commands accept and ignore `--dry-run`; it does not suppress their
   normal behavior. Opening a store can create the Locus home, and session
   inspection can freeze a drifted pin as a fail-closed security measure. See the
-  [full command matrix](dry-run-matrix-q8.md) for the read-only forms.
+  [full command matrix](dry-run-matrix-q8.md) for the read-only forms and the
+  [mutating command inventory](dry-run-command-inventory.md) for effects and verification.
 - Other mutating operations do not have a Locus dry-run option. In particular,
   the child commands launched by `exec`, `run`, or `ci run`, provider operations,
   and MCP tool calls are not previewed by this flag. Any dry-run facility for

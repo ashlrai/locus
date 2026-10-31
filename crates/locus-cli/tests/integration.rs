@@ -58,6 +58,8 @@ mod mcp_supervised;
 mod offboard_cmd;
 #[path = "onboard_marketplace.rs"]
 mod onboard_marketplace;
+#[path = "packaged_binaries.rs"]
+mod packaged_binaries;
 #[path = "phantom_credential_contract.rs"]
 mod phantom_credential_contract;
 #[path = "pin_rewrite_configs.rs"]

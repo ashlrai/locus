@@ -210,3 +210,63 @@ fn fleet_read_only_commands_are_in_the_full_matrix_and_help() {
         assert!(String::from_utf8_lossy(&output.stdout).contains("--dry-run"));
     }
 }
+
+#[test]
+fn mutating_inventory_tracks_matrix_and_examples() {
+    let inventory = include_str!("../../../docs/dry-run-command-inventory.md");
+    let plans = inventory
+        .split("## Commands with plans")
+        .nth(1)
+        .unwrap()
+        .split("\n\n- ")
+        .next()
+        .unwrap();
+    let unsupported = inventory
+        .split("## No Locus preview")
+        .nth(1)
+        .unwrap()
+        .split("\n\nThese forms")
+        .next()
+        .unwrap();
+    let matrix = include_str!("../../../docs/dry-run-matrix-q8.md");
+    let command_column = |table: &str| -> BTreeSet<String> {
+        table
+            .lines()
+            .filter(|line| line.starts_with("| `"))
+            .flat_map(|line| {
+                line.split('|')
+                    .nth(1)
+                    .unwrap()
+                    .split('`')
+                    .skip(1)
+                    .step_by(2)
+            })
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(command_column(plans), forms(matrix, "| Plan |"));
+    let matrix_unsupported = matrix.split("## Unsupported cases").nth(1).unwrap();
+    assert_eq!(
+        command_column(unsupported),
+        forms(matrix_unsupported, "| `")
+    );
+    assert!(include_str!("../../../docs/README.md").contains("dry-run-command-inventory.md"));
+
+    let home = tempfile::tempdir().unwrap();
+    for args in [&["binding", "rm", "--help"][..], &["exec", "--help"]] {
+        let command = format!("locus {}", args.join(" "));
+        assert!(inventory.lines().any(|line| line == command));
+        assert!(locus(args, home.path()).status.success());
+    }
+    assert!(inventory.contains("LOCUS_HOME=\"$scratch/locus\" locus init --dry-run --json"));
+    let output = locus(&["init", "--dry-run", "--json"], home.path());
+    assert!(output.status.success());
+    let plan: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(plan["schema"], "locus.plan.v1");
+    assert_eq!(plan["dry_run"], true);
+    assert!(!home.path().join("locus").exists());
+    assert!(inventory.contains("locus --dry-run exec -- true; test \"$?\" -eq 2"));
+    let output = locus(&["--dry-run", "exec", "--", "true"], home.path());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!home.path().join("locus").exists());
+}
