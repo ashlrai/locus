@@ -7,10 +7,10 @@ import { spawnSync } from 'node:child_process';
 import { repository, run, sources, replaceBlocks } from './engine.mjs';
 
 const config = JSON.parse(await readFile(join(repository, 'scripts/freshness/blocks.json'), 'utf8'));
-const values = { version: '1.2.3', cli: '1.2.3', mcp: '1.2.3', date: '2026-01-01', highlights: 'A release.' };
+const values = { version: '1.2.3', publishedVersion: '1.2.3', cli: '1.2.3', mcp: '1.2.3', date: '2026-01-01', highlights: 'A release.' };
 const expected = {
   badge: 'release-v1.2.3-blue', install: 'npm install -g locus-cli@1.2.3 @ashlrai/locus-mcp@1.2.3',
-  versions: '| Rust workspace | 1.2.3 |', pin: 'npx --yes @ashlrai/locus-mcp@1.2.3 --version',
+  versions: '| Rust workspace (source) | 1.2.3 |', pin: 'npx --yes @ashlrai/locus-mcp@1.2.3 --version',
   release: '(2026-01-01).\n\nA release.',
 };
 for (const [name, text] of Object.entries(expected)) {
@@ -47,19 +47,35 @@ test('CLI rejects seeded drift, sync repairs it, source disagreement writes noth
     assert.equal(cli('check').status, 0);
     assert.equal(await readFile(path, 'utf8'), original);
     assert.deepEqual(await run(root), []);
-    const currentVersion = (await sources(root)).version;
-    // A release bump regenerates every registered surface from the sources.
+    const originalSources = await sources(root);
+    const currentVersion = originalSources.version;
+    // A source bump must not advertise an unpublished version as installable.
     for (const source of ['Cargo.toml', 'npm/package.json', 'npm-mcp/package.json', 'CHANGELOG.md']) {
       const sourcePath = join(root, source);
       const text = await readFile(sourcePath, 'utf8');
-      await writeFile(sourcePath, text.replaceAll(currentVersion, '9.8.7'));
+      const updated = source === 'CHANGELOG.md'
+        ? text.replace(`## [${currentVersion}]`, '## [9.8.7] - 2026-12-01\n\nHighlights: Candidate fixture.\n\n' + `## [${currentVersion}]`)
+        : text.replaceAll(currentVersion, '9.8.7');
+      await writeFile(sourcePath, updated);
     }
     assert.equal(cli('check').status, 1);
     assert.equal(cli('sync').status, 0);
     assert.equal(cli('check').status, 0);
-    for (const file of Object.keys(config.files)) {
-      assert.match(await readFile(join(root, file), 'utf8'), /9\.8\.7/);
-    }
+    const pending = await sources(root);
+    assert.equal(pending.version, '9.8.7');
+    assert.equal(pending.publishedVersion, originalSources.publishedVersion);
+    assert.equal(pending.cli, originalSources.publishedVersion);
+    assert.ok((await readFile(join(root, 'README.md'), 'utf8')).includes(`Latest release: [v${originalSources.publishedVersion}]`));
+    assert.ok((await readFile(join(root, 'docs/mcp.md'), 'utf8')).includes(`locus-cli@${originalSources.publishedVersion}`));
+    // Publication is an explicit separate input update, after external verification.
+    const statePath = join(root, 'scripts/freshness/published.json');
+    await writeFile(statePath, JSON.stringify({ version: '9.8.7' }));
+    assert.equal(cli('sync').status, 0);
+    assert.equal((await sources(root)).publishedVersion, '9.8.7');
+    assert.match(await readFile(join(root, 'docs/mcp.md'), 'utf8'), /locus-cli@9\.8\.7/);
+    await writeFile(statePath, JSON.stringify({ version: '99.0.0' }));
+    await assert.rejects(sources(root), /exactly one dated changelog/);
+    await writeFile(statePath, JSON.stringify({ version: '9.8.7' }));
     const bumped = await readFile(path, 'utf8');
     await writeFile(join(root, 'npm/package.json'), '{"version":"9.9.9"}');
     await assert.rejects(sources(root), /disagree/);

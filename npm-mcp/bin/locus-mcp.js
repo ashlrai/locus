@@ -30,7 +30,7 @@ const { join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
-const VERSION = "0.5.2";
+const VERSION = "0.6.0";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus-mcp";
 const CARGO_PACKAGE = "locus-mcp";

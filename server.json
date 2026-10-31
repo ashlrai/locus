@@ -3,7 +3,7 @@
   "name": "io.github.ashlrai/locus-mcp",
   "title": "Locus",
   "description": "Identity control tools for coding agents. Pinned provider tools require a supervised Locus launch.",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "websiteUrl": "https://github.com/ashlrai/locus",
   "repository": {
     "url": "https://github.com/ashlrai/locus",
@@ -14,7 +14,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@ashlrai/locus-mcp",
-      "version": "0.5.2",
+      "version": "0.6.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

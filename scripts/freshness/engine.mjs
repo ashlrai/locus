@@ -15,11 +15,21 @@ export async function sources(root) {
   const changelog = await read(root, 'CHANGELOG.md');
   const release = changelog.match(/^## \[(\d+\.\d+\.\d+(?:-[\w.-]+)?)\] (?:-|\u2014) (\d{4}-\d{2}-\d{2})\s*\n([\s\S]*?)(?=^## |$(?![\s\S]))/m);
   if (!release || [cli.version, mcp.version, release[1]].some(value => value !== version)) {
-    throw new Error('Release sources disagree: Cargo, npm wrappers and latest released changelog must match');
+    throw new Error('Release sources disagree: Cargo, npm wrappers and latest source changelog must match');
   }
-  const highlights = release[3].match(/^Highlights: (.+)$/m)?.[1];
-  if (!highlights) throw new Error('Latest released changelog needs a Highlights: line');
-  return { version, cli: cli.version, mcp: mcp.version, date: release[2], highlights };
+  // Source versions can advance before publication. This explicit, reviewed
+  // pointer changes only after the release assets and npm packages are verified.
+  const publishedVersion = JSON.parse(await read(root, 'scripts/freshness/published.json')).version;
+  if (typeof publishedVersion !== 'string' || !/^\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(publishedVersion)) {
+    throw new Error('Invalid published release version');
+  }
+  const published = [...changelog.matchAll(/^## \[(\d+\.\d+\.\d+(?:-[\w.-]+)?)\] (?:-|\u2014) (\d{4}-\d{2}-\d{2})\s*\n([\s\S]*?)(?=^## |$(?![\s\S]))/gm)]
+    .filter(entry => entry[1] === publishedVersion);
+  if (published.length !== 1) throw new Error('Published release needs exactly one dated changelog entry');
+  const highlights = published[0][3].match(/^Highlights: (.+)$/m)?.[1];
+  if (!highlights) throw new Error('Published changelog needs a Highlights: line');
+  return { version, publishedVersion, cli: publishedVersion, mcp: publishedVersion,
+    date: published[0][2], highlights };
 }
 
 export function render(template, values) {

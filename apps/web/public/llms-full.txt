@@ -16,6 +16,7 @@ listed verbatim so an agent can jump straight to the right document.
   - Measured: wrong-client credential reachability
   - How isolation works
   - MCP (Claude Code / Cursor)
+  - How Locus plugs into Phantom
   - Core concepts
   - CLI
   - Roadmap
@@ -125,11 +126,24 @@ listed verbatim so an agent can jump straight to the right document.
   - Ambient environment
   - Release assets
 
+## docs/broker-recovery-q8.md
+
+- [Recovering a pin after its broker exits](https://github.com/ashlrai/locus/blob/main/docs/broker-recovery-q8.md)
+  - Enter first
+  - If enter is refused
+
 ## docs/cli-routing.md
 
 - [Route a provider CLI](https://github.com/ashlrai/locus/blob/main/docs/cli-routing.md)
   - AWS credential bundle
   - Boundary
+
+## docs/conflict-drivers.md
+
+- [Conflict drivers - deterministic resolution for high-churn paths](https://github.com/ashlrai/locus/blob/main/docs/conflict-drivers.md)
+  - Usage
+  - Caveats
+  - Tests
 
 ## docs/credential-audit.md
 
@@ -144,6 +158,7 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [Credential compatibility](https://github.com/ashlrai/locus/blob/main/docs/credential-compatibility.md)
   - Phantom Secrets references
+  - Configuration validation
 
 ## docs/doctor-fix.md
 
@@ -167,13 +182,26 @@ listed verbatim so an agent can jump straight to the right document.
   - Troubleshooting
   - Operator checklist
 
+## docs/dry-run-matrix-q8.md
+
+- [Dry-run command matrix](https://github.com/ashlrai/locus/blob/main/docs/dry-run-matrix-q8.md)
+  - Unsupported cases
+
 ## docs/exec-latency.md
 
 - [locus exec latency](https://github.com/ashlrai/locus/blob/main/docs/exec-latency.md)
+  - Reproducing issue #170
+  - Comparing launchers for issue #170
+  - Historical measurement
   - Harness medians
   - What the time was
   - What changed
   - After phases
+  - Broker-delegated audit (issue #170 follow-up)
+
+## docs/exit-codes.md
+
+- [Stable CLI exit codes](https://github.com/ashlrai/locus/blob/main/docs/exit-codes.md)
 
 ## docs/firm-mode.md
 
@@ -248,16 +276,19 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [locus-mcp - Claude Code, Cursor, and friends](https://github.com/ashlrai/locus/blob/main/docs/mcp.md)
   - Install
+  - Replace npx registrations during pin
   - Human workflow (pin first)
     - Provider tools need a supervised launch
   - Wire into Claude Code
     - Supervised launch (provider tools)
+    - One router for multiple provider servers
   - Wire into Cursor
   - Wire into Codex / other stdio MCP clients
   - Wire into Gemini CLI
   - Wire into Grok Build
   - Any other stdio MCP client (generic)
   - Protocol notes
+  - Process lifecycle
   - HTTP transport (CI / remote agents)
     - Mcp-Session-Id (memory + disk resume)
     - Streamable Accept / Content-Type
@@ -281,6 +312,7 @@ listed verbatim so an agent can jump straight to the right document.
   - Troubleshooting
   - Security properties (MCP-specific)
   - Related
+    - Local agent peers
 
 ## docs/observability.md
 
@@ -310,6 +342,13 @@ listed verbatim so an agent can jump straight to the right document.
   - Serving multiple tenants (hub mode)
   - 5. Troubleshooting
   - Related
+
+## docs/peers.md
+
+- [Local agent peers and message relay](https://github.com/ashlrai/locus/blob/main/docs/peers.md)
+  - Registration and sender identity
+  - MCP tools
+  - Limits and lifecycle
 
 ## docs/phantom-enrolled-repos.md
 
@@ -357,13 +396,23 @@ listed verbatim so an agent can jump straight to the right document.
   - Library note
   - If a migration is needed
 
+## docs/README.md
+
+- [Locus documentation](https://github.com/ashlrai/locus/blob/main/docs/README.md)
+  - Previewing changes with --dry-run
+    - Limits and unsupported operations
+
 ## docs/registry-trust.md
 
-- [Adapter registry release manifests (signed)](https://github.com/ashlrai/locus/blob/main/docs/registry-trust.md)
+- [Adapter registry release manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-trust.md)
+  - Current release status
+    - Artifact coverage
+  - Local verification of an unsigned release manifest
+    - Tampering example
   - What it is
   - Trust model
   - Commands
-    - Operator: sign at release time
+    - Operator: optionally sign and distribute a manifest
     - Consumer: verify
   - What verify-manifest proves
   - Non-goals
@@ -371,6 +420,7 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/RELEASE.md
 
 - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+  - 0.6.0 release candidate - prepared 2026-10-31
   - Preconditions
   - Checklist - v0.5.1 (launch: Oct 20)
   - Checklist - v0.5.0
@@ -413,6 +463,14 @@ listed verbatim so an agent can jump straight to the right document.
   - Operator launch
   - Audit and recovery
 
+## docs/swarm-child-jobs.md
+
+- [Locus swarm broker: child jobs](https://github.com/ashlrai/locus/blob/main/docs/swarm-child-jobs.md)
+  - Outcome and current boundary
+  - Dependency-ordered dispatch
+  - Invariant ownership
+  - Shared acceptance and handoff
+
 ## docs/verification-plane.md
 
 - [Verification plane](https://github.com/ashlrai/locus/blob/main/docs/verification-plane.md)
@@ -448,6 +506,7 @@ listed verbatim so an agent can jump straight to the right document.
     - Optional idle timeout
   - Capability tickets
   - Tests
+    - Child memory limits
 
 ## Agent surfaces
 
