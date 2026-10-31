@@ -103,7 +103,11 @@ fn doctor_exits_zero_after_quickstart_and_shell_hook() {
         .current_dir(operator.project.path())
         .output()
         .expect("setup shell runs");
-    assert_eq!(out.status.code(), Some(0), "setup and doctor must succeed: {out:?}");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "setup and doctor must succeed: {out:?}"
+    );
     let report: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["verdict"], "WARN");
     assert_eq!(report["runtime"]["authority_anchor_ok"], true);
