@@ -29,6 +29,7 @@ function runWithTempDir(t, failProject = false, scratchParts = ['custom tmp']) {
   mkdirSync(bin);
   mkdirSync(scratch, { recursive: true });
   writeFileSync(join(scratch, 'keep'), 'sentinel');
+  writeFileSync(join(scratch, '.locus-hub-int-scan.unrelated'), 'hidden sentinel');
   writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
 if [[ "${'$'}{FAIL_PROJECT:-}" == 1 && "${'$'}{*: -1}" == */locus-hub-int-proj.XXXXXX ]]; then
   [[ -f "$(cat "${'$'}MKTEMP_RECORD")/home-sentinel" ]] || exit 74
@@ -37,6 +38,7 @@ if [[ "${'$'}{FAIL_PROJECT:-}" == 1 && "${'$'}{*: -1}" == */locus-hub-int-proj.X
 fi
 path="$("${'$'}REAL_MKTEMP" "${'$'}@")" || exit
 [[ -d "${'$'}path" ]] || exit 1
+touch "${'$'}path/cleanup-sentinel" || exit 1
 if [[ "${'$'}{FAIL_PROJECT:-}" == 1 ]]; then : > "${'$'}path/home-sentinel"; fi
 printf '%s\\n' "${'$'}path" >> "${'$'}MKTEMP_RECORD"
 printf '%s\\n' "${'$'}path"
@@ -58,10 +60,16 @@ test('integration smoke uses and cleans a nondefault TMPDIR', (t) => {
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, 'integration smoke must succeed');
   assert.doesNotMatch(result.stdout, /^skip\s/m, 'all integration checks must run');
+  assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
   assert.equal(paths.length, 2);
   assert.match(paths[0], new RegExp(`^${scratch}/locus-hub-int\\.[^/]+$`));
   assert.match(paths[1], new RegExp(`^${scratch}/locus-hub-int-proj\\.[^/]+$`));
-  assert.deepEqual(readdirSync(scratch), ['keep']);
+  for (const path of paths) {
+    assert.equal(existsSync(path), false, `populated temporary directory must be removed: ${path}`);
+  }
+  assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+  assert.equal(readFileSync(join(scratch, '.locus-hub-int-scan.unrelated'), 'utf8'), 'hidden sentinel');
 });
 
 test('integration smoke handles spaces in temporary home and project paths', (t) => {
@@ -79,7 +87,7 @@ test('integration smoke handles spaces in temporary home and project paths', (t)
   assert.match(result.stdout, /^ok\s+canary scan detects a canary under a spaced path$/m);
   assert.match(result.stdout, /^ok\s+ambient canary absent under /m);
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
-  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
 });
 
 test('failed project allocation cleans the temporary home', (t) => {
@@ -91,7 +99,7 @@ test('failed project allocation cleans the temporary home', (t) => {
   assert.equal(paths.length, 1);
   assert.equal(existsSync(paths[0]), false, 'the populated temporary home must be removed');
   assert.match(paths[0], new RegExp(`^${scratch}/locus-hub-int\\.[^/]+$`));
-  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
 });
 
 test('an exit from inside the temporary project removes it', (t) => {
