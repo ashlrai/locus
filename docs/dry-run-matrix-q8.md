@@ -1,6 +1,8 @@
 # Dry-run command matrix
 
-This matrix describes the CLI in this checkout. `--dry-run` is a global flag;
+This matrix tracks [issue #171](https://github.com/ashlrai/locus/issues/171)
+and describes the CLI in this checkout, not necessarily a published release.
+`--dry-run` is a global flag;
 place it before or after a supported command and supply that command's normal
 required arguments. For example, `locus --json init --dry-run` previews setup,
 and `locus pin personal --dry-run` previews a pin against an existing binding.
@@ -37,13 +39,23 @@ security measure.
 
 ## Unsupported cases
 
-- `exec`, `run`, `ci run`, `mcp` without a subcommand (the server), `serve`,
-  and `dashboard` cannot be previewed with `--dry-run`. Their child or server
-  execution has no plan. `locus exec --dry-run -- env` exits 1 from exec's
-  argument check; other placements and the other listed commands reject the
-  flag as a usage error (exit 2). A `--dry-run` after `--` belongs to the child,
-  not to Locus.
-- `doctor --fix --apply --dry-run` is a usage error (exit 2). `agent setup
+| Command form | Why it cannot be previewed |
+| --- | --- |
+| `exec` | Runs a child in the pinned session. |
+| `run` | Runs a child with a binding. |
+| `ci run` | Runs a child in CI. |
+| `mcp` | Starts the MCP server when used without a subcommand. |
+| `serve` | Starts a server. |
+| `dashboard` | Starts a dashboard server. |
+
+These forms have no Locus plan. `locus exec --dry-run -- env` exits 1 from
+exec's argument check; other placements and the other listed commands reject
+the flag as a usage error (exit 2). A `--dry-run` after `--` belongs to the
+child, not to Locus. Subcommands such as `mcp mint` are classified separately
+in the table above.
+
+- `doctor --fix --apply --dry-run` and `offboard <alias> --apply --dry-run` are usage
+  errors (exit 2). `agent setup
   --apply --dry-run` is also rejected, with exit 1. Use the dry-run form
   without `--apply` for these commands.
 - `pin --rewrite-configs --dry-run` is rejected; rewriting client configs

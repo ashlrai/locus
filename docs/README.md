@@ -27,10 +27,10 @@ not complete invocations; some require additional arguments.
 | Setup and adapters | `agent setup`, `doctor --fix`, `adapter install`, `adapter uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add`, `adapter registry index remove` |
 | Approvals and audit | `approve grant`, `approve deny`, `notify on`, `notify off`, `events export`, `forensics export` |
 
-`doctor --fix` already previews repairs without the flag; `--apply` performs
-them. Similarly, `binding migrate-credential-refs` previews by default and
-requires `--write` to persist. The global flag produces the plan schema even
-when a command has its own default preview. `setup --print` and `setup
+`doctor --fix` and `offboard <alias>` already preview without the flag;
+`--apply` performs their changes. Similarly, `binding migrate-credential-refs`
+previews by default and requires `--write` to persist. The global flag produces
+the plan schema even when a command has its own default preview. `setup --print` and `setup
 --client generic` are print-only forms: even with `--dry-run`, they print the
 configuration instead of a plan.
 
@@ -45,7 +45,8 @@ configuration instead of a plan.
   add`, `client add`, `agent setup`, and `doctor --fix` can preview against an
   uninitialized home, subject to their options and inputs. Other preconditions, such as binding existence or the workspace
   allowlist, can still cause a preview to fail.
-- `doctor --fix --apply --dry-run` is rejected (exit 2), as is `agent setup
+- `doctor --fix --apply --dry-run` and `offboard <alias> --apply --dry-run` are
+  rejected (exit 2), as is `agent setup
   --apply --dry-run` (exit 1). Omit `--apply` for these previews. `pin
   --rewrite-configs --dry-run` is also rejected.
 - `exec`, `run`, `ci run`, the `mcp` server (without a subcommand), `serve`,

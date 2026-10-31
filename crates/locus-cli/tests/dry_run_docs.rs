@@ -162,16 +162,34 @@ fn readme_identifies_unplannable_commands_that_reject_the_flag() {
         .split("\n---")
         .next()
         .unwrap();
+    let matrix = include_str!("../../../docs/dry-run-matrix-q8.md")
+        .split("## Unsupported cases")
+        .nth(1)
+        .expect("unsupported cases section")
+        .split("\n\n")
+        .nth(1)
+        .expect("unsupported command table");
+    let cases: [(&str, &[&str]); 6] = [
+        ("exec", &["exec", "--", "true"]),
+        ("run", &["run", "-b", "example", "--", "true"]),
+        ("ci run", &["ci", "run", "-b", "example", "--", "true"]),
+        ("mcp", &["mcp"]),
+        ("serve", &["serve"]),
+        ("dashboard", &["dashboard", "--no-open"]),
+    ];
+    let expected: BTreeSet<_> = cases.iter().map(|(name, _)| (*name).to_owned()).collect();
+    assert_eq!(forms(matrix, "| `"), expected);
     let home = tempfile::tempdir().unwrap();
-    for (name, args) in [
-        ("exec", &["exec", "--", "true"][..]),
-        ("run", &["run", "-b", "example", "--", "true"][..]),
-        ("ci run", &["ci", "run", "-b", "example", "--", "true"][..]),
-        ("mcp", &["mcp"][..]),
-        ("serve", &["serve"][..]),
-        ("dashboard", &["dashboard", "--no-open"][..]),
-    ] {
+    for (name, args) in cases {
         assert!(readme.contains(&format!("`{name}`")), "missing {name}");
+        let mut help_args: Vec<_> = name.split_whitespace().collect();
+        help_args.push("--help");
+        let help = locus(&help_args, home.path());
+        assert!(help.status.success(), "help failed for {name}");
+        assert!(
+            !String::from_utf8_lossy(&help.stdout).contains("--dry-run"),
+            "{name} advertises --dry-run"
+        );
         let mut preview = vec!["--dry-run"];
         preview.extend_from_slice(args);
         let output = locus(&preview, home.path());
