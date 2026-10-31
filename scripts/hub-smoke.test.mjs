@@ -38,6 +38,46 @@ test('prerequisites document tracks the script environment and checked files', (
   assert.match(doc, /== hub-smoke OK ==/);
 });
 
+test('output guide covers the script messages and check names', () => {
+  const source = readFileSync(script, 'utf8');
+  const doc = readFileSync(join(dirname(script), '../docs/hub-smoke-output.md'), 'utf8');
+  assert.match(doc, /\.\/scripts\/hub-smoke\.sh/);
+  const messages = [
+    'error: hub-smoke could not create temporary home',
+    'error: hub-smoke could not create temporary project directory',
+    'error: hub-smoke could not create temporary error file',
+    'error: jq is required',
+    'building locus with agent report…',
+    'FAIL  status --oneline expected alias:tenant, got:',
+    'ok    mcp mint --json grant contract (token validated, not echoed)',
+    'FAIL  mcp mint --json grant contract',
+    'ok    mcp list --json values-free roster',
+    'FAIL  mcp list --json roster contract',
+    'ok    mcp revoke removes grant from roster',
+    'FAIL  mcp revoke contract',
+    'skip  mcp mint/list/revoke (locus mcp subcommand unavailable)',
+    '== hub-smoke FAILED ==',
+    '== hub-smoke OK ==',
+  ];
+  for (const message of messages) {
+    assert.ok(source.includes(message) && doc.includes(message), `missing message: ${message}`);
+  }
+  for (const match of source.matchAll(/check_json "([^"]+)"/g)) {
+    assert.ok(doc.includes(`\`${match[1]}\``), `missing check: ${match[1]}`);
+  }
+  for (const match of source.matchAll(/for f in ([^;]+); do/g)) {
+    for (const file of match[1].trim().split(/\s+/)) {
+      const path = file.endsWith('.schema.json') ? `schema/${file}` : file;
+      assert.ok(doc.includes(path), `missing checked file: ${path}`);
+    }
+  }
+  for (const phrase of ['not JSON (exit=', 'jq predicate failed:',
+    'possible secret material in output', 'attempt <1 or 2> failed; retrying…',
+    'failed after 3 attempts', 'final banner', 'not itself a pass criterion']) {
+    assert.ok(doc.includes(phrase), `missing output behavior: ${phrase}`);
+  }
+});
+
 function smokeCommandGuard(root) {
   const guard = join(root, 'guard.sh');
   const marker = join(root, 'smoke-command-ran');
@@ -81,6 +121,15 @@ printf '%s\\n' "$path"
   assert.equal(result.status, 0, 'smoke must succeed');
   assert.match(result.stdout, /^== hub-smoke OK ==$/m);
   assert.doesNotMatch(result.stdout, /^skip\s/m, 'all smoke checks must run');
+  for (const name of ['agent report --json', 'doctor --json', 'whoami --json',
+    'status --json', 'agent report unpinned']) {
+    assert.ok(result.stdout.includes(`ok    ${name} (exit=`), `missing success: ${name}`);
+  }
+  for (const message of ['ok    status --oneline (',
+    'ok    mcp mint --json grant contract (token validated, not echoed)',
+    'ok    mcp list --json values-free roster', 'ok    mcp revoke removes grant from roster']) {
+    assert.ok(result.stdout.includes(message), `missing success: ${message}`);
+  }
   const paths = readFileSync(record, 'utf8').trim().split('\n');
   assert.equal(paths.length, 3);
   for (const [path, prefix] of paths.map((path, i) => [path, [
@@ -187,7 +236,10 @@ locus() {
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 1);
+  assert.match(result.stderr, /warn: hub-smoke init\/pin attempt 1 failed; retrying…/);
+  assert.match(result.stderr, /warn: hub-smoke init\/pin attempt 2 failed; retrying…/);
   assert.match(result.stderr, /error: hub-smoke init\/pin failed after 3 attempts/);
+  assert.doesNotMatch(result.stdout, /== hub-smoke (OK|FAILED) ==/);
   assert.match(result.stderr, /synthetic init failure/);
   assert.equal(readFileSync(marker, 'utf8'), 'attempt\nattempt\nattempt\n');
   assert.deepEqual(readdirSync(scratch), ['unrelated']);

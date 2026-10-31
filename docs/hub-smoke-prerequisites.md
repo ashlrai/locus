@@ -50,6 +50,9 @@ output if the environment or diagnostics are sensitive.
 
 ## Expected outcomes
 
+For the individual messages and their script paths, see
+[hub smoke output](hub-smoke-output.md).
+
 - Initialization and pinning succeed within three attempts. Each JSON check
   prints `ok` when its predicate passes; a valid JSON response can pass even if
   its command exits nonzero. The checks also reject common secret prefixes.
