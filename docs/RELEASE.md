@@ -17,17 +17,29 @@ The tag workflow builds Linux x64 and macOS arm64/x64 archives, checks their
 SHA256 sidecars, exports an unsigned adapter manifest, creates the GitHub
 Release, then publishes both npm packages through trusted OIDC. Verify every
 stage and both registry versions; a GitHub Release alone does not prove npm
-publication. Do not provision credentials or change protections to bypass gates.
+publication. Only then update `scripts/freshness/published.json` to the verified
+version, run `node scripts/freshness/sync.mjs` and
+`node apps/web/discoverability.mjs`, and publish that reviewed docs
+update. Until then public install pins and release badges retain the previous
+verified release; source manifests describe the candidate. Do not provision credentials or change protections to bypass gates.
 
 Run the focused TypeScript drop-in tests with Node 22.6+ separately from the
 Node 20 full-suite job, and record whether `scripts/e2e.sh` below was run rather
 than inferring its result from the manual CI job. After updating canonical
 versions and the changelog, regenerate and check both `scripts/freshness` and
-`apps/web/discoverability.mjs`. Root `server.json` must also match.
+`apps/web/discoverability.mjs`. Root `server.json` must match the source candidate;
+the website `apps/web/public/server.json` separately describes the verified
+published package.
 Homebrew's live tap, the live website and MCP registry submission are separate
 channels; verify them independently and never invent checksums before assets exist.
 
 ## Preconditions
+
+The Linux full `ci.yml` job invokes `scripts/e2e.sh` after the release build
+on scheduled and manual runs. The shell suite uses isolated Locus homes and
+synthetic fixtures; its summary includes feature-detected skips. Inspect that
+summary and the exact release SHA before claiming runtime coverage. Adding the
+step alone is not evidence that a hosted run passed.
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"

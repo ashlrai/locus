@@ -178,7 +178,7 @@ test('JSON-LD SoftwareApplication parses and matches repo sources', () => {
   const data = JSON.parse(blocks[0]);
   assert.equal(data['@type'], 'SoftwareApplication');
   assert.equal(data.name, 'Locus');
-  assert.equal(data.softwareVersion, repoVersion().version, 'JSON-LD version must come from Cargo.toml');
+  assert.equal(data.softwareVersion, repoVersion().publishedVersion, 'JSON-LD must name the verified published release');
   assert.match(String(data.license), /MIT/i, 'JSON-LD license must be MIT');
   assert.equal(data.codeRepository, REPO);
   assert.ok(Array.isArray(data.operatingSystem) && data.operatingSystem.length >= 3,
@@ -264,7 +264,8 @@ test('server.json is a valid MCP registry manifest', () => {
   assert.equal(data.name, MCP_NAME);
   assert.match(data.name, /^[a-z0-9]+(?:[.-][a-z0-9]+)*\/[a-z0-9][a-z0-9._-]*$/i);
   assert.ok(data.description?.trim());
-  assert.equal(data.version, repoVersion().version);
+  assert.equal(data.version, repoVersion().publishedVersion);
+  assert.equal(data.packages[0].version, repoVersion().publishedVersion);
   assert.ok(Array.isArray(data.packages) && data.packages.length > 0, 'server.json needs packages or remotes');
   assert.equal(data.packages[0].identifier, '@ashlrai/locus-mcp');
 });
@@ -326,4 +327,24 @@ test('security.txt is served under .well-known with required fields', () => {
   assert.match(text, /^Contact: mailto:security@ashlr\.ai/m);
   assert.match(text, /^Expires: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z/m);
   assert.ok(existsSync(join(PUBLIC, '.well-known', 'security.txt')));
+});
+
+
+test('candidate source version never replaces verified package metadata', () => {
+  const candidate = { ...inputs, version: '99.0.0' };
+  const output = buildOutputs(REPO_ROOT, candidate);
+  const caps = JSON.parse(output.files['capabilities.json']);
+  assert.equal(caps.version, '99.0.0');
+  assert.match(caps.versionScope, /source checkout/);
+  assert.equal(caps.publishedVersion, inputs.publishedVersion);
+  const manifest = JSON.parse(output.files['server.json']);
+  assert.equal(manifest.version, inputs.publishedVersion);
+  assert.equal(manifest.packages[0].version, inputs.publishedVersion);
+  assert.equal(output.regions.version, `v${inputs.publishedVersion}`);
+  assert.ok(caps.install.npm.includes(`locus-cli@${inputs.publishedVersion}`));
+  const rootManifest = JSON.parse(readFileSync(join(REPO_ROOT, 'server.json'), 'utf8'));
+  assert.equal(rootManifest.version, inputs.version);
+  assert.equal(rootManifest.packages[0].version, inputs.version);
+  const sourcePackage = JSON.parse(readFileSync(join(REPO_ROOT, 'npm-mcp/package.json'), 'utf8'));
+  assert.equal(rootManifest.packages[0].version, sourcePackage.version);
 });

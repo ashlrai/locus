@@ -17,7 +17,7 @@ Pin a client, and every CLI command, MCP tool and agent session is sealed to tha
 [**Docs**](#docs)
 
 <!-- fresh:begin badge -->
-[![Release 0.6.0](https://img.shields.io/badge/release-v0.6.0-blue?style=for-the-badge&labelColor=0b0b14)](https://github.com/ashlrai/locus/releases/tag/v0.6.0)
+[![Release 0.5.2](https://img.shields.io/badge/release-v0.5.2-blue?style=for-the-badge&labelColor=0b0b14)](https://github.com/ashlrai/locus/releases/tag/v0.5.2)
 <!-- fresh:end -->
 [![CI](https://img.shields.io/github/actions/workflow/status/ashlrai/locus/ci.yml?style=for-the-badge&label=CI&logo=github&labelColor=0b0b14)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
 [![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?style=for-the-badge&logo=npm&label=locus-cli&labelColor=0b0b14)](https://www.npmjs.com/package/locus-cli)
@@ -27,9 +27,9 @@ Pin a client, and every CLI command, MCP tool and agent session is sealed to tha
 </div>
 
 <!-- fresh:begin release -->
-Latest release: [v0.6.0](https://github.com/ashlrai/locus/releases/tag/v0.6.0) (2026-10-31).
+Latest release: [v0.5.2](https://github.com/ashlrai/locus/releases/tag/v0.5.2) (2026-10-26).
 
-Grant-scoped swarm and local peer relay, stricter binding validation, safer npm cache replacement, and failure-safe MCP configuration registration.
+`locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
 <!-- fresh:end -->
 
 ![locus quickstart pins a sample binding; locus whoami shows the sealed session and its scoped providers](docs/assets/locus-demo.gif)

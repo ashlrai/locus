@@ -1,9 +1,9 @@
 # Changelog
 
 <!-- fresh:begin release -->
-Latest release: [v0.6.0](https://github.com/ashlrai/locus/releases/tag/v0.6.0) (2026-10-31).
+Latest release: [v0.5.2](https://github.com/ashlrai/locus/releases/tag/v0.5.2) (2026-10-26).
 
-Grant-scoped swarm and local peer relay, stricter binding validation, safer npm cache replacement, and failure-safe MCP configuration registration.
+`locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
 <!-- fresh:end -->
 
 All notable changes to this project will be documented in this file.

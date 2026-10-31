@@ -213,6 +213,19 @@ jobs:
       - name: Release build
         run: cargo build --workspace --release
 
+      # The release guide requires this shell suite in addition to Rust tests.
+      # It uses disposable Locus homes, synthetic fixtures and loopback servers.
+      # Its summary reports optional feature skips; green is not zero-skips proof.
+      - name: Release end-to-end gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in bash cargo python3 curl git jq; do
+            command -v "$tool" >/dev/null || { echo "missing e2e prerequisite: $tool" >&2; exit 1; }
+          done
+          node --test scripts/ci/e2e-release-gate.test.mjs
+          bash scripts/e2e.sh
+
       # npm wrappers at the Cargo version and packable; release locus-mcp keeps
       # the MCP surface Phantom's companion smoke drives. About 1s.
       - name: Release and Phantom contract
