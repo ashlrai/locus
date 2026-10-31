@@ -20,6 +20,24 @@ test('header documents the local smoke command and prerequisites', () => {
   assert.match(header, /throwaway LOCUS_HOME/);
 });
 
+test('prerequisites document tracks the script environment and checked files', () => {
+  const source = readFileSync(script, 'utf8');
+  const doc = readFileSync(join(dirname(script), '../docs/hub-smoke-prerequisites.md'), 'utf8');
+  for (const variable of ['HOME', 'PATH', 'TMPDIR', 'LOCUS_CONTROL_CAPABILITY',
+    'LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS', 'LOCUS_HOME', 'LOCUS_SESSION_ID']) {
+    assert.ok(source.includes(variable) && doc.includes(`\`${variable}\``), `missing environment variable: ${variable}`);
+  }
+  for (const match of source.matchAll(/for f in ([^;]+); do/g)) {
+    for (const file of match[1].trim().split(/\s+/)) {
+      const path = file.endsWith('.schema.json') ? `schema/${file}` : file;
+      assert.ok(doc.includes(path), `missing checked file: ${path}`);
+    }
+  }
+  assert.match(doc, /overall smoke may still succeed/);
+  assert.match(doc, /valid JSON response can pass even if/);
+  assert.match(doc, /== hub-smoke OK ==/);
+});
+
 function smokeCommandGuard(root) {
   const guard = join(root, 'guard.sh');
   const marker = join(root, 'smoke-command-ran');
