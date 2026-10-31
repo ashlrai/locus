@@ -227,17 +227,16 @@ inside the checkout, but it does not select the toolchain for `cargo install
 --git` run elsewhere. Check the versions in the directory where you install.
 
 ```bash
-# Install both binaries from Git (measured on one Linux box: 179 s)
+# Install both binaries from Git
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
+cargo install --git https://github.com/ashlrai/locus locus-cli --locked
 ```
 
 Or install from a local checkout:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --locked --path crates/locus-cli
 ```
 
 Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
@@ -603,75 +602,12 @@ node scripts/check-readme-links.mjs
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for build/test/lint and how to add adapters. Agent-oriented rules: [AGENTS.md](./AGENTS.md). Short IDE guide: [CLAUDE.md](./CLAUDE.md).
 
-### Investigating repeated `locus-core` compilation
+### Building both binaries
 
-[Issue #168](https://github.com/ashlrai/locus/issues/168) reports that a single
-`cargo install --git` of both binaries compiled `locus-core` twice. From the
-repository root, run this Bash recipe with a fresh target directory and install
-root. It captures the revision, platform and toolchain alongside Cargo output:
-
-```bash
-(
-set -eu
-umask 077
-investigation_dir=$(mktemp -d)
-printf 'Investigation files: %s\n' "$investigation_dir"
-revision=$(git rev-parse HEAD)
-{ printf '%s\n' "$revision"; uname -srm; cargo --version; rustc --version; } > "$investigation_dir/context.txt"
-repo_url=$(python3 -c 'from pathlib import Path; print(Path.cwd().as_uri())')
-if cargo install --git "$repo_url" --rev "$revision" locus-cli locus-mcp --locked \
-  --root "$investigation_dir/install" --target-dir "$investigation_dir/target" \
-  --message-format=json > "$investigation_dir/artifacts.jsonl" 2> "$investigation_dir/cargo.log"; then
-  :
-else
-  printf 'Install failed; inspect cargo.log before interpreting artifacts.\n' >&2
-  exit 1
-fi
-grep -E 'Compiling locus-core|Finished `release`' "$investigation_dir/cargo.log" || true
-python3 - "$investigation_dir/artifacts.jsonl" <<'PY'
-import json, pathlib, sys
-skipped = 0
-with open(sys.argv[1], encoding="utf-8") as stream:
-    for line in stream:
-        try:
-            message = json.loads(line)
-        except json.JSONDecodeError:
-            skipped += 1
-            continue
-        if not isinstance(message, dict):
-            skipped += 1
-            continue
-        if message.get("reason") == "compiler-artifact" and message["target"]["name"] == "locus_core":
-            print({"package_id": message["package_id"], "kind": message["target"]["kind"],
-                   "profile": message["profile"], "features": message["features"],
-                   "filenames": [pathlib.Path(f).name for f in message["filenames"]],
-                   "fresh": message["fresh"]})
-if skipped:
-    print(f"Skipped {skipped} non-object or non-JSON line(s); inspect the captured stream.", file=sys.stderr)
-PY
-)
-```
-
-This installs the checkout's committed `HEAD`, not uncommitted changes. Record
-the command and captured context when comparing runs. The log shows the order of
-compilation and completed installs; the JSON records identify each core artifact.
-Repeated `Compiling locus-core` lines show the reported pattern; compare the
-artifact records to see whether they were built (`fresh: False`) or reused
-(`fresh: True`). Artifact records do not necessarily map one-to-one to compiler
-invocations. If the pattern is absent, that run does not reproduce the report;
-it does not establish that the issue is resolved. Cargo output can
-contain local paths or other sensitive details, so review it before sharing. The
-parser warns about non-object or non-JSON lines; inspect the captured stream if any are skipped.
-The original Linux report used commit `e969d9c4`: the CLI finished first,
-then Cargo compiled the core again for MCP. A later macOS run at `7233ae79ceff`
-with Cargo and rustc 1.95.0 found two non-fresh core artifacts with matching
-package, target, profile and features but different filenames. On macOS arm64
-at `0842e3aa6899` with the same toolchain, the install again logged a second
-core compilation after the CLI finished. `fresh: false`
-means Cargo built the artifact in that invocation; a repeated name alone does
-not establish identical compiler work. The reason for the distinct artifact
-identities remains unconfirmed. See [the detailed investigation](./CONTRIBUTING.md#investigating-repeated-compilation-during-install)
-for comparison guidance and the cautions around verbose logs.
+The `locus-cli` package builds and installs both `locus` and `locus-mcp` in
+one Cargo invocation, sharing `locus-core`. See [build verification](./docs/build-q8.md)
+for the timing and artifact checks. The standalone `locus-mcp` package remains
+available for server-only installs.
 
 ### Comparing exec launch latency
 
