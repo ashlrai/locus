@@ -1,4 +1,5 @@
-//! Opt-in release benchmark (includes process startup, child exit and audit fsync).
+//! Opt-in release benchmark (includes process startup, child exit and the
+//! broker-delegated post-child audit append).
 //!
 //! Build `cargo build --release -p locus-cli`, then run with a temporary HOME
 //! and the real CARGO_HOME/RUSTUP_HOME:

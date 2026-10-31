@@ -4330,7 +4330,7 @@ fn cmd_exec(
     let spawned = run_child(&mut child, program);
     trace.mark("spawn_wait");
     let (exit, spawn_error) = child_audit_fields(&spawned);
-    s.audit(
+    s.audit_via_broker(
         "session.exec",
         &session.binding_alias,
         Some(serde_json::json!({
@@ -4594,7 +4594,7 @@ fn cmd_ci_run(
 
     let spawned = run_child(&mut child, program);
     let (exit, spawn_error) = child_audit_fields(&spawned);
-    s.audit(
+    s.audit_via_broker(
         "ci.run",
         &session.binding_alias,
         Some(serde_json::json!({
@@ -4769,7 +4769,7 @@ fn cmd_run(
 
     let spawned = run_child(&mut child, program);
     let (exit, spawn_error) = child_audit_fields(&spawned);
-    s.audit(
+    s.audit_via_broker(
         "session.run",
         &session.binding_alias,
         Some(serde_json::json!({
@@ -4837,7 +4837,7 @@ fn run_exact_session_child(
 
     let spawned = run_child(&mut child, program);
     let (exit, spawn_error) = child_audit_fields(&spawned);
-    s.audit(
+    s.audit_via_broker(
         audit_op,
         &session.binding_alias,
         Some(json!({
