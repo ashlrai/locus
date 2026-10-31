@@ -9,7 +9,7 @@ resolver = "2"
 [workspace.package]
 version = "0.5.2"
 edition = "2021"
-# Measured MSRV for this lockfile is rustc 1.89.0. See README install options.
+# Measured MSRV for this lockfile is rustc 1.89.0 — see docs/MSRV.md.
 rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/ashlrai/locus"

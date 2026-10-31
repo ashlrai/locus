@@ -163,6 +163,20 @@ fn documented_install_requirements_agree() {
         );
     }
 
+    // docs/MSRV.md records the measurement: the declared value, a compiler
+    // that was tried at the floor, and the std API that sets it.
+    let msrv_doc = normalized("docs/MSRV.md");
+    for needle in [
+        format!("rust-version = \"{msrv}\""),
+        format!("rustc/cargo {msrv}.0"),
+        "file_lock".to_string(),
+    ] {
+        assert!(
+            msrv_doc.contains(&needle),
+            "docs/MSRV.md must record `{needle}`"
+        );
+    }
+
     // The npm wrappers carry the floor in their cargo-fallback messages; it
     // must be the same constant the workspace declares.
     for rel in ["npm/bin/locus.js", "npm-mcp/bin/locus-mcp.js"] {

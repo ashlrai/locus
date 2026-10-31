@@ -98,6 +98,10 @@ fn issue_177_older_npm_wrapper_preserves_newer_binary() {
     let status = Command::new("node")
         .args([
             "--test",
+            // Newer Node defaults --test to the spec reporter; the assertion
+            // below matches TAP's `# pass 1`, so request TAP explicitly.
+            "--test-reporter",
+            "tap",
             "--test-name-pattern",
             "an older wrapper preserves a newer executable",
             "npm/test/no-downgrade.test.js",

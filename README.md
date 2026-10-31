@@ -213,6 +213,8 @@ With Rust 1.83, installation fails before compiling Locus because the locked
 `idna_adapter` dependency uses the 2024 edition, which that Cargo cannot parse
 ([issue #167](https://github.com/ashlrai/locus/issues/167)). Cargo 1.85 through
 1.88 can parse it but reject the workspace's minimum Rust version.
+[docs/MSRV.md](./docs/MSRV.md) records the compilers measured and the API that
+sets the floor.
 
 Check the active toolchain before installing:
 
