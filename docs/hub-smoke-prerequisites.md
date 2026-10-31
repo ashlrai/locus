@@ -44,8 +44,9 @@ No environment variable needs to be set specifically for this smoke test.
 | `LOCUS_HOME` | Overridden with the temporary home for Locus commands; the caller's home is not used for bindings. |
 | `LOCUS_SESSION_ID` | Unset before Locus commands to avoid inheriting a session. |
 
-The script removes its temporary home, project, and error file on exit. It
-prints the temporary `LOCUS_HOME` path and CLI version; avoid exposing captured
+The [resource map](hub-smoke-resource-map.md) describes creation, use, and
+cleanup, including resources outside the temporary home. The script removes
+its temporary home, project, and error file on exit. It prints the temporary `LOCUS_HOME` path and CLI version; avoid exposing captured
 output if the environment or diagnostics are sensitive.
 
 ## Expected outcomes
