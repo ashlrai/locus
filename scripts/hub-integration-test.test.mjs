@@ -20,7 +20,7 @@ test('the report hygiene comment points to the filesystem canary test', () => {
   assert.match(readFileSync(target, 'utf8'), /fn canary_scan_unreadable_path_exits_nonzero\(/);
 });
 
-function runWithTempDir(t, failProject = false, scratchParts = ['custom tmp']) {
+function runWithTempDir(t, failProject = false, scratchParts = ['custom-tmp']) {
   // Keep paths short enough for the live authority broker's Unix socket.
   const root = mkdtempSync('/tmp/lhi-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -74,8 +74,8 @@ test('integration smoke uses and cleans a nondefault TMPDIR', (t) => {
   assert.equal(readFileSync(join(scratch, '.locus-hub-int-scan.unrelated'), 'utf8'), 'hidden sentinel');
 });
 
-test('integration smoke handles spaces in temporary home and project paths', (t) => {
-  const { result, scratch, paths } = runWithTempDir(t, false, ['a b', 'c d']);
+test('integration smoke uses and cleans TMPDIR with spaces and shell metacharacters', (t) => {
+  const { result, scratch, paths } = runWithTempDir(t, false, ['a [b]', 'c d']);
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, 'integration smoke must succeed');
@@ -89,7 +89,12 @@ test('integration smoke handles spaces in temporary home and project paths', (t)
   assert.match(result.stdout, /^ok\s+canary scan detects a canary under a spaced path$/m);
   assert.match(result.stdout, /^ok\s+ambient canary absent under /m);
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
+  for (const path of paths) {
+    assert.equal(existsSync(path), false, `populated temporary directory must be removed: ${path}`);
+  }
   assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+  assert.equal(readFileSync(join(scratch, '.locus-hub-int-scan.unrelated'), 'utf8'), 'hidden sentinel');
 });
 
 test('failed project allocation cleans the temporary home', (t) => {
