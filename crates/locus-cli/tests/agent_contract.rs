@@ -540,7 +540,13 @@ fn unsigned_release_manifest_requires_explicit_drift_only_verification() {
     let env = Env::new();
     let path = env.project().join("release.json");
     let path_arg = path.to_str().unwrap();
-    let export = env.run(&["adapter", "registry", "export", "--out", path_arg]);
+    // An available signing-key variable does not make an export signed unless
+    // --sign is explicitly requested, as in the release workflow.
+    let export = env.run_with(
+        &["adapter", "registry", "export", "--out", path_arg],
+        None,
+        &[("LOCUS_REGISTRY_SIGNING_KEY", "invalid-test-key")],
+    );
     assert!(export.status.success(), "{}", stderr(&export));
 
     let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -567,6 +573,24 @@ fn unsigned_release_manifest_requires_explicit_drift_only_verification() {
     let report = doc(&matching, "locus.adapter.verify_manifest.v1");
     assert_eq!(report["signature"], "unsigned");
     assert_eq!(report["ok"], true);
+    assert!(report.get("drift").is_none());
+
+    // Explicit signing fails closed without a key and creates no artifact.
+    let signed_path = env.project().join("signed.json");
+    let signed = env.run_with(
+        &[
+            "adapter",
+            "registry",
+            "export",
+            "--sign",
+            "--out",
+            signed_path.to_str().unwrap(),
+        ],
+        None,
+        &[("LOCUS_REGISTRY_SIGNING_KEY", "")],
+    );
+    assert!(!signed.status.success());
+    assert!(!signed_path.exists());
 
     // Empty signatures are unsigned; a nonempty malformed signature must not
     // be accepted by the drift-only opt-in.
