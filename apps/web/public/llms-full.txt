@@ -420,7 +420,7 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/RELEASE.md
 
 - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
-  - 0.6.0 release candidate - prepared 2026-10-31
+  - 0.6.1 release candidate - prepared 2026-10-31
   - Preconditions
   - Checklist - v0.5.1 (launch: Oct 20)
   - Checklist - v0.5.0

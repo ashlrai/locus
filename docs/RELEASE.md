@@ -1,16 +1,18 @@
 # Releasing Locus
 
 Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
-`[workspace.package] version` (currently **0.6.0**, prepared for release). Crates inherit via
+`[workspace.package] version` (currently **0.6.1**, prepared for release). Crates inherit via
 `version.workspace = true`. npm packages under `npm/`, `npm-mcp/`, and
 `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
 `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
 
-## 0.6.0 release candidate — prepared 2026-10-31
+## 0.6.1 release candidate — prepared 2026-10-31
 
-This checkout prepares 0.6.0; a version bump is not publication evidence.
-After merging the final candidate, run `ci.yml` with `workflow_dispatch` and
-verify success on the exact final commit SHA before creating its non-forced tag.
+This checkout prepares 0.6.1; a version bump is not publication evidence.
+Once the final candidate commit is reviewed and frozen, run `ci.yml` with
+`workflow_dispatch` on its ref and verify success on that exact commit SHA
+before creating its non-forced tag. The candidate may be a release branch based
+on a published tag; do not imply it was merged to main unless it actually was.
 The release workflow requires that evidence. Current manual CI runs Linux
 stable full checks and Linux rustc 1.89 checking, not native macOS/Windows tests.
 The tag workflow builds Linux x64 and macOS arm64/x64 archives, checks their
@@ -52,7 +54,7 @@ cargo fmt --all -- --check
 - [ ] `CHANGELOG.md` has a dated `## [X.Y.Z]` section with the full feature list
 - [ ] Workspace + npm versions match (Cargo.toml, package.json, bin VERSION)
 - [ ] Working tree clean (or intentional release commit)
-- [ ] CI green on `main`
+- [ ] Required checks and manual full CI green on the exact release candidate commit
 - [ ] e2e green locally (`scripts/e2e.sh`)
 
 ## Checklist — v0.5.1 (launch: Oct 20)
@@ -229,7 +231,7 @@ cargo fmt --all -- --check
 Tags must match `v*` so [`.github/workflows/release.yml`](../.github/workflows/release.yml) runs.
 
 ```bash
-# From a clean main at the release commit:
+# From the reviewed release commit after its exact-SHA full CI passes:
 git tag -a v0.2.0 -m "Locus v0.2.0"
 git push origin v0.2.0
 ```

@@ -1038,7 +1038,7 @@ dependencies = [
 
 [[package]]
 name = "locus-cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "locus-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "argon2",
  "base64",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "locus-mcp"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "chrono",

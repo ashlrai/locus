@@ -2,9 +2,16 @@
 
 <!-- fresh:begin install -->
 ```bash
-npm install -g locus-cli@0.5.2 @ashlrai/locus-mcp@0.5.2
+npm install -g locus-cli@0.6.0 @ashlrai/locus-mcp@0.6.0
 ```
 <!-- fresh:end -->
+
+**Version scope:** The install pin above selects the 0.6.0 wrappers, whose
+publication was verified as of October 31, 2026. If their checksum download fails
+or cannot be parsed, they can install without verification; on first run, a
+checksum mismatch can fall back to Cargo. Version 0.6.1 implements the fail-closed
+checksum behavior described below. The 0.6.0 CLI postinstall can also report success
+while deferring a failed download until first use.
 
 npm wrapper for the [Locus](https://github.com/ashlrai/locus) CLI — identity plane for coding agents.
 
@@ -18,7 +25,7 @@ npm install -g locus-cli
 npx locus-cli --help
 ```
 
-Requires Node ≥ 16. Without an override, the wrapper selects a binary as follows:
+Requires Node ≥ 16. In version 0.6.1, without an override, the wrapper selects a binary as follows:
 
 1. It checks `~/.locus/bin/locus` first. A binary matching the wrapper's packaged
    version is reused. A newer binary, or one whose version cannot be determined,
@@ -28,8 +35,14 @@ Requires Node ≥ 16. Without an override, the wrapper selects a binary as follo
    `PATH` (or in `~/.cargo/bin`). It reuses one matching or newer than the
    packaged version; an older or unversioned candidate is not selected.
 3. Otherwise it downloads the GitHub release matching the wrapper's packaged
-   version into `~/.locus/bin`. If the download fails, or there is no prebuilt
-   release for the platform (currently Linux arm64 and Windows), it builds
+   version into `~/.locus/bin` after verifying its SHA-256 sidecar. If the
+   checksum cannot be retrieved or parsed, or does not match, installation stops
+   with an error and does not fall back to Cargo; retry after checking the
+   release sidecar. The CLI's eager postinstall also fails on checksum errors;
+   when eager installation is deferred, the error appears on first use. The
+   sidecar detects corruption, but is not a publisher signature. If another
+   download or extraction error occurs, or there is no prebuilt release for the
+   platform (currently Linux arm64 and Windows), it builds
    with `cargo install --git https://github.com/ashlrai/locus locus-cli --locked`.
    This fallback requires Rust 1.89 or newer ([rustup](https://rustup.rs)) — the
    workspace's `rust-version` — and can take several minutes.
