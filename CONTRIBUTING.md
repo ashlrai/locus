@@ -75,6 +75,22 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo test --workspace
 ```
 
+### Minimum supported Rust version
+
+The workspace declares Rust 1.89 as its minimum supported Rust version (MSRV).
+When changing Rust code or dependencies, verify the locked workspace, including
+test and example targets, with that toolchain:
+
+```bash
+rustup toolchain install 1.89.0 --profile minimal
+cargo +1.89.0 check --workspace --all-targets --locked
+```
+
+This checks the current host and lockfile; repeat on supported target platforms
+when changing platform-specific code or dependencies. If the minimum must rise,
+update the workspace declaration, installation documentation and npm fallback
+messages together. The Rust-version tests check those surfaces for agreement.
+
 Isolation and adapter behavior live primarily in `locus-core` unit tests. Prefer `LOCUS_HOME` for any local smoke tests so you do not touch `~/.locus`:
 
 ```bash
