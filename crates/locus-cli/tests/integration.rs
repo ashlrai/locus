@@ -32,6 +32,8 @@ mod doctor_fix_phm_names;
 mod dry_run_docs;
 #[path = "dry_run_no_side_effects.rs"]
 mod dry_run_no_side_effects;
+#[path = "dry_run_review_matrix.rs"]
+mod dry_run_review_matrix;
 #[path = "exec_exit_codes.rs"]
 mod exec_exit_codes;
 #[path = "exec_expect.rs"]
