@@ -627,3 +627,41 @@ fn spoofed_non_origin_remote_does_not_match() {
     assert_eq!(v["report"]["reason"], "no_history");
     assert!(v["report"]["suggestion"].is_null());
 }
+
+#[test]
+fn without_origin_suggestion_uses_other_remotes_but_does_not_pin() {
+    let (home, repo, cap) = setup(&[("acme", 5)]);
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["remote", "rename", "origin", "upstream"])
+        .status()
+        .unwrap()
+        .success());
+
+    let output = locus(
+        home.path(),
+        repo.path(),
+        None,
+        &[],
+        &["autopin", "suggest", "--json"],
+    );
+    assert!(output.status.success());
+    assert_eq!(json(&output)["report"]["suggestion"], "acme");
+    assert!(!repo.path().join(".locus.toml").exists());
+    assert!(!home.path().join("sessions/active.json").exists());
+
+    let output = locus(
+        home.path(),
+        repo.path(),
+        Some(&cap),
+        &[],
+        &["autopin", "suggest", "--apply", "--json"],
+    );
+    assert!(output.status.success());
+    assert_eq!(json(&output)["report"]["suggestion"], "acme");
+    let policy = std::fs::read_to_string(repo.path().join(".locus.toml")).unwrap();
+    let parsed: toml::Table = toml::from_str(&policy).unwrap();
+    assert_eq!(parsed["default_binding"].as_str(), Some("acme"));
+    assert!(!home.path().join("sessions/active.json").exists());
+}
