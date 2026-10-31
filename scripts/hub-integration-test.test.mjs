@@ -102,6 +102,62 @@ test('failed project allocation cleans the temporary home', (t) => {
   assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
 });
 
+test('early initialization failure cleans both temporary directories', (t) => {
+  const root = mkdtempSync('/tmp/lhi-early-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  const scratch = join(root, 'scratch with spaces');
+  const record = join(root, 'created');
+  const reached = join(root, 'init-reached');
+  mkdirSync(bin);
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+path="$("$REAL_MKTEMP" "$@")" || exit
+touch "$path/cleanup-sentinel" || exit
+printf '%s\\n' "$path" >> "$MKTEMP_RECORD"
+printf '%s\\n' "$path"
+`, { mode: 0o755 });
+
+  // Fail at init only after confirming both allocated directories are populated.
+  const harness = `
+node() { :; }
+jq() { :; }
+cargo() { :; }
+locus() {
+  if [[ "$1" == init ]]; then
+    home_dir="$(sed -n '1p' "$MKTEMP_RECORD")"
+    project_dir="$(sed -n '2p' "$MKTEMP_RECORD")"
+    [[ "$LOCUS_HOME" == "$home_dir" && -f "$home_dir/cleanup-sentinel" && -f "$project_dir/cleanup-sentinel" ]] || return 74
+    : > "$INIT_REACHED"
+    return 73
+  fi
+}
+export -f node jq cargo locus
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'cleanup-test', script], {
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: process.env.HOME, TMPDIR: scratch,
+      REAL_MKTEMP: realMktemp, MKTEMP_RECORD: record, INIT_REACHED: reached },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected initialization failure must propagate');
+  assert.equal(existsSync(reached), true, 'initialization must reach the injected failure');
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2);
+  assert.equal(dirname(paths[0]), scratch);
+  assert.equal(dirname(paths[1]), scratch);
+  assert.match(paths[0].slice(scratch.length + 1), /^locus-hub-int\.[^/]+$/);
+  assert.match(paths[1].slice(scratch.length + 1), /^locus-hub-int-proj\.[^/]+$/);
+  assert.equal(existsSync(paths[0]), false, 'the populated temporary home must be removed');
+  assert.equal(existsSync(paths[1]), false, 'the populated temporary project must be removed');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+});
+
 test('an exit from inside the temporary project removes it', (t) => {
   const root = mkdtempSync('/tmp/lhi-cleanup-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
