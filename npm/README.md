@@ -1,8 +1,8 @@
 # locus-cli
 
-<!-- fresh:begin install -->
+<!-- fresh:begin package-install -->
 ```bash
-npm install -g locus-cli@0.6.1 @ashlrai/locus-mcp@0.6.1
+npm install -g locus-cli @ashlrai/locus-mcp
 ```
 <!-- fresh:end -->
 
