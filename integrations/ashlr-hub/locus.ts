@@ -2231,7 +2231,7 @@ function writeMcpConfigAtomically(path: string, text: string, previous?: Stats):
  * Refuses final symlinks, hardlinks and nonregular files (like the guarded
  * workspace writer in crates/locus-core/src/store.rs). Changed existing files must
  * be writable. New files are private (0600); POSIX owner/group/mode survive
- * replacement requires a writable parent directory. Extended ACLs/xattrs
+ * replacement. Replacement requires a writable parent directory. Extended ACLs/xattrs
  * and concurrent writers are not supported.
  *
  * @example
