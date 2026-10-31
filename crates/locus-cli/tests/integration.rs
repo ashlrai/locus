@@ -60,6 +60,8 @@ mod quickstart_then_doctor;
 mod quickstart_then_enter;
 #[path = "readme_quickstart.rs"]
 mod readme_quickstart;
+#[path = "regress_closed_issues.rs"]
+mod regress_closed_issues;
 #[path = "sample_exec_quiet.rs"]
 mod sample_exec_quiet;
 #[path = "setup_client_shapes.rs"]
