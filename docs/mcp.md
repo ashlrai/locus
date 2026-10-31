@@ -518,11 +518,14 @@ Each tick is a JSON-RPC `notifications/message` with values-free `data`:
   "doctor_verdict": "SAFE",
   "safe_next": "ready",
   "pinned": true,
-  "frozen": false
+  "frozen": false,
+  "version": "0.5.2"
 }
 ```
 
-`X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets. Ticks run the same external probes as `locus doctor` (Phantom on PATH, unresolved `phm:` refs), so `session_ok: true` is a real verdict on a healthy pin — not a conservative constant.
+`X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets. Operator ticks run the same external probes as `locus doctor` (Phantom on PATH, unresolved `phm:` refs), so their `session_ok` reflects doctor and safe-next readiness. Tenant ticks instead report the grant-scoped drift result: `doctor_verdict` is synthesized as `SAFE` or `UNSAFE`, and `safe_next` is `proceed` or `remint_grant`.
+
+Wire contract: `params.data` validates against [`schema/locus-events.v1.schema.json`](../schema/locus-events.v1.schema.json) `$defs.sessionTick` (tenant ticks add `scope`/`grant_id`/`issues`). This closed schema describes the current emitted shape: it requires the emitting binary `version` and rejects unknown fields, so older or future tick shapes may not validate. The binary version is not schema negotiation.
 
 Cross-process `Mcp-Session-Id` resume is **on** when workers share the same `LOCUS_HOME` (or `LOCUS_MCP_SESSION_DIR`). Multi-tenant remote multiplexor remains open.
 

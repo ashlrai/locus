@@ -108,20 +108,27 @@ locus events export --binding acme --out acme.jsonl
 locus events export --since 2026-08-09T00:00:00Z
 ```
 
-Envelope schema `locus.audit.v1`:
+Envelope schema `locus.audit.v1` (versioned wire contract:
+[`schema/locus-events.v1.schema.json`](../schema/locus-events.v1.schema.json),
+`$defs.audit`; the same file also covers `locus.session_tick` and `watch`
+ticks):
 
 ```json
 {
   "schema": "locus.audit.v1",
   "locus_version": "0.1.1",
-  "exported_at": "…",
-  "ts": "…",
+  "exported_at": "2026-10-27T12:05:00Z",
+  "ts": "2026-10-27T12:00:00Z",
   "op": "mcp.scope_freeze",
   "binding": "acme",
   "detail": { "tool": "…", "args_digest": "…" },
   "kind": "audit"
 }
 ```
+
+Schema validation checks structure, not redaction or absence of sensitive data.
+Audit `detail` is copied from the underlying record and can contain arbitrary
+JSON; handle exports accordingly.
 
 ### SIEM NDJSON
 

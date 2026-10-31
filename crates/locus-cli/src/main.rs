@@ -12480,6 +12480,47 @@ credential_ref = "env:GH_TOKEN"
         ));
     }
 
+    /// Wire contract (events-schema bet): the NDJSON heartbeat a hub router
+    /// consumes conforms to schema/locus-events.v1.schema.json $defs.watchTick.
+    #[test]
+    fn watch_heartbeat_validates_against_event_schema() {
+        let mut schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schema/locus-events.v1.schema.json"))
+                .unwrap();
+        schema["$ref"] = serde_json::json!("#/$defs/watchTick");
+        schema.as_object_mut().unwrap().remove("oneOf");
+        let validator = jsonschema::options()
+            .should_validate_formats(true)
+            .build(&schema)
+            .unwrap();
+
+        let base = WatchHeartbeat {
+            kind: "watch".into(),
+            session_ok: true,
+            whoami: Some("acme".into()),
+            doctor_verdict: "SAFE".into(),
+            safe_next: "ready".into(),
+            pinned: true,
+            frozen: false,
+        };
+        // With and without `whoami` (unpinned tick omits it).
+        for hb in [
+            base.clone(),
+            WatchHeartbeat {
+                whoami: None,
+                session_ok: false,
+                doctor_verdict: "UNSAFE".into(),
+                safe_next: "enter".into(),
+                pinned: false,
+                ..base
+            },
+        ] {
+            let line = serde_json::to_string(&hb).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert!(validator.is_valid(&v), "{line}");
+        }
+    }
+
     #[test]
     fn watch_pack_attaches_control_capability_findings() {
         let dir = tempdir().unwrap();
