@@ -595,6 +595,8 @@ Exact steps: [`integrations/phantom/fleet-preflight.md`](../integrations/phantom
 
 ## Validation
 
+See [hub smoke prerequisites](./hub-smoke-prerequisites.md) for setup, environment, and expected outcomes.
+
 ```bash
 # From repo root (jq + node required for composition smoke)
 export PATH="$HOME/.cargo/bin:$PATH"
