@@ -203,6 +203,8 @@ Intel, and Linux x86_64 with glibc. On unsupported platforms, including Linux
 ARM, try a source install. It requires Bash, curl, tar, and `sha256sum` or `shasum`;
 its default destination is `~/.local/bin`, without sudo or shell profile edits.
 Users must add the destination to their `PATH` themselves.
+See the [installer platform matrix](./docs/installer-platform-matrix.md) for
+prerequisites, evidence limits, and unresolved platform decisions.
 
 ### Install from source
 
