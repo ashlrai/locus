@@ -12,6 +12,8 @@ mod ashlr_handshake;
 mod autopin_learned_guard;
 #[path = "autopin_suggest.rs"]
 mod autopin_suggest;
+#[path = "binding_add_idempotent.rs"]
+mod binding_add_idempotent;
 #[path = "dead_broker_hint.rs"]
 mod dead_broker_hint;
 #[path = "doc_facts.rs"]
