@@ -6,8 +6,9 @@
 // Run: node --test apps/web/discoverability.test.mjs   (or: npm test)
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import {
   PUBLIC,
   REPO_ROOT,
@@ -348,3 +349,27 @@ test('candidate source version never replaces verified package metadata', () => 
   const sourcePackage = JSON.parse(readFileSync(join(REPO_ROOT, 'npm-mcp/package.json'), 'utf8'));
   assert.equal(rootManifest.packages[0].version, sourcePackage.version);
 });
+
+
+for (const [source, published] of [
+  ['0.6.0', '0.5.2'],
+  ['0.6.0-rc.1', '0.5.2'],
+  ['0.6.0-rc.1', '0.6.0-rc.1'],
+  ['0.6.0', '0.6.0-rc.1'],
+]) {
+  test(`dated source ${source} and published ${published} retain distinct versions`, t => {
+    const root = mkdtempSync(join(tmpdir(), 'locus-web-version-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, 'apps/web'), { recursive: true });
+    mkdirSync(join(root, 'scripts/freshness'), { recursive: true });
+    writeFileSync(join(root, 'Cargo.toml'), `[workspace.package]\nversion = "${source}"\n`);
+    writeFileSync(join(root, 'apps/web/package.json'), JSON.stringify({ version: source }));
+    writeFileSync(join(root, 'scripts/freshness/published.json'), JSON.stringify({ version: published }));
+    const headings = `## [${source}] - 2026-10-31\n` +
+      (source === published ? '' : `## [${published}] — 2026-10-26\n`);
+    writeFileSync(join(root, 'CHANGELOG.md'), headings);
+    assert.deepEqual(repoVersion(root), { version: source, date: '2026-10-31', publishedVersion: published });
+    writeFileSync(join(root, 'CHANGELOG.md'), headings + `## [${published}] - 2026-10-25\n`);
+    assert.throws(() => repoVersion(root), /exactly one dated CHANGELOG entry/);
+  });
+}

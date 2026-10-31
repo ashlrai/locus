@@ -65,7 +65,7 @@ export function repoVersion(root = REPO_ROOT) {
   )?.[1];
   if (!cargo) throw new Error('no [workspace.package] version in Cargo.toml');
   const release = read(root, 'CHANGELOG.md').match(
-    /^## \[(\d+\.\d+\.\d+)\]\s*[-\u2013\u2014]\s*(\d{4}-\d{2}-\d{2})/m
+    /^## \[(\d+\.\d+\.\d+(?:-[\w.-]+)?)\]\s*[-\u2013\u2014]\s*(\d{4}-\d{2}-\d{2})/m
   );
   if (!release) throw new Error('no released ## [x.y.z] - date heading in CHANGELOG.md');
   if (release[1] !== cargo) {
@@ -76,7 +76,7 @@ export function repoVersion(root = REPO_ROOT) {
     throw new Error(`apps/web/package.json version ${pkg.version} != Cargo workspace ${cargo}`);
   }
   const publishedVersion = JSON.parse(read(root, 'scripts/freshness/published.json')).version;
-  const releases = [...read(root, 'CHANGELOG.md').matchAll(/^## \[(\d+\.\d+\.\d+)\]\s*[-\u2013\u2014]\s*(\d{4}-\d{2}-\d{2})/gm)];
+  const releases = [...read(root, 'CHANGELOG.md').matchAll(/^## \[(\d+\.\d+\.\d+(?:-[\w.-]+)?)\]\s*[-\u2013\u2014]\s*(\d{4}-\d{2}-\d{2})/gm)];
   if (typeof publishedVersion !== 'string' || releases.filter(entry => entry[1] === publishedVersion).length !== 1) {
     throw new Error('published version needs exactly one dated CHANGELOG entry');
   }
