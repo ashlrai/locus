@@ -357,19 +357,22 @@ for (const [source, published] of [
   ['0.6.0-rc.1', '0.6.0-rc.1'],
   ['0.6.0', '0.6.0-rc.1'],
 ]) {
-  test(`dated source ${source} and published ${published} retain distinct versions`, t => {
+  test(`dated source ${source} and published ${published} retain distinct versions`, () => {
     const root = mkdtempSync(join(tmpdir(), 'locus-web-version-'));
-    t.after(() => rmSync(root, { recursive: true, force: true }));
-    mkdirSync(join(root, 'apps/web'), { recursive: true });
-    mkdirSync(join(root, 'scripts/freshness'), { recursive: true });
-    writeFileSync(join(root, 'Cargo.toml'), `[workspace.package]\nversion = "${source}"\n`);
-    writeFileSync(join(root, 'apps/web/package.json'), JSON.stringify({ version: source }));
-    writeFileSync(join(root, 'scripts/freshness/published.json'), JSON.stringify({ version: published }));
-    const headings = `## [${source}] - 2026-10-31\n` +
-      (source === published ? '' : `## [${published}] — 2026-10-26\n`);
-    writeFileSync(join(root, 'CHANGELOG.md'), headings);
-    assert.deepEqual(repoVersion(root), { version: source, date: '2026-10-31', publishedVersion: published });
-    writeFileSync(join(root, 'CHANGELOG.md'), headings + `## [${published}] - 2026-10-25\n`);
-    assert.throws(() => repoVersion(root), /exactly one dated CHANGELOG entry/);
+    try {
+      mkdirSync(join(root, 'apps/web'), { recursive: true });
+      mkdirSync(join(root, 'scripts/freshness'), { recursive: true });
+      writeFileSync(join(root, 'Cargo.toml'), `[workspace.package]\nversion = "${source}"\n`);
+      writeFileSync(join(root, 'apps/web/package.json'), JSON.stringify({ version: source }));
+      writeFileSync(join(root, 'scripts/freshness/published.json'), JSON.stringify({ version: published }));
+      const headings = `## [${source}] - 2026-10-31\n` +
+        (source === published ? '' : `## [${published}] — 2026-10-26\n`);
+      writeFileSync(join(root, 'CHANGELOG.md'), headings);
+      assert.deepEqual(repoVersion(root), { version: source, date: '2026-10-31', publishedVersion: published });
+      writeFileSync(join(root, 'CHANGELOG.md'), headings + `## [${published}] - 2026-10-25\n`);
+      assert.throws(() => repoVersion(root), /exactly one dated CHANGELOG entry/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 }
