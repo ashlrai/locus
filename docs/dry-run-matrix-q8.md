@@ -11,7 +11,7 @@ and exit codes.
 | Behavior | Command forms accepting `--dry-run` |
 | --- | --- |
 | Plan | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew` |
-| Plan | `engagement init`, `engagement close`, `graph export`, `graph import`, `binding add`, `binding rm`, `binding migrate-credential-refs`, `client add` |
+| Plan | `engagement init`, `engagement close`, `graph export`, `graph import`, `binding add`, `binding rm`, `binding migrate-credential-refs`, `client add`, `offboard` |
 | Plan | `autopin suggest --apply`, `capability persist`, `capability unpersist`, `ci mint`, `ci env`, `mcp mint`, `mcp revoke` |
 | Plan | `agent setup`, `doctor --fix`, `adapter install`, `adapter uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add`, `adapter registry index remove` |
 | Plan | `approve grant`, `approve deny`, `notify on`, `notify off`, `events export`, `forensics export` |

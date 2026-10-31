@@ -133,10 +133,12 @@ credential_ref = "env:PREVIEW_FIXTURE"
                 &["pin", "acme"][..],
                 &["binding", "rm", "acme", "--yes"],
                 &["capability", "persist"],
+                &["offboard", "acme"],
             ] {
                 preview(root, args, true);
             }
         }
+        preview(root, &["offboard", "missing"], false);
         preview(root, &["binding", "rm", "missing", "--yes"], false);
         preview(root, &["pin", "missing"], false);
         if initialized {

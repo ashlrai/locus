@@ -35,6 +35,7 @@ pub mod inherit_env;
 pub mod isolation;
 pub mod loopback;
 pub mod marketplace;
+pub mod offboard;
 pub mod onboard;
 pub mod peers;
 pub mod pin_history;
@@ -158,6 +159,9 @@ pub use marketplace::{
     save_index_sources, search_indexes, uninstall_adapter, validate_index_entry,
     validate_index_url, CommunityAdapterManifest, CommunityIndex, CommunityIndexEntry, IndexSource,
     InstallReport, InstalledAdapter, SearchHit, ADAPTERS_DIR,
+};
+pub use offboard::{
+    apply as offboard_apply, inventory as offboard_inventory, OffboardInventory, OffboardOutcome,
 };
 pub use onboard::steps;
 pub use onboard::{

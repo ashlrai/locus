@@ -295,7 +295,7 @@ checkout; supply their normal required arguments:
 | Area | Command forms |
 | --- | --- |
 | Setup and sessions | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew` |
-| Bindings and workspaces | `engagement init`, `engagement close`, `graph export`, `graph import`, `binding add`, `binding rm`, `binding migrate-credential-refs`, `client add`, `autopin suggest --apply` |
+| Bindings and workspaces | `engagement init`, `engagement close`, `graph export`, `graph import`, `binding add`, `binding rm`, `binding migrate-credential-refs`, `client add`, `offboard`, `autopin suggest --apply` |
 | Capabilities and grants | `capability persist`, `capability unpersist`, `ci mint`, `ci env`, `mcp mint`, `mcp revoke` |
 | Setup and adapters | `agent setup`, `doctor --fix`, `adapter install`, `adapter uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add`, `adapter registry index remove` |
 | Approvals and audit | `approve grant`, `approve deny`, `notify on`, `notify off`, `events export`, `forensics export` |
@@ -498,6 +498,7 @@ locus events --last N · events export # audit tail / fleet pulse / OTLP
 locus graph list|export|import        # encrypted binding graph share (no secrets)
 locus ci mint|env|run                 # short-lived sealed sessions for pipelines
 locus engagement init|close           # client engagement lifecycle (binding + workspace)
+locus offboard <alias> [--apply]      # plan first; --apply removes the client's local records
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
 locus adapter search|install|uninstall · registry export|verify-manifest  # community + release adapters
@@ -568,7 +569,7 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | done |
 | **2** Firm UX, doctor pane, run/ns, notify, local `locus graph`, `locus ci` | done (0.1.1) |
 | **2.x / 0.2–0.5** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch`; 0.5 signed registry manifests, hub MT drop-in | **you are here (0.5.2)** |
-| **3** Remote binding graph sync, dual-control packs, offboard, SIEM export | next |
+| **3** Remote binding graph sync, dual-control packs, ~~offboard~~ (done), SIEM export | next |
 | **4** Adapter SDK, broader prebuilt platforms | later |
 
 See [GOALS.md](./GOALS.md) (living milestones), [PLAN.md](./PLAN.md), and [DESIGN.md](./DESIGN.md).
