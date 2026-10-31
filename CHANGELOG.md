@@ -13,6 +13,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SIEM NDJSON audit export.** `locus events export --format ndjson` emits
+  one `locus.siem.v1` event per line with stable field names (`schema`, `ts`,
+  `op`, `binding`, `severity`, `kind`, `detail`, `exported_at`,
+  `locus_version`) for SIEM ingest, and `--since <ts>` bounds the exported
+  slice in every format (RFC3339 or a bare `YYYY-MM-DD`, inclusive; an
+  unparseable bound fails closed). Beyond the store's write-time
+  sanitization, `detail` is deep-redacted at export: credential-shaped keys
+  (`password`, `token`, `credential_ref`, `*_key`, `authorization`, …)
+  surface as `<name>_redacted: "<redacted>"`, and strings carrying
+  `phm:`/`env:`/`test:` locators or known token prefixes become
+  `<redacted>`; the finished body must pass the same fail-closed secret scan
+  as the webhook sink. `--format` also accepts `fleet` (default) and `otlp`
+  (the `--otlp` flag remains as its alias). See
+  [docs/observability.md](docs/observability.md).
+
 ### Documentation
 
 - **Shell installer proposal ([#169](https://github.com/ashlrai/locus/issues/169)).**

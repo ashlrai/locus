@@ -91,7 +91,12 @@ jq '{pack_version, near_miss, chain_tip, verdict: .doctor.verdict}' /tmp/pack.js
 
 ---
 
-## Events export (fleet pulse / OTLP)
+## Events export (fleet pulse / SIEM / OTLP)
+
+`--since <ts>` bounds the exported slice in every format — RFC3339
+(`2026-08-09T00:00:00Z`, any offset) or a bare date (`2026-08-09` = start of
+day UTC), inclusive. Events whose `ts` does not parse are dropped while a
+since filter is active; an unparseable bound is an error, not a silent skip.
 
 ### JSON lines (default)
 
@@ -100,6 +105,7 @@ One envelope per audit event — compatible with fleet pulse / log shippers:
 ```bash
 locus events export --last 200
 locus events export --binding acme --out acme.jsonl
+locus events export --since 2026-08-09T00:00:00Z
 ```
 
 Envelope schema `locus.audit.v1`:
@@ -116,6 +122,27 @@ Envelope schema `locus.audit.v1`:
   "kind": "audit"
 }
 ```
+
+### SIEM NDJSON
+
+`--format ndjson` emits one `locus.siem.v1` event per line with stable field
+names, built for SIEM ingest:
+
+```bash
+locus events export --format ndjson --since 2026-08-09T00:00:00Z
+locus events export --format ndjson --binding acme --out acme.siem.ndjson
+```
+
+```json
+{"schema":"locus.siem.v1","ts":"…","op":"mcp.scope_freeze","binding":"acme","severity":"WARN","kind":"audit","detail":{"tool":"…","args_digest":"…"},"exported_at":"…","locus_version":"…"}
+```
+
+Beyond the store's write-time sanitization, the SIEM path deep-redacts
+`detail` again at export: credential-shaped keys (`password`, `token`,
+`credential_ref`, `*_key`, `authorization`, …) surface as
+`<name>_redacted: "<redacted>"`, and strings carrying locator prefixes
+(`phm:`/`env:`/`test:`) or known token prefixes become `<redacted>`. The
+finished body must pass the same fail-closed secret scan as the webhook sink.
 
 ### OTLP-compatible logs JSON
 

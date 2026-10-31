@@ -494,7 +494,7 @@ locus forensics export                # shareable pack (no secrets)
 locus verify session · claim --text "…"  # verification plane: session pack · claim score
 locus approve list|grant|status|wait|deny  # require_approval / dual-control
 locus notify status|on|off            # desktop banners OFF by default
-locus events --last N · events export # audit tail / fleet pulse / OTLP
+locus events --last N · events export # audit tail / fleet pulse / SIEM ndjson / OTLP
 locus graph list|export|import        # encrypted binding graph share (no secrets)
 locus ci mint|env|run                 # short-lived sealed sessions for pipelines
 locus engagement init|close           # client engagement lifecycle (binding + workspace)

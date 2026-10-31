@@ -43,6 +43,7 @@ pub mod recipes;
 pub mod recovery;
 pub mod seal;
 pub mod session;
+pub mod siem_export;
 pub mod store;
 pub mod swarm;
 pub mod ticket;
@@ -174,6 +175,10 @@ pub use session::{
     binding_fingerprint, namespace_tool, parse_ttl, split_namespaced_tool, PinSource, Session,
     SessionAuthority, SessionAuthorityAnchor, SessionBackingIdentity, SessionBackingType,
     SessionMode, CURRENT_SEAL_VERSION,
+};
+pub use siem_export::{
+    events_since, export_siem_ndjson, parse_since, redact_siem_value, SiemEvent, SiemExportOptions,
+    SIEM_SCHEMA,
 };
 pub use store::{
     audit_events_path, is_safe_mcp_grant_id, locus_home, parse_mcp_grant_token, renew_bounds,
