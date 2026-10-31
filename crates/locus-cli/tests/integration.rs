@@ -74,6 +74,8 @@ mod quickstart_then_enter;
 mod readme_commands;
 #[path = "readme_quickstart.rs"]
 mod readme_quickstart;
+#[path = "registry_manifest_consumer_checklist.rs"]
+mod registry_manifest_consumer_checklist;
 #[path = "registry_trust_faq.rs"]
 mod registry_trust_faq;
 #[path = "regress_closed_issues.rs"]
