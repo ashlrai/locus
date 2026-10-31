@@ -1,6 +1,6 @@
 // Run: node --test scripts/e2e.test.mjs
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -10,6 +10,61 @@ import { test } from 'node:test';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(root, 'scripts', 'e2e.sh');
 const locus = join(root, 'target', 'release', 'locus');
+
+test('workspace creation preserves a spaced TMPDIR argument and cleans up on failure', { timeout: 1_800_000 }, (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-workspace-test-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'custom tmp with spaces');
+  const bin = join(fixture, 'bin');
+  const created = join(fixture, 'workspace-created');
+  const entered = join(fixture, 'workspace-entered');
+  mkdirSync(scratch);
+  mkdirSync(bin);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
+case "$*" in
+  *locus-ws.XXXXXX*)
+    [[ $# -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-ws.XXXXXX" ]] || exit 1
+    workspace="$("$REAL_MKTEMP" "$@")" || exit $?
+    printf '%s' "$workspace" > "$WORKSPACE_CREATED"
+    printf '%s\\n' "$workspace"
+    ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+`, { mode: 0o755 });
+  const wrapper = join(bin, 'locus');
+  writeFileSync(wrapper, `#!/bin/bash
+if [[ "\${1:-}" == workspace ]]; then
+  [[ -d "$PWD" ]] || exit 1
+  printf '%s' "$PWD" > "$WORKSPACE_ENTERED"
+  touch "$PWD/cleanup-sentinel"
+  exit 1
+fi
+exec '${locus.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    cwd: root,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
+      LOCUS_BIN: wrapper, REAL_MKTEMP: realMktemp, WORKSPACE_CREATED: created,
+      WORKSPACE_ENTERED: entered },
+    encoding: 'utf8',
+    timeout: 1_800_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+  assert.equal(result.status, 1, 'the injected workspace failure should stop e2e');
+  assert.match(result.stdout, /==> 4\. workspace allowlist/);
+  assert.ok(existsSync(created), 'workspace mktemp did not receive the expected arguments');
+  assert.ok(existsSync(entered), 'the workspace command was not reached');
+  const workspace = readFileSync(created, 'utf8');
+  assert.equal(dirname(workspace), scratch);
+  assert.match(workspace, /\/locus-ws\.[^/]+$/);
+  assert.equal(readFileSync(entered, 'utf8'), workspace, 'command entered a different directory');
+  assert.equal(existsSync(workspace), false, 'workspace survived exit cleanup');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+});
 
 test('binding add regression detects changes to an existing matching file', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-binding-test-'));
