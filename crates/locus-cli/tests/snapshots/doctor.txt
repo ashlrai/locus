@@ -1,4 +1,4 @@
-doctor locus 0.5.2
+doctor locus 0.6.0
   verdict   WARN
   home      <HOME>/locus
   bindings  0

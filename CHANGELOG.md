@@ -1,9 +1,9 @@
 # Changelog
 
 <!-- fresh:begin release -->
-Latest release: [v0.5.2](https://github.com/ashlrai/locus/releases/tag/v0.5.2) (2026-10-26).
+Latest release: [v0.6.0](https://github.com/ashlrai/locus/releases/tag/v0.6.0) (2026-10-31).
 
-`locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
+Grant-scoped swarm and local peer relay, stricter binding validation, safer npm cache replacement, and failure-safe MCP configuration registration.
 <!-- fresh:end -->
 
 All notable changes to this project will be documented in this file.
@@ -156,6 +156,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notes now state the same `rust-version` the workspace declares, and
   `crates/locus-core/tests/rust_version.rs` keeps `cargo metadata`, member
   crate manifests and the documented install requirements in agreement with it.
+
+## [0.6.0] - 2026-10-31
+
+Highlights: Grant-scoped swarm and local peer relay, stricter binding validation, safer npm cache replacement, and failure-safe MCP configuration registration.
+
+**Release preparation:** October 31 is the candidate preparation date. This source
+section does not assert that the tag, release assets, npm packages, website or
+Homebrew update have been published. Verify the release and package registries
+before installing the new version.
+
+### Added
+
+- `locus offboard` plans local client cleanup by default; explicit `--apply`
+  removes operable local records while preserving audit/archive evidence. It
+  does not revoke provider credentials or remove external repository access.
+- Grant-scoped swarm MCP serving and bounded local peer relay using
+  operator-controlled graph and engine manifests; registration does not confer
+  new execution authority.
+- Credential-free workbench status and launch diagnostics, optional native MCP
+  registration rewrites with backups, and an opt-in versioned strict grant schema.
+
+### Fixed
+
+- Session renewal does not restore a session after concurrent leave or enter.
+  Broker recovery guidance, binding-add idempotence, credential-presence reports
+  and supervised child lifecycle handling have also been improved.
+- npm wrappers preserve newer or unknown-version cached binaries rather than
+  silently downgrading them. Replacement requires an explicit leading `--force`;
+  postinstall success alone does not prove the cached binary was replaced.
+- MCP config registration refuses malformed existing JSON and atomically stages
+  replacements instead of truncating existing config on a failed write.
+- Authenticated swarm preflight now reports the existing `multi_tenant` category,
+  consistent with anonymous grant-layer detection, and retains the grant ID.
+
+### Compatibility and upgrade notes
+
+- Binding, provider, upstream and policy structures reject unknown fields;
+  fix misspelled or unsupported fields rather than bypassing validation.
+  `policy.default` must normalize to `allow` or `deny`.
+- Phantom reference names must match `[A-Z_][A-Z0-9_]*`, at most 256 ASCII
+  characters. Formerly accepted lowercase, dotted or hyphenated names are
+  rejected, not automatically rewritten. `phm:` credential resolution already
+  failed closed in v0.5.2; this release does not activate a Phantom execution
+  bridge. Supported credential resolution remains explicit `env:` references.
+- MCP config replacement refuses symbolic/multiple hard links and nonregular
+  targets and requires a writable parent directory. POSIX owner/group/mode are
+  preserved where supported; custom ACL/xattr preservation, concurrent-writer
+  safety and power-loss durability are not promised. Interrupted staging can
+  leave a temporary sibling at the previous file's mode after metadata restore,
+  not necessarily the initial private mode.
+- Manual CI covers Linux stable and Linux MSRV 1.89. macOS release builds are not
+  native test qualification; no Windows archive or native Windows test claim is
+  made. Check the exact final release SHA's workflow evidence before tagging.
 
 ## [0.5.2] - 2026-10-26
 

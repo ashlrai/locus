@@ -17,7 +17,7 @@ Pin a client, and every CLI command, MCP tool and agent session is sealed to tha
 [**Docs**](#docs)
 
 <!-- fresh:begin badge -->
-[![Release 0.5.2](https://img.shields.io/badge/release-v0.5.2-blue?style=for-the-badge&labelColor=0b0b14)](https://github.com/ashlrai/locus/releases/tag/v0.5.2)
+[![Release 0.6.0](https://img.shields.io/badge/release-v0.6.0-blue?style=for-the-badge&labelColor=0b0b14)](https://github.com/ashlrai/locus/releases/tag/v0.6.0)
 <!-- fresh:end -->
 [![CI](https://img.shields.io/github/actions/workflow/status/ashlrai/locus/ci.yml?style=for-the-badge&label=CI&logo=github&labelColor=0b0b14)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
 [![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?style=for-the-badge&logo=npm&label=locus-cli&labelColor=0b0b14)](https://www.npmjs.com/package/locus-cli)
@@ -27,9 +27,9 @@ Pin a client, and every CLI command, MCP tool and agent session is sealed to tha
 </div>
 
 <!-- fresh:begin release -->
-Latest release: [v0.5.2](https://github.com/ashlrai/locus/releases/tag/v0.5.2) (2026-10-26).
+Latest release: [v0.6.0](https://github.com/ashlrai/locus/releases/tag/v0.6.0) (2026-10-31).
 
-`locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
+Grant-scoped swarm and local peer relay, stricter binding validation, safer npm cache replacement, and failure-safe MCP configuration registration.
 <!-- fresh:end -->
 
 ![locus quickstart pins a sample binding; locus whoami shows the sealed session and its scoped providers](docs/assets/locus-demo.gif)
@@ -568,7 +568,7 @@ Override home for tests/CI: `LOCUS_HOME=/tmp/locus-test locus …`
 | **0** Daemon-less control plane, pin/whoami/exec, isolation tests | done |
 | **1** `locus-mcp`, credential resolve, adapters, scope freeze, setup | done |
 | **2** Firm UX, doctor pane, run/ns, notify, local `locus graph`, `locus ci` | done (0.1.1) |
-| **2.x / 0.2–0.5** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch`; 0.5 signed registry manifests, hub MT drop-in | **you are here (0.5.2)** |
+| **2.x / 0.2–0.5** Dashboard, forensics, HTTP MCP, agent report, goal loop; 0.3 dogfood polish, TTL, client add, MCP session pin-anchoring; 0.4 multi-tenant multiplexor, Anthropic/OpenAI adapters, `locus switch`; 0.5 signed registry manifests, hub MT drop-in | **0.5.2 released; 0.6.0 candidate prepared** |
 | **3** Remote binding graph sync, dual-control packs, ~~offboard~~ (done), SIEM export | next |
 | **4** Adapter SDK, broader prebuilt platforms | later |
 

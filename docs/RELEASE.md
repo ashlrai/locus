@@ -1,10 +1,31 @@
 # Releasing Locus
 
 Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
-`[workspace.package] version` (currently **0.5.2**). Crates inherit via
+`[workspace.package] version` (currently **0.6.0**, prepared for release). Crates inherit via
 `version.workspace = true`. npm packages under `npm/`, `npm-mcp/`, and
 `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
 `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
+
+## 0.6.0 release candidate — prepared 2026-10-31
+
+This checkout prepares 0.6.0; a version bump is not publication evidence.
+After merging the final candidate, run `ci.yml` with `workflow_dispatch` and
+verify success on the exact final commit SHA before creating its non-forced tag.
+The release workflow requires that evidence. Current manual CI runs Linux
+stable full checks and Linux rustc 1.89 checking, not native macOS/Windows tests.
+The tag workflow builds Linux x64 and macOS arm64/x64 archives, checks their
+SHA256 sidecars, exports an unsigned adapter manifest, creates the GitHub
+Release, then publishes both npm packages through trusted OIDC. Verify every
+stage and both registry versions; a GitHub Release alone does not prove npm
+publication. Do not provision credentials or change protections to bypass gates.
+
+Run the focused TypeScript drop-in tests with Node 22.6+ separately from the
+Node 20 full-suite job, and record whether `scripts/e2e.sh` below was run rather
+than inferring its result from the manual CI job. After updating canonical
+versions and the changelog, regenerate and check both `scripts/freshness` and
+`apps/web/discoverability.mjs`. Root `server.json` must also match.
+Homebrew's live tap, the live website and MCP registry submission are separate
+channels; verify them independently and never invent checksums before assets exist.
 
 ## Preconditions
 
