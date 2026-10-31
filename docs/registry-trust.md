@@ -11,6 +11,8 @@ For a pre-flight review list, see the
 For common trust questions, see the [registry trust FAQ](./registry-trust-faq.md).
 For unresolved release verification decisions, see the
 [verification questions](./registry-manifest-verification-questions.md).
+For the open decisions of the unsigned-to-signed transition itself, see
+[registry signing open questions](./registry-signing-open-questions.md).
 
 ## Current release status
 
