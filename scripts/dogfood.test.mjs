@@ -8,6 +8,21 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 const script = join(dirname(fileURLToPath(import.meta.url)), 'dogfood.sh');
+const scriptsDir = dirname(script);
+
+test('temporary resource guide covers each dogfood and Hub mktemp template', () => {
+  const guide = readFileSync(join(scriptsDir, '../docs/dogfood-temporary-resources.md'), 'utf8');
+  for (const name of ['dogfood.sh', 'hub-smoke.sh']) {
+    const source = readFileSync(join(scriptsDir, name), 'utf8');
+    const templates = [...source.matchAll(/\bmktemp\s+(?:-d\s+)?"\$\{TMPDIR:-\/tmp\}\/([^"/]+\.XXXXXX)"/g)]
+      .map((match) => match[1]);
+    assert.ok(templates.length > 0, `no temporary resource templates found in ${name}`);
+    for (const template of templates) {
+      assert.ok(guide.includes(`\`${template}`), `${name}: guide missing ${template}`);
+    }
+  }
+});
+
 const harness = String.raw`
 source "$1"
 locus() {
