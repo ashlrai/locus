@@ -66,5 +66,6 @@ configuration instead of a plan.
   and MCP tool calls are not previewed by this flag. Any dry-run facility for
   those operations must be provided by the child or provider itself.
 
-See the [agent contract](agent-contract.md#--dry-run) for plan details and exit
-codes, and [doctor repairs](doctor-fix.md) for its default preview.
+See the [manual verification procedure](dry-run-verification.md) to check plans
+and unchanged state, the [agent contract](agent-contract.md#--dry-run) for plan
+details and exit codes, and [doctor repairs](doctor-fix.md) for its default preview.

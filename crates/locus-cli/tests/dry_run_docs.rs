@@ -210,3 +210,29 @@ fn fleet_read_only_commands_are_in_the_full_matrix_and_help() {
         assert!(String::from_utf8_lossy(&output.stdout).contains("--dry-run"));
     }
 }
+
+#[test]
+fn manual_verification_procedure_runs_from_the_checkout() {
+    let doc = include_str!("../../../docs/dry-run-verification.md");
+    let script = doc
+        .split("```bash\n")
+        .nth(1)
+        .expect("manual verification script")
+        .split("\n```")
+        .next()
+        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .env("LOCUS_BIN", env!("CARGO_BIN_EXE_locus"))
+        .env("HOME", home.path())
+        .output()
+        .expect("run manual verification");
+    assert!(
+        output.status.success(),
+        "manual verification failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("PASS: help, planned actions"));
+}
