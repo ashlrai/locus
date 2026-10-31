@@ -2,6 +2,9 @@
 
 This matrix tracks [issue #171](https://github.com/ashlrai/locus/issues/171)
 and describes the CLI in this checkout, not necessarily a published release.
+The 11 commands reported in that issue are exercised in human and JSON modes
+by `crates/locus-cli/tests/issue171_matrix.rs`, including home and workspace
+content, permission and modification-time checks after every invocation.
 `--dry-run` is a global flag;
 place it before or after a supported command and supply that command's normal
 required arguments. For example, `locus --json init --dry-run` previews setup,
