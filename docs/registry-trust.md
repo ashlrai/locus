@@ -6,6 +6,7 @@
 
 For a concise consumer walkthrough, see
 [Verifying an adapter registry release manifest](./registry-manifest-verification.md).
+For common trust questions, see the [registry trust FAQ](./registry-trust-faq.md).
 
 ## Current release status
 
