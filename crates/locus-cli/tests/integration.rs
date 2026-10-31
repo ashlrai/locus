@@ -12,6 +12,8 @@ mod ashlr_handshake;
 mod autopin_learned_guard;
 #[path = "autopin_suggest.rs"]
 mod autopin_suggest;
+#[path = "binding_add_noop.rs"]
+mod binding_add_noop;
 #[path = "doc_facts.rs"]
 mod doc_facts;
 #[path = "doctor_after_quickstart.rs"]
