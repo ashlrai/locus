@@ -99,3 +99,31 @@ test('a nonexistent TMPDIR fails before creating an isolated home', (t) => {
   assert.match(result.stderr, /mktemp/);
   assert.deepEqual(readdirSync(fixture.root), ['bin']);
 });
+
+test('security fixture directories are removed by the script exit trap', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createHome = source.match(/^create_security_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(createHome, 'missing security home creation function');
+  const probe = `${cleanup}
+${createHome}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+mkdir "$LOCUS_HOME"
+trap 'e2e_cleanup' EXIT
+create_security_home
+SECURITY_WS="$(mktemp -d "\${TMPDIR:-/tmp}/locus-security-ws.XXXXXX")"
+touch "$SECURITY_HOME/sentinel" "$SECURITY_WS/sentinel"
+exit 73
+`;
+  const result = spawnSync('bash', ['-c', probe, 'security-cleanup', scratch], { encoding: 'utf8' });
+  assert.equal(result.status, 73, 'the injected failure should reach the exit trap');
+  assert.equal(result.signal, null);
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must remove fixtures and preserve unrelated files');
+});
