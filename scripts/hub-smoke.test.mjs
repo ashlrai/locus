@@ -179,12 +179,15 @@ jq() { : > "$SMOKE_COMMAND_MARKER"; return 1; }
   return { BASH_ENV: guard, SMOKE_COMMAND_MARKER: marker };
 }
 
-test('successful smoke cleans all resources under a custom TMPDIR', (t) => {
+for (const [description, directory] of [
+  ['custom TMPDIR', 'custom tmp'],
+  ['TMPDIR with spaces and shell pattern characters', 'a [*] b'],
+]) test(`successful smoke uses and cleans a ${description}`, (t) => {
   // The authority broker uses a Unix socket, so keep the temporary path short.
   const root = mkdtempSync('/tmp/lhs-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, 'bin');
-  const scratch = join(root, 'custom tmp');
+  const scratch = join(root, directory);
   const record = join(root, 'created');
   mkdirSync(bin);
   mkdirSync(scratch);
@@ -192,6 +195,10 @@ test('successful smoke cleans all resources under a custom TMPDIR', (t) => {
     'locus-hub-proj.unrelated', 'locus-hub-smoke-err.unrelated'];
   for (const name of sentinels) writeFileSync(join(scratch, name), 'sentinel');
   writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+case "\${1:-}" in
+  -d) [[ $# -eq 2 && "$2" == "$TMPDIR"/locus-hub-*.XXXXXX ]] || exit 72 ;;
+  *)  [[ $# -eq 1 && "$1" == "$TMPDIR"/locus-hub-*.XXXXXX ]] || exit 72 ;;
+esac
 path="$("$REAL_MKTEMP" "$@")" || exit
 case "$path" in
   "$TMPDIR"/locus-hub-smoke.*|"$TMPDIR"/locus-hub-proj.*|"$TMPDIR"/locus-hub-smoke-err.*)
