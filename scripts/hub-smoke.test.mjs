@@ -288,10 +288,14 @@ exec "$REAL_MKTEMP" "$@"
   });
 }
 
-test('init failure cleans the used error file and other temporary resources', (t) => {
+for (const [name, scratchName] of [
+  ['init failure cleans the used error file and other temporary resources', 'scratch'],
+  ['init failure cleans resources under a TMPDIR with spaces and shell metacharacters',
+    "scratch with spaces [*] 'quoted'"],
+]) test(name, (t) => {
   const root = mkdtempSync(join(tmpdir(), 'hub-smoke-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const scratch = join(root, 'scratch');
+  const scratch = join(root, scratchName);
   const guard = join(root, 'guard.sh');
   const marker = join(root, 'init-attempts');
   const resources = join(root, 'resources');
