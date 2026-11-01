@@ -111,6 +111,25 @@ test('exit cleanup preserves an inherited graph home before the fallback runs', 
   assert.deepEqual(readdirSync(scratch), []);
 });
 
+test('exit cleanup preserves inherited security directories before the probes run', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'scratch');
+  const inheritedHome = join(fixture.root, 'unrelated security home');
+  const inheritedWorkspace = join(fixture.root, 'unrelated security workspace');
+  mkdirSync(scratch);
+  for (const dir of [inheritedHome, inheritedWorkspace]) {
+    mkdirSync(dir);
+    writeFileSync(join(dir, 'keep'), 'unrelated');
+  }
+
+  const result = run(fixture, scratch, { SECURITY_HOME: inheritedHome, SECURITY_WS: inheritedWorkspace });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /fresh quickstart failed/);
+  for (const dir of [inheritedHome, inheritedWorkspace]) assert.deepEqual(readdirSync(dir), ['keep']);
+  assert.deepEqual(readdirSync(scratch), []);
+});
+
 for (const [label, temp] of [['unset', undefined], ['empty', '']]) {
   test(`${label} TMPDIR falls back to /tmp`, (t) => {
     const fixture = setup(t);
@@ -194,20 +213,21 @@ for (const exitStatus of [0, 73]) {
     const source = readFileSync(script, 'utf8');
     const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
     const createHome = source.match(/^create_security_home\(\) \{[\s\S]*?^\}/m)?.[0];
-    const createWorkspace = source.match(/^SECURITY_WS="\$\(mktemp -d .*\)"$/m)?.[0];
+    const createWorkspace = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
     assert.ok(cleanup, 'missing e2e cleanup function');
     assert.ok(createHome, 'missing security home creation function');
     assert.ok(createWorkspace, 'missing security workspace creation');
     const probe = `${cleanup}
 ${createHome}
+${createWorkspace}
 TMPDIR="$1"
 LOCUS_HOME="$TMPDIR/main-home"
 WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
 mkdir "$LOCUS_HOME"
 trap 'e2e_cleanup' EXIT
 create_security_home
-${createWorkspace}
-[[ "$SECURITY_HOME" != "$SECURITY_WS" && "\${SECURITY_HOME%/*}" == "$TMPDIR" && "\${SECURITY_WS%/*}" == "$TMPDIR" ]] || exit 1
+create_security_workspace
+[[ -d "$SECURITY_HOME" && -d "$SECURITY_WS" && ! "$SECURITY_HOME" -ef "$SECURITY_WS" && "\${SECURITY_HOME%/*}" == "$TMPDIR" && "\${SECURITY_WS%/*}" == "$TMPDIR" ]] || exit 1
 touch "$SECURITY_HOME/sentinel" "$SECURITY_WS/sentinel"
 exit "$2"
 `;
