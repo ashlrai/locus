@@ -11,19 +11,27 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(root, 'scripts', 'e2e.sh');
 const locus = join(root, 'target', 'release', 'locus');
 
-test('workspace creation preserves a spaced TMPDIR argument and cleans up on failure', { timeout: 1_800_000 }, (t) => {
+test('home and workspace honor a spaced TMPDIR and are cleaned up on failure', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-workspace-test-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
   const scratch = join(fixture, 'custom tmp with spaces');
   const bin = join(fixture, 'bin');
   const created = join(fixture, 'workspace-created');
   const entered = join(fixture, 'workspace-entered');
+  const homeCreated = join(fixture, 'home-created');
+  const homeUsed = join(fixture, 'home-used');
   mkdirSync(scratch);
   mkdirSync(bin);
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
   writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
 case "$*" in
+  *locus-e2e.XXXXXX*)
+    [[ $# -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]] || exit 1
+    home="$("$REAL_MKTEMP" "$@")" || exit $?
+    printf '%s' "$home" > "$HOME_CREATED"
+    printf '%s\\n' "$home"
+    ;;
   *locus-ws.XXXXXX*)
     [[ $# -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-ws.XXXXXX" ]] || exit 1
     workspace="$("$REAL_MKTEMP" "$@")" || exit $?
@@ -37,7 +45,9 @@ esac
   writeFileSync(wrapper, `#!/bin/bash
 if [[ "\${1:-}" == workspace ]]; then
   [[ -d "$PWD" ]] || exit 1
+  [[ -d "$LOCUS_HOME" ]] || exit 1
   printf '%s' "$PWD" > "$WORKSPACE_ENTERED"
+  printf '%s' "$LOCUS_HOME" > "$HOME_USED"
   touch "$PWD/cleanup-sentinel"
   exit 1
 fi
@@ -48,7 +58,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     cwd: root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
       LOCUS_BIN: wrapper, REAL_MKTEMP: realMktemp, WORKSPACE_CREATED: created,
-      WORKSPACE_ENTERED: entered },
+      WORKSPACE_ENTERED: entered, HOME_CREATED: homeCreated, HOME_USED: homeUsed },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -58,6 +68,13 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.match(result.stdout, /==> 4\. workspace allowlist/);
   assert.ok(existsSync(created), 'workspace mktemp did not receive the expected arguments');
   assert.ok(existsSync(entered), 'the workspace command was not reached');
+  assert.ok(existsSync(homeCreated), 'home mktemp did not receive the expected arguments');
+  assert.ok(existsSync(homeUsed), 'the workspace command did not observe a home');
+  const home = readFileSync(homeCreated, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-e2e\.[^/]+$/);
+  assert.equal(readFileSync(homeUsed, 'utf8'), home, 'command used a different home');
+  assert.equal(existsSync(home), false, 'home survived exit cleanup');
   const workspace = readFileSync(created, 'utf8');
   assert.equal(dirname(workspace), scratch);
   assert.match(workspace, /\/locus-ws\.[^/]+$/);
