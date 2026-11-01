@@ -1,16 +1,15 @@
 # locus-cli
 
-<!-- fresh:begin install -->
+<!-- fresh:begin package-install -->
 ```bash
-npm install -g locus-cli@0.6.0 @ashlrai/locus-mcp@0.6.0
+npm install -g locus-cli @ashlrai/locus-mcp
 ```
 <!-- fresh:end -->
 
-**Version scope:** The install pin above selects the 0.6.0 wrappers, whose
-publication was verified as of October 31, 2026. If their checksum download fails
-or cannot be parsed, they can install without verification; on first run, a
-checksum mismatch can fall back to Cargo. Version 0.6.1 implements the fail-closed
-checksum behavior described below. The 0.6.0 CLI postinstall can also report success
+**Version scope:** The 0.6.0 wrappers can install without verification when a
+checksum download fails or cannot be parsed; on first run, a checksum mismatch
+can fall back to Cargo. Version 0.6.1 implements the fail-closed checksum
+behavior described below. The 0.6.0 CLI postinstall can also report success
 while deferring a failed download until first use.
 
 npm wrapper for the [Locus](https://github.com/ashlrai/locus) CLI — identity plane for coding agents.

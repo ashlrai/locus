@@ -1,14 +1,14 @@
 # Releasing Locus
 
 Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
-`[workspace.package] version` (currently **0.6.1**, prepared for release). Crates inherit via
+`[workspace.package] version` (currently **0.6.2**, prepared for release). Crates inherit via
 `version.workspace = true`. npm packages under `npm/`, `npm-mcp/`, and
 `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
 `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
 
-## 0.6.1 release candidate — prepared 2026-10-31
+## 0.6.2 release candidate — prepared 2026-10-31
 
-This checkout prepares 0.6.1; a version bump is not publication evidence.
+This checkout prepares 0.6.2; a version bump is not publication evidence.
 Once the final candidate commit is reviewed and frozen, run `ci.yml` with
 `workflow_dispatch` on its ref and verify success on that exact commit SHA
 before creating its non-forced tag. The candidate may be a release branch based

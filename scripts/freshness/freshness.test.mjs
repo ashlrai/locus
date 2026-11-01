@@ -10,6 +10,7 @@ const config = JSON.parse(await readFile(join(repository, 'scripts/freshness/blo
 const values = { version: '1.2.3', publishedVersion: '1.2.3', cli: '1.2.3', mcp: '1.2.3', date: '2026-01-01', highlights: 'A release.' };
 const expected = {
   badge: 'release-v1.2.3-blue', install: 'npm install -g locus-cli@1.2.3 @ashlrai/locus-mcp@1.2.3',
+  'package-install': 'npm install -g locus-cli @ashlrai/locus-mcp',
   versions: '| Rust workspace (source) | 1.2.3 |', pin: 'npx --yes @ashlrai/locus-mcp@1.2.3 --version',
   release: '(2026-01-01).\n\nA release.',
 };
@@ -67,6 +68,11 @@ test('CLI rejects seeded drift, sync repairs it, source disagreement writes noth
     assert.equal(pending.cli, originalSources.publishedVersion);
     assert.ok((await readFile(join(root, 'README.md'), 'utf8')).includes(`Latest release: [v${originalSources.publishedVersion}]`));
     assert.ok((await readFile(join(root, 'docs/mcp.md'), 'utf8')).includes(`locus-cli@${originalSources.publishedVersion}`));
+    for (const file of ['npm/README.md', 'npm-mcp/README.md']) {
+      const text = await readFile(join(root, file), 'utf8');
+      assert.match(text, /npm install -g locus-cli @ashlrai\/locus-mcp/);
+      assert.doesNotMatch(text, /npm install -g locus-cli@/);
+    }
     // Publication is an explicit separate input update, after external verification.
     const statePath = join(root, 'scripts/freshness/published.json');
     await writeFile(statePath, JSON.stringify({ version: '9.8.7' }));

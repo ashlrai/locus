@@ -2,8 +2,8 @@
 
 <!-- fresh:begin pin -->
 ```bash
-npx --yes locus-cli@0.6.0 --version
-npx --yes @ashlrai/locus-mcp@0.6.0 --version
+npx --yes locus-cli@0.6.1 --version
+npx --yes @ashlrai/locus-mcp@0.6.1 --version
 ```
 <!-- fresh:end -->
 
