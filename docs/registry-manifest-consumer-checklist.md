@@ -40,9 +40,12 @@ about your own review, not a defect in the artifact.
 - [ ] Run the drift comparison, substituting the real asset name:
 
   ```bash
-  locus adapter verify-manifest locus-adapters-<tag>.json --allow-unsigned
+  locus adapter verify-manifest locus-adapters-v0.6.2.json --allow-unsigned
   ```
 
+- [ ] Replace `v0.6.2` with the actual release tag; quote the filename if it
+  contains shell-special characters. The command reads the local file and
+  does not download either artifact.
 - [ ] Expected pass output: `signature unsigned`, `drift none`, exit 0. Add
   `--json` for a machine-readable report.
 - [ ] Without `--allow-unsigned`, the unsigned asset fails even when the
@@ -51,6 +54,10 @@ about your own review, not a defect in the artifact.
   invalid JSON, an unsupported schema, empty or duplicate adapter ids, and
   ambiguous canonical-material separators; the drift check reports added,
   missing, or changed adapter entries.
+- [ ] The comparison checks the Locus version and adapter ids, names,
+  versions, tool lists, and entry digests. It trims surrounding whitespace,
+  matches ids case-insensitively, and ignores tool order. Entry descriptions
+  and per-entry signatures and signers are not compared.
 - [ ] `--allow-unsigned` excuses **only** a missing or empty signature. A
   nonempty malformed, untrusted, or invalid signature still fails, and drift
   always fails. A `signed_by` value on an unsigned manifest is a claim, not
@@ -66,7 +73,7 @@ about your own review, not a defect in the artifact.
   and a manifest exported from it can still agree. See the
   [tampering example](./registry-trust.md#tampering-example).
 - [ ] **Metadata digests only.** Entry digests cover canonical catalog
-  metadata (name, status, synthetic flag, capabilities, frozen selectors,
+  metadata (id, name, status, synthetic flag, capabilities, frozen selectors,
   tools, destructive tools), not adapter code. Changed behavior with
   unchanged catalog metadata is invisible to the check.
 - [ ] **No artifact coverage.** The manifest does not hash release archives,

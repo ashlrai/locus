@@ -105,6 +105,7 @@ fn checklist_verify_example_runs_and_rejects_drift() {
         .lines()
         .find(|l| l.contains("verify-manifest"))
         .unwrap();
+    assert!(!cmdline.contains(['<', '>']), "example must be shell-safe");
     let args: Vec<String> = cmdline
         .split_whitespace()
         .map(|t| {
@@ -143,4 +144,31 @@ fn checklist_verify_example_runs_and_rejects_drift() {
         String::from_utf8_lossy(&drifted.stderr)
     );
     assert!(report.contains("drift"), "expected drift report: {report}");
+
+    // Opting in to unsigned input does not accept a malformed signature or JSON.
+    // Start from a fresh export so the test does not depend on adapter ordering.
+    assert!(
+        run(&["adapter", "registry", "export", "--out", "release.json"])
+            .status
+            .success()
+    );
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.path().join("release.json")).unwrap()).unwrap();
+    manifest["signature"] = "not-a-signature".into();
+    std::fs::write(
+        dir.path().join("release.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        !run(&args[1..].iter().map(String::as_str).collect::<Vec<_>>())
+            .status
+            .success()
+    );
+    std::fs::write(dir.path().join("release.json"), b"invalid JSON").unwrap();
+    assert!(
+        !run(&args[1..].iter().map(String::as_str).collect::<Vec<_>>())
+            .status
+            .success()
+    );
 }
