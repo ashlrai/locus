@@ -27,4 +27,5 @@ The repository contains [`scripts/install.sh`](../scripts/install.sh); its
 presence alone does not establish a hosted entry point or asset availability.
 Use the [acceptance checklist](installer-acceptance.md) for detailed installation,
 upgrade, and failure checks, and the [platform matrix](installer-platform-matrix.md)
-for supported target selection and unresolved compatibility questions.
+for supported target selection. The [archive selection questions](shell-installer-archive-selection.md)
+record unresolved compatibility and release decisions.
