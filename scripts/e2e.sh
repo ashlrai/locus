@@ -69,8 +69,10 @@ log "2. LOCUS_HOME=$LOCUS_HOME"
 # Optional background PIDs (HTTP MCP, etc.) cleaned on any exit path.
 HTTP_MCP_PID=""
 MT_MCP_PID=""
-# Only a directory created by this run may be removed as the graph home.
+# Only directories created by this run may be removed by the cleanup trap.
 GRAPH_HOME=""
+SECURITY_HOME=""
+SECURITY_WS=""
 e2e_cleanup() {
   if [[ -n "${HTTP_MCP_PID:-}" ]]; then
     kill "$HTTP_MCP_PID" 2>/dev/null || true
@@ -91,9 +93,13 @@ create_security_home() {
   SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
 }
 
+create_security_workspace() {
+  SECURITY_WS="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-ws.XXXXXX")"
+}
+
 # Exercise the same creation and EXIT cleanup used by the security probes.
 # The subshell owns its test home so its cleanup cannot remove the main home.
-log "2c. security home honors a nondefault TMPDIR"
+log "2c. security directories honor a nondefault TMPDIR"
 security_tmp="$LOCUS_HOME/custom temp"
 mkdir -p "$security_tmp"
 (
@@ -103,16 +109,24 @@ mkdir -p "$security_tmp"
   WS_DIR="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
   trap 'e2e_cleanup' EXIT
   create_security_home
+  create_security_workspace
   [[ -d "$SECURITY_HOME" && "${SECURITY_HOME%/*}" == "$TMPDIR" && \
-    "${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
+    "${SECURITY_HOME##*/}" == locus-security-e2e.* && \
+    -d "$SECURITY_WS" && "${SECURITY_WS%/*}" == "$TMPDIR" && \
+    "${SECURITY_WS##*/}" == locus-security-ws.* && \
+    ! "$SECURITY_HOME" -ef "$SECURITY_WS" ]] || exit 1
   printf '%s' "$SECURITY_HOME" >"$security_tmp/security-home-path"
-  touch "$SECURITY_HOME/cleanup-sentinel"
-) || die "security home was not created beneath the supplied TMPDIR"
+  printf '%s' "$SECURITY_WS" >"$security_tmp/security-workspace-path"
+  touch "$SECURITY_HOME/cleanup-sentinel" "$SECURITY_WS/cleanup-sentinel"
+) || die "security directories were not created distinctly beneath the supplied TMPDIR"
 security_test_home="$(cat "$security_tmp/security-home-path")"
+security_test_ws="$(cat "$security_tmp/security-workspace-path")"
 [[ ! -e "$security_test_home" && ! -L "$security_test_home" ]] \
   || die "security home survived exit cleanup"
+[[ ! -e "$security_test_ws" && ! -L "$security_test_ws" ]] \
+  || die "security workspace survived exit cleanup"
 [[ -d "$security_tmp" ]] || die "security cleanup removed the supplied TMPDIR"
-ok "security home honors nondefault TMPDIR and is cleaned on exit"
+ok "distinct security directories honor nondefault TMPDIR and are cleaned on exit"
 
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
@@ -1559,7 +1573,7 @@ fi
 # ── 24. adversarial release security probes ────────────────────────────────
 log "24. adversarial release credential/workspace probes"
 create_security_home
-SECURITY_WS="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-ws.XXXXXX")"
+create_security_workspace
 LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" init >/dev/null
 
 # Issue #175: identical retries are no-ops, but conflicting content must
