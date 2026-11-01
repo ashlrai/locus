@@ -39,16 +39,24 @@ for (const [index, [, variable, , template, diagnostic]] of allocations.entries(
     const bin = join(fixture, 'bin');
     const scratch = join(fixture, 'scratch with spaces');
     const record = join(fixture, 'attempts');
+    const created = join(fixture, 'created');
     mkdirSync(bin);
     mkdirSync(scratch);
     writeFileSync(join(scratch, 'keep'), 'sentinel');
     // Resolve the real utility before intercepting it, without exposing environment values.
     const lookup = spawnSync('which', ['mktemp'], { encoding: 'utf8' });
     assert.equal(lookup.status, 0);
-    writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash\nprintf '%s\\n' "\${!#}" >> "$ATTEMPTS"\nif [[ "\${!#}" == */"$FAIL_TEMPLATE" ]]; then exit 1; fi\nexec "$REAL_MKTEMP" "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+printf '%s\\n' "\${!#}" >> "$ATTEMPTS"
+if [[ "\${!#}" == */"$FAIL_TEMPLATE" ]]; then exit 1; fi
+path="$("$REAL_MKTEMP" "$@")" || exit 1
+[[ "$1" == -d && -d "$path" ]] || exit 1
+printf '%s\\n' "$path" >> "$CREATED"
+printf '%s\\n' "$path"
+`, { mode: 0o755 });
     const result = spawnSync('bash', [script], {
       env: { ...process.env, BASH_ENV: '', TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
-        ATTEMPTS: record, FAIL_TEMPLATE: template, REAL_MKTEMP: lookup.stdout.trim() },
+        ATTEMPTS: record, CREATED: created, FAIL_TEMPLATE: template, REAL_MKTEMP: lookup.stdout.trim() },
       encoding: 'utf8',
     });
     assert.equal(result.status, 1);
@@ -58,6 +66,13 @@ for (const [index, [, variable, , template, diagnostic]] of allocations.entries(
     const attempts = readFileSync(record, 'utf8').trim().split('\n');
     assert.deepEqual(attempts.map((path) => path.slice(scratch.length + 1)),
       allocations.slice(0, index + 1).map((allocation) => allocation[3]));
+    const paths = existsSync(created) ? readFileSync(created, 'utf8').trim().split('\n') : [];
+    assert.equal(paths.length, index, 'every prior allocation must have created a directory');
+    for (const [prior, path] of paths.entries()) {
+      assert.equal(dirname(path), scratch);
+      assert.ok(path.slice(scratch.length + 1).startsWith(allocations[prior][3].replace('XXXXXX', '')));
+      assert.equal(existsSync(path), false, `created directory ${prior} must be removed`);
+    }
     assert.deepEqual(readdirSync(scratch), ['keep']);
     assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
     assert.ok(existsSync(scratch));
