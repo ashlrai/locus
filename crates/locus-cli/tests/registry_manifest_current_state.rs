@@ -4,6 +4,27 @@ use std::path::Path;
 use std::process::Command;
 
 const GUIDE: &str = include_str!("../../../docs/registry-manifest-current-state.md");
+const SIGNING_STATUS: &str = include_str!("../../../docs/registry-signing-status.md");
+
+#[test]
+fn signing_status_cites_sources_and_distinguishes_release_from_capability() {
+    let trust = include_str!("../../../docs/registry-trust.md");
+    let changelog = include_str!("../../../CHANGELOG.md");
+    assert!(SIGNING_STATUS.contains("](./registry-trust.md#current-release-status)"));
+    assert!(trust.contains("## Current release status"));
+    assert!(SIGNING_STATUS.contains("](../CHANGELOG.md#050--2026-08-16)"));
+    assert!(changelog.contains("## [0.5.0] — 2026-08-16"));
+    assert!(trust.contains("](./registry-signing-status.md)"));
+    for phrase in [
+        "**without `--sign`**",
+        "**unsigned**",
+        "`--allow-unsigned`",
+        "optional operator-managed process",
+        "**future work**",
+    ] {
+        assert!(SIGNING_STATUS.contains(phrase), "missing {phrase:?}");
+    }
+}
 
 #[test]
 fn guide_links_to_sources_and_labels_release_signing_unimplemented() {
