@@ -139,6 +139,52 @@ test('failed project allocation cleans the temporary home', (t) => {
   assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
 });
 
+test('real temporary directories stay under TMPDIR and are removed after init fails', (t) => {
+  const root = mkdtempSync('/tmp/lhi-direct-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'custom [temp]');
+  const record = join(root, 'observed');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+
+  // Observe the real mktemp results at init, before the EXIT trap removes them.
+  const harness = `
+node() { :; }
+jq() { :; }
+cargo() { :; }
+locus() {
+  if [[ "$1" == init ]]; then
+    local projects=("$TMPDIR"/locus-hub-int-proj.*)
+    [[ -d "$LOCUS_HOME" && "${'$'}{LOCUS_HOME%/*}" == "$TMPDIR" ]] || return 74
+    [[ "${'$'}{#projects[@]}" == 1 && -d "${'$'}{projects[0]}" ]] || return 75
+    touch "$LOCUS_HOME/fixture" "${'$'}{projects[0]}/fixture" || return 76
+    printf '%s\\n' "$LOCUS_HOME" "${'$'}{projects[0]}" > "$OBSERVED"
+    return 73
+  fi
+}
+export -f node jq cargo locus
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'cleanup-test', script], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, OBSERVED: record },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected initialization failure must propagate');
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2);
+  assert.match(paths[0].slice(scratch.length + 1), /^locus-hub-int\.[^/]+$/);
+  assert.match(paths[1].slice(scratch.length + 1), /^locus-hub-int-proj\.[^/]+$/);
+  for (const path of paths) {
+    assert.equal(dirname(path), scratch, 'each directory must be directly under TMPDIR');
+    assert.equal(existsSync(path), false, 'each populated directory must be removed on exit');
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+});
+
 test('early initialization failure cleans both temporary directories', (t) => {
   const root = mkdtempSync('/tmp/lhi-early-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
