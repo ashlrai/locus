@@ -1,7 +1,7 @@
 // Run: node --test scripts/e2e-temp.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -50,14 +50,32 @@ function run({ bin, locus }, temp, extraEnv = {}) {
 
 test('uses TMPDIR and cleans the isolated home after a later failure', (t) => {
   const fixture = setup(t);
-  const scratch = join(fixture.root, 'scratch');
+  const scratch = join(fixture.root, 'custom tmp');
+  const homeCreated = join(fixture.root, 'home-created');
   mkdirSync(scratch);
   writeFileSync(join(scratch, 'keep'), 'unrelated');
-  const result = run(fixture, scratch);
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+case "$2" in
+  */locus-e2e.XXXXXX)
+    home="$("$REAL_MKTEMP" "$@")" || exit 1
+    test -d "$home" || exit 1
+    printf '%s' "$home" > "$HOME_CREATED"
+    touch "$home/sentinel"
+    printf '%s\n' "$home"
+    ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+`, { mode: 0o755 });
+  const result = run(fixture, scratch, { HOME_CREATED: homeCreated, REAL_MKTEMP: realMktemp });
 
   assert.notEqual(result.status, 0);
   assert.equal(result.signal, null);
   assert.match(result.stderr, /fresh quickstart failed/);
+  const home = readFileSync(homeCreated, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-e2e\.[^/]+$/);
+  assert.equal(existsSync(home), false, 'home and its sentinel must be removed on exit');
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
