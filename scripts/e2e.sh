@@ -11,9 +11,9 @@
 # Temporary directories: TMPDIR, when nonempty, must name an existing writable
 # directory; otherwise mktemp uses /tmp. The script creates isolated home and
 # workspace directories there and removes them on shell exit after installing
-# its cleanup trap. An optional graph-import home is removed after a successful
-# import but can remain after a failure or interruption. Abrupt termination or
-# removal errors can also leave temporary directories; inspect and remove any
+# its cleanup trap. An optional graph-import home is also removed immediately
+# after a successful import. Abrupt termination or removal errors can leave
+# temporary directories; inspect and remove any
 # leftover locus-e2e.*, locus-ws.*, locus-security-e2e.*, locus-security-ws.*,
 # or locus-graph-imp.* directories when needed.
 set -euo pipefail

@@ -7,7 +7,26 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
-const script = join(dirname(fileURLToPath(import.meta.url)), 'e2e.sh');
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const script = join(root, 'scripts', 'e2e.sh');
+
+test('temporary directory reference matches the E2E script', () => {
+  const source = readFileSync(script, 'utf8');
+  const doc = readFileSync(join(root, 'docs', 'e2e-temp-resource-types.md'), 'utf8');
+  const created = [...source.matchAll(/^\s*(\w+)="\$\(mktemp -d "\$\{TMPDIR:-\/tmp\}\/([^/"\s]+)XXXXXX"\)"/gm)]
+    .map(([, variable, prefix]) => [variable, prefix]);
+  const documented = [...doc.matchAll(/^\| `(\w+)` \| `([^`]+)` \| ([^|\n]+) \|$/gm)]
+    .map(([, variable, prefix, purpose]) => {
+      assert.ok(purpose.trim(), `${variable} needs a purpose`);
+      return [variable, prefix];
+    });
+
+  assert.equal(created.length, 5, 'expected five temporary directory assignments');
+  assert.equal([...source.matchAll(/\bmktemp\s+-d\b/g)].length, created.length,
+    'every mktemp directory must be represented in the inventory');
+  assert.equal(new Set(created.map(([variable]) => variable)).size, created.length);
+  assert.deepEqual(documented.sort(), created.sort(), 'documented variables and prefixes must match the script');
+});
 
 function setup(t) {
   const root = mkdtempSync(join(tmpdir(), 'locus-e2e-temp-test-'));
