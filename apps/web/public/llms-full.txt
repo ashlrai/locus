@@ -201,6 +201,22 @@ listed verbatim so an agent can jump straight to the right document.
   - Troubleshooting
   - Operator checklist
 
+## docs/dogfood-probe-cleanup.md
+
+- [Dogfood probe cleanup](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-cleanup.md)
+
+## docs/dogfood-probe-roles.md
+
+- [Dogfood probe directory roles](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-roles.md)
+
+## docs/dogfood-temp-failures.md
+
+- [Dogfood temporary-directory creation failures](https://github.com/ashlrai/locus/blob/main/docs/dogfood-temp-failures.md)
+
+## docs/dogfood-temp-prefix-reference.md
+
+- [Dogfood temporary-directory prefixes](https://github.com/ashlrai/locus/blob/main/docs/dogfood-temp-prefix-reference.md)
+
 ## docs/dry-run-acceptance.md
 
 - [Dry-run acceptance checklist](https://github.com/ashlrai/locus/blob/main/docs/dry-run-acceptance.md)
@@ -227,6 +243,18 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/dry-run-verification.md
 
 - [Manual dry-run verification](https://github.com/ashlrai/locus/blob/main/docs/dry-run-verification.md)
+
+## docs/e2e-graph-isolation.md
+
+- [E2E graph import isolation](https://github.com/ashlrai/locus/blob/main/docs/e2e-graph-isolation.md)
+
+## docs/e2e-security-isolation.md
+
+- [E2E security isolation fixtures](https://github.com/ashlrai/locus/blob/main/docs/e2e-security-isolation.md)
+
+## docs/e2e-temp-resource-types.md
+
+- [E2E temporary directory types](https://github.com/ashlrai/locus/blob/main/docs/e2e-temp-resource-types.md)
 
 ## docs/e2e-test-map.md
 
@@ -291,6 +319,16 @@ listed verbatim so an agent can jump straight to the right document.
   - What this means for a gateway
   - Setting a gateway URL inside locus exec
 
+## docs/hub-integration-isolation.md
+
+- [Hub integration smoke isolation](https://github.com/ashlrai/locus/blob/main/docs/hub-integration-isolation.md)
+  - Allocation and use
+  - Cleanup and boundaries
+
+## docs/hub-integration-temp-lifecycle.md
+
+- [Hub integration smoke temporary lifecycle](https://github.com/ashlrai/locus/blob/main/docs/hub-integration-temp-lifecycle.md)
+
 ## docs/hub-integration.md
 
 - [Phantom ↔ Locus integration contract](https://github.com/ashlrai/locus/blob/main/docs/hub-integration.md)
@@ -336,6 +374,26 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [Hub smoke resource map](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-resource-map.md)
 
+## docs/hub-smoke-resource-roles.md
+
+- [Hub smoke temporary resource roles](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-resource-roles.md)
+
+## docs/hub-smoke-temp-failures.md
+
+- [Hub smoke temporary-resource failures](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-temp-failures.md)
+
+## docs/hub-smoke-temp-lifecycle.md
+
+- [Hub smoke temporary path lifecycle](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-temp-lifecycle.md)
+
+## docs/hub-smoke-temp-resources.md
+
+- [Hub smoke temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-temp-resources.md)
+
+## docs/hub-test-temp-comparison.md
+
+- [Hub test temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-test-temp-comparison.md)
+
 ## docs/installer-acceptance.md
 
 - [Shell installer acceptance checklist](https://github.com/ashlrai/locus/blob/main/docs/installer-acceptance.md)
@@ -344,6 +402,20 @@ listed verbatim so an agent can jump straight to the right document.
   - Installation and upgrade
   - Verification and failure cases
   - Evidence
+
+## docs/installer-archive-requirements.md
+
+- [Installer archive requirements](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-requirements.md)
+  - Goal and constraints from the issue
+  - Archive questions to resolve
+  - Existing implementation and evidence
+
+## docs/installer-error-questions.md
+
+- [Installer error questions](https://github.com/ashlrai/locus/blob/main/docs/installer-error-questions.md)
+  - Unsupported platforms
+  - Download failure
+  - Installation failure
 
 ## docs/installer-failure-matrix.md
 
@@ -358,6 +430,21 @@ listed verbatim so an agent can jump straight to the right document.
   - Selected release targets
   - Prerequisites and alternatives
   - Unresolved decisions and evidence gaps
+
+## docs/installer-requirements.md
+
+- [Shell installer requirements](https://github.com/ashlrai/locus/blob/main/docs/installer-requirements.md)
+  - Stated outcome and constraints
+  - Current implementation context
+  - Open questions
+
+## docs/installer-user-journey.md
+
+- [Shell installer user journey](https://github.com/ashlrai/locus/blob/main/docs/installer-user-journey.md)
+  - Before installing
+  - Run the installer
+  - Verify and start
+  - Uninstall questions
 
 ## docs/mcp.md
 
@@ -494,6 +581,13 @@ listed verbatim so an agent can jump straight to the right document.
   - Previewing changes with --dry-run
     - Limits and unsupported operations
 
+## docs/registry-manifest-ci-role.md
+
+- [CI's role in adapter registry manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-ci-role.md)
+  - What the release workflow does
+  - What a consumer can check
+  - Future signing
+
 ## docs/registry-manifest-consumer-checklist.md
 
 - [Release manifest consumer checklist](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer-checklist.md)
@@ -502,6 +596,13 @@ listed verbatim so an agent can jump straight to the right document.
   - 3. Run the check
   - 4. What a pass does not establish (current limits)
   - 5. Optional: an operator-signed manifest
+
+## docs/registry-manifest-current-state.md
+
+- [Adapter registry manifest: current state](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-current-state.md)
+  - What the manifest contains
+  - Checking today's asset
+  - Signing capability and future release signing
 
 ## docs/registry-manifest-verification-questions.md
 
@@ -534,6 +635,17 @@ listed verbatim so an agent can jump straight to the right document.
     - Ownership and evidence bar
   - Scope notes
 
+## docs/registry-signing-status.md
+
+- [Adapter registry signing status](https://github.com/ashlrai/locus/blob/main/docs/registry-signing-status.md)
+  - Current releases
+  - Available capability and future work
+
+## docs/registry-trust-actors.md
+
+- [Adapter registry trust actors](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-actors.md)
+  - Boundaries between the roles
+
 ## docs/registry-trust-faq.md
 
 - [Adapter registry trust FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-faq.md)
@@ -557,6 +669,12 @@ listed verbatim so an agent can jump straight to the right document.
     - Consumer: verify
   - What verify-manifest proves
   - Non-goals
+
+## docs/registry-unsigned-consumer-guidance.md
+
+- [Consuming an unsigned adapter registry manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-consumer-guidance.md)
+  - Decide whether the check is enough
+  - Interpret the result
 
 ## docs/RELEASE.md
 
@@ -596,6 +714,19 @@ listed verbatim so an agent can jump straight to the right document.
   - elvish
   - After upgrading
 
+## docs/shell-installer-archive-selection.md
+
+- [Shell installer archive selection](https://github.com/ashlrai/locus/blob/main/docs/shell-installer-archive-selection.md)
+  - Current selection requirements
+  - Questions and evidence still needed
+
+## docs/shell-installer-failure-cases.md
+
+- [Shell installer failure cases](https://github.com/ashlrai/locus/blob/main/docs/shell-installer-failure-cases.md)
+  - Unsupported platforms
+  - Download and verification failures
+  - Archive inspection and extraction failures
+
 ## docs/shell-installer-issue-checklist.md
 
 - [Shell installer issue checklist](https://github.com/ashlrai/locus/blob/main/docs/shell-installer-issue-checklist.md)
@@ -616,6 +747,10 @@ listed verbatim so an agent can jump straight to the right document.
   - Dependency-ordered dispatch
   - Invariant ownership
   - Shared acceptance and handoff
+
+## docs/temp-parent-reference.md
+
+- [Hub scripts: temporary parent and prefixes](https://github.com/ashlrai/locus/blob/main/docs/temp-parent-reference.md)
 
 ## docs/verification-plane.md
 

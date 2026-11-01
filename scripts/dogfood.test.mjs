@@ -221,6 +221,9 @@ exit 42
 test('a nonexistent TMPDIR fails before initializing the dogfood home', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  const existingHome = join(root, 'existing home');
+  mkdirSync(existingHome);
+  writeFileSync(join(existingHome, 'keep'), 'preserve');
   const fixtureRoot = join(root, 'fixture');
   const bin = join(fixtureRoot, 'target', 'debug');
   mkdirSync(bin, { recursive: true });
@@ -237,7 +240,7 @@ test('a nonexistent TMPDIR fails before initializing the dogfood home', (t) => {
       ...process.env,
       TMPDIR: scratch,
       PROBE_FILE: probe,
-      DOGFOOD_HOME: '',
+      DOGFOOD_HOME: existingHome,
       DOGFOOD_USE_REAL_HOME: '0',
       DOGFOOD_SELF_TEST: '0',
     },
@@ -249,6 +252,7 @@ test('a nonexistent TMPDIR fails before initializing the dogfood home', (t) => {
   assert.match(result.stderr, /mktemp/);
   assert.equal(existsSync(probe), false, 'Locus must not run after allocation fails');
   assert.equal(existsSync(scratch), false);
+  assert.equal(readFileSync(join(existingHome, 'keep'), 'utf8'), 'preserve');
 });
 
 const harness = String.raw`
@@ -340,3 +344,36 @@ for (const [failure, expectedStages] of [
     }
   });
 }
+
+
+test('multi-tenant allocation failure stops before probe setup', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const trace = join(root, 'trace');
+  const missing = join(root, 'missing');
+  const result = spawnSync('bash', ['-c', String.raw`
+source "$1"
+locus() { touch "$TRACE_FILE"; }
+mt_grant_probe || { [[ "$?" == 1 ]] || exit 43; exit 42; }
+exit 0
+`, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: missing, TRACE_FILE: trace },
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 42);
+  assert.match(result.stderr, /mktemp/);
+  assert.equal(existsSync(trace), false);
+  assert.equal(existsSync(missing), false);
+});
+
+test('temporary failure guide covers all allocation templates', () => {
+  const source = readFileSync(script, 'utf8');
+  const guide = readFileSync(join(dirname(script), '..', 'docs', 'dogfood-temp-failures.md'), 'utf8');
+  const templates = [...source.matchAll(/mktemp -d "\$\{TMPDIR:-\/tmp\}\/([^"/]+)"/g)]
+    .map((match) => match[1]).sort();
+  const rows = [...guide.matchAll(/^\| `(locus-[\w.-]+\.XXXXXX)` \|/gm)]
+    .map((match) => match[1]).sort();
+  assert.deepEqual(rows, templates);
+});
