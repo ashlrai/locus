@@ -46,6 +46,77 @@ test('probe role guide tracks each allocation and its readiness contract', () =>
   }
 });
 
+test('probe cleanup guide covers both traps and the grant lifecycle', () => {
+  const source = readFileSync(script, 'utf8');
+  const guide = readFileSync(join(dirname(script), '..', 'docs', 'dogfood-probe-cleanup.md'), 'utf8');
+  const sandbox = source.slice(source.indexOf('sandbox_attestation() {'), source.indexOf('mt_grant_probe() {'));
+  const multiTenant = source.slice(source.indexOf('mt_grant_probe() {'), source.indexOf('# Allow the probe functions'));
+  assert.match(sandbox, /sandbox_cleanup_root="\$probe_root"[\s\S]*trap 'rm -rf "\$sandbox_cleanup_root"' EXIT/);
+  assert.match(multiTenant, /kill "\$mt_pid"[\s\S]*wait "\$mt_pid"[\s\S]*cd \/[\s\S]*rm -rf "\$probe_root"[\s\S]*trap 'mt_cleanup' EXIT/);
+  for (const fact of ['locus-sandbox-dogfood.XXXXXX', 'locus-mt-dogfood.XXXXXX',
+    'before entering its subshell', 'inside its subshell', 'not** in its exit trap',
+    'uncatchable termination', 'failed removal']) {
+    assert.ok(guide.includes(fact), `cleanup guide missing ${fact}`);
+  }
+});
+
+test('sandbox probe removes its root after a missing binding failure', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-sandbox-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const probe = join(root, 'probe');
+  const harness = String.raw`
+source "$1"
+locus() {
+  if [[ "$1" == init ]]; then
+    printf '%s\n' "$PWD" > "$PROBE_FILE"
+    mkdir -p "$LOCUS_HOME"
+    touch "$LOCUS_HOME/sentinel"
+  fi
+}
+sandbox_attestation
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, PROBE_FILE: probe },
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /sandbox probe binding missing/);
+  const probeRoot = dirname(readFileSync(probe, 'utf8').trim());
+  assert.match(probeRoot, /\/locus-sandbox-dogfood\.[^/]+$/);
+  assert.equal(dirname(probeRoot), scratch);
+  assert.equal(existsSync(probeRoot), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
+test('sandbox probe stops when its temporary directory cannot be allocated', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-sandbox-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const probe = join(root, 'probe');
+  const harness = String.raw`
+source "$1"
+locus() { touch "$PROBE_FILE"; }
+# Match the production caller, which disables errexit for this probe.
+set +e
+sandbox_attestation
+exit "$?"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: join(root, 'missing'), PROBE_FILE: probe },
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /mktemp/);
+  assert.equal(existsSync(probe), false);
+});
+
 test('isolated dogfood home is created under a custom TMPDIR and removed on exit', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
