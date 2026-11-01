@@ -17,6 +17,7 @@ Machine contract for **Phantom** (and similar orchestrators) to shell out to Loc
 | Doctor `checkLocus` | [`integrations/phantom/doctor-check.md`](../integrations/phantom/doctor-check.md) |
 | Northstar | [`GOALS.md`](../GOALS.md) · `locus goal status` |
 | Smoke | [`scripts/hub-smoke.sh`](../scripts/hub-smoke.sh), [`scripts/hub-integration-test.sh`](../scripts/hub-integration-test.sh) |
+| Integration smoke temporary paths | [`docs/hub-integration-tmpdir.md`](hub-integration-tmpdir.md) |
 
 ---
 
