@@ -597,7 +597,8 @@ Exact steps: [`integrations/phantom/fleet-preflight.md`](../integrations/phantom
 
 See [hub smoke prerequisites](./hub-smoke-prerequisites.md) for setup and environment, and [hub smoke output](./hub-smoke-output.md) for the individual outcomes.
 The [temporary resource comparison](./hub-test-temp-comparison.md) covers
-both scripts' paths and cleanup.
+both scripts' paths and cleanup; the [integration smoke lifecycle](./hub-integration-temp-lifecycle.md)
+details its allocations, cleanup, and failure limits.
 
 ```bash
 # From repo root (jq + node required for composition smoke)
