@@ -29,7 +29,11 @@ script-owned temporary directory, not a setting for choosing a Locus home.
    `locus-graph-imp.*` directory before removing it, and preserve its parent
    and unrelated files.
 
-The focused graph test runs the actual section with simulated import outcomes:
+The suite also checks creation and exit cleanup unconditionally in section 2d,
+using a separate temporary parent and both successful and failing exits. It
+checks that unrelated files survive. The focused graph test runs the actual
+section with simulated import outcomes and verifies that the lifecycle probe
+detects a missing cleanup:
 `node --test scripts/e2e-graph-isolation.test.mjs`. The temporary resource
 test, `node --test scripts/e2e-temp.test.mjs`, checks that an inherited
 `GRAPH_HOME` survives early exit. The graph fallback tests in

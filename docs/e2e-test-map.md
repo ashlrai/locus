@@ -32,6 +32,7 @@ fragment alone is not equivalent to running the suite.
 | 1 | `cargo build --release -p locus-cli -p locus-mcp --locked` | Build and check both release executables. |
 | 2 | `mktemp`, cleanup trap | Create an isolated Locus home and arrange cleanup. |
 | 2c | Security home creation under a custom `TMPDIR` | Check the security fixture respects a path with spaces and is removed on exit. |
+| 2d | Graph home creation under a custom `TMPDIR` | Check creation and exit cleanup on success and failure while preserving unrelated files. |
 | 2a | `quickstart`, `doctor`, `doctor --json` | Check fresh-install advisories and reject invalid workspace policy. |
 | 2b | `binding add` twice, then with conflicting content | Verify an identical add preserves the file and timestamp and a conflict is rejected. |
 | 3 | `init --with-samples`, `pin`, `whoami --json`, `exec` | Check sample pins, exclusive identity, credential presence metadata, binding add idempotence and missing-reference warnings. |

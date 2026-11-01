@@ -91,6 +91,10 @@ create_security_home() {
   SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
 }
 
+create_graph_home() {
+  GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
+}
+
 # Exercise the same creation and EXIT cleanup used by the security probes.
 # The subshell owns its test home so its cleanup cannot remove the main home.
 log "2c. security home honors a nondefault TMPDIR"
@@ -113,6 +117,36 @@ security_test_home="$(cat "$security_tmp/security-home-path")"
   || die "security home survived exit cleanup"
 [[ -d "$security_tmp" ]] || die "security cleanup removed the supplied TMPDIR"
 ok "security home honors nondefault TMPDIR and is cleaned on exit"
+
+# Exercise graph home creation and EXIT cleanup even when graph is unavailable
+# or its same-home import succeeds. All resources belong to this subshell.
+log "2d. graph home lifecycle"
+graph_tmp="$LOCUS_HOME/graph temp"
+mkdir -p "$graph_tmp"
+touch "$graph_tmp/keep"
+for graph_exit in 0 73; do
+  graph_status=0
+  (
+    export TMPDIR="$graph_tmp"
+    LOCUS_HOME="$graph_tmp/subshell-home"
+    mkdir -p "$LOCUS_HOME" || exit 1
+    WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+    trap 'e2e_cleanup' EXIT
+    create_graph_home || exit 1
+    [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
+      "${GRAPH_HOME##*/}" == locus-graph-imp.* ]] || exit 1
+    printf '%s' "$GRAPH_HOME" >"$graph_tmp/graph-home-path" || exit 1
+    touch "$GRAPH_HOME/cleanup-sentinel" || exit 1
+    exit "$graph_exit"
+  ) || graph_status=$?
+  [[ "$graph_status" -eq "$graph_exit" ]] || die "graph home lifecycle probe failed"
+  graph_test_home="$(cat "$graph_tmp/graph-home-path")"
+  [[ ! -e "$graph_test_home" && ! -L "$graph_test_home" ]] \
+    || die "graph home survived exit cleanup"
+  [[ -f "$graph_tmp/keep" && -d "$graph_tmp" ]] \
+    || die "graph cleanup removed unrelated resources"
+done
+ok "graph home honors nondefault TMPDIR and is cleaned on exit"
 
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
@@ -1300,7 +1334,7 @@ else
       ok "graph import --force roundtrip"
     else
       # Fresh home for a true write path
-      GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
+      create_graph_home
       if LOCUS_HOME="$GRAPH_HOME" LOCUS_GRAPH_PASSPHRASE="$LOCUS_GRAPH_PASSPHRASE" \
         locus init >/dev/null 2>&1 \
         && LOCUS_HOME="$GRAPH_HOME" LOCUS_GRAPH_PASSPHRASE="$LOCUS_GRAPH_PASSPHRASE" \
