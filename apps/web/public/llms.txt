@@ -69,6 +69,7 @@ Identity is resolved at the gate, not in the prompt. Bindings hold principal, te
 - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
 - [Session budget caps (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/session-budget.md)
 - [Shell completions](https://github.com/ashlrai/locus/blob/main/docs/shell-completions.md)
+- [Shell installer issue checklist](https://github.com/ashlrai/locus/blob/main/docs/shell-installer-issue-checklist.md)
 - [Grant-scoped swarm broker](https://github.com/ashlrai/locus/blob/main/docs/swarm-broker.md)
 - [Locus swarm broker: child jobs](https://github.com/ashlrai/locus/blob/main/docs/swarm-child-jobs.md)
 - [Verification plane](https://github.com/ashlrai/locus/blob/main/docs/verification-plane.md)
