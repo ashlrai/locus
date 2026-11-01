@@ -245,6 +245,45 @@ printf '%s\\n' "$path"
   for (const name of sentinels) assert.equal(readFileSync(join(scratch, name), 'utf8'), 'sentinel');
 });
 
+test('successful smoke removes its temporary error file', (t) => {
+  // Keep the broker socket path short and isolate the error file from other runs.
+  const root = mkdtempSync('/tmp/lhs-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary files');
+  const record = join(root, 'error-file');
+  const hook = join(root, 'observe-pin.sh');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'locus-hub-smoke-err.unrelated'), 'keep');
+  writeFileSync(hook, `locus() {
+  if [[ "$*" == 'pin personal' ]]; then
+    [[ -f "$SMOKE_ERR" ]] || return 90
+    printf 'synthetic pin diagnostic\\n' >&2
+    command locus "$@" || return
+    grep -q '^synthetic pin diagnostic$' "$SMOKE_ERR" || return 91
+    printf '%s\\n' "$SMOKE_ERR" > "$SMOKE_ERR_RECORD"
+  else
+    command locus "$@"
+  fi
+}
+`);
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, TMPDIR: scratch, BASH_ENV: hook, SMOKE_ERR_RECORD: record },
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'smoke must complete successfully');
+  assert.match(result.stdout, /^== hub-smoke OK ==$/m);
+  assert.doesNotMatch(result.stdout, /^skip\s/m, 'all smoke checks must run');
+  const errorFile = readFileSync(record, 'utf8').trim();
+  assert.equal(dirname(errorFile), scratch);
+  assert.match(errorFile.slice(scratch.length + 1), /^locus-hub-smoke-err\./);
+  assert.equal(existsSync(errorFile), false, 'the observed error file must be removed');
+  assert.equal(readFileSync(join(scratch, 'locus-hub-smoke-err.unrelated'), 'utf8'), 'keep');
+});
+
 test('a spaced TMPDIR holds all three resources until a build failure cleans them', (t) => {
   const root = mkdtempSync('/tmp/lhs-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
