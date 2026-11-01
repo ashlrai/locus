@@ -38,6 +38,7 @@ the optional client probe inspects client installations. A diagnostic
 are not removed by these directory traps.
 
 For the concise prefix inventory, see the [temporary-directory reference](dogfood-temp-prefix-reference.md).
+For the two probes' checks and purposes, see [dogfood probe purposes](dogfood-probe-purposes.md).
 For trap order and cleanup limitations, see [dogfood probe cleanup](dogfood-probe-cleanup.md).
 Run `node --test scripts/dogfood.test.mjs` to check the inventory, probe roles,
 and existing cleanup paths.

@@ -340,3 +340,80 @@ for (const [failure, expectedStages] of [
     }
   });
 }
+
+test('multi-tenant probe completes the grant lifecycle and cleans up', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-success-test-'));
+  const pidFile = join(root, 'server-pid');
+  t.after(() => {
+    if (existsSync(pidFile)) {
+      try { process.kill(Number(readFileSync(pidFile, 'utf8').trim())); } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+  const scratch = join(root, 'scratch');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const server = join(root, 'server');
+  writeFileSync(server, '#!/usr/bin/env bash\nprintf "%s\\n" "$$" > "$PID_FILE"\nexec sleep 120\n', { mode: 0o755 });
+  const successHarness = String.raw`
+source "$1"
+locus() {
+  local stage="$1"
+  [[ "$stage" != mcp ]] || stage="$2"
+  printf '%s\n' "$stage" >> "$TRACE_FILE"
+  case "$stage" in
+    init) printf '%s\n' "$PWD" > "$PROBE_FILE" ;;
+    mint) printf '%s\n' '{"grant_id":"grant_fixture","token":"lmt_fixture"}' ;;
+    list)
+      if [[ -f "$REVOKED_FILE" ]]; then printf '%s\n' '[]'
+      else printf '%s\n' '[{"grant_id":"grant_fixture","revoked":false,"expired":false}]'; fi ;;
+    revoke) [[ "$3" == grant_fixture ]] || return 1; touch "$REVOKED_FILE" ;;
+  esac
+}
+curl() {
+  if [[ "$*" == */health ]]; then
+    for _ in {1..100}; do
+      [[ -f "$PID_FILE" ]] && return 0
+      /bin/sleep 0.01
+    done
+    return 1
+  fi
+  [[ "$*" == *'Authorization: Bearer dogfood-mt-'* ]] || return 1
+  if [[ "$*" != *'X-Locus-Tenant-Token:'* ]]; then
+    printf 'tenantless\n' >> "$TRACE_FILE"
+    while [[ "$1" != -o ]]; do shift; done
+    printf '%s' 'invalid_grant' > "$2"
+    printf '401'
+  elif [[ "$*" != *'X-Locus-Tenant-Token: lmt_fixture'* ]]; then
+    return 1
+  elif [[ -f "$REVOKED_FILE" ]]; then
+    printf 'revoked\n' >> "$TRACE_FILE"; printf '401'
+  else
+    printf 'granted\n' >> "$TRACE_FILE"; printf '200'
+  fi
+}
+mt_grant_probe || exit 42
+`;
+  const trace = join(root, 'trace');
+  const probe = join(root, 'probe');
+  const result = spawnSync('bash', ['-c', successHarness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, TRACE_FILE: trace, PROBE_FILE: probe,
+      REVOKED_FILE: join(root, 'revoked'), MCP_BIN: server, PID_FILE: pidFile },
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, '');
+  assert.deepEqual(readFileSync(trace, 'utf8').trim().split('\n'), [
+    'init', 'binding', 'mint', 'list', 'tenantless', 'granted', 'revoke', 'revoked', 'list',
+  ]);
+  const probeRoot = readFileSync(probe, 'utf8').trim();
+  assert.match(probeRoot, /\/locus-mt-dogfood\.[^/]+$/);
+  assert.equal(dirname(probeRoot), scratch);
+  assert.equal(existsSync(probeRoot), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.throws(() => process.kill(Number(readFileSync(pidFile, 'utf8').trim()), 0), { code: 'ESRCH' });
+});
