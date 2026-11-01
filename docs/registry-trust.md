@@ -15,6 +15,8 @@ For guidance on deciding what an unsigned comparison establishes, see
 For common trust questions, see the [registry trust FAQ](./registry-trust-faq.md).
 For the release workflow's responsibilities and limits, see
 [CI's role](./registry-manifest-ci-role.md).
+For how the release attachment is produced and what its origin establishes,
+see [manifest provenance](./registry-manifest-provenance.md).
 For the responsibilities of each party, see
 [registry trust actors](./registry-trust-actors.md).
 For unresolved release verification decisions, see the
