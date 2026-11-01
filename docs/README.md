@@ -3,6 +3,7 @@
 For autopin implementation changes, use the [autopin review checklist](autopin-review-checklist.md).
 For the suggestion command's output and examples, see [autopin suggest output](autopin-suggest-output.md).
 For the proposed one-command archive installer, see the [user journey](installer-user-journey.md), [requirements](installer-requirements.md), and [issue checklist](shell-installer-issue-checklist.md).
+For archive requirements and unresolved release decisions, see [installer archive requirements](installer-archive-requirements.md).
 For open error-contract decisions, see [installer error questions](installer-error-questions.md).
 For troubleshooting, see [shell installer failure cases](shell-installer-failure-cases.md).
 
