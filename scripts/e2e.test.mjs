@@ -114,28 +114,42 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.doesNotMatch(result.stdout, /ok  binding add repeats without a write and rejects conflicts/);
 });
 
-for (const failImport of [false, true]) {
-  test(`graph fallback uses TMPDIR and cleans up ${failImport ? 'after import failure' : 'after import'}`, { timeout: 1_800_000 }, (t) => {
+for (const failure of ['none', 'init', 'import']) {
+  test(`graph fallback uses TMPDIR and cleans up ${failure === 'none' ? 'after import' : `after ${failure} failure`}`, { timeout: 1_800_000 }, (t) => {
     const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-test-'));
     t.after(() => rmSync(fixture, { recursive: true, force: true }));
     const scratch = join(fixture, 'custom tmp');
     const bin = join(fixture, 'bin');
     const observed = join(fixture, 'graph-home');
     const imported = join(fixture, 'import-observed');
+    const initialized = join(fixture, 'init-observed');
+    const cleanedEarly = join(fixture, 'cleaned-before-next-section');
     mkdirSync(scratch);
     mkdirSync(bin);
+    writeFileSync(join(scratch, 'keep'), 'unrelated');
 
     // Force both same-home attempts to fail, then observe the real fresh-home import.
     const wrapper = join(bin, 'locus');
     writeFileSync(wrapper, `#!/bin/bash
+if [[ "\${1:-}" == init && "$LOCUS_HOME" == "$TMPDIR"/locus-graph-imp.* ]]; then
+  [[ -d "$LOCUS_HOME" && "$LOCUS_GRAPH_PASSPHRASE" == e2e-test ]] || exit 1
+  printf '%s' "$LOCUS_HOME" > "$GRAPH_INIT_RECORD"
+  [[ "$GRAPH_FAILURE" != init ]] || exit 1
+fi
 if [[ "\${1:-}" == graph && "\${2:-}" == import ]]; then
   if [[ "$LOCUS_HOME" != "$TMPDIR"/locus-graph-imp.* ]]; then
     exit 1
   fi
-  [[ -d "$LOCUS_HOME" ]] || exit 1
+  [[ -d "$LOCUS_HOME" && "$LOCUS_GRAPH_PASSPHRASE" == e2e-test ]] || exit 1
+  [[ "$(cat "$GRAPH_INIT_RECORD")" == "$LOCUS_HOME" ]] || exit 1
   printf '%s' "$LOCUS_HOME" > "$GRAPH_HOME_RECORD"
   : > "$GRAPH_IMPORT_RECORD"
-  [[ "$FAIL_GRAPH_IMPORT" != 1 ]] || exit 1
+  [[ "$GRAPH_FAILURE" != import ]] || exit 1
+fi
+if [[ "\${1:-}" == ci && "\${2:-}" == --help && -f "$GRAPH_IMPORT_RECORD" ]]; then
+  graph_home="$(cat "$GRAPH_HOME_RECORD")"
+  [[ ! -e "$graph_home" && ! -L "$graph_home" ]] || exit 1
+  : > "$GRAPH_CLEANED_RECORD"
 fi
 exec '${locus.replaceAll("'", "'\\''")}' "$@"
 `, { mode: 0o755 });
@@ -148,7 +162,9 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
         LOCUS_BIN: wrapper,
         GRAPH_HOME_RECORD: observed,
         GRAPH_IMPORT_RECORD: imported,
-        FAIL_GRAPH_IMPORT: failImport ? '1' : '0',
+        GRAPH_INIT_RECORD: initialized,
+        GRAPH_CLEANED_RECORD: cleanedEarly,
+        GRAPH_FAILURE: failure,
         LOCUS_GRAPH_PASSPHRASE: 'e2e-test',
       },
       encoding: 'utf8',
@@ -158,17 +174,20 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
 
     assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
     const stages = [...result.stdout.matchAll(/^==> (\d+[a-z]?)\./gm)];
-    assert.equal(result.status, failImport ? 1 : 0,
+    assert.equal(result.status, failure === 'none' ? 0 : 1,
       `unexpected e2e exit status at stage ${stages.at(-1)?.[1] ?? 'before startup'}`);
-    assert.ok(existsSync(imported), 'fresh graph import was not reached');
-    const graphHome = readFileSync(observed, 'utf8');
+    assert.ok(existsSync(initialized), 'fresh graph initialization was not reached');
+    assert.equal(existsSync(imported), failure !== 'init', 'unexpected fresh graph import');
+    const graphHome = readFileSync(initialized, 'utf8');
+    if (failure !== 'init') assert.equal(readFileSync(observed, 'utf8'), graphHome);
     assert.ok(dirname(graphHome) === scratch, 'graph home was not created directly under TMPDIR');
     assert.ok(/\/locus-graph-imp\.[^/]+$/.test(graphHome), 'unexpected graph home name');
     assert.equal(existsSync(graphHome), false, 'graph home was not cleaned up');
-    assert.deepEqual(readdirSync(scratch), [], 'e2e left temporary directories behind');
-    if (failImport) {
+    assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+    if (failure !== 'none') {
       assert.ok(/graph import failed/.test(result.stderr), 'expected graph import failure');
     } else {
+      assert.ok(existsSync(cleanedEarly), 'graph home survived until the next section');
       assert.match(result.stdout, /ok  sample exec succeeds without unset-variable warnings/);
       assert.match(result.stdout, /ok  sample exec reports missing credentials/);
       assert.ok(/ok  graph export\/import into fresh LOCUS_HOME/.test(result.stdout), 'fresh import did not pass');

@@ -18,7 +18,8 @@ build still runs. `TMPDIR`, if set and nonempty, must be an existing writable
 directory. The script creates its own `LOCUS_HOME`, uses synthetic values, and
 normally cleans up temporary homes, workspaces and HTTP servers on exit. See the
 [temporary resource reference](e2e-temp-resource-types.md) for directory types
-and cleanup limitations.
+and cleanup limitations, and [graph import isolation](e2e-graph-isolation.md)
+for the fresh-home fallback.
 
 The numbers below match the script's `==>` log labels, in execution order. There
 is no section selector: invocations in the table describe what the suite runs,
