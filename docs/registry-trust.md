@@ -10,6 +10,8 @@ For a concise status of today's asset and the signing roadmap, see the
 [current-state summary](./registry-manifest-current-state.md).
 For a pre-flight review list, see the
 [consumer checklist](./registry-manifest-consumer-checklist.md).
+For guidance on deciding what an unsigned comparison establishes, see
+[unsigned consumer guidance](./registry-unsigned-consumer-guidance.md).
 For common trust questions, see the [registry trust FAQ](./registry-trust-faq.md).
 For the release workflow's responsibilities and limits, see
 [CI's role](./registry-manifest-ci-role.md).
