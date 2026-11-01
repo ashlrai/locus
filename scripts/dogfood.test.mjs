@@ -9,6 +9,21 @@ import { test } from 'node:test';
 
 const script = join(dirname(fileURLToPath(import.meta.url)), 'dogfood.sh');
 
+test('temporary directory reference covers every dogfood script template', () => {
+  const source = readFileSync(script, 'utf8');
+  const reference = readFileSync(join(dirname(script), '..', 'docs', 'dogfood-temp-prefix-reference.md'), 'utf8');
+  const templates = [...source.matchAll(/mktemp -d "\$\{TMPDIR:-\/tmp\}\/([^"/]+)"/g)]
+    .map((match) => match[1]).sort();
+  const documented = [...reference.matchAll(/\| `(locus-[\w.-]+\.XXXXXX)` \|/g)]
+    .map((match) => match[1]).sort();
+  assert.deepEqual(templates, [
+    'locus-dogfood.XXXXXX',
+    'locus-mt-dogfood.XXXXXX',
+    'locus-sandbox-dogfood.XXXXXX',
+  ]);
+  assert.deepEqual(documented, templates);
+});
+
 test('isolated dogfood home works with spaces in TMPDIR and is removed on exit', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
