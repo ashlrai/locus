@@ -22,5 +22,6 @@ Cleanup is best effort: `rm` can fail, and an uncatchable termination such as
 `SIGKILL` cannot run the trap. The trap also does not remove Cargo's `target/`
 build artifacts or the shared per-user authority socket directory; broker socket
 retirement is asynchronous. Treat failure diagnostics as potentially sensitive.
-See the [resource map](hub-smoke-resource-map.md) for the broker, grant and
+See [temporary-resource failures](hub-smoke-temp-failures.md) for allocation
+diagnostics and partial cleanup, the [resource map](hub-smoke-resource-map.md) for the broker, grant and
 other resources, and the [output guide](hub-smoke-output.md) for error messages.
