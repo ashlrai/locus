@@ -13,6 +13,8 @@ For a pre-flight review list, see the
 For common trust questions, see the [registry trust FAQ](./registry-trust-faq.md).
 For the release workflow's responsibilities and limits, see
 [CI's role](./registry-manifest-ci-role.md).
+For the responsibilities of each party, see
+[registry trust actors](./registry-trust-actors.md).
 For unresolved release verification decisions, see the
 [verification questions](./registry-manifest-verification-questions.md).
 For a concise distinction between release status and future signing, see
