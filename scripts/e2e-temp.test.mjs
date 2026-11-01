@@ -204,6 +204,45 @@ test('a nonexistent TMPDIR fails before creating an isolated home', (t) => {
   assert.deepEqual(readdirSync(fixture.root), ['bin']);
 });
 
+test('an initial mktemp failure stops before the e2e workload', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const inherited = join(fixture.root, 'inherited home');
+  const home = join(fixture.root, 'home');
+  const attempts = join(fixture.root, 'mktemp-attempts');
+  const workload = join(fixture.root, 'workload-started');
+  mkdirSync(scratch);
+  mkdirSync(inherited);
+  mkdirSync(home);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(inherited, 'keep'), 'inherited');
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+printf 'attempt\\n' >> "$MKTEMP_ATTEMPTS"
+test "$#" -eq 2 && test "$1" = -d && test "$2" = "$TMPDIR/locus-e2e.XXXXXX" || exit 92
+printf 'injected mktemp failure\\n' >&2
+exit 73
+`, { mode: 0o755 });
+  // The first fixture setup invokes mkdir; both binaries are workload entry points.
+  const workloadStub = '#!/bin/sh\nprintf started > "$WORKLOAD_MARKER"\nexit 91\n';
+  writeFileSync(join(fixture.bin, 'mkdir'), workloadStub, { mode: 0o755 });
+  writeFileSync(fixture.locus, workloadStub, { mode: 0o755 });
+
+  const result = run(fixture, scratch, {
+    HOME: home, LOCUS_HOME: inherited, LOCUS_CONTROL_CAPABILITY: 'test-capability',
+    MKTEMP_ATTEMPTS: attempts, WORKLOAD_MARKER: workload,
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the initial mktemp failure must stop the script');
+  assert.equal(readFileSync(attempts, 'utf8'), 'attempt\n', 'only the initial mktemp should run');
+  assert.match(result.stderr, /injected mktemp failure/);
+  assert.match(result.stdout, /ok  locus \+ locus-mcp release binaries/);
+  assert.doesNotMatch(result.stdout, /==> 2\./, 'fixture setup must not start');
+  assert.equal(existsSync(workload), false, 'the e2e workload must not run');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited');
+});
+
 for (const exitStatus of [0, 73]) {
   test(`workspace honors TMPDIR and is removed on exit ${exitStatus}`, (t) => {
     const fixture = setup(t);
