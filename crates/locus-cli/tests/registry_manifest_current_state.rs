@@ -69,19 +69,27 @@ fn documented_unsigned_check_rejects_unsigned_by_default_and_detects_drift() {
             .status
             .success()
     );
-    let example = GUIDE
-        .split("```bash\n")
-        .nth(1)
-        .unwrap()
-        .split("\n```")
-        .next()
-        .unwrap();
-    let args: Vec<_> = example.split_whitespace().collect();
-    assert_eq!(args.first(), Some(&"locus"));
-    let output = run(&args[1..]);
-    assert!(output.status.success());
-    let report = String::from_utf8(output.stdout).unwrap();
-    assert!(report.contains("unsigned") && report.contains("none"));
+    let examples: Vec<Vec<&str>> = [GUIDE, SIGNING_STATUS]
+        .iter()
+        .map(|guide| {
+            let example = guide
+                .split("```bash\n")
+                .nth(1)
+                .unwrap()
+                .split("\n```")
+                .next()
+                .unwrap();
+            let args: Vec<_> = example.split_whitespace().collect();
+            assert_eq!(args.first(), Some(&"locus"));
+            args
+        })
+        .collect();
+    for args in &examples {
+        let output = run(&args[1..]);
+        assert!(output.status.success());
+        let report = String::from_utf8(output.stdout).unwrap();
+        assert!(report.contains("unsigned") && report.contains("none"));
+    }
     assert!(!run(&["adapter", "verify-manifest", "release.json"])
         .status
         .success());
@@ -89,7 +97,15 @@ fn documented_unsigned_check_rejects_unsigned_by_default_and_detects_drift() {
     let path = dir.path().join("release.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["signature"] = "invalid-signature".into();
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    for args in &examples {
+        assert!(!run(&args[1..]).status.success());
+    }
+    manifest.as_object_mut().unwrap().remove("signature");
     manifest["locus_version"] = "0.0.0-drift".into();
     std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    assert!(!run(&args[1..]).status.success());
+    for args in &examples {
+        assert!(!run(&args[1..]).status.success());
+    }
 }

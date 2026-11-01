@@ -90,6 +90,8 @@ mod registry_manifest_current_state;
 mod registry_manifest_verification;
 #[path = "registry_signing_open_questions.rs"]
 mod registry_signing_open_questions;
+#[path = "registry_trust_actors.rs"]
+mod registry_trust_actors;
 #[path = "registry_trust_faq.rs"]
 mod registry_trust_faq;
 #[path = "registry_unsigned_consumer_guidance.rs"]
