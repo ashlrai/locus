@@ -49,6 +49,7 @@ Identity is resolved at the gate, not in the prompt. Bindings hold principal, te
 - [Hub smoke prerequisites](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-prerequisites.md)
 - [Hub smoke resource map](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-resource-map.md)
 - [Hub smoke temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-temp-resources.md)
+- [Hub test temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-test-temp-comparison.md)
 - [Shell installer acceptance checklist](https://github.com/ashlrai/locus/blob/main/docs/installer-acceptance.md)
 - [Shell installer failure matrix](https://github.com/ashlrai/locus/blob/main/docs/installer-failure-matrix.md)
 - [Shell installer platform matrix](https://github.com/ashlrai/locus/blob/main/docs/installer-platform-matrix.md)

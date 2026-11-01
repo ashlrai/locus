@@ -596,6 +596,8 @@ Exact steps: [`integrations/phantom/fleet-preflight.md`](../integrations/phantom
 ## Validation
 
 See [hub smoke prerequisites](./hub-smoke-prerequisites.md) for setup and environment, and [hub smoke output](./hub-smoke-output.md) for the individual outcomes.
+The [temporary resource comparison](./hub-test-temp-comparison.md) covers
+both scripts' paths and cleanup.
 
 ```bash
 # From repo root (jq + node required for composition smoke)

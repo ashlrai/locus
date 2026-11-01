@@ -348,6 +348,10 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [Hub smoke temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-temp-resources.md)
 
+## docs/hub-test-temp-comparison.md
+
+- [Hub test temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-test-temp-comparison.md)
+
 ## docs/installer-acceptance.md
 
 - [Shell installer acceptance checklist](https://github.com/ashlrai/locus/blob/main/docs/installer-acceptance.md)
