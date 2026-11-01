@@ -170,6 +170,74 @@ esac
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
 });
 
+test('successful dogfood run removes its isolated home and preserves neighboring files', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-success-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  const fixtureRoot = join(root, 'fixture');
+  const bin = join(fixtureRoot, 'target', 'debug');
+  mkdirSync(scratch);
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(fixtureRoot, 'scripts'));
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
+  writeFileSync(join(fixtureRoot, 'scripts', 'dogfood-ready.jq'), readFileSync(join(dirname(script), 'dogfood-ready.jq')));
+  writeFileSync(join(fixtureRoot, 'scripts', 'hub-smoke.sh'), '#!/bin/sh\nexit 0\n');
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'uname'), '#!/bin/sh\nprintf Darwin\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+
+  const pin = { alias: 'dogfood', tenant: 'dogfood', binding_id: 'bnd_fixture', expires_at: '2030-01-01', seal_ok: true, expired: false };
+  const providers = [{ provider: 'github' }];
+  const runtime = { pinned: true, seal_ok: true, binding_present: true, binding_id_match: true,
+    tenant_match: true, providers_match: true, frozen: false, expired: false, ok: true, issues: [],
+    session_id: 'ses_fixture', binding_alias: pin.alias, binding_id_session: pin.binding_id,
+    binding_id_file: pin.binding_id, tenant_session: pin.tenant, tenant_file: pin.tenant, providers };
+  const doctor = { home: '/fixture', pin, pin_seal_ok: true, verdict: 'SAFE', ok: true, unresolved_phm: [], runtime };
+  const report = { status: 'ready', ready: true, exit_code: 0, pin, status_oneline: 'dogfood:dogfood',
+    env_session_id: null, home: doctor.home, doctor, required_servers: ['locus', 'phantom'], mcp_command: 'locus-mcp' };
+  const verify = { kind: 'session', session_ok: true, doctor,
+    whoami: { session_id: runtime.session_id, binding_alias: pin.alias, binding_id: pin.binding_id,
+      tenant: pin.tenant, expires_at: pin.expires_at, worker_home: '/fixture/worker', providers, seal_ok: true, frozen: false },
+    safe_next: { ready: true, action: 'ready', binding: pin.alias, tenant: pin.tenant } };
+  writeFileSync(join(root, 'report.json'), JSON.stringify(report));
+  writeFileSync(join(root, 'verify.json'), JSON.stringify(verify));
+  writeFileSync(join(bin, 'locus'), `#!/bin/bash
+case "$1 $2" in
+  'init ')
+    if [[ "$LOCUS_HOME" == "$TMPDIR"/locus-dogfood.* ]]; then
+      [[ "$PWD" == "$LOCUS_HOME/project" && -d "$LOCUS_HOME" ]] || exit 89
+      printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"
+      touch "$LOCUS_HOME/sentinel"
+    fi ;;
+  'binding add') mkdir -p "$LOCUS_HOME/bindings"; touch "$LOCUS_HOME/bindings/$3.toml" ;;
+  'exec --no-resolve') printf '%s\\n' '{"id":2,"result":{"tools":[]}}' '{"id":3,"result":{"isError":false,"content":[{"text":"{\\"isError\\":false,\\"content\\":[{\\"text\\":\\"sandboxed=1 backend=sandbox-exec\\"}]}"}]}}' ;;
+  'agent report') cat "$FIXTURE_ROOT/report.json" ;;
+  'verify session') [[ "\${3:-}" == --help ]] || cat "$FIXTURE_ROOT/verify.json" ;;
+  'forensics export') printf '{}\\n' > "$4" ;;
+  'goal status') exit 1 ;;
+  '--version '|'quickstart '|'pin sandbox-probe'|'agent setup'|'doctor ') ;;
+  *) exit 90 ;;
+esac
+`, { mode: 0o755 });
+
+  const probe = join(root, 'probe');
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, PROBE_FILE: probe, FIXTURE_ROOT: root },
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'the fixture must reach a normal successful exit');
+  assert.match(result.stdout, /DOGFOOD READY/);
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.match(home, /\/locus-dogfood\.[^/]+$/);
+  assert.equal(dirname(home), scratch);
+  assert.equal(existsSync(home), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
 test('initialization failure removes only the allocated dogfood home', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
