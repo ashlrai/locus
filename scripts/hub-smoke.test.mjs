@@ -125,6 +125,29 @@ test('temporary resource guide matches allocation types and prefixes', () => {
   assert.match(doc, /uncatchable kill/);
 });
 
+test('resource roles cite each allocation and explain its use', () => {
+  const lines = readFileSync(script, 'utf8').split('\n');
+  const doc = readFileSync(join(dirname(script), '../docs/hub-smoke-resource-roles.md'), 'utf8');
+  const allocations = lines.flatMap((line, index) => {
+    const match = line.match(/^if ! (SMOKE_\w+)="\$\(mktemp(?: -d)? /);
+    return match ? [[match[1], index + 1]] : [];
+  });
+  assert.equal(allocations.length, 3, 'review resource roles when allocations change');
+  for (const [variable, line] of allocations) {
+    const row = doc.split('\n').find((entry) => entry.startsWith(`| \`${variable}\``));
+    assert.ok(row, `missing resource role: ${variable}`);
+    assert.ok(row.includes(`../scripts/hub-smoke.sh#L${line}`), `wrong creation site: ${variable}`);
+  }
+  for (const [variable, marker, role] of [
+    ['SMOKE_HOME', 'export LOCUS_HOME="$SMOKE_HOME"', /LOCUS_HOME.*isolating/],
+    ['SMOKE_PROJ', 'cd "$SMOKE_PROJ"', /working project.*\.mcp\.json/],
+    ['SMOKE_ERR', ': >"$SMOKE_ERR"', /stderr.*truncated/],
+  ]) {
+    assert.ok(lines.some((line) => line.includes(marker)), `script use changed: ${variable}`);
+    assert.match(doc.split('\n').find((entry) => entry.startsWith(`| \`${variable}\``)), role);
+  }
+});
+
 function smokeCommandGuard(root) {
   const guard = join(root, 'guard.sh');
   const marker = join(root, 'smoke-command-ran');
