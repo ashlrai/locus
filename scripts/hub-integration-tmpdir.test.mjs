@@ -54,6 +54,58 @@ for (const setting of ['unset', 'empty']) {
   });
 }
 
+for (const [failedTemplate, expectedAttempts] of [
+  ['locus-hub-int.XXXXXX', ['locus-hub-int.XXXXXX']],
+  ['locus-hub-int-proj.XXXXXX', ['locus-hub-int.XXXXXX', 'locus-hub-int-proj.XXXXXX']],
+]) {
+  test(`failure creating ${failedTemplate} stops execution and cleans earlier directories`, (t) => {
+    const scratch = mkdtempSync('/tmp/locus-tmp-failure-');
+    t.after(() => rmSync(scratch, { recursive: true, force: true }));
+    const temp = join(scratch, 'temp [with spaces]');
+    const attempts = join(scratch, 'attempts');
+    const created = join(scratch, 'created');
+    const reached = join(scratch, 'init-reached');
+    mkdirSync(temp);
+    writeFileSync(join(temp, 'keep'), 'sentinel');
+
+    const failAllocation = `
+node() { :; }
+jq() { :; }
+cargo() { :; }
+locus() { [[ "$1" != init ]] || : > "$REACHED"; }
+mktemp() {
+  local template="${'$'}{!#}" path
+  printf '%s\\n' "${'$'}{template##*/}" >> "$ATTEMPTS"
+  [[ "${'$'}{template##*/}" != "$FAIL_TEMPLATE" ]] || return 73
+  path="$(command mktemp "$@")" || return
+  touch "$path/fixture" || return
+  printf '%s\\n' "$path" >> "$CREATED"
+  printf '%s\\n' "$path"
+}
+export -f node jq cargo locus mktemp
+exec bash "$1"
+`;
+    const result = spawnSync('bash', ['-c', failAllocation, 'failure-test', script], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: temp,
+        ATTEMPTS: attempts, CREATED: created, REACHED: reached, FAIL_TEMPLATE: failedTemplate },
+      encoding: 'utf8',
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 73, 'the allocation failure must propagate');
+    assert.deepEqual(readFileSync(attempts, 'utf8').trim().split('\n'), expectedAttempts);
+    const paths = existsSync(created) ? readFileSync(created, 'utf8').trim().split('\n') : [];
+    assert.equal(paths.length, expectedAttempts.length - 1);
+    for (const path of paths) {
+      assert.equal(dirname(path), temp);
+      assert.equal(existsSync(path), false, 'the populated earlier directory must be removed');
+    }
+    assert.equal(existsSync(reached), false, 'initialization must not run after allocation failure');
+    assert.deepEqual(readdirSync(temp), ['keep']);
+    assert.equal(readFileSync(join(temp, 'keep'), 'utf8'), 'sentinel');
+  });
+}
+
 test('custom TMPDIR creates and cleans both directories without touching a glob-matching neighbor', (t) => {
   const scratch = mkdtempSync('/tmp/locus-tmpdir-test-');
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
