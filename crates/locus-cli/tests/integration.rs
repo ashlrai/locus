@@ -78,6 +78,8 @@ mod quickstart_then_enter;
 mod readme_commands;
 #[path = "readme_quickstart.rs"]
 mod readme_quickstart;
+#[path = "registry_manifest_ci_role.rs"]
+mod registry_manifest_ci_role;
 #[path = "registry_manifest_consumer_checklist.rs"]
 mod registry_manifest_consumer_checklist;
 #[path = "registry_signing_open_questions.rs"]

@@ -9,6 +9,8 @@ For a concise consumer walkthrough, see
 For a pre-flight review list, see the
 [consumer checklist](./registry-manifest-consumer-checklist.md).
 For common trust questions, see the [registry trust FAQ](./registry-trust-faq.md).
+For the release workflow's responsibilities and limits, see
+[CI's role](./registry-manifest-ci-role.md).
 For unresolved release verification decisions, see the
 [verification questions](./registry-manifest-verification-questions.md).
 For the open decisions of the unsigned-to-signed transition itself, see
