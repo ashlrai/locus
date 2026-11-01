@@ -5,6 +5,8 @@ using sample state. Run it from the repository root with
 `./scripts/hub-smoke.sh`; see [prerequisites](hub-smoke-prerequisites.md) and
 [output guide](hub-smoke-output.md). The table follows the script's execution
 order. Paths under `TMPDIR` use `/tmp` when it is unset or empty.
+For the three temporary paths and their prefixes, see
+[temporary resources](hub-smoke-temp-resources.md).
 
 | Temporary resource | Creation | Use | Cleanup |
 | --- | --- | --- | --- |
