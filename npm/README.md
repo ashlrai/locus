@@ -6,7 +6,7 @@ npm install -g locus-cli @ashlrai/locus-mcp
 ```
 <!-- fresh:end -->
 
-**Release integrity:** The published v0.6.1 wrapper enforces the fail-closed
+**Release integrity:** The published v0.6.2 wrapper enforces the fail-closed
 checksum behavior described below. Earlier v0.6.0 wrappers could install
 without verification when a checksum sidecar was missing or unparseable and
 could fall back to Cargo on a checksum mismatch during first use. The v0.6.0

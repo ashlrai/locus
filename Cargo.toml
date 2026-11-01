@@ -7,7 +7,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 # MSRV for the locked workspace; verify it using the commands in CONTRIBUTING.md.
 rust-version = "1.89"
@@ -19,7 +19,7 @@ authors = ["Mason Wyatt <mason@ashlr.ai>"]
 readme = "README.md"
 
 [workspace.dependencies]
-locus-core = { path = "crates/locus-core", version = "0.6.1" }
+locus-core = { path = "crates/locus-core", version = "0.6.2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
