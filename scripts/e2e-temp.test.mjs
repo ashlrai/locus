@@ -100,6 +100,41 @@ test('a nonexistent TMPDIR fails before creating an isolated home', (t) => {
   assert.deepEqual(readdirSync(fixture.root), ['bin']);
 });
 
+for (const exitStatus of [0, 73]) {
+  test(`workspace honors TMPDIR and is removed on exit ${exitStatus}`, (t) => {
+    const fixture = setup(t);
+    const scratch = join(fixture.root, 'custom tmp');
+    const record = join(fixture.root, 'workspace-path');
+    mkdirSync(scratch);
+    writeFileSync(join(scratch, 'keep'), 'unrelated');
+    const source = readFileSync(script, 'utf8');
+    const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+    const createWorkspace = source.match(/^WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
+    assert.ok(cleanup, 'missing e2e cleanup function');
+    assert.ok(createWorkspace, 'missing workspace creation');
+    const probe = `${cleanup}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+mkdir "$LOCUS_HOME"
+trap 'e2e_cleanup' EXIT
+${createWorkspace}
+[[ -d "$WS_DIR" && "\${WS_DIR%/*}" == "$TMPDIR" && "\${WS_DIR##*/}" == locus-ws.* ]] || exit 1
+printf '%s' "$WS_DIR" > "$2"
+touch "$WS_DIR/cleanup-sentinel"
+exit "$3"
+`;
+    const result = spawnSync('bash', ['-c', probe, 'workspace-cleanup', scratch, record, String(exitStatus)],
+      { encoding: 'utf8' });
+    assert.equal(result.status, exitStatus, 'workspace creation or cleanup probe failed');
+    assert.equal(result.signal, null);
+    const workspace = readFileSync(record, 'utf8');
+    assert.equal(dirname(workspace), scratch);
+    assert.match(workspace, /\/locus-ws\.[^/]+$/);
+    assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must remove workspace and preserve unrelated files');
+  });
+}
+
 test('security fixture directories are removed by the script exit trap', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp');
