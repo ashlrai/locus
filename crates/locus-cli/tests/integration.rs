@@ -30,6 +30,8 @@ mod doctor_fix_cli;
 mod doctor_fix_phm_names;
 #[path = "dry_run_docs.rs"]
 mod dry_run_docs;
+#[path = "dry_run_docs_coverage.rs"]
+mod dry_run_docs_coverage;
 #[path = "dry_run_no_side_effects.rs"]
 mod dry_run_no_side_effects;
 #[path = "dry_run_review_matrix.rs"]
