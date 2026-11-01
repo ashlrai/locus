@@ -270,7 +270,7 @@ locus() {
   case "$stage" in
     mint) printf '%s\n' '{"grant_id":"grant_fixture","token":"lmt_fixture"}' ;;
     list)
-      if [[ "$FAIL_STAGE" == http ]]; then
+      if [[ "$FAIL_STAGE" == http || "$FAIL_STAGE" == interrupt ]]; then
         printf '%s\n' '[{"grant_id":"grant_fixture","revoked":false,"expired":false}]'
       else
         printf '%s\n' '[]'
@@ -280,7 +280,16 @@ locus() {
 curl() {
   if [[ "$*" == */health ]]; then
     for _ in {1..100}; do
-      [[ -f "$PID_FILE" ]] && return 0
+      if [[ -f "$PID_FILE" ]]; then
+        if [[ "$FAIL_STAGE" == interrupt ]]; then
+          [[ -f "$LOCUS_HOME/sentinel" ]] && kill -0 "$(cat "$PID_FILE")" || return 1
+          touch "$INTERRUPT_FILE"
+          # The child targets its parent (the probe subshell), including on Bash 3.2.
+          sh -c 'kill -TERM "$PPID"'
+          return 1
+        fi
+        return 0
+      fi
       /bin/sleep 0.01
     done
     return 1
@@ -344,6 +353,52 @@ for (const [failure, expectedStages] of [
     }
   });
 }
+
+test('multi-tenant probe cleans up after interruption with a running server', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-interrupt-test-'));
+  const pidFile = join(root, 'server-pid');
+  let serverStopped = false;
+  t.after(() => {
+    if (!serverStopped && existsSync(pidFile)) {
+      try {
+        process.kill(Number(readFileSync(pidFile, 'utf8').trim()));
+      } catch (error) {
+        if (error.code !== 'ESRCH') throw error;
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const trace = join(root, 'trace');
+  const probe = join(root, 'probe');
+  const interrupted = join(root, 'interrupted');
+  const server = join(root, 'server');
+  writeFileSync(server, '#!/usr/bin/env bash\nprintf "%s\\n" "$$" > "$PID_FILE"\nexec sleep 120\n', { mode: 0o755 });
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, TRACE_FILE: trace, PROBE_FILE: probe, FAIL_STAGE: 'interrupt', MCP_BIN: server, PID_FILE: pidFile, INTERRUPT_FILE: interrupted },
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 42);
+  assert.equal(existsSync(interrupted), true, 'signal must be sent after the server and probe home exist');
+  assert.deepEqual(readFileSync(trace, 'utf8').trim().split('\n'), ['init', 'binding', 'mint', 'list']);
+  const probeRoot = readFileSync(probe, 'utf8').trim();
+  assert.match(probeRoot, /\/locus-mt-dogfood\.[^/]+$/);
+  assert.equal(dirname(probeRoot), scratch);
+  assert.equal(existsSync(probeRoot), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+  const pid = Number(readFileSync(pidFile, 'utf8').trim());
+  assert.ok(Number.isInteger(pid) && pid > 0);
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  serverStopped = true;
+});
 
 
 test('multi-tenant allocation failure stops before probe setup', (t) => {
