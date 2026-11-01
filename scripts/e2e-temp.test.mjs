@@ -28,6 +28,22 @@ test('temporary directory reference matches the E2E script', () => {
   assert.deepEqual(documented.sort(), created.sort(), 'documented variables and prefixes must match the script');
 });
 
+test('security directory guide maps the script fixtures and their cleanup', () => {
+  const source = readFileSync(script, 'utf8');
+  const doc = readFileSync(join(root, 'docs', 'e2e-security-directories.md'), 'utf8');
+  const rows = [...doc.matchAll(/^\| `(SECURITY_(?:HOME|WS))` \| `([^`]+)` \| ([^|\n]+) \|$/gm)];
+  assert.deepEqual(rows.map(([, variable]) => variable), ['SECURITY_HOME', 'SECURITY_WS']);
+  for (const [, variable, prefix, purpose] of rows) {
+    assert.ok(purpose.trim(), `${variable} needs a purpose`);
+    assert.ok(source.includes(`${variable}="$(mktemp -d "\${TMPDIR:-/tmp}/${prefix}XXXXXX")"`),
+      `${variable} prefix must match its creation in the script`);
+    assert.ok(source.includes(`"\${${variable}:-}"`), `${variable} must be covered by cleanup`);
+  }
+  assert.match(doc, /`LOCUS_HOME`/);
+  assert.match(doc, /`\.locus\.toml` symlink/);
+  assert.match(doc, /`EXIT` trap/);
+});
+
 function setup(t) {
   const root = mkdtempSync(join(tmpdir(), 'locus-e2e-temp-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -135,17 +151,20 @@ exit "$3"
   });
 }
 
-test('security fixture directories are removed by the script exit trap', (t) => {
-  const fixture = setup(t);
-  const scratch = join(fixture.root, 'custom tmp');
-  mkdirSync(scratch);
-  writeFileSync(join(scratch, 'keep'), 'unrelated');
-  const source = readFileSync(script, 'utf8');
-  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
-  const createHome = source.match(/^create_security_home\(\) \{[\s\S]*?^\}/m)?.[0];
-  assert.ok(cleanup, 'missing e2e cleanup function');
-  assert.ok(createHome, 'missing security home creation function');
-  const probe = `${cleanup}
+for (const exitStatus of [0, 73]) {
+  test(`security fixture directories are removed on exit ${exitStatus}`, (t) => {
+    const fixture = setup(t);
+    const scratch = join(fixture.root, 'custom tmp');
+    mkdirSync(scratch);
+    writeFileSync(join(scratch, 'keep'), 'unrelated');
+    const source = readFileSync(script, 'utf8');
+    const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+    const createHome = source.match(/^create_security_home\(\) \{[\s\S]*?^\}/m)?.[0];
+    const createWorkspace = source.match(/^SECURITY_WS="\$\(mktemp -d .*\)"$/m)?.[0];
+    assert.ok(cleanup, 'missing e2e cleanup function');
+    assert.ok(createHome, 'missing security home creation function');
+    assert.ok(createWorkspace, 'missing security workspace creation');
+    const probe = `${cleanup}
 ${createHome}
 TMPDIR="$1"
 LOCUS_HOME="$TMPDIR/main-home"
@@ -153,12 +172,14 @@ WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_P
 mkdir "$LOCUS_HOME"
 trap 'e2e_cleanup' EXIT
 create_security_home
-SECURITY_WS="$(mktemp -d "\${TMPDIR:-/tmp}/locus-security-ws.XXXXXX")"
+${createWorkspace}
+[[ "$SECURITY_HOME" != "$SECURITY_WS" && "\${SECURITY_HOME%/*}" == "$TMPDIR" && "\${SECURITY_WS%/*}" == "$TMPDIR" ]] || exit 1
 touch "$SECURITY_HOME/sentinel" "$SECURITY_WS/sentinel"
-exit 73
+exit "$2"
 `;
-  const result = spawnSync('bash', ['-c', probe, 'security-cleanup', scratch], { encoding: 'utf8' });
-  assert.equal(result.status, 73, 'the injected failure should reach the exit trap');
-  assert.equal(result.signal, null);
-  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must remove fixtures and preserve unrelated files');
-});
+    const result = spawnSync('bash', ['-c', probe, 'security-cleanup', scratch, String(exitStatus)], { encoding: 'utf8' });
+    assert.equal(result.status, exitStatus, 'security fixture creation or cleanup probe failed');
+    assert.equal(result.signal, null);
+    assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must remove fixtures and preserve unrelated files');
+  });
+}
