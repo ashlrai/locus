@@ -22,11 +22,20 @@ scratch=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/state/user" "$scratch/state/project"
 
+# Keep LLVM runtime writes outside the observed tree, even after env -i.
+# Resolve an inherited relative path before changing the CLI's working directory.
+profile_file=$(python3 - "${LLVM_PROFILE_FILE:-$scratch/locus-%p-%m.profraw}" <<'PYPROFILE'
+import os, sys
+print(os.path.abspath(sys.argv[1]))
+PYPROFILE
+)
+
 # Isolate the CLI from the operator's home, identity and workspace.
 locus_test() {
   (cd "$scratch/state/project" && env -i PATH="$PATH" \
     HOME="$scratch/state/user" USERPROFILE="$scratch/state/user" \
     LOCUS_HOME="$scratch/state/locus" NO_COLOR=1 LOCUS_NON_INTERACTIVE=1 \
+    LLVM_PROFILE_FILE="$profile_file" \
     "$LOCUS_BIN" "$@")
 }
 
