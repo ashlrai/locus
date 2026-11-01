@@ -24,6 +24,28 @@ test('temporary directory reference covers every dogfood script template', () =>
   assert.deepEqual(documented, templates);
 });
 
+test('probe role guide tracks each allocation and its readiness contract', () => {
+  const source = readFileSync(script, 'utf8');
+  const guide = readFileSync(join(dirname(script), '..', 'docs', 'dogfood-probe-roles.md'), 'utf8');
+  const templates = [...source.matchAll(/mktemp -d "\$\{TMPDIR:-\/tmp\}\/([^"/]+)"/g)]
+    .map((match) => match[1]).sort();
+  const rows = [...guide.matchAll(/^\| `(locus-[\w.-]+\.XXXXXX)` \| [^|\n]+ \| [^|\n]+ \|$/gm)]
+    .map((match) => match[1]).sort();
+  assert.deepEqual(rows, templates);
+  for (const [template, facts] of [
+    ['locus-dogfood.XXXXXX', ['quickstart', 'agent setup', 'doctor', 'forensics', 'session', 'readiness']],
+    ['locus-sandbox-dogfood.XXXXXX', ['fixture', 'sandbox-exec', 'unsupported-backend', 'blocks readiness']],
+    ['locus-mt-dogfood.XXXXXX', ['DOGFOOD_MT=1', 'mints', '401', '200', 'revokes']],
+  ]) {
+    const row = guide.split('\n').find((line) => line.startsWith(`| \`${template}\` |`));
+    for (const fact of facts) assert.ok(row.includes(fact), `${template}: missing ${fact}`);
+  }
+  for (const fact of ['DOGFOOD_USE_REAL_HOME=1', 'DOGFOOD_HOME', 'DOGFOOD_PACK',
+    'DOGFOOD_SKIP_HUB_SMOKE=1', 'hub-smoke.sh', 'uncatchable']) {
+    assert.ok(guide.includes(fact), `guide missing ${fact}`);
+  }
+});
+
 test('isolated dogfood home is created under a custom TMPDIR and removed on exit', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

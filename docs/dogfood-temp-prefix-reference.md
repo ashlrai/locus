@@ -6,6 +6,9 @@ are replaced with a unique suffix. These prefixes describe directories created
 by this script itself; optional helper scripts may create their own temporary
 files or directories.
 
+For probe behavior and readiness effects, see the
+[dogfood probe roles](dogfood-probe-roles.md).
+
 | Template | Creation context | Cleanup |
 | --- | --- | --- |
 | `locus-dogfood.XXXXXX` | Default isolated run: the directory is `LOCUS_HOME`, contains the throwaway project and, by default, `pack.json`. It is not created when `DOGFOOD_USE_REAL_HOME=1`. | The main script's exit trap removes it. A custom `DOGFOOD_PACK` path is outside this cleanup unless placed inside the directory. |
