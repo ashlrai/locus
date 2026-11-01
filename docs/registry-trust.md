@@ -15,6 +15,8 @@ For the release workflow's responsibilities and limits, see
 [CI's role](./registry-manifest-ci-role.md).
 For unresolved release verification decisions, see the
 [verification questions](./registry-manifest-verification-questions.md).
+For a concise distinction between release status and future signing, see
+[registry signing status](./registry-signing-status.md).
 For the open decisions of the unsigned-to-signed transition itself, see
 [registry signing open questions](./registry-signing-open-questions.md).
 
