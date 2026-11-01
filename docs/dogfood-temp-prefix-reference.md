@@ -18,3 +18,5 @@ For probe behavior and readiness effects, see the
 Exit traps handle normal exit and trappable failures; an uncatchable termination
 can leave a directory behind. Inspect any leftover directory before removing it,
 especially if a run wrote diagnostic artifacts there.
+
+For allocation failures and their effects on readiness, see [temporary-directory failure handling](dogfood-temp-failures.md).
