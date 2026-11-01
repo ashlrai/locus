@@ -125,6 +125,26 @@ test('temporary resource guide matches allocation types and prefixes', () => {
   assert.match(doc, /uncatchable kill/);
 });
 
+test('temporary resources reference identifies each allocation and its purpose', () => {
+  const source = readFileSync(script, 'utf8');
+  const doc = readFileSync(join(dirname(script), '../docs/hub-smoke-resources.md'), 'utf8');
+  const allocations = [...source.matchAll(/if ! (SMOKE_\w+)="\$\(mktemp( -d)? "\$\{TMPDIR:-\/tmp\}\/([^"]+)"\)"/g)];
+  const expected = [
+    ['SMOKE_HOME', ' -d', 'locus-hub-smoke.XXXXXX', 'Directory', 'export LOCUS_HOME="$SMOKE_HOME"', /LOCUS_HOME.*sample bindings.*pin/],
+    ['SMOKE_PROJ', ' -d', 'locus-hub-proj.XXXXXX', 'Directory', 'cd "$SMOKE_PROJ"', /working project.*\.mcp\.json.*agent report/i],
+    ['SMOKE_ERR', undefined, 'locus-hub-smoke-err.XXXXXX', 'File', ': >"$SMOKE_ERR"', /init and pin stderr.*retry.*truncated/],
+  ];
+  assert.equal(allocations.length, expected.length, 'review the reference when allocations change');
+  for (const [index, [variable, flag, template, kind, use, purpose]] of expected.entries()) {
+    assert.deepEqual(allocations[index].slice(1), [variable, flag, template]);
+    assert.ok(source.includes(use), `script use changed: ${variable}`);
+    const row = doc.split('\n').find((line) => line.startsWith(`| \`${variable}\``));
+    assert.ok(row, `missing resource: ${variable}`);
+    assert.ok(row.includes(`| ${kind} |`) && row.includes(`\`${template}\``));
+    assert.match(row, purpose);
+  }
+});
+
 test('resource roles cite each allocation and explain its use', () => {
   const lines = readFileSync(script, 'utf8').split('\n');
   const doc = readFileSync(join(dirname(script), '../docs/hub-smoke-resource-roles.md'), 'utf8');
