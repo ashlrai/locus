@@ -1,5 +1,8 @@
 # E2E graph import isolation
 
+For the full ownership and cleanup lifecycle, see the
+[GRAPH_HOME lifecycle](e2e-graph-lifecycle.md).
+
 The [graph export/import roundtrip in section 16](../scripts/e2e.sh#L1273)
 of `scripts/e2e.sh` is feature-detected. If graph support is unavailable, or
 an export cannot be produced, the section reports a skip. A successful export

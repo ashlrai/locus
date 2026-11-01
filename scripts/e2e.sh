@@ -69,6 +69,8 @@ log "2. LOCUS_HOME=$LOCUS_HOME"
 # Optional background PIDs (HTTP MCP, etc.) cleaned on any exit path.
 HTTP_MCP_PID=""
 MT_MCP_PID=""
+# Only a directory created by this run may be removed as the graph home.
+GRAPH_HOME=""
 e2e_cleanup() {
   if [[ -n "${HTTP_MCP_PID:-}" ]]; then
     kill "$HTTP_MCP_PID" 2>/dev/null || true
