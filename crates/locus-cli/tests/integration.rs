@@ -98,6 +98,8 @@ mod registry_trust_actors;
 mod registry_trust_faq;
 #[path = "registry_unsigned_consumer_guidance.rs"]
 mod registry_unsigned_consumer_guidance;
+#[path = "registry_unsigned_manifest_faq.rs"]
+mod registry_unsigned_manifest_faq;
 #[path = "regress_closed_issues.rs"]
 mod regress_closed_issues;
 #[path = "sample_exec_quiet.rs"]
