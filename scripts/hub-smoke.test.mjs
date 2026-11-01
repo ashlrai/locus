@@ -102,6 +102,29 @@ test('resource map covers temporary allocations and their lifecycle', () => {
   }
 });
 
+test('temporary resource guide matches allocation types and prefixes', () => {
+  const source = readFileSync(script, 'utf8');
+  const doc = readFileSync(join(dirname(script), '../docs/hub-smoke-temp-resources.md'), 'utf8');
+  const allocations = [...source.matchAll(/if ! (SMOKE_\w+)="\$\(mktemp( -d)? "\$\{TMPDIR:-\/tmp\}\/([^"]+)"\)"/g)];
+  const expected = [
+    ['SMOKE_HOME', ' -d', 'locus-hub-smoke.XXXXXX', 'Directory'],
+    ['SMOKE_PROJ', ' -d', 'locus-hub-proj.XXXXXX', 'Directory'],
+    ['SMOKE_ERR', undefined, 'locus-hub-smoke-err.XXXXXX', 'Regular file'],
+  ];
+  assert.equal(allocations.length, expected.length, 'review the guide when allocations change');
+  for (const [index, [variable, flag, template, kind]] of expected.entries()) {
+    assert.deepEqual(allocations[index].slice(1), [variable, flag, template]);
+    const row = doc.split('\n').find((line) => line.startsWith(`| \`${variable}\``));
+    assert.ok(row, `missing resource row: ${variable}`);
+    assert.ok(row.includes(`| ${kind} |`), `wrong kind for ${variable}`);
+    assert.ok(row.includes(`\`${template}\``), `missing template: ${template}`);
+    assert.ok(row.includes(`\`${template.slice(0, -6)}\``), `missing prefix: ${variable}`);
+  }
+  assert.match(doc, /`TMPDIR`.*`\/tmp`/);
+  assert.match(doc, /`EXIT` trap/);
+  assert.match(doc, /uncatchable kill/);
+});
+
 function smokeCommandGuard(root) {
   const guard = join(root, 'guard.sh');
   const marker = join(root, 'smoke-command-ran');
