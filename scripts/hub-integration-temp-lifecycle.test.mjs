@@ -8,6 +8,7 @@ import { test } from 'node:test';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const source = readFileSync(join(root, 'scripts/hub-integration-test.sh'), 'utf8');
 const doc = readFileSync(join(root, 'docs/hub-integration-temp-lifecycle.md'), 'utf8');
+const isolation = readFileSync(join(root, 'docs/hub-integration-isolation.md'), 'utf8');
 
 test('guide inventories all integration smoke mktemp directories in creation order', () => {
   const code = source.split('\n').filter((line) => !/^\s*#/.test(line)).join('\n');
@@ -34,4 +35,20 @@ test('guide describes cleanup and separate temporary resources present in the sc
     '.locus-hub-int-scan.$$.${RANDOM}', 'uncatchable kill', 'authority broker']) {
     assert.ok(doc.includes(marker), `guide lifecycle detail missing: ${marker}`);
   }
+});
+
+test('isolation walkthrough traces both directories and their uses to the script', () => {
+  for (const [variable, template] of [['SMOKE_HOME', 'locus-hub-int.XXXXXX'],
+    ['SMOKE_PROJ', 'locus-hub-int-proj.XXXXXX']]) {
+    assert.ok(source.includes(`${variable}="$(mktemp -d "\${TMPDIR:-/tmp}/${template}")"`));
+    assert.ok(isolation.includes(`\`${variable}\` (\`${template}\`)`));
+  }
+  for (const marker of ['LOCUS_HOME', 'LOCUS_SESSION_ID', '.mcp.json', 'hub-merged.mcp.json',
+    'mt-server.log', 'mt-body.json', 'mt-init.headers', 'EXIT', 'TMPDIR']) {
+    assert.ok(source.includes(marker), `script no longer references ${marker}`);
+    assert.ok(isolation.includes(marker), `isolation walkthrough is missing ${marker}`);
+  }
+  assert.match(isolation, /\[`cleanup`\]\(\.\.\/scripts\/hub-integration-test\.sh#L\d+-L\d+\)/);
+  assert.match(isolation, /uncatchable kill/);
+  assert.match(isolation, /does not redirect the caller's `HOME`/);
 });
