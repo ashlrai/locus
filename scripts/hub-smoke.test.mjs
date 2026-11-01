@@ -168,12 +168,21 @@ test('successful smoke cleans all resources under a custom TMPDIR', (t) => {
   const record = join(root, 'created');
   mkdirSync(bin);
   mkdirSync(scratch);
-  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  const sentinels = ['keep', '.hidden', 'locus-hub-smoke.unrelated',
+    'locus-hub-proj.unrelated', 'locus-hub-smoke-err.unrelated'];
+  for (const name of sentinels) writeFileSync(join(scratch, name), 'sentinel');
   writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
 path="$("$REAL_MKTEMP" "$@")" || exit
 case "$path" in
   "$TMPDIR"/locus-hub-smoke.*|"$TMPDIR"/locus-hub-proj.*|"$TMPDIR"/locus-hub-smoke-err.*)
-    printf '%s\\n' "$path" >> "$MKTEMP_RECORD" ;;
+    if [[ "\${1:-}" == -d && -d "$path" ]]; then
+      kind=directory
+    elif [[ "\${1:-}" != -d && -f "$path" ]]; then
+      kind=file
+    else
+      exit 1
+    fi
+    printf '%s\\t%s\\n' "$kind" "$path" >> "$MKTEMP_RECORD" ;;
 esac
 printf '%s\\n' "$path"
 `, { mode: 0o755 });
@@ -200,17 +209,20 @@ printf '%s\\n' "$path"
     'ok    mcp list --json values-free roster', 'ok    mcp revoke removes grant from roster']) {
     assert.ok(result.stdout.includes(message), `missing success: ${message}`);
   }
-  const paths = readFileSync(record, 'utf8').trim().split('\n');
-  assert.equal(paths.length, 3);
-  for (const [path, prefix] of paths.map((path, i) => [path, [
-    'locus-hub-smoke.', 'locus-hub-proj.', 'locus-hub-smoke-err.',
-  ][i]])) {
+  const resources = readFileSync(record, 'utf8').trim().split('\n').map((line) => line.split('\t'));
+  assert.equal(resources.length, 3);
+  for (const [i, [kind, path]] of resources.entries()) {
+    const [expectedKind, prefix] = [
+      ['directory', 'locus-hub-smoke.'], ['directory', 'locus-hub-proj.'],
+      ['file', 'locus-hub-smoke-err.'],
+    ][i];
+    assert.equal(kind, expectedKind);
     assert.equal(dirname(path), scratch);
     assert.ok(path.slice(scratch.length + 1).startsWith(prefix));
     assert.equal(existsSync(path), false, `${prefix} must be removed`);
   }
-  assert.deepEqual(readdirSync(scratch), ['keep']);
-  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+  assert.deepEqual(readdirSync(scratch).sort(), sentinels.sort());
+  for (const name of sentinels) assert.equal(readFileSync(join(scratch, name), 'utf8'), 'sentinel');
 });
 
 test('a TMPDIR with spaces is cleaned after partial setup failure', (t) => {
