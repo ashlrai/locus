@@ -6,6 +6,8 @@
 
 For a concise consumer walkthrough, see
 [Verifying an adapter registry release manifest](./registry-manifest-verification.md).
+For a concise status of today's asset and the signing roadmap, see the
+[current-state summary](./registry-manifest-current-state.md).
 For a pre-flight review list, see the
 [consumer checklist](./registry-manifest-consumer-checklist.md).
 For common trust questions, see the [registry trust FAQ](./registry-trust-faq.md).
