@@ -2,6 +2,7 @@
 
 For autopin implementation changes, use the [autopin review checklist](autopin-review-checklist.md).
 For the suggestion command's output and examples, see [autopin suggest output](autopin-suggest-output.md).
+For the proposed one-command archive installer, see the [issue checklist](shell-installer-issue-checklist.md).
 
 ## Previewing changes with `--dry-run`
 
