@@ -1,5 +1,8 @@
 # Hub test temporary resources
 
+For a compact parent and prefix inventory, see the
+[temporary parent reference](temp-parent-reference.md).
+
 Both [`hub-smoke.sh`](../scripts/hub-smoke.sh) and
 [`hub-integration-test.sh`](../scripts/hub-integration-test.sh) use sample
 bindings in an isolated `LOCUS_HOME` and create a separate project directory.
