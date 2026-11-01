@@ -286,6 +286,44 @@ exit 42
   assert.equal(readFileSync(join(existingHome, 'keep'), 'utf8'), 'preserve');
 });
 
+test('SIGTERM removes the isolated dogfood home under a custom TMPDIR', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-signal-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  const fixtureRoot = join(root, 'fixture');
+  const bin = join(fixtureRoot, 'target', 'debug');
+  mkdirSync(scratch);
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(fixtureRoot, 'scripts'));
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus'), `#!/bin/bash
+[[ "$1" == init && -d "$LOCUS_HOME" && "\${LOCUS_HOME%/*}" == "$TMPDIR" ]] || exit 89
+[[ "$PWD" == "$LOCUS_HOME/project" ]] || exit 90
+printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"
+touch "$LOCUS_HOME/sentinel"
+kill -TERM "$PPID"
+`, { mode: 0o755 });
+  const probe = join(root, 'probe');
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, PROBE_FILE: probe },
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+
+  assert.ifError(result.error);
+  assert.equal(result.signal, 'SIGTERM');
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.match(home, /\/locus-dogfood\.[^/]+$/);
+  assert.equal(dirname(home), scratch);
+  assert.equal(existsSync(home), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
 test('a nonexistent TMPDIR fails before initializing the dogfood home', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
