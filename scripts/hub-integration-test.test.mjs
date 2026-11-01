@@ -9,6 +9,7 @@ import { test } from 'node:test';
 
 const script = join(dirname(fileURLToPath(import.meta.url)), 'hub-integration-test.sh');
 const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+const realRm = execFileSync('which', ['rm'], { encoding: 'utf8' }).trim();
 const realCurl = execFileSync('which', ['curl'], { encoding: 'utf8' }).trim();
 
 test('the report hygiene comment points to the filesystem canary test', () => {
@@ -27,6 +28,7 @@ function runWithTempDir(t, failProject = false, scratchParts = ['custom-tmp']) {
   const bin = join(root, 'bin');
   const scratch = join(root, ...scratchParts);
   const record = join(root, 'created');
+  const cleanupRecord = join(root, 'cleanup-observed');
   const projectAttempt = join(root, 'project-attempt');
   mkdirSync(bin);
   mkdirSync(scratch, { recursive: true });
@@ -45,15 +47,30 @@ if [[ "${'$'}{FAIL_PROJECT:-}" == 1 ]]; then : > "${'$'}path/home-sentinel"; fi
 printf '%s\\n' "${'$'}path" >> "${'$'}MKTEMP_RECORD"
 printf '%s\\n' "${'$'}path"
 `, { mode: 0o755 });
+  writeFileSync(join(bin, 'rm'), `#!/usr/bin/env bash
+if [[ -f "${'$'}MKTEMP_RECORD" && ! -f "${'$'}CLEANUP_RECORD" ]]; then
+  for arg in "${'$'}@"; do
+    case "${'$'}arg" in "${'$'}TMPDIR"/locus-hub-int.*|"${'$'}TMPDIR"/locus-hub-int-proj.*) ;; *) continue ;; esac
+    home_dir="$(sed -n '1p' "${'$'}MKTEMP_RECORD")"
+    project_dir="$(sed -n '2p' "${'$'}MKTEMP_RECORD")"
+    if [[ -n "${'$'}project_dir" && ( "${'$'}arg" == "${'$'}home_dir" || "${'$'}arg" == "${'$'}project_dir" ) ]]; then
+      [[ -f "${'$'}home_dir/cleanup-sentinel" && -f "${'$'}project_dir/cleanup-sentinel" ]] || exit 75
+      : > "${'$'}CLEANUP_RECORD"
+      break
+    fi
+  done
+fi
+exec "${'$'}REAL_RM" "${'$'}@"
+`, { mode: 0o755 });
   const result = spawnSync('bash', [script], {
     env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
       REAL_MKTEMP: realMktemp, MKTEMP_RECORD: record, PROJECT_ATTEMPT: projectAttempt,
-      FAIL_PROJECT: failProject ? '1' : '0' },
+      FAIL_PROJECT: failProject ? '1' : '0', REAL_RM: realRm, CLEANUP_RECORD: cleanupRecord },
     encoding: 'utf8',
     maxBuffer: 4 * 1024 * 1024,
   });
   const paths = readFileSync(record, 'utf8').trim().split('\n');
-  return { result, scratch, paths, projectAttempt };
+  return { result, scratch, paths, projectAttempt, cleanupRecord };
 }
 
 test('integration smoke uses and cleans a nondefault TMPDIR', (t) => {
@@ -72,6 +89,19 @@ test('integration smoke uses and cleans a nondefault TMPDIR', (t) => {
   assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
   assert.equal(readFileSync(join(scratch, '.locus-hub-int-scan.unrelated'), 'utf8'), 'hidden sentinel');
+});
+
+test('normal exit removes both directories that were populated at cleanup', (t) => {
+  const { result, paths, cleanupRecord } = runWithTempDir(t);
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'integration smoke must finish normally');
+  assert.doesNotMatch(result.stdout, /^skip\s/m, 'all integration checks must run');
+  assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
+  assert.equal(paths.length, 2, 'both temporary directories must be allocated');
+  assert.equal(existsSync(cleanupRecord), true, 'exit cleanup must receive both populated directories');
+  assert.equal(existsSync(paths[0]), false, 'temporary home must be removed');
+  assert.equal(existsSync(paths[1]), false, 'temporary project must be removed');
 });
 
 test('integration smoke uses and cleans TMPDIR with spaces and shell metacharacters', (t) => {
