@@ -12,20 +12,22 @@ const script = join(root, 'scripts', 'e2e.sh');
 
 test('temporary directory reference matches the E2E script', () => {
   const source = readFileSync(script, 'utf8');
-  const doc = readFileSync(join(root, 'docs', 'e2e-temp-resource-types.md'), 'utf8');
   const created = [...source.matchAll(/^\s*(\w+)="\$\(mktemp -d "\$\{TMPDIR:-\/tmp\}\/([^/"\s]+)XXXXXX"\)"/gm)]
     .map(([, variable, prefix]) => [variable, prefix]);
-  const documented = [...doc.matchAll(/^\| `(\w+)` \| `([^`]+)` \| ([^|\n]+) \|$/gm)]
-    .map(([, variable, prefix, purpose]) => {
-      assert.ok(purpose.trim(), `${variable} needs a purpose`);
-      return [variable, prefix];
-    });
 
   assert.equal(created.length, 5, 'expected five temporary directory assignments');
   assert.equal([...source.matchAll(/\bmktemp\s+-d\b/g)].length, created.length,
     'every mktemp directory must be represented in the inventory');
   assert.equal(new Set(created.map(([variable]) => variable)).size, created.length);
-  assert.deepEqual(documented.sort(), created.sort(), 'documented variables and prefixes must match the script');
+  for (const name of ['e2e-temp-resource-types.md', 'e2e-temp-prefixes.md']) {
+    const doc = readFileSync(join(root, 'docs', name), 'utf8');
+    const documented = [...doc.matchAll(/^\| `(\w+)` \| `([^`]+)` \| ([^|\n]+) \|$/gm)]
+      .map(([, variable, prefix, purpose]) => {
+        assert.ok(purpose.trim(), `${name}: ${variable} needs a purpose`);
+        return [variable, prefix];
+      });
+    assert.deepEqual(documented.sort(), [...created].sort(), `${name}: variables and prefixes must match the script`);
+  }
 });
 
 function setup(t) {
