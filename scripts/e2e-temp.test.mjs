@@ -61,6 +61,22 @@ test('uses TMPDIR and cleans the isolated home after a later failure', (t) => {
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
+test('exit cleanup preserves an inherited graph home before the fallback runs', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'scratch');
+  const inherited = join(fixture.root, 'unrelated graph home');
+  mkdirSync(scratch);
+  mkdirSync(inherited);
+  writeFileSync(join(inherited, 'keep'), 'unrelated');
+
+  const result = run(fixture, scratch, { GRAPH_HOME: inherited });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /fresh quickstart failed/);
+  assert.deepEqual(readdirSync(inherited), ['keep']);
+  assert.deepEqual(readdirSync(scratch), []);
+});
+
 for (const [label, temp] of [['unset', undefined], ['empty', '']]) {
   test(`${label} TMPDIR falls back to /tmp`, (t) => {
     const fixture = setup(t);
