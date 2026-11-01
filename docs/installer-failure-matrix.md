@@ -34,7 +34,7 @@ matched. An archive that fails checksum verification never reaches tar.
 | --- | --- | --- |
 | Corrupt archive or missing required member | Reports `archive must contain locus and locus-mcp`; tar may print details. Existing binaries preserved. | Offline corrupt and missing-member tests. |
 | Binary member is a link or directory, or appears more than once | Reports that binaries must be regular files or occur exactly once; existing binaries preserved. | Offline link, directory and duplicate tests. |
-| Required member is empty or cannot be streamed | Reports `archive contains an empty` binary or `could not unpack` it; existing binaries preserved. | Empty-member test; streaming failure after listing is **unresolved** by the offline suite. |
+| Required member is empty or cannot be streamed | Reports `archive contains an empty` binary or `could not unpack` it; existing binaries preserved. | Offline empty-member and simulated streaming-failure tests. |
 | Unrelated absolute or traversal archive entries | Only the two named binaries are streamed; unrelated entries are not extracted. This alone does not cause an error. | Absolute-path fixture is tested; traversal fixture and real release archives remain **unverified**. |
 
 ## Destination and replacement

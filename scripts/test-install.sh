@@ -77,6 +77,10 @@ MOCK
 cat > "$TEST_ROOT/tools/tar" <<'MOCK'
 #!/bin/bash
 printf '%s\n' called >> "$TEST_CASE/tar-calls"
+if [[ "$1" == -xOzf && "${3##*/}" == "${TEST_FAIL_UNPACK:-}" ]]; then
+    echo 'simulated extraction failure' >&2
+    exit 1
+fi
 exec "$TEST_REAL_TAR" "$@"
 MOCK
 cat > "$TEST_ROOT/hash" <<'MOCK'
@@ -107,13 +111,14 @@ new_case() {
     TEST_VERSION=v1.2.3
     TEST_LATEST_URL=https://github.com/ashlrai/locus/releases/tag/v1.2.3
     TEST_FAIL_DOWNLOAD=
+    TEST_FAIL_UNPACK=
     TEST_ARCHIVE="$TEST_CASE/release.tar.gz"
     TEST_CHECKSUM="$TEST_CASE/release.sha256"
     TEST_REAL_TAR=$REAL_TAR
     TEST_REAL_HASH=$HASH_BIN
     TEST_REAL_HASH_KIND=${HASH_BIN##*/}
     export TEST_CASE TEST_OS TEST_ARCH TEST_TARGET TEST_VERSION TEST_LATEST_URL
-    export TEST_FAIL_DOWNLOAD TEST_ARCHIVE TEST_CHECKSUM TEST_REAL_TAR TEST_REAL_HASH TEST_REAL_HASH_KIND
+    export TEST_FAIL_DOWNLOAD TEST_FAIL_UNPACK TEST_ARCHIVE TEST_CHECKSUM TEST_REAL_TAR TEST_REAL_HASH TEST_REAL_HASH_KIND
 }
 
 fixture() {
@@ -282,10 +287,12 @@ for args in help unknown missing-version missing-destination bad-version; do
 done
 
 for platform in Linux-arm64 Linux-aarch64 Windows-x86_64 FreeBSD-x86_64 Darwin-ppc; do
-    new_case
+    new_case; seed_install
     TEST_OS=${platform%-*}; TEST_ARCH=${platform##*-}
     rejection --version v1.2.3
     [[ ! -e "$TEST_CASE/downloads" ]] || fail 'unsupported platform downloaded'
+    assert_preserved
+    grep -Fq "unsupported platform: $TEST_OS/$TEST_ARCH; use a source install" "$TEST_CASE/stderr" || fail 'missing unsupported platform error'
     ok "rejects unsupported $platform"
 done
 
@@ -294,6 +301,7 @@ for download in archive checksum latest; do
     TEST_FAIL_DOWNLOAD=$download
     rejection
     assert_preserved
+    [[ ! -e "$TEST_CASE/tar-calls" ]] || fail 'failed download opened archive'
     case "$download" in
         latest) message='could not resolve the latest release' ;;
         archive) message='archive download failed; nothing installed' ;;
@@ -360,6 +368,16 @@ for broken in missing empty symlink hardlink directory duplicate corrupt; do
     rejection --version v1.2.3
     assert_preserved
     ok "rejects $broken binary archive before replacing installation"
+done
+
+for binary in locus locus-mcp; do
+    new_case; fixture; seed_install
+    TEST_FAIL_UNPACK=$binary
+    rejection --version v1.2.3
+    assert_preserved
+    grep -Fq "could not unpack $binary" "$TEST_CASE/stderr" || fail "missing $binary extraction error"
+    if grep -Fq 'Installed locus and locus-mcp' "$TEST_CASE/stdout"; then fail 'reported success after extraction failure'; fi
+    ok "preserves existing installation when extracting $binary fails"
 done
 
 new_case; fixture
