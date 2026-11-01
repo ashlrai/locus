@@ -33,6 +33,66 @@ function archiveText(archive, target) {
   throw new Error(`missing ${target} in npm archive`);
 }
 
+// Join shell continuation lines, but keep separate commands separate. This
+// detects known same-command and default-root sequential collision patterns;
+// it is a documentation regression guard, not a general shell parser.
+function hasCollidingCargoInstall(text) {
+  const source = text.replace(/<[^>]*>/g, "").replace(/\\\r?\n\s*/g, " ");
+  const commands = source.split(/\r?\n|&&/).map((line) => line.trim()).filter(Boolean);
+  const dual = commands.some((line) => /\bcargo\s+(?:\+\S+\s+)?install\b/.test(line)
+    && /(?:^|\s)locus-cli(?=\s|$)/.test(line)
+    && /(?:^|\s)locus-mcp(?=\s|$)/.test(line));
+  // Compare adjacent install commands only when their roots are both default
+  // or the same literal. This is deliberately not a shell parser.
+  const invocation = (line) => {
+    if (!/\bcargo\s+(?:\+\S+\s+)?install\b/.test(line)) return null;
+    const packages = ["locus-cli", "locus-mcp"].filter((name) =>
+      new RegExp(`(?:^|\\s)${name}(?=\\s|$)`).test(line)
+      || line.includes(`--path crates/${name}`));
+    const root = /(?:^|\s)--root(?:=|\s+)(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(line);
+    return { packages, root: root ? (root[1] ?? root[2] ?? root[3]) : null };
+  };
+  const sequential = commands.some((line, index) => {
+    const first = invocation(line);
+    const second = invocation(commands[index + 1] || "");
+    return first && second && first.root === second.root
+      && first.packages.length === 1 && second.packages.length === 1
+      && first.packages[0] !== second.packages[0];
+  });
+  return dual || sequential;
+}
+
+test("cargo documentation collision guard detects the known patterns", () => {
+  assert.equal(hasCollidingCargoInstall("cargo install --git url locus-cli locus-mcp --locked"), true);
+  assert.equal(hasCollidingCargoInstall("cargo install --git url locus-mcp \\\n  --locked locus-cli"), true);
+  assert.equal(hasCollidingCargoInstall("cargo install --path crates/locus-cli\ncargo install --path crates/locus-mcp"), true);
+  assert.equal(hasCollidingCargoInstall("cargo install --path crates/locus-cli && cargo install --path crates/locus-mcp"), true);
+  assert.equal(hasCollidingCargoInstall("cargo +1.89.0 install --path crates/locus-cli\ncargo +1.89.0 install --path crates/locus-mcp"), true);
+  assert.equal(hasCollidingCargoInstall("cargo install --path crates/locus-mcp && cargo install --path crates/locus-cli"), true);
+  assert.equal(hasCollidingCargoInstall("cargo install --git url locus-cli\ncargo install --git url locus-mcp"), true);
+  assert.equal(hasCollidingCargoInstall("cargo install --git url locus-mcp --root /tmp/a && cargo install --git url locus-cli --root /tmp/a"), true);
+  assert.equal(hasCollidingCargoInstall("cargo install --path crates/locus-cli --root /tmp/a\ncargo install --path crates/locus-mcp --root /tmp/b"), false);
+  assert.equal(hasCollidingCargoInstall("cargo install --git url locus-cli --root /tmp/a && cargo install --git url locus-mcp --root /tmp/b"), false);
+  assert.equal(hasCollidingCargoInstall("cargo install --git url locus-cli --locked"), false);
+  assert.equal(hasCollidingCargoInstall("cargo install --git url locus-mcp --locked"), false);
+});
+
+test("current source-install guidance avoids the colliding combined or sequential commands", () => {
+  // Scope the guidance to the checked-out source, not the separately published tag.
+  const manifest = readFileSync(join(root, "crates/locus-cli/Cargo.toml"), "utf8");
+  const binNames = manifest.split(/^\[\[bin\]\][ \t]*$/m).slice(1)
+    .map((section) => section.split(/^\[/m, 1)[0].match(/^name\s*=\s*"([^"]+)"/m)?.[1]);
+  assert.ok(binNames.includes("locus") && binNames.includes("locus-mcp"), "source package must install both documented binaries");
+  for (const path of ["AGENTS.md", "CONTRIBUTING.md", "docs/mcp.md", "docs/onboarding.md",
+    "docs/dogfood-multi-account.md", "integrations/homebrew/README.md", "apps/web/public/index.html",
+    "apps/web/public/AGENTS.md"]) {
+    assert.equal(hasCollidingCargoInstall(readFileSync(join(root, path), "utf8")), false, path);
+  }
+  const capabilities = JSON.parse(readFileSync(join(root, "apps/web/public/capabilities.json"), "utf8"));
+  assert.equal(capabilities.install.local, "cargo install --locked --path crates/locus-cli");
+  assert.equal(hasCollidingCargoInstall(capabilities.install.local), false);
+});
+
 for (const dir of ["npm", "npm-mcp"]) {
   test(`${dir} packed README uses version-neutral installs for current and future source`, () => {
     const temp = mkdtempSync(join(tmpdir(), "locus-pack-readme-"));
@@ -63,6 +123,7 @@ for (const dir of ["npm", "npm-mcp"]) {
         for (const line of commands) {
           assert.doesNotMatch(line, /(?:locus-cli|@ashlrai\/locus-mcp)@\S+/, `versioned install in ${dir}: ${line}`);
         }
+        assert.equal(hasCollidingCargoInstall(readme), false, `colliding Cargo instructions in packed ${dir} README`);
         if (candidate === "9.8.7") assert.ok(!readme.includes(candidate), "future fixture must not be advertised as published");
       }
     } finally {

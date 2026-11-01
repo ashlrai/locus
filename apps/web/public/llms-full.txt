@@ -201,6 +201,10 @@ listed verbatim so an agent can jump straight to the right document.
   - Troubleshooting
   - Operator checklist
 
+## docs/dogfood-temp-prefix-reference.md
+
+- [Dogfood temporary-directory prefixes](https://github.com/ashlrai/locus/blob/main/docs/dogfood-temp-prefix-reference.md)
+
 ## docs/dry-run-acceptance.md
 
 - [Dry-run acceptance checklist](https://github.com/ashlrai/locus/blob/main/docs/dry-run-acceptance.md)
@@ -227,6 +231,10 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/dry-run-verification.md
 
 - [Manual dry-run verification](https://github.com/ashlrai/locus/blob/main/docs/dry-run-verification.md)
+
+## docs/e2e-temp-resource-types.md
+
+- [E2E temporary directory types](https://github.com/ashlrai/locus/blob/main/docs/e2e-temp-resource-types.md)
 
 ## docs/e2e-test-map.md
 
@@ -335,6 +343,10 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/hub-smoke-resource-map.md
 
 - [Hub smoke resource map](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-resource-map.md)
+
+## docs/hub-smoke-temp-resources.md
+
+- [Hub smoke temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-temp-resources.md)
 
 ## docs/installer-acceptance.md
 
@@ -494,6 +506,13 @@ listed verbatim so an agent can jump straight to the right document.
   - Previewing changes with --dry-run
     - Limits and unsupported operations
 
+## docs/registry-manifest-ci-role.md
+
+- [CI's role in adapter registry manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-ci-role.md)
+  - What the release workflow does
+  - What a consumer can check
+  - Future signing
+
 ## docs/registry-manifest-consumer-checklist.md
 
 - [Release manifest consumer checklist](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer-checklist.md)
@@ -502,6 +521,13 @@ listed verbatim so an agent can jump straight to the right document.
   - 3. Run the check
   - 4. What a pass does not establish (current limits)
   - 5. Optional: an operator-signed manifest
+
+## docs/registry-manifest-current-state.md
+
+- [Adapter registry manifest: current state](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-current-state.md)
+  - What the manifest contains
+  - Checking today's asset
+  - Signing capability and future release signing
 
 ## docs/registry-manifest-verification-questions.md
 
@@ -595,6 +621,19 @@ listed verbatim so an agent can jump straight to the right document.
   - PowerShell
   - elvish
   - After upgrading
+
+## docs/shell-installer-archive-selection.md
+
+- [Shell installer archive selection](https://github.com/ashlrai/locus/blob/main/docs/shell-installer-archive-selection.md)
+  - Current selection requirements
+  - Questions and evidence still needed
+
+## docs/shell-installer-failure-cases.md
+
+- [Shell installer failure cases](https://github.com/ashlrai/locus/blob/main/docs/shell-installer-failure-cases.md)
+  - Unsupported platforms
+  - Download and verification failures
+  - Archive inspection and extraction failures
 
 ## docs/shell-installer-issue-checklist.md
 

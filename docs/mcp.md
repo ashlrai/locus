@@ -22,10 +22,11 @@ Credential-free upstream declarations are permitted and remain usable.
 
 ## Install
 
+From the current source checkout, `locus-cli` installs both `locus` and `locus-mcp`:
+
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --locked --path crates/locus-cli
 ```
 
 Or use release binaries from GitHub Releases (`locus` + `locus-mcp` for your target).

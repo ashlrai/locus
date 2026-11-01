@@ -22,7 +22,7 @@
     "npm": "npm install -g locus-cli@0.6.2 @ashlrai/locus-mcp@0.6.2",
     "npx": "npx locus-cli@0.6.2 --help",
     "cargo": "cargo install --git https://github.com/ashlrai/locus locus-cli --locked",
-    "local": "cargo install --path crates/locus-cli && cargo install --path crates/locus-mcp"
+    "local": "cargo install --locked --path crates/locus-cli"
   },
   "commands": [
     "locus init",
