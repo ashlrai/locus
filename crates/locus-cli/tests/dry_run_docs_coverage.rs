@@ -15,11 +15,13 @@ fn procedure_routes_profiles_outside_state_and_still_rejects_mutations() {
     let wrapper = root.path().join("instrumented-locus");
     // Emulate the runtime even in ordinary builds, so this regression does not
     // depend on CI instrumentation. A missing override writes into the cwd.
+    // Exec preserves the direct CLI supervisor: spawning a child would retire
+    // the init broker when this wrapper exits, racing subsequent snapshots.
     std::fs::write(
         &wrapper,
         format!(
             r#"#!/usr/bin/env python3
-import os, subprocess, sys
+import os, sys
 from pathlib import Path
 profile = os.environ.get('LLVM_PROFILE_FILE', 'default.profraw')
 profile = profile.replace('%p', str(os.getpid())).replace('%m', 'fixture')
@@ -28,7 +30,7 @@ p.parent.mkdir(parents=True, exist_ok=True)
 p.write_bytes(b'synthetic profile')
 if False and '--dry-run' in sys.argv:
     Path('unexpected-state').write_text('preview mutation')
-sys.exit(subprocess.call([{binary:?}] + sys.argv[1:]))
+os.execv({binary:?}, [{binary:?}] + sys.argv[1:])
 "#,
             binary = env!("CARGO_BIN_EXE_locus"),
         ),
@@ -73,7 +75,8 @@ sys.exit(subprocess.call([{binary:?}] + sys.argv[1:]))
         } else {
             assert!(
                 output.status.success(),
-                "{kind}: {}",
+                "{kind} ({}): {}",
+                output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
             assert!(String::from_utf8_lossy(&output.stdout).contains("PASS: help, planned actions"));

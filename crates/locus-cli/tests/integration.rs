@@ -36,6 +36,8 @@ mod dry_run_docs_coverage;
 mod dry_run_no_side_effects;
 #[path = "dry_run_review_matrix.rs"]
 mod dry_run_review_matrix;
+#[path = "dry_run_snapshot_scope.rs"]
+mod dry_run_snapshot_scope;
 #[path = "exec_exit_codes.rs"]
 mod exec_exit_codes;
 #[path = "exec_expect.rs"]
