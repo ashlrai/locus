@@ -1,9 +1,9 @@
 # Changelog
 
 <!-- fresh:begin release -->
-Latest release: [v0.6.1](https://github.com/ashlrai/locus/releases/tag/v0.6.1) (2026-10-31).
+Latest release: [v0.6.2](https://github.com/ashlrai/locus/releases/tag/v0.6.2) (2026-11-01).
 
-Native npm wrapper downloads now fail closed when release checksums cannot be verified.
+npm package READMEs use version-neutral installation commands to avoid stale pinned releases.
 <!-- fresh:end -->
 
 All notable changes to this project will be documented in this file.
@@ -156,6 +156,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notes now state the same `rust-version` the workspace declares, and
   `crates/locus-core/tests/rust_version.rs` keeps `cargo metadata`, member
   crate manifests and the documented install requirements in agreement with it.
+
+## [0.6.2] - 2026-11-01
+
+Highlights: npm package READMEs use version-neutral installation commands to avoid stale pinned releases.
+
+### Fixed
+
+- Package README install commands no longer embed an older release pin in immutable npm tarballs. Public documentation retains the separately verified published-version pin.
 
 ## [0.6.1] - 2026-10-31
 
