@@ -14,11 +14,28 @@ const locus = join(root, 'target', 'release', 'locus');
 test('temporary home is removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-success-test-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
-  const scratch = join(fixture, 'custom tmp');
+  const scratch = join(fixture, 'custom tmp $literal; [test]');
+  const inherited = join(fixture, 'inherited home');
+  const bin = join(fixture, 'bin');
+  const homeCreated = join(fixture, 'home-created');
   const homeUsed = join(fixture, 'home-used');
-  const wrapper = join(fixture, 'locus');
+  const wrapper = join(bin, 'locus');
   mkdirSync(scratch);
+  mkdirSync(inherited);
+  mkdirSync(bin);
   writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(inherited, 'keep'), 'inherited');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
+if [[ "$#" -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]]; then
+  home="$("$REAL_MKTEMP" "$@")" || exit $?
+  [[ -d "$home" ]] || exit 1
+  printf '%s' "$home" > "$HOME_CREATED"
+  printf '%s\\n' "$home"
+else
+  exec "$REAL_MKTEMP" "$@"
+fi
+`, { mode: 0o755 });
   writeFileSync(wrapper, `#!/bin/bash
 if [[ "\${1:-}" == workspace ]]; then
   [[ -d "$LOCUS_HOME" && "$LOCUS_HOME" == "$TMPDIR"/locus-e2e.* ]] || exit 1
@@ -30,7 +47,9 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
 
   const result = spawnSync('bash', [script], {
     cwd: root,
-    env: { ...process.env, TMPDIR: scratch, LOCUS_BIN: wrapper, HOME_USED: homeUsed },
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
+      LOCUS_HOME: inherited, LOCUS_BIN: wrapper, HOME_CREATED: homeCreated,
+      HOME_USED: homeUsed, REAL_MKTEMP: realMktemp },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -38,12 +57,16 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
   assert.equal(result.status, 0, 'e2e should exit successfully');
   assert.match(result.stdout, /e2e PASS  \(\d+ checks, \d+ skipped\)/);
+  assert.ok(existsSync(homeCreated), 'mktemp did not create the temporary home');
   assert.ok(existsSync(homeUsed), 'the workspace command did not observe the temporary home');
-  const home = readFileSync(homeUsed, 'utf8');
+  const home = readFileSync(homeCreated, 'utf8');
+  assert.equal(readFileSync(homeUsed, 'utf8'), home, 'CLI used a different home');
   assert.equal(dirname(home), scratch);
   assert.match(home, /\/locus-e2e\.[^/]+$/);
   assert.equal(existsSync(home), false, 'temporary home survived exit cleanup');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+  assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited',
+    'cleanup must preserve the inherited home');
 });
 
 test('home and workspace honor a spaced TMPDIR and are cleaned up on failure', { timeout: 1_800_000 }, (t) => {
