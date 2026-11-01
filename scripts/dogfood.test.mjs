@@ -24,10 +24,10 @@ test('temporary directory reference covers every dogfood script template', () =>
   assert.deepEqual(documented, templates);
 });
 
-test('isolated dogfood home works with spaces in TMPDIR and is removed on exit', (t) => {
+test('isolated dogfood home is created under a custom TMPDIR and removed on exit', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const scratch = join(root, 'temporary directory with spaces');
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
   const fixtureRoot = join(root, 'fixture');
   const bin = join(fixtureRoot, 'target', 'debug');
   mkdirSync(scratch);
@@ -40,6 +40,7 @@ test('isolated dogfood home works with spaces in TMPDIR and is removed on exit',
   writeFileSync(join(bin, 'locus'), `#!/bin/bash
 case "$1" in
   init)
+    [[ -d "$LOCUS_HOME" && "\${LOCUS_HOME%/*}" == "$TMPDIR" ]] || exit 89
     printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"
     [[ "$PWD" == "$LOCUS_HOME/project" ]] || exit 90
     printf 'usable' > "$LOCUS_HOME/sentinel"
@@ -74,6 +75,39 @@ esac
   assert.equal(existsSync(home), false);
   assert.deepEqual(readdirSync(scratch), ['keep']);
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
+test('a nonexistent TMPDIR fails before initializing the dogfood home', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixtureRoot = join(root, 'fixture');
+  const bin = join(fixtureRoot, 'target', 'debug');
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(fixtureRoot, 'scripts'));
+  writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus'), '#!/bin/sh\ntouch "$PROBE_FILE"\nexit 0\n', { mode: 0o755 });
+  const probe = join(root, 'probe');
+  const scratch = join(root, 'missing directory');
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: {
+      ...process.env,
+      TMPDIR: scratch,
+      PROBE_FILE: probe,
+      DOGFOOD_HOME: '',
+      DOGFOOD_USE_REAL_HOME: '0',
+      DOGFOOD_SELF_TEST: '0',
+    },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /mktemp/);
+  assert.equal(existsSync(probe), false, 'Locus must not run after allocation fails');
+  assert.equal(existsSync(scratch), false);
 });
 
 const harness = String.raw`
