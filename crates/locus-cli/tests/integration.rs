@@ -86,6 +86,8 @@ mod registry_manifest_ci_role;
 mod registry_manifest_consumer_checklist;
 #[path = "registry_manifest_current_state.rs"]
 mod registry_manifest_current_state;
+#[path = "registry_manifest_verification.rs"]
+mod registry_manifest_verification;
 #[path = "registry_signing_open_questions.rs"]
 mod registry_signing_open_questions;
 #[path = "registry_trust_faq.rs"]
