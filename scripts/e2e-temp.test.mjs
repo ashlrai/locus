@@ -95,6 +95,41 @@ esac
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
+test('exports a custom TMPDIR home to children and preserves an inherited home', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  const inherited = join(fixture.root, 'existing home');
+  const observed = join(fixture.root, 'observed-home');
+  mkdirSync(scratch);
+  mkdirSync(inherited);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(inherited, 'keep'), 'inherited');
+  // The first mkdir after home creation inherits the script's exported home.
+  // Record it while it exists, then let the real command proceed normally.
+  writeFileSync(join(fixture.bin, 'mkdir'), `#!/bin/sh
+case "$LOCUS_HOME" in
+  "$TMPDIR"/locus-e2e.*)
+    test -d "$LOCUS_HOME" || exit 1
+    printf '%s' "$LOCUS_HOME" > "$OBSERVED_HOME"
+    touch "$LOCUS_HOME/cleanup-sentinel"
+    ;;
+esac
+exec /bin/mkdir "$@"
+`, { mode: 0o755 });
+
+  const result = run(fixture, scratch, { LOCUS_HOME: inherited, OBSERVED_HOME: observed });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.signal, null);
+  assert.match(result.stderr, /fresh quickstart failed/);
+  const home = readFileSync(observed, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-e2e\.[^/]+$/);
+  assert.equal(existsSync(home), false, 'exported home and its sentinel must be removed');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited');
+});
+
 test('exit cleanup preserves an inherited graph home before the fallback runs', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'scratch');
