@@ -29,6 +29,7 @@ function runWithTempDir(t, failProject = false, scratchParts = ['custom-tmp']) {
   const scratch = join(root, ...scratchParts);
   const record = join(root, 'created');
   const cleanupRecord = join(root, 'cleanup-observed');
+  const initializedHomeRecord = join(root, 'initialized-home-observed');
   const projectAttempt = join(root, 'project-attempt');
   mkdirSync(bin);
   mkdirSync(scratch, { recursive: true });
@@ -55,6 +56,7 @@ if [[ -f "${'$'}MKTEMP_RECORD" && ! -f "${'$'}CLEANUP_RECORD" ]]; then
     project_dir="$(sed -n '2p' "${'$'}MKTEMP_RECORD")"
     if [[ -n "${'$'}project_dir" && ( "${'$'}arg" == "${'$'}home_dir" || "${'$'}arg" == "${'$'}project_dir" ) ]]; then
       [[ -f "${'$'}home_dir/cleanup-sentinel" && -f "${'$'}project_dir/cleanup-sentinel" ]] || exit 75
+      if [[ -f "${'$'}home_dir/bindings/personal.toml" ]]; then : > "${'$'}INITIALIZED_HOME_RECORD"; fi
       : > "${'$'}CLEANUP_RECORD"
       break
     fi
@@ -65,12 +67,13 @@ exec "${'$'}REAL_RM" "${'$'}@"
   const result = spawnSync('bash', [script], {
     env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
       REAL_MKTEMP: realMktemp, MKTEMP_RECORD: record, PROJECT_ATTEMPT: projectAttempt,
-      FAIL_PROJECT: failProject ? '1' : '0', REAL_RM: realRm, CLEANUP_RECORD: cleanupRecord },
+      FAIL_PROJECT: failProject ? '1' : '0', REAL_RM: realRm, CLEANUP_RECORD: cleanupRecord,
+      INITIALIZED_HOME_RECORD: initializedHomeRecord },
     encoding: 'utf8',
     maxBuffer: 4 * 1024 * 1024,
   });
   const paths = readFileSync(record, 'utf8').trim().split('\n');
-  return { result, scratch, paths, projectAttempt, cleanupRecord };
+  return { result, scratch, paths, projectAttempt, cleanupRecord, initializedHomeRecord };
 }
 
 test('integration smoke uses and cleans a nondefault TMPDIR', (t) => {
@@ -92,14 +95,17 @@ test('integration smoke uses and cleans a nondefault TMPDIR', (t) => {
 });
 
 test('normal exit removes both directories that were populated at cleanup', (t) => {
-  const { result, paths, cleanupRecord } = runWithTempDir(t);
+  const { result, paths, cleanupRecord, initializedHomeRecord } = runWithTempDir(t);
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, 'integration smoke must finish normally');
   assert.doesNotMatch(result.stdout, /^skip\s/m, 'all integration checks must run');
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
   assert.equal(paths.length, 2, 'both temporary directories must be allocated');
+  assert.ok(result.stdout.split('\n').includes(`== hub-integration-test LOCUS_HOME=${paths[0]} ==`),
+    'the allocated home must be the home used by the smoke script');
   assert.equal(existsSync(cleanupRecord), true, 'exit cleanup must receive both populated directories');
+  assert.equal(existsSync(initializedHomeRecord), true, 'the home must contain the initialized binding at cleanup');
   assert.equal(existsSync(paths[0]), false, 'temporary home must be removed');
   assert.equal(existsSync(paths[1]), false, 'temporary project must be removed');
 });
