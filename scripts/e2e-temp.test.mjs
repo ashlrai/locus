@@ -95,6 +95,38 @@ esac
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
+test('an unhandled setup command failure removes the populated LOCUS_HOME', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const inherited = join(fixture.root, 'inherited home');
+  const observed = join(fixture.root, 'home-before-failure');
+  mkdirSync(scratch);
+  mkdirSync(inherited);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(inherited, 'keep'), 'inherited');
+  // Fail the first setup command after the real EXIT trap is installed.
+  writeFileSync(join(fixture.bin, 'mkdir'), `#!/bin/sh
+if [ "$1" = -p ] && [ "$2" = "$LOCUS_HOME/custom temp" ]; then
+  test -d "$LOCUS_HOME" || exit 90
+  touch "$LOCUS_HOME/sentinel" || exit 91
+  printf '%s' "$LOCUS_HOME" > "$OBSERVED_HOME"
+  exit 73
+fi
+exec /bin/mkdir "$@"
+`, { mode: 0o755 });
+
+  const result = run(fixture, scratch, { LOCUS_HOME: inherited, OBSERVED_HOME: observed });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the failing command status must survive cleanup');
+  const home = readFileSync(observed, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-e2e\.[^/]+$/);
+  assert.equal(existsSync(home), false, 'the populated home must be removed on failure');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited');
+});
+
 test('exports a custom TMPDIR home to children and preserves an inherited home', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp $literal; [test]');
