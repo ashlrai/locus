@@ -1,7 +1,7 @@
 // Run: node --test scripts/e2e.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +11,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(root, 'scripts', 'e2e.sh');
 const locus = join(root, 'target', 'release', 'locus');
 
-test('temporary home is removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
+test('temporary home and security workspace are removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-success-test-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
   const scratch = join(fixture, 'custom tmp $literal; [test]');
@@ -19,6 +19,8 @@ test('temporary home is removed after a successful e2e exit', { timeout: 1_800_0
   const bin = join(fixture, 'bin');
   const homeCreated = join(fixture, 'home-created');
   const homeUsed = join(fixture, 'home-used');
+  const securityCreated = join(fixture, 'security-workspace-created');
+  const securityUsed = join(fixture, 'security-workspace-used');
   const wrapper = join(bin, 'locus');
   mkdirSync(scratch);
   mkdirSync(inherited);
@@ -32,6 +34,11 @@ if [[ "$#" -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]]; then
   [[ -d "$home" ]] || exit 1
   printf '%s' "$home" > "$HOME_CREATED"
   printf '%s\\n' "$home"
+elif [[ "$#" -eq 2 && "$1" == -d && "$2" == "$SECURITY_TEST_TMP/locus-security-ws.XXXXXX" ]]; then
+  workspace="$("$REAL_MKTEMP" "$@")" || exit $?
+  [[ -d "$workspace" ]] || exit 1
+  printf '%s' "$workspace" > "$SECURITY_CREATED"
+  printf '%s\\n' "$workspace"
 else
   exec "$REAL_MKTEMP" "$@"
 fi
@@ -42,6 +49,11 @@ if [[ "\${1:-}" == workspace ]]; then
   printf '%s' "$LOCUS_HOME" > "$HOME_USED"
   touch "$LOCUS_HOME/cleanup-sentinel" || exit 1
 fi
+if [[ "\${1:-}" == --json && "\${2:-}" == doctor && "$PWD" == "$SECURITY_TEST_TMP"/locus-security-ws.* ]]; then
+  [[ -L .locus.toml ]] || exit 1
+  printf '%s' "$PWD" > "$SECURITY_USED"
+  touch cleanup-sentinel || exit 1
+fi
 exec '${locus.replaceAll("'", "'\\''")}' "$@"
 `, { mode: 0o755 });
 
@@ -49,7 +61,8 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     cwd: root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
       LOCUS_HOME: inherited, LOCUS_BIN: wrapper, HOME_CREATED: homeCreated,
-      HOME_USED: homeUsed, REAL_MKTEMP: realMktemp },
+      HOME_USED: homeUsed, REAL_MKTEMP: realMktemp, SECURITY_TEST_TMP: scratch,
+      SECURITY_CREATED: securityCreated, SECURITY_USED: securityUsed },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -57,6 +70,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
   assert.equal(result.status, 0, 'e2e should exit successfully');
   assert.match(result.stdout, /e2e PASS  \(\d+ checks, \d+ skipped\)/);
+  assert.match(result.stdout, /ok  broken workspace link blocks force\/run and makes doctor UNSAFE/);
   assert.ok(existsSync(homeCreated), 'mktemp did not create the temporary home');
   assert.ok(existsSync(homeUsed), 'the workspace command did not observe the temporary home');
   const home = readFileSync(homeCreated, 'utf8');
@@ -64,6 +78,13 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(dirname(home), scratch);
   assert.match(home, /\/locus-e2e\.[^/]+$/);
   assert.equal(existsSync(home), false, 'temporary home survived exit cleanup');
+  const securityWorkspace = readFileSync(securityCreated, 'utf8');
+  assert.equal(dirname(securityWorkspace), scratch);
+  assert.match(securityWorkspace, /\/locus-security-ws\.[^/]+$/);
+  assert.equal(readFileSync(securityUsed, 'utf8'), securityWorkspace,
+    'security doctor used a different workspace');
+  assert.throws(() => lstatSync(securityWorkspace), { code: 'ENOENT' },
+    'security workspace and its contents must be removed on exit');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
   assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited',
     'cleanup must preserve the inherited home');
