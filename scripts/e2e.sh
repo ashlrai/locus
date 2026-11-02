@@ -10,8 +10,9 @@
 #
 # Temporary directories: TMPDIR, when nonempty, must name an existing writable
 # directory; otherwise mktemp uses /tmp. The script creates isolated home and
-# workspace directories there and removes them on shell exit after installing
-# its cleanup trap. An optional graph-import home is also removed immediately
+# workspace directories there, verifies the home is created directly beneath
+# the supplied TMPDIR, and removes them on shell exit after installing its
+# cleanup trap. An optional graph-import home is also removed immediately
 # after a successful import. Abrupt termination or removal errors can leave
 # temporary directories; inspect and remove any
 # leftover locus-e2e.*, locus-ws.*, locus-security-e2e.*, locus-security-ws.*,
@@ -89,6 +90,18 @@ e2e_cleanup() {
 }
 trap 'e2e_cleanup' EXIT
 ok "isolated home ready"
+
+# A supplied TMPDIR is the containment boundary the caller chose; the suite
+# home must be created directly beneath it. A mktemp regression that
+# relocates the home must stop the suite before fixtures escape the isolated
+# root — the exit trap still removes the misplaced home. When TMPDIR is unset
+# or empty the /tmp fallback applies instead.
+if [[ -n "${TMPDIR:-}" ]]; then
+  [[ -d "$LOCUS_HOME" && "${LOCUS_HOME%/*}" == "$TMPDIR" && \
+    "${LOCUS_HOME##*/}" == locus-e2e.* ]] \
+    || die "LOCUS_HOME was not created directly beneath TMPDIR"
+  ok "isolated home is created directly beneath TMPDIR"
+fi
 
 create_security_home() {
   SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
