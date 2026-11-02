@@ -159,3 +159,36 @@ rm() {
   assert.deepEqual(readdirSync(scratch), ['locus-hub-smoke-err.unrelated']);
   assert.equal(readFileSync(join(scratch, 'locus-hub-smoke-err.unrelated'), 'utf8'), 'keep');
 });
+
+test('normal completion leaves no error file behind with the real rm', (t) => {
+  const root = mkdtempSync('/tmp/locus-err-test-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'real rm');
+  const hook = join(root, 'hook.sh');
+  mkdirSync(scratch);
+  // Unlike the tests above, rm is not shimmed: the EXIT trap's own rm must
+  // delete the populated error file (and the other temporaries) by itself.
+  writeFileSync(hook, `jq() { printf '%s\\n' grant; }
+cargo() { return 0; }
+locus() {
+  if [[ "\${1:-} \${2:-}" == 'status --oneline' ]]; then
+    printf '%s\\n' personal:tenant
+    return 0
+  fi
+  case "\${1:-}" in
+    init|pin) printf 'synthetic %s diagnostic\\n' "$1" >&2 ;;
+  esac
+  printf '%s\\n' '{}'
+}
+`);
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, TMPDIR: scratch, BASH_ENV: hook },
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, 'smoke must complete successfully');
+  assert.ok(result.stdout.split('\n').includes('== hub-smoke OK =='), 'success banner missing');
+  assert.deepEqual(readdirSync(scratch), [], 'no temporary file or directory may remain');
+});
