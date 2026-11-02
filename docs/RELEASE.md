@@ -6,6 +6,27 @@ Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
 `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
 `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
 
+## Automatic releases
+
+Merge a version bump PR once its checks are green and
+[auto-tag.yml](../.github/workflows/auto-tag.yml) creates `v<version>` from
+`Cargo.toml`'s `[workspace.package] version` on that exact commit, after
+every required check on it is green. The tag push (or one automatic
+dispatch) then runs release.yml, which builds, verifies and publishes. No
+manual step, no designated release caller, no PUBLISH_HOLD.
+
+Manual equivalents, one command each:
+
+```bash
+gh workflow run auto-tag.yml -R ashlrai/locus                  # tag main's manifest version if absent and checks are green
+gh workflow run release.yml -R ashlrai/locus -f version=X.Y.Z  # publish an existing vX.Y.Z tag
+```
+
+Every release gate still applies on the manual path: release.yml requires a
+successful `workflow_dispatch` run of `ci.yml` on the tag's commit first.
+If none exists yet, run `gh workflow run ci.yml -R ashlrai/locus`, wait for
+green, then dispatch the release.
+
 ## 0.6.0 release candidate — prepared 2026-10-31
 
 This section records the 0.6.0 preparation; a version bump alone is not publication evidence.
