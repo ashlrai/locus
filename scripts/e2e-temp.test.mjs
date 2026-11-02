@@ -213,6 +213,43 @@ test('exit cleanup preserves an inherited graph home before the fallback runs', 
   assert.deepEqual(readdirSync(scratch), []);
 });
 
+test('exit cleanup removes the populated graph home after success', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  const observed = join(fixture.root, 'graph-home-observed');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createGraphHome = source.match(/^\s*GRAPH_HOME="\$\(mktemp -d .*\)"$/m)?.[0];
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(createGraphHome, 'missing graph home creation');
+
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+LOCUS_HOME="$1/main-home"
+mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+${createGraphHome}
+[[ -d "$GRAPH_HOME" && "\${GRAPH_HOME%/*}" == "$TMPDIR" && "\${GRAPH_HOME##*/}" == locus-graph-imp.* ]]
+touch "$GRAPH_HOME/import-sentinel"
+[[ -f "$GRAPH_HOME/import-sentinel" ]]
+printf '%s' "$GRAPH_HOME" > "$2"
+`, 'graph-cleanup', scratch, observed], {
+    env: { ...process.env, TMPDIR: scratch },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'graph cleanup probe must exit successfully');
+  const graphHome = readFileSync(observed, 'utf8');
+  assert.equal(dirname(graphHome), scratch);
+  assert.match(graphHome, /\/locus-graph-imp\.[^/]+$/);
+  assert.throws(() => lstatSync(graphHome), { code: 'ENOENT' }, 'graph home must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
+
 test('exit cleanup preserves an inherited workspace before the workspace is created', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'scratch');
