@@ -548,7 +548,38 @@ test('successful multi-tenant probe removes its temporary directory and stops it
   const trace = join(root, 'trace');
   const probe = join(root, 'probe');
   const server = join(root, 'server');
-  writeFileSync(server, '#!/usr/bin/env bash\nprintf "%s\\n" "$$" > "$PID_FILE"\nexec sleep 120\n', { mode: 0o755 });
+  writeFileSync(server, String.raw`#!/usr/bin/env node
+const http = require('node:http');
+const fs = require('node:fs');
+if (process.argv[2] !== '--http' || process.argv[4] !== '--multi-tenant') process.exit(2);
+const [host, port] = process.argv[3].split(':');
+const server = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200).end();
+    return;
+  }
+  let body = '';
+  req.on('data', (chunk) => { body += chunk; });
+  req.on('end', () => {
+    let init;
+    try { init = JSON.parse(body); } catch { res.writeHead(400).end(); return; }
+    if (req.method !== 'POST' || req.url !== '/mcp' ||
+        req.headers.authorization !== 'Bearer ' + process.env.LOCUS_MCP_HTTP_TOKEN ||
+        req.headers['content-type'] !== 'application/json' ||
+        req.headers.accept !== 'application/json' || init.method !== 'initialize') {
+      res.writeHead(400).end();
+      return;
+    }
+    const token = req.headers['x-locus-tenant-token'];
+    const revoked = fs.existsSync(process.env.STATE_DIR + '/revoked');
+    if (token && token !== 'lmt_fixture') { res.writeHead(400).end(); return; }
+    const stage = !token ? 'tenantless' : revoked ? 'revoked' : 'granted';
+    fs.appendFileSync(process.env.TRACE_FILE, stage + '\n');
+    res.writeHead(stage === 'granted' ? 200 : 401).end('invalid_grant');
+  });
+});
+server.listen(Number(port), host, () => fs.writeFileSync(process.env.PID_FILE, String(process.pid)));
+`, { mode: 0o755 });
   const successHarness = String.raw`
 source "$1"
 locus() {
@@ -572,26 +603,6 @@ locus() {
     revoke) [[ "$3" == grant_fixture ]] || return 1; touch "$STATE_DIR/revoked" ;;
     *) return 1 ;;
   esac
-}
-curl() {
-  if [[ "$*" == */health ]]; then
-    for _ in {1..100}; do
-      [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" && return 0
-      /bin/sleep 0.01
-    done
-    return 1
-  fi
-  if [[ "$*" != *X-Locus-Tenant-Token:* ]]; then
-    printf '%s\n' tenantless >> "$TRACE_FILE"
-    printf 'invalid_grant' > "$LOCUS_HOME/../notenant.body"
-    printf '401'
-  elif [[ -f "$STATE_DIR/revoked" ]]; then
-    printf '%s\n' revoked >> "$TRACE_FILE"
-    printf '401'
-  else
-    printf '%s\n' granted >> "$TRACE_FILE"
-    printf '200'
-  fi
 }
 caller_pwd="$PWD"
 caller_home="$LOCUS_HOME"
