@@ -253,18 +253,24 @@ printf '%s\\n' "$path"
   for (const name of sentinels) assert.equal(readFileSync(join(scratch, name), 'utf8'), 'sentinel');
 });
 
-test('successful smoke removes its temporary error file', (t) => {
+test('successful smoke cleans its temporary error file after a pin retry', (t) => {
   // Keep the broker socket path short and isolate the error file from other runs.
   const root = mkdtempSync('/tmp/lhs-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const scratch = join(root, 'temporary files');
   const record = join(root, 'error-file');
+  const attempts = join(root, 'pin-attempts');
   const hook = join(root, 'observe-pin.sh');
   mkdirSync(scratch);
   writeFileSync(join(scratch, 'locus-hub-smoke-err.unrelated'), 'keep');
   writeFileSync(hook, `locus() {
   if [[ "$*" == 'pin personal' ]]; then
-    [[ -f "$SMOKE_ERR" ]] || return 90
+    [[ -f "$SMOKE_ERR" && ! -s "$SMOKE_ERR" ]] || return 90
+    printf 'attempt\\n' >> "$SMOKE_PIN_ATTEMPTS"
+    if [[ $(wc -l < "$SMOKE_PIN_ATTEMPTS") -eq 1 ]]; then
+      printf 'synthetic first pin failure\\n' >&2
+      return 1
+    fi
     printf 'synthetic pin diagnostic\\n' >&2
     command locus "$@" || return
     grep -q '^synthetic pin diagnostic$' "$SMOKE_ERR" || return 91
@@ -275,7 +281,8 @@ test('successful smoke removes its temporary error file', (t) => {
 }
 `);
   const result = spawnSync('bash', [script], {
-    env: { ...process.env, TMPDIR: scratch, BASH_ENV: hook, SMOKE_ERR_RECORD: record },
+    env: { ...process.env, TMPDIR: scratch, BASH_ENV: hook, SMOKE_ERR_RECORD: record,
+      SMOKE_PIN_ATTEMPTS: attempts },
     encoding: 'utf8',
     maxBuffer: 4 * 1024 * 1024,
   });
@@ -285,6 +292,9 @@ test('successful smoke removes its temporary error file', (t) => {
   assert.equal(result.status, 0, 'smoke must complete successfully');
   assert.match(result.stdout, /^== hub-smoke OK ==$/m);
   assert.doesNotMatch(result.stdout, /^skip\s/m, 'all smoke checks must run');
+  assert.match(result.stderr, /warn: hub-smoke init\/pin attempt 1 failed; retrying/);
+  assert.match(result.stderr, /synthetic first pin failure/);
+  assert.equal(readFileSync(attempts, 'utf8'), 'attempt\nattempt\n');
   const errorFile = readFileSync(record, 'utf8').trim();
   assert.equal(dirname(errorFile), scratch);
   assert.match(errorFile.slice(scratch.length + 1), /^locus-hub-smoke-err\./);
