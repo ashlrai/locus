@@ -3,21 +3,28 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Locus · AI-native identity plane</title>
-  <meta name="description" content="AI-native identity plane for coding agents. Pin a client: CLI, MCP, and the local dashboard are hard-scoped to that binding. Wrong account, impossible." />
+  <title>Locus: wrong account, impossible</title>
+  <meta name="description" content="Identity plane for coding agents. One install command, JSON from the CLI, and an MCP server for Claude, Cursor, and Codex. Pin a client and the wrong account is unavailable." />
+  <meta name="robots" content="index, follow" />
   <meta name="theme-color" content="#0a0a0a" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="author" content="Ashlr" />
   <link rel="canonical" href="https://locus.dev/" />
-  <meta property="og:title" content="Locus · AI-native identity plane" />
-  <meta property="og:description" content="Pin a binding and every CLI command, MCP tool and agent session is sealed to that tenant until a human re-pins. Wrong account, impossible." />
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <meta property="og:title" content="Locus: wrong account, impossible" />
+  <meta property="og:description" content="Pin a client. CLI commands, MCP tools, and the local dashboard stay on that client until a person pins again." />
   <meta property="og:type" content="website" />
+  <meta property="og:locale" content="en_US" />
   <meta property="og:url" content="https://locus.dev/" />
   <meta property="og:image" content="https://locus.dev/og.png" />
   <meta property="og:image:width" content="1200" />
   <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="Locus. Wrong account, impossible." />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Locus · AI-native identity plane" />
-  <meta name="twitter:description" content="Pin a binding and every CLI command, MCP tool and agent session is sealed to that tenant until a human re-pins. Wrong account, impossible." />
+  <meta name="twitter:title" content="Locus: wrong account, impossible" />
+  <meta name="twitter:description" content="Pin a client. CLI commands, MCP tools, and the local dashboard stay on that client until a person pins again." />
   <meta name="twitter:image" content="https://locus.dev/og.png" />
+  <meta name="twitter:image:alt" content="Locus. Wrong account, impossible." />
   <!-- disc:json-ld -->
 <script type="application/ld+json">
 {
@@ -60,29 +67,27 @@
       --dim: #555555;
       --line: #222222;
       --line-strong: #333333;
-      --accent: #f0f0f0;
       --ok: #a8ffb0;
       --warn: #ffd28a;
+      --bad: #ffb4b4;
       --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
       --sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-      --max: 720px;
+      --max: 880px;
     }
-
     * { box-sizing: border-box; margin: 0; padding: 0; }
-
     html { scroll-behavior: smooth; }
-
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+    }
     body {
       background: var(--bg);
       color: var(--fg);
       font-family: var(--sans);
-      font-size: 15px;
+      font-size: 16px;
       line-height: 1.55;
       min-height: 100vh;
       -webkit-font-smoothing: antialiased;
     }
-
-    /* subtle grid */
     body::before {
       content: "";
       position: fixed;
@@ -95,10 +100,21 @@
       mask-image: radial-gradient(ellipse 70% 50% at 50% 0%, #000 20%, transparent 75%);
       z-index: 0;
     }
-
     a { color: inherit; text-decoration: none; }
     a:hover { text-decoration: underline; text-underline-offset: 3px; }
-
+    :focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+    .skip {
+      position: absolute;
+      left: 0.75rem;
+      top: -3rem;
+      background: var(--fg);
+      color: var(--bg);
+      padding: 0.4rem 0.7rem;
+      z-index: 5;
+      font-family: var(--mono);
+      font-size: 0.75rem;
+    }
+    .skip:focus { top: 0.75rem; }
     .wrap {
       position: relative;
       z-index: 1;
@@ -106,17 +122,15 @@
       margin: 0 auto;
       padding: 0 1.25rem 4rem;
     }
-
-    /* ── nav ───────────────────────────────────────────── */
     nav {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 1rem;
       padding: 1.25rem 0;
       border-bottom: 1px solid var(--line);
-      margin-bottom: 3.5rem;
+      margin-bottom: 2.5rem;
     }
-
     .brand {
       font-family: var(--mono);
       font-size: 0.85rem;
@@ -126,89 +140,70 @@
       align-items: center;
       gap: 0.55rem;
     }
-
     .brand .dot {
       width: 7px;
       height: 7px;
       border-radius: 50%;
-      background: var(--fg);
-      box-shadow: 0 0 0 3px rgba(255,255,255,0.08);
+      background: var(--ok);
+      box-shadow: 0 0 0 3px rgba(168,255,176,0.12);
     }
-
     .nav-links {
       display: flex;
-      gap: 1.25rem;
+      flex-wrap: wrap;
+      gap: 1rem;
       font-family: var(--mono);
       font-size: 0.72rem;
       color: var(--muted);
-      letter-spacing: 0.02em;
     }
-
     .nav-links a:hover { color: var(--fg); text-decoration: none; }
-
-    /* ── hero ──────────────────────────────────────────── */
     .eyebrow {
       font-family: var(--mono);
       font-size: 0.7rem;
       color: var(--muted);
       letter-spacing: 0.12em;
       text-transform: uppercase;
-      margin-bottom: 1.25rem;
+      margin-bottom: 1rem;
     }
-
     h1 {
-      font-size: clamp(2.1rem, 6vw, 3.15rem);
+      font-size: clamp(2.2rem, 6vw, 3.4rem);
       font-weight: 600;
       letter-spacing: -0.035em;
-      line-height: 1.08;
-      margin-bottom: 1.25rem;
+      line-height: 1.05;
+      margin-bottom: 1rem;
     }
-
-    h1 .dim { color: var(--dim); font-weight: 400; }
-
+    h1 .dim { color: var(--dim); font-weight: 500; }
     .lede {
       color: var(--muted);
-      font-size: 1.02rem;
-      max-width: 36rem;
-      margin-bottom: 2rem;
+      font-size: 1.05rem;
+      max-width: 40rem;
+      margin-bottom: 1.5rem;
     }
-
-    .lede strong { color: var(--fg); font-weight: 500; }
-
-    .cta-row {
+    .lede strong { color: var(--fg); font-weight: 550; }
+    .cta-row, .link-row {
       display: flex;
       flex-wrap: wrap;
-      gap: 0.75rem;
-      margin-bottom: 3.5rem;
+      gap: 0.65rem;
+      margin-bottom: 2rem;
     }
-
-    .btn {
+    .btn, button.copy, .tabs button, .pin-switch button {
       font-family: var(--mono);
       font-size: 0.78rem;
-      padding: 0.65rem 1rem;
+      padding: 0.6rem 0.9rem;
       border: 1px solid var(--line-strong);
       border-radius: 4px;
       background: var(--bg-elev);
       color: var(--fg);
       cursor: pointer;
-      transition: border-color 0.15s, background 0.15s;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.45rem;
     }
-
-    .btn:hover { border-color: #555; text-decoration: none; background: #161616; }
-
-    .btn.primary {
+    .btn.primary, button.copy {
       background: var(--fg);
       color: var(--bg);
       border-color: var(--fg);
-      font-weight: 600;
+      font-weight: 650;
     }
-
-    .btn.primary:hover { background: #fff; border-color: #fff; }
-
-    /* ── sibling ───────────────────────────────────────── */
+    .btn:hover, button.copy:hover, .tabs button:hover, .pin-switch button:hover {
+      text-decoration: none;
+    }
     .sibling {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -217,67 +212,59 @@
       border: 1px solid var(--line);
       border-radius: 6px;
       overflow: hidden;
-      margin-bottom: 3.5rem;
+      margin-bottom: 2.75rem;
     }
-
-    .sibling article {
-      background: var(--bg-panel);
-      padding: 1.15rem 1.25rem;
-    }
-
+    .sibling article { background: var(--bg-panel); padding: 1.1rem 1.2rem; }
     .sibling .label {
       font-family: var(--mono);
       font-size: 0.68rem;
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--dim);
-      margin-bottom: 0.5rem;
-    }
-
-    .sibling h2 {
-      font-size: 0.95rem;
-      font-weight: 600;
       margin-bottom: 0.4rem;
-      letter-spacing: -0.02em;
     }
-
-    .sibling p {
-      font-size: 0.85rem;
-      color: var(--muted);
-      line-height: 1.5;
-    }
-
-    .sibling a { color: var(--fg); border-bottom: 1px solid var(--line-strong); }
-    .sibling a:hover { border-bottom-color: var(--fg); text-decoration: none; }
-
-    @media (max-width: 540px) {
-      .sibling { grid-template-columns: 1fr; }
-    }
-
-    /* ── sections ──────────────────────────────────────── */
-    section { margin-bottom: 3.25rem; }
-
-    .sec-label {
+    .sibling h2 { font-size: 1rem; font-weight: 600; margin-bottom: 0.35rem; }
+    .sibling p { font-size: 0.88rem; color: var(--muted); }
+    @media (max-width: 640px) { .sibling { grid-template-columns: 1fr; } }
+    section { margin-bottom: 2.75rem; }
+    h2.sec, .flow h3, .faq h3 {
       font-family: var(--mono);
-      font-weight: 400;
-      font-size: 0.68rem;
-      letter-spacing: 0.12em;
+      font-weight: 500;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--dim);
-      margin-bottom: 0.85rem;
+    }
+    h2.sec {
+      font-size: 0.72rem;
+      margin-bottom: 0.9rem;
       display: flex;
       align-items: center;
       gap: 0.75rem;
     }
-
-    .sec-label::after {
-      content: "";
-      flex: 1;
-      height: 1px;
-      background: var(--line);
+    h2.sec::after, h2.plain::after { content: none; }
+    h2.plain {
+      font-size: 1.35rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      text-transform: none;
+      color: var(--fg);
+      font-family: var(--sans);
+      margin-bottom: 0.6rem;
     }
-
-    /* ── terminal / install ────────────────────────────── */
+    h3 {
+      font-size: 0.95rem;
+      font-weight: 600;
+      margin: 1.1rem 0 0.45rem;
+    }
+    p.note { color: var(--muted); font-size: 0.9rem; margin: 0.55rem 0 0.8rem; }
+    code {
+      font-family: var(--mono);
+      font-size: 0.84em;
+      background: var(--bg-elev);
+      border: 1px solid var(--line);
+      padding: 0.05rem 0.35rem;
+      border-radius: 3px;
+    }
     .term {
       background: var(--bg-elev);
       border: 1px solid var(--line);
@@ -285,403 +272,426 @@
       overflow: hidden;
       font-family: var(--mono);
       font-size: 0.78rem;
-      line-height: 1.65;
+      line-height: 1.6;
     }
-
-    .term-bar {
-      display: flex;
-      align-items: center;
-      gap: 0.4rem;
-      padding: 0.55rem 0.85rem;
-      border-bottom: 1px solid var(--line);
-      background: #0c0c0c;
-    }
-
-    .term-bar .c {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #2a2a2a;
-    }
-
-    .term-bar .title {
-      margin-left: 0.5rem;
-      color: var(--dim);
-      font-size: 0.68rem;
-    }
-
-    .term pre {
-      padding: 1rem 1.1rem 1.15rem;
-      overflow-x: auto;
-      color: var(--fg);
-      white-space: pre;
-    }
-
-    .term .cmt { color: var(--dim); }
-    .term .cmd { color: var(--fg); }
-    .term .ok  { color: var(--ok); }
-    .term .warn { color: var(--warn); }
-    .term .out { color: var(--muted); }
-
-    .install-tabs {
+    .tabs {
       display: flex;
       gap: 0;
       border-bottom: 1px solid var(--line);
       background: #0c0c0c;
-      font-family: var(--mono);
-      font-size: 0.7rem;
     }
-
-    .install-tabs button {
+    .tabs button {
       background: transparent;
       border: none;
       border-bottom: 1px solid transparent;
+      border-radius: 0;
       color: var(--dim);
-      padding: 0.55rem 0.9rem;
-      cursor: pointer;
-      font-family: inherit;
-      font-size: inherit;
       margin-bottom: -1px;
     }
-
-    .install-tabs button.active {
+    .tabs button[aria-selected="true"] {
       color: var(--fg);
       border-bottom-color: var(--fg);
     }
-
-    .install-tabs button:hover { color: var(--muted); }
-
     .term-block { display: none; }
     .term-block.active { display: block; }
-
-    .copy-hint {
-      font-family: var(--mono);
-      font-size: 0.68rem;
-      color: var(--dim);
-      margin-top: 0.55rem;
+    .term-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.35rem 0.45rem 0.35rem 0.9rem;
     }
-
-    /* ── architecture diagram ──────────────────────────── */
-    .arch {
-      font-family: var(--mono);
-      font-size: 0.72rem;
-      line-height: 1.45;
-      background: var(--bg-elev);
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      padding: 1.25rem 1.1rem;
-      color: var(--muted);
+    pre {
+      padding: 0.2rem 1rem 1rem;
       overflow-x: auto;
+      white-space: pre;
     }
-
-    .arch .hl { color: var(--fg); }
-    .arch .ok { color: var(--ok); }
-    .arch .dim { color: var(--dim); }
-
-    /* ── flow cards ────────────────────────────────────── */
-    .flow {
+    .cmt { color: var(--dim); }
+    .ok { color: var(--ok); }
+    .bad { color: var(--bad); }
+    .out { color: var(--muted); }
+    .steps {
       display: grid;
-      gap: 0.65rem;
-    }
-
-    .flow-step {
-      display: grid;
-      grid-template-columns: 2rem 1fr;
+      grid-template-columns: repeat(3, 1fr);
       gap: 0.75rem;
-      align-items: start;
-      padding: 0.85rem 0;
-      border-bottom: 1px solid var(--line);
     }
-
-    .flow-step:last-child { border-bottom: none; }
-
-    .flow-n {
+    @media (max-width: 720px) { .steps { grid-template-columns: 1fr; } }
+    .steps article {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 1rem;
+      background: var(--bg-panel);
+      min-height: 100%;
+    }
+    .steps .n {
       font-family: var(--mono);
-      font-size: 0.72rem;
       color: var(--dim);
-      padding-top: 0.15rem;
+      font-size: 0.72rem;
+      letter-spacing: 0.08em;
     }
-
-    .flow-step h3 {
-      font-size: 0.9rem;
-      font-weight: 600;
-      margin-bottom: 0.2rem;
-      letter-spacing: -0.01em;
+    .steps h3 { margin-top: 0.45rem; text-transform: none; letter-spacing: 0; color: var(--fg); font-family: var(--sans); }
+    .steps p { color: var(--muted); font-size: 0.88rem; }
+    .pin-switch { display: flex; flex-wrap: wrap; gap: 0.45rem; margin-bottom: 0.75rem; }
+    .pin-switch button[aria-pressed="true"] {
+      background: var(--fg);
+      color: var(--bg);
+      border-color: var(--fg);
     }
-
-    .flow-step p {
-      font-size: 0.85rem;
-      color: var(--muted);
+    .demo-grid {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 0.75rem;
     }
-
-    .flow-step code {
+    @media (max-width: 720px) { .demo-grid { grid-template-columns: 1fr; } }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--bg-elev);
+      padding: 0.9rem 1rem;
       font-family: var(--mono);
       font-size: 0.78rem;
-      background: var(--bg-elev);
-      border: 1px solid var(--line);
-      padding: 0.05rem 0.35rem;
-      border-radius: 3px;
-      color: var(--fg);
     }
-
-    /* ── footer ────────────────────────────────────────── */
+    .panel h3 { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); font-weight: 500; }
+    .tool { display: block; padding: 0.15rem 0; }
+    .tool.on { color: var(--ok); }
+    .tool.off { color: var(--dim); }
+    .faq details {
+      border-top: 1px solid var(--line);
+      padding: 0.75rem 0;
+    }
+    .faq details:last-child { border-bottom: 1px solid var(--line); }
+    .faq summary { cursor: pointer; font-weight: 600; }
+    .faq summary h3 { display: inline; margin: 0; font-size: 1rem; }
+    .faq details p { color: var(--muted); margin-top: 0.45rem; }
+    .star {
+      border: 1px solid var(--line-strong);
+      border-radius: 8px;
+      padding: 1.25rem;
+      background: linear-gradient(180deg, #141414, #0e0e0e);
+    }
     footer {
-      margin-top: 3rem;
-      padding-top: 1.5rem;
+      margin-top: 1rem;
+      padding-top: 1.25rem;
       border-top: 1px solid var(--line);
       display: flex;
       flex-wrap: wrap;
       justify-content: space-between;
-      gap: 1rem;
+      gap: 0.75rem;
       font-family: var(--mono);
       font-size: 0.7rem;
       color: var(--dim);
     }
-
     footer a { color: var(--muted); }
-    footer a:hover { color: var(--fg); text-decoration: none; }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 0.2rem 0.55rem;
-      color: var(--muted);
-    }
-
-    .badge i {
-      width: 5px;
-      height: 5px;
-      border-radius: 50%;
-      background: var(--ok);
-      display: inline-block;
-    }
   </style>
 </head>
 <body>
+  <a class="skip" href="#main">Skip to content</a>
   <div class="wrap">
     <nav>
       <div class="brand"><span class="dot"></span> locus</div>
       <div class="nav-links">
-        <a href="#install">install</a>
-        <a href="#surfaces">surfaces</a>
-        <a href="#arch">arch</a>
+        <a href="#agents">agents</a>
+        <a href="#demo">pin</a>
+        <a href="#how">how</a>
+        <a href="#faq">faq</a>
         <a href="https://github.com/ashlrai/locus">github</a>
+        <a href="/llms.txt">llms.txt</a>
       </div>
     </nav>
 
     <header>
-      <p class="eyebrow">AI-native identity plane · <!-- disc:version -->v0.6.2<!-- /disc:version --></p>
+      <p class="eyebrow">Identity plane for coding agents · <!-- disc:version -->v0.6.2<!-- /disc:version --></p>
       <h1>Wrong account,<br /><span class="dim">impossible.</span></h1>
       <p class="lede">
-        Pin a client: every CLI command, MCP tool, and the <strong>local dashboard</strong>
-        is hard-scoped to that binding until you re-pin. Agents inherit a sealed session,
-        not ambient <code style="font-family:var(--mono);font-size:0.88em">gh auth</code>.
+        Pin one client. After that, every CLI command, MCP tool, and the local dashboard acts as <strong>that client</strong> until a person pins again.
+        Agents are first-class users: install, read JSON, connect the MCP server.
       </p>
       <div class="cta-row">
-        <a class="btn primary" href="https://github.com/ashlrai/locus">View on GitHub →</a>
-        <a class="btn" href="#install">Install</a>
-        <a class="btn" href="https://phm.dev">Sibling: Phantom</a>
+        <a class="btn primary" href="#agents">Start in one command</a>
+        <a class="btn" href="https://github.com/ashlrai/locus">View on GitHub</a>
+        <a class="btn" href="/llms.txt">llms.txt</a>
+        <a class="btn" href="/llms-full.txt">llms-full.txt</a>
       </div>
     </header>
 
     <div class="sibling">
       <article>
-        <div class="label">Phantom · phm.dev</div>
+        <div class="label">Phantom</div>
         <h2>Can this secret enter the model?</h2>
-        <p>
-          <a href="https://phm.dev">Phantom</a> protects secrets <em>in context</em>:
-          vault + proxy so AI never sees real keys.
-        </p>
+        <p><a href="https://phm.dev">Phantom</a> keeps real keys out of agent context.</p>
       </article>
       <article>
-        <div class="label">Locus · this</div>
+        <div class="label">Locus</div>
         <h2>As whom, against which tenant?</h2>
-        <p>
-          Locus seals the active identity. Wrong tenant tools do not exist.
-          Scope freeze denies override attempts.
-        </p>
+        <p>Locus seals the active identity. The other client's tools are not in the catalog.</p>
       </article>
     </div>
 
-    <section id="install">
-      <h2 class="sec-label">Install</h2>
-      <div class="term">
-        <div class="install-tabs" role="tablist">
-          <button type="button" class="active" data-tab="cargo" role="tab">cargo</button>
-          <button type="button" data-tab="npx" role="tab">npx</button>
-          <button type="button" data-tab="brew" role="tab">brew</button>
+    <main id="main">
+      <section id="agents">
+        <h2 class="sec">For agents</h2>
+        <h3>Install</h3>
+        <p class="note">One command installs <code>locus</code> and <code>locus-mcp</code>. At the v0.6.2 release the Homebrew tap installs v0.6.1, so use npm for v0.6.2. The v0.6.2 npm wrappers fail closed if a release checksum sidecar is missing, unparseable, unreachable, or mismatched, and a checksum failure does not fall back to Cargo. Checksums detect corruption, not publisher authenticity. Source installs need Rust 1.89 or newer.</p>
+        <div class="term">
+          <div class="tabs" role="tablist" aria-label="Install method">
+            <button type="button" role="tab" id="tab-npm" aria-selected="true" aria-controls="panel-npm" data-group="install" data-panel="panel-npm">npm</button>
+            <button type="button" role="tab" id="tab-brew" aria-selected="false" aria-controls="panel-brew" data-group="install" data-panel="panel-brew">brew</button>
+            <button type="button" role="tab" id="tab-cargo" aria-selected="false" aria-controls="panel-cargo" data-group="install" data-panel="panel-cargo">cargo</button>
+          </div>
+          <div class="term-block active" id="panel-npm" role="tabpanel" aria-labelledby="tab-npm">
+            <div class="term-head"><span class="cmt">both binaries</span><button type="button" class="copy" data-target="src-npm">Copy</button></div>
+            <pre id="src-npm">npm install -g locus-cli @ashlrai/locus-mcp</pre>
+          </div>
+          <div class="term-block" id="panel-brew" role="tabpanel" aria-labelledby="tab-brew">
+            <div class="term-head"><span class="cmt">tap is v0.6.1 at the v0.6.2 release</span><button type="button" class="copy" data-target="src-brew">Copy</button></div>
+            <pre id="src-brew">brew install ashlrai/tap/locus</pre>
+          </div>
+          <div class="term-block" id="panel-cargo" role="tabpanel" aria-labelledby="tab-cargo">
+            <div class="term-head"><span class="cmt">Rust 1.89 or newer</span><button type="button" class="copy" data-target="src-cargo">Copy</button></div>
+            <pre id="src-cargo">cargo install --git https://github.com/ashlrai/locus locus-cli --locked</pre>
+          </div>
         </div>
-        <div class="term-block active" id="tab-cargo">
-          <pre><span class="cmt"># current Git main builds both binaries into ~/.cargo/bin</span>
-<span class="cmd">export PATH="$HOME/.cargo/bin:$PATH"</span>
-<span class="cmd">cargo install --git https://github.com/ashlrai/locus \
-  locus-cli --locked</span>
 
-<span class="cmt"># or from a local checkout</span>
-<span class="cmd">cargo install --locked --path crates/locus-cli</span></pre>
+        <h3>Read JSON</h3>
+        <p class="note">Run this in one shell. <code>LOCUS_HOME</code> keeps the trial off your real home directory. The first JSON key is <code>schema</code>. Nothing here prints a secret. <code>--expect acme</code> exits 1 with <code>pin_mismatch</code> and does not start the child.</p>
+        <div class="term">
+          <div class="term-head"><span class="cmt">throwaway home</span><button type="button" class="copy" data-target="src-json">Copy</button></div>
+          <pre id="src-json">export LOCUS_HOME="$(mktemp -d)"
+locus quickstart
+eval "$(locus hook bash)"
+locus enter personal
+locus whoami --json
+locus status --json
+locus doctor --json</pre>
         </div>
-        <div class="term-block" id="tab-npx">
-          <pre><span class="cmt"># downloads a release binary (falls back to cargo)</span>
-<span class="cmd">npm install -g locus-cli @ashlrai/locus-mcp</span>
-<span class="cmd">npx locus-cli --help</span>
-<span class="cmd">npx @ashlrai/locus-mcp</span>  <span class="cmt"># MCP server for Claude Code / Cursor</span></pre>
-        </div>
-        <div class="term-block" id="tab-brew">
-          <pre><span class="cmt"># tap is v0.6.1 at the v0.6.2 release; use npm for v0.6.2</span>
-<span class="cmd">brew install ashlrai/tap/locus</span></pre>
-        </div>
-      </div>
-      <p class="copy-hint">Published v0.6.2 npm wrappers fail closed on missing, unparseable, unreachable or mismatched checksum sidecars without Cargo fallback. Earlier v0.6.0 wrappers could install unverified or fall back to Cargo on mismatch. Checksums detect corruption, not publisher authenticity. <a href="https://github.com/ashlrai/locus/blob/main/npm/README.md">Details</a></p>
-      <p class="copy-hint">MIT · open source · github.com/ashlrai/locus</p>
-    </section>
 
-    <section>
-      <h2 class="sec-label">Quick start</h2>
-      <div class="term">
-        <div class="term-bar">
-          <span class="c"></span><span class="c"></span><span class="c"></span>
-          <span class="title">zsh · locus</span>
+        <h3>MCP for Claude, Cursor, and Codex</h3>
+        <p class="note">Provider tools need <code>locus mcp --supervised</code>, a live pin, and the control capability in the shell that launches the client. Restart the client after a re-pin. Agents cannot pin. <code>locus setup --client claude --print</code> prints the control-tools entry and writes nothing.</p>
+        <div class="term">
+          <div class="tabs" role="tablist" aria-label="MCP client">
+            <button type="button" role="tab" id="tab-claude" aria-selected="true" aria-controls="panel-claude" data-group="mcp" data-panel="panel-claude">Claude</button>
+            <button type="button" role="tab" id="tab-cursor" aria-selected="false" aria-controls="panel-cursor" data-group="mcp" data-panel="panel-cursor">Cursor</button>
+            <button type="button" role="tab" id="tab-codex" aria-selected="false" aria-controls="panel-codex" data-group="mcp" data-panel="panel-codex">Codex</button>
+          </div>
+          <div class="term-block active" id="panel-claude" role="tabpanel" aria-labelledby="tab-claude">
+            <div class="term-head"><span class="cmt">.mcp.json</span><button type="button" class="copy" data-target="src-claude">Copy</button></div>
+            <pre id="src-claude">{ "mcpServers": { "locus": { "command": "locus", "args": ["mcp", "--supervised"] } } }</pre>
+          </div>
+          <div class="term-block" id="panel-cursor" role="tabpanel" aria-labelledby="tab-cursor">
+            <div class="term-head"><span class="cmt">~/.cursor/mcp.json</span><button type="button" class="copy" data-target="src-cursor">Copy</button></div>
+            <pre id="src-cursor">{ "mcpServers": { "locus": { "command": "locus", "args": ["mcp", "--supervised"] } } }</pre>
+          </div>
+          <div class="term-block" id="panel-codex" role="tabpanel" aria-labelledby="tab-codex">
+            <div class="term-head"><span class="cmt">~/.codex/config.toml</span><button type="button" class="copy" data-target="src-codex">Copy</button></div>
+            <pre id="src-codex">[mcp_servers.locus]
+command = "locus"
+args = ["mcp", "--supervised"]</pre>
+          </div>
         </div>
-        <pre><span class="cmd">locus quickstart</span>  <span class="cmt"># init samples · enter · whoami · doctor</span>
-<span class="cmd">locus enter personal && locus whoami</span>
-<span class="out">ok  entered personal (personal)</span>
+      </section>
 
-<span class="cmd">locus enter acme && locus whoami</span>
-<span class="out">ok  entered acme (acme-corp)</span>
-<span class="cmt"># previous identity is gone from the process env</span>
+      <section id="demo" aria-labelledby="demo-title">
+        <h2 class="plain" id="demo-title">Try a pin</h2>
+        <p class="note">Illustration, not a live session. Switching the pin changes which tools exist. A frozen project id from the other client is denied.</p>
+        <div class="pin-switch" role="group" aria-label="Illustrated pin">
+          <button type="button" data-pin="unpinned" aria-pressed="false">unpinned</button>
+          <button type="button" data-pin="personal" aria-pressed="true">personal</button>
+          <button type="button" data-pin="acme" aria-pressed="false">acme</button>
+        </div>
+        <div class="demo-grid">
+          <div class="panel">
+            <h3>whoami</h3>
+            <p id="demo-who" class="ok">personal / personal</p>
+            <h3>catalog</h3>
+            <div id="demo-tools"></div>
+          </div>
+          <div class="panel">
+            <h3>sample call</h3>
+            <p id="demo-call" class="bad">project_ref for acme is denied</p>
+            <p class="note">Scope freeze happens at the gate. The model does not get to pick the account.</p>
+          </div>
+        </div>
+      </section>
 
-<span class="cmd">locus agent setup --apply</span>  <span class="cmt"># wire MCP + AGENT.md</span>
-<span class="cmd">locus doctor</span>  <span class="cmt"># SAFE | WARN | UNSAFE</span>
-<span class="cmd">locus dashboard</span>  <span class="cmt"># local identity UI · 127.0.0.1:8750</span>
-<span class="cmd">locus goal status</span>  <span class="cmt"># northstar from GOALS.md</span>
-<span class="cmd">locus verify claim --text "Deploy hits https://api.x/v2"</span>
-<span class="cmt"># MCP: locus_safe_next → single best next action (enter / approve / ready)</span></pre>
-      </div>
-    </section>
+      <section id="how">
+        <h2 class="sec">How it works</h2>
+        <div class="steps">
+          <article>
+            <div class="n">01</div>
+            <h3>A person pins</h3>
+            <p><code>locus enter acme</code> seals the session to one binding. An agent can ask with <code>locus_request_pin</code>. It cannot pin.</p>
+          </article>
+          <article>
+            <div class="n">02</div>
+            <h3>The seal is checked</h3>
+            <p>An HMAC seal plus a live broker. A bad seal, an unknown binding, or a scope mismatch is a deny.</p>
+          </article>
+          <article>
+            <div class="n">03</div>
+            <h3>Tools follow the pin</h3>
+            <p>The MCP catalog is this pin only. <code>locus exec</code> scrubs ambient <code>GH_TOKEN</code>, <code>AWS_*</code>, <code>SUPABASE_*</code>, and <code>VERCEL_*</code>.</p>
+          </article>
+        </div>
+      </section>
 
-    <section id="surfaces">
-      <h2 class="sec-label">Surfaces</h2>
-      <div class="flow">
-        <div class="flow-step">
-          <div class="flow-n">UI</div>
-          <div>
-            <h3>Local dashboard</h3>
-            <p><code>locus dashboard</code> / <code>locus serve</code>: pin, whoami, approvals, doctor, audit on loopback. No secrets.</p>
+      <section id="faq" class="faq" itemscope itemtype="https://schema.org/FAQPage">
+        <h2 class="sec">FAQ</h2>
+        <details open itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+          <summary><h3 itemprop="name">Can an agent change the pin?</h3></summary>
+          <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+            <p itemprop="text">No. Pin changes are human commands: locus enter, locus pin, locus switch. If the tools are the wrong tenant, ask a person to pin.</p>
           </div>
-        </div>
-        <div class="flow-step">
-          <div class="flow-n">MCP</div>
-          <div>
-            <h3>Stdio + HTTP MCP</h3>
-            <p>Claude Code / Cursor via stdio. CI agents: <code>locus-mcp --http</code> with token auth on <code>POST /mcp</code>. Agents call <code>locus_safe_next</code> for the single best next action.</p>
+        </details>
+        <details itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+          <summary><h3 itemprop="name">Where do secrets go?</h3></summary>
+          <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+            <p itemprop="text">Bindings store env:VAR and phm:NAME pointers, never raw tokens. MCP results do not return resolved values. phm: resolution fails closed until a scoped bridge exists.</p>
           </div>
-        </div>
-        <div class="flow-step">
-          <div class="flow-n">AUD</div>
-          <div>
-            <h3>Forensics pack</h3>
-            <p><code>locus forensics export</code>: shareable pin + doctor + audit snapshot (CredentialRefs only).</p>
+        </details>
+        <details itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+          <summary><h3 itemprop="name">Is Locus a sandbox?</h3></summary>
+          <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+            <p itemprop="text">No. It scrubs the child environment and redirects HOME. A process can still open a file by an absolute path the operating system already allows.</p>
           </div>
-        </div>
-        <div class="flow-step">
-          <div class="flow-n">HUB</div>
-          <div>
-            <h3>Goal + agent report</h3>
-            <p><code>locus goal status</code> · <code>locus agent report --json</code> for hub gates (ready / protected / unsafe).</p>
+        </details>
+        <details itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+          <summary><h3 itemprop="name">What does the json flag print?</h3></summary>
+          <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+            <p itemprop="text">One JSON object whose first key is schema, such as locus.whoami.v1. Failures use locus.error.v1. The field list is locus topic agent-contract --json.</p>
           </div>
-        </div>
-        <div class="flow-step">
-          <div class="flow-n">VRF</div>
-          <div>
-            <h3>Verify claim</h3>
-            <p><code>locus verify claim --text "…"</code> / MCP <code>locus_verify_claim</code>: heuristic confidence + <code>needs_tool</code> before acting on numbers, URLs, or versions.</p>
-          </div>
-        </div>
-      </div>
-    </section>
+        </details>
+      </section>
 
-    <section id="arch">
-      <h2 class="sec-label">Architecture</h2>
-      <div class="arch" aria-label="Architecture diagram">
-<span class="hl">locus enter acme</span>
-        <span class="dim">│</span>
-        <span class="dim">▼</span>
-  Session sealed <span class="ok">(HMAC)</span> → binding <span class="hl">"acme"</span>
-        <span class="dim">│</span>
-        <span class="dim">├─►</span> <span class="hl">locus-mcp</span>   tools = this binding only (+ locus_whoami)
-        <span class="dim">│</span>             agents cannot pin · freeze · resources/prompts
-        <span class="dim">│</span>
-        <span class="dim">├─►</span> <span class="hl">dashboard</span>  serve · whoami · doctor · approvals (127.0.0.1)
-        <span class="dim">│</span>
-        <span class="dim">└─►</span> <span class="hl">locus exec</span>  scrub ambient · resolve phm:/env: · private worker dirs
-      </div>
-    </section>
-
-    <section>
-      <h2 class="sec-label">How it works</h2>
-      <div class="flow">
-        <div class="flow-step">
-          <div class="flow-n">01</div>
-          <div>
-            <h3>Bind tenant × providers × policy</h3>
-            <p>A binding is principal, tenant, credential refs, and freeze scopes; never raw secrets.</p>
-          </div>
+      <section id="star" class="star">
+        <h2 class="plain">Star Locus</h2>
+        <p class="note">If a pin kept an agent on the right account, star the repo so the next person can find it.</p>
+        <div class="link-row">
+          <a class="btn primary" href="https://github.com/ashlrai/locus/stargazers">Star on GitHub</a>
+          <a class="btn" href="https://github.com/ashlrai/locus/blob/main/README.md">README</a>
+          <a class="btn" href="https://github.com/ashlrai/locus/blob/main/docs/mcp.md">MCP docs</a>
+          <a class="btn" href="https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md">JSON contract</a>
         </div>
-        <div class="flow-step">
-          <div class="flow-n">02</div>
-          <div>
-            <h3>Human pins. Agents cannot.</h3>
-            <p><code>locus enter acme</code> seals the session. MCP only offers <code>locus_request_pin</code>.</p>
-          </div>
-        </div>
-        <div class="flow-step">
-          <div class="flow-n">03</div>
-          <div>
-            <h3>Catalog is the isolation boundary</h3>
-            <p>Unpinned → control tools only. Pinned → that client’s provider tools. Nothing ambient leaks in.</p>
-          </div>
-        </div>
-        <div class="flow-step">
-          <div class="flow-n">04</div>
-          <div>
-            <h3>Freeze + approval</h3>
-            <p>Wrong <code>project_ref</code> / <code>team_id</code> is denied. Destructive patterns hit <code>require_approval</code>.</p>
-          </div>
-        </div>
-      </div>
-    </section>
+      </section>
+    </main>
 
     <footer>
-      <div>
-        <span class="badge"><i></i> MIT · open source</span>
-      </div>
+      <div>MIT · open source</div>
       <div>
         <a href="https://github.com/ashlrai/locus">github.com/ashlrai/locus</a>
-        &nbsp;·&nbsp;
-        <a href="/llms.txt">llms.txt</a>
-        &nbsp;·&nbsp;
-        <a href="https://phm.dev">phm.dev</a>
-        &nbsp;·&nbsp;
-        <a href="https://github.com/ashlrai/locus/blob/main/LICENSE">license</a>
+        · <a href="/llms.txt">llms.txt</a>
+        · <a href="/llms-full.txt">llms-full.txt</a>
+        · <a href="https://phm.dev">phm.dev</a>
       </div>
     </footer>
   </div>
-
   <script>
     (function () {
-      var tabs = document.querySelectorAll(".install-tabs button");
-      tabs.forEach(function (btn) {
-        btn.addEventListener("click", function () {
-          tabs.forEach(function (b) { b.classList.remove("active"); });
-          btn.classList.add("active");
-          document.querySelectorAll(".term-block").forEach(function (el) {
-            el.classList.toggle("active", el.id === "tab-" + btn.dataset.tab);
-          });
+      function selectTab(button) {
+        var group = button.getAttribute("data-group");
+        var panel = button.getAttribute("data-panel");
+        document.querySelectorAll('[data-group="' + group + '"]').forEach(function (tab) {
+          var on = tab === button;
+          tab.setAttribute("aria-selected", on ? "true" : "false");
+        });
+        document.querySelectorAll("[data-group=\"" + group + "\"]").forEach(function (tab) {
+          var id = tab.getAttribute("data-panel");
+          var el = document.getElementById(id);
+          if (el) el.classList.toggle("active", id === panel);
+        });
+      }
+      document.querySelectorAll(".tabs button").forEach(function (button) {
+        button.addEventListener("click", function () { selectTab(button); });
+      });
+
+      document.querySelectorAll("button.copy").forEach(function (button) {
+        button.addEventListener("click", function () {
+          var node = document.getElementById(button.getAttribute("data-target"));
+          var text = node ? node.textContent.replace(/\n$/, "") : "";
+          var done = function () {
+            var previous = button.textContent;
+            button.textContent = "Copied";
+            window.setTimeout(function () { button.textContent = previous; }, 1200);
+          };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done, function () { fallback(text); done(); });
+          } else {
+            fallback(text);
+            done();
+          }
         });
       });
+      function fallback(text) {
+        var area = document.createElement("textarea");
+        area.value = text;
+        document.body.appendChild(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+      }
+
+      var pins = {
+        unpinned: {
+          who: "unpinned",
+          whoClass: "out",
+          tools: [
+            ["locus_whoami", true],
+            ["locus_request_pin", true],
+            ["locus_safe_next", true],
+            ["github / supabase / vercel", false]
+          ],
+          call: "No provider tools until a person pins.",
+          callClass: "out"
+        },
+        personal: {
+          who: "personal / personal",
+          whoClass: "ok",
+          tools: [
+            ["locus_whoami", true],
+            ["github (personal)", true],
+            ["supabase (personal)", true],
+            ["acme tools", false]
+          ],
+          call: "project_ref for acme is denied.",
+          callClass: "bad"
+        },
+        acme: {
+          who: "acme / acme-corp",
+          whoClass: "ok",
+          tools: [
+            ["locus_whoami", true],
+            ["github (acme-corp)", true],
+            ["supabase (read only)", true],
+            ["personal tools", false]
+          ],
+          call: "project_ref for personal is denied.",
+          callClass: "bad"
+        }
+      };
+      var who = document.getElementById("demo-who");
+      var tools = document.getElementById("demo-tools");
+      var call = document.getElementById("demo-call");
+      function showPin(name) {
+        var state = pins[name];
+        who.textContent = state.who;
+        who.className = state.whoClass;
+        call.textContent = state.call;
+        call.className = state.callClass;
+        tools.textContent = "";
+        state.tools.forEach(function (row) {
+          var line = document.createElement("span");
+          line.className = "tool " + (row[1] ? "on" : "off");
+          line.textContent = (row[1] ? "on  " : "off ") + row[0];
+          tools.appendChild(line);
+        });
+        document.querySelectorAll("[data-pin]").forEach(function (button) {
+          button.setAttribute("aria-pressed", button.getAttribute("data-pin") === name ? "true" : "false");
+        });
+      }
+      document.querySelectorAll("[data-pin]").forEach(function (button) {
+        button.addEventListener("click", function () { showPin(button.getAttribute("data-pin")); });
+      });
+      var initial = new URLSearchParams(location.search).get("pin");
+      showPin(pins[initial] ? initial : "personal");
     })();
   </script>
 </body>

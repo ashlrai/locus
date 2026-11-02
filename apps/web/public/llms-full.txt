@@ -9,20 +9,19 @@ listed verbatim so an agent can jump straight to the right document.
 ## README
 
 - [README](https://github.com/ashlrai/locus/blob/main/README.md)
+  - For agents
   - 30-second start
-  - Connect your agent (MCP)
+  - How it works
+  - Features
+  - Measured reach of the wrong client's credentials
+  - FAQ
+  - Star Locus
   - Install options
-  - More of the CLI
-  - Measured: wrong-client credential reachability
-  - How isolation works
-  - MCP (Claude Code / Cursor)
-  - How Locus plugs into Phantom
-  - Core concepts
   - CLI
-  - Roadmap
-  - Development
-  - Daily firm workflow
+  - When the pin breaks
   - Security model
+  - Docs
+  - Development
   - Part of the Ashlr ecosystem
   - Contributing
   - License
@@ -180,6 +179,16 @@ listed verbatim so an agent can jump straight to the right document.
   - Usage
   - Caveats
   - Tests
+
+## docs/copy-paste.md
+
+- [Copy-paste examples](https://github.com/ashlrai/locus/blob/main/docs/copy-paste.md)
+  - Install
+  - Pin a sample and read JSON
+  - Preview without writing
+  - MCP config, print only
+  - MCP config, provider tools
+  - Same shell, switch clients
 
 ## docs/credential-audit.md
 
@@ -493,6 +502,7 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/mcp.md
 
 - [locus-mcp - Claude Code, Cursor, and friends](https://github.com/ashlrai/locus/blob/main/docs/mcp.md)
+  - Agent setup
   - Install
   - Replace npx registrations during pin
   - Human workflow (pin first)

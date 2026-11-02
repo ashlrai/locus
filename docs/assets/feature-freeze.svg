@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="220" viewBox="0 0 720 220" role="img" aria-labelledby="freezeTitle">
+  <title id="freezeTitle">Frozen project and team ids cannot be overridden</title>
+  <rect width="720" height="220" rx="16" fill="#111118"/>
+  <text x="28" y="52" fill="#a1a1aa" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="14">BINDING SCOPE</text>
+  <text x="28" y="100" fill="#f4f4f5" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="22">project_ref = acme</text>
+  <text x="28" y="140" fill="#f4f4f5" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="22">team_id = acme</text>
+  <text x="28" y="180" fill="#86efac" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">frozen at the gate</text>
+  <rect x="400" y="48" width="292" height="124" rx="12" fill="#3f1d1d" stroke="#fca5a5"/>
+  <text x="420" y="92" fill="#fca5a5" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="16">model arg</text>
+  <text x="420" y="126" fill="#fecaca" font-family="ui-sans-serif, system-ui, sans-serif" font-size="20">other project_ref</text>
+  <text x="420" y="156" fill="#fca5a5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">denied</text>
+</svg>

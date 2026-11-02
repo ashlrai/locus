@@ -13,7 +13,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Continuous integration
+
+- **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
+  CI now runs `node apps/web/discoverability.mjs --check` and
+  `node --test apps/web`, so `apps/web/public/llms.txt` and `llms-full.txt`
+  cannot drift from the source docs.
+
+### Tests
+
+- **Temporary-directory cleanup coverage ([#587](https://github.com/ashlrai/locus/pull/587), [#600](https://github.com/ashlrai/locus/pull/600)).**
+  The e2e, dogfood and hub-smoke scripts now assert that their temporary homes
+  and workspaces (including the graph-import home and `DOGFOOD_HOME`) are
+  removed on success and on failure. The related `docs/` pages describe the
+  updated behavior. No product code changed.
+
 ### Documentation
+
+- **Doctor exit status in the development guide.** `CLAUDE.md` said `locus doctor`
+  exits 1 on any WARN, including a missing Phantom. Since 0.5.2 a WARN made only
+  of setup advisories (`phantom_missing`, `approvals_missing`,
+  `control_capability_not_exported`, `executor_authority_unavailable`) exits 0,
+  while other warnings still exit 1 and unsafe conditions exit 2.
 
 - **Shell installer proposal ([#169](https://github.com/ashlrai/locus/issues/169)).**
   The issue proposes a one-command shell installer that downloads and verifies
