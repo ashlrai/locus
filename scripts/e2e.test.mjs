@@ -325,3 +325,59 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(existsSync(workspace), false, 'security workspace survived exit cleanup');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
 });
+
+test('security home is cleaned when workspace creation fails', { timeout: 1_800_000 }, (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-security-setup-test-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'custom tmp $literal; [test]');
+  const inheritedWorkspace = join(fixture, 'inherited security workspace');
+  const bin = join(fixture, 'bin');
+  const homeRecord = join(fixture, 'security-home');
+  const failureRecord = join(fixture, 'workspace-failure');
+  mkdirSync(scratch);
+  mkdirSync(inheritedWorkspace);
+  mkdirSync(bin);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(inheritedWorkspace, 'keep'), 'inherited');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
+if [[ "$#" -eq 2 && "$1" == -d && "$TMPDIR" == "$PROBE_SCRATCH" ]]; then
+  case "$2" in
+    "$TMPDIR/locus-security-e2e.XXXXXX")
+      home="$("$REAL_MKTEMP" "$@")" || exit $?
+      [[ -d "$home" ]] || exit 1
+      printf '%s' "$home" > "$SECURITY_HOME_RECORD"
+      touch "$home/cleanup-sentinel" || exit 1
+      printf '%s\\n' "$home"
+      exit 0
+      ;;
+    "$TMPDIR/locus-security-ws.XXXXXX")
+      [[ -f "$SECURITY_HOME_RECORD" && -f "$(cat "$SECURITY_HOME_RECORD")/cleanup-sentinel" ]] || exit 1
+      : > "$SECURITY_FAILURE_RECORD"
+      exit 73
+      ;;
+  esac
+fi
+exec "$REAL_MKTEMP" "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    cwd: root,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
+      SECURITY_WS: inheritedWorkspace, REAL_MKTEMP: realMktemp, PROBE_SCRATCH: scratch,
+      SECURITY_HOME_RECORD: homeRecord, SECURITY_FAILURE_RECORD: failureRecord },
+    encoding: 'utf8',
+    timeout: 1_800_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+  assert.equal(result.status, 73, 'the injected workspace creation failure should stop e2e');
+  assert.match(result.stdout, /==> 24\. adversarial release credential\/workspace probes/);
+  assert.ok(existsSync(failureRecord), 'workspace creation failure was not reached');
+  const home = readFileSync(homeRecord, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-security-e2e\.[^/]+$/);
+  assert.equal(existsSync(home), false, 'security home and its sentinel survived exit cleanup');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+  assert.equal(readFileSync(join(inheritedWorkspace, 'keep'), 'utf8'), 'inherited');
+});
