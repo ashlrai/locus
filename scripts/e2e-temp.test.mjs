@@ -407,6 +407,49 @@ exit 73
   assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited');
 });
 
+test('workspace cleanup survives a command failure after leaving the workspace', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  const record = join(fixture.root, 'workspace-path');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"');
+  const end = source.indexOf('\n# leave force-pin;', start);
+  assert.ok(cleanup && start >= 0 && end > start, 'missing workspace lifecycle');
+  const workspaceSection = source.slice(start, end);
+  const probe = `set -euo pipefail
+${cleanup}
+TMPDIR="$1" LOCUS_HOME="$1/main-home"
+GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+mkdir "$LOCUS_HOME"
+trap 'e2e_cleanup' EXIT
+locus() {
+  case "$*" in
+    workspace*) touch .locus.toml cleanup-sentinel; printf '%s' "$PWD" > "$WORKSPACE_RECORD" ;;
+    'pin personal') printf 'not allowed\\n' >&2; return 1 ;;
+    'pin personal --force') return 0 ;;
+    *) return 74 ;;
+  esac
+}
+log() { :; }; ok() { :; }; die() { exit 75; }
+${workspaceSection}
+[[ -f "$WS_DIR/.locus.toml" && -f "$WS_DIR/cleanup-sentinel" && "$PWD" != "$WS_DIR" ]] || exit 74
+bash -c 'exit 73'
+`;
+  const result = spawnSync('bash', ['-c', probe, 'workspace-failure', scratch], {
+    env: { ...process.env, WORKSPACE_RECORD: record }, encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected failure must propagate');
+  const workspace = readFileSync(record, 'utf8');
+  assert.equal(dirname(workspace), scratch);
+  assert.match(workspace, /\/locus-ws\.[^/]+$/);
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' });
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
 for (const exitStatus of [0, 73]) {
   test(`workspace honors TMPDIR and is removed on exit ${exitStatus}`, (t) => {
     const fixture = setup(t);
