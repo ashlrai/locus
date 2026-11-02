@@ -651,6 +651,15 @@ listed verbatim so an agent can jump straight to the right document.
   - 4. What a pass does not establish (current limits)
   - 5. Optional: an operator-signed manifest
 
+## docs/registry-manifest-consumer.md
+
+- [Consuming the adapter registry release manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer.md)
+  - Current status: unsigned
+  - What the manifest is
+  - What you can verify
+  - What you cannot verify
+  - Operator-signed manifests
+
 ## docs/registry-manifest-current-state.md
 
 - [Adapter registry manifest: current state](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-current-state.md)
