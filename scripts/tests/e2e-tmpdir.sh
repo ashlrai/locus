@@ -14,12 +14,12 @@ cat >"$TEST_ROOT/bin/mktemp" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 created="$("$E2E_REAL_MKTEMP" "$@")"
-case "$created" in
-  */locus-e2e.*)
+case "${created##*/}" in
+  locus-e2e.*)
     [[ -d "$created" ]] || exit 1
     printf '%s\n' "$created" >>"$E2E_HOME_RECORD"
     ;;
-  */locus-ws.*)
+  locus-ws.*)
     [[ -d "$created" ]] || exit 1
     printf '%s\n' "$created" >>"$E2E_WORKSPACE_RECORD"
     ;;

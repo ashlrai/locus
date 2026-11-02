@@ -11,7 +11,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(root, 'scripts', 'e2e.sh');
 const locus = join(root, 'target', 'release', 'locus');
 
-test('temporary home is removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
+test('temporary and security homes are removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-success-test-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
   const scratch = join(fixture, 'custom tmp $literal; [test]');
@@ -19,6 +19,7 @@ test('temporary home is removed after a successful e2e exit', { timeout: 1_800_0
   const bin = join(fixture, 'bin');
   const homeCreated = join(fixture, 'home-created');
   const homeUsed = join(fixture, 'home-used');
+  const securityHomeUsed = join(fixture, 'security-home-used');
   const wrapper = join(bin, 'locus');
   mkdirSync(scratch);
   mkdirSync(inherited);
@@ -42,6 +43,11 @@ if [[ "\${1:-}" == workspace ]]; then
   printf '%s' "$LOCUS_HOME" > "$HOME_USED"
   touch "$LOCUS_HOME/cleanup-sentinel" || exit 1
 fi
+if [[ "\${1:-}" == init && "$LOCUS_HOME" == "$TMPDIR"/locus-security-e2e.* ]]; then
+  [[ -d "$LOCUS_HOME" ]] || exit 1
+  printf '%s' "$LOCUS_HOME" > "$SECURITY_HOME_USED"
+  touch "$LOCUS_HOME/cleanup-sentinel" || exit 1
+fi
 exec '${locus.replaceAll("'", "'\\''")}' "$@"
 `, { mode: 0o755 });
 
@@ -49,7 +55,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     cwd: root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
       LOCUS_HOME: inherited, LOCUS_BIN: wrapper, HOME_CREATED: homeCreated,
-      HOME_USED: homeUsed, REAL_MKTEMP: realMktemp },
+      HOME_USED: homeUsed, SECURITY_HOME_USED: securityHomeUsed, REAL_MKTEMP: realMktemp },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -64,6 +70,12 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(dirname(home), scratch);
   assert.match(home, /\/locus-e2e\.[^/]+$/);
   assert.equal(existsSync(home), false, 'temporary home survived exit cleanup');
+  assert.ok(existsSync(securityHomeUsed), 'security probes did not use a temporary home');
+  const securityHome = readFileSync(securityHomeUsed, 'utf8');
+  assert.equal(dirname(securityHome), scratch);
+  assert.match(securityHome, /\/locus-security-e2e\.[^/]+$/);
+  assert.notEqual(securityHome, home);
+  assert.equal(existsSync(securityHome), false, 'security home survived successful exit cleanup');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
   assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited',
     'cleanup must preserve the inherited home');
