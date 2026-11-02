@@ -1,7 +1,7 @@
 // Run: node --test scripts/hub-smoke-home-cleanup.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -61,4 +61,53 @@ rm() {
     'cleanup must target the active, populated Locus home and its nested sentinel');
   assert.equal(existsSync(home), false, 'temporary home must be removed');
   assert.equal(readFileSync(join(root, 'keep'), 'utf8'), 'sentinel');
+});
+
+test('pin failure removes the initialized temporary home', (t) => {
+  const root = mkdtempSync('/tmp/locus-home-fail-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary resources with spaces');
+  const homeRecord = join(root, 'home');
+  const attempts = join(root, 'attempts');
+  const hook = join(root, 'hook.sh');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'locus-hub-smoke.unrelated'), 'sentinel');
+  // Fail pin only after init has populated the actual exported home.
+  writeFileSync(hook, `jq() { return 0; }
+cargo() { return 0; }
+sleep() { :; }
+locus() {
+  case "\${1:-}" in
+    init)
+      [[ -d "$LOCUS_HOME" && "$LOCUS_HOME" == "$TMPDIR"/locus-hub-smoke.* ]] || return 90
+      mkdir -p "$LOCUS_HOME/bindings/nested"
+      printf 'fixture\\n' > "$LOCUS_HOME/bindings/nested/payload"
+      printf '%s' "$LOCUS_HOME" > "$HOME_RECORD" ;;
+    pin)
+      [[ -f "$LOCUS_HOME/bindings/nested/payload" ]] || return 91
+      printf 'pin\\n' >> "$PIN_ATTEMPTS"
+      return 1 ;;
+    *) return 0 ;;
+  esac
+}
+`);
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, TMPDIR: scratch, BASH_ENV: hook,
+      HOME_RECORD: homeRecord, PIN_ATTEMPTS: attempts },
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /error: hub-smoke init\/pin failed after 3 attempts/);
+  assert.equal(readFileSync(attempts, 'utf8'), 'pin\npin\npin\npin\n');
+  const home = readFileSync(homeRecord, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.ok(home.slice(scratch.length + 1).startsWith('locus-hub-smoke.'));
+  assert.ok(result.stdout.includes(`== hub-smoke LOCUS_HOME=${home} ==`));
+  assert.equal(existsSync(home), false, 'the populated temporary home must be removed');
+  assert.deepEqual(readdirSync(scratch), ['locus-hub-smoke.unrelated']);
+  assert.equal(readFileSync(join(scratch, 'locus-hub-smoke.unrelated'), 'utf8'), 'sentinel');
 });
