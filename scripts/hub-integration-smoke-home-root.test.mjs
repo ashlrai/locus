@@ -70,3 +70,25 @@ test('SMOKE_HOME is created directly beneath an isolated TMPDIR', (t) => {
   assert.deepEqual(readdirSync(tmpdir), ['keep'], 'cleanup must leave the isolated root untouched');
   assert.equal(readFileSync(join(tmpdir, 'keep'), 'utf8'), 'sentinel');
 });
+
+// With TMPDIR unset the script must fall back to /tmp, and SMOKE_HOME must be
+// a live directory there while the run is in progress (not just a recorded path).
+test('SMOKE_HOME is a live directory under /tmp when TMPDIR is unset', (t) => {
+  const scratch = mkdtempSync('/tmp/locus-home-root-');
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const record = join(scratch, 'allocated');
+  const observed = join(scratch, 'observed');
+  const unsetHarness = harness.replace('"${LOCUS_HOME%/*}" == "$TMPDIR"', '"${LOCUS_HOME%/*}" == /tmp');
+
+  const result = spawnSync('bash', ['-c', unsetHarness, 'smoke-home-default', script], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, RECORD: record, OBSERVED: observed },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 73, 'init must observe SMOKE_HOME as an existing directory directly under /tmp');
+  const home = readFileSync(observed, 'utf8').trim();
+  assert.equal(dirname(home), '/tmp');
+  assert.match(basename(home), /^locus-hub-int\.[^/]+$/);
+  assert.equal(existsSync(home), false, 'SMOKE_HOME must be removed on exit');
+});
