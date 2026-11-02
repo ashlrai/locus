@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -296,6 +296,62 @@ exec bash "$1"
   assert.equal(readFileSync(entered, 'utf8').trim(), project);
   assert.equal(existsSync(project), false, 'the populated project directory must be removed');
   assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+test('a failure inside the populated temporary project removes both directories', (t) => {
+  const root = mkdtempSync('/tmp/lhi-cleanup-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  const scratch = join(root, 'scratch');
+  const record = join(root, 'created');
+  mkdirSync(bin);
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+path="$("$REAL_MKTEMP" "$@")" || exit
+printf '%s\\n' "$path" >> "$CREATED_RECORD"
+builtin printf '%s\\n' "$path"
+`, { mode: 0o755 });
+
+  // Fail at status after the real project config write, not during allocation.
+  const harness = `
+node() { :; }
+jq() { :; }
+cargo() { :; }
+locus() {
+  if [[ "${'$'}{1:-}" == status ]]; then
+    [[ -f .mcp.json && -d "$LOCUS_HOME" ]] || return 74
+    mkdir nested || return 75
+    touch nested/project-file "$LOCUS_HOME/home-file" || return 76
+    pwd -L > "$ENTERED_RECORD"
+    return 73
+  fi
+}
+export -f node jq cargo locus
+exec bash "$1"
+`;
+  const entered = join(root, 'entered');
+  const result = spawnSync('bash', ['-c', harness, 'cleanup-test', script], {
+    env: { PATH: `${bin}:${process.env.PATH}`, HOME: process.env.HOME, TMPDIR: scratch,
+      REAL_MKTEMP: realMktemp, CREATED_RECORD: record, ENTERED_RECORD: entered },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected status failure must propagate');
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2, 'both temporary directories must be created');
+  const [home, project] = paths;
+  assert.equal(dirname(home), scratch);
+  assert.equal(dirname(project), scratch);
+  assert.match(basename(home), /^locus-hub-int\.[^/]+$/);
+  assert.match(basename(project), /^locus-hub-int-proj\.[^/]+$/);
+  assert.equal(readFileSync(entered, 'utf8').trim(), project);
+  assert.equal(existsSync(home), false, 'the populated temporary home must be removed');
+  assert.equal(existsSync(project), false, 'the populated project directory must be removed');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
 });
 
 test('the canary scan reports failure for a canary under a spaced path', () => {
