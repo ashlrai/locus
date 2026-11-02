@@ -31,3 +31,5 @@ and directory prefixes against the script. Run
 `node --test scripts/hub-integration-test.test.mjs` for the full integration
 smoke with a `TMPDIR` containing spaces and shell metacharacters; it observes
 the directories and scan listings while they exist and checks their cleanup.
+`scripts/hub-integration-tmpdir.test.mjs` also covers plain-whitespace values
+(embedded, doubled, leading and trailing spaces).

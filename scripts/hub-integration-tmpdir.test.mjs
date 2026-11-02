@@ -169,3 +169,50 @@ test('guide inventories the script templates and fallback', () => {
   assert.ok(doc.includes('`.locus-hub-int-scan.$$.${RANDOM}`'));
   assert.match(doc, /unset \*\*or empty\*\*, Bash selects `\/tmp`/);
 });
+
+// Plain whitespace edge cases (no glob/metacharacters): word splitting or
+// trimming of TMPDIR would relocate or leak a directory.
+for (const name of ['my tmp dir', ' lead and trail ', 'two  spaces']) {
+  test(`TMPDIR ${JSON.stringify(name)} holds both created directories`, (t) => {
+    const scratch = mkdtempSync('/tmp/locus-tmpdir-space-');
+    t.after(() => rmSync(scratch, { recursive: true, force: true }));
+    const custom = join(scratch, name);
+    const record = join(scratch, 'observed');
+    mkdirSync(custom);
+    writeFileSync(join(custom, 'keep'), 'sentinel');
+
+    const observe = `
+node() { :; }
+jq() { :; }
+cargo() { :; }
+locus() {
+  if [[ "$1" == init ]]; then
+    local projects=("$TMPDIR"/locus-hub-int-proj.*)
+    [[ -d "$LOCUS_HOME" && "${'$'}{LOCUS_HOME%/*}" == "$TMPDIR" ]] || return 74
+    [[ "${'$'}{#projects[@]}" == 1 && -d "${'$'}{projects[0]}" ]] || return 75
+    printf '%s\\n' "$LOCUS_HOME" "${'$'}{projects[0]}" > "$RECORD"
+    return 73
+  fi
+}
+export -f node jq cargo locus
+exec bash "$1"
+`;
+    const result = spawnSync('bash', ['-c', observe, 'space-test', script], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: custom, RECORD: record },
+      encoding: 'utf8',
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 73, 'the injected init failure must propagate');
+    const paths = readFileSync(record, 'utf8').trim().split('\n');
+    assert.equal(paths.length, 2);
+    assert.match(basename(paths[0]), /^locus-hub-int\.[^/]+$/);
+    assert.match(basename(paths[1]), /^locus-hub-int-proj\.[^/]+$/);
+    for (const path of paths) {
+      assert.equal(dirname(path), custom, 'each directory must be directly under the spaced TMPDIR');
+      assert.equal(existsSync(path), false, 'each directory must be removed on exit');
+    }
+    assert.deepEqual(readdirSync(custom), ['keep']);
+    assert.deepEqual(readdirSync(scratch).sort(), [name, 'observed'].sort());
+  });
+}
