@@ -285,6 +285,49 @@ esac
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
 });
 
+test('project setup failure removes the allocated dogfood home before initialization', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-setup-failure-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'isolated temporary parent');
+  const fixtureRoot = join(root, 'fixture');
+  const bin = join(fixtureRoot, 'target', 'debug');
+  mkdirSync(scratch);
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(fixtureRoot, 'scripts'));
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus'), '#!/bin/sh\ntouch "$LOCUS_CALLED"\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'mkdir'), `#!/bin/bash
+[[ "$1" == -p && "$2" == "$TMPDIR"/locus-dogfood.*/project ]] || exit 89
+home="${'$'}{2%/project}"
+[[ -d "$home" ]] || exit 90
+printf '%s\\n' "$home" > "$PROBE_FILE"
+touch "$home/sentinel"
+exit 42
+`, { mode: 0o755 });
+  const probe = join(root, 'probe');
+  const locusCalled = join(root, 'locus-called');
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, PROBE_FILE: probe, LOCUS_CALLED: locusCalled },
+    encoding: 'utf8',
+  });
+
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 42, 'dogfood should propagate the injected project setup failure');
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.match(home, /\/locus-dogfood\.[^/]+$/);
+  assert.equal(dirname(home), scratch);
+  assert.equal(existsSync(home), false);
+  assert.equal(existsSync(locusCalled), false, 'Locus must not run after project setup fails');
+  assert.doesNotMatch(result.stdout, /DOGFOOD READY/);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
 test('initialization failure removes only the allocated dogfood home', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
