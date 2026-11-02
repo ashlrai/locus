@@ -217,16 +217,11 @@ esac
   assert.equal(readFileSync(join(neighbor, 'keep'), 'utf8'), 'neighbor');
 });
 
-test('successful dogfood run removes its isolated home and preserves neighboring files', (t) => {
-  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-success-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+function writeSuccessFixture(root) {
   const fixtureRoot = join(root, 'fixture');
   const bin = join(fixtureRoot, 'target', 'debug');
-  mkdirSync(scratch);
   mkdirSync(bin, { recursive: true });
   mkdirSync(join(fixtureRoot, 'scripts'));
-  writeFileSync(join(scratch, 'keep'), 'preserve');
   writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
   writeFileSync(join(fixtureRoot, 'scripts', 'dogfood-ready.jq'), readFileSync(join(dirname(script), 'dogfood-ready.jq')));
   writeFileSync(join(fixtureRoot, 'scripts', 'hub-smoke.sh'), '#!/bin/sh\nexit 0\n');
@@ -267,6 +262,16 @@ case "$1 $2" in
   *) exit 90 ;;
 esac
 `, { mode: 0o755 });
+  return fixtureRoot;
+}
+
+test('successful dogfood run removes its isolated home and preserves neighboring files', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-success-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const fixtureRoot = writeSuccessFixture(root);
 
   const probe = join(root, 'probe');
   const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
@@ -283,6 +288,32 @@ esac
   assert.equal(existsSync(home), false);
   assert.deepEqual(readdirSync(scratch), ['keep']);
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
+test('successful dogfood run ignores an inherited DOGFOOD_HOME and leaves it intact', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-inherited-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'tmp');
+  const inherited = join(root, 'caller-owned');
+  mkdirSync(scratch);
+  mkdirSync(inherited);
+  writeFileSync(join(inherited, 'keep'), 'preserve');
+  const fixtureRoot = writeSuccessFixture(root);
+
+  const probe = join(root, 'probe');
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, PROBE_FILE: probe,
+      FIXTURE_ROOT: root, DOGFOOD_HOME: inherited },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0);
+  assert.match(result.stdout, /DOGFOOD READY/);
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.notEqual(home, inherited);
+  assert.equal(dirname(home), scratch);
+  assert.deepEqual(readdirSync(scratch), []);
+  assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'preserve');
 });
 
 test('project setup failure removes the allocated dogfood home before initialization', (t) => {
