@@ -60,6 +60,19 @@ test('probe cleanup guide covers both traps and the grant lifecycle', () => {
   }
 });
 
+test('probe isolation guide cites the probe functions and their root lifecycle', () => {
+  const source = readFileSync(script, 'utf8');
+  const guide = readFileSync(join(dirname(script), '..', 'docs', 'dogfood-probe-isolation.md'), 'utf8');
+  const probeTemplates = [...source.matchAll(/mktemp -d "\$\{TMPDIR:-\/tmp\}\/(locus-(?:sandbox|mt)-dogfood\.XXXXXX)"/g)]
+    .map((match) => match[1]).sort();
+  assert.deepEqual(probeTemplates, ['locus-mt-dogfood.XXXXXX', 'locus-sandbox-dogfood.XXXXXX']);
+  for (const fact of ['sandbox_attestation()', 'mt_grant_probe()', 'mt_cleanup()',
+    'sandbox_cleanup_root', ...probeTemplates, 'LOCUS_HOME', 'LOCUS_SESSION_ID',
+    'subshell', 'EXIT', 'mktemp', 'DOGFOOD_MT=1', 'DOGFOOD READY']) {
+    assert.ok(guide.includes(fact), `isolation guide missing ${fact}`);
+  }
+});
+
 test('sandbox probe removes its root after a missing binding failure', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-sandbox-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));

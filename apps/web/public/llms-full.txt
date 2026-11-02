@@ -231,6 +231,15 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [Dogfood probe cleanup](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-cleanup.md)
 
+## docs/dogfood-probe-isolation.md
+
+- [Dogfood probe root isolation](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-isolation.md)
+  - Creation
+  - Use
+  - Cleanup
+  - Readiness effect
+  - Related
+
 ## docs/dogfood-probe-roles.md
 
 - [Dogfood probe directory roles](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-roles.md)
