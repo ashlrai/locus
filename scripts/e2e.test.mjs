@@ -336,3 +336,46 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(existsSync(workspace), false, 'security workspace survived exit cleanup');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
 });
+
+test('populated security workspace is cleaned after a later probe failure', { timeout: 1_800_000 }, (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-security-workspace-test-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'custom tmp $literal; [test]');
+  const bin = join(fixture, 'bin');
+  const record = join(fixture, 'workspace');
+  mkdirSync(scratch);
+  mkdirSync(bin);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const realLn = execFileSync('which', ['ln'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(bin, 'ln'), `#!/bin/bash
+if [[ "$#" -eq 3 && "$1" == -s && "$2" == missing-policy.toml && \
+      "$3" == "$TMPDIR"/locus-security-ws.*/.locus.toml ]]; then
+  workspace="\${3%/.locus.toml}"
+  [[ -d "$workspace" ]] || exit 91
+  "$REAL_LN" "$@" || exit 92
+  [[ -L "$workspace/.locus.toml" ]] || exit 93
+  touch "$workspace/cleanup-sentinel" || exit 94
+  printf '%s' "$workspace" > "$WORKSPACE_RECORD"
+  exit 73
+fi
+exec "$REAL_LN" "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    cwd: root,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
+      REAL_LN: realLn, WORKSPACE_RECORD: record },
+    encoding: 'utf8',
+    timeout: 1_800_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+  assert.equal(result.status, 73, 'the injected failure status must survive cleanup');
+  assert.match(result.stdout, /==> 24\. adversarial release credential\/workspace probes/);
+  assert.doesNotMatch(result.stdout, /==> 25\./, 'the failure must stop the next section');
+  const workspace = readFileSync(record, 'utf8');
+  assert.equal(dirname(workspace), scratch);
+  assert.match(workspace, /\/locus-security-ws\.[^/]+$/);
+  assert.equal(existsSync(workspace), false, 'populated security workspace survived exit cleanup');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+});

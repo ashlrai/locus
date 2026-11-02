@@ -360,3 +360,42 @@ exit "$2"
     assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must remove fixtures and preserve unrelated files');
   });
 }
+
+test('an unhandled failure after security workspace creation triggers cleanup', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  const record = join(fixture.root, 'security-workspace');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWorkspace = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(createWorkspace, 'missing security workspace creation function');
+  const probe = `set -euo pipefail
+${cleanup}
+${createWorkspace}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+mkdir "$LOCUS_HOME"
+trap 'e2e_cleanup' EXIT
+create_security_workspace
+[[ -d "$SECURITY_WS" && "\${SECURITY_WS%/*}" == "$TMPDIR" ]] || exit 91
+touch "$SECURITY_WS/sentinel"
+printf '%s' "$SECURITY_WS" > "$2"
+(exit 73)
+touch "$3"
+`;
+  const marker = join(fixture.root, 'continued');
+  const result = spawnSync('bash', ['-c', probe, 'security-workspace-failure', scratch, record, marker],
+    { encoding: 'utf8' });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected command failure must survive cleanup');
+  const workspace = readFileSync(record, 'utf8');
+  assert.equal(dirname(workspace), scratch);
+  assert.match(workspace, /\/locus-security-ws\.[^/]+$/);
+  assert.equal(existsSync(workspace), false, 'populated security workspace survived failure cleanup');
+  assert.equal(existsSync(marker), false, 'execution continued after the injected failure');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+});
