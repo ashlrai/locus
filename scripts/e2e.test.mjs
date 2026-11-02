@@ -141,6 +141,49 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
 });
 
+test('a later workspace command failure removes the populated workspace', { timeout: 1_800_000 }, (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-workspace-late-failure-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'tmp $literal; [test]');
+  const bin = join(fixture, 'bin');
+  const recorded = join(fixture, 'workspace-at-failure');
+  const inherited = join(fixture, 'inherited workspace');
+  mkdirSync(scratch);
+  mkdirSync(bin);
+  mkdirSync(inherited);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(inherited, 'keep'), 'inherited');
+  const wrapper = join(bin, 'locus');
+  writeFileSync(wrapper, `#!/bin/bash
+if [[ "\${1:-}" == pin && "\${2:-}" == personal && "\${3:-}" == --force && "$PWD" == "$TMPDIR"/locus-ws.* ]]; then
+  [[ -f "$PWD/.locus.toml" ]] || exit 74
+  touch "$PWD/cleanup-sentinel" || exit 74
+  printf '%s' "$PWD" > "$WORKSPACE_AT_FAILURE"
+  exit 73
+fi
+exec '${locus.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, WS_DIR: inherited,
+      LOCUS_BIN: wrapper, WORKSPACE_AT_FAILURE: recorded },
+    encoding: 'utf8',
+    timeout: 1_800_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+  assert.equal(result.status, 73, 'cleanup must preserve the injected command failure');
+  assert.match(result.stdout, /ok  personal blocked without --force/);
+  assert.ok(existsSync(recorded), 'failure was not reached in the populated workspace');
+  const workspace = readFileSync(recorded, 'utf8');
+  assert.equal(dirname(workspace), scratch);
+  assert.match(workspace, /\/locus-ws\.[^/]+$/);
+  assert.equal(existsSync(workspace), false, 'populated workspace survived exit cleanup');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+  assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited');
+});
+
 test('binding add regression detects changes to an existing matching file', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-binding-test-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
