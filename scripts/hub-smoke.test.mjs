@@ -182,6 +182,7 @@ jq() { : > "$SMOKE_COMMAND_MARKER"; return 1; }
 for (const [description, directory] of [
   ['custom TMPDIR', 'custom tmp'],
   ['TMPDIR with spaces and shell pattern characters', 'a [*] b'],
+  ['TMPDIR with spaces, quotes, and shell substitution characters', "a '$(false)' b"],
 ]) test(`successful smoke uses and cleans a ${description}`, (t) => {
   // The authority broker uses a Unix socket, so keep the temporary path short.
   const root = mkdtempSync('/tmp/lhs-');
