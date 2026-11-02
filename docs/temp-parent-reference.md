@@ -21,6 +21,14 @@ script also constructs a canary scan listing at
 `${TMPDIR:-/tmp}/.locus-hub-int-scan.$$.${RANDOM}` using the shell's process ID
 and `RANDOM` value, rather than `mktemp`.
 
+The parent may contain spaces or shell pattern characters. Each template is
+passed to `mktemp` as a single quoted argument, so the path is never word-split
+or glob-expanded, and the exit trap removes exactly the paths that were
+created — unrelated files under the same parent are left untouched.
+[`hub-smoke-spaced-tmpdir.test.mjs`](../scripts/hub-smoke-spaced-tmpdir.test.mjs)
+keeps this contract under test, and the conformance workflow runs the smoke
+with a spaced `TMPDIR` end to end.
+
 Each script installs an `EXIT` trap that attempts to remove its assigned paths;
 the integration trap also removes matching scan listings for its shell PID.
 Cleanup is not guaranteed after an uncatchable termination or a removal error.
