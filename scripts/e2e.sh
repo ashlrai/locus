@@ -1329,6 +1329,13 @@ else
     else
       # Fresh home for a true write path
       GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
+      # Same containment rule as LOCUS_HOME: a supplied TMPDIR owns the graph home.
+      if [[ -n "${TMPDIR:-}" ]]; then
+        [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
+          "${GRAPH_HOME##*/}" == locus-graph-imp.* ]] \
+          || die "GRAPH_HOME was not created directly beneath TMPDIR"
+        ok "graph home is created directly beneath TMPDIR"
+      fi
       if LOCUS_HOME="$GRAPH_HOME" LOCUS_GRAPH_PASSPHRASE="$LOCUS_GRAPH_PASSPHRASE" \
         locus init >/dev/null 2>&1 \
         && LOCUS_HOME="$GRAPH_HOME" LOCUS_GRAPH_PASSPHRASE="$LOCUS_GRAPH_PASSPHRASE" \

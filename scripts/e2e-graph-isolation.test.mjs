@@ -13,7 +13,7 @@ const graph = source.slice(source.indexOf('# ── 16. graph'), source.indexOf(
 const cleanup = source.slice(source.indexOf('e2e_cleanup() {'), source.indexOf("trap 'e2e_cleanup' EXIT"));
 assert.ok(graph.includes('GRAPH_HOME=') && cleanup.includes('"${GRAPH_HOME:-}"'));
 
-for (const scenario of ['same-home', 'success', 'init-failure', 'import-failure', 'cleanup-failure']) {
+for (const scenario of ['same-home', 'success', 'init-failure', 'import-failure', 'cleanup-failure', 'relocated']) {
   test(`graph ${scenario} uses and cleans the expected home`, (t) => {
     const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-section-'));
     t.after(() => rmSync(fixture, { recursive: true, force: true }));
@@ -34,6 +34,9 @@ ok() { :; }
 skip() { exit 90; }
 die() { printf '%s\\n' "$*" >&2; exit 1; }
 has_cmd() { return 0; }
+if [[ "$TEST_SCENARIO" == relocated ]]; then
+  mktemp() { command mktemp -d "$TEST_MAIN_HOME/locus-graph-imp.XXXXXX"; }
+fi
 rm() {
   if [[ "$TEST_SCENARIO" == cleanup-failure && "$#" -eq 2 && "$2" == "$GRAPH_HOME" ]]; then
     return 0
@@ -75,17 +78,20 @@ fi
         TEST_RM_OBSERVED: rmObserved, TEST_SCENARIO: scenario, LOCUS_GRAPH_PASSPHRASE: 'graph-test' },
       encoding: 'utf8',
     });
-    assert.equal(result.status, scenario.endsWith('failure') ? 1 : 0);
+    assert.equal(result.status, scenario.endsWith('failure') || scenario === 'relocated' ? 1 : 0);
     assert.equal(result.signal, null);
     if (scenario === 'cleanup-failure') {
       assert.match(result.stderr, /graph import temporary home was not removed/);
+    } else if (scenario === 'relocated') {
+      assert.match(result.stderr, /GRAPH_HOME was not created directly beneath TMPDIR/);
+      assert.equal(existsSync(home), false, 'relocated graph home survived exit cleanup');
     } else if (scenario === 'init-failure' || scenario === 'import-failure') {
       assert.match(result.stderr, /graph import failed/);
     }
     assert.deepEqual(readdirSync(scratch), ['keep']);
     assert.equal(existsSync(rmObserved), scenario === 'success',
       'only the success path must route the populated graph home through rm');
-    if (scenario === 'same-home') {
+    if (scenario === 'same-home' || scenario === 'relocated') {
       assert.throws(() => readFileSync(record), { code: 'ENOENT' });
     } else {
       const graphHome = readFileSync(record, 'utf8');
