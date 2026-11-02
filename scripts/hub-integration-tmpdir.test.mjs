@@ -216,3 +216,47 @@ exec bash "$1"
     assert.deepEqual(readdirSync(scratch).sort(), [name, 'observed'].sort());
   });
 }
+
+// A relative TMPDIR is resolved against the caller's cwd, but the script cd's
+// into the smoke project before exiting; the EXIT trap must still find and
+// remove both directories.
+test('relative TMPDIR holds both directories and they are removed after the script changes directory', (t) => {
+  const scratch = mkdtempSync('/tmp/locus-tmpdir-rel-');
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  mkdirSync(join(scratch, 'rel parent'));
+  writeFileSync(join(scratch, 'rel parent', 'keep'), 'sentinel');
+  const record = join(scratch, 'observed');
+
+  // Fail at the first command that runs after `cd "$SMOKE_PROJ"`.
+  const observe = `
+node() { :; }
+jq() { :; }
+cargo() { :; }
+locus() {
+  if [[ "$1" == status ]]; then
+    printf '%s\\n' "$LOCUS_HOME" "$PWD" > "$RECORD"
+    return 73
+  fi
+}
+export -f node jq cargo locus
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', observe, 'relative-test', script], {
+    cwd: scratch,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: 'rel parent', RECORD: record },
+    encoding: 'utf8',
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected failure must propagate');
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2);
+  assert.match(basename(paths[0]), /^locus-hub-int\.[^/]+$/);
+  assert.match(basename(paths[1]), /^locus-hub-int-proj\.[^/]+$/);
+  for (const path of paths) {
+    assert.ok(path.startsWith('/'), 'directory paths must be absolute');
+    assert.equal(basename(dirname(path)), 'rel parent');
+    assert.equal(existsSync(path), false, 'each directory must be removed on exit');
+  }
+  assert.deepEqual(readdirSync(join(scratch, 'rel parent')), ['keep']);
+});
