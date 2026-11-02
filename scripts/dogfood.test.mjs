@@ -170,6 +170,53 @@ esac
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
 });
 
+test('dogfood cleanup treats spaces and shell glob characters in TMPDIR literally', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-literal-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, "temporary * [a] 'quoted' directory");
+  const neighbor = join(root, "temporary match a 'quoted' directory");
+  const bin = join(root, 'fixture', 'target', 'debug');
+  const fixtureScript = join(root, 'fixture', 'scripts', 'dogfood.sh');
+  mkdirSync(scratch);
+  mkdirSync(neighbor);
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(dirname(fixtureScript));
+  writeFileSync(join(scratch, 'keep'), 'scratch');
+  writeFileSync(join(neighbor, 'keep'), 'neighbor');
+  writeFileSync(fixtureScript, readFileSync(script));
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus'), `#!/bin/bash
+case "$1" in
+  init)
+    [[ -d "$LOCUS_HOME" && "\${LOCUS_HOME%/*}" == "$TMPDIR" ]] || exit 89
+    printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"
+    touch "$LOCUS_HOME/sentinel" ;;
+  binding) [[ -f "$LOCUS_HOME/sentinel" ]] || exit 90 ;;
+  --version) ;;
+  quickstart) exit 42 ;;
+  *) exit 91 ;;
+esac
+`, { mode: 0o755 });
+  const probe = join(root, 'probe');
+  const result = spawnSync('bash', [fixtureScript], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, PROBE_FILE: probe },
+    encoding: 'utf8',
+  });
+
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 42, 'dogfood should reach the controlled quickstart failure');
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-dogfood\.[^/]+$/);
+  assert.equal(existsSync(home), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'scratch');
+  assert.equal(readFileSync(join(neighbor, 'keep'), 'utf8'), 'neighbor');
+});
+
 test('successful dogfood run removes its isolated home and preserves neighboring files', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-success-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
