@@ -110,6 +110,47 @@ test('successful integration smoke removes the initialized SMOKE_HOME', (t) => {
   assert.equal(existsSync(home), false, 'the initialized SMOKE_HOME must be removed');
 });
 
+test('pin failure removes the initialized temporary home and its contents', (t) => {
+  const root = mkdtempSync('/tmp/lhi-pin-fail-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'scratch with spaces');
+  const observed = join(root, 'initialized-home');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+
+  // Let the real CLI initialize the home, then fail at pin only after checking
+  // its state and recording the path while it still exists.
+  const harness = `
+locus() {
+  if [[ "$1" == pin ]]; then
+    [[ -f "$LOCUS_HOME/bindings/personal.toml" && -f "$LOCUS_HOME/daemon.key" ]] || return 74
+    mkdir -p "$LOCUS_HOME/nested/fixture" || return 75
+    : > "$LOCUS_HOME/nested/fixture/sentinel"
+    printf '%s\\n' "$LOCUS_HOME" > "$OBSERVED"
+    return 73
+  fi
+  command locus "$@"
+}
+export -f locus
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'pin-failure-test', script], {
+    env: { ...process.env, TMPDIR: scratch, OBSERVED: observed },
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected pin failure must propagate');
+  const home = readFileSync(observed, 'utf8').trim();
+  assert.equal(dirname(home), scratch);
+  assert.match(basename(home), /^locus-hub-int\.[^/]+$/);
+  assert.equal(existsSync(home), false, 'the initialized home and nested fixture must be removed');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must remove the project as well');
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+});
+
 test('integration smoke uses and cleans a nondefault TMPDIR', (t) => {
   const { result, scratch, paths } = runWithTempDir(t);
   assert.equal(result.error, undefined);
