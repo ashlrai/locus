@@ -20,7 +20,8 @@ script-owned temporary directory, not a setting for choosing a Locus home.
    export from the main home and receives the same graph passphrase. Either
    command failing stops the suite rather than skipping the fallback.
 4. **Cleanup.** After a successful fallback import, `rm -rf` immediately
-   removes the graph home. The variable remains set, so the suite's `EXIT`
+   removes the graph home, and the suite checks that no directory or symlink
+   remains before proceeding. The variable remains set, so the suite's `EXIT`
    trap attempts to remove it again; the trap also removes it if initialization
    or import fails after creation. The main home and export are removed by
    the same trap. The trap runs on normal shell exit, including ordinary
