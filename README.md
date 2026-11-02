@@ -444,6 +444,7 @@ Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md](./DESIGN.md).
 | [docs/README.md](./docs/README.md) | Doc index and dry-run limits |
 | [CONTRIBUTING.md](./CONTRIBUTING.md) | Build, test, adapters |
 | [SECURITY.md](./SECURITY.md) | Reporting |
+| [SUPPORT.md](./SUPPORT.md) | Where to get help |
 
 Site: [locus.dev](https://locus.dev/) (same indexes at [/llms.txt](https://locus.dev/llms.txt) and [/llms-full.txt](https://locus.dev/llms-full.txt)).
 

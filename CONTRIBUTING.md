@@ -104,6 +104,8 @@ Docs checks (Node 18+, no dependencies):
 ```bash
 node scripts/check-readme-links.mjs   # every README link / anchor / image resolves
 node --test scripts/check-readme-links.test.mjs
+bash scripts/check-support-links.sh   # every relative link in SUPPORT.md resolves
+node --test scripts/check-support-links.test.mjs
 node scripts/freshness/check.mjs      # generated release blocks are in sync
 ```
 
