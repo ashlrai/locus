@@ -1,5 +1,18 @@
 # Locus documentation
 
+Agents start here. Every command block in [copy-paste.md](copy-paste.md) is meant to be pasted.
+
+| Read this | For |
+| --- | --- |
+| [copy-paste.md](copy-paste.md) | Install, JSON, MCP, the 30-second pin |
+| [agent-contract.md](agent-contract.md) | `--json` schemas, exit codes, dry-run |
+| [mcp.md](mcp.md) | Claude Code, Cursor, Codex, supervised launch |
+| [../llms.txt](../llms.txt) | Short index for agents |
+| [../llms-full.txt](../llms-full.txt) | Heading index of the README and these docs |
+| [../AGENTS.md](../AGENTS.md) | Rules when changing this repo |
+| [architecture.md](architecture.md) | How a pin becomes the only account |
+| [credential-compatibility.md](credential-compatibility.md) | `env:` and `phm:` refs |
+
 For autopin implementation changes, use the [autopin review checklist](autopin-review-checklist.md).
 For the suggestion command's output and examples, see [autopin suggest output](autopin-suggest-output.md).
 For the proposed one-command archive installer, see the [user journey](installer-user-journey.md), [requirements](installer-requirements.md), and [issue checklist](shell-installer-issue-checklist.md).

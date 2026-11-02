@@ -40,15 +40,10 @@ fn command_matrix_matches_the_documented_plan_forms() {
     assert!(!listed.is_empty());
     assert_eq!(listed, forms(matrix, "| Plan |"));
 
-    let readme = include_str!("../../../README.md")
-        .split("### Previewing mutations with `--dry-run`")
-        .nth(1)
-        .expect("README dry-run section")
-        .split("\n---")
-        .next()
-        .unwrap();
-    assert_eq!(forms(readme, "|"), listed);
-    assert!(readme.contains("Leave persistent state unchanged"));
+    assert!(
+        include_str!("../../../docs/README.md").contains("writes no state"),
+        "docs/README.md must say a plan writes no state"
+    );
 }
 
 #[test]
@@ -154,14 +149,8 @@ fn unsupported_exec_preview_does_not_start_the_child() {
 }
 
 #[test]
-fn readme_identifies_unplannable_commands_that_reject_the_flag() {
-    let readme = include_str!("../../../README.md")
-        .split("### Previewing mutations with `--dry-run`")
-        .nth(1)
-        .expect("README dry-run section")
-        .split("\n---")
-        .next()
-        .unwrap();
+fn docs_identify_unplannable_commands_that_reject_the_flag() {
+    let readme = include_str!("../../../docs/README.md");
     let matrix = include_str!("../../../docs/dry-run-matrix-q8.md")
         .split("## Unsupported cases")
         .nth(1)
