@@ -29,6 +29,7 @@ function runWithTempDir(t, failProject = false, scratchParts = ['custom-tmp']) {
   const scratch = join(root, ...scratchParts);
   const record = join(root, 'created');
   const cleanupRecord = join(root, 'cleanup-observed');
+  const homeRecord = join(root, 'initialized-home-observed');
   const projectRecord = join(root, 'project-observed');
   const projectAttempt = join(root, 'project-attempt');
   mkdirSync(bin);
@@ -56,6 +57,9 @@ if [[ -f "${'$'}MKTEMP_RECORD" && ! -f "${'$'}CLEANUP_RECORD" ]]; then
     project_dir="$(sed -n '2p' "${'$'}MKTEMP_RECORD")"
     if [[ -n "${'$'}project_dir" && ( "${'$'}arg" == "${'$'}home_dir" || "${'$'}arg" == "${'$'}project_dir" ) ]]; then
       [[ -f "${'$'}home_dir/cleanup-sentinel" && -f "${'$'}project_dir/cleanup-sentinel" ]] || exit 75
+      if [[ "${'$'}LOCUS_HOME" == "${'$'}home_dir" && -f "${'$'}home_dir/bindings/personal.toml" ]]; then
+        printf '%s\\n' "${'$'}LOCUS_HOME" > "${'$'}HOME_RECORD"
+      fi
       if [[ "${'$'}PWD" -ef "${'$'}project_dir" && -f "${'$'}project_dir/.mcp.json" && -f "${'$'}project_dir/hub-merged.mcp.json" ]]; then
         : > "${'$'}PROJECT_RECORD"
       fi
@@ -70,13 +74,28 @@ exec "${'$'}REAL_RM" "${'$'}@"
     env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
       REAL_MKTEMP: realMktemp, MKTEMP_RECORD: record, PROJECT_ATTEMPT: projectAttempt,
       FAIL_PROJECT: failProject ? '1' : '0', REAL_RM: realRm, CLEANUP_RECORD: cleanupRecord,
-      PROJECT_RECORD: projectRecord },
+      PROJECT_RECORD: projectRecord, HOME_RECORD: homeRecord },
     encoding: 'utf8',
     maxBuffer: 4 * 1024 * 1024,
   });
   const paths = readFileSync(record, 'utf8').trim().split('\n');
-  return { result, scratch, paths, projectAttempt, cleanupRecord, projectRecord };
+  return { result, scratch, paths, projectAttempt, cleanupRecord, projectRecord, homeRecord };
 }
+
+test('successful integration smoke removes the initialized SMOKE_HOME', (t) => {
+  const { result, scratch, paths, homeRecord } = runWithTempDir(t);
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'integration smoke must succeed');
+  assert.doesNotMatch(result.stdout, /^skip\s/m, 'all integration checks must run');
+  assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
+  assert.equal(paths.length, 2, 'both temporary directories must be allocated');
+  assert.equal(existsSync(homeRecord), true, 'the initialized home must exist at cleanup');
+  const home = readFileSync(homeRecord, 'utf8').trim();
+  assert.equal(home, paths[0], 'LOCUS_HOME must be the allocated SMOKE_HOME');
+  assert.equal(dirname(home), scratch);
+  assert.equal(existsSync(home), false, 'the initialized SMOKE_HOME must be removed');
+});
 
 test('integration smoke uses and cleans a nondefault TMPDIR', (t) => {
   const { result, scratch, paths } = runWithTempDir(t);
