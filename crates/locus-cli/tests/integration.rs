@@ -86,6 +86,8 @@ mod readme_commands;
 mod readme_quickstart;
 #[path = "registry_manifest_ci_role.rs"]
 mod registry_manifest_ci_role;
+#[path = "registry_manifest_consumer.rs"]
+mod registry_manifest_consumer;
 #[path = "registry_manifest_consumer_checklist.rs"]
 mod registry_manifest_consumer_checklist;
 #[path = "registry_manifest_current_state.rs"]

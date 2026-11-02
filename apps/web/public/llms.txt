@@ -130,6 +130,7 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
 - [Locus documentation](https://github.com/ashlrai/locus/blob/main/docs/README.md)
 - [CI's role in adapter registry manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-ci-role.md)
 - [Release manifest consumer checklist](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer-checklist.md)
+- [Consuming the adapter registry release manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer.md)
 - [Adapter registry manifest: current state](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-current-state.md)
 - [Adapter registry manifest provenance](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-provenance.md)
 - [Adapter registry manifest verification: open questions](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-verification-questions.md)
