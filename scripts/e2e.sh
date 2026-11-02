@@ -1324,6 +1324,9 @@ else
         die "graph import failed for $graph_path"
       fi
       rm -rf "$GRAPH_HOME"
+      [[ ! -e "$GRAPH_HOME" && ! -L "$GRAPH_HOME" ]] \
+        || die "graph import temporary home was not removed"
+      ok "graph import temporary home removed"
     fi
   fi
 fi

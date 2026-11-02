@@ -13,7 +13,7 @@ const graph = source.slice(source.indexOf('# ── 16. graph'), source.indexOf(
 const cleanup = source.slice(source.indexOf('e2e_cleanup() {'), source.indexOf("trap 'e2e_cleanup' EXIT"));
 assert.ok(graph.includes('GRAPH_HOME=') && cleanup.includes('"${GRAPH_HOME:-}"'));
 
-for (const scenario of ['same-home', 'success', 'init-failure', 'import-failure']) {
+for (const scenario of ['same-home', 'success', 'init-failure', 'import-failure', 'cleanup-failure']) {
   test(`graph ${scenario} uses and cleans the expected home`, (t) => {
     const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-section-'));
     t.after(() => rmSync(fixture, { recursive: true, force: true }));
@@ -30,8 +30,14 @@ GRAPH_HOME="" WS_DIR="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_P
 log() { :; }
 ok() { :; }
 skip() { exit 90; }
-die() { exit 1; }
+die() { printf '%s\\n' "$*" >&2; exit 1; }
 has_cmd() { return 0; }
+rm() {
+  if [[ "$TEST_SCENARIO" == cleanup-failure && "$#" -eq 2 && "$2" == "$GRAPH_HOME" ]]; then
+    return 0
+  fi
+  command rm "$@"
+}
 locus() {
   case "$1:\${2:-}" in
     graph:export) printf 'LOCUSGRAPH00' > "$4" ;;
@@ -41,6 +47,7 @@ locus() {
       else
         [[ -d "$LOCUS_HOME" && "$LOCUS_GRAPH_PASSPHRASE" == graph-test ]] || return 1
         [[ "$(cat "$TEST_RECORD")" == "$LOCUS_HOME" ]] || return 1
+        touch "$LOCUS_HOME/import-sentinel"
         [[ "$TEST_SCENARIO" != import-failure ]]
       fi ;;
     init:*)
@@ -64,6 +71,9 @@ fi
     });
     assert.equal(result.status, scenario.endsWith('failure') ? 1 : 0);
     assert.equal(result.signal, null);
+    if (scenario === 'cleanup-failure') {
+      assert.match(result.stderr, /graph import temporary home was not removed/);
+    }
     assert.deepEqual(readdirSync(scratch), ['keep']);
     if (scenario === 'same-home') {
       assert.throws(() => readFileSync(record), { code: 'ENOENT' });
