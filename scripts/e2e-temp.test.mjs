@@ -1,7 +1,7 @@
 // Run: node --test scripts/e2e-temp.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,6 +63,41 @@ function run({ bin, locus }, temp, extraEnv = {}) {
     encoding: 'utf8',
   });
 }
+
+test('successful exit removes the populated isolated home', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const observed = join(fixture.root, 'observed-home');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+
+  // Execute the script's actual home setup and EXIT trap in a successful shell.
+  // The full e2e success path is covered separately by e2e.test.mjs.
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('export LOCUS_HOME\n');
+  const trap = "trap 'e2e_cleanup' EXIT";
+  const end = source.indexOf(trap, start);
+  assert.ok(start >= 0 && end > start, 'home setup and cleanup trap must exist');
+  const setupSource = source.slice(start, end + trap.length);
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+log() { :; }
+${setupSource}
+[[ -d "$LOCUS_HOME" ]]
+touch "$LOCUS_HOME/cleanup-sentinel"
+printf '%s' "$LOCUS_HOME" > "$OBSERVED_HOME"
+`], {
+    env: { ...process.env, TMPDIR: scratch, OBSERVED_HOME: observed },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, 'the shell must exit successfully');
+  assert.equal(result.signal, null);
+  const home = readFileSync(observed, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-e2e\.[^/]+$/);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' }, 'the home must be removed');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
 
 test('uses TMPDIR and cleans the isolated home after a later failure', (t) => {
   const fixture = setup(t);

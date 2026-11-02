@@ -1,7 +1,7 @@
 // Run: node --test scripts/e2e.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,7 @@ test('temporary home is removed after a successful e2e exit', { timeout: 1_800_0
   const bin = join(fixture, 'bin');
   const homeCreated = join(fixture, 'home-created');
   const homeUsed = join(fixture, 'home-used');
+  const cleanupObserved = join(fixture, 'cleanup-observed');
   const wrapper = join(bin, 'locus');
   mkdirSync(scratch);
   mkdirSync(inherited);
@@ -26,6 +27,19 @@ test('temporary home is removed after a successful e2e exit', { timeout: 1_800_0
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   writeFileSync(join(inherited, 'keep'), 'inherited');
   const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  const realRm = execFileSync('which', ['rm'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(bin, 'rm'), `#!/bin/bash
+if [[ -f "$HOME_CREATED" ]]; then
+  IFS= read -r home < "$HOME_CREATED" || [[ -n "$home" ]]
+  for arg in "$@"; do
+    if [[ "$arg" == "$home" ]]; then
+      [[ -f "$home/cleanup-sentinel" ]] || exit 1
+      printf '%s' "$home" > "$CLEANUP_OBSERVED"
+    fi
+  done
+fi
+exec "$REAL_RM" "$@"
+`, { mode: 0o755 });
   writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
 if [[ "$#" -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]]; then
   home="$("$REAL_MKTEMP" "$@")" || exit $?
@@ -49,7 +63,8 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     cwd: root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
       LOCUS_HOME: inherited, LOCUS_BIN: wrapper, HOME_CREATED: homeCreated,
-      HOME_USED: homeUsed, REAL_MKTEMP: realMktemp },
+      HOME_USED: homeUsed, CLEANUP_OBSERVED: cleanupObserved, REAL_MKTEMP: realMktemp,
+      REAL_RM: realRm },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -63,7 +78,9 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(readFileSync(homeUsed, 'utf8'), home, 'CLI used a different home');
   assert.equal(dirname(home), scratch);
   assert.match(home, /\/locus-e2e\.[^/]+$/);
-  assert.equal(existsSync(home), false, 'temporary home survived exit cleanup');
+  assert.ok(existsSync(cleanupObserved), 'exit cleanup did not receive the populated home');
+  assert.equal(readFileSync(cleanupObserved, 'utf8'), home);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' }, 'temporary home survived exit cleanup');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
   assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited',
     'cleanup must preserve the inherited home');
