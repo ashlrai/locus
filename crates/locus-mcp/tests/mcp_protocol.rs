@@ -293,8 +293,8 @@ fn handshake(client: &mut McpClient) -> Value {
     );
     // notifications/initialized must not hang / break subsequent requests
     client.notify("notifications/initialized", json!({}));
-    // tiny pause so notification is fully consumed before next write
-    std::thread::sleep(Duration::from_millis(20));
+    // The following request shares this ordered pipe, so it also verifies
+    // recovery after the notification without a scheduling-dependent pause.
     result
 }
 
@@ -3145,9 +3145,11 @@ fn route_excludes_synthetic_and_upstream_tools_before_worker_start() {
 
 #[test]
 fn route_invalid_binding_selection_fails_closed_but_control_tools_work() {
+    // Reuse the authority fixture; each case still gets a fresh binding and
+    // client, and leaves its pin before the next case. No worker may start.
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
     for missing in [true, false] {
-        let dir = tempdir().unwrap();
-        let store = Store::open(dir.path()).unwrap();
         let mut binding = routed_binding(dir.path(), Policy::default());
         if missing {
             binding.providers.retain(|p| p.provider != "supabase");
@@ -3174,6 +3176,7 @@ fn route_invalid_binding_selection_fails_closed_but_control_tools_work() {
         let response = client.request("tools/call", json!({"name":"locus_whoami","arguments":{}}));
         assert!(response.get("result").is_some(), "{response}");
         assert!(!dir.path().join("github.starts").exists());
+        store.leave().unwrap();
     }
 }
 
