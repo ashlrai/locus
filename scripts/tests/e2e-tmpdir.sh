@@ -14,12 +14,13 @@ cat >"$TEST_ROOT/bin/mktemp" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 created="$("$E2E_REAL_MKTEMP" "$@")"
-case "$created" in
-  */locus-e2e.*)
+# Match the template: a created-path glob also matches nested security fixtures.
+case "${2:-}" in
+  */locus-e2e.XXXXXX)
     [[ -d "$created" ]] || exit 1
     printf '%s\n' "$created" >>"$E2E_HOME_RECORD"
     ;;
-  */locus-ws.*)
+  */locus-ws.XXXXXX)
     [[ -d "$created" ]] || exit 1
     printf '%s\n' "$created" >>"$E2E_WORKSPACE_RECORD"
     ;;
@@ -65,7 +66,7 @@ assert_fixtures_cleaned() {
 }
 
 # Observe the home used by the actual CLI after setup, and optionally fail
-# inside the workspace to exercise cleanup on an unsuccessful exit.
+# after the real workspace command has populated the workspace.
 ln -s "${LOCUS_BIN:-$ROOT/target/release/locus}" "$TEST_ROOT/bin/real-locus"
 cat >"$TEST_ROOT/bin/observe-locus" <<'EOF'
 #!/bin/bash
@@ -75,6 +76,9 @@ if [[ "${1:-}" == workspace ]]; then
   printf '%s\n' "$LOCUS_HOME" >"$E2E_HOME_USED"
   touch "$LOCUS_HOME/cleanup-sentinel" "$PWD/cleanup-sentinel"
   if [[ "${E2E_INJECT_FAILURE:-}" == 1 ]]; then
+    "${0%/*}/real-locus" "$@" || exit 1
+    [[ -f "$workspace/.locus.toml" && -f "$workspace/cleanup-sentinel" && \
+       -f "$LOCUS_HOME/cleanup-sentinel" ]] || exit 1
     printf '%s\n' "$workspace" >"$E2E_FAILURE_RECORD"
     exit 73
   fi
@@ -93,7 +97,7 @@ assert_fixtures_cleaned
 grep '^e2e PASS ' "$TEST_ROOT/e2e.log"
 printf 'PASS: custom TMPDIR home and workspace were created and cleaned up\n'
 
-# Fail the first command inside the real workspace, after proving it exists.
+# Fail the first command inside the real workspace after it creates its config.
 # All earlier commands still use the real binary and exercise the real script.
 export E2E_FAILURE_RECORD="$TEST_ROOT/failure-workspace"
 rm "$E2E_WORKSPACE_RECORD" "$E2E_HOME_RECORD" "$E2E_HOME_USED"

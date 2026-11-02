@@ -26,6 +26,8 @@ behind. Inspect leftovers before removing them, and do not remove the parent
 `TMPDIR` or unrelated files.
 
 Run `node --test scripts/e2e-temp.test.mjs` to check the documented variable
-and prefix inventory against the script and exercise temporary-home cleanup.
+and prefix inventory against the script and exercise temporary-directory cleanup.
+Run `scripts/tests/e2e-tmpdir.sh` to exercise the full suite under a custom
+`TMPDIR`, including an injected failure after workspace creation.
 See the [security directories](e2e-security-directories.md) for the
 security probes and the [E2E test map](e2e-test-map.md) for the full suite.

@@ -70,6 +70,7 @@ log "2. LOCUS_HOME=$LOCUS_HOME"
 HTTP_MCP_PID=""
 MT_MCP_PID=""
 # Only directories created by this run may be removed by the cleanup trap.
+WS_DIR=""
 GRAPH_HOME=""
 SECURITY_HOME=""
 SECURITY_WS=""

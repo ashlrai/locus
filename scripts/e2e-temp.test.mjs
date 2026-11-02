@@ -146,6 +146,23 @@ test('exit cleanup preserves an inherited graph home before the fallback runs', 
   assert.deepEqual(readdirSync(scratch), []);
 });
 
+test('exit cleanup preserves an inherited workspace before the workspace is created', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'scratch');
+  const inherited = join(fixture.root, 'unrelated workspace');
+  mkdirSync(scratch);
+  mkdirSync(inherited);
+  writeFileSync(join(inherited, 'keep'), 'unrelated');
+
+  const result = run(fixture, scratch, { WS_DIR: inherited });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.signal, null);
+  assert.match(result.stderr, /fresh quickstart failed/);
+  assert.deepEqual(readdirSync(inherited), ['keep']);
+  assert.deepEqual(readdirSync(scratch), []);
+});
+
 test('exit cleanup preserves inherited security directories before the probes run', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'scratch');
