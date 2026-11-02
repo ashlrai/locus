@@ -1,7 +1,7 @@
 // Run: node --test scripts/e2e-temp.test.mjs
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -97,6 +97,49 @@ printf '%s' "$LOCUS_HOME" > "$OBSERVED_HOME"
   assert.match(home, /\/locus-e2e\.[^/]+$/);
   assert.throws(() => lstatSync(home), { code: 'ENOENT' }, 'the home must be removed');
   assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+test('successful home cleanup preserves an inherited home and symlink target', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'tmp $literal; [test]');
+  const inherited = join(fixture.root, 'inherited home');
+  const target = join(fixture.root, 'external target');
+  const observed = join(fixture.root, 'observed-home');
+  mkdirSync(scratch);
+  mkdirSync(inherited);
+  mkdirSync(target);
+  writeFileSync(join(inherited, 'keep'), 'inherited');
+  writeFileSync(join(target, 'keep'), 'external');
+  symlinkSync(target, join(scratch, 'target-link'));
+
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('export LOCUS_HOME\n');
+  const trap = "trap 'e2e_cleanup' EXIT";
+  const end = source.indexOf(trap, start);
+  assert.ok(start >= 0 && end > start, 'home setup and cleanup trap must exist');
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+log() { :; }
+${source.slice(start, end + trap.length)}
+[[ -d "$LOCUS_HOME" && "$LOCUS_HOME" != "$INHERITED_HOME" ]]
+mkdir "$LOCUS_HOME/nested"
+touch "$LOCUS_HOME/nested/sentinel"
+ln -s "$TMPDIR/target-link" "$LOCUS_HOME/nested/external-link"
+[[ -f "$LOCUS_HOME/nested/external-link/keep" ]]
+printf '%s' "$LOCUS_HOME" > "$OBSERVED_HOME"
+`], {
+    env: { ...process.env, TMPDIR: scratch, LOCUS_HOME: inherited,
+      INHERITED_HOME: inherited, OBSERVED_HOME: observed },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'the shell must exit successfully');
+  const home = readFileSync(observed, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' }, 'the temporary home must be removed');
+  assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited');
+  assert.equal(readFileSync(join(target, 'keep'), 'utf8'), 'external');
+  assert.deepEqual(readdirSync(scratch), ['target-link']);
 });
 
 test('uses TMPDIR and cleans the isolated home after a later failure', (t) => {
