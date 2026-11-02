@@ -25,7 +25,7 @@ secrets, use [`scripts/dogfood-dual-ide.sh`](../scripts/dogfood-dual-ide.sh).
 
 | Need | Notes |
 |------|--------|
-| `locus` + `locus-mcp` on `PATH` | `cargo install --path crates/locus-cli` / `locus-mcp`, or release bins |
+| `locus` + `locus-mcp` on `PATH` | `cargo install --locked --path crates/locus-cli` from this checkout, or release bins |
 | `jq` | Report / session JSON gates |
 | Two bindings | Distinct tenants + CredentialRefs (never reuse personal PAT on client) |
 | Resolved credentials | Phantom (`phm:…`) preferred; doctor should not list unresolved PHM |

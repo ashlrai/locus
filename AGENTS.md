@@ -33,11 +33,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Binaries: `./target/release/locus`, `./target/release/locus-mcp`.
 
-Local install:
+Local install from this checkout (`locus-cli` installs both binaries):
 
 ```bash
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --locked --path crates/locus-cli
 ```
 
 CI enforces fmt + clippy `-D warnings` + test + release build (see `.github/workflows/ci.yml`).

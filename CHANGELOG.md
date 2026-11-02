@@ -34,15 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unresolved issue: the cause and whether this represents identical compiler
   work remain unverified; no fix is claimed. See [the benchmark record](docs/BENCHMARKS.md).
 
-  From a checkout, compare one install of both packages with two separate
-  installs. This uses the same committed revision, lockfile, release profile,
-  toolchain, and a fresh target and install root for each case; it installs no
-  binaries into the usual Cargo bin directory. `/usr/bin/time -p` reports wall
+  From a checkout with the first-run commit in its Git object database, compare
+  one install of both packages with two separate installs at that historical
+  revision. It had separate binary targets; current `locus-cli` includes both
+  binaries, so the old same-root two-package recipe would collide on current
+  source. This measures the historical revision, not current build performance.
+  Each case uses the same pinned revision, lockfile, release profile, toolchain,
+  and a fresh target and install root; it installs no binaries into the usual
+  Cargo bin directory. `/usr/bin/time -p` reports wall
   time as `real` in each log; add the two separate-install times for their total.
 
   ```bash
   set -e
-  revision=$(git rev-parse HEAD)
+  revision=e969d9c44a3c0bff1d0a1fee4deb1b77fb58652e
   repo="file://$(pwd -P)"
   work=$(mktemp -d)
   /usr/bin/time -p cargo install --git "$repo" --rev "$revision" --locked \
@@ -61,8 +65,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```
 
   The second separate install intentionally shares its target directory with
-  the first; neither case reuses the other's build artifacts. The Git source is
-  committed `HEAD`, so uncommitted edits are excluded. Record the revision,
+  the first; neither case reuses the other's build artifacts. The pinned Git
+  revision excludes uncommitted edits. If it is absent from a shallow checkout,
+  obtain that public commit before running. Record the revision,
   OS/architecture, `cargo --version`, `rustc --version`, and cache/network
   conditions. Run both orders and repeat with new directories: Cargo's download
   cache and the OS cache can make later runs warmer, and timings include install

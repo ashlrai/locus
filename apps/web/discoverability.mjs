@@ -147,7 +147,7 @@ export function installCommands(root = REPO_ROOT) {
     npm: cmd(/^npm install -g/),
     npx: cmd(/^npx locus-cli/),
     cargo: cmd(/^cargo install --git/),
-    local: 'cargo install --path crates/locus-cli && cargo install --path crates/locus-mcp',
+    local: 'cargo install --locked --path crates/locus-cli',
   };
 }
 

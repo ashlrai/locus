@@ -19,12 +19,11 @@ in the prompt — agents never pin and never see secrets.
 
 ## 0. Prerequisites
 
-Install both binaries and put them on `PATH`:
+Install both binaries from the current source checkout and put them on `PATH` (`locus-cli` includes both targets):
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --locked --path crates/locus-cli
 which locus locus-mcp
 ```
 

@@ -69,7 +69,9 @@ class CargoInstallRecipeTest(unittest.TestCase):
             self.assertIn("--message-format=json", args)
         def value(args, option):
             return args[args.index(option) + 1]
-        self.assertEqual(len({value(args, "--rev") for args in calls}), 1)
+        self.assertEqual({value(args, "--rev") for args in calls},
+                         {"e969d9c44a3c0bff1d0a1fee4deb1b77fb58652e"})
+        self.assertNotIn("git rev-parse HEAD", recipe())
         self.assertEqual(len({value(args, "--git") for args in calls}), 1)
         self.assertNotEqual(value(calls[0], "--target-dir"), value(calls[1], "--target-dir"))
         self.assertEqual(value(calls[1], "--target-dir"), value(calls[2], "--target-dir"))
