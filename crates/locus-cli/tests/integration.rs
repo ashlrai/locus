@@ -56,6 +56,8 @@ mod fleet_feed_q8;
 mod fleet_preflight_q8;
 #[path = "handshake_conformance.rs"]
 mod handshake_conformance;
+#[path = "hub_smoke_tmpdir_spaces.rs"]
+mod hub_smoke_tmpdir_spaces;
 #[path = "issue171_matrix.rs"]
 mod issue171_matrix;
 #[path = "json_errors.rs"]
