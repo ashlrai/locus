@@ -27,7 +27,7 @@ test('normal completion removes the populated temporary error file', (t) => {
   esac
   printf '%s\\n' "$path"
 }
-jq() { printf '%s\\n' grant; }
+jq() { cat >/dev/null; printf '%s\\n' grant; }
 cargo() { return 0; }
 locus() {
   if [[ "\${1:-} \${2:-}" == 'status --oneline' ]]; then
@@ -98,7 +98,7 @@ test('normal completion truncates and removes the reused error file after a retr
   esac
   printf '%s\\n' "$path"
 }
-jq() { printf '%s\\n' grant; }
+jq() { cat >/dev/null; printf '%s\\n' grant; }
 cargo() { return 0; }
 sleep() { :; }
 locus() {
@@ -168,7 +168,7 @@ test('normal completion leaves no error file behind with the real rm', (t) => {
   mkdirSync(scratch);
   // Unlike the tests above, rm is not shimmed: the EXIT trap's own rm must
   // delete the populated error file (and the other temporaries) by itself.
-  writeFileSync(hook, `jq() { printf '%s\\n' grant; }
+  writeFileSync(hook, `jq() { cat >/dev/null; printf '%s\\n' grant; }
 cargo() { return 0; }
 locus() {
   if [[ "\${1:-} \${2:-}" == 'status --oneline' ]]; then

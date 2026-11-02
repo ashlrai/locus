@@ -324,7 +324,7 @@ test('a spaced TMPDIR holds all three resources until a build failure cleans the
   printf '%s\\t%s\\n' "$kind" "$path" >> "$SMOKE_RECORD"
   printf '%s\\n' "$path"
 }
-jq() { return 0; }
+jq() { cat >/dev/null; }
 locus() { return 1; }
 cargo() {
   local kind path count=0
@@ -485,7 +485,7 @@ for (const [name, scratchName] of [
   writeFileSync(join(scratch, 'unrelated'), 'keep');
   // Intercept even a locally built binary, and fail only after the error file
   // has been created and opened for the init command's stderr.
-  writeFileSync(guard, `jq() { return 0; }
+  writeFileSync(guard, `jq() { cat >/dev/null; }
 sleep() { :; }
 locus() {
   if [[ "$1" == init ]]; then
