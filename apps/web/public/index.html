@@ -431,7 +431,7 @@
       <section id="agents">
         <h2 class="sec">For agents</h2>
         <h3>Install</h3>
-        <p class="note">One command installs <code>locus</code> and <code>locus-mcp</code>. At the v0.6.2 release the Homebrew tap installs v0.6.1, so use npm for v0.6.2. Source installs need Rust 1.89 or newer.</p>
+        <p class="note">One command installs <code>locus</code> and <code>locus-mcp</code>. At the v0.6.2 release the Homebrew tap installs v0.6.1, so use npm for v0.6.2. The v0.6.2 npm wrappers fail closed if a release checksum sidecar is missing, unparseable, unreachable, or mismatched, and a checksum failure does not fall back to Cargo. Checksums detect corruption, not publisher authenticity. Source installs need Rust 1.89 or newer.</p>
         <div class="term">
           <div class="tabs" role="tablist" aria-label="Install method">
             <button type="button" role="tab" id="tab-npm" aria-selected="true" aria-controls="panel-npm" data-group="install" data-panel="panel-npm">npm</button>
