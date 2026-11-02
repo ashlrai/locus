@@ -48,6 +48,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The script cd's into the smoke project, so a relative TMPDIR would make the
+# EXIT trap look for the temporary directories from the wrong place.
+if [[ -n "${TMPDIR:-}" && "$TMPDIR" != /* ]]; then
+  TMPDIR="$(cd -- "$TMPDIR" && pwd)"
+  export TMPDIR
+fi
+
 SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
 SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
 
