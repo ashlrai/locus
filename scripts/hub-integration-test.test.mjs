@@ -594,3 +594,118 @@ exec bash "$1"
   assert.deepEqual(readdirSync(scratch), ['keep']);
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
 });
+
+test('an injected failure removes the created project directory', (t) => {
+  const root = mkdtempSync('/tmp/lhi-proj-fail-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const bin = join(root, 'bin');
+  const scratch = join(root, 'scratch');
+  const state = join(root, 'pin-state');
+  const record = join(root, 'created');
+  const observed = join(root, 'project-at-cleanup');
+  mkdirSync(bin);
+  mkdirSync(scratch);
+  mkdirSync(state);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+path="$("$REAL_MKTEMP" "$@")" || exit
+[[ -d "$path" ]] || exit 1
+printf '%s\\n' "$path" >> "$MKTEMP_RECORD"
+printf '%s\\n' "$path"
+`, { mode: 0o755 });
+  // When the trap removes the project, the shell is still inside it and both
+  // files the script wrote there (.mcp.json, hub-merged.mcp.json) must be
+  // present: removal must target the populated project, not an empty husk.
+  writeFileSync(join(bin, 'rm'), `#!/usr/bin/env bash
+project="$(sed -n '2p' "$MKTEMP_RECORD" 2>/dev/null)"
+for arg in "$@"; do
+  if [[ -n "$project" && "$arg" == "$project" && "$PWD" -ef "$project" \\
+      && -f "$project/.mcp.json" && -f "$project/hub-merged.mcp.json" ]]; then
+    cat "$project/.mcp.json" > "$PROJECT_OBSERVED"
+  fi
+done
+exec "$REAL_RM" "$@"
+`, { mode: 0o755 });
+  // Presence only: lets `command -v locus-mcp` pass so the multi-tenant
+  // section runs; the injected `locus mcp mint` failure lands before launch.
+  writeFileSync(join(bin, 'locus-mcp'), '#!/usr/bin/env bash\nexit 0\n', { mode: 0o755 });
+
+  // Stub prerequisites with canned contract output; the run stays green until
+  // `locus mcp mint` fails inside the populated project — an unguarded call in
+  // the multi-tenant section, before the server starts (MT_SRV_PID empty).
+  const mintEnv = '"env":{"LOCUS_BINDING_ID":"bid-personal","LOCUS_BINDING":"personal","LOCUS_SESSION_ID":"ses_stub","LOCUS_TENANT":"personal","LOCUS_SEAL":"hmac-sha256:stub","LOCUS_WORKER_HOME":"/tmp/stub-worker","LOCUS_EXECUTOR_CAPABILITY":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"';
+  const mint = (expires) => `{"binding":"personal","binding_id":"bid-personal","session_id":"ses_stub","tenant":"personal","seal":"hmac-sha256:stub","worker_home":"/tmp/stub-worker","expires_at":"${expires}","secrets_resolved":false,${mintEnv},"LOCUS_EXPIRES_AT":"${expires}"}}`;
+  const harness = `
+node() {
+  if [[ -n "${'$'}{HUB_INT_MCP_OUT:-}" ]]; then
+    printf '%s\\n' '{"mcpServers":{"phantom":{"command":"phantom-mcp","args":[]},"locus":{"command":"locus-mcp","args":[]}}}' > "$HUB_INT_MCP_OUT"
+  fi
+  [[ "${'$'}{HUB_MINT_JSON:-}" != *1970-01-01* ]]
+}
+cargo() { :; }
+locus() {
+  case "${'$'}{1:-}" in
+    init) ;;
+    pin) rm -f "$STUB_STATE/left" ;;
+    leave) : > "$STUB_STATE/left" ;;
+    status)
+      if [[ "${'$'}{2:-}" == --oneline ]]; then
+        if [[ -f "$STUB_STATE/left" ]]; then printf 'unpinned\\n'; else printf 'personal:tenant\\n'; fi
+      else printf '%s\\n' '{}'; fi ;;
+    agent)
+      if [[ -f "$STUB_STATE/left" ]]; then
+        printf '%s\\n' '{"status":"protected","ready":false,"status_oneline":"unpinned","required_servers":["locus","phantom"],"mcp_command":"locus-mcp"}'
+      else
+        printf '%s\\n' '{"status":"ready","ready":true,"status_oneline":"personal:tenant","required_servers":["locus","phantom"],"mcp_command":"locus-mcp"}'
+      fi ;;
+    ci)
+      if [[ "${'$'}{2:-}" == mint ]]; then
+        if [[ " $* " == *' --ttl '* ]]; then
+          printf '%s\\n' '${mint('1970-01-01T00:00:00Z')}'
+        else
+          printf '%s\\n' '${mint('2030-01-01T00:00:00Z')}'
+        fi
+      else printf '%s\\n' '{}'; fi ;;
+    mcp)
+      if [[ "${'$'}{2:-}" == mint && "${'$'}{3:-}" != --help ]]; then return 73; fi
+      printf '%s\\n' '{}' ;;
+    *) printf '%s\\n' '{}' ;;
+  esac
+}
+export -f node cargo locus
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'cleanup-test', script], {
+    env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
+      REAL_MKTEMP: realMktemp, REAL_RM: realRm, MKTEMP_RECORD: record,
+      PROJECT_OBSERVED: observed, STUB_STATE: state },
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected grant mint failure must propagate');
+  assert.doesNotMatch(result.stdout, /^FAIL\s/m, 'no check may fail before the injected fault');
+  assert.match(result.stdout, /^ok\s+Hub mint is exact-binding and exact-session consistent$/m);
+  assert.match(result.stdout, /^ok\s+Hub rejects expired broker-backed session before callback$/m);
+  assert.doesNotMatch(result.stdout, /== hub-integration-test (OK|FAILED) ==/,
+    'the injected failure must abort before either final banner');
+
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2, 'both temporary directories must be created');
+  const [home, project] = paths;
+  assert.equal(dirname(home), scratch);
+  assert.equal(dirname(project), scratch);
+  assert.match(basename(home), /^locus-hub-int\.[^/]+$/);
+  assert.match(basename(project), /^locus-hub-int-proj\.[^/]+$/);
+  assert.equal(existsSync(observed), true,
+    'cleanup must remove the project while still populated inside it');
+  assert.deepEqual(JSON.parse(readFileSync(observed, 'utf8')), {
+    mcpServers: { locus: { command: 'locus-mcp', args: [] } },
+  }, 'the removed project must contain its MCP registration');
+  assert.equal(existsSync(project), false, 'the created project directory must be removed');
+  assert.equal(existsSync(home), false, 'the created temporary home must be removed');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+});
