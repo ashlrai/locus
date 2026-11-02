@@ -21,6 +21,7 @@ For the one-command goal, its prerequisite exclusions, and unresolved platform a
 For testable archive installation outcomes, see [installer acceptance cases](installer-acceptance-cases.md).
 For release acceptance and delivery assumptions, see [archive installer acceptance](archive-installer-acceptance.md).
 For open error-contract decisions, see [installer error questions](installer-error-questions.md).
+For unresolved archive selection and installation questions, see [installer archive questions](installer-archive-questions.md).
 For troubleshooting, see [shell installer failure cases](shell-installer-failure-cases.md).
 
 ## Previewing changes with `--dry-run`

@@ -456,6 +456,13 @@ listed verbatim so an agent can jump straight to the right document.
   - Verification and failure cases
   - Evidence
 
+## docs/installer-archive-questions.md
+
+- [Installer archive questions](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-questions.md)
+  - Archive selection
+  - Installation
+  - Evidence boundary
+
 ## docs/installer-archive-requirements.md
 
 - [Installer archive requirements](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-requirements.md)
