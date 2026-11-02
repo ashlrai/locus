@@ -11,7 +11,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(root, 'scripts', 'e2e.sh');
 const locus = join(root, 'target', 'release', 'locus');
 
-test('temporary home is removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
+test('temporary home and workspace are removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-success-test-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
   const scratch = join(fixture, 'custom tmp $literal; [test]');
@@ -19,6 +19,8 @@ test('temporary home is removed after a successful e2e exit', { timeout: 1_800_0
   const bin = join(fixture, 'bin');
   const homeCreated = join(fixture, 'home-created');
   const homeUsed = join(fixture, 'home-used');
+  const workspaceCreated = join(fixture, 'workspace-created');
+  const workspaceUsed = join(fixture, 'workspace-used');
   const wrapper = join(bin, 'locus');
   mkdirSync(scratch);
   mkdirSync(inherited);
@@ -27,19 +29,24 @@ test('temporary home is removed after a successful e2e exit', { timeout: 1_800_0
   writeFileSync(join(inherited, 'keep'), 'inherited');
   const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
   writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
-if [[ "$#" -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]]; then
-  home="$("$REAL_MKTEMP" "$@")" || exit $?
-  [[ -d "$home" ]] || exit 1
-  printf '%s' "$home" > "$HOME_CREATED"
-  printf '%s\\n' "$home"
-else
-  exec "$REAL_MKTEMP" "$@"
-fi
+case "\${2:-}" in
+  "$TMPDIR/locus-e2e.XXXXXX") record="$HOME_CREATED" ;;
+  "$TMPDIR/locus-ws.XXXXXX") record="$WORKSPACE_CREATED" ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+[[ "$#" -eq 2 && "$1" == -d ]] || exit 1
+created="$("$REAL_MKTEMP" "$@")" || exit $?
+[[ -d "$created" ]] || exit 1
+printf '%s' "$created" > "$record"
+printf '%s\\n' "$created"
 `, { mode: 0o755 });
   writeFileSync(wrapper, `#!/bin/bash
 if [[ "\${1:-}" == workspace ]]; then
   [[ -d "$LOCUS_HOME" && "$LOCUS_HOME" == "$TMPDIR"/locus-e2e.* ]] || exit 1
   printf '%s' "$LOCUS_HOME" > "$HOME_USED"
+  [[ -d "$PWD" && "$PWD" == "$(cat "$WORKSPACE_CREATED")" ]] || exit 1
+  printf '%s' "$PWD" > "$WORKSPACE_USED"
+  touch "$PWD/cleanup-sentinel" || exit 1
   touch "$LOCUS_HOME/cleanup-sentinel" || exit 1
 fi
 exec '${locus.replaceAll("'", "'\\''")}' "$@"
@@ -49,7 +56,8 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     cwd: root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
       LOCUS_HOME: inherited, LOCUS_BIN: wrapper, HOME_CREATED: homeCreated,
-      HOME_USED: homeUsed, REAL_MKTEMP: realMktemp },
+      HOME_USED: homeUsed, WORKSPACE_CREATED: workspaceCreated,
+      WORKSPACE_USED: workspaceUsed, REAL_MKTEMP: realMktemp },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -64,6 +72,13 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(dirname(home), scratch);
   assert.match(home, /\/locus-e2e\.[^/]+$/);
   assert.equal(existsSync(home), false, 'temporary home survived exit cleanup');
+  assert.ok(existsSync(workspaceCreated), 'mktemp did not create the workspace');
+  assert.ok(existsSync(workspaceUsed), 'the workspace command did not enter the workspace');
+  const workspace = readFileSync(workspaceCreated, 'utf8');
+  assert.equal(readFileSync(workspaceUsed, 'utf8'), workspace, 'CLI used a different workspace');
+  assert.equal(dirname(workspace), scratch);
+  assert.match(workspace, /\/locus-ws\.[^/]+$/);
+  assert.equal(existsSync(workspace), false, 'workspace survived exit cleanup');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
   assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited',
     'cleanup must preserve the inherited home');
