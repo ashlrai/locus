@@ -17,6 +17,8 @@ the [unsigned manifest FAQ](./registry-unsigned-manifest-faq.md).
 For common trust questions, see the [registry trust FAQ](./registry-trust-faq.md).
 For the release workflow's responsibilities and limits, see
 [CI's role](./registry-manifest-ci-role.md).
+For the current CI trust status and outstanding signing work, see
+[registry trust CI status](./registry-trust-ci-status.md).
 For how the release attachment is produced and what its origin establishes,
 see [manifest provenance](./registry-manifest-provenance.md).
 For the responsibilities of each party, see
