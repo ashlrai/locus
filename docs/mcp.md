@@ -6,6 +6,34 @@ npm install -g locus-cli@0.6.2 @ashlrai/locus-mcp@0.6.2
 ```
 <!-- fresh:end -->
 
+## Agent setup
+
+An agent cannot pin. A person runs the [30-second start](../README.md#30-second-start), then the client launches the supervised server from that shell.
+
+Print the control-tools entry (`locus-mcp`) without writing a config:
+
+```bash
+locus setup --client claude --print
+locus setup --client cursor --print
+locus setup --client codex --print
+```
+
+Provider tools use `locus mcp --supervised`. Claude Code (`.mcp.json`) and Cursor (`~/.cursor/mcp.json`):
+
+```json
+{ "mcpServers": { "locus": { "command": "locus", "args": ["mcp", "--supervised"] } } }
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.locus]
+command = "locus"
+args = ["mcp", "--supervised"]
+```
+
+More blocks: [copy-paste.md](copy-paste.md). The rest of this page is the full client matrix.
+
 `locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding (provider tools need a supervised launch; see [below](#provider-tools-need-a-supervised-launch)). It is the agent-facing half of the identity plane.
 
 CLI and MCP share the same store and seal under `~/.locus` (or `LOCUS_HOME`).

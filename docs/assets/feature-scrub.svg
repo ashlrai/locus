@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="220" viewBox="0 0 720 220" role="img" aria-labelledby="scrubTitle">
+  <title id="scrubTitle">Ambient credentials are scrubbed from the child</title>
+  <rect width="720" height="220" rx="16" fill="#111118"/>
+  <text x="28" y="48" fill="#a1a1aa" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="14">PARENT SHELL</text>
+  <text x="28" y="88" fill="#fca5a5" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="18">GH_TOKEN</text>
+  <text x="28" y="118" fill="#fca5a5" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="18">AWS_PROFILE</text>
+  <text x="28" y="148" fill="#fca5a5" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="18">SUPABASE_*</text>
+  <text x="28" y="178" fill="#fca5a5" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="18">VERCEL_*</text>
+  <path d="M250 110 H390" stroke="#3f3f46" stroke-width="2"/>
+  <text x="286" y="98" fill="#71717a" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="13">scrub</text>
+  <rect x="400" y="36" width="292" height="148" rx="12" fill="#052e16" stroke="#86efac"/>
+  <text x="420" y="72" fill="#86efac" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="14">CHILD OF locus exec</text>
+  <text x="420" y="112" fill="#f4f4f5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="18">pinned provider only</text>
+  <text x="420" y="146" fill="#a1a1aa" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">other accounts removed</text>
+</svg>
