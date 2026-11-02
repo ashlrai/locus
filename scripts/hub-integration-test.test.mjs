@@ -59,7 +59,7 @@ if [[ -f "${'$'}MKTEMP_RECORD" && ! -f "${'$'}CLEANUP_RECORD" ]]; then
     project_dir="$(sed -n '2p' "${'$'}MKTEMP_RECORD")"
     if [[ -n "${'$'}project_dir" && ( "${'$'}arg" == "${'$'}home_dir" || "${'$'}arg" == "${'$'}project_dir" ) ]]; then
       [[ -f "${'$'}home_dir/cleanup-sentinel" && -f "${'$'}project_dir/cleanup-sentinel" ]] || exit 75
-      if [[ "${'$'}LOCUS_HOME" == "${'$'}home_dir" && -f "${'$'}home_dir/bindings/personal.toml" ]]; then
+      if [[ "${'$'}LOCUS_HOME" == "${'$'}home_dir" && -f "${'$'}home_dir/bindings/personal.toml" && -f "${'$'}home_dir/daemon.key" && -f "${'$'}home_dir/sessions/active.json" ]]; then
         printf '%s\\n' "${'$'}LOCUS_HOME" > "${'$'}HOME_RECORD"
       fi
       if [[ "${'$'}PWD" -ef "${'$'}project_dir" && -f "${'$'}project_dir/.mcp.json" && -f "${'$'}project_dir/hub-merged.mcp.json" ]]; then
@@ -103,10 +103,12 @@ test('successful integration smoke removes the initialized SMOKE_HOME', (t) => {
   assert.doesNotMatch(result.stdout, /^skip\s/m, 'all integration checks must run');
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
   assert.equal(paths.length, 2, 'both temporary directories must be allocated');
-  assert.equal(existsSync(homeRecord), true, 'the initialized home must exist at cleanup');
+  assert.equal(existsSync(homeRecord), true, 'the binding, seal key, and active session must exist at cleanup');
   const home = readFileSync(homeRecord, 'utf8').trim();
   assert.equal(home, paths[0], 'LOCUS_HOME must be the allocated SMOKE_HOME');
   assert.equal(dirname(home), scratch);
+  assert.ok(result.stdout.includes(`== hub-integration-test LOCUS_HOME=${home} ==`),
+    'the smoke run must report the same home');
   assert.equal(existsSync(home), false, 'the initialized SMOKE_HOME must be removed');
 });
 
