@@ -27,4 +27,7 @@ build artifacts remain in `target/`. See the
 [temporary lifecycle guide](hub-integration-temp-lifecycle.md) for details.
 
 Run `node --test scripts/hub-integration-tmpdir.test.mjs` to check the fallback
-and directory prefixes against the script.
+and directory prefixes against the script. Run
+`node --test scripts/hub-integration-test.test.mjs` for the full integration
+smoke with a `TMPDIR` containing spaces and shell metacharacters; it observes
+the directories and scan listings while they exist and checks their cleanup.
