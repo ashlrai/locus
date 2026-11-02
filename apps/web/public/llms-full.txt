@@ -111,6 +111,23 @@ listed verbatim so an agent can jump straight to the right document.
   - What ships vs roadmap
   - Composition
 
+## docs/archive-installer-acceptance.md
+
+- [Archive installer acceptance](https://github.com/ashlrai/locus/blob/main/docs/archive-installer-acceptance.md)
+  - Delivery assumptions to validate
+  - Testable outcomes
+  - Evidence and limits
+
+## docs/archive-installer-requirements.md
+
+- [Archive installer requirements](https://github.com/ashlrai/locus/blob/main/docs/archive-installer-requirements.md)
+  - Goal from the issue
+  - Prerequisite exclusions
+  - Unresolved decisions
+    - Platform coverage
+    - Installation location
+  - Evidence boundary
+
 ## docs/ashlr-handshake.md
 
 - [Ashlr companion handshake (v1)](https://github.com/ashlrai/locus/blob/main/docs/ashlr-handshake.md)
@@ -248,6 +265,14 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [E2E graph import isolation](https://github.com/ashlrai/locus/blob/main/docs/e2e-graph-isolation.md)
 
+## docs/e2e-graph-lifecycle.md
+
+- [GRAPHHOME lifecycle in the E2E suite](https://github.com/ashlrai/locus/blob/main/docs/e2e-graph-lifecycle.md)
+
+## docs/e2e-security-directories.md
+
+- [E2E security directories](https://github.com/ashlrai/locus/blob/main/docs/e2e-security-directories.md)
+
 ## docs/e2e-security-isolation.md
 
 - [E2E security isolation fixtures](https://github.com/ashlrai/locus/blob/main/docs/e2e-security-isolation.md)
@@ -329,6 +354,10 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [Hub integration smoke temporary lifecycle](https://github.com/ashlrai/locus/blob/main/docs/hub-integration-temp-lifecycle.md)
 
+## docs/hub-integration-tmpdir.md
+
+- [Hub integration test temporary paths](https://github.com/ashlrai/locus/blob/main/docs/hub-integration-tmpdir.md)
+
 ## docs/hub-integration.md
 
 - [Phantom ↔ Locus integration contract](https://github.com/ashlrai/locus/blob/main/docs/hub-integration.md)
@@ -355,6 +384,10 @@ listed verbatim so an agent can jump straight to the right document.
   - Validation
   - Related docs
 
+## docs/hub-smoke-interruption.md
+
+- [Hub smoke interruption and cleanup](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-interruption.md)
+
 ## docs/hub-smoke-output.md
 
 - [Hub smoke output](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-output.md)
@@ -378,6 +411,10 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [Hub smoke temporary resource roles](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-resource-roles.md)
 
+## docs/hub-smoke-resources.md
+
+- [Hub smoke temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-resources.md)
+
 ## docs/hub-smoke-temp-failures.md
 
 - [Hub smoke temporary-resource failures](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-temp-failures.md)
@@ -393,6 +430,13 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/hub-test-temp-comparison.md
 
 - [Hub test temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-test-temp-comparison.md)
+
+## docs/installer-acceptance-cases.md
+
+- [Archive installer acceptance cases](https://github.com/ashlrai/locus/blob/main/docs/installer-acceptance-cases.md)
+  - Setup and evidence
+  - Success cases
+  - Failure cases
 
 ## docs/installer-acceptance.md
 
@@ -604,6 +648,12 @@ listed verbatim so an agent can jump straight to the right document.
   - Checking today's asset
   - Signing capability and future release signing
 
+## docs/registry-manifest-provenance.md
+
+- [Adapter registry manifest provenance](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-provenance.md)
+  - From source to release attachment
+  - Signing and evidence
+
 ## docs/registry-manifest-verification-questions.md
 
 - [Adapter registry manifest verification: open questions](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-verification-questions.md)
@@ -675,6 +725,15 @@ listed verbatim so an agent can jump straight to the right document.
 - [Consuming an unsigned adapter registry manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-consumer-guidance.md)
   - Decide whether the check is enough
   - Interpret the result
+
+## docs/registry-unsigned-manifest-faq.md
+
+- [Unsigned adapter registry manifest FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-manifest-faq.md)
+  - What is the release manifest, and why is it unsigned?
+  - How do I compare it with a Locus CLI?
+  - Does a match prove that the release is authentic?
+  - Can someone sign a manifest today?
+  - What is future work?
 
 ## docs/RELEASE.md
 
