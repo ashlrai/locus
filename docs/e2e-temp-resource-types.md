@@ -14,7 +14,8 @@ These are script variables, not options for selecting the directory names.
 
 All five are created directly under `TMPDIR` when it is nonempty, or under
 `/tmp` when it is unset or empty. A supplied `TMPDIR` must already exist and
-be writable. The cleanup-check subshell uses a separate `TMPDIR` inside the
+be writable; the suite verifies the main home is created directly beneath it
+before continuing. The cleanup-check subshell uses a separate `TMPDIR` inside the
 main home to verify the security home creation and cleanup.
 
 After the main home is created, an `EXIT` trap removes the directories that

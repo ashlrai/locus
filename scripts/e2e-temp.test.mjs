@@ -173,6 +173,37 @@ esac
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
+test('a home created outside TMPDIR fails the temporary-root check', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const wrongRoot = join(fixture.root, 'wrong root');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  // Answer with the expected name shape but relocate the created home outside
+  // TMPDIR; the in-script check must stop the suite before the workload runs.
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+case "$2" in
+  "$TMPDIR"/locus-e2e.XXXXXX)
+    home="$("$REAL_MKTEMP" -d "$WRONG_ROOT/locus-e2e.XXXXXX")" || exit $?
+    touch "$home/sentinel" || exit 1
+    printf '%s\n' "$home"
+    ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+`, { mode: 0o755 });
+
+  const result = run(fixture, scratch, { REAL_MKTEMP: realMktemp, WRONG_ROOT: wrongRoot });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.signal, null);
+  assert.match(result.stderr, /LOCUS_HOME was not created directly beneath TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok  isolated home is created directly beneath TMPDIR/);
+  assert.deepEqual(readdirSync(wrongRoot), [], 'the misplaced home must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
 test('an unhandled setup command failure removes the populated LOCUS_HOME', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp');
