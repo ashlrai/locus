@@ -489,6 +489,7 @@ locus() {
     binding) [[ -f "$LOCUS_HOME/sentinel" ]] || return 1 ;;
     mint) printf '%s\n' '{"grant_id":"grant_fixture","token":"lmt_fixture"}' ;;
     list)
+      [[ -f "$LOCUS_HOME/sentinel" && "$LOCUS_HOME" == "$PWD/home" ]] || return 1
       if [[ -f "$STATE_DIR/revoked" ]]; then
         printf '%s\n' '[]'
       else
@@ -518,11 +519,18 @@ curl() {
     printf '200'
   fi
 }
+caller_pwd="$PWD"
+caller_home="$LOCUS_HOME"
+caller_session="$LOCUS_SESSION_ID"
 mt_grant_probe || exit 42
+[[ ! -e "$(cat "$PROBE_FILE")" ]] || exit 43
+[[ "$PWD" == "$caller_pwd" && "$LOCUS_HOME" == "$caller_home" && "$LOCUS_SESSION_ID" == "$caller_session" ]] || exit 44
+printf 'probe returned after cleanup\n'
 `;
   const result = spawnSync('bash', ['-c', successHarness, 'dogfood-test', script], {
     cwd: root,
-    env: { ...process.env, TMPDIR: scratch, TRACE_FILE: trace, PROBE_FILE: probe, STATE_DIR: root, MCP_BIN: server, PID_FILE: pidFile },
+    env: { ...process.env, TMPDIR: scratch, TRACE_FILE: trace, PROBE_FILE: probe, STATE_DIR: root, MCP_BIN: server, PID_FILE: pidFile,
+      LOCUS_HOME: join(root, 'caller-home'), LOCUS_SESSION_ID: 'caller-session' },
     encoding: 'utf8',
     timeout: 30_000,
   });
@@ -530,6 +538,7 @@ mt_grant_probe || exit 42
   assert.ifError(result.error);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'probe returned after cleanup\n');
   assert.deepEqual(readFileSync(trace, 'utf8').trim().split('\n'),
     ['init', 'binding', 'mint', 'list', 'tenantless', 'granted', 'revoke', 'revoked', 'list']);
   const probeRoot = readFileSync(probe, 'utf8').trim();
