@@ -15,6 +15,8 @@ test('normal completion removes the populated temporary project', (t) => {
   const projectRecord = join(root, 'project');
   const observed = join(root, 'observed');
   const hook = join(root, 'hook.sh');
+  const sentinel = join(root, 'keep');
+  writeFileSync(sentinel, 'unrelated');
   writeFileSync(hook, `mktemp() {
   local path
   path="$(command mktemp "$@")" || return
@@ -24,10 +26,13 @@ test('normal completion removes the populated temporary project', (t) => {
   printf '%s\\n' "$path"
 }
 rm() {
-  local project
+  local project arg targeted=
   project="$(cat "$PROJECT_RECORD")"
-  if [[ "$PWD" == "$project" && -f "$project/.mcp.json" ]]; then
-    printf '%s' observed > "$PROJECT_OBSERVED"
+  for arg in "$@"; do
+    [[ "$arg" == "$project" ]] && targeted=1
+  done
+  if [[ -n "$targeted" && "$PWD" == "$project" && -f "$project/.mcp.json" ]]; then
+    cat "$project/.mcp.json" > "$PROJECT_OBSERVED"
   fi
   command rm "$@"
 }
@@ -43,8 +48,13 @@ rm() {
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, 'smoke must complete successfully');
   assert.ok(result.stdout.split('\n').includes('== hub-smoke OK =='), 'success banner missing');
-  assert.equal(readFileSync(observed, 'utf8'), 'observed', 'cleanup must see the populated project');
+  assert.doesNotMatch(result.stdout, /^skip\s/m, 'all smoke checks must run');
+  assert.deepEqual(JSON.parse(readFileSync(observed, 'utf8')), {
+    mcpServers: { locus: { command: 'locus-mcp', args: [] } },
+  }, 'cleanup must target the project containing its MCP registration');
   const project = readFileSync(projectRecord, 'utf8');
   assert.equal(dirname(project), root);
+  assert.ok(project.slice(root.length + 1).startsWith('locus-hub-proj.'));
   assert.equal(existsSync(project), false, 'temporary project must be removed');
+  assert.equal(readFileSync(sentinel, 'utf8'), 'unrelated');
 });
