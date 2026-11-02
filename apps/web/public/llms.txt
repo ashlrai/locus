@@ -95,6 +95,7 @@ Identity is resolved at the gate, not in the prompt. Bindings hold principal, te
 - [Adapter registry signing: open questions](https://github.com/ashlrai/locus/blob/main/docs/registry-signing-open-questions.md)
 - [Adapter registry signing status](https://github.com/ashlrai/locus/blob/main/docs/registry-signing-status.md)
 - [Adapter registry trust actors](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-actors.md)
+- [Adapter registry trust: CI status](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-ci-status.md)
 - [Adapter registry trust FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-faq.md)
 - [Adapter registry release manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-trust.md)
 - [Consuming an unsigned adapter registry manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-consumer-guidance.md)

@@ -94,6 +94,10 @@ jobs:
           node --check npm-mcp/install.js
           node --check npm-mcp/bin/locus-mcp.js
           node --test npm/test
+          # Keep generated agent indexes aligned with the current source docs.
+          node apps/web/discoverability.mjs --check
+          # Exercise the dependency-free public-site contract in the required gate.
+          node --test apps/web
           node --test scripts/check-crypto.test.mjs
           node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
