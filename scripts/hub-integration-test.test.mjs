@@ -11,6 +11,7 @@ const script = join(dirname(fileURLToPath(import.meta.url)), 'hub-integration-te
 const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
 const realRm = execFileSync('which', ['rm'], { encoding: 'utf8' }).trim();
 const realCurl = execFileSync('which', ['curl'], { encoding: 'utf8' }).trim();
+const realFind = execFileSync('which', ['find'], { encoding: 'utf8' }).trim();
 
 test('the report hygiene comment points to the filesystem canary test', () => {
   const source = readFileSync(script, 'utf8');
@@ -32,6 +33,7 @@ function runWithTempDir(t, failProject = false, scratchParts = ['custom-tmp']) {
   const homeRecord = join(root, 'initialized-home-observed');
   const projectRecord = join(root, 'project-observed');
   const projectAttempt = join(root, 'project-attempt');
+  const scanRecord = join(root, 'scan-listings');
   mkdirSync(bin);
   mkdirSync(scratch, { recursive: true });
   writeFileSync(join(scratch, 'keep'), 'sentinel');
@@ -70,16 +72,27 @@ if [[ -f "${'$'}MKTEMP_RECORD" && ! -f "${'$'}CLEANUP_RECORD" ]]; then
 fi
 exec "${'$'}REAL_RM" "${'$'}@"
 `, { mode: 0o755 });
+  // The shell opens the scan listing before find starts, so observe the real
+  // file while it exists instead of inferring its creation from script text.
+  writeFileSync(join(bin, 'find'), `#!/usr/bin/env bash
+if [[ "${'$'}#" == 4 && "${'$'}2" == -type && "${'$'}3" == f && "${'$'}4" == -print0 ]]; then
+  shopt -s nullglob
+  listings=("${'$'}TMPDIR"/.locus-hub-int-scan.[0-9]*.*)
+  [[ "${'$'}{#listings[@]}" == 1 && -f "${'$'}{listings[0]}" ]] || exit 76
+  printf '%s\\n' "${'$'}{listings[0]}" >> "${'$'}SCAN_RECORD"
+fi
+exec "${'$'}REAL_FIND" "${'$'}@"
+`, { mode: 0o755 });
   const result = spawnSync('bash', [script], {
     env: { ...process.env, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
       REAL_MKTEMP: realMktemp, MKTEMP_RECORD: record, PROJECT_ATTEMPT: projectAttempt,
       FAIL_PROJECT: failProject ? '1' : '0', REAL_RM: realRm, CLEANUP_RECORD: cleanupRecord,
-      PROJECT_RECORD: projectRecord, HOME_RECORD: homeRecord },
+      PROJECT_RECORD: projectRecord, HOME_RECORD: homeRecord, REAL_FIND: realFind, SCAN_RECORD: scanRecord },
     encoding: 'utf8',
     maxBuffer: 4 * 1024 * 1024,
   });
   const paths = readFileSync(record, 'utf8').trim().split('\n');
-  return { result, scratch, paths, projectAttempt, cleanupRecord, projectRecord, homeRecord };
+  return { result, scratch, paths, projectAttempt, cleanupRecord, projectRecord, homeRecord, scanRecord };
 }
 
 test('successful integration smoke removes the initialized SMOKE_HOME', (t) => {
@@ -130,7 +143,7 @@ test('normal exit removes the populated smoke project and temporary home', (t) =
 });
 
 test('integration smoke uses and cleans TMPDIR with spaces and shell metacharacters', (t) => {
-  const { result, scratch, paths } = runWithTempDir(t, false, ['a [b]', 'c d']);
+  const { result, scratch, paths, scanRecord } = runWithTempDir(t, false, ['a [b]', 'c d']);
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, 'integration smoke must succeed');
@@ -146,6 +159,13 @@ test('integration smoke uses and cleans TMPDIR with spaces and shell metacharact
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
   for (const path of paths) {
     assert.equal(existsSync(path), false, `populated temporary directory must be removed: ${path}`);
+  }
+  const listings = readFileSync(scanRecord, 'utf8').trim().split('\n');
+  assert.equal(listings.length, 4, 'both canary regressions and both final scans must create listings');
+  for (const listing of listings) {
+    assert.equal(dirname(listing), scratch, 'each scan listing must be directly under TMPDIR');
+    assert.match(basename(listing), /^\.locus-hub-int-scan\.\d+\.\d+$/);
+    assert.equal(existsSync(listing), false, 'each scan listing must be removed');
   }
   assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
