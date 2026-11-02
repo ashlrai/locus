@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **`SUPPORT.md` (new).** Where to get help: install and MCP docs, bug and feature
+  issue forms, private security reporting, and contributing. Its relative links are
+  checked by `scripts/check-support-links.sh`, which exits 1 when one does not resolve.
+
 - **Doctor exit status in the development guide.** `CLAUDE.md` said `locus doctor`
   exits 1 on any WARN, including a missing Phantom. Since 0.5.2 a WARN made only
   of setup advisories (`phantom_missing`, `approvals_missing`,

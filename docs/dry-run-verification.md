@@ -105,6 +105,17 @@ PY
 
 # Only fixture setup writes state. Capture fresh baselines for each preview.
 locus_test init --with-samples > /dev/null
+# init's authority broker is supervised only by that one invocation: once it
+# returns, the broker publishes then retires its endpoint asynchronously
+# (`runtime/authority.json` -> `authority-retired.json`, ~250ms supervisor
+# poll). Wait for the retirement record before baselining so broker lifecycle
+# cannot race a preview window — authority files themselves stay fully in
+# scope. If a still-supervised broker stays up, the baseline simply includes it.
+for _ in $(seq 1 80); do
+  [ -e "$scratch/state/locus/runtime/authority-retired.json" ] &&
+    [ ! -e "$scratch/state/locus/runtime/authority.json" ] && break
+  sleep 0.25
+done
 for scenario in workspace remove pin missing; do
   snapshot "$scratch/before.json"
   case "$scenario" in

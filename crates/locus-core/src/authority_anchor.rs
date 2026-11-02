@@ -32,6 +32,11 @@ const IO_TIMEOUT: Duration = Duration::from_secs(2);
 /// 3s proved flaky under CI load after heavy `cargo test` + large debug binaries.
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const TEST_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// Coverage-instrumented binaries (`cargo llvm-cov` sets `--cfg coverage`) run
+/// every basic block through counter updates; identity hashing and process
+/// introspection during broker startup can take an order of magnitude longer
+/// than an ordinary debug build, so the handoff window needs real headroom.
+const COVERAGE_START_TIMEOUT: Duration = Duration::from_secs(120);
 /// Optional override: `LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS` (clamped 500–120_000).
 const BROKER_START_TIMEOUT_ENV: &str = "LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS";
 const CONTROL_TTL: Duration = Duration::from_secs(2);
@@ -97,6 +102,11 @@ struct ServerStartup {
     epoch: String,
     endpoint_generation: u64,
     launcher_executable: String,
+    /// Measured by the launcher before spawn so the broker does not re-hash its
+    /// own binary inside the startup window: the child verifies only metadata
+    /// (device/inode/length/mtime) against this recorded identity, which is
+    /// exactly what [`authenticate_server`] re-checks for every connection.
+    launcher_identity: ExecutableIdentity,
     supervisor: SupervisorIdentity,
     control_capability: String,
 }
@@ -903,11 +913,16 @@ fn start_broker(
         LocusError::AuthorityAnchorUnavailable(format!("cannot locate current executable: {error}"))
     })?;
     let executable = fs::canonicalize(executable)?;
+    // Hash the launcher here, outside the handoff window: under
+    // `-C instrument-coverage` a debug `sha2` pass over a large binary can
+    // outlast the broker start timeout all by itself.
+    let launcher_identity = executable_identity(&executable)?;
     let startup = ServerStartup {
         home: canonical_home(home)?,
         epoch: random_hex(16),
         endpoint_generation: random_u64(),
         launcher_executable: executable.display().to_string(),
+        launcher_identity,
         supervisor: platform::capture_supervisor_identity()?,
         control_capability: hex::encode(auth.key),
     };
@@ -916,9 +931,14 @@ fn start_broker(
             .or_else(|_| retry_current_endpoint(home, auth, may_restart));
     }
 
-    let mut child = Command::new(&executable)
-        .env_clear()
-        .env(SERVER_ENV, "1")
+    let mut command = Command::new(&executable);
+    command.env_clear().env(SERVER_ENV, "1");
+    // Keep coverage runtime output where the operator/CI directed it; a
+    // stripped env would drop `default.profraw` into the inherited cwd.
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // Drain stderr so a chatty failure cannot block on a full pipe, and so
@@ -1075,8 +1095,34 @@ fn run_server(
     let owner_executable = fs::canonicalize(&startup.launcher_executable).map_err(|error| {
         LocusError::AuthorityAnchorUnavailable(format!("invalid broker launcher: {error}"))
     })?;
-    let owner_executable_identity = executable_identity(&owner_executable)?;
-    if !platform::supervisor_matches_identity(&startup.supervisor)? {
+    // The launcher already hashed its own image; this broker only confirms
+    // the executable on disk still matches that measurement. A full re-hash
+    // inside the startup window can exceed the handoff timeout under
+    // `-C instrument-coverage`.
+    if !executable_metadata_matches(&owner_executable, &startup.launcher_identity)? {
+        return Err(LocusError::AuthorityAnchorUnavailable(
+            "broker launcher executable changed during startup".into(),
+        ));
+    }
+    let owner_executable_identity = startup.launcher_identity.clone();
+    // When the supervisor is the launcher itself (the common case: the broker
+    // is spawned by `current_exe`), the supervisor's executable identity is
+    // the measurement the launcher just made of the same file. Re-hashing it
+    // here would only repeat that work inside the startup window — under
+    // `-C instrument-coverage` a second pass over a large binary can outlast
+    // the handoff timeout. `supervisor_loss_reason` re-checks liveness,
+    // executable path, on-disk metadata and uid without hashing; equality of
+    // the recorded identities proves the file is the one already measured.
+    let supervisor_is_launcher = startup.supervisor.executable
+        == owner_executable.display().to_string()
+        && startup.supervisor.executable_identity == startup.launcher_identity;
+    if supervisor_is_launcher {
+        if let Some(reason) = platform::supervisor_loss_reason(&startup.supervisor) {
+            return Err(LocusError::AuthorityAnchorUnavailable(format!(
+                "authority supervisor identity is no longer current: {reason}"
+            )));
+        }
+    } else if !platform::supervisor_matches_identity(&startup.supervisor)? {
         return Err(LocusError::AuthorityAnchorUnavailable(
             "authority supervisor identity is no longer current".into(),
         ));
@@ -1984,7 +2030,9 @@ fn broker_start_timeout() -> Duration {
             return Duration::from_millis(ms.clamp(500, 120_000));
         }
     }
-    if is_test_harness() {
+    if cfg!(coverage) {
+        COVERAGE_START_TIMEOUT
+    } else if is_test_harness() {
         TEST_START_TIMEOUT
     } else {
         START_TIMEOUT
@@ -2788,8 +2836,17 @@ mod tests {
         release.join().unwrap();
         let endpoint = endpoint.expect("broker must start once the lock frees up");
         ping(dir.path(), &endpoint, &auth()).unwrap();
+        // The bound proves the start did not wait out the broker timeout
+        // (15s under test, 120s under coverage). Instrumented hashing of a
+        // large test binary can cost seconds by itself, so coverage gets
+        // headroom while still catching a full-timeout wait.
+        let bound = if cfg!(coverage) {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(5)
+        };
         assert!(
-            elapsed < Duration::from_secs(5),
+            elapsed < bound,
             "start waited {elapsed:?} for an endpoint that could not appear"
         );
         retire(dir.path());
