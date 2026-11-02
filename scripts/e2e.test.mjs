@@ -529,3 +529,41 @@ exec "$REAL_MKTEMP" "$@"
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
   assert.equal(readFileSync(join(inheritedWorkspace, 'keep'), 'utf8'), 'inherited');
 });
+
+test('security workspace with its broken policy link is removed after a late probe failure', { timeout: 1_800_000 }, (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-security-ws-late-test-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'custom tmp');
+  const workspaceRecord = join(fixture, 'security-workspace');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  // Fail the doctor probe, which runs inside the workspace after the dangling
+  // .locus.toml symlink and other fixtures have been written.
+  const wrapper = join(fixture, 'locus');
+  writeFileSync(wrapper, `#!/bin/bash
+if [[ "\${1:-}" == --json && "\${2:-}" == doctor && "$PWD" == "$TMPDIR"/locus-security-ws.* ]]; then
+  [[ -L "$PWD/.locus.toml" ]] || exit 1
+  printf '%s' "$PWD" > "$SECURITY_WS_RECORD"
+  touch "$PWD/cleanup-sentinel"
+  exit 74
+fi
+exec '${locus.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, LOCUS_BIN: wrapper, SECURITY_WS_RECORD: workspaceRecord },
+    encoding: 'utf8',
+    timeout: 1_800_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+  // 74 is not doctor's UNSAFE status (2), so the script's own check fails with 1.
+  assert.equal(result.status, 1, 'the injected doctor failure should stop e2e');
+  assert.match(result.stderr, /FAIL doctor did not report UNSAFE for broken workspace link/);
+  const workspace = readFileSync(workspaceRecord, 'utf8');
+  assert.equal(dirname(workspace), scratch);
+  assert.match(workspace, /\/locus-security-ws\.[^/]+$/);
+  assert.equal(existsSync(workspace), false, 'security workspace survived exit cleanup');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+});
