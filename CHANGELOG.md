@@ -13,6 +13,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-02
+
+Highlights: SIEM NDJSON audit export, smarter npm wrapper upgrades, idempotent `binding add`, and a hardened workspace autopin write path.
+
+### Added
+
+- **SIEM export.** `locus events export --format ndjson [--since <ts>]` emits one `locus.siem.v1` event per line with stable field names. `--since` accepts RFC 3339 or `YYYY-MM-DD`. Credential-shaped keys and locator references (`phm:`, `env:`, `test:`) are deep-redacted, and the export fails closed if the finished body still matches a secret pattern.
+- **Event schema contract tests** pin the exported audit event shape so downstream parsers can rely on it.
+
+### Security
+
+- Workspace `.locus.toml` updates made by autopin now go through one private atomic write path that reads the existing file through a single no-follow descriptor, so a symlink swapped in for the file is not read.
+
+### Internal
+
+- The `locus-mcp` tool catalog and call gate moved from `main.rs` into `lib.rs` with no behavior change, so integration tests can exercise it directly.
+- Expanded dry-run, JSON-failure, README-command and registry-manifest documentation tests.
+
 ### Documentation
 
 - **Shell installer proposal ([#169](https://github.com/ashlrai/locus/issues/169)).**
@@ -126,7 +144,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **npm wrapper upgrades ([#177](https://github.com/ashlrai/locus/issues/177)).**
-  In this unreleased checkout, both wrappers compare versions using SemVer
+  Starting in 0.7.0, both wrappers compare versions using SemVer
   precedence, probing the binary with `--version` before falling back to its
   adjacent `.version` file. By default, an equal cached version is reused; an
   older one can be upgraded. With a newer or unversioned cache, `locus-cli`

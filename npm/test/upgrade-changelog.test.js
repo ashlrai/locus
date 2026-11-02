@@ -5,10 +5,11 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const test = require("node:test");
 
-test("unreleased changelog distinguishes npm wrapper upgrade behavior", () => {
+test("changelog distinguishes npm wrapper upgrade behavior", () => {
   const changelog = readFileSync(join(__dirname, "../..", "CHANGELOG.md"), "utf8");
-  const unreleased = changelog.split("## [Unreleased]")[1].split("\n## [")[0];
-  const note = unreleased.split("**npm wrapper upgrades")[1].split("\n- **")[0]
+  // The note ships in the 0.7.0 section, the first release after Unreleased.
+  const section = changelog.split("## [0.7.0]")[1].split("\n## [")[0];
+  const note = section.split("**npm wrapper upgrades")[1].split("\n- **")[0]
     .replace(/\s+/g, " ");
 
   assert.match(note, /equal cached version is reused; an older one can be upgraded/);
