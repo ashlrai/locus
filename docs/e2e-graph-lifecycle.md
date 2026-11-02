@@ -13,6 +13,8 @@ script-owned temporary directory, not a setting for choosing a Locus home.
    `GRAPH_HOME` a new directory from `mktemp -d`, using the template
    `locus-graph-imp.XXXXXX` directly under a nonempty `TMPDIR`, or `/tmp` if
    `TMPDIR` is unset or empty. A supplied `TMPDIR` must exist and be writable.
+   Under a supplied `TMPDIR` the script then verifies the new directory is
+   directly beneath it and named `locus-graph-imp.*`, and stops otherwise.
    No graph home is created when the graph section is skipped or either
    same-home import succeeds.
 3. **Use.** The fallback runs `locus init` and then `locus graph import` with
