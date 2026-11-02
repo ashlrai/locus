@@ -181,6 +181,7 @@ for (const failure of ['none', 'init', 'import']) {
     const observed = join(fixture, 'graph-home');
     const imported = join(fixture, 'import-observed');
     const initialized = join(fixture, 'init-observed');
+    const attempts = join(fixture, 'same-home-attempts');
     const cleanedEarly = join(fixture, 'cleaned-before-next-section');
     mkdirSync(scratch);
     mkdirSync(bin);
@@ -196,11 +197,17 @@ if [[ "\${1:-}" == init && "$LOCUS_HOME" == "$TMPDIR"/locus-graph-imp.* ]]; then
 fi
 if [[ "\${1:-}" == graph && "\${2:-}" == import ]]; then
   if [[ "$LOCUS_HOME" != "$TMPDIR"/locus-graph-imp.* ]]; then
+    if [[ "\${4:-}" == --force ]]; then
+      printf 'force\\n' >> "$GRAPH_ATTEMPTS_RECORD"
+    else
+      printf 'normal\\n' >> "$GRAPH_ATTEMPTS_RECORD"
+    fi
     exit 1
   fi
   [[ -d "$LOCUS_HOME" && "$LOCUS_GRAPH_PASSPHRASE" == e2e-test ]] || exit 1
   [[ "$(cat "$GRAPH_INIT_RECORD")" == "$LOCUS_HOME" ]] || exit 1
   printf '%s' "$LOCUS_HOME" > "$GRAPH_HOME_RECORD"
+  touch "$LOCUS_HOME/import-sentinel" || exit 1
   : > "$GRAPH_IMPORT_RECORD"
   [[ "$GRAPH_FAILURE" != import ]] || exit 1
 fi
@@ -221,6 +228,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
         GRAPH_HOME_RECORD: observed,
         GRAPH_IMPORT_RECORD: imported,
         GRAPH_INIT_RECORD: initialized,
+        GRAPH_ATTEMPTS_RECORD: attempts,
         GRAPH_CLEANED_RECORD: cleanedEarly,
         GRAPH_FAILURE: failure,
         LOCUS_GRAPH_PASSPHRASE: 'e2e-test',
@@ -235,6 +243,8 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     assert.equal(result.status, failure === 'none' ? 0 : 1,
       `unexpected e2e exit status at stage ${stages.at(-1)?.[1] ?? 'before startup'}`);
     assert.ok(existsSync(initialized), 'fresh graph initialization was not reached');
+    assert.equal(readFileSync(attempts, 'utf8'), 'normal\nforce\n',
+      'both same-home imports must fail before the fresh-home fallback');
     assert.equal(existsSync(imported), failure !== 'init', 'unexpected fresh graph import');
     const graphHome = readFileSync(initialized, 'utf8');
     if (failure !== 'init') assert.equal(readFileSync(observed, 'utf8'), graphHome);
@@ -244,6 +254,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
     if (failure !== 'none') {
       assert.ok(/graph import failed/.test(result.stderr), 'expected graph import failure');
+      assert.doesNotMatch(result.stdout, /==> 17\. /, 'failure must stop before the next section');
     } else {
       assert.ok(existsSync(cleanedEarly), 'graph home survived until the next section');
       assert.match(result.stdout, /ok  sample exec succeeds without unset-variable warnings/);
