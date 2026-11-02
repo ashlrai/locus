@@ -23,4 +23,6 @@ The trap does not remove Cargo's persistent `target/` build outputs or the
 shared per-user authority socket directory; broker socket retirement is
 asynchronous. See the [resource map](hub-smoke-resource-map.md) for other
 resources and their lifecycles, the [prerequisites](hub-smoke-prerequisites.md)
-for setup, and the [output guide](hub-smoke-output.md) for failure messages.
+for setup, the [temporary path lifecycle](hub-smoke-temp-lifecycle.md) for
+creation and exit behavior, and the [output guide](hub-smoke-output.md) for
+failure messages.

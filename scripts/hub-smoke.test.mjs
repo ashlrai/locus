@@ -125,6 +125,49 @@ test('temporary resource guide matches allocation types and prefixes', () => {
   assert.match(doc, /uncatchable kill/);
 });
 
+test('temporary resources reference identifies each allocation and its purpose', () => {
+  const source = readFileSync(script, 'utf8');
+  const doc = readFileSync(join(dirname(script), '../docs/hub-smoke-resources.md'), 'utf8');
+  const allocations = [...source.matchAll(/if ! (SMOKE_\w+)="\$\(mktemp( -d)? "\$\{TMPDIR:-\/tmp\}\/([^"]+)"\)"/g)];
+  const expected = [
+    ['SMOKE_HOME', ' -d', 'locus-hub-smoke.XXXXXX', 'Directory', 'export LOCUS_HOME="$SMOKE_HOME"', /LOCUS_HOME.*sample bindings.*pin/],
+    ['SMOKE_PROJ', ' -d', 'locus-hub-proj.XXXXXX', 'Directory', 'cd "$SMOKE_PROJ"', /working project.*\.mcp\.json.*agent report/i],
+    ['SMOKE_ERR', undefined, 'locus-hub-smoke-err.XXXXXX', 'File', ': >"$SMOKE_ERR"', /init and pin stderr.*retry.*truncated/],
+  ];
+  assert.equal(allocations.length, expected.length, 'review the reference when allocations change');
+  for (const [index, [variable, flag, template, kind, use, purpose]] of expected.entries()) {
+    assert.deepEqual(allocations[index].slice(1), [variable, flag, template]);
+    assert.ok(source.includes(use), `script use changed: ${variable}`);
+    const row = doc.split('\n').find((line) => line.startsWith(`| \`${variable}\``));
+    assert.ok(row, `missing resource: ${variable}`);
+    assert.ok(row.includes(`| ${kind} |`) && row.includes(`\`${template}\``));
+    assert.match(row, purpose);
+  }
+});
+
+test('resource roles cite each allocation and explain its use', () => {
+  const lines = readFileSync(script, 'utf8').split('\n');
+  const doc = readFileSync(join(dirname(script), '../docs/hub-smoke-resource-roles.md'), 'utf8');
+  const allocations = lines.flatMap((line, index) => {
+    const match = line.match(/^if ! (SMOKE_\w+)="\$\(mktemp(?: -d)? /);
+    return match ? [[match[1], index + 1]] : [];
+  });
+  assert.equal(allocations.length, 3, 'review resource roles when allocations change');
+  for (const [variable, line] of allocations) {
+    const row = doc.split('\n').find((entry) => entry.startsWith(`| \`${variable}\``));
+    assert.ok(row, `missing resource role: ${variable}`);
+    assert.ok(row.includes(`../scripts/hub-smoke.sh#L${line}`), `wrong creation site: ${variable}`);
+  }
+  for (const [variable, marker, role] of [
+    ['SMOKE_HOME', 'export LOCUS_HOME="$SMOKE_HOME"', /LOCUS_HOME.*isolating/],
+    ['SMOKE_PROJ', 'cd "$SMOKE_PROJ"', /working project.*\.mcp\.json/],
+    ['SMOKE_ERR', ': >"$SMOKE_ERR"', /stderr.*truncated/],
+  ]) {
+    assert.ok(lines.some((line) => line.includes(marker)), `script use changed: ${variable}`);
+    assert.match(doc.split('\n').find((entry) => entry.startsWith(`| \`${variable}\``)), role);
+  }
+});
+
 function smokeCommandGuard(root) {
   const guard = join(root, 'guard.sh');
   const marker = join(root, 'smoke-command-ran');
@@ -136,21 +179,37 @@ jq() { : > "$SMOKE_COMMAND_MARKER"; return 1; }
   return { BASH_ENV: guard, SMOKE_COMMAND_MARKER: marker };
 }
 
-test('successful smoke cleans all resources under a custom TMPDIR', (t) => {
+for (const [description, directory] of [
+  ['custom TMPDIR', 'custom tmp'],
+  ['TMPDIR with spaces and shell pattern characters', 'a [*] b'],
+]) test(`successful smoke uses and cleans a ${description}`, (t) => {
   // The authority broker uses a Unix socket, so keep the temporary path short.
   const root = mkdtempSync('/tmp/lhs-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, 'bin');
-  const scratch = join(root, 'custom tmp');
+  const scratch = join(root, directory);
   const record = join(root, 'created');
   mkdirSync(bin);
   mkdirSync(scratch);
-  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  const sentinels = ['keep', '.hidden', 'locus-hub-smoke.unrelated',
+    'locus-hub-proj.unrelated', 'locus-hub-smoke-err.unrelated'];
+  for (const name of sentinels) writeFileSync(join(scratch, name), 'sentinel');
   writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+case "\${1:-}" in
+  -d) [[ $# -eq 2 && "$2" == "$TMPDIR"/locus-hub-*.XXXXXX ]] || exit 72 ;;
+  *)  [[ $# -eq 1 && "$1" == "$TMPDIR"/locus-hub-*.XXXXXX ]] || exit 72 ;;
+esac
 path="$("$REAL_MKTEMP" "$@")" || exit
 case "$path" in
   "$TMPDIR"/locus-hub-smoke.*|"$TMPDIR"/locus-hub-proj.*|"$TMPDIR"/locus-hub-smoke-err.*)
-    printf '%s\\n' "$path" >> "$MKTEMP_RECORD" ;;
+    if [[ "\${1:-}" == -d && -d "$path" ]]; then
+      kind=directory
+    elif [[ "\${1:-}" != -d && -f "$path" ]]; then
+      kind=file
+    else
+      exit 1
+    fi
+    printf '%s\\t%s\\n' "$kind" "$path" >> "$MKTEMP_RECORD" ;;
 esac
 printf '%s\\n' "$path"
 `, { mode: 0o755 });
@@ -177,11 +236,117 @@ printf '%s\\n' "$path"
     'ok    mcp list --json values-free roster', 'ok    mcp revoke removes grant from roster']) {
     assert.ok(result.stdout.includes(message), `missing success: ${message}`);
   }
-  const paths = readFileSync(record, 'utf8').trim().split('\n');
-  assert.equal(paths.length, 3);
-  for (const [path, prefix] of paths.map((path, i) => [path, [
-    'locus-hub-smoke.', 'locus-hub-proj.', 'locus-hub-smoke-err.',
-  ][i]])) {
+  const resources = readFileSync(record, 'utf8').trim().split('\n').map((line) => line.split('\t'));
+  assert.equal(resources.length, 3);
+  for (const [i, [kind, path]] of resources.entries()) {
+    const [expectedKind, prefix] = [
+      ['directory', 'locus-hub-smoke.'], ['directory', 'locus-hub-proj.'],
+      ['file', 'locus-hub-smoke-err.'],
+    ][i];
+    assert.equal(kind, expectedKind);
+    assert.equal(dirname(path), scratch);
+    assert.ok(path.slice(scratch.length + 1).startsWith(prefix));
+    assert.equal(existsSync(path), false, `${prefix} must be removed`);
+  }
+  assert.deepEqual(readdirSync(scratch).sort(), sentinels.sort());
+  for (const name of sentinels) assert.equal(readFileSync(join(scratch, name), 'utf8'), 'sentinel');
+});
+
+test('successful smoke removes its temporary error file', (t) => {
+  // Keep the broker socket path short and isolate the error file from other runs.
+  const root = mkdtempSync('/tmp/lhs-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary files');
+  const record = join(root, 'error-file');
+  const hook = join(root, 'observe-pin.sh');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'locus-hub-smoke-err.unrelated'), 'keep');
+  writeFileSync(hook, `locus() {
+  if [[ "$*" == 'pin personal' ]]; then
+    [[ -f "$SMOKE_ERR" ]] || return 90
+    printf 'synthetic pin diagnostic\\n' >&2
+    command locus "$@" || return
+    grep -q '^synthetic pin diagnostic$' "$SMOKE_ERR" || return 91
+    printf '%s\\n' "$SMOKE_ERR" > "$SMOKE_ERR_RECORD"
+  else
+    command locus "$@"
+  fi
+}
+`);
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, TMPDIR: scratch, BASH_ENV: hook, SMOKE_ERR_RECORD: record },
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'smoke must complete successfully');
+  assert.match(result.stdout, /^== hub-smoke OK ==$/m);
+  assert.doesNotMatch(result.stdout, /^skip\s/m, 'all smoke checks must run');
+  const errorFile = readFileSync(record, 'utf8').trim();
+  assert.equal(dirname(errorFile), scratch);
+  assert.match(errorFile.slice(scratch.length + 1), /^locus-hub-smoke-err\./);
+  assert.equal(existsSync(errorFile), false, 'the observed error file must be removed');
+  assert.equal(readFileSync(join(scratch, 'locus-hub-smoke-err.unrelated'), 'utf8'), 'keep');
+});
+
+test('a spaced TMPDIR holds all three resources until a build failure cleans them', (t) => {
+  const root = mkdtempSync('/tmp/lhs-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'custom temporary directory');
+  const record = join(root, 'created');
+  const marker = join(root, 'build-saw-resources');
+  const hook = join(root, 'hook.sh');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  writeFileSync(hook, `mktemp() {
+  local path kind
+  path="$(command mktemp "$@")" || return
+  if [[ "\${1:-}" == -d && -d "$path" ]]; then
+    kind=directory
+  elif [[ "\${1:-}" != -d && -f "$path" ]]; then
+    kind=file
+  else
+    return 1
+  fi
+  printf '%s\\t%s\\n' "$kind" "$path" >> "$SMOKE_RECORD"
+  printf '%s\\n' "$path"
+}
+jq() { return 0; }
+locus() { return 1; }
+cargo() {
+  local kind path count=0
+  while IFS=$'\\t' read -r kind path; do
+    case "$kind" in
+      directory) [[ -d "$path" ]] || return 74 ;;
+      file) [[ -f "$path" ]] || return 74 ;;
+      *) return 74 ;;
+    esac
+    count=$((count + 1))
+  done < "$SMOKE_RECORD"
+  [[ $count -eq 3 ]] || return 74
+  : > "$SMOKE_MARKER"
+  return 73
+}
+`);
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, BASH_ENV: hook, TMPDIR: scratch, SMOKE_RECORD: record, SMOKE_MARKER: marker },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the simulated build failure must propagate');
+  assert.ok(existsSync(marker), 'all resources must exist when the build starts');
+  const resources = readFileSync(record, 'utf8').trim().split('\n').map((line) => line.split('\t'));
+  assert.equal(resources.length, 3);
+  for (const [index, [kind, path]] of resources.entries()) {
+    const [expectedKind, prefix] = [
+      ['directory', 'locus-hub-smoke.'], ['directory', 'locus-hub-proj.'],
+      ['file', 'locus-hub-smoke-err.'],
+    ][index];
+    assert.equal(kind, expectedKind);
     assert.equal(dirname(path), scratch);
     assert.ok(path.slice(scratch.length + 1).startsWith(prefix));
     assert.equal(existsSync(path), false, `${prefix} must be removed`);
@@ -288,10 +453,14 @@ exec "$REAL_MKTEMP" "$@"
   });
 }
 
-test('init failure cleans the used error file and other temporary resources', (t) => {
+for (const [name, scratchName] of [
+  ['init failure cleans the used error file and other temporary resources', 'scratch'],
+  ['init failure cleans resources under a TMPDIR with spaces and shell metacharacters',
+    "scratch with spaces [*] 'quoted'"],
+]) test(name, (t) => {
   const root = mkdtempSync(join(tmpdir(), 'hub-smoke-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const scratch = join(root, 'scratch');
+  const scratch = join(root, scratchName);
   const guard = join(root, 'guard.sh');
   const marker = join(root, 'init-attempts');
   const resources = join(root, 'resources');

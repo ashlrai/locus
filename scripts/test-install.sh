@@ -390,6 +390,16 @@ assert_binaries "$TEST_CASE/home/.local/bin"
 [[ ! -e "$TEST_CASE/absolute-victim" ]] || fail 'unrelated absolute archive member was extracted'
 ok 'streams only binaries without extracting unrelated absolute paths'
 
+new_case; fixture
+printf 'archive must not write this file\n' > "$TEST_CASE/traversal-victim"
+"$REAL_TAR" -czPf "$TEST_ARCHIVE" -C "$TEST_CASE/stage" "locus-$TEST_TARGET" ../traversal-victim
+checksum
+rm "$TEST_CASE/traversal-victim"
+(cd "$TEST_CASE/stage" && success --version v1.2.3)
+assert_binaries "$TEST_CASE/home/.local/bin"
+[[ ! -e "$TEST_CASE/traversal-victim" ]] || fail 'unrelated traversal archive member was extracted'
+ok 'streams only binaries without extracting unrelated traversal paths'
+
 for destination in symlink directory; do
     new_case; fixture; seed_install
     rm "$TEST_CASE/home/.local/bin/locus-mcp"

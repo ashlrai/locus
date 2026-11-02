@@ -27,4 +27,5 @@ behind. Inspect leftovers before removing them, and do not remove the parent
 
 Run `node --test scripts/e2e-temp.test.mjs` to check the documented variable
 and prefix inventory against the script and exercise temporary-home cleanup.
-See the [E2E test map](e2e-test-map.md) for the complete suite and its coverage.
+See the [security directories](e2e-security-directories.md) for the
+security probes and the [E2E test map](e2e-test-map.md) for the full suite.

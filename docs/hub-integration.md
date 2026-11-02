@@ -17,6 +17,7 @@ Machine contract for **Phantom** (and similar orchestrators) to shell out to Loc
 | Doctor `checkLocus` | [`integrations/phantom/doctor-check.md`](../integrations/phantom/doctor-check.md) |
 | Northstar | [`GOALS.md`](../GOALS.md) · `locus goal status` |
 | Smoke | [`scripts/hub-smoke.sh`](../scripts/hub-smoke.sh), [`scripts/hub-integration-test.sh`](../scripts/hub-integration-test.sh) |
+| Integration smoke temporary paths | [`docs/hub-integration-tmpdir.md`](hub-integration-tmpdir.md) |
 
 ---
 
@@ -597,7 +598,9 @@ Exact steps: [`integrations/phantom/fleet-preflight.md`](../integrations/phantom
 
 See [hub smoke prerequisites](./hub-smoke-prerequisites.md) for setup and environment, and [hub smoke output](./hub-smoke-output.md) for the individual outcomes.
 The [temporary resource comparison](./hub-test-temp-comparison.md) covers
-both scripts' paths and cleanup.
+both scripts' paths and cleanup; the [integration smoke lifecycle](./hub-integration-temp-lifecycle.md)
+details its allocations, cleanup, and failure limits. The [integration isolation
+walkthrough](./hub-integration-isolation.md) traces each resource to the script.
 
 ```bash
 # From repo root (jq + node required for composition smoke)

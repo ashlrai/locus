@@ -11,19 +11,85 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(root, 'scripts', 'e2e.sh');
 const locus = join(root, 'target', 'release', 'locus');
 
-test('workspace creation preserves a spaced TMPDIR argument and cleans up on failure', { timeout: 1_800_000 }, (t) => {
+test('temporary home is removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-success-test-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'custom tmp $literal; [test]');
+  const inherited = join(fixture, 'inherited home');
+  const bin = join(fixture, 'bin');
+  const homeCreated = join(fixture, 'home-created');
+  const homeUsed = join(fixture, 'home-used');
+  const wrapper = join(bin, 'locus');
+  mkdirSync(scratch);
+  mkdirSync(inherited);
+  mkdirSync(bin);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(inherited, 'keep'), 'inherited');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
+if [[ "$#" -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]]; then
+  home="$("$REAL_MKTEMP" "$@")" || exit $?
+  [[ -d "$home" ]] || exit 1
+  printf '%s' "$home" > "$HOME_CREATED"
+  printf '%s\\n' "$home"
+else
+  exec "$REAL_MKTEMP" "$@"
+fi
+`, { mode: 0o755 });
+  writeFileSync(wrapper, `#!/bin/bash
+if [[ "\${1:-}" == workspace ]]; then
+  [[ -d "$LOCUS_HOME" && "$LOCUS_HOME" == "$TMPDIR"/locus-e2e.* ]] || exit 1
+  printf '%s' "$LOCUS_HOME" > "$HOME_USED"
+  touch "$LOCUS_HOME/cleanup-sentinel" || exit 1
+fi
+exec '${locus.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    cwd: root,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
+      LOCUS_HOME: inherited, LOCUS_BIN: wrapper, HOME_CREATED: homeCreated,
+      HOME_USED: homeUsed, REAL_MKTEMP: realMktemp },
+    encoding: 'utf8',
+    timeout: 1_800_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+  assert.equal(result.status, 0, 'e2e should exit successfully');
+  assert.match(result.stdout, /e2e PASS  \(\d+ checks, \d+ skipped\)/);
+  assert.ok(existsSync(homeCreated), 'mktemp did not create the temporary home');
+  assert.ok(existsSync(homeUsed), 'the workspace command did not observe the temporary home');
+  const home = readFileSync(homeCreated, 'utf8');
+  assert.equal(readFileSync(homeUsed, 'utf8'), home, 'CLI used a different home');
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-e2e\.[^/]+$/);
+  assert.equal(existsSync(home), false, 'temporary home survived exit cleanup');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+  assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited',
+    'cleanup must preserve the inherited home');
+});
+
+test('home and workspace honor a spaced TMPDIR and are cleaned up on failure', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-workspace-test-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
   const scratch = join(fixture, 'custom tmp with spaces');
   const bin = join(fixture, 'bin');
   const created = join(fixture, 'workspace-created');
   const entered = join(fixture, 'workspace-entered');
+  const homeCreated = join(fixture, 'home-created');
+  const homeUsed = join(fixture, 'home-used');
   mkdirSync(scratch);
   mkdirSync(bin);
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
   writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
 case "$*" in
+  *locus-e2e.XXXXXX*)
+    [[ $# -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]] || exit 1
+    home="$("$REAL_MKTEMP" "$@")" || exit $?
+    printf '%s' "$home" > "$HOME_CREATED"
+    printf '%s\\n' "$home"
+    ;;
   *locus-ws.XXXXXX*)
     [[ $# -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-ws.XXXXXX" ]] || exit 1
     workspace="$("$REAL_MKTEMP" "$@")" || exit $?
@@ -37,7 +103,9 @@ esac
   writeFileSync(wrapper, `#!/bin/bash
 if [[ "\${1:-}" == workspace ]]; then
   [[ -d "$PWD" ]] || exit 1
+  [[ -d "$LOCUS_HOME" ]] || exit 1
   printf '%s' "$PWD" > "$WORKSPACE_ENTERED"
+  printf '%s' "$LOCUS_HOME" > "$HOME_USED"
   touch "$PWD/cleanup-sentinel"
   exit 1
 fi
@@ -48,7 +116,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     cwd: root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
       LOCUS_BIN: wrapper, REAL_MKTEMP: realMktemp, WORKSPACE_CREATED: created,
-      WORKSPACE_ENTERED: entered },
+      WORKSPACE_ENTERED: entered, HOME_CREATED: homeCreated, HOME_USED: homeUsed },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -58,6 +126,13 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.match(result.stdout, /==> 4\. workspace allowlist/);
   assert.ok(existsSync(created), 'workspace mktemp did not receive the expected arguments');
   assert.ok(existsSync(entered), 'the workspace command was not reached');
+  assert.ok(existsSync(homeCreated), 'home mktemp did not receive the expected arguments');
+  assert.ok(existsSync(homeUsed), 'the workspace command did not observe a home');
+  const home = readFileSync(homeCreated, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-e2e\.[^/]+$/);
+  assert.equal(readFileSync(homeUsed, 'utf8'), home, 'command used a different home');
+  assert.equal(existsSync(home), false, 'home survived exit cleanup');
   const workspace = readFileSync(created, 'utf8');
   assert.equal(dirname(workspace), scratch);
   assert.match(workspace, /\/locus-ws\.[^/]+$/);
@@ -97,28 +172,42 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.doesNotMatch(result.stdout, /ok  binding add repeats without a write and rejects conflicts/);
 });
 
-for (const failImport of [false, true]) {
-  test(`graph fallback uses TMPDIR and cleans up ${failImport ? 'after import failure' : 'after import'}`, { timeout: 1_800_000 }, (t) => {
+for (const failure of ['none', 'init', 'import']) {
+  test(`graph fallback uses TMPDIR and cleans up ${failure === 'none' ? 'after import' : `after ${failure} failure`}`, { timeout: 1_800_000 }, (t) => {
     const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-test-'));
     t.after(() => rmSync(fixture, { recursive: true, force: true }));
     const scratch = join(fixture, 'custom tmp');
     const bin = join(fixture, 'bin');
     const observed = join(fixture, 'graph-home');
     const imported = join(fixture, 'import-observed');
+    const initialized = join(fixture, 'init-observed');
+    const cleanedEarly = join(fixture, 'cleaned-before-next-section');
     mkdirSync(scratch);
     mkdirSync(bin);
+    writeFileSync(join(scratch, 'keep'), 'unrelated');
 
     // Force both same-home attempts to fail, then observe the real fresh-home import.
     const wrapper = join(bin, 'locus');
     writeFileSync(wrapper, `#!/bin/bash
+if [[ "\${1:-}" == init && "$LOCUS_HOME" == "$TMPDIR"/locus-graph-imp.* ]]; then
+  [[ -d "$LOCUS_HOME" && "$LOCUS_GRAPH_PASSPHRASE" == e2e-test ]] || exit 1
+  printf '%s' "$LOCUS_HOME" > "$GRAPH_INIT_RECORD"
+  [[ "$GRAPH_FAILURE" != init ]] || exit 1
+fi
 if [[ "\${1:-}" == graph && "\${2:-}" == import ]]; then
   if [[ "$LOCUS_HOME" != "$TMPDIR"/locus-graph-imp.* ]]; then
     exit 1
   fi
-  [[ -d "$LOCUS_HOME" ]] || exit 1
+  [[ -d "$LOCUS_HOME" && "$LOCUS_GRAPH_PASSPHRASE" == e2e-test ]] || exit 1
+  [[ "$(cat "$GRAPH_INIT_RECORD")" == "$LOCUS_HOME" ]] || exit 1
   printf '%s' "$LOCUS_HOME" > "$GRAPH_HOME_RECORD"
   : > "$GRAPH_IMPORT_RECORD"
-  [[ "$FAIL_GRAPH_IMPORT" != 1 ]] || exit 1
+  [[ "$GRAPH_FAILURE" != import ]] || exit 1
+fi
+if [[ "\${1:-}" == ci && "\${2:-}" == --help && -f "$GRAPH_IMPORT_RECORD" ]]; then
+  graph_home="$(cat "$GRAPH_HOME_RECORD")"
+  [[ ! -e "$graph_home" && ! -L "$graph_home" ]] || exit 1
+  : > "$GRAPH_CLEANED_RECORD"
 fi
 exec '${locus.replaceAll("'", "'\\''")}' "$@"
 `, { mode: 0o755 });
@@ -131,7 +220,9 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
         LOCUS_BIN: wrapper,
         GRAPH_HOME_RECORD: observed,
         GRAPH_IMPORT_RECORD: imported,
-        FAIL_GRAPH_IMPORT: failImport ? '1' : '0',
+        GRAPH_INIT_RECORD: initialized,
+        GRAPH_CLEANED_RECORD: cleanedEarly,
+        GRAPH_FAILURE: failure,
         LOCUS_GRAPH_PASSPHRASE: 'e2e-test',
       },
       encoding: 'utf8',
@@ -141,17 +232,20 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
 
     assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
     const stages = [...result.stdout.matchAll(/^==> (\d+[a-z]?)\./gm)];
-    assert.equal(result.status, failImport ? 1 : 0,
+    assert.equal(result.status, failure === 'none' ? 0 : 1,
       `unexpected e2e exit status at stage ${stages.at(-1)?.[1] ?? 'before startup'}`);
-    assert.ok(existsSync(imported), 'fresh graph import was not reached');
-    const graphHome = readFileSync(observed, 'utf8');
+    assert.ok(existsSync(initialized), 'fresh graph initialization was not reached');
+    assert.equal(existsSync(imported), failure !== 'init', 'unexpected fresh graph import');
+    const graphHome = readFileSync(initialized, 'utf8');
+    if (failure !== 'init') assert.equal(readFileSync(observed, 'utf8'), graphHome);
     assert.ok(dirname(graphHome) === scratch, 'graph home was not created directly under TMPDIR');
     assert.ok(/\/locus-graph-imp\.[^/]+$/.test(graphHome), 'unexpected graph home name');
     assert.equal(existsSync(graphHome), false, 'graph home was not cleaned up');
-    assert.deepEqual(readdirSync(scratch), [], 'e2e left temporary directories behind');
-    if (failImport) {
+    assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+    if (failure !== 'none') {
       assert.ok(/graph import failed/.test(result.stderr), 'expected graph import failure');
     } else {
+      assert.ok(existsSync(cleanedEarly), 'graph home survived until the next section');
       assert.match(result.stdout, /ok  sample exec succeeds without unset-variable warnings/);
       assert.match(result.stdout, /ok  sample exec reports missing credentials/);
       assert.ok(/ok  graph export\/import into fresh LOCUS_HOME/.test(result.stdout), 'fresh import did not pass');
@@ -185,4 +279,49 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(result.status, 1, 'e2e should reject the injected warning');
   assert.match(result.stderr, /FAIL sample exec emitted an unset-variable warning/);
   assert.doesNotMatch(result.stdout, /ok  sample exec succeeds without unset-variable warnings/);
+});
+
+test('security fixtures are isolated and cleaned after a probe failure', { timeout: 1_800_000 }, (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-security-test-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'custom tmp');
+  const observed = join(fixture, 'security-home');
+  const workspaceRecord = join(fixture, 'security-workspace');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const wrapper = join(fixture, 'locus');
+  writeFileSync(wrapper, `#!/bin/bash
+if [[ "\${1:-}" == init && "$LOCUS_HOME" == "$TMPDIR"/locus-security-e2e.* ]]; then
+  [[ -d "$LOCUS_HOME" ]] || exit 1
+  printf '%s' "$LOCUS_HOME" > "$SECURITY_HOME_RECORD"
+  workspaces=("$TMPDIR"/locus-security-ws.*)
+  [[ \${#workspaces[@]} -eq 1 && -d "\${workspaces[0]}" ]] || exit 1
+  printf '%s' "\${workspaces[0]}" > "$SECURITY_WS_RECORD"
+  touch "$LOCUS_HOME/cleanup-sentinel" "\${workspaces[0]}/cleanup-sentinel"
+  exit 73
+fi
+exec '${locus.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, LOCUS_BIN: wrapper,
+      SECURITY_HOME_RECORD: observed, SECURITY_WS_RECORD: workspaceRecord },
+    encoding: 'utf8',
+    timeout: 1_800_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+  assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+  assert.equal(result.status, 73, 'the injected security initialization failure should stop e2e');
+  assert.match(result.stdout, /==> 24\. adversarial release credential\/workspace probes/);
+  const home = readFileSync(observed, 'utf8');
+  const workspace = readFileSync(workspaceRecord, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.equal(dirname(workspace), scratch);
+  assert.match(home, /\/locus-security-e2e\.[^/]+$/);
+  assert.match(workspace, /\/locus-security-ws\.[^/]+$/);
+  assert.notEqual(home, workspace);
+  assert.equal(existsSync(home), false, 'security home survived exit cleanup');
+  assert.equal(existsSync(workspace), false, 'security workspace survived exit cleanup');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
 });

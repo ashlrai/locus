@@ -146,10 +146,12 @@ dogfood_gate_self_test() {
 
 sandbox_attestation() {
   local probe_root
-  probe_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-sandbox-dogfood.XXXXXX")"
+  probe_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-sandbox-dogfood.XXXXXX")" || return 1
 
   (
-    trap 'rm -rf "$probe_root"' EXIT
+    # Function locals may be out of scope when an EXIT trap runs after exit.
+    sandbox_cleanup_root="$probe_root"
+    trap 'rm -rf "$sandbox_cleanup_root"' EXIT
     export LOCUS_HOME="$probe_root/home"
     unset LOCUS_SESSION_ID LOCUS_DOGFOOD_SANDBOX_UNUSED || true
 
