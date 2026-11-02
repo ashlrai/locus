@@ -35,4 +35,5 @@ The focused graph test runs the actual section with simulated import outcomes:
 test, `node --test scripts/e2e-temp.test.mjs`, checks that an inherited
 `GRAPH_HOME` survives early exit. The graph fallback tests in
 [`scripts/e2e.test.mjs`](../scripts/e2e.test.mjs) exercise the real release CLI
-and cleanup on success and failure.
+and cleanup on success and failure; one intercepts `rm` to confirm the
+populated import home is removed during the run, not only by the exit trap.

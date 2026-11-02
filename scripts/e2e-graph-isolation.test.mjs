@@ -1,7 +1,7 @@
 // Run: node --test scripts/e2e-graph-isolation.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,7 @@ for (const scenario of ['same-home', 'success', 'init-failure', 'import-failure'
     const home = join(fixture, 'main-home');
     const record = join(fixture, 'record');
     const importRecord = join(fixture, 'import-record');
+    const rmObserved = join(fixture, 'rm-observed');
     mkdirSync(scratch);
     mkdirSync(home);
     writeFileSync(join(scratch, 'keep'), 'unrelated');
@@ -36,6 +37,9 @@ has_cmd() { return 0; }
 rm() {
   if [[ "$TEST_SCENARIO" == cleanup-failure && "$#" -eq 2 && "$2" == "$GRAPH_HOME" ]]; then
     return 0
+  fi
+  if [[ "$#" -eq 2 && "$1" == -rf && "$2" == "$GRAPH_HOME" && -f "$2/import-sentinel" ]]; then
+    printf '%s' "$2" > "$TEST_RM_OBSERVED"
   fi
   command rm "$@"
 }
@@ -68,7 +72,7 @@ fi
 `;
     const result = spawnSync('bash', ['-c', harness], {
       env: { ...process.env, TMPDIR: scratch, TEST_MAIN_HOME: home, TEST_RECORD: record, TEST_IMPORT_RECORD: importRecord,
-        TEST_SCENARIO: scenario, LOCUS_GRAPH_PASSPHRASE: 'graph-test' },
+        TEST_RM_OBSERVED: rmObserved, TEST_SCENARIO: scenario, LOCUS_GRAPH_PASSPHRASE: 'graph-test' },
       encoding: 'utf8',
     });
     assert.equal(result.status, scenario.endsWith('failure') ? 1 : 0);
@@ -79,6 +83,8 @@ fi
       assert.match(result.stderr, /graph import failed/);
     }
     assert.deepEqual(readdirSync(scratch), ['keep']);
+    assert.equal(existsSync(rmObserved), scenario === 'success',
+      'only the success path must route the populated graph home through rm');
     if (scenario === 'same-home') {
       assert.throws(() => readFileSync(record), { code: 'ENOENT' });
     } else {
@@ -86,6 +92,10 @@ fi
       assert.equal(dirname(graphHome), scratch);
       assert.match(graphHome, /\/locus-graph-imp\.[^/]+$/);
       assert.throws(() => lstatSync(graphHome), { code: 'ENOENT' }, 'graph home survived exit cleanup');
+      if (scenario === 'success') {
+        assert.equal(readFileSync(rmObserved, 'utf8'), graphHome,
+          'rm was observed removing a different directory');
+      }
       if (scenario === 'init-failure') {
         assert.throws(() => readFileSync(importRecord), { code: 'ENOENT' });
       } else {

@@ -328,6 +328,83 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   });
 }
 
+test('graph fallback success removes the populated import home through rm', { timeout: 1_800_000 }, (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-graph-rm-test-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'custom tmp $literal; [test]');
+  const bin = join(fixture, 'bin');
+  const initialized = join(fixture, 'init-observed');
+  const attempts = join(fixture, 'same-home-attempts');
+  const rmObserved = join(fixture, 'rm-observed');
+  mkdirSync(scratch);
+  mkdirSync(bin);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const realRm = execFileSync('which', ['rm'], { encoding: 'utf8' }).trim();
+  // The section cleanup is `rm -rf "$GRAPH_HOME"` — a two-argument call. The
+  // EXIT trap passes the graph home among several arguments, so only the
+  // two-argument form proves the success-path removal carried a populated home.
+  writeFileSync(join(bin, 'rm'), `#!/bin/bash
+if [[ "$#" -eq 2 && "$1" == -rf && "$2" == "$TMPDIR"/locus-graph-imp.* ]]; then
+  if [[ -e "$2" || -L "$2" ]]; then
+    [[ -f "$2/import-sentinel" ]] || exit 1
+    printf '%s' "$2" > "$GRAPH_RM_OBSERVED"
+  fi
+fi
+exec "$REAL_RM" "$@"
+`, { mode: 0o755 });
+  const wrapper = join(bin, 'locus');
+  writeFileSync(wrapper, `#!/bin/bash
+if [[ "\${1:-}" == init && "$LOCUS_HOME" == "$TMPDIR"/locus-graph-imp.* ]]; then
+  [[ -d "$LOCUS_HOME" && "$LOCUS_GRAPH_PASSPHRASE" == e2e-test ]] || exit 1
+  printf '%s' "$LOCUS_HOME" > "$GRAPH_INIT_RECORD"
+fi
+if [[ "\${1:-}" == graph && "\${2:-}" == import ]]; then
+  if [[ "$LOCUS_HOME" != "$TMPDIR"/locus-graph-imp.* ]]; then
+    if [[ "\${4:-}" == --force ]]; then
+      printf 'force\\n' >> "$GRAPH_ATTEMPTS_RECORD"
+    else
+      printf 'normal\\n' >> "$GRAPH_ATTEMPTS_RECORD"
+    fi
+    exit 1
+  fi
+  [[ -d "$LOCUS_HOME" && "$LOCUS_GRAPH_PASSPHRASE" == e2e-test ]] || exit 1
+  [[ "$(cat "$GRAPH_INIT_RECORD")" == "$LOCUS_HOME" ]] || exit 1
+  touch "$LOCUS_HOME/import-sentinel" || exit 1
+fi
+exec '${locus.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [script], {
+    cwd: root,
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
+      LOCUS_BIN: wrapper, REAL_RM: realRm, GRAPH_INIT_RECORD: initialized,
+      GRAPH_ATTEMPTS_RECORD: attempts, GRAPH_RM_OBSERVED: rmObserved },
+    encoding: 'utf8',
+    timeout: 1_800_000,
+    maxBuffer: 10 * 1024 * 1024,
+  });
+
+  assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+  assert.equal(result.status, 0, 'e2e should exit successfully');
+  assert.match(result.stdout, /e2e PASS  \(\d+ checks, \d+ skipped\)/);
+  assert.equal(readFileSync(attempts, 'utf8'), 'normal\nforce\n',
+    'both same-home imports must fail before the fresh-home fallback');
+  assert.ok(existsSync(initialized), 'fresh graph initialization was not reached');
+  const graphHome = readFileSync(initialized, 'utf8');
+  assert.equal(dirname(graphHome), scratch);
+  assert.match(graphHome, /\/locus-graph-imp\.[^/]+$/);
+  assert.match(result.stdout, /ok  graph export\/import into fresh LOCUS_HOME/,
+    'fresh import did not pass');
+  assert.match(result.stdout, /ok  graph import temporary home removed/,
+    'the suite did not confirm the import home removal');
+  assert.ok(existsSync(rmObserved),
+    'rm was not observed removing the populated import home');
+  assert.equal(readFileSync(rmObserved, 'utf8'), graphHome,
+    'rm removed a different directory than the initialized import home');
+  assert.equal(existsSync(graphHome), false, 'graph import home survived the run');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+});
+
 test('sample exec regression rejects an unset-variable warning', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-warning-test-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
