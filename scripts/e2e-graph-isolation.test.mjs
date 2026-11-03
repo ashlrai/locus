@@ -143,3 +143,45 @@ GRAPH_HOME="$(mktemp -d "\${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
 test('e2e.sh graph home uses the same TMPDIR-or-/tmp template as the stubbed probe', () => {
   assert.ok(graph.includes('GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"'));
 });
+
+// Runs the real graph section (not a copy of its mktemp line) with a stubbed
+// mktemp that records its template, so the configured TMPDIR is proven to be used.
+test('e2e.sh graph section passes the configured TMPDIR to a stubbed mktemp', (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-real-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'temp with spaces');
+  const templates = join(fixture, 'templates');
+  mkdirSync(scratch);
+  mkdirSync(join(fixture, 'main-home'));
+  const harness = `#!/bin/bash
+set -euo pipefail
+export LOCUS_HOME="$TEST_MAIN_HOME"
+GRAPH_HOME="" WS_DIR="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+log() { :; }
+ok() { :; }
+skip() { exit 90; }
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+has_cmd() { return 0; }
+mktemp() { printf '%s\\n' "$2" >> "$TEST_TEMPLATES"; command mktemp "$@"; }
+locus() {
+  case "$1:\${2:-}" in
+    graph:export) printf 'LOCUSGRAPH00' > "$4" ;;
+    graph:import) [[ "$LOCUS_HOME" != "$TEST_MAIN_HOME" ]] ;;
+    *) return 0 ;;
+  esac
+}
+${cleanup}
+trap 'e2e_cleanup' EXIT
+${graph}
+`;
+  const result = spawnSync('bash', ['-c', harness], {
+    env: { ...process.env, TMPDIR: scratch, TEST_MAIN_HOME: join(fixture, 'main-home'),
+      TEST_TEMPLATES: templates, LOCUS_GRAPH_PASSPHRASE: 'graph-test' },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(existsSync(templates), `mktemp stub was never called: ${result.stderr}`);
+  const lines = readFileSync(templates, 'utf8').trim().split('\n');
+  assert.ok(lines.includes(`${scratch}/locus-graph-imp.XXXXXX`), lines.join('\n'));
+  assert.ok(lines.every((l) => l.startsWith(`${scratch}/`)), 'a template escaped TMPDIR');
+});
