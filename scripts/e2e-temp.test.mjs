@@ -678,3 +678,91 @@ printf '%s' "$SECURITY_WS" > "$2"
   assert.throws(() => lstatSync(ws), { code: 'ENOENT' }, 'security workspace must be removed on exit');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files and create no split paths');
 });
+
+test('repeated security home creation yields distinct directories beneath TMPDIR', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const observed = join(fixture.root, 'observed-security-homes');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createHome = source.match(/^create_security_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(createHome, 'missing security home creation function');
+
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createHome}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+create_security_home
+first="$SECURITY_HOME"
+create_security_home
+[[ -d "$first" && -d "$SECURITY_HOME" && "$first" != "$SECURITY_HOME" && ! "$first" -ef "$SECURITY_HOME" ]] || exit 1
+[[ "\${first%/*}" == "$TMPDIR" && "\${SECURITY_HOME%/*}" == "$TMPDIR" && "\${first##*/}" == locus-security-e2e.* && "\${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
+touch "$first/sentinel" "$SECURITY_HOME/sentinel"
+printf '%s\\n%s\\n' "$first" "$SECURITY_HOME" > "$2"
+`, 'security-home-repeat', scratch, observed], { encoding: 'utf8' });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'two invocations must create distinct security homes beneath TMPDIR');
+  const [first, second] = readFileSync(observed, 'utf8').trim().split('\n');
+  assert.notEqual(first, second, 'the second invocation must not reuse the first directory');
+  for (const home of [first, second]) {
+    assert.equal(dirname(home), scratch, 'each home is created directly beneath the chosen TMPDIR');
+    assert.match(home, /\/locus-security-e2e\.[^/]+$/);
+  }
+  // The EXIT trap removes the live SECURITY_HOME only; a superseded home is no
+  // longer tracked, which is why the script creates one per shell.
+  assert.throws(() => lstatSync(second), { code: 'ENOENT' }, 'the live security home must be removed on exit');
+  assert.ok(existsSync(join(first, 'sentinel')), 'the superseded home is not tracked for removal');
+  rmSync(first, { recursive: true, force: true });
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
+
+test('separate shells create distinct security homes and each cleans its own', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createHome = source.match(/^create_security_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(createHome, 'missing security home creation function');
+  const probe = `set -euo pipefail
+${cleanup}
+${createHome}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+create_security_home
+[[ -d "$SECURITY_HOME" && "\${SECURITY_HOME%/*}" == "$TMPDIR" && "\${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
+touch "$SECURITY_HOME/sentinel"
+printf '%s' "$SECURITY_HOME" > "$2"
+`;
+
+  const homes = [1, 2].map((n) => {
+    const observed = join(fixture.root, `observed-home-${n}`);
+    const result = spawnSync('bash', ['-c', probe, 'security-home-invocation', scratch, observed],
+      { encoding: 'utf8' });
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, `invocation ${n} must create its home beneath TMPDIR`);
+    return readFileSync(observed, 'utf8');
+  });
+
+  const [first, second] = homes;
+  assert.notEqual(first, second, 'each invocation must create a fresh directory');
+  for (const home of homes) {
+    assert.equal(dirname(home), scratch, 'each home is created directly beneath the chosen TMPDIR');
+    assert.match(home, /\/locus-security-e2e\.[^/]+$/);
+    assert.throws(() => lstatSync(home), { code: 'ENOENT' }, `removed by its own exit trap: ${home}`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
+});
