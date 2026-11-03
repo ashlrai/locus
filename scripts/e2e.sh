@@ -124,23 +124,42 @@ mkdir -p "$security_tmp"
   trap 'e2e_cleanup' EXIT
   create_security_home
   create_security_workspace
+  # A repeated creation must return a second, distinct workspace beneath the
+  # same root and leave the first intact. The exit trap removes only the
+  # latest SECURITY_WS assignment, so the superseded workspace is removed
+  # here and its path recorded for the parent to confirm.
+  first_security_ws="$SECURITY_WS"
+  create_security_workspace
   [[ -d "$SECURITY_HOME" && "${SECURITY_HOME%/*}" == "$TMPDIR" && \
     "${SECURITY_HOME##*/}" == locus-security-e2e.* && \
-    -d "$SECURITY_WS" && "${SECURITY_WS%/*}" == "$TMPDIR" && \
+    -d "$first_security_ws" && -d "$SECURITY_WS" && \
+    "$first_security_ws" != "$SECURITY_WS" && \
+    ! "$first_security_ws" -ef "$SECURITY_WS" && \
+    "${first_security_ws%/*}" == "$TMPDIR" && \
+    "${first_security_ws##*/}" == locus-security-ws.* && \
+    "${SECURITY_WS%/*}" == "$TMPDIR" && \
     "${SECURITY_WS##*/}" == locus-security-ws.* && \
     ! "$SECURITY_HOME" -ef "$SECURITY_WS" ]] || exit 1
   printf '%s' "$SECURITY_HOME" >"$security_tmp/security-home-path"
   printf '%s' "$SECURITY_WS" >"$security_tmp/security-workspace-path"
-  touch "$SECURITY_HOME/cleanup-sentinel" "$SECURITY_WS/cleanup-sentinel"
+  printf '%s' "$first_security_ws" >"$security_tmp/security-first-workspace-path"
+  touch "$SECURITY_HOME/cleanup-sentinel" "$SECURITY_WS/cleanup-sentinel" \
+    "$first_security_ws/cleanup-sentinel"
+  rm -rf "$first_security_ws"
 ) || die "security directories were not created distinctly beneath the supplied TMPDIR"
 security_test_home="$(cat "$security_tmp/security-home-path")"
 security_test_ws="$(cat "$security_tmp/security-workspace-path")"
+security_first_ws="$(cat "$security_tmp/security-first-workspace-path")"
+[[ "$security_first_ws" != "$security_test_ws" ]] \
+  || die "repeated security workspace creation returned the same directory"
 [[ ! -e "$security_test_home" && ! -L "$security_test_home" ]] \
   || die "security home survived exit cleanup"
 [[ ! -e "$security_test_ws" && ! -L "$security_test_ws" ]] \
   || die "security workspace survived exit cleanup"
+[[ ! -e "$security_first_ws" && ! -L "$security_first_ws" ]] \
+  || die "superseded security workspace survived cleanup"
 [[ -d "$security_tmp" ]] || die "security cleanup removed the supplied TMPDIR"
-ok "distinct security directories honor nondefault TMPDIR and are cleaned on exit"
+ok "distinct security directories, including repeated workspace creation, honor nondefault TMPDIR and are cleaned on exit"
 
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }

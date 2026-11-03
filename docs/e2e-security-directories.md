@@ -34,9 +34,11 @@ alongside the other suite-owned temporary directories, on normal exit or an
 ordinary failure. The security directories are created at the start of section
 24 and remain until that trap runs. In section 2c a subshell creates a
 separate security home and workspace inside a custom temporary directory whose
-name contains spaces. It verifies that they are distinct; its exit trap removes
-both, and the parent checks their removal and preservation of the supplied
-temporary directory.
+name contains spaces, then creates the workspace a second time. It verifies
+that all three directories are distinct. The superseded workspace is removed
+explicitly because the exit trap removes only the latest `SECURITY_WS`
+assignment; the trap removes the rest, and the parent checks their removal and
+preservation of the supplied temporary directory.
 
 A termination that prevents the trap from running or a removal error can leave
 files behind. A failure before trap installation can leave the main home, but

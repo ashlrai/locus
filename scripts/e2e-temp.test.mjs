@@ -678,3 +678,52 @@ printf '%s' "$SECURITY_WS" > "$2"
   assert.throws(() => lstatSync(ws), { code: 'ENOENT' }, 'security workspace must be removed on exit');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files and create no split paths');
 });
+
+// Two create_security_workspace invocations in one shell must hand back two
+// distinct directories beneath the chosen temporary root. The exit trap
+// removes only the latest SECURITY_WS assignment, so the probe removes the
+// superseded workspace itself — matching the section 2c subshell.
+test('two security workspace invocations create distinct directories beneath the temporary root', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  const observed = join(fixture.root, 'observed-security-workspaces');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWs = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup && createWs, 'missing cleanup or security workspace creation');
+
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createWs}
+LOCUS_HOME="$1/main-home"
+mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+create_security_workspace
+first_ws="$SECURITY_WS"
+create_security_workspace
+[[ -d "$first_ws" && -d "$SECURITY_WS" && "$first_ws" != "$SECURITY_WS" && ! "$first_ws" -ef "$SECURITY_WS" ]] || exit 1
+[[ "\${first_ws%/*}" == "$TMPDIR" && "\${first_ws##*/}" == locus-security-ws.* ]] || exit 1
+[[ "\${SECURITY_WS%/*}" == "$TMPDIR" && "\${SECURITY_WS##*/}" == locus-security-ws.* ]] || exit 1
+touch "$first_ws/sentinel" "$SECURITY_WS/sentinel"
+printf '%s\\n%s\\n' "$first_ws" "$SECURITY_WS" > "$2"
+rm -rf "$first_ws"
+`, 'security-ws-repeat', scratch, observed], {
+    env: { ...process.env, TMPDIR: scratch },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  const [first, second] = readFileSync(observed, 'utf8').split('\n');
+  assert.ok(first && second, 'both workspace paths must be recorded');
+  assert.notEqual(first, second, 'repeated creation returned the same workspace');
+  for (const ws of [first, second]) {
+    assert.equal(dirname(ws), scratch, 'workspace escaped the chosen temporary root');
+    assert.match(ws, /\/locus-security-ws\.[^/]+$/);
+    assert.throws(() => lstatSync(ws), { code: 'ENOENT' }, 'every created workspace must be removed');
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
