@@ -643,3 +643,38 @@ printf '%s' "$SECURITY_HOME" > "$2"
   assert.throws(() => lstatSync(home), { code: 'ENOENT' }, 'security home must be removed on exit');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
 });
+
+test('security workspace is created beneath a TMPDIR containing spaces as a single path and removed on exit', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'scratch dir with  spaces');
+  const observed = join(fixture.root, 'observed-security-ws');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWs = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup && createWs, 'missing cleanup or security workspace creation');
+
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createWs}
+LOCUS_HOME="$1/main-home"
+mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+create_security_workspace
+[[ -d "$SECURITY_WS" && "\${SECURITY_WS%/*}" == "$TMPDIR" && "\${SECURITY_WS##*/}" == locus-security-ws.* ]]
+touch "$SECURITY_WS/sentinel"
+printf '%s' "$SECURITY_WS" > "$2"
+`, 'security-ws-spaces', scratch, observed], {
+    env: { ...process.env, TMPDIR: scratch },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const ws = readFileSync(observed, 'utf8');
+  assert.equal(dirname(ws), scratch, 'created directly beneath the spaced TMPDIR');
+  assert.match(ws, /\/locus-security-ws\.[^/\s]+$/, 'final component is one unsplit name');
+  assert.throws(() => lstatSync(ws), { code: 'ENOENT' }, 'security workspace must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files and create no split paths');
+});
