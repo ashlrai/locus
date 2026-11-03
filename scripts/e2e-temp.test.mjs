@@ -608,3 +608,38 @@ printf '%s\\n' "\${2%XXXXXX}stub"
     assert.equal(result.stdout, `${base}/locus-security-ws.stub`);
   });
 }
+
+test('security home is created beneath a TMPDIR containing spaces and removed on exit', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'scratch dir with  spaces');
+  const observed = join(fixture.root, 'observed-security-home');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createHome = source.match(/^create_security_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup && createHome, 'missing cleanup or security home creation');
+
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createHome}
+LOCUS_HOME="$1/main-home"
+mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+create_security_home
+[[ -d "$SECURITY_HOME" && "\${SECURITY_HOME%/*}" == "$TMPDIR" && "\${SECURITY_HOME##*/}" == locus-security-e2e.* ]]
+touch "$SECURITY_HOME/sentinel"
+printf '%s' "$SECURITY_HOME" > "$2"
+`, 'security-home-spaces', scratch, observed], {
+    env: { ...process.env, TMPDIR: scratch },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const home = readFileSync(observed, 'utf8');
+  assert.equal(dirname(home), scratch, 'created at the intended spaced path');
+  assert.match(home, /\/locus-security-e2e\.[^/]+$/);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' }, 'security home must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
