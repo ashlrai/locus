@@ -549,3 +549,30 @@ exit "$2"
     assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must remove fixtures and preserve unrelated files');
   });
 }
+
+// Stubbed mktemp records the template the script's real WS_DIR line asks for,
+// so nothing is created in the real /tmp for the fallback cases.
+for (const [label, temp] of [['custom', 'custom tmp $literal; [test]'], ['unset', undefined], ['empty', '']]) {
+  test(`workspace template uses ${label} TMPDIR root`, (t) => {
+    const fixture = setup(t);
+    const scratch = join(fixture.root, temp === undefined || temp === '' ? 'unused' : temp);
+    const capture = join(fixture.root, 'template');
+    mkdirSync(scratch);
+    const createWorkspace = readFileSync(script, 'utf8').match(/^WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
+    assert.ok(createWorkspace, 'missing workspace creation');
+    writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+printf '%s' "$2" > "$PROBE_CAPTURE"
+printf '%s\\n' "\${2%XXXXXX}stub"
+`, { mode: 0o755 });
+    const env = { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}`, PROBE_CAPTURE: capture };
+    if (temp === undefined) delete env.TMPDIR;
+    else env.TMPDIR = temp === '' ? '' : scratch;
+    const result = spawnSync('bash', ['-c', `set -euo pipefail\n${createWorkspace}\nprintf '%s' "$WS_DIR"`],
+      { env, encoding: 'utf8' });
+
+    assert.equal(result.status, 0, result.stderr);
+    const root = temp ? scratch : '/tmp';
+    assert.equal(readFileSync(capture, 'utf8'), `${root}/locus-ws.XXXXXX`);
+    assert.equal(result.stdout, `${root}/locus-ws.stub`);
+  });
+}
