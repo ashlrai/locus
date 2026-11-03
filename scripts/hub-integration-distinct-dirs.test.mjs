@@ -1,7 +1,7 @@
 // Run: node --test scripts/hub-integration-distinct-dirs.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -47,3 +47,28 @@ test('SMOKE_HOME and SMOKE_PROJ are two distinct, non-nested directories under T
   for (const p of [home, proj]) assert.equal(existsSync(p), false, 'removed on exit');
 });
 
+
+test('two invocations create distinct SMOKE_HOME directories and each cleans up its own', (t) => {
+  const scratch = mkdtempSync('/tmp/locus-distinct-test-');
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const tmp = join(scratch, 'tmp');
+  mkdirSync(tmp);
+
+  const runs = [1, 2].map((n) => {
+    const record = join(scratch, `observed-${n}`);
+    const result = spawnSync('bash', ['-c', harness, 'distinct-test', script], {
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: tmp, RECORD: record },
+      encoding: 'utf8',
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 73, `run ${n}: both directories must exist when init runs`);
+    const [home, proj] = readFileSync(record, 'utf8').trim().split('\n');
+    return { home, proj };
+  });
+
+  const all = runs.flatMap(({ home, proj }) => [home, proj]);
+  assert.equal(new Set(all).size, 4, 'no directory name may repeat across invocations');
+  assert.notEqual(runs[0].home, runs[1].home, 'SMOKE_HOME must differ between invocations');
+  for (const p of all) assert.equal(existsSync(p), false, `removed on exit: ${p}`);
+  assert.deepEqual(readdirSync(tmp), [], 'neither invocation may leave anything behind');
+});
