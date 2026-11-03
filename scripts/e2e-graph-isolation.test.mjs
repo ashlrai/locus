@@ -110,3 +110,36 @@ fi
     }
   });
 }
+
+// A stubbed mktemp records its template, proving root selection (TMPDIR, else /tmp)
+// independently of where the real mktemp happens to place the directory.
+for (const [name, useTmpdir] of [['TMPDIR set', true], ['TMPDIR unset', false]]) {
+  test(`graph home mktemp template is rooted by the temporary root (${name})`, (t) => {
+    const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-stub-'));
+    t.after(() => rmSync(fixture, { recursive: true, force: true }));
+    const scratch = join(fixture, 'temp with spaces');
+    const templates = join(fixture, 'templates');
+    mkdirSync(scratch);
+    const harness = `#!/bin/bash
+set -uo pipefail
+GRAPH_HOME=""
+log() { :; }
+ok() { :; }
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+mktemp() { printf '%s\\n' "$2" >> "$TEST_TEMPLATES"; command mktemp "$@"; }
+locus() { return 1; }
+GRAPH_HOME="$(mktemp -d "\${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
+[[ -d "$GRAPH_HOME" ]] && command rm -rf "$GRAPH_HOME"
+`;
+    const env = { ...process.env, TEST_TEMPLATES: templates };
+    if (useTmpdir) env.TMPDIR = scratch; else delete env.TMPDIR;
+    const result = spawnSync('bash', ['-c', harness], { env, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(templates, 'utf8').trim(),
+      `${useTmpdir ? scratch : '/tmp'}/locus-graph-imp.XXXXXX`);
+  });
+}
+
+test('e2e.sh graph home uses the same TMPDIR-or-/tmp template as the stubbed probe', () => {
+  assert.ok(graph.includes('GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"'));
+});
