@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -768,4 +768,43 @@ test('temporary failure guide covers all allocation templates', () => {
   const rows = [...guide.matchAll(/^\| `(locus-[\w.-]+\.XXXXXX)` \|/gm)]
     .map((match) => match[1]).sort();
   assert.deepEqual(rows, templates);
+});
+
+test('multi-tenant probe root is created under the supplied TMPDIR and removed on failure', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const probe = join(root, 'probe');
+  // Stub locus: record where the probe root was chosen, then fail init so the
+  // probe stops before it starts any server.
+  const harness = String.raw`
+source "$1"
+locus() {
+  if [[ "$1" == init ]]; then
+    printf '%s\n%s\n' "$LOCUS_HOME" "$PWD" > "$PROBE_FILE"
+    mkdir -p "$LOCUS_HOME"
+    touch "$LOCUS_HOME/sentinel"
+    return 1
+  fi
+}
+set +e
+mt_grant_probe
+exit "$?"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, PROBE_FILE: probe },
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  const [home, cwd] = readFileSync(probe, 'utf8').trim().split('\n');
+  const probeRoot = dirname(home);
+  assert.match(probeRoot, /\/locus-mt-dogfood\.[^/]+$/);
+  assert.equal(dirname(probeRoot), scratch);
+  assert.equal(basename(cwd), basename(probeRoot));
+  assert.equal(existsSync(probeRoot), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
 });
