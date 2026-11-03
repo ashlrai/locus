@@ -60,3 +60,7 @@ path = "tests/packaged_binaries.rs"
 [[test]]
 name = "cli-unknown-command"
 path = "tests/cli-unknown-command.rs"
+
+[[test]]
+name = "cli_help_exit"
+path = "tests/cli_help_exit.rs"
