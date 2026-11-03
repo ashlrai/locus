@@ -56,3 +56,7 @@ path = "tests/integration.rs"
 [[test]]
 name = "packaged_binaries"
 path = "tests/packaged_binaries.rs"
+
+[[test]]
+name = "cli-unknown-command"
+path = "tests/cli-unknown-command.rs"
