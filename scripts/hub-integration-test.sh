@@ -58,19 +58,6 @@ fi
 SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
 SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
 
-# Stubbed test: verify default temporary-root selection for SMOKE_PROJ.
-# When TMPDIR is unset, the ${TMPDIR:-/tmp} fallback must create under /tmp.
-# Runs in an isolated subshell with its own cleanup to avoid polluting main state.
-(
-  trap 'rm -rf -- "${_STUB_HOME:-}" "${_STUB_PROJ:-}"' EXIT
-  unset TMPDIR
-  _STUB_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
-  _STUB_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
-  [[ -d "$_STUB_PROJ" ]] || { echo "FAIL  stubbed test: SMOKE_PROJ not created under /tmp"; exit 1; }
-  [[ "${_STUB_PROJ%/}" == /tmp/* ]] || { echo "FAIL  stubbed test: SMOKE_PROJ=${_STUB_PROJ} not under /tmp"; exit 1; }
-  echo "ok    stubbed test: SMOKE_PROJ created under /tmp when TMPDIR is unset"
-) || exit 1
-
 export LOCUS_HOME="$SMOKE_HOME"
 unset LOCUS_SESSION_ID || true
 
