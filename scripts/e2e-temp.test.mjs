@@ -576,3 +576,35 @@ printf '%s\\n' "\${2%XXXXXX}stub"
     assert.equal(result.stdout, `${root}/locus-ws.stub`);
   });
 }
+
+// A stubbed mktemp counts its arguments: a space-containing TMPDIR must reach
+// it inside one quoted template, never split into several words.
+for (const [label, temp] of [['spaced', 'spaced tmp dir'], ['unset', undefined], ['empty', '']]) {
+  test(`security workspace template is one mktemp argument with ${label} TMPDIR`, (t) => {
+    const fixture = setup(t);
+    const scratch = join(fixture.root, temp || 'unused');
+    const capture = join(fixture.root, 'args');
+    mkdirSync(scratch);
+    const fn = readFileSync(script, 'utf8')
+      .match(/^create_security_workspace\(\) \{\n[^\n]*\n\}$/m)?.[0];
+    assert.ok(fn, 'missing create_security_workspace');
+    writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+printf '%s' "$#" > "$PROBE_CAPTURE.argc"
+printf '%s' "$1" > "$PROBE_CAPTURE.flag"
+printf '%s' "$2" > "$PROBE_CAPTURE.template"
+printf '%s\\n' "\${2%XXXXXX}stub"
+`, { mode: 0o755 });
+    const env = { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}`, PROBE_CAPTURE: capture };
+    if (temp === undefined) delete env.TMPDIR;
+    else env.TMPDIR = temp === '' ? '' : scratch;
+    const result = spawnSync('bash', ['-c', `set -euo pipefail\n${fn}\ncreate_security_workspace\nprintf '%s' "$SECURITY_WS"`],
+      { env, encoding: 'utf8' });
+
+    assert.equal(result.status, 0, result.stderr);
+    const base = temp ? scratch : '/tmp';
+    assert.equal(readFileSync(`${capture}.argc`, 'utf8'), '2', 'mktemp must receive exactly -d and one template');
+    assert.equal(readFileSync(`${capture}.flag`, 'utf8'), '-d');
+    assert.equal(readFileSync(`${capture}.template`, 'utf8'), `${base}/locus-security-ws.XXXXXX`);
+    assert.equal(result.stdout, `${base}/locus-security-ws.stub`);
+  });
+}
