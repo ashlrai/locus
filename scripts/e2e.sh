@@ -313,7 +313,7 @@ ok "fresh quickstart doctor rejects an invalid workspace policy"
 
 # Issue #175: repeat the same add without rewriting the binding, and keep
 # rejecting a different binding at the same alias without --force.
-log "2b. binding add is idempotent"
+log "2g. binding add is idempotent"
 ADD_HOME="$LOCUS_HOME/binding-add-test"
 add_binding() {
   LOCUS_HOME="$ADD_HOME" "$LOCUS_BIN" --json binding add e2e-add \
@@ -1742,6 +1742,15 @@ fi
 log "24. adversarial release credential/workspace probes"
 create_security_home
 create_security_workspace
+# Same containment rule as LOCUS_HOME: a supplied TMPDIR owns the security fixtures.
+if [[ -n "${TMPDIR:-}" ]]; then
+  [[ -d "$SECURITY_HOME" && "${SECURITY_HOME%/*}" == "$TMPDIR" && \
+    "${SECURITY_HOME##*/}" == locus-security-e2e.* && \
+    -d "$SECURITY_WS" && "${SECURITY_WS%/*}" == "$TMPDIR" && \
+    "${SECURITY_WS##*/}" == locus-security-ws.* ]] \
+    || die "security directories were not created directly beneath TMPDIR"
+  ok "security directories are created directly beneath TMPDIR"
+fi
 LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" init >/dev/null
 
 # Issue #175: identical retries are no-ops, but conflicting content must

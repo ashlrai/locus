@@ -32,7 +32,10 @@ After the main home is created, the script installs an `EXIT` trap. It stops
 any tracked background MCP servers and removes the security home and workspace
 alongside the other suite-owned temporary directories, on normal exit or an
 ordinary failure. The security directories are created at the start of section
-24 and remain until that trap runs. In section 2c a subshell creates a
+24 and remain until that trap runs. Section 24 applies the same containment
+rule as the main home: when `TMPDIR` is supplied it verifies both fixtures sit
+directly beneath it before the probes run, and a misplaced directory stops the
+suite while the exit trap still removes it. In section 2c a subshell creates a
 separate security home and workspace inside a custom temporary directory whose
 name contains spaces. It verifies that they are distinct; its exit trap removes
 both, and the parent checks their removal and preservation of the supplied
@@ -42,6 +45,8 @@ A termination that prevents the trap from running or a removal error can leave
 files behind. A failure before trap installation can leave the main home, but
 the security directories have not yet been created. Inspect any leftover
 `locus-security-e2e.*` and `locus-security-ws.*` directories before removing
-them; do not remove the parent `TMPDIR` or unrelated files. See the
+them; do not remove the parent `TMPDIR` or unrelated files. Run
+`node --test scripts/e2e-security-home-selection.test.mjs` for the focused
+`SECURITY_HOME` temporary-root selection and containment checks. See the
 [temporary resource reference](e2e-temp-resource-types.md) for all directory
 types and the [test map](e2e-test-map.md) for the full suite and prerequisites.

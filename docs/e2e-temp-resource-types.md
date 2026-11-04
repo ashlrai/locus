@@ -32,6 +32,8 @@ Run `node --test scripts/e2e-temp.test.mjs` to check the documented variable
 and prefix inventory against the script and exercise temporary-directory cleanup.
 Run `node --test scripts/e2e-home-selection.test.mjs` for the focused
 `LOCUS_HOME` temporary-root selection checks.
+Run `node --test scripts/e2e-security-home-selection.test.mjs` for the focused
+`SECURITY_HOME` temporary-root selection checks.
 Run `scripts/tests/e2e-tmpdir.sh` to exercise the full suite under a custom
 `TMPDIR`, including an injected failure after workspace creation.
 See the [security directories](e2e-security-directories.md) for the

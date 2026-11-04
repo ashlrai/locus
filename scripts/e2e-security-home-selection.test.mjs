@@ -36,6 +36,19 @@ function section2c() {
   return source.slice(start, end + endMarker.length);
 }
 
+// The script's real section 24 fixture setup: create both security
+// directories, then verify they sit directly beneath a supplied TMPDIR before
+// the probes run (the same containment rule as LOCUS_HOME).
+function section24() {
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('create_security_home\ncreate_security_workspace\n# Same containment rule');
+  const endMarker = 'ok "security directories are created directly beneath TMPDIR"\nfi';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start,
+    'e2e.sh must contain the section 24 security fixture containment check');
+  return source.slice(start, end + endMarker.length);
+}
+
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'locus-e2e-security-home-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -66,6 +79,40 @@ ${tail}
 printf '%s' "$SECURITY_HOME" > "$OBSERVED_HOME"
 `], { env, encoding: 'utf8' });
   return { dir, observed, result };
+}
+
+// Runs the real section 24 fixture block under the real EXIT trap.
+// tmpdir === undefined leaves TMPDIR unset; extraEnv feeds shim record files.
+// Returns the spawn result and the files the probe writes the created paths
+// to before exit cleanup runs.
+function select24(t, { tmpdir, shim = '', tail = '', extraEnv = {} }) {
+  const dir = fixture(t);
+  const observed = join(dir, 'observed-home');
+  const observedWs = join(dir, 'observed-ws');
+  const mainHome = join(dir, 'main-home');
+  mkdirSync(mainHome);
+  const { cleanup, createHome, createWs } = securityParts();
+  const env = { ...process.env, MAIN_HOME: mainHome, OBSERVED_HOME: observed,
+    OBSERVED_WS: observedWs, ...extraEnv };
+  if (tmpdir === undefined) delete env.TMPDIR;
+  else env.TMPDIR = tmpdir;
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createHome}
+${createWs}
+${shim}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$MAIN_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+${section24()}
+${tail}
+printf '%s' "$SECURITY_HOME" > "$OBSERVED_HOME"
+printf '%s' "$SECURITY_WS" > "$OBSERVED_WS"
+`], { env, encoding: 'utf8' });
+  return { dir, observed, observedWs, result };
 }
 
 test('SECURITY_HOME is created under the supplied TMPDIR', (t) => {
@@ -266,3 +313,136 @@ ${section2c()}
     'the misplaced security home must be removed by the subshell exit trap');
   assert.deepEqual(readdirSync(wrongRoot), []);
 });
+
+// Runs the real section 24 block (not a copy of its mktemp calls) with a
+// recording mktemp: the supplied TMPDIR must reach both security templates,
+// both fixtures must land directly beneath it, and the exit trap removes them.
+test('section 24 creates both security directories beneath the supplied TMPDIR', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, 'custom tmp');
+  const templates = join(dir, 'templates');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const shim = `mktemp() { printf '%s\\n' "$2" >> "$TEST_TEMPLATES"; command mktemp "$@"; }
+`;
+
+  const { observed, observedWs, result } = select24(t, {
+    tmpdir: scratch, shim,
+    tail: `
+[[ -d "$SECURITY_HOME" && -w "$SECURITY_HOME" && -d "$SECURITY_WS" && \\
+  ! "$SECURITY_HOME" -ef "$SECURITY_WS" ]] || exit 71
+touch "$SECURITY_HOME/cleanup-sentinel" "$SECURITY_WS/cleanup-sentinel" || exit 72
+`,
+    extraEnv: { TEST_TEMPLATES: templates },
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ok security directories are created directly beneath TMPDIR/);
+  assert.deepEqual(readFileSync(templates, 'utf8').trim().split('\n'), [
+    `${scratch}/locus-security-e2e.XXXXXX`,
+    `${scratch}/locus-security-ws.XXXXXX`,
+  ], 'both security fixtures must be requested beneath the supplied TMPDIR');
+  const home = readFileSync(observed, 'utf8');
+  const workspace = readFileSync(observedWs, 'utf8');
+  assert.equal(dirname(home), scratch, 'the security home sits directly beneath TMPDIR');
+  assert.equal(dirname(workspace), scratch, 'the security workspace sits directly beneath TMPDIR');
+  assert.match(home, /\/locus-security-e2e\.[A-Za-z0-9]{6}$/, 'the mktemp prefix and suffix shape hold');
+  assert.match(workspace, /\/locus-security-ws\.[A-Za-z0-9]{6}$/);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' },
+    'the populated security home must be removed on exit');
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' },
+    'the populated security workspace must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
+
+// A mktemp regression that relocates either security fixture must stop the
+// suite at the section 24 containment check, before the probes run; the exit
+// trap still removes the misplaced directory.
+for (const [label, prefix, record] of [
+  ['security home', 'locus-security-e2e', 'security-home-created'],
+  ['security workspace', 'locus-security-ws', 'security-ws-created'],
+]) {
+  test(`a ${label} created outside the supplied TMPDIR stops section 24`, (t) => {
+    const dir = fixture(t);
+    const scratch = join(dir, 'custom tmp');
+    const wrongRoot = join(dir, 'wrong root');
+    const created = join(dir, record);
+    mkdirSync(scratch);
+    mkdirSync(wrongRoot);
+    writeFileSync(join(scratch, 'keep'), 'unrelated');
+    // Answer with the expected name shape but relocate the fixture outside
+    // TMPDIR; the containment check must fail closed.
+    const shim = `mktemp() {
+  local d
+  if [[ "\${2:-}" == */${prefix}.XXXXXX ]]; then
+    d="$(command mktemp -d "$WRONG_ROOT/${prefix}.XXXXXX")"
+    printf '%s' "$d" > "$FIXTURE_CREATED"
+    printf '%s\\n' "$d"
+    return
+  fi
+  command mktemp "$@"
+}
+`;
+
+    const { result } = select24(t, {
+      tmpdir: scratch, shim,
+      extraEnv: { WRONG_ROOT: wrongRoot, FIXTURE_CREATED: created },
+    });
+
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 1, 'the section 24 containment check must fail the suite');
+    assert.match(result.stderr, /FAIL security directories were not created directly beneath TMPDIR/);
+    assert.doesNotMatch(result.stdout, /ok security directories are created directly beneath TMPDIR/);
+    const fixturePath = readFileSync(created, 'utf8');
+    assert.equal(dirname(fixturePath), wrongRoot);
+    assert.match(fixturePath, new RegExp(`/${prefix}\\.[^/]+$`));
+    assert.throws(() => lstatSync(fixturePath), { code: 'ENOENT' },
+      `the misplaced ${label} must be removed by the exit trap`);
+    assert.deepEqual(readdirSync(wrongRoot), []);
+    assert.deepEqual(readdirSync(scratch), ['keep']);
+  });
+}
+
+// With no supplied TMPDIR there is no caller-chosen boundary to check; the
+// block must still create both fixtures under the /tmp fallback and clean them.
+for (const [label, tmpdir] of [['unset', undefined], ['empty', '']]) {
+  test(`section 24 selects the /tmp root and skips the check when TMPDIR is ${label}`, (t) => {
+    const dir = fixture(t);
+    const controlled = join(dir, 'controlled');
+    const templates = join(dir, 'templates');
+    mkdirSync(controlled);
+    // Record the requested templates and redirect creation into the controlled
+    // directory so the probe never writes to the real /tmp.
+    const shim = `mktemp() {
+  printf '%s\\n' "$2" >> "$TEST_TEMPLATES"
+  case "\${2:-}" in
+    /tmp/locus-security-e2e.XXXXXX) command mktemp -d "$CONTROLLED/locus-security-e2e.XXXXXX" ;;
+    /tmp/locus-security-ws.XXXXXX) command mktemp -d "$CONTROLLED/locus-security-ws.XXXXXX" ;;
+    *) command mktemp "$@" ;;
+  esac
+}
+`;
+
+    const { observed, observedWs, result } = select24(t, {
+      tmpdir, shim,
+      extraEnv: { CONTROLLED: controlled, TEST_TEMPLATES: templates },
+    });
+
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(readFileSync(templates, 'utf8').trim().split('\n'), [
+      '/tmp/locus-security-e2e.XXXXXX',
+      '/tmp/locus-security-ws.XXXXXX',
+    ], `the script must select the /tmp root when TMPDIR is ${label}`);
+    assert.doesNotMatch(result.stdout, /ok security directories are created directly beneath TMPDIR/,
+      'the supplied-TMPDIR confirmation must not print without a supplied TMPDIR');
+    for (const record of [observed, observedWs]) {
+      const created = readFileSync(record, 'utf8');
+      assert.equal(dirname(created), controlled);
+      assert.throws(() => lstatSync(created), { code: 'ENOENT' },
+        'the redirected fixture must be cleaned up');
+    }
+    assert.deepEqual(readdirSync(controlled), []);
+  });
+}

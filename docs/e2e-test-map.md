@@ -31,10 +31,13 @@ fragment alone is not equivalent to running the suite.
 | --- | --- | --- |
 | 1 | `cargo build --release -p locus-cli -p locus-mcp --locked` | Build and check both release executables. |
 | 2 | `mktemp`, cleanup trap | Create an isolated Locus home directly beneath the requested temporary root and arrange cleanup. |
+| 2b | Home creation under a space-containing `TMPDIR` | Check the isolated home respects a path with spaces and is removed on exit. |
 | 2c | Security home creation under a custom `TMPDIR` | Check the security fixture respects a path with spaces and is removed on exit. |
 | 2d | Workspace creation under a space-containing `TMPDIR` | Check the workspace fixture respects a path with spaces and is removed on exit. |
+| 2e | Security workspace creation under a space-containing `TMPDIR` | Check the security workspace respects a path with spaces and is removed on exit. |
+| 2f | `LOCUS_HOME` under a space-containing `TMPDIR` | Check the isolated home reaches the binary and cleanup as a single path. |
 | 2a | `quickstart`, `doctor`, `doctor --json` | Check fresh-install advisories and reject invalid workspace policy. |
-| 2b | `binding add` twice, then with conflicting content | Verify an identical add preserves the file and timestamp and a conflict is rejected. |
+| 2g | `binding add` twice, then with conflicting content | Verify an identical add preserves the file and timestamp and a conflict is rejected. |
 | 3 | `init --with-samples`, `pin`, `whoami --json`, `exec` | Check sample pins, exclusive identity, credential presence metadata, binding add idempotence and missing-reference warnings. |
 | 3a | `autopin suggest` and `--json` | Check empty history returns no suggestion without changing the pin, bindings or workspace. |
 | 3b | `autopin suggest --json` with changed Git remotes | Check a secondary remote cannot spoof another repository's pin history. |
@@ -60,7 +63,7 @@ fragment alone is not equivalent to running the suite.
 | 21 | `forensics export` | Check an optional export has recognizable structure and omits secrets and credential locators. |
 | 22 | `goal status` | Check optional progress output in JSON or text. |
 | 23 | `topic` / `help topic dashboard` | Smoke-test optional topic help. |
-| 24 | Release CLI credential and workspace probes | Check conflicting adds, rejection of `test:` credentials, legacy migration, Phantom fail-closed behavior, non-disclosure and broken workspace links. |
+| 24 | Security fixtures under `TMPDIR`, then release CLI credential and workspace probes | Check the security fixtures sit directly beneath the supplied temporary root, then conflicting adds, rejection of `test:` credentials, legacy migration, Phantom fail-closed behavior, non-disclosure and broken workspace links. |
 | 25 | `verify claim --json` | Check optional claim scoring and secret hygiene. |
 | 26 | `verify session --json` | Check optional session report shape, exit status and secret hygiene. |
 | 26b | `watch --once --json`, `--require-ok` | Check optional session heartbeat shape and fail-closed status. |

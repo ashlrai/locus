@@ -40,8 +40,10 @@ if [[ -f "$HOME_CREATED" ]]; then
 fi
 exec "$REAL_RM" "$@"
 `, { mode: 0o755 });
+  // Record only the main home: the rehearsal subshells re-export TMPDIR, so
+  // matching the supplied root needs a dedicated variable.
   writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
-if [[ "$#" -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]]; then
+if [[ "$#" -eq 2 && "$1" == -d && "$2" == "$MAIN_ROOT/locus-e2e.XXXXXX" ]]; then
   home="$("$REAL_MKTEMP" "$@")" || exit $?
   [[ -d "$home" ]] || exit 1
   printf '%s' "$home" > "$HOME_CREATED"
@@ -50,9 +52,11 @@ else
   exec "$REAL_MKTEMP" "$@"
 fi
 `, { mode: 0o755 });
+  // Observe the home only inside the real suite workspace; the section 2d
+  // rehearsal also calls `locus workspace` beneath its own nested TMPDIR.
   writeFileSync(wrapper, `#!/bin/bash
-if [[ "\${1:-}" == workspace ]]; then
-  [[ -d "$LOCUS_HOME" && "$LOCUS_HOME" == "$TMPDIR"/locus-e2e.* ]] || exit 1
+if [[ "\${1:-}" == workspace && "$PWD" == "$MAIN_ROOT"/locus-ws.* ]]; then
+  [[ -d "$LOCUS_HOME" && "$LOCUS_HOME" == "$MAIN_ROOT"/locus-e2e.* ]] || exit 1
   printf '%s' "$LOCUS_HOME" > "$HOME_USED"
   touch "$LOCUS_HOME/cleanup-sentinel" || exit 1
 fi
@@ -64,7 +68,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
       LOCUS_HOME: inherited, LOCUS_BIN: wrapper, HOME_CREATED: homeCreated,
       HOME_USED: homeUsed, CLEANUP_OBSERVED: cleanupObserved, REAL_MKTEMP: realMktemp,
-      REAL_RM: realRm },
+      REAL_RM: realRm, MAIN_ROOT: scratch },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -99,16 +103,18 @@ test('home and workspace honor a spaced TMPDIR and are cleaned up on failure', {
   mkdirSync(bin);
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  // Record only fixtures directly beneath the supplied root: the rehearsal
+  // subshells re-export TMPDIR, so matching it needs a dedicated variable.
   writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
-case "$*" in
-  *locus-e2e.XXXXXX*)
-    [[ $# -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]] || exit 1
+case "$2" in
+  "$MAIN_ROOT"/locus-e2e.XXXXXX)
+    [[ $# -eq 2 && "$1" == -d ]] || exit 1
     home="$("$REAL_MKTEMP" "$@")" || exit $?
     printf '%s' "$home" > "$HOME_CREATED"
     printf '%s\\n' "$home"
     ;;
-  *locus-ws.XXXXXX*)
-    [[ $# -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-ws.XXXXXX" ]] || exit 1
+  "$MAIN_ROOT"/locus-ws.XXXXXX)
+    [[ $# -eq 2 && "$1" == -d ]] || exit 1
     workspace="$("$REAL_MKTEMP" "$@")" || exit $?
     printf '%s' "$workspace" > "$WORKSPACE_CREATED"
     printf '%s\\n' "$workspace"
@@ -117,8 +123,10 @@ case "$*" in
 esac
 `, { mode: 0o755 });
   const wrapper = join(bin, 'locus');
+  // Inject the failure only inside the real suite workspace; the section 2d
+  // rehearsal also calls `locus workspace` beneath its own nested TMPDIR.
   writeFileSync(wrapper, `#!/bin/bash
-if [[ "\${1:-}" == workspace ]]; then
+if [[ "\${1:-}" == workspace && "$PWD" == "$MAIN_ROOT"/locus-ws.* ]]; then
   [[ -d "$PWD" ]] || exit 1
   [[ -d "$LOCUS_HOME" ]] || exit 1
   printf '%s' "$PWD" > "$WORKSPACE_ENTERED"
@@ -133,7 +141,8 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     cwd: root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
       LOCUS_BIN: wrapper, REAL_MKTEMP: realMktemp, WORKSPACE_CREATED: created,
-      WORKSPACE_ENTERED: entered, HOME_CREATED: homeCreated, HOME_USED: homeUsed },
+      WORKSPACE_ENTERED: entered, HOME_CREATED: homeCreated, HOME_USED: homeUsed,
+      MAIN_ROOT: scratch },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -622,15 +631,20 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(result.status, 0, 'e2e should exit successfully');
   assert.match(result.stdout, /e2e PASS  \(\d+ checks, \d+ skipped\)/);
   assert.ok(existsSync(templates), 'no locus-security-ws template reached mktemp');
-  // Section 2c rehearses creation beneath its own nested spaced TMPDIR before
-  // the probes create the real fixture directly beneath the suite TMPDIR.
+  // Sections 2c and 2e rehearse creation beneath their own nested spaced
+  // TMPDIRs before the probes create the real fixture directly beneath the
+  // suite TMPDIR.
   const calls = readFileSync(templates, 'utf8').trim().split('\n');
-  assert.equal(calls.length, 2, 'expected the subshell rehearsal and the probe creation');
+  assert.equal(calls.length, 3, 'expected both subshell rehearsals and the probe creation');
   assert.ok(calls[0].startsWith(`${scratch}/locus-e2e.`),
-    'subshell creation must sit beneath the suite home');
+    'the 2c rehearsal must sit beneath the suite home');
   assert.ok(calls[0].endsWith('/custom temp/locus-security-ws.XXXXXX'),
-    'subshell creation must use the nested TMPDIR');
-  assert.equal(calls[1], `${scratch}/locus-security-ws.XXXXXX`);
+    'the 2c rehearsal must use the nested TMPDIR');
+  assert.ok(calls[1].startsWith(`${scratch}/locus-e2e.`),
+    'the 2e rehearsal must sit beneath the suite home');
+  assert.ok(calls[1].endsWith('/security  ws temp root/locus-security-ws.XXXXXX'),
+    'the 2e rehearsal must use its doubled-space nested TMPDIR');
+  assert.equal(calls[2], `${scratch}/locus-security-ws.XXXXXX`);
   assert.ok(existsSync(created), 'security workspace mktemp did not run beneath TMPDIR');
   const workspace = readFileSync(created, 'utf8');
   assert.equal(dirname(workspace), scratch, 'created directly beneath the spaced TMPDIR');
