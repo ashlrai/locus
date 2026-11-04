@@ -349,3 +349,17 @@ test('a rehearsal graph home created outside the supplied TMPDIR stops section 2
   assert.deepEqual(readdirSync(join(home, 'graph  home temp root')), [],
     'the rehearsal exits before recording a home path');
 });
+
+// TMPDIR must name an existing directory: a missing one fails loudly instead
+// of silently falling back to /tmp, and nothing is created in its place.
+test('a nonexistent TMPDIR fails graph home creation without creating anything', (t) => {
+  const dir = fixture(t);
+  const missing = join(dir, 'does not exist');
+
+  const { observed, result } = select(t, { tmpdir: missing });
+
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0, 'creation under a missing TMPDIR must fail');
+  assert.throws(() => lstatSync(missing), { code: 'ENOENT' }, 'the missing root must not be created');
+  assert.throws(() => lstatSync(observed), { code: 'ENOENT' }, 'no graph home may be recorded');
+});
