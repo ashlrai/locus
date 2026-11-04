@@ -139,3 +139,28 @@ test('a rehearsal home created outside the selected TMPDIR stops the suite', (t)
   assert.deepEqual(readdirSync(join(home, 'home temp root')), [],
     'the rehearsal exits before recording a home path');
 });
+
+// The rehearsal also uses the home: a nested, space-containing path under it
+// must accept a write and read back intact. A failing write stops the suite
+// and the subshell trap still removes the home.
+test('a rehearsal home that cannot be used stops the suite', (t) => {
+  const dir = fixture(t);
+  const home = join(dir, 'main home');
+  const outer = join(dir, 'outer tmp');
+  mkdirSync(home);
+  mkdirSync(outer);
+  const shim = `mkdir() {
+  if [[ "\${2:-}" == */bindings/nested\\ dir ]]; then return 1; fi
+  command mkdir "$@"
+}
+`;
+
+  const result = rehearse(home, { shim, extraEnv: { TMPDIR: outer } });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /FAIL home was not created beneath the space-containing TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok home creation succeeds/);
+  assert.deepEqual(readdirSync(join(home, 'home temp root')), ['home-path'],
+    'the failed home must be removed by the subshell exit trap');
+});

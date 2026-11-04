@@ -123,6 +123,11 @@ mkdir -p "$home_tmp"
   [[ -d "$LOCUS_HOME" && "${LOCUS_HOME%/*}" == "$TMPDIR" && \
     "${LOCUS_HOME##*/}" == locus-e2e.* ]] || exit 1
   printf '%s' "$LOCUS_HOME" >"$home_tmp/home-path"
+  # Use the home, not just create it: a nested path under the spaced root must
+  # round-trip through quoted expansions without splitting.
+  mkdir -p "$LOCUS_HOME/bindings/nested dir" || exit 2
+  printf 'payload' >"$LOCUS_HOME/bindings/nested dir/f.toml" || exit 3
+  [[ "$(cat "$LOCUS_HOME/bindings/nested dir/f.toml")" == payload ]] || exit 4
   touch "$LOCUS_HOME/cleanup-sentinel"
 ) || die "home was not created beneath the space-containing TMPDIR"
 home_test_dir="$(cat "$home_tmp/home-path")"
