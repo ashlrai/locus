@@ -77,6 +77,39 @@ test('SMOKE_PROJ is created directly beneath the supplied TMPDIR', (t) => {
   assert.equal(readFileSync(join(tmpdir, 'keep'), 'utf8'), 'sentinel');
 });
 
+test('SMOKE_PROJ treats shell metacharacters in TMPDIR as literal path characters', (t) => {
+  const scratch = mkdtempSync('/tmp/locus-proj-root-');
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const tmpdir = join(scratch, 'root [*] $(touch injected)');
+  const templates = join(scratch, 'templates');
+  const allocated = join(scratch, 'allocated');
+  const observed = join(scratch, 'observed');
+  mkdirSync(tmpdir);
+  writeFileSync(join(tmpdir, 'keep'), 'sentinel');
+
+  const result = spawnSync('bash', ['-c', harness, 'smoke-proj-literal', script], {
+    cwd: scratch,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: tmpdir, PARENT: tmpdir,
+      TEMPLATES: templates, ALLOCATED: allocated, OBSERVED: observed },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'init must observe the live project before cleanup');
+  const roots = readFileSync(templates, 'utf8').trim().split('\n');
+  const paths = readFileSync(allocated, 'utf8').trim().split('\n');
+  const [home, project] = readFileSync(observed, 'utf8').trim().split('\n');
+  assert.equal(roots[1], `${tmpdir}/locus-hub-int-proj.XXXXXX`);
+  assert.deepEqual([home, project], paths);
+  assert.equal(dirname(project), tmpdir);
+  assert.equal(existsSync(project), false, 'the project must be cleaned up');
+  assert.equal(existsSync(home), false, 'the home must be cleaned up');
+  assert.equal(existsSync(join(scratch, 'injected')), false, 'path characters must not be evaluated');
+  assert.deepEqual(readdirSync(tmpdir), ['keep']);
+  assert.equal(readFileSync(join(tmpdir, 'keep'), 'utf8'), 'sentinel');
+});
+
 // macOS exports TMPDIR with a trailing slash, so the mktemp template gains a
 // doubled separator. The project must still be allocated directly beneath the
 // supplied root — not beside it or under /tmp — and cleanup must remove it.
