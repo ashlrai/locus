@@ -102,7 +102,9 @@ test('successful integration smoke removes the initialized SMOKE_HOME', (t) => {
   assert.equal(result.status, 0, 'integration smoke must succeed');
   assert.doesNotMatch(result.stdout, /^skip\s/m, 'all integration checks must run');
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
-  assert.equal(paths.length, 2, 'both temporary directories must be allocated');
+  assert.equal(paths.length, 3, 'both temporary directories and the spaced-TMPDIR probe must be allocated');
+  assert.equal(dirname(paths[2]), join(paths[1], 'tmp with spaces'),
+    'the spaced-TMPDIR probe allocates beneath the project');
   assert.equal(existsSync(homeRecord), true, 'the binding, seal key, and active session must exist at cleanup');
   const home = readFileSync(homeRecord, 'utf8').trim();
   assert.equal(home, paths[0], 'LOCUS_HOME must be the allocated SMOKE_HOME');
@@ -160,9 +162,11 @@ test('integration smoke uses and cleans a nondefault TMPDIR', (t) => {
   assert.equal(result.status, 0, 'integration smoke must succeed');
   assert.doesNotMatch(result.stdout, /^skip\s/m, 'all integration checks must run');
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
-  assert.equal(paths.length, 2);
+  assert.equal(paths.length, 3);
   assert.match(paths[0], new RegExp(`^${scratch}/locus-hub-int\\.[^/]+$`));
   assert.match(paths[1], new RegExp(`^${scratch}/locus-hub-int-proj\\.[^/]+$`));
+  assert.equal(dirname(paths[2]), join(paths[1], 'tmp with spaces'),
+    'the spaced-TMPDIR probe allocates beneath the project');
   for (const path of paths) {
     assert.equal(existsSync(path), false, `populated temporary directory must be removed: ${path}`);
   }
@@ -178,11 +182,14 @@ test('normal exit removes the populated smoke project and temporary home', (t) =
   assert.equal(result.status, 0, 'integration smoke must finish normally');
   assert.doesNotMatch(result.stdout, /^skip\s/m, 'all integration checks must run');
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
-  assert.equal(paths.length, 2, 'both temporary directories must be allocated');
+  assert.equal(paths.length, 3, 'both temporary directories and the spaced-TMPDIR probe must be allocated');
+  assert.equal(dirname(paths[2]), join(paths[1], 'tmp with spaces'),
+    'the spaced-TMPDIR probe allocates beneath the project');
   assert.equal(existsSync(cleanupRecord), true, 'exit cleanup must receive both populated directories');
   assert.equal(existsSync(projectRecord), true, 'the project must be the working directory and contain generated files at cleanup');
   assert.equal(existsSync(paths[0]), false, 'temporary home must be removed');
   assert.equal(existsSync(paths[1]), false, 'temporary project must be removed');
+  assert.equal(existsSync(paths[2]), false, 'spaced-TMPDIR probe must be removed');
 });
 
 test('integration smoke uses and cleans TMPDIR with spaces and shell metacharacters', (t) => {
@@ -191,10 +198,12 @@ test('integration smoke uses and cleans TMPDIR with spaces and shell metacharact
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, 'integration smoke must succeed');
   assert.doesNotMatch(result.stdout, /^skip\s/m, 'all integration checks must run');
-  assert.equal(paths.length, 2);
-  assert.ok(paths.every((path) => dirname(path) === scratch && path.includes(' ')));
+  assert.equal(paths.length, 3);
+  assert.ok(paths.slice(0, 2).every((path) => dirname(path) === scratch && path.includes(' ')));
   assert.match(paths[0].slice(scratch.length + 1), /^locus-hub-int\.[^/]+$/);
   assert.match(paths[1].slice(scratch.length + 1), /^locus-hub-int-proj\.[^/]+$/);
+  assert.equal(dirname(paths[2]), join(paths[1], 'tmp with spaces'),
+    'the spaced-TMPDIR probe allocates beneath the project');
   assert.ok(result.stdout.includes(`registerLocusInMcpConfig merge write (${paths[1]}/hub-merged.mcp.json)`));
   assert.match(result.stdout, /^ok\s+mt: live drop-in slice /m);
   assert.match(result.stdout, /^ok\s+canary scan detects a canary under a spaced path$/m);
@@ -584,10 +593,12 @@ exec bash "$1"
   assert.equal(result.status, 1, 'the failed check must exit through the fail flag');
 
   const paths = readFileSync(record, 'utf8').trim().split('\n');
-  assert.equal(paths.length, 2);
-  assert.ok(paths.every((path) => dirname(path) === scratch && path.includes(' ')));
+  assert.equal(paths.length, 3);
+  assert.ok(paths.slice(0, 2).every((path) => dirname(path) === scratch && path.includes(' ')));
   assert.match(paths[0].slice(scratch.length + 1), /^locus-hub-int\.[^/]+$/);
   assert.match(paths[1].slice(scratch.length + 1), /^locus-hub-int-proj\.[^/]+$/);
+  assert.equal(dirname(paths[2]), join(paths[1], 'tmp with spaces'),
+    'the spaced-TMPDIR probe allocates beneath the project');
   for (const path of paths) {
     assert.equal(existsSync(path), false, `populated temporary directory must be removed: ${path}`);
   }
