@@ -1252,3 +1252,48 @@ for (const [label, tmpdirEnv] of [['unset', () => ({})], ['empty', () => ({ TMPD
     assert.deepEqual(left, []);
   });
 }
+
+test('multi-tenant probe directory is created literally under a glob-character TMPDIR', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-literal-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, "temporary * [a] 'quoted' directory");
+  const neighbor = join(root, "temporary match a 'quoted' directory");
+  mkdirSync(scratch);
+  mkdirSync(neighbor);
+  writeFileSync(join(scratch, 'keep'), 'scratch');
+  writeFileSync(join(neighbor, 'keep'), 'neighbor');
+  const probe = join(root, 'probe');
+  // The probe cds into its root before init, so the stub observes the live
+  // directory at creation time: it must sit directly under the literal TMPDIR
+  // (exit 43 when it does not), record it, then stop the probe before any
+  // grant or server work.
+  const harness = String.raw`
+source "$1"
+locus() {
+  if [[ "$1" == init ]]; then
+    [[ -d "$PWD" && "${'$'}{PWD%/*}" == "$TMPDIR" && "$PWD" == "$TMPDIR"/locus-mt-dogfood.* && "$LOCUS_HOME" == "$PWD/home" ]] || exit 43
+    printf '%s\n' "$PWD" > "$PROBE_FILE"
+    return 1
+  fi
+  return 1
+}
+set +e
+mt_grant_probe
+exit "$?"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, PROBE_FILE: probe },
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'probe must reach init under the supplied TMPDIR and stop on the injected failure');
+  const probeRoot = readFileSync(probe, 'utf8').trim();
+  assert.match(basename(probeRoot), /^locus-mt-dogfood\.[^/]+$/);
+  assert.equal(dirname(probeRoot), scratch);
+  assert.equal(existsSync(probeRoot), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'scratch');
+  assert.equal(readFileSync(join(neighbor, 'keep'), 'utf8'), 'neighbor',
+    'a glob-expanded TMPDIR match must not be mistaken for the probe parent');
+});
