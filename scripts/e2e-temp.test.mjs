@@ -204,6 +204,56 @@ esac
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
+test('isolated home is created directly beneath a TMPDIR containing spaces', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'scratch dir with  spaces');
+  const observed = join(fixture.root, 'observed-home');
+  const mktempArgs = join(fixture.root, 'mktemp-args');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  // A spaced parent must reach mktemp inside one quoted template. Record the
+  // arguments, then let the real command create the directory it was given.
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+printf '%s\\n' "$@" > "$MKTEMP_ARGS"
+printf '%s' "$#" >> "$MKTEMP_ARGS"
+exec "$REAL_MKTEMP" "$@"
+`, { mode: 0o755 });
+  // Exercise the script's own home creation, parent check, and EXIT cleanup.
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('export LOCUS_HOME\n');
+  const endMarker = 'ok "isolated home is created directly beneath TMPDIR"\nfi';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, 'home setup and parent check must exist');
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+${source.slice(start, end + endMarker.length)}
+touch "$LOCUS_HOME/cleanup-sentinel"
+printf '%s' "$LOCUS_HOME" > "$OBSERVED_HOME"
+`], {
+    env: { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}`, TMPDIR: scratch,
+      OBSERVED_HOME: observed, MKTEMP_ARGS: mktempArgs, REAL_MKTEMP: realMktemp },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ok isolated home is created directly beneath TMPDIR/,
+    'the script must confirm the home lands beneath the spaced parent');
+  const [flag, template, argc] = readFileSync(mktempArgs, 'utf8').split('\n');
+  assert.equal(flag, '-d');
+  assert.equal(template, `${scratch}/locus-e2e.XXXXXX`,
+    'the spaced parent must arrive inside one template argument');
+  assert.equal(argc, '2', 'mktemp must receive exactly -d and one template');
+  const home = readFileSync(observed, 'utf8');
+  assert.equal(dirname(home), scratch, 'created directly beneath the spaced TMPDIR');
+  assert.match(home, /\/locus-e2e\.[^/\s]+$/, 'home name is one unsplit component');
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' }, 'home must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
+
 test('an unhandled setup command failure removes the populated LOCUS_HOME', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp');
