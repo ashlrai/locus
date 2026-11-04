@@ -1297,3 +1297,41 @@ exit "$?"
   assert.equal(readFileSync(join(neighbor, 'keep'), 'utf8'), 'neighbor',
     'a glob-expanded TMPDIR match must not be mistaken for the probe parent');
 });
+
+for (const sig of ['HUP']) {
+  test(`dogfood home under TMPDIR is removed when the run receives SIG${sig}`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-signal-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const scratch = join(root, 'temporary directory');
+    const fixtureRoot = join(root, 'fixture');
+    const bin = join(fixtureRoot, 'target', 'debug');
+    mkdirSync(scratch);
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(join(fixtureRoot, 'scripts'));
+    writeFileSync(join(scratch, 'keep'), 'preserve');
+    writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
+    writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    // quickstart signals the parent script while the home exists, then lets it unwind.
+    writeFileSync(join(bin, 'locus'), `#!/bin/bash
+case "$1" in
+  init) printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE" ;;
+  quickstart) kill -${sig} "$PPID"; sleep 1; exit 0 ;;
+esac
+`, { mode: 0o755 });
+    const probe = join(root, 'probe');
+    const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+      cwd: root,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, PROBE_FILE: probe },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+
+    assert.ifError(result.error);
+    const home = readFileSync(probe, 'utf8').trim();
+    assert.equal(dirname(home), scratch);
+    assert.match(basename(home), /^locus-dogfood\./);
+    assert.equal(existsSync(home), false, 'signal must not leave the dogfood home behind');
+    assert.deepEqual(readdirSync(scratch), ['keep']);
+  });
+}
