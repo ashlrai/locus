@@ -679,6 +679,50 @@ printf '%s' "$SECURITY_WS" > "$2"
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files and create no split paths');
 });
 
+test('a security workspace created outside TMPDIR fails the temporary-root check', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const wrongRoot = join(fixture.root, 'wrong root');
+  const created = join(fixture.root, 'security-ws-created');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  // Answer with the expected name shape but relocate the workspace outside
+  // TMPDIR; the section 2c containment check must stop the suite before the
+  // security probes run. The subshell exit trap still removes the misplaced
+  // workspace and the parent trap removes the suite home.
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+case "$2" in
+  */locus-security-ws.XXXXXX)
+    ws="$("$REAL_MKTEMP" -d "$WRONG_ROOT/locus-security-ws.XXXXXX")" || exit $?
+    touch "$ws/sentinel" || exit 1
+    printf '%s' "$ws" > "$WS_CREATED" || exit 1
+    printf '%s\\n' "$ws"
+    ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+`, { mode: 0o755 });
+
+  const result = run(fixture, scratch, {
+    REAL_MKTEMP: realMktemp, WRONG_ROOT: wrongRoot, WS_CREATED: created,
+  });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.signal, null);
+  assert.match(result.stdout, /==> 2c\. security directories honor a nondefault TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok  distinct security directories honor nondefault TMPDIR/);
+  assert.match(result.stderr, /FAIL security directories were not created distinctly beneath the supplied TMPDIR/);
+  assert.ok(existsSync(created), 'the relocated workspace creation was not reached');
+  const workspace = readFileSync(created, 'utf8');
+  assert.equal(dirname(workspace), wrongRoot);
+  assert.match(workspace, /\/locus-security-ws\.[^/]+$/);
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' },
+    'the misplaced workspace must be removed on exit');
+  assert.deepEqual(readdirSync(wrongRoot), []);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
 test('repeated security home creation yields distinct directories beneath TMPDIR', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp');
