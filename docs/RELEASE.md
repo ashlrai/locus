@@ -224,6 +224,22 @@ cargo fmt --all -- --check
    locus --version   # or extracted binary
    ```
 
+## Automatic releases
+
+Merging a change to the Cargo workspace version (`Cargo.toml`) on `main` runs
+[`release.yml`](../.github/workflows/release.yml) with no human step: the
+`plan` job checks every version carrier (`node scripts/release-version.mjs
+check`: Cargo, `Cargo.lock`, `npm/`, `npm-mcp/`, `server.json`), requires a
+green CI run on that exact sha (the merge queue's run counts), then builds,
+creates the `v<version>` tag and GitHub Release, and publishes both npm
+packages through trusted publishing. It does nothing when the release and both
+npm versions already exist, so unrelated `Cargo.toml` edits are harmless. If a
+release run fails midway, re-run it or `gh workflow run release.yml --ref main`.
+
+To bump by hand: `node scripts/release-version.mjs sync X.Y.Z`, open a PR; CI
+fails on any carrier that disagrees. The version PR itself is opened by the
+workflow in [release-automation.md](./release-automation.md) once enabled.
+
 ## Tag and push
 
 Tags must match `v*` so [`.github/workflows/release.yml`](../.github/workflows/release.yml) runs.

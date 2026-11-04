@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - "v*"
+    # Auto-release: a merge that changes the Cargo workspace version (the
+    # version PR) releases itself. Any other Cargo.toml edit finds the tag and
+    # release already there and does nothing.
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+  # Heal a release that failed after the version landed: run on main.
+  workflow_dispatch:
   # Dry run: a PR that changes this workflow builds, packages and checksums
   # the Linux archive and verifies the assets, but never publishes a release.
   pull_request:
@@ -22,35 +30,75 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  full-suite-evidence:
-    # Release gate: the full suite (macOS and Windows included) must have
-    # passed in a manual workflow_dispatch run of CI on this exact sha.
-    name: Full suite green on release sha
+  plan:
+    # Decides what this run releases and whether the release is owed at all.
+    # Release gate: the sha must have a green CI run. A manual v* tag needs the
+    # full suite from a workflow_dispatch run; an automatic release (main push
+    # or dispatch on main) accepts the merge queue's CI Gate run on that exact
+    # sha, which is the check that let the version PR merge.
+    name: Plan release
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     permissions:
       actions: read
+      contents: read
+    outputs:
+      run: ${{ steps.plan.outputs.run }}
+      tag: ${{ steps.plan.outputs.tag }}
     steps:
-      - name: Require a successful workflow_dispatch CI run on this sha
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Decide the tag and require green CI on this sha
+        id: plan
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
-          CI_WORKFLOW: ci.yml
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
           EVENT: ${{ github.event_name }}
+          CI_WORKFLOW: ci.yml
         run: |
           set -euo pipefail
-          # PR dry runs never publish, so they need no full-suite evidence.
-          if [ "$EVENT" = "pull_request" ]; then echo "PR dry run: evidence not required"; exit 0; fi
-          n="$(gh api "repos/${REPO}/actions/workflows/${CI_WORKFLOW}/runs?event=workflow_dispatch&head_sha=${SHA}&status=success&per_page=1" --jq '.total_count')"
-          if [ "${n:-0}" -lt 1 ]; then
-            echo "::error::No successful workflow_dispatch run of ${CI_WORKFLOW} on ${SHA}. Run 'gh workflow run ${CI_WORKFLOW} --ref <this ref>', wait for green, then release."
+          # PR dry runs never publish, so they need no evidence.
+          if [ "$EVENT" = "pull_request" ]; then
+            echo "PR dry run: evidence not required"
+            { echo "run=true"; echo "tag=dry-run"; } >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          node scripts/release-version.mjs check
+          version="$(node scripts/release-version.mjs version)"
+          if [ "$EVENT" = "push" ] && [[ "$REF" == refs/tags/v* ]]; then
+            node scripts/release-version.mjs check --tag "$REF_NAME"
+            tag="$REF_NAME"; events="workflow_dispatch"
+          else
+            [ "$REF" = "refs/heads/main" ] || { echo "::error::automatic releases run from main only (ref is ${REF})"; exit 1; }
+            tag="v${version}"; events="merge_group workflow_dispatch"
+            # Owed only while the release or either npm package is missing.
+            if gh release view "$tag" --repo "$REPO" >/dev/null 2>&1 \
+               && npm view "locus-cli@${version}" version >/dev/null 2>&1 \
+               && npm view "@ashlrai/locus-mcp@${version}" version >/dev/null 2>&1; then
+              echo "${tag} is already released and on npm; nothing to do."
+              { echo "run=false"; echo "tag=${tag}"; } >> "$GITHUB_OUTPUT"; exit 0
+            fi
+          fi
+          n=0
+          for ev in $events; do
+            c="$(gh api "repos/${REPO}/actions/workflows/${CI_WORKFLOW}/runs?event=${ev}&head_sha=${SHA}&status=success&per_page=1" --jq '.total_count')"
+            n=$((n + ${c:-0}))
+          done
+          if [ "$n" -lt 1 ]; then
+            echo "::error::No successful ${CI_WORKFLOW} run (${events}) on ${SHA}. Run 'gh workflow run ${CI_WORKFLOW} --ref <this ref>', wait for green, then re-run this workflow."
             exit 1
           fi
-          echo "full suite green on ${SHA} (${n} run(s))"
+          echo "CI green on ${SHA} (${n} run(s)); releasing ${tag}"
+          { echo "run=true"; echo "tag=${tag}"; } >> "$GITHUB_OUTPUT"
 
   build:
-    needs: [full-suite-evidence]
+    needs: [plan]
+    if: needs.plan.outputs.run == 'true'
     # The PR dry run builds Linux only: the macOS job becomes a no-op on
     # ubuntu so it never queues behind the shared macOS runners.
     name: Build ${{ matrix.name }}${{ github.event_name == 'pull_request' && matrix.release_only && ' (release only)' || '' }}
@@ -149,7 +197,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [plan, build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -206,12 +254,12 @@ jobs:
       # See docs/registry-trust.md.
       - name: Export adapter registry manifest (unsigned)
         shell: bash
+        env:
+          TAG: ${{ needs.plan.outputs.tag }}
         run: |
           set -euo pipefail
-          # A tag push names it after the tag; the PR dry run's ref (`79/merge`)
-          # has a slash, so slashes become dashes.
           cargo run --release --locked -p locus-cli -- adapter registry export \
-            --out "release-assets/locus-adapters-${GITHUB_REF_NAME//\//-}.json"
+            --out "release-assets/locus-adapters-${TAG}.json"
 
       # TODO(registry-signing): once a LOCUS_REGISTRY_SIGNING_KEY repo secret
       # exists (base64 or 64-hex ed25519 seed; NOT yet provisioned — do not
@@ -231,23 +279,29 @@ jobs:
       # --ed25519-pub <b64>) in the release notes / docs/registry-trust.md.
 
       - name: Create release
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
+          # Creates the tag at this sha when an automatic release has none yet.
+          tag_name: ${{ needs.plan.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           generate_release_notes: true
           files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # npm publish through trusted publishing (OIDC): no NPM_TOKEN. Runs only on a
-  # v* tag push, after the GitHub Release exists, because the npm wrappers
-  # download that release's assets on first run. Never on a PR (the dry run).
+  # npm publish through trusted publishing (OIDC): no NPM_TOKEN. Runs for a v*
+  # tag push or an automatic release from main, after the GitHub Release
+  # exists, because the npm wrappers download that release's assets on first
+  # run. Never on a PR (the dry run).
   # Register on npmjs.com for each package: owner ashlrai, repo locus,
   # workflow release.yml, no environment.
   npm-publish:
     name: Publish npm packages (${{ matrix.dir }})
-    needs: release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [plan, release]
+    if: github.event_name != 'pull_request'
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -283,7 +337,7 @@ jobs:
           set -euo pipefail
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
-          [ "v${version}" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} does not match ${name}@${version}" >&2; exit 1; }
+          [ "v${version}" = "${TAG}" ] || { echo "tag ${TAG} does not match ${name}@${version}" >&2; exit 1; }
           echo "NPM_PKG=${name}@${version}" >> "$GITHUB_ENV"
 
       - name: Publish
