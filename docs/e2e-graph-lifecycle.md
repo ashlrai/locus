@@ -33,7 +33,9 @@ script-owned temporary directory, not a setting for choosing a Locus home.
    and unrelated files.
 
 The focused graph test runs the actual section with simulated import outcomes:
-`node --test scripts/e2e-graph-isolation.test.mjs`. The temporary resource
+`node --test scripts/e2e-graph-isolation.test.mjs`. The temporary-root
+selection checks run `create_graph_home` under the real exit trap:
+`node --test scripts/e2e-graph-home-selection.test.mjs`. The temporary resource
 test, `node --test scripts/e2e-temp.test.mjs`, checks that an inherited
 `GRAPH_HOME` survives early exit. The graph fallback tests in
 [`scripts/e2e.test.mjs`](../scripts/e2e.test.mjs) exercise the real release CLI
