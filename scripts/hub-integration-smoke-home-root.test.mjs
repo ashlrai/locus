@@ -1,7 +1,7 @@
 // Run: node --test scripts/hub-integration-smoke-home-root.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -68,6 +68,40 @@ test('SMOKE_HOME is created directly beneath an isolated TMPDIR', (t) => {
     assert.equal(existsSync(path), false, 'each allocated directory must be removed on exit');
   }
   assert.deepEqual(readdirSync(tmpdir), ['keep'], 'cleanup must leave the isolated root untouched');
+  assert.equal(readFileSync(join(tmpdir, 'keep'), 'utf8'), 'sentinel');
+});
+
+test('a relative TMPDIR selects the home root and is safe to clean up', (t) => {
+  const scratch = realpathSync(mkdtempSync('/tmp/locus-home-relative-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const relativeRoot = 'root [*] with spaces';
+  const tmpdir = join(scratch, relativeRoot);
+  const record = join(scratch, 'allocated');
+  const observed = join(scratch, 'observed');
+  mkdirSync(tmpdir);
+  writeFileSync(join(tmpdir, 'keep'), 'sentinel');
+
+  const result = spawnSync('bash', ['-c', harness, 'smoke-home-relative', script], {
+    cwd: scratch,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: relativeRoot,
+      RECORD: record, OBSERVED: observed },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'init must observe a live home under the normalized root');
+  const allocated = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(allocated.length, 2);
+  const home = readFileSync(observed, 'utf8').trim();
+  assert.equal(home, allocated[0]);
+  assert.equal(dirname(home), tmpdir);
+  assert.match(basename(home), /^locus-hub-int\.[^/]+$/);
+  for (const path of allocated) {
+    assert.equal(dirname(path), tmpdir);
+    assert.equal(existsSync(path), false, 'cleanup must remove the allocated directory');
+  }
+  assert.deepEqual(readdirSync(tmpdir), ['keep']);
   assert.equal(readFileSync(join(tmpdir, 'keep'), 'utf8'), 'sentinel');
 });
 
