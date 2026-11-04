@@ -139,6 +139,14 @@ test('sandbox probe root is created under a dedicated TMPDIR and removed', (t) =
   assert.deepEqual(left, []);
 });
 
+test('sandbox probe root stays directly beneath an explicit TMPDIR written with a trailing slash', (t) => {
+  const { controlled, template, created, left } = sandboxRootSelection(t, (dir) => ({ TMPDIR: `${dir}/` }));
+  assert.equal(template, `${controlled}//locus-sandbox-dogfood.XXXXXX`);
+  assert.equal(resolve(dirname(created)), controlled);
+  assert.match(basename(created), /^locus-sandbox-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.deepEqual(left, []);
+});
+
 for (const [label, tmpdirEnv] of [['unset', () => ({})], ['empty', () => ({ TMPDIR: '' })]]) {
   test(`sandbox probe root falls back to /tmp when TMPDIR is ${label}`, (t) => {
     const { template, left } = sandboxRootSelection(t, tmpdirEnv);
@@ -1334,6 +1342,15 @@ test('multi-tenant probe root is selected and created under an explicit TMPDIR',
   const { controlled, template, created, left } = mtRootSelection(t, (dir) => ({ TMPDIR: dir }));
   assert.equal(template, `${controlled}/locus-mt-dogfood.XXXXXX`);
   assert.equal(dirname(created), controlled);
+  assert.match(basename(created), /^locus-mt-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.equal(existsSync(created), false);
+  assert.deepEqual(left, []);
+});
+
+test('multi-tenant probe root stays directly beneath an explicit TMPDIR written with a trailing slash', (t) => {
+  const { controlled, template, created, left } = mtRootSelection(t, (dir) => ({ TMPDIR: `${dir}/` }));
+  assert.equal(template, `${controlled}//locus-mt-dogfood.XXXXXX`);
+  assert.equal(resolve(dirname(created)), controlled);
   assert.match(basename(created), /^locus-mt-dogfood\.[A-Za-z0-9]{6}$/);
   assert.equal(existsSync(created), false);
   assert.deepEqual(left, []);
