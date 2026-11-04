@@ -516,6 +516,92 @@ exit "$3"
   });
 }
 
+test('repeated workspace creation yields distinct directories beneath TMPDIR', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const observed = join(fixture.root, 'observed-workspaces');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWorkspace = source.match(/^WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(createWorkspace, 'missing workspace creation');
+
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+mkdir "$LOCUS_HOME"
+GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+${createWorkspace}
+first="$WS_DIR"
+${createWorkspace}
+[[ -d "$first" && -d "$WS_DIR" && "$first" != "$WS_DIR" && ! "$first" -ef "$WS_DIR" ]] || exit 1
+[[ "\${first%/*}" == "$TMPDIR" && "\${WS_DIR%/*}" == "$TMPDIR" && "\${first##*/}" == locus-ws.* && "\${WS_DIR##*/}" == locus-ws.* ]] || exit 1
+touch "$first/sentinel" "$WS_DIR/sentinel"
+printf '%s\\n%s\\n' "$first" "$WS_DIR" > "$2"
+`, 'workspace-repeat', scratch, observed], { encoding: 'utf8' });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'two creations must produce distinct workspaces beneath TMPDIR');
+  const [first, second] = readFileSync(observed, 'utf8').trim().split('\n');
+  assert.notEqual(first, second, 'the second creation must not reuse the first directory');
+  for (const workspace of [first, second]) {
+    assert.equal(dirname(workspace), scratch, 'each workspace is created directly beneath the chosen TMPDIR');
+    assert.match(workspace, /\/locus-ws\.[^/]+$/);
+  }
+  // The EXIT trap removes the live WS_DIR only; a superseded workspace is no
+  // longer tracked, which is why the script creates one per run.
+  assert.throws(() => lstatSync(second), { code: 'ENOENT' }, 'the live workspace must be removed on exit');
+  assert.ok(existsSync(join(first, 'sentinel')), 'the superseded workspace is not tracked for removal');
+  rmSync(first, { recursive: true, force: true });
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
+
+test('separate shells create distinct workspaces and each cleans its own', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWorkspace = source.match(/^WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(createWorkspace, 'missing workspace creation');
+  const probe = `set -euo pipefail
+${cleanup}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+mkdir "$LOCUS_HOME"
+GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+${createWorkspace}
+[[ -d "$WS_DIR" && "\${WS_DIR%/*}" == "$TMPDIR" && "\${WS_DIR##*/}" == locus-ws.* ]] || exit 1
+touch "$WS_DIR/sentinel"
+printf '%s' "$WS_DIR" > "$2"
+`;
+
+  const workspaces = [1, 2].map((n) => {
+    const observed = join(fixture.root, `observed-workspace-${n}`);
+    const result = spawnSync('bash', ['-c', probe, 'workspace-invocation', scratch, observed],
+      { encoding: 'utf8' });
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, `invocation ${n} must create its workspace beneath TMPDIR`);
+    return readFileSync(observed, 'utf8');
+  });
+
+  const [first, second] = workspaces;
+  assert.notEqual(first, second, 'each invocation must create a fresh directory');
+  for (const workspace of workspaces) {
+    assert.equal(dirname(workspace), scratch, 'each workspace is created directly beneath the chosen TMPDIR');
+    assert.match(workspace, /\/locus-ws\.[^/]+$/);
+    assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, `removed by its own exit trap: ${workspace}`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
+});
+
 for (const exitStatus of [0, 73]) {
   test(`security fixture directories are removed on exit ${exitStatus}`, (t) => {
     const fixture = setup(t);
