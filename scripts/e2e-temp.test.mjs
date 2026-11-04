@@ -1316,3 +1316,21 @@ ${block}
     assert.deepEqual(readdirSync(scratch), ['keep'], 'block must clean up both homes');
   }
 });
+
+// Real mktemp, no stub: with TMPDIR unset the security workspace must actually
+// be created as a directory directly under /tmp (the documented fallback).
+test('security workspace is created under /tmp when TMPDIR is unset', (t) => {
+  const fn = readFileSync(script, 'utf8')
+    .match(/^create_security_workspace\(\) \{\n[^\n]*\n\}$/m)?.[0];
+  assert.ok(fn, 'missing create_security_workspace');
+  const env = { ...process.env };
+  delete env.TMPDIR;
+  const result = spawnSync('bash', ['-c', `set -euo pipefail\n${fn}\ncreate_security_workspace\nprintf '%s' "$SECURITY_WS"`],
+    { env, encoding: 'utf8' });
+  const created = result.stdout;
+  if (created.startsWith('/tmp/')) t.after(() => rmSync(created, { recursive: true, force: true }));
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(created, /^\/tmp\/locus-security-ws\.[A-Za-z0-9]{6}$/);
+  assert.ok(lstatSync(created).isDirectory(), 'workspace must exist as a real directory');
+});
