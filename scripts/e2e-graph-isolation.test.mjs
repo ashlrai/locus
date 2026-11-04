@@ -189,3 +189,37 @@ ${graph}
   assert.ok(lines.includes(`${scratch}/locus-graph-imp.XXXXXX`), lines.join('\n'));
   assert.ok(lines.every((l) => l.startsWith(`${scratch}/`)), 'a template escaped TMPDIR');
 });
+
+// Focused check of the e2e.sh 2f rehearsal: the real create_graph_home and
+// e2e_cleanup, run under a TMPDIR with spaces (including a doubled space).
+test('GRAPH_HOME is created under a space-containing TMPDIR and removed on exit', (t) => {
+  assert.match(source, /log "2f\. GRAPH_HOME creation honors a space-containing TMPDIR"/);
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-spaced-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'graph  temp root');
+  const record = join(fixture, 'record');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const harness = `#!/bin/bash
+set -euo pipefail
+${cleanup}
+${createGraphHome}
+LOCUS_HOME="$TEST_FIXTURE/main-home"; mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+create_graph_home
+[[ -d "$GRAPH_HOME" && "\${GRAPH_HOME%/*}" == "$TMPDIR" && "\${GRAPH_HOME##*/}" == locus-graph-imp.* ]]
+touch "$GRAPH_HOME/sentinel"
+printf '%s' "$GRAPH_HOME" > "$TEST_RECORD"
+`;
+  const result = spawnSync('bash', ['-c', harness], {
+    env: { ...process.env, TMPDIR: scratch, TEST_FIXTURE: fixture, TEST_RECORD: record },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const graphHome = readFileSync(record, 'utf8');
+  assert.equal(dirname(graphHome), scratch);
+  assert.match(graphHome, / {2}temp root\/locus-graph-imp\.[^/\s]+$/);
+  assert.throws(() => lstatSync(graphHome), { code: 'ENOENT' }, 'graph home survived exit cleanup');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
