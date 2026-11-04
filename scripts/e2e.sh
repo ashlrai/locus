@@ -10,8 +10,8 @@
 #
 # Temporary directories: TMPDIR, when nonempty, must name an existing writable
 # directory; otherwise mktemp uses /tmp. The script creates isolated home and
-# workspace directories there, verifies the home is created directly beneath
-# the supplied TMPDIR, and removes them on shell exit after installing its
+# workspace directories there, verifies each is created directly beneath the
+# supplied TMPDIR, and removes them on shell exit after installing its
 # cleanup trap. An optional graph-import home is also removed immediately
 # after a successful import. Abrupt termination or removal errors can leave
 # temporary directories; inspect and remove any
@@ -527,6 +527,15 @@ ok "autopin suggest ignores non-origin history and refuses to apply it"
 # ── 4. workspace allowlist blocks personal without --force ───────────────────
 log "4. workspace allowlist block personal without --force"
 WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"
+# Same containment rule as LOCUS_HOME: a supplied TMPDIR owns the workspace,
+# so a mktemp regression that relocates it must stop the suite before the
+# allowlist fixtures escape the isolated root.
+if [[ -n "${TMPDIR:-}" ]]; then
+  [[ -d "$WS_DIR" && "${WS_DIR%/*}" == "$TMPDIR" && \
+    "${WS_DIR##*/}" == locus-ws.* ]] \
+    || die "WS_DIR was not created directly beneath TMPDIR"
+  ok "isolated workspace is created directly beneath TMPDIR"
+fi
 (
   cd "$WS_DIR"
   locus workspace --default acme --allow acme,acme-ro --require-pin --force >/dev/null

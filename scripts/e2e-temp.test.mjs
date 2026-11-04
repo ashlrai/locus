@@ -516,6 +516,105 @@ exit "$3"
   });
 }
 
+// The selection slice runs the real WS_DIR creation through its
+// temporary-root check, stopping before the allowlist subshell.
+function workspaceRootCheckSection() {
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"');
+  const end = source.indexOf('\n(\n  cd "$WS_DIR"', start);
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(start >= 0 && end > start, 'missing workspace creation and temporary-root check');
+  const section = source.slice(start, end);
+  assert.match(section, /WS_DIR was not created directly beneath TMPDIR/,
+    'the workspace section must include the temporary-root check');
+  return { cleanup, section };
+}
+
+test('the workspace is created directly beneath the supplied TMPDIR', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  const record = join(fixture.root, 'workspace-path');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const { cleanup, section } = workspaceRootCheckSection();
+
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+LOCUS_HOME="$TMPDIR/main-home"
+mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+ok() { printf '  ok  %s\\n' "$*"; }
+die() { printf '  FAIL %s\\n' "$*" >&2; exit 1; }
+${section}
+[[ -d "$WS_DIR" ]] || exit 74
+touch "$WS_DIR/cleanup-sentinel"
+printf '%s' "$WS_DIR" > "$1"
+`, 'ws-tmpdir-check', record], {
+    env: { ...process.env, TMPDIR: scratch },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ok  isolated workspace is created directly beneath TMPDIR/);
+  const workspace = readFileSync(record, 'utf8');
+  assert.equal(dirname(workspace), scratch, 'the workspace must be created directly beneath TMPDIR');
+  assert.match(workspace, /\/locus-ws\.[^/]+$/);
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'the workspace must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+test('a workspace created outside TMPDIR fails the temporary-root check', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const wrongRoot = join(fixture.root, 'wrong root');
+  const reached = join(fixture.root, 'workspace-used');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  // Answer with the expected name shape but relocate the created workspace
+  // outside TMPDIR; the in-script check must stop the suite before the
+  // workspace is used, and the exit trap removes the misplaced directory.
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+case "$2" in
+  "$TMPDIR"/locus-ws.XXXXXX)
+    ws="$("$REAL_MKTEMP" -d "$WRONG_ROOT/locus-ws.XXXXXX")" || exit $?
+    touch "$ws/sentinel" || exit 1
+    printf '%s\\n' "$ws"
+    ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+`, { mode: 0o755 });
+  const { cleanup, section } = workspaceRootCheckSection();
+
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+LOCUS_HOME="$TMPDIR/main-home"
+mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+ok() { printf '  ok  %s\\n' "$*"; }
+die() { printf '  FAIL %s\\n' "$*" >&2; exit 1; }
+${section}
+printf 'reached\\n' > "$1"
+`, 'ws-tmpdir-check', reached], {
+    env: { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}`,
+      TMPDIR: scratch, REAL_MKTEMP: realMktemp, WRONG_ROOT: wrongRoot },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the temporary-root check must stop the suite');
+  assert.match(result.stderr, /WS_DIR was not created directly beneath TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok  isolated workspace is created directly beneath TMPDIR/);
+  assert.equal(existsSync(reached), false, 'the workspace must not be used after the check fails');
+  assert.deepEqual(readdirSync(wrongRoot), [], 'the misplaced workspace must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
 for (const exitStatus of [0, 73]) {
   test(`security fixture directories are removed on exit ${exitStatus}`, (t) => {
     const fixture = setup(t);
