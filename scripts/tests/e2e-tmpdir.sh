@@ -46,9 +46,12 @@ assert_fixtures_cleaned() {
   [[ -f "$E2E_HOME_RECORD" && -f "$E2E_HOME_USED" ]] || { printf 'FAIL: home was not created and used\n' >&2; exit 1; }
   local homes=() home
   while IFS= read -r home; do
-    homes+=("$home")
+    [[ ! -e "$home" && ! -L "$home" ]] || { printf 'FAIL: home was not cleaned up\n' >&2; exit 1; }
+    if [[ "${home%/*}" == "$TMPDIR" ]]; then
+      homes+=("$home")
+    fi
   done <"$E2E_HOME_RECORD"
-  [[ ${#homes[@]} -eq 1 ]] || { printf 'FAIL: expected one home\n' >&2; exit 1; }
+  [[ ${#homes[@]} -eq 1 ]] || { printf 'FAIL: expected one home directly beneath TMPDIR\n' >&2; exit 1; }
   home="${homes[0]}"
   [[ "${home%/*}" == "$TMPDIR" ]] || { printf 'FAIL: home was not created directly beneath TMPDIR\n' >&2; exit 1; }
   [[ "$(cat "$E2E_HOME_USED")" == "$home" ]] || { printf 'FAIL: CLI used a different home\n' >&2; exit 1; }

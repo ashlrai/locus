@@ -68,9 +68,12 @@ cargo build --release -p locus-cli -p locus-mcp --locked
 ok "locus + locus-mcp release binaries"
 
 # ── 2. Isolated LOCUS_HOME ───────────────────────────────────────────────────
+create_locus_home() {
+  LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")"
+}
 export LOCUS_HOME
-LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")"
-log "2. LOCUS_HOME=$LOCUS_HOME"
+create_locus_home
+log "2. isolated home"
 # Optional background PIDs (HTTP MCP, etc.) cleaned on any exit path.
 HTTP_MCP_PID=""
 MT_MCP_PID=""
@@ -106,6 +109,27 @@ if [[ -n "${TMPDIR:-}" ]]; then
     || die "LOCUS_HOME was not created directly beneath TMPDIR"
   ok "isolated home is created directly beneath TMPDIR"
 fi
+
+# Exercise home creation and exit cleanup even when the caller did not set
+# TMPDIR. The subshell owns its home and leaves the supplied root intact.
+log "2b. home creation honors a space-containing TMPDIR"
+home_tmp="$LOCUS_HOME/home temp root"
+mkdir -p "$home_tmp"
+(
+  export TMPDIR="$home_tmp"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  create_locus_home
+  trap 'e2e_cleanup' EXIT
+  [[ -d "$LOCUS_HOME" && "${LOCUS_HOME%/*}" == "$TMPDIR" && \
+    "${LOCUS_HOME##*/}" == locus-e2e.* ]] || exit 1
+  printf '%s' "$LOCUS_HOME" >"$home_tmp/home-path"
+  touch "$LOCUS_HOME/cleanup-sentinel"
+) || die "home was not created beneath the space-containing TMPDIR"
+home_test_dir="$(cat "$home_tmp/home-path")"
+[[ ! -e "$home_test_dir" && ! -L "$home_test_dir" ]] \
+  || die "rehearsed home survived exit cleanup"
+[[ -d "$home_tmp" ]] || die "home cleanup removed the supplied TMPDIR"
+ok "home creation succeeds beneath a TMPDIR containing spaces and is cleaned on exit"
 
 create_security_home() {
   SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
