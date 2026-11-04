@@ -6,7 +6,8 @@ unset **or empty**, Bash selects `/tmp`; otherwise it uses the supplied path.
 The parent must already exist and allow the script to create files and
 directories. Use an absolute path: the script changes working directory, so
 a relative `TMPDIR` can resolve differently during scans and cleanup. Paths
-containing spaces are supported.
+containing spaces are supported, and so is a trailing slash — the form macOS
+exports — which simply doubles the separator in the `mktemp` template.
 
 | Resource | Template beneath the parent | Purpose |
 | --- | --- | --- |
