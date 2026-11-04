@@ -363,3 +363,27 @@ test('a nonexistent TMPDIR fails graph home creation without creating anything',
   assert.throws(() => lstatSync(missing), { code: 'ENOENT' }, 'the missing root must not be created');
   assert.throws(() => lstatSync(observed), { code: 'ENOENT' }, 'no graph home may be recorded');
 });
+
+// macOS hands out TMPDIR with a trailing slash. The home must still land in
+// that root, and the section-2i containment test (`${GRAPH_HOME%/*}` equals
+// `$TMPDIR`) must keep holding for the unnormalized value.
+test('a TMPDIR with a trailing slash still holds the graph home', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, 'custom tmp');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+
+  const { observed, result } = select(t, {
+    tmpdir: `${scratch}/`,
+    tail: '[[ "${GRAPH_HOME%/*}" == "$TMPDIR" && -d "$GRAPH_HOME" ]] || exit 76',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  const home = readFileSync(observed, 'utf8');
+  assert.ok(home.startsWith(`${scratch}//locus-graph-imp.`),
+    'the supplied slash is kept verbatim and the home is a direct child of the root');
+  assert.match(home, /\/locus-graph-imp\.[^/\s]+$/);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' });
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
