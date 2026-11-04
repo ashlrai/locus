@@ -254,6 +254,41 @@ printf '%s' "$LOCUS_HOME" > "$OBSERVED_HOME"
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
 });
 
+test('home under a spaced TMPDIR is usable and its real path stays beneath the parent', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'usable tmp dir');
+  const observed = join(fixture.root, 'observed-home');
+  mkdirSync(scratch);
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('export LOCUS_HOME\n');
+  const endMarker = 'ok "isolated home is created directly beneath TMPDIR"\nfi';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, 'home setup and parent check must exist');
+  // Use the home the way the suite does: nested spaced paths, write, read back,
+  // and a physical-path containment check that a plain string compare cannot give.
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+log() { :; }
+ok() { :; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+${source.slice(start, end + endMarker.length)}
+[[ -w "$LOCUS_HOME" && -x "$LOCUS_HOME" ]]
+mkdir -p "$LOCUS_HOME/bindings/with space"
+printf 'payload' > "$LOCUS_HOME/bindings/with space/f.toml"
+[[ "$(cat "$LOCUS_HOME/bindings/with space/f.toml")" == payload ]]
+real_parent="$(cd "$TMPDIR" && pwd -P)"
+real_home="$(cd "$LOCUS_HOME" && pwd -P)"
+[[ "$real_home" == "$real_parent"/* && "$real_home" != *..* ]]
+printf '%s' "$LOCUS_HOME" > "$OBSERVED_HOME"
+`], {
+    env: { ...process.env, TMPDIR: scratch, OBSERVED_HOME: observed },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(dirname(readFileSync(observed, 'utf8')), scratch);
+  assert.deepEqual(readdirSync(scratch), [], 'usable home must still be cleaned on exit');
+});
+
 test('an unhandled setup command failure removes the populated LOCUS_HOME', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp');
