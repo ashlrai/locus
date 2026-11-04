@@ -90,3 +90,28 @@ locus() {
   assert.match(errorFile, /\/locus-hub-smoke-err\.[A-Za-z0-9]{6}$/);
   assert.deepEqual(readdirSync(scratch), [], 'removed on exit');
 });
+
+test('SMOKE_ERR stays directly under a TMPDIR given with a trailing slash', (t) => {
+  const root = mkdtempSync('/tmp/lhs-sel-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'scratch');
+  const seen = join(root, 'seen');
+  mkdirSync(scratch);
+  writeFileSync(join(root, 'hook.sh'), `jq() { cat >/dev/null; printf '%s\\n' grant; }
+cargo() { return 0; }
+locus() {
+  if [[ "\${1:-}" == init ]]; then printf '%s\\n' "$SMOKE_ERR" > "$SEEN"; fi
+  if [[ "\${1:-} \${2:-}" == 'status --oneline' ]]; then printf '%s\\n' personal:tenant; return 0; fi
+  printf '%s\\n' '{}'
+}
+`);
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, BASH_ENV: join(root, 'hook.sh'), TMPDIR: `${scratch}/`, SEEN: seen },
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 0, `stderr:\n${result.stderr}`);
+  assert.equal(dirname(readFileSync(seen, 'utf8').trim().replace('//', '/')), scratch);
+  assert.deepEqual(readdirSync(scratch), [], 'removed on exit');
+});
