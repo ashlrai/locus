@@ -15,7 +15,9 @@ const script = join(root, 'scripts', 'e2e.sh');
 // and creates GRAPH_HOME there, and the e2e_cleanup EXIT trap removes it.
 // The probes below run both verbatim; shims provide only a recording mktemp.
 // The section-16 containment check on a relocated home is covered by
-// scripts/e2e-graph-isolation.test.mjs.
+// scripts/e2e-graph-isolation.test.mjs. The last two tests run the script's
+// own section 2i rehearsal, which exercises the same lifecycle beneath a
+// supplied temporary root whose name contains spaces.
 function graphParts() {
   const source = readFileSync(script, 'utf8');
   const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
@@ -205,4 +207,145 @@ rm -rf "$graph_home_a" "$graph_home_b"
   assert.throws(() => lstatSync(homeA), { code: 'ENOENT' });
   assert.throws(() => lstatSync(homeB), { code: 'ENOENT' });
   assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+// The script's own section 2i rehearsal: a subshell exports a nested,
+// doubled-space TMPDIR, creates the graph home beneath it, populates it the
+// way the import fallback does (init with LOCUS_HOME="$GRAPH_HOME"), and
+// relies on its EXIT trap. The probes below run the block verbatim; stubs
+// provide log/ok/die, an init-capable locus binary and, where noted, a
+// recording mktemp.
+function section2i() {
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('log "2i.');
+  const endMarker = 'ok "GRAPH_HOME creation succeeds beneath a TMPDIR containing spaces"';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, 'e2e.sh must contain the section 2i rehearsal');
+  return source.slice(start, end + endMarker.length);
+}
+
+// A locus stub just real enough for the rehearsal: `init` populates the home
+// it is pointed at, the way the fallback populates GRAPH_HOME before import.
+function stubLocus(dir) {
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  const locus = join(bin, 'locus');
+  writeFileSync(locus, `#!/bin/sh
+case "$1" in
+  init) printf 'stub init\\n' > "$LOCUS_HOME/init-stamp" && exit 0 ;;
+esac
+exit 1
+`, { mode: 0o755 });
+  return locus;
+}
+
+// Runs the real section 2i (not a copy of its subshell) against a prepared
+// main home. The block owns the subshell trap itself, so the main home and
+// the nested temporary root stay inspectable after the spawn exits.
+function rehearse2i(home, locus, { shim = '', extraEnv = {} } = {}) {
+  const { cleanup, createHome } = graphParts();
+  return spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${shim}
+${createHome}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$1"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+${section2i()}
+`, 'graph-home-2i', home], {
+    env: { ...process.env, LOCUS_BIN: locus, ...extraEnv }, encoding: 'utf8',
+  });
+}
+
+test('section 2i creates the graph home beneath the space-containing TMPDIR', (t) => {
+  const dir = fixture(t);
+  const home = join(dir, 'main home');
+  const outer = join(dir, 'outer tmp');
+  const templates = join(dir, 'mktemp-templates');
+  const argc = join(dir, 'mktemp-argc');
+  mkdirSync(home);
+  mkdirSync(outer);
+  const locus = stubLocus(dir);
+  // Record the requested templates and argument count, then let the real
+  // command create the directory it was given. The outer TMPDIR stays visible
+  // to prove the subshell-selected root is what reaches mktemp.
+  const shim = `mktemp() {
+  printf '%s\\n' "$2" >> "$MKTEMP_TEMPLATES"
+  printf '%s' "$#" > "$MKTEMP_ARGC"
+  command mktemp "$@"
+}
+`;
+
+  const result = rehearse2i(home, locus, {
+    shim,
+    extraEnv: { TMPDIR: outer, MKTEMP_TEMPLATES: templates, MKTEMP_ARGC: argc },
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `the 2i rehearsal must succeed: ${result.stderr}`);
+  assert.match(result.stdout,
+    /ok GRAPH_HOME creation succeeds beneath a TMPDIR containing spaces/);
+  const selected = join(home, 'graph  home temp root');
+  assert.equal(readFileSync(argc, 'utf8'), '2',
+    'mktemp must receive exactly -d and one template');
+  assert.deepEqual(readFileSync(templates, 'utf8').trim().split('\n'),
+    [`${selected}/locus-graph-imp.XXXXXX`],
+    'the subshell-selected root must reach mktemp inside one template argument');
+  const recorded = readFileSync(join(selected, 'graph-home-path'), 'utf8');
+  assert.equal(dirname(recorded), selected,
+    'the rehearsal home is created directly beneath the supplied TMPDIR');
+  assert.match(recorded, /\/locus-graph-imp\.[^/\s]+$/,
+    'the home name is one unsplit component');
+  assert.throws(() => lstatSync(recorded), { code: 'ENOENT' },
+    'the populated rehearsal home must be removed on subshell exit');
+  assert.deepEqual(readdirSync(selected), ['graph-home-path'],
+    'only the recorded home path may remain beneath the supplied root');
+  assert.deepEqual(readdirSync(outer), [],
+    'the outer TMPDIR must not receive the graph home');
+  assert.deepEqual(readdirSync(home), ['graph  home temp root'],
+    'the subshell trap must leave the main home and the supplied root intact');
+});
+
+// A mktemp regression that relocates the rehearsal graph home outside the
+// supplied root must stop the suite at the 2i subshell; the subshell trap
+// still removes the misplaced directory before the failure reaches the caller.
+test('a rehearsal graph home created outside the supplied TMPDIR stops section 2i', (t) => {
+  const dir = fixture(t);
+  const home = join(dir, 'main home');
+  const wrongRoot = join(dir, 'wrong root');
+  const created = join(dir, 'graph-home-created');
+  mkdirSync(home);
+  mkdirSync(wrongRoot);
+  const locus = stubLocus(dir);
+  const shim = `mktemp() {
+  local d
+  if [[ "\${2:-}" == */locus-graph-imp.XXXXXX ]]; then
+    d="$(command mktemp -d "$WRONG_ROOT/locus-graph-imp.XXXXXX")"
+    printf '%s' "$d" > "$HOME_CREATED"
+    printf '%s\\n' "$d"
+    return
+  fi
+  command mktemp "$@"
+}
+`;
+
+  const result = rehearse2i(home, locus, {
+    shim,
+    extraEnv: { WRONG_ROOT: wrongRoot, HOME_CREATED: created },
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the containment check must fail the suite');
+  assert.match(result.stderr, /FAIL GRAPH_HOME was not created beneath the space-containing TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok GRAPH_HOME creation succeeds/);
+  const misplaced = readFileSync(created, 'utf8');
+  assert.equal(dirname(misplaced), wrongRoot);
+  assert.match(misplaced, /\/locus-graph-imp\.[^/]+$/);
+  assert.throws(() => lstatSync(misplaced), { code: 'ENOENT' },
+    'the misplaced graph home must be removed by the subshell exit trap');
+  assert.deepEqual(readdirSync(wrongRoot), []);
+  assert.deepEqual(readdirSync(join(home, 'graph  home temp root')), [],
+    'the rehearsal exits before recording a home path');
 });
