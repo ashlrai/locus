@@ -231,6 +231,32 @@ security_ws_test_dir="$(cat "$security_ws_tmp/security-workspace-path")"
 [[ -d "$security_ws_tmp" ]] || die "SECURITY_WS cleanup removed the supplied TMPDIR"
 ok "SECURITY_WS creation succeeds beneath a TMPDIR containing spaces"
 
+# Same creation and EXIT cleanup as the graph import probe, beneath a supplied
+# temporary root with spaces. The subshell owns its test home so its cleanup
+# cannot remove the main home.
+log "2f. GRAPH_HOME creation honors a space-containing TMPDIR"
+graph_tmp="$LOCUS_HOME/graph temp root"
+mkdir -p "$graph_tmp"
+(
+  export TMPDIR="$graph_tmp"
+  LOCUS_HOME="$graph_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_graph_home
+  [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
+    "${GRAPH_HOME##*/}" == locus-graph-imp.* ]] || exit 1
+  # The home must stay usable as one word: write into it.
+  touch "$GRAPH_HOME/cleanup-sentinel"
+  [[ -f "$GRAPH_HOME/cleanup-sentinel" ]] || exit 1
+  printf '%s' "$GRAPH_HOME" >"$graph_tmp/graph-home-path"
+) || die "GRAPH_HOME was not created beneath the space-containing TMPDIR"
+graph_test_dir="$(cat "$graph_tmp/graph-home-path")"
+[[ ! -e "$graph_test_dir" && ! -L "$graph_test_dir" ]] \
+  || die "rehearsed GRAPH_HOME survived exit cleanup"
+[[ -d "$graph_tmp" ]] || die "GRAPH_HOME cleanup removed the supplied TMPDIR"
+ok "GRAPH_HOME creation succeeds beneath a TMPDIR containing spaces"
+
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
 

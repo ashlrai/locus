@@ -189,3 +189,27 @@ ${graph}
   assert.ok(lines.includes(`${scratch}/locus-graph-imp.XXXXXX`), lines.join('\n'));
   assert.ok(lines.every((l) => l.startsWith(`${scratch}/`)), 'a template escaped TMPDIR');
 });
+
+// Runs the real create_graph_home with the real mktemp: the directory must exist
+// directly beneath the selected TMPDIR, and a second call must yield a distinct one.
+test('create_graph_home creates fresh directories directly under the selected TMPDIR', (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-create-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const scratch = join(fixture, 'temp with spaces');
+  mkdirSync(scratch);
+  const harness = `set -euo pipefail
+${createGraphHome}
+create_graph_home; printf '%s\\n' "$GRAPH_HOME"
+create_graph_home; printf '%s\\n' "$GRAPH_HOME"
+`;
+  const result = spawnSync('bash', ['-c', harness], { env: { ...process.env, TMPDIR: scratch }, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const [first, second] = result.stdout.trim().split('\n');
+  assert.notEqual(first, second);
+  for (const dir of [first, second]) {
+    assert.equal(dirname(dir), scratch);
+    assert.match(dir, /\/locus-graph-imp\.[^/]+$/);
+    assert.ok(lstatSync(dir).isDirectory());
+  }
+  assert.deepEqual(readdirSync(scratch).length, 2);
+});

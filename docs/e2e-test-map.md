@@ -33,6 +33,8 @@ fragment alone is not equivalent to running the suite.
 | 2 | `mktemp`, cleanup trap | Create an isolated Locus home directly beneath the requested temporary root and arrange cleanup. |
 | 2c | Security home creation under a custom `TMPDIR` | Check the security fixture respects a path with spaces and is removed on exit. |
 | 2d | Workspace creation under a space-containing `TMPDIR` | Check the workspace fixture respects a path with spaces and is removed on exit. |
+| 2e | `SECURITY_WS` creation under a space-containing `TMPDIR` | Check the security workspace respects a path with spaces and is removed on exit. |
+| 2f | `GRAPH_HOME` creation under a space-containing `TMPDIR` | Check the graph import home is created under the full spaced path and is removed on exit. |
 | 2a | `quickstart`, `doctor`, `doctor --json` | Check fresh-install advisories and reject invalid workspace policy. |
 | 2b | `binding add` twice, then with conflicting content | Verify an identical add preserves the file and timestamp and a conflict is rejected. |
 | 3 | `init --with-samples`, `pin`, `whoami --json`, `exec` | Check sample pins, exclusive identity, credential presence metadata, binding add idempotence and missing-reference warnings. |
