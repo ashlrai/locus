@@ -175,6 +175,29 @@ workspace_test_dir="$(cat "$workspace_tmp/workspace-path")"
 [[ -d "$workspace_tmp" ]] || die "workspace cleanup removed the supplied TMPDIR"
 ok "workspace creation succeeds beneath a TMPDIR containing spaces"
 
+# Exercise graph-home creation and the same EXIT cleanup as the import path,
+# regardless of whether the optional graph import needs a fresh home.
+log "2e. graph home creation honors a space-containing TMPDIR"
+graph_tmp="$LOCUS_HOME/graph temp root"
+mkdir -p "$graph_tmp"
+(
+  export TMPDIR="$graph_tmp"
+  LOCUS_HOME="$graph_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_graph_home
+  [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
+    "${GRAPH_HOME##*/}" == locus-graph-imp.* ]] || exit 1
+  printf '%s' "$GRAPH_HOME" >"$graph_tmp/graph-home-path"
+  touch "$GRAPH_HOME/cleanup-sentinel"
+) || die "graph home was not created beneath the space-containing TMPDIR"
+graph_test_home="$(cat "$graph_tmp/graph-home-path")"
+[[ ! -e "$graph_test_home" && ! -L "$graph_test_home" ]] \
+  || die "rehearsed graph home survived exit cleanup"
+[[ -d "$graph_tmp" ]] || die "graph cleanup removed the supplied TMPDIR"
+ok "graph home creation succeeds beneath a TMPDIR containing spaces"
+
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
 

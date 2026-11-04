@@ -1316,3 +1316,36 @@ ${block}
     assert.deepEqual(readdirSync(scratch), ['keep'], 'block must clean up both homes');
   }
 });
+
+test('the graph home spaced-parent probe succeeds and cleans up', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'outer temp');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const result = run(fixture, scratch);
+  assert.equal(result.status, 1, 'the fixture stops later at fresh quickstart');
+  assert.match(result.stdout, /ok  graph home creation succeeds beneath a TMPDIR containing spaces/);
+  assert.match(result.stderr, /fresh quickstart failed/);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+test('the graph home spaced-parent probe rejects a misplaced directory', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'outer temp');
+  const wrongRoot = join(fixture.root, 'wrong root');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+case "$2" in
+  */locus-graph-imp.XXXXXX) exec "$REAL_MKTEMP" -d "$WRONG_ROOT/locus-graph-imp.XXXXXX" ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+`, { mode: 0o755 });
+  const result = run(fixture, scratch, { REAL_MKTEMP: realMktemp, WRONG_ROOT: wrongRoot });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /graph home was not created beneath the space-containing TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok  graph home creation succeeds/);
+  assert.deepEqual(readdirSync(wrongRoot), [], 'exit cleanup removes the misplaced home');
+  assert.deepEqual(readdirSync(scratch), []);
+});
