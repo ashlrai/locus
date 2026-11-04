@@ -1424,3 +1424,29 @@ ${source.slice(start, end)}
   assert.ok(rm.slice(2).includes(cd[2]), 'cleanup must pass the same WS_DIR as one argument');
   assert.throws(() => lstatSync(cd[2]), { code: 'ENOENT' }, 'workspace must be removed');
 });
+
+// Whitespace at the edges of a path component is the easiest thing for an
+// unquoted expansion or a trimming command substitution to lose.
+test('WS_DIR preserves the complete spaced TMPDIR path, including edge spaces', (t) => {
+  const fixture = setup(t);
+  const outer = join(fixture.root, ' lead  dir ');
+  const scratch = join(outer, 'trail ');
+  mkdirSync(scratch, { recursive: true });
+  const record = join(fixture.root, 'ws-path');
+  const source = readFileSync(script, 'utf8');
+  const createWorkspace = source.match(/^create_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(createWorkspace, 'missing create_workspace');
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${createWorkspace}
+TMPDIR="$1"
+create_workspace
+[[ -d "$WS_DIR" && "\${WS_DIR%/*}" == "$TMPDIR" ]] || exit 74
+printf '%s' "$WS_DIR" > "$RECORD"
+`, 'ws-edge', scratch], { env: { ...process.env, RECORD: record }, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const ws = readFileSync(record, 'utf8');
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  assert.equal(dirname(ws), scratch, 'every character of the TMPDIR prefix survives');
+  assert.match(ws.slice(scratch.length + 1), /^locus-ws\.[A-Za-z0-9]{6}$/);
+  assert.ok(lstatSync(ws).isDirectory());
+});
