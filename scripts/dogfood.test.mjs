@@ -966,6 +966,77 @@ exit "$?"
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
+test('two concurrent multi-tenant probes hold distinct live probe_root directories', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-distinct-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const roots = join(root, 'roots');
+  const bothAlive = join(root, 'both-alive');
+  // Two probes run concurrently. Each init stub records its probe_root (the
+  // cwd once the probe has cd'd into it) then parks until RELEASE appears, so
+  // the parent can prove both roots exist at the same time before releasing
+  // them. Each probe then fails at init and its EXIT trap removes only its
+  // own root.
+  const harness = String.raw`
+source "$1"
+locus() {
+  [[ "$1" == init ]] || return 1
+  printf '%s\n' "$PWD" > "$REC_FILE"
+  local n=0
+  while [[ ! -f "$RELEASE" && $n -lt 400 ]]; do
+    sleep 0.05
+    n=$((n + 1))
+  done
+  return 1
+}
+( REC_FILE="$R1"; mt_grant_probe ) & p1=$!
+( REC_FILE="$R2"; mt_grant_probe ) & p2=$!
+n=0
+while [[ $n -lt 400 ]] && [[ ! -s "$R1" || ! -s "$R2" ]]; do
+  sleep 0.05
+  n=$((n + 1))
+done
+r1=""
+r2=""
+if [[ -s "$R1" ]]; then r1="$(cat "$R1")"; fi
+if [[ -s "$R2" ]]; then r2="$(cat "$R2")"; fi
+printf '%s\n%s\n' "$r1" "$r2" > "$ROOTS_FILE"
+if [[ -n "$r1" && -n "$r2" && -d "$r1" && -d "$r2" && "$r1" != "$r2" ]]; then
+  touch "$BOTH_ALIVE"
+fi
+touch "$RELEASE"
+s1=0
+s2=0
+wait "$p1" || s1=$?
+wait "$p2" || s2=$?
+[[ -f "$BOTH_ALIVE" ]] || exit 43
+[[ $s1 -eq 1 && $s2 -eq 1 ]] || exit 44
+[[ ! -e "$r1" && ! -e "$r2" ]] || exit 45
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, R1: join(root, 'rec-1'), R2: join(root, 'rec-2'),
+      RELEASE: join(root, 'release'), ROOTS_FILE: roots, BOTH_ALIVE: bothAlive },
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `concurrent probe harness failed: ${result.stderr}`);
+  assert.equal(existsSync(bothAlive), true,
+    'both probe roots must exist at the same time and have different paths');
+  const [first, second] = readFileSync(roots, 'utf8').trim().split('\n');
+  assert.notEqual(first, second);
+  for (const probeRoot of [first, second]) {
+    assert.match(probeRoot, /\/locus-mt-dogfood\.[^/]+$/);
+    assert.equal(dirname(probeRoot), scratch);
+    assert.equal(existsSync(probeRoot), false, `removed on probe exit: ${probeRoot}`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
 test('default pack path and project dir stay one argument under a space-containing TMPDIR', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-pack-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
