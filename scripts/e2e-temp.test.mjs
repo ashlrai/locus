@@ -1364,3 +1364,63 @@ test('security workspace is created under /tmp when TMPDIR is unset', (t) => {
   assert.match(created, /^\/tmp\/locus-security-ws\.[A-Za-z0-9]{6}$/);
   assert.ok(lstatSync(created).isDirectory(), 'workspace must exist as a real directory');
 });
+
+// WS_DIR must reach every command as exactly one argument, even when TMPDIR has
+// a doubled space and glob characters that word splitting or globbing would
+// mangle. Static: every expansion in the script is double-quoted. Dynamic: the
+// real workspace section runs with `cd` and `rm` wrapped to record their argv.
+test('WS_DIR under a space-containing TMPDIR is passed as one argument', (t) => {
+  const source = readFileSync(script, 'utf8');
+  const unquoted = source.split('\n').flatMap((line, i) => {
+    if (!/\$\{?WS_DIR\b/.test(line) || line.trimStart().startsWith('#')) return [];
+    const quoted = line.replace(/"[^"]*"/g, '');
+    return /\$\{?WS_DIR\b/.test(quoted) ? [`${i + 1}: ${line.trim()}`] : [];
+  });
+  assert.deepEqual(unquoted, [], 'every WS_DIR expansion must be double-quoted');
+
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'temp  with *spaces? [x]');
+  const argvLog = join(fixture.root, 'argv-log');
+  mkdirSync(scratch);
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWorkspace = source.match(/^create_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('create_workspace\n# Same containment rule');
+  const end = source.indexOf('\n# leave force-pin;', start);
+  assert.ok(cleanup && createWorkspace && start >= 0 && end > start, 'missing workspace lifecycle');
+  const probe = `set -euo pipefail
+${cleanup}
+${createWorkspace}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+mkdir "$LOCUS_HOME"
+trap 'e2e_cleanup' EXIT
+record() { local c="$1"; shift; printf '%s\\t%s' "$c" "$#" >> "$ARGV_LOG"; printf '\\t%s' "$@" >> "$ARGV_LOG"; printf '\\n' >> "$ARGV_LOG"; }
+cd() { record cd "$@"; builtin cd "$@"; }
+rm() { record rm "$@"; command rm "$@"; }
+locus() {
+  case "$*" in
+    workspace*) touch .locus.toml ;;
+    'pin personal') printf 'not allowed\\n' >&2; return 1 ;;
+    'pin personal --force') return 0 ;;
+    *) return 74 ;;
+  esac
+}
+log() { :; }; ok() { :; }; die() { printf '%s\\n' "$*" >&2; exit 74; }
+${source.slice(start, end)}
+`;
+  const result = spawnSync('bash', ['-c', probe, 'workspace-argv', scratch], {
+    env: { ...process.env, ARGV_LOG: argvLog }, encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `the workspace section must succeed: ${result.stderr}`);
+
+  const rows = readFileSync(argvLog, 'utf8').trim().split('\n').map((l) => l.split('\t'));
+  const cd = rows.find(([cmd, , dir]) => cmd === 'cd' && dir?.startsWith(`${scratch}/locus-ws.`));
+  assert.ok(cd, 'the section must cd into the workspace');
+  assert.equal(cd[1], '1', 'cd must receive WS_DIR as exactly one argument');
+  const rm = rows.find(([cmd, , , ...rest]) => cmd === 'rm' && rest.some((a) => a.startsWith(`${scratch}/locus-ws.`)));
+  assert.ok(rm, 'exit cleanup must remove the workspace');
+  assert.ok(rm.slice(2).includes(cd[2]), 'cleanup must pass the same WS_DIR as one argument');
+  assert.throws(() => lstatSync(cd[2]), { code: 'ENOENT' }, 'workspace must be removed');
+});
