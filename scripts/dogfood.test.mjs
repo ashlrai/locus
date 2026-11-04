@@ -170,6 +170,81 @@ exit "$?"
   assert.equal(existsSync(probe), false);
 });
 
+test('two concurrent sandbox probes hold distinct live probe_root directories under a spaced TMPDIR', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-sandbox-threads-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const roots = join(root, 'roots');
+  const bothAlive = join(root, 'both-alive');
+  // Two sandbox probes run concurrently. Each init stub records LOCUS_HOME
+  // (whose parent is the probe_root; the sandbox probe does not cd) then
+  // parks until RELEASE appears, so the parent can prove both roots exist at
+  // the same time before releasing them. Each probe then fails at init and
+  // its EXIT trap removes only its own root.
+  const harness = String.raw`
+source "$1"
+locus() {
+  [[ "$1" == init ]] || return 1
+  [[ "$LOCUS_HOME" == "$TMPDIR"/locus-sandbox-dogfood.*/home ]] || exit 44
+  mkdir -p "$LOCUS_HOME"
+  [[ -d "$LOCUS_HOME/.." ]] || exit 44
+  printf '%s\n' "$LOCUS_HOME" > "$REC_FILE"
+  local n=0
+  while [[ ! -f "$RELEASE" && $n -lt 400 ]]; do
+    sleep 0.05
+    n=$((n + 1))
+  done
+  return 1
+}
+( REC_FILE="$R1"; sandbox_attestation ) & p1=$!
+( REC_FILE="$R2"; sandbox_attestation ) & p2=$!
+n=0
+while [[ $n -lt 400 ]] && [[ ! -s "$R1" || ! -s "$R2" ]]; do
+  sleep 0.05
+  n=$((n + 1))
+done
+r1=""
+r2=""
+if [[ -s "$R1" ]]; then r1="$(cat "$R1")"; fi
+if [[ -s "$R2" ]]; then r2="$(cat "$R2")"; fi
+printf '%s\n%s\n' "$r1" "$r2" > "$ROOTS_FILE"
+if [[ -n "$r1" && -n "$r2" && -d "$r1/.." && -d "$r2/.." && "$r1" != "$r2" ]]; then
+  touch "$BOTH_ALIVE"
+fi
+touch "$RELEASE"
+s1=0
+s2=0
+wait "$p1" || s1=$?
+wait "$p2" || s2=$?
+[[ -f "$BOTH_ALIVE" ]] || exit 45
+[[ $s1 -eq 1 && $s2 -eq 1 ]] || exit 46
+[[ ! -e "$r1/.." && ! -e "$r2/.." ]] || exit 47
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, R1: join(root, 'rec-1'), R2: join(root, 'rec-2'),
+      RELEASE: join(root, 'release'), ROOTS_FILE: roots, BOTH_ALIVE: bothAlive },
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `concurrent sandbox probe harness failed: ${result.stderr}`);
+  assert.equal(existsSync(bothAlive), true,
+    'both sandbox probe roots must exist at the same time and have different paths');
+  const [first, second] = readFileSync(roots, 'utf8').trim().split('\n').map((home) => dirname(home));
+  assert.notEqual(first, second);
+  for (const probeRoot of [first, second]) {
+    assert.match(probeRoot, /\/locus-sandbox-dogfood\.[^/]+$/);
+    assert.equal(dirname(probeRoot), scratch);
+    assert.equal(existsSync(probeRoot), false, `removed on probe exit: ${probeRoot}`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
 test('isolated dogfood home is created under a custom TMPDIR and removed on exit', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -1141,6 +1216,151 @@ wait "$p2" || s2=$?
     assert.equal(existsSync(probeRoot), false, `removed on probe exit: ${probeRoot}`);
   }
   assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+test('two concurrent multi-tenant probes with live servers each remove their own probe_root', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-servers-test-'));
+  const pidFiles = [join(root, 'server-pid-1'), join(root, 'server-pid-2')];
+  let serversStopped = false;
+  t.after(() => {
+    if (!serversStopped) {
+      for (const pidFile of pidFiles) {
+        if (existsSync(pidFile)) {
+          try {
+            process.kill(Number(readFileSync(pidFile, 'utf8').trim()));
+          } catch (error) {
+            if (error.code !== 'ESRCH') throw error;
+          }
+        }
+      }
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const server = join(root, 'server');
+  writeFileSync(server, '#!/usr/bin/env bash\nprintf "%s\\n" "$$" > "$PID_FILE"\nexec sleep 120\n', { mode: 0o755 });
+  const recs = [join(root, 'rec-1'), join(root, 'rec-2')];
+  const traces = [join(root, 'trace-1'), join(root, 'trace-2')];
+  const roots = join(root, 'roots');
+  const bothUp = join(root, 'both-up');
+  const release = join(root, 'release');
+  // Two probes run concurrently, each with a stubbed locus/curl and a stub
+  // MCP server. Each init stub records its probe_root (the cwd once the
+  // probe has cd'd into it); the probe then mints, spawns its server, and
+  // parks inside the tenantless request until the other probe's server is
+  // also live — proving both probe roots and both servers exist at the same
+  // time under the spaced TMPDIR. RELEASE then fails each request; each EXIT
+  // trap kills only its own server and removes only its own probe_root.
+  const harness = String.raw`
+source "$1"
+locus() {
+  local stage="$1"
+  [[ "$stage" != mcp ]] || stage="$2"
+  printf '%s\n' "$stage" >> "$TRACE_FILE"
+  case "$stage" in
+    init)
+      [[ -d "$PWD" && "${'$'}{PWD%/*}" == "$TMPDIR" && "$PWD" == "$TMPDIR"/locus-mt-dogfood.* && "$LOCUS_HOME" == "$PWD/home" ]] || exit 44
+      printf '%s\n' "$PWD" > "$REC_FILE"
+      mkdir -p "$LOCUS_HOME"
+      touch "$LOCUS_HOME/sentinel" ;;
+    binding) [[ -f "$LOCUS_HOME/sentinel" ]] || return 1 ;;
+    mint) printf '%s\n' '{"grant_id":"grant_fixture","token":"lmt_fixture"}' ;;
+    list) printf '%s\n' '[{"grant_id":"grant_fixture","revoked":false,"expired":false}]' ;;
+    *) return 1 ;;
+  esac
+}
+curl() {
+  if [[ "$*" == */health ]]; then
+    local n=0
+    while [[ ! -f "$PID_FILE" && $n -lt 400 ]]; do
+      sleep 0.05
+      n=$((n + 1))
+    done
+    [[ -f "$PID_FILE" ]]
+    return
+  fi
+  local marked=0 n=0
+  while [[ ! -f "$RELEASE" && $n -lt 400 ]]; do
+    if [[ "$marked" -eq 0 && -f "$PID1_FILE" && -f "$PID2_FILE" ]] \
+      && kill -0 "$(cat "$PID1_FILE" 2>/dev/null)" 2>/dev/null \
+      && kill -0 "$(cat "$PID2_FILE" 2>/dev/null)" 2>/dev/null; then
+      printf '%s\n' "$TAG" >> "$BOTH_UP"
+      marked=1
+    fi
+    sleep 0.05
+    n=$((n + 1))
+  done
+  printf '500'
+}
+run_probe() {
+  export TRACE_FILE="$1" REC_FILE="$2" PID_FILE="$3" TAG="$4"
+  mt_grant_probe
+}
+run_probe "$T1" "$R1" "$PID1_FILE" 1 & p1=$!
+run_probe "$T2" "$R2" "$PID2_FILE" 2 & p2=$!
+n=0
+lines=0
+while [[ $n -lt 400 ]]; do
+  if [[ -f "$BOTH_UP" ]]; then
+    lines="$(wc -l < "$BOTH_UP" | tr -d ' ')"
+  fi
+  if [[ "$lines" -ge 2 ]]; then break; fi
+  if ! kill -0 "$p1" 2>/dev/null; then break; fi
+  if ! kill -0 "$p2" 2>/dev/null; then break; fi
+  sleep 0.05
+  n=$((n + 1))
+done
+r1=""
+r2=""
+if [[ -s "$R1" ]]; then r1="$(cat "$R1")"; fi
+if [[ -s "$R2" ]]; then r2="$(cat "$R2")"; fi
+printf '%s\n%s\n' "$r1" "$r2" > "$ROOTS_FILE"
+touch "$RELEASE"
+s1=0
+s2=0
+wait "$p1" || s1=$?
+wait "$p2" || s2=$?
+[[ $s1 -eq 1 && $s2 -eq 1 ]] || exit 45
+[[ "$lines" -ge 2 ]] || exit 46
+[[ -n "$r1" && -n "$r2" && "$r1" != "$r2" ]] || exit 47
+[[ ! -e "$r1" && ! -e "$r2" ]] || exit 48
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, MCP_BIN: server,
+      T1: traces[0], T2: traces[1], R1: recs[0], R2: recs[1],
+      PID1_FILE: pidFiles[0], PID2_FILE: pidFiles[1],
+      BOTH_UP: bothUp, RELEASE: release, ROOTS_FILE: roots,
+      LOCUS_HOME: join(root, 'caller-home'), LOCUS_SESSION_ID: 'caller-session' },
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `concurrent probe harness failed: ${result.stderr}`);
+  const [first, second] = readFileSync(roots, 'utf8').trim().split('\n');
+  assert.notEqual(first, second);
+  for (const probeRoot of [first, second]) {
+    assert.match(probeRoot, /\/locus-mt-dogfood\.[^/]+$/);
+    assert.equal(dirname(probeRoot), scratch);
+    assert.equal(existsSync(probeRoot), false, `removed on probe exit: ${probeRoot}`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+  assert.deepEqual(readFileSync(bothUp, 'utf8').trim().split('\n').sort(), ['1', '2'],
+    'each probe must observe both servers alive before release');
+  for (const trace of traces) {
+    assert.deepEqual(readFileSync(trace, 'utf8').trim().split('\n'),
+      ['init', 'binding', 'mint', 'list']);
+  }
+  for (const pidFile of pidFiles) {
+    const pid = Number(readFileSync(pidFile, 'utf8').trim());
+    assert.ok(Number.isInteger(pid) && pid > 0);
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  }
+  serversStopped = true;
 });
 
 test('multi-tenant probe directory is created beneath the configured TMPDIR', (t) => {
