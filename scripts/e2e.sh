@@ -166,6 +166,11 @@ mkdir -p "$workspace_tmp"
   create_workspace
   [[ -d "$WS_DIR" && "${WS_DIR%/*}" == "$TMPDIR" && \
     "${WS_DIR##*/}" == locus-ws.* ]] || exit 1
+  # The workspace must be usable, not just present: write its allowlist from
+  # inside the spaced path and check the file landed there.
+  "$LOCUS_BIN" init >/dev/null
+  (cd "$WS_DIR" && "$LOCUS_BIN" workspace --default acme --allow acme >/dev/null) || exit 1
+  [[ -s "$WS_DIR/.locus.toml" ]] || exit 1
   printf '%s' "$WS_DIR" >"$workspace_tmp/workspace-path"
   touch "$WS_DIR/cleanup-sentinel"
 ) || die "workspace was not created beneath the space-containing TMPDIR"
