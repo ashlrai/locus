@@ -136,6 +136,39 @@ home_test_dir="$(cat "$home_tmp/home-path")"
 [[ -d "$home_tmp" ]] || die "home cleanup removed the supplied TMPDIR"
 ok "home creation succeeds beneath a TMPDIR containing spaces and is cleaned on exit"
 
+# Rehearse the suite's own allocation path (export + create_locus_home + the
+# TMPDIR containment check above) beneath a supplied root with several spaces,
+# including a doubled space. The allocated home must be usable as one path by
+# the binary, and exit cleanup must remove exactly the home: a decoy at the
+# first word-split fragment of the root catches an unquoted rm in the trap.
+log "2h. LOCUS_HOME allocation honors a space-containing TMPDIR"
+alloc_decoy="$LOCUS_HOME/home"
+alloc_tmp="$alloc_decoy  alloc tmp root"
+mkdir -p "$alloc_decoy" "$alloc_tmp"
+touch "$alloc_decoy/decoy-sentinel"
+(
+  export TMPDIR="$alloc_tmp"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  create_locus_home
+  trap 'e2e_cleanup' EXIT
+  [[ "$TMPDIR" == *" "* && -d "$LOCUS_HOME" && \
+    "${LOCUS_HOME%/*}" == "$TMPDIR" && \
+    "${LOCUS_HOME##*/}" == locus-e2e.* ]] || exit 1
+  # Allocation must succeed, not just land: the binary uses the home unmodified.
+  "$LOCUS_BIN" init >/dev/null || exit 2
+  [[ -n "$(ls -A "$LOCUS_HOME")" ]] || exit 3
+  printf '%s' "$LOCUS_HOME" >"$alloc_tmp/home-path"
+  touch "$LOCUS_HOME/cleanup-sentinel"
+) || die "LOCUS_HOME was not allocated beneath the space-containing TMPDIR"
+alloc_home="$(cat "$alloc_tmp/home-path")"
+[[ "$alloc_home" == *" "* ]] || die "allocated LOCUS_HOME path did not contain spaces"
+[[ ! -e "$alloc_home" && ! -L "$alloc_home" ]] \
+  || die "allocated LOCUS_HOME under a spaced TMPDIR survived exit cleanup"
+[[ -d "$alloc_tmp" ]] || die "LOCUS_HOME cleanup removed the spaced TMPDIR"
+[[ -f "$alloc_decoy/decoy-sentinel" ]] \
+  || die "LOCUS_HOME cleanup removed a word-split sibling of the spaced TMPDIR"
+ok "LOCUS_HOME allocation succeeds beneath a TMPDIR containing spaces"
+
 create_security_home() {
   SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
 }
