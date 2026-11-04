@@ -531,12 +531,14 @@ test('workspace cleanup survives a command failure after leaving the workspace',
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   const source = readFileSync(script, 'utf8');
   const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
-  const start = source.indexOf('WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"');
+  const createWorkspace = source.match(/^create_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('create_workspace\n# Same containment rule');
   const end = source.indexOf('\n# leave force-pin;', start);
-  assert.ok(cleanup && start >= 0 && end > start, 'missing workspace lifecycle');
+  assert.ok(cleanup && createWorkspace && start >= 0 && end > start, 'missing workspace lifecycle');
   const workspaceSection = source.slice(start, end);
   const probe = `set -euo pipefail
 ${cleanup}
+${createWorkspace}
 TMPDIR="$1" LOCUS_HOME="$1/main-home"
 GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
 mkdir "$LOCUS_HOME"
@@ -575,7 +577,7 @@ for (const exitStatus of [0, 73]) {
     writeFileSync(join(scratch, 'keep'), 'unrelated');
     const source = readFileSync(script, 'utf8');
     const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
-    const createWorkspace = source.match(/^WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
+    const createWorkspace = source.match(/^\s*WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
     assert.ok(cleanup, 'missing e2e cleanup function');
     assert.ok(createWorkspace, 'missing workspace creation');
     const probe = `${cleanup}
@@ -614,12 +616,14 @@ test('e2e.sh workspace section creates WS_DIR directly beneath the supplied TMPD
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   const source = readFileSync(script, 'utf8');
   const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
-  const start = source.indexOf('WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"');
+  const createWorkspace = source.match(/^create_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('create_workspace\n# Same containment rule');
   const end = source.indexOf('\n# leave force-pin;', start);
-  assert.ok(cleanup && start >= 0 && end > start, 'missing workspace lifecycle');
+  assert.ok(cleanup && createWorkspace && start >= 0 && end > start, 'missing workspace lifecycle');
   const workspaceSection = source.slice(start, end);
   const probe = `set -euo pipefail
 ${cleanup}
+${createWorkspace}
 TMPDIR="$1"
 LOCUS_HOME="$TMPDIR/main-home"
 GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
@@ -666,11 +670,13 @@ test('a WS_DIR created outside TMPDIR fails the temporary-root check', (t) => {
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   const source = readFileSync(script, 'utf8');
   const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
-  const start = source.indexOf('WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"');
+  const createWorkspace = source.match(/^create_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('create_workspace\n# Same containment rule');
   const end = source.indexOf('\n# leave force-pin;', start);
-  assert.ok(cleanup && start >= 0 && end > start, 'missing workspace lifecycle');
+  assert.ok(cleanup && createWorkspace && start >= 0 && end > start, 'missing workspace lifecycle');
   const probe = `set -euo pipefail
 ${cleanup}
+${createWorkspace}
 TMPDIR="$1"
 LOCUS_HOME="$TMPDIR/main-home"
 GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
@@ -702,7 +708,7 @@ test('repeated workspace creation yields distinct directories beneath TMPDIR', (
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   const source = readFileSync(script, 'utf8');
   const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
-  const createWorkspace = source.match(/^WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
+  const createWorkspace = source.match(/^\s*WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
   assert.ok(cleanup, 'missing e2e cleanup function');
   assert.ok(createWorkspace, 'missing workspace creation');
 
@@ -745,7 +751,7 @@ test('separate shells create distinct workspaces and each cleans its own', (t) =
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   const source = readFileSync(script, 'utf8');
   const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
-  const createWorkspace = source.match(/^WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
+  const createWorkspace = source.match(/^\s*WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
   assert.ok(cleanup, 'missing e2e cleanup function');
   assert.ok(createWorkspace, 'missing workspace creation');
   const probe = `set -euo pipefail
@@ -778,6 +784,86 @@ printf '%s' "$WS_DIR" > "$2"
     assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, `removed by its own exit trap: ${workspace}`);
   }
   assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
+});
+
+// Runs the script's real section 2d: a subshell rehearses create_workspace
+// beneath a nested temporary root whose name contains spaces, verifies the
+// workspace sits directly beneath that root, and its exit trap removes it.
+test('section 2d rehearses workspace creation beneath a TMPDIR containing spaces', (t) => {
+  const fixture = setup(t);
+  const home = join(fixture.root, 'main home');
+  mkdirSync(home);
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWorkspace = source.match(/^create_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('log "2d.');
+  const endMarker = 'ok "workspace creation succeeds beneath a TMPDIR containing spaces"';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(cleanup && createWorkspace && start >= 0 && end > start,
+    'missing the section 2d workspace rehearsal');
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createWorkspace}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$1"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+${source.slice(start, end + endMarker.length)}
+`, 'workspace-2d', home], { encoding: 'utf8' });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `the 2d rehearsal must succeed: ${result.stderr}`);
+  assert.match(result.stdout, /ok workspace creation succeeds beneath a TMPDIR containing spaces/);
+  const root = join(home, 'workspace temp root');
+  const recorded = readFileSync(join(root, 'workspace-path'), 'utf8');
+  assert.equal(dirname(recorded), root, 'rehearsed beneath the space-containing root');
+  assert.match(recorded, /\/locus-ws\.[^/\s]+$/, 'workspace name is one unsplit component');
+  assert.throws(() => lstatSync(recorded), { code: 'ENOENT' },
+    'the rehearsal workspace must be removed on subshell exit');
+  assert.deepEqual(readdirSync(root), ['workspace-path'],
+    'the subshell trap must also remove its own home');
+});
+
+// A mktemp regression that relocates the rehearsal workspace must stop the
+// suite at the 2d subshell; the subshell trap still removes the misplaced
+// directory before the failure reaches the caller.
+test('a rehearsal workspace created outside the spaced TMPDIR stops section 2d', (t) => {
+  const fixture = setup(t);
+  const home = join(fixture.root, 'main home');
+  const wrongRoot = join(fixture.root, 'wrong root');
+  const created = join(fixture.root, 'ws-created');
+  mkdirSync(home);
+  mkdirSync(wrongRoot);
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWorkspace = source.match(/^create_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('log "2d.');
+  const endMarker = 'ok "workspace creation succeeds beneath a TMPDIR containing spaces"';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(cleanup && createWorkspace && start >= 0 && end > start,
+    'missing the section 2d workspace rehearsal');
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+mktemp() { local d; d="$(command mktemp -d "$WRONG_ROOT/locus-ws.XXXXXX")"; printf '%s' "$d" > "$WS_CREATED"; printf '%s\\n' "$d"; }
+${createWorkspace}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$1"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+${source.slice(start, end + endMarker.length)}
+`, 'workspace-2d-misplaced', home], {
+    env: { ...process.env, WRONG_ROOT: wrongRoot, WS_CREATED: created },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the 2d check must fail the suite');
+  assert.match(result.stderr, /workspace was not created beneath the space-containing TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok workspace creation succeeds/);
+  assert.equal(readFileSync(created, 'utf8').startsWith(`${wrongRoot}/`), true);
+  assert.deepEqual(readdirSync(wrongRoot), [], 'the misplaced rehearsal workspace must be removed');
 });
 
 for (const exitStatus of [0, 73]) {
@@ -822,7 +908,7 @@ for (const [label, temp] of [['custom', 'custom tmp $literal; [test]'], ['unset'
     const scratch = join(fixture.root, temp === undefined || temp === '' ? 'unused' : temp);
     const capture = join(fixture.root, 'template');
     mkdirSync(scratch);
-    const createWorkspace = readFileSync(script, 'utf8').match(/^WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
+    const createWorkspace = readFileSync(script, 'utf8').match(/^\s*WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
     assert.ok(createWorkspace, 'missing workspace creation');
     writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
 printf '%s' "$2" > "$PROBE_CAPTURE"

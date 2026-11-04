@@ -115,6 +115,11 @@ create_security_workspace() {
   SECURITY_WS="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-ws.XXXXXX")"
 }
 
+# Sets WS_DIR to a fresh workspace directory directly beneath the temp root.
+create_workspace() {
+  WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"
+}
+
 # Exercise the same creation and EXIT cleanup used by the security probes.
 # The subshell owns its test home so its cleanup cannot remove the main home.
 log "2c. security directories honor a nondefault TMPDIR"
@@ -145,6 +150,30 @@ security_test_ws="$(cat "$security_tmp/security-workspace-path")"
   || die "security workspace survived exit cleanup"
 [[ -d "$security_tmp" ]] || die "security cleanup removed the supplied TMPDIR"
 ok "distinct security directories honor nondefault TMPDIR and are cleaned on exit"
+
+# Exercise the same workspace creation and EXIT cleanup used by the allowlist
+# probes, beneath a supplied temporary root whose name contains spaces. The
+# subshell owns its test home so its cleanup cannot remove the main home.
+log "2d. workspace creation honors a space-containing TMPDIR"
+workspace_tmp="$LOCUS_HOME/workspace temp root"
+mkdir -p "$workspace_tmp"
+(
+  export TMPDIR="$workspace_tmp"
+  LOCUS_HOME="$workspace_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_workspace
+  [[ -d "$WS_DIR" && "${WS_DIR%/*}" == "$TMPDIR" && \
+    "${WS_DIR##*/}" == locus-ws.* ]] || exit 1
+  printf '%s' "$WS_DIR" >"$workspace_tmp/workspace-path"
+  touch "$WS_DIR/cleanup-sentinel"
+) || die "workspace was not created beneath the space-containing TMPDIR"
+workspace_test_dir="$(cat "$workspace_tmp/workspace-path")"
+[[ ! -e "$workspace_test_dir" && ! -L "$workspace_test_dir" ]] \
+  || die "rehearsed workspace survived exit cleanup"
+[[ -d "$workspace_tmp" ]] || die "workspace cleanup removed the supplied TMPDIR"
+ok "workspace creation succeeds beneath a TMPDIR containing spaces"
 
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
@@ -530,7 +559,7 @@ ok "autopin suggest ignores non-origin history and refuses to apply it"
 
 # ── 4. workspace allowlist blocks personal without --force ───────────────────
 log "4. workspace allowlist block personal without --force"
-WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"
+create_workspace
 # Same containment rule as LOCUS_HOME: a supplied TMPDIR owns the workspace.
 if [[ -n "${TMPDIR:-}" ]]; then
   [[ -d "$WS_DIR" && "${WS_DIR%/*}" == "$TMPDIR" && \

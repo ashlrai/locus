@@ -56,12 +56,15 @@ assert_fixtures_cleaned() {
   [[ -f "$E2E_WORKSPACE_RECORD" ]] || { printf 'FAIL: workspace was not created\n' >&2; exit 1; }
   local workspaces=() workspace
   while IFS= read -r workspace; do
-    workspaces+=("$workspace")
+    # Section 2d rehearses creation beneath its own nested TMPDIR; every
+    # recorded workspace must be gone, and the suite fixture sits beneath ours.
+    [[ ! -e "$workspace" && ! -L "$workspace" ]] || { printf 'FAIL: workspace was not cleaned up\n' >&2; exit 1; }
+    if [[ "${workspace%/*}" == "$TMPDIR" ]]; then
+      workspaces+=("$workspace")
+    fi
   done <"$E2E_WORKSPACE_RECORD"
-  [[ ${#workspaces[@]} -eq 1 ]] || { printf 'FAIL: expected one workspace\n' >&2; exit 1; }
+  [[ ${#workspaces[@]} -eq 1 ]] || { printf 'FAIL: expected one workspace directly beneath TMPDIR\n' >&2; exit 1; }
   workspace="${workspaces[0]}"
-  [[ "${workspace%/*}" == "$TMPDIR" ]] || { printf 'FAIL: workspace was not created directly beneath TMPDIR\n' >&2; exit 1; }
-  [[ ! -e "$workspace" && ! -L "$workspace" ]] || { printf 'FAIL: workspace was not cleaned up\n' >&2; exit 1; }
   [[ -f "$TMPDIR/unrelated" ]] || { printf 'FAIL: cleanup removed unrelated data\n' >&2; exit 1; }
   (
     shopt -s nullglob dotglob
@@ -76,8 +79,15 @@ ln -s "${LOCUS_BIN:-$ROOT/target/release/locus}" "$TEST_ROOT/bin/real-locus"
 cat >"$TEST_ROOT/bin/observe-locus" <<'EOF'
 #!/bin/bash
 if [[ "${1:-}" == workspace ]]; then
-  IFS= read -r workspace <"$E2E_WORKSPACE_RECORD"
-  [[ -d "$workspace" && "$PWD" -ef "$workspace" && -d "$LOCUS_HOME" ]] || exit 1
+  # The suite fixture sits directly beneath our TMPDIR; the section 2d
+  # rehearsal records a nested workspace first, so pick the top-level entry.
+  workspace=""
+  while IFS= read -r candidate; do
+    if [[ "${candidate%/*}" == "$TMPDIR" ]]; then
+      workspace="$candidate"
+    fi
+  done <"$E2E_WORKSPACE_RECORD"
+  [[ -n "$workspace" && -d "$workspace" && "$PWD" -ef "$workspace" && -d "$LOCUS_HOME" ]] || exit 1
   printf '%s\n' "$LOCUS_HOME" >"$E2E_HOME_USED"
   touch "$LOCUS_HOME/cleanup-sentinel" "$PWD/cleanup-sentinel"
   if [[ "${E2E_INJECT_FAILURE:-}" == 1 ]]; then
@@ -123,7 +133,13 @@ status=0
 E2E_INJECT_FAILURE=1 bash "$ROOT/scripts/e2e.sh" >"$TEST_ROOT/failure.log" 2>&1 || status=$?
 [[ "$status" -eq 73 ]] || { printf 'FAIL: expected status 73 from injected failure, got %s\n' "$status" >&2; exit 1; }
 [[ -f "$E2E_FAILURE_RECORD" ]] || { printf 'FAIL: injected failure was not reached\n' >&2; exit 1; }
-[[ "$(cat "$E2E_FAILURE_RECORD")" == "$(cat "$E2E_WORKSPACE_RECORD")" ]] \
+top_level_ws=""
+while IFS= read -r recorded_ws; do
+  if [[ "${recorded_ws%/*}" == "$TMPDIR" ]]; then
+    top_level_ws="$recorded_ws"
+  fi
+done <"$E2E_WORKSPACE_RECORD"
+[[ "$(cat "$E2E_FAILURE_RECORD")" == "$top_level_ws" ]] \
   || { printf 'FAIL: injected failure did not occur in the recorded workspace\n' >&2; exit 1; }
 assert_fixtures_cleaned
 printf 'PASS: home and workspace were cleaned up after an injected failure\n'
