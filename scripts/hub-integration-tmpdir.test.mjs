@@ -217,6 +217,43 @@ exec bash "$1"
   });
 }
 
+// Creation alone is not enough: the script must also work inside SMOKE_PROJ.
+// Stop at the first locus call after the cd and check the working directory
+// and the .mcp.json written there are beneath the spaced TMPDIR.
+test('SMOKE_PROJ under a spaced TMPDIR is entered and receives .mcp.json', (t) => {
+  const scratch = mkdtempSync('/tmp/locus-tmpdir-proj-');
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const custom = join(scratch, 'my tmp dir');
+  const record = join(scratch, 'observed');
+  mkdirSync(custom);
+
+  const observe = `
+node() { :; }
+jq() { :; }
+cargo() { :; }
+locus() {
+  if [[ "${'$'}{1:-} ${'$'}{2:-} ${'$'}{3:-}" == "agent report --json" ]]; then
+    printf '%s\\n' "$PWD" "$(cat .mcp.json)" > "$RECORD"
+    exit 73
+  fi
+}
+export -f node jq cargo locus
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', observe, 'proj-test', script], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: custom, RECORD: record },
+    encoding: 'utf8',
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  const [cwd, mcp] = readFileSync(record, 'utf8').split('\n');
+  assert.equal(dirname(cwd), custom, 'SMOKE_PROJ must be created directly beneath the spaced TMPDIR');
+  assert.match(basename(cwd), /^locus-hub-int-proj\.[^/]+$/);
+  assert.equal(JSON.parse(mcp).mcpServers.locus.command, 'locus-mcp');
+  assert.equal(existsSync(cwd), false, 'SMOKE_PROJ must be removed on exit');
+  assert.deepEqual(readdirSync(custom), []);
+});
+
 // A relative TMPDIR is resolved against the caller's cwd, but the script cd's
 // into the smoke project before exiting; the EXIT trap must still find and
 // remove both directories.
