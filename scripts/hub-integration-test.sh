@@ -55,8 +55,13 @@ if [[ -n "${TMPDIR:-}" && "$TMPDIR" != /* ]]; then
   export TMPDIR
 fi
 
-SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
-SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
+# make_smoke_dir NAME — create a unique directory under ${TMPDIR:-/tmp}.
+make_smoke_dir() {
+  mktemp -d "${TMPDIR:-/tmp}/$1.XXXXXX"
+}
+
+SMOKE_HOME="$(make_smoke_dir locus-hub-int)"
+SMOKE_PROJ="$(make_smoke_dir locus-hub-int-proj)"
 
 export LOCUS_HOME="$SMOKE_HOME"
 unset LOCUS_SESSION_ID || true
@@ -1294,6 +1299,17 @@ fi
 #    Regression: detection must hold under paths containing spaces; a walk
 #    that word-splits or skips such files would pass a tree hiding a leak.
 # ---------------------------------------------------------------------------
+# SMOKE_HOME creation must succeed beneath a TMPDIR that contains spaces.
+SPACED_TMP="$SMOKE_PROJ/tmp with spaces"
+mkdir -p -- "$SPACED_TMP"
+spaced_home="$(TMPDIR="$SPACED_TMP" make_smoke_dir locus-hub-int 2>/dev/null)" || spaced_home=""
+if [[ -n "$spaced_home" && -d "$spaced_home" && "$spaced_home" == "$SPACED_TMP"/locus-hub-int.* ]]; then
+  ok "SMOKE_HOME created beneath TMPDIR containing spaces"
+else
+  bad "SMOKE_HOME creation failed beneath TMPDIR containing spaces"
+fi
+rm -rf -- "$SPACED_TMP"
+
 SPACED_ROOT="$SMOKE_PROJ/canary scan/nested dir"
 mkdir -p "$SPACED_ROOT"
 printf 'ordinary contents\n' >"$SPACED_ROOT/clean file"
