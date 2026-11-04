@@ -270,6 +270,79 @@ esac
   assert.equal(readFileSync(join(neighbor, 'keep'), 'utf8'), 'neighbor');
 });
 
+// The mktemp stub records the template the script mainline passes and
+// redirects anything outside $CONTROLLED into it, so the fallback cases
+// never touch /tmp. It lives in the fixture's target/debug, which dogfood.sh
+// prepends to PATH.
+function dogfoodHomeRootSelection(t, tmpdirEnv) {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-select-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const controlled = join(root, 'controlled');
+  const fixtureRoot = join(root, 'fixture');
+  const bin = join(fixtureRoot, 'target', 'debug');
+  mkdirSync(controlled);
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(fixtureRoot, 'scripts'));
+  writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+last="\${!#}"
+printf '%s\\n' "$last" >> "$MKTEMP_LOG"
+args=("$@")
+[[ "$last" == "$CONTROLLED"/* ]] || args[$(($# - 1))]="$CONTROLLED/\${last##*/}"
+path="$(PATH=/usr/bin:/bin command mktemp "\${args[@]}")" || exit
+printf '%s\\n' "$path" >> "$CREATED_LOG"
+printf '%s\\n' "$path"
+`, { mode: 0o755 });
+  writeFileSync(join(bin, 'locus'), `#!/bin/bash
+case "$1" in
+  init) printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE" ;;
+  quickstart) exit 42 ;;
+esac
+`, { mode: 0o755 });
+  const templates = join(root, 'templates');
+  const created = join(root, 'created');
+  const probe = join(root, 'probe');
+  const env = { PATH: process.env.PATH, HOME: process.env.HOME, CONTROLLED: controlled,
+    MKTEMP_LOG: templates, CREATED_LOG: created, PROBE_FILE: probe };
+  Object.assign(env, tmpdirEnv(controlled));
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root, env, encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 42, 'dogfood should reach the controlled quickstart failure');
+  return {
+    controlled,
+    templates: readFileSync(templates, 'utf8').trim().split('\n'),
+    created: readFileSync(created, 'utf8').trim(),
+    home: readFileSync(probe, 'utf8').trim(),
+    left: readdirSync(controlled),
+  };
+}
+
+test('dogfood home root is selected and created under an explicit TMPDIR', (t) => {
+  const { controlled, templates, created, home, left } = dogfoodHomeRootSelection(t, (dir) => ({ TMPDIR: dir }));
+  assert.deepEqual(templates, [`${controlled}/locus-dogfood.XXXXXX`]);
+  assert.equal(dirname(created), controlled);
+  assert.match(basename(created), /^locus-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.equal(home, created);
+  assert.equal(existsSync(created), false);
+  assert.deepEqual(left, []);
+});
+
+for (const [label, tmpdirEnv] of [['unset', () => ({})], ['empty', () => ({ TMPDIR: '' })]]) {
+  test(`dogfood home root falls back to /tmp when TMPDIR is ${label}`, (t) => {
+    const { controlled, templates, created, home, left } = dogfoodHomeRootSelection(t, tmpdirEnv);
+    assert.deepEqual(templates, ['/tmp/locus-dogfood.XXXXXX']);
+    assert.equal(dirname(created), controlled);
+    assert.match(basename(created), /^locus-dogfood\.[A-Za-z0-9]{6}$/);
+    assert.equal(home, created);
+    assert.equal(existsSync(created), false);
+    assert.deepEqual(left, []);
+  });
+}
+
 function writeSuccessFixture(root) {
   const fixtureRoot = join(root, 'fixture');
   const bin = join(fixtureRoot, 'target', 'debug');
