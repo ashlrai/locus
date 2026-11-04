@@ -264,10 +264,13 @@ ok "WS_DIR is created beneath a plain custom TMPDIR and cleaned on exit"
 
 # Same creation, use and EXIT cleanup as the broken-link security probe, beneath
 # a supplied temporary root with spaces (including a doubled space). The subshell
-# owns its test home so its cleanup cannot remove the main home.
+# owns its test home so its cleanup cannot remove the main home. A decoy at the
+# first word-split fragment of the root catches an unquoted rm in the exit trap.
 log "2e. SECURITY_WS creation honors a space-containing TMPDIR"
-security_ws_tmp="$LOCUS_HOME/security  ws temp root"
-mkdir -p "$security_ws_tmp"
+security_ws_decoy="$LOCUS_HOME/security"
+security_ws_tmp="$security_ws_decoy  ws temp root"
+mkdir -p "$security_ws_decoy" "$security_ws_tmp"
+touch "$security_ws_decoy/decoy-sentinel"
 (
   export TMPDIR="$security_ws_tmp"
   LOCUS_HOME="$security_ws_tmp/subshell-home"
@@ -284,9 +287,12 @@ mkdir -p "$security_ws_tmp"
   printf '%s' "$SECURITY_WS" >"$security_ws_tmp/security-workspace-path"
 ) || die "SECURITY_WS was not created beneath the space-containing TMPDIR"
 security_ws_test_dir="$(cat "$security_ws_tmp/security-workspace-path")"
+[[ "$security_ws_test_dir" == *" "* ]] || die "SECURITY_WS path did not contain spaces"
 [[ ! -e "$security_ws_test_dir" && ! -L "$security_ws_test_dir" ]] \
   || die "rehearsed SECURITY_WS survived exit cleanup"
 [[ -d "$security_ws_tmp" ]] || die "SECURITY_WS cleanup removed the supplied TMPDIR"
+[[ -f "$security_ws_decoy/decoy-sentinel" ]] \
+  || die "SECURITY_WS cleanup removed a word-split sibling of the spaced TMPDIR"
 ok "SECURITY_WS creation succeeds beneath a TMPDIR containing spaces"
 
 # The binary must receive a spaced LOCUS_HOME as one path. Everything it writes

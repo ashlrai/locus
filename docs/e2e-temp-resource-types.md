@@ -32,7 +32,9 @@ and prefix inventory against the script and exercise temporary-directory cleanup
 Run `node --test scripts/e2e-home-selection.test.mjs` for the focused
 `LOCUS_HOME` temporary-root selection checks, and
 `node --test scripts/e2e-graph-home-selection.test.mjs` for the `GRAPH_HOME`
-equivalent.
+equivalent, and
+`node --test scripts/e2e-security-workspace-spaced-tmpdir.test.mjs` for the
+`SECURITY_WS` space-containing `TMPDIR` checks.
 Run `scripts/tests/e2e-tmpdir.sh` to exercise the full suite under a custom
 `TMPDIR`, including an injected failure after workspace creation.
 See the [security directories](e2e-security-directories.md) for the
