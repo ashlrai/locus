@@ -231,6 +231,35 @@ security_ws_test_dir="$(cat "$security_ws_tmp/security-workspace-path")"
 [[ -d "$security_ws_tmp" ]] || die "SECURITY_WS cleanup removed the supplied TMPDIR"
 ok "SECURITY_WS creation succeeds beneath a TMPDIR containing spaces"
 
+# Same creation, use and EXIT cleanup as the credential security home, beneath
+# a supplied temporary root with spaces (including a doubled space). The
+# subshell owns its test home so its cleanup cannot remove the main home.
+log "2h. SECURITY_HOME creation honors a space-containing TMPDIR"
+security_home_tmp="$LOCUS_HOME/security  home temp root"
+mkdir -p "$security_home_tmp"
+(
+  export TMPDIR="$security_home_tmp"
+  LOCUS_HOME="$security_home_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_security_home
+  [[ -d "$SECURITY_HOME" && "${SECURITY_HOME%/*}" == "$TMPDIR" && \
+    "${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
+  # The probes pass the home to the binary as LOCUS_HOME; a nested store path
+  # beneath the spaced root must round-trip as one path.
+  mkdir -p "$SECURITY_HOME/bindings/nested dir" || exit 1
+  printf 'payload' >"$SECURITY_HOME/bindings/nested dir/probe.toml" || exit 1
+  [[ "$(cat "$SECURITY_HOME/bindings/nested dir/probe.toml")" == payload ]] || exit 1
+  printf '%s' "$SECURITY_HOME" >"$security_home_tmp/security-home-path"
+  touch "$SECURITY_HOME/cleanup-sentinel"
+) || die "SECURITY_HOME was not created beneath the space-containing TMPDIR"
+security_home_test_dir="$(cat "$security_home_tmp/security-home-path")"
+[[ ! -e "$security_home_test_dir" && ! -L "$security_home_test_dir" ]] \
+  || die "rehearsed SECURITY_HOME survived exit cleanup"
+[[ -d "$security_home_tmp" ]] || die "SECURITY_HOME cleanup removed the supplied TMPDIR"
+ok "SECURITY_HOME creation succeeds beneath a TMPDIR containing spaces"
+
 # The binary must receive a spaced LOCUS_HOME as one path. Everything it writes
 # must land inside that one directory: a split path would create stray siblings
 # beneath the supplied TMPDIR.

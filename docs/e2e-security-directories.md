@@ -36,7 +36,9 @@ ordinary failure. The security directories are created at the start of section
 separate security home and workspace inside a custom temporary directory whose
 name contains spaces. It verifies that they are distinct; its exit trap removes
 both, and the parent checks their removal and preservation of the supplied
-temporary directory.
+temporary directory. Sections 2e and 2h rehearse the security workspace and
+the security home separately, each beneath its own supplied root whose name
+contains spaces, with the same exit-trap cleanup.
 
 A termination that prevents the trap from running or a removal error can leave
 files behind. A failure before trap installation can leave the main home, but
