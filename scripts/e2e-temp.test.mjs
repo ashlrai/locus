@@ -566,6 +566,58 @@ exit "$3"
   });
 }
 
+// Runs the real workspace section (not a copy of its mktemp line) with a
+// stubbed mktemp that records its template before delegating to the real
+// command. With TMPDIR set, the selected root must be that directory and the
+// created workspace must sit directly beneath it.
+test('e2e.sh workspace section creates WS_DIR directly beneath the supplied TMPDIR', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'temp with spaces');
+  const templates = join(fixture.root, 'templates');
+  const wsUsed = join(fixture.root, 'ws-used');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"');
+  const end = source.indexOf('\n# leave force-pin;', start);
+  assert.ok(cleanup && start >= 0 && end > start, 'missing workspace lifecycle');
+  const workspaceSection = source.slice(start, end);
+  const probe = `set -euo pipefail
+${cleanup}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+mkdir "$LOCUS_HOME"
+trap 'e2e_cleanup' EXIT
+mktemp() { printf '%s\\n' "$2" >> "$TEST_TEMPLATES"; command mktemp "$@"; }
+locus() {
+  case "$*" in
+    workspace*) touch .locus.toml; printf '%s' "$PWD" > "$WS_USED" ;;
+    'pin personal') printf 'not allowed\\n' >&2; return 1 ;;
+    'pin personal --force') return 0 ;;
+    *) return 74 ;;
+  esac
+}
+log() { :; }; ok() { :; }; die() { printf '%s\\n' "$*" >&2; exit 74; }
+${workspaceSection}
+`;
+  const result = spawnSync('bash', ['-c', probe, 'workspace-root', scratch], {
+    env: { ...process.env, TEST_TEMPLATES: templates, WS_USED: wsUsed },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `the workspace section must succeed: ${result.stderr}`);
+  assert.equal(readFileSync(templates, 'utf8').trim(), `${scratch}/locus-ws.XXXXXX`,
+    'the section must ask mktemp for a directory rooted at TMPDIR');
+  const workspace = readFileSync(wsUsed, 'utf8');
+  assert.equal(dirname(workspace), scratch, 'the workspace is created directly beneath TMPDIR');
+  assert.match(workspace, /\/locus-ws\.[^/]+$/);
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'workspace must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
+
 test('repeated workspace creation yields distinct directories beneath TMPDIR', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp');
