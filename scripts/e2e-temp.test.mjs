@@ -672,6 +672,43 @@ ${workspaceSection}
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
 });
 
+for (const setting of ['isolated', 'unset', 'empty']) {
+  test(`WS_DIR selects the temporary root when TMPDIR is ${setting}`, (t) => {
+    const fixture = setup(t);
+    const capture = join(fixture.root, 'template');
+    const observed = join(fixture.root, 'workspace');
+    const source = readFileSync(script, 'utf8');
+    const createWorkspace = source.match(/^create_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+    assert.ok(createWorkspace, 'missing workspace creation function');
+    const env = { ...process.env, CAPTURE: capture, OBSERVED: observed, CONTROLLED_ROOT: fixture.root };
+    if (setting === 'unset') delete env.TMPDIR;
+    else env.TMPDIR = setting === 'empty' ? '' : fixture.root;
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+${createWorkspace}
+mktemp() {
+  [[ "$#" == 2 && "$1" == -d ]] || exit 71
+  printf '%s' "$2" > "$CAPTURE"
+  if [[ -n "\${TMPDIR:-}" ]]; then
+    command mktemp "$@"
+  else
+    command mktemp -d "$CONTROLLED_ROOT/locus-ws.XXXXXX"
+  fi
+}
+create_workspace
+[[ -d "$WS_DIR" ]] || exit 72
+printf '%s' "$WS_DIR" > "$OBSERVED"
+rm -rf -- "$WS_DIR"
+`], { env, encoding: 'utf8' });
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, result.stderr);
+    const expectedRoot = setting === 'isolated' ? fixture.root : '/tmp';
+    assert.equal(readFileSync(capture, 'utf8'), `${expectedRoot}/locus-ws.XXXXXX`);
+    const workspace = readFileSync(observed, 'utf8');
+    assert.equal(dirname(workspace), fixture.root);
+    assert.throws(() => lstatSync(workspace), { code: 'ENOENT' });
+  });
+}
+
 // A mktemp regression that relocates the workspace must stop the suite at the
 // section 4 containment check; the exit trap still removes the misplaced
 // directory. Runs the real workspace section, not a copy of its mktemp line.
