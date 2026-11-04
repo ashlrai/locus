@@ -946,3 +946,93 @@ printf '%s' "$SECURITY_HOME" > "$2"
   }
   assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
 });
+
+test('repeated security workspace creation yields distinct directories beneath a spaced TMPDIR', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'security ws tmp $literal; [test]');
+  const observed = join(fixture.root, 'observed-security-workspaces');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWs = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(createWs, 'missing security workspace creation function');
+
+  // The script invokes create_security_workspace once per shell; a second call
+  // must still land beneath the spaced TMPDIR as a fresh directory.
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createWs}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+create_security_workspace
+first="$SECURITY_WS"
+create_security_workspace
+[[ -d "$first" && -d "$SECURITY_WS" && "$first" != "$SECURITY_WS" && ! "$first" -ef "$SECURITY_WS" ]] || exit 1
+[[ "\${first%/*}" == "$TMPDIR" && "\${SECURITY_WS%/*}" == "$TMPDIR" && "\${first##*/}" == locus-security-ws.* && "\${SECURITY_WS##*/}" == locus-security-ws.* ]] || exit 1
+touch "$first/sentinel" "$SECURITY_WS/sentinel"
+printf '%s\\n%s\\n' "$first" "$SECURITY_WS" > "$2"
+`, 'security-ws-repeat', scratch, observed], { encoding: 'utf8' });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'two invocations must create distinct workspaces beneath the spaced TMPDIR');
+  const [first, second] = readFileSync(observed, 'utf8').trim().split('\n');
+  assert.notEqual(first, second, 'the second invocation must not reuse the first directory');
+  for (const workspace of [first, second]) {
+    assert.equal(dirname(workspace), scratch, 'each workspace is created directly beneath the spaced TMPDIR');
+    assert.match(workspace, /\/locus-security-ws\.[^/]+$/);
+  }
+  // The EXIT trap removes the live SECURITY_WS only; a superseded workspace is
+  // no longer tracked, which is why the script creates one per shell.
+  assert.throws(() => lstatSync(second), { code: 'ENOENT' }, 'the live security workspace must be removed on exit');
+  assert.ok(existsSync(join(first, 'sentinel')), 'the superseded workspace is not tracked for removal');
+  rmSync(first, { recursive: true, force: true });
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
+
+test('separate shells create distinct security workspaces beneath a spaced TMPDIR and each cleans its own', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'security ws tmp dir');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWs = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(createWs, 'missing security workspace creation function');
+  const probe = `set -euo pipefail
+${cleanup}
+${createWs}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+mkdir "$LOCUS_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+create_security_workspace
+[[ -d "$SECURITY_WS" && "\${SECURITY_WS%/*}" == "$TMPDIR" && "\${SECURITY_WS##*/}" == locus-security-ws.* ]] || exit 1
+touch "$SECURITY_WS/sentinel"
+printf '%s' "$SECURITY_WS" > "$2"
+`;
+
+  const workspaces = [1, 2].map((n) => {
+    const observed = join(fixture.root, `observed-workspace-${n}`);
+    const result = spawnSync('bash', ['-c', probe, 'security-ws-invocation', scratch, observed],
+      { encoding: 'utf8' });
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, `invocation ${n} must create its workspace beneath the spaced TMPDIR`);
+    return readFileSync(observed, 'utf8');
+  });
+
+  const [first, second] = workspaces;
+  assert.notEqual(first, second, 'each invocation must create a fresh directory');
+  for (const workspace of workspaces) {
+    assert.equal(dirname(workspace), scratch, 'each workspace is created directly beneath the spaced TMPDIR');
+    assert.match(workspace, /\/locus-security-ws\.[^/]+$/);
+    assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, `removed by its own exit trap: ${workspace}`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
+});
