@@ -24,6 +24,10 @@ case "${2:-}" in
     [[ -d "$created" ]] || exit 1
     printf '%s\n' "$created" >>"$E2E_WORKSPACE_RECORD"
     ;;
+  */locus-security-e2e.XXXXXX)
+    [[ -d "$created" ]] || exit 1
+    printf '%s\n' "$created" >>"$E2E_SECURITY_HOME_RECORD"
+    ;;
 esac
 printf '%s\n' "$created"
 EOF
@@ -33,6 +37,7 @@ export E2E_REAL_MKTEMP="$REAL_MKTEMP"
 export E2E_HOME_RECORD="$TEST_ROOT/homes"
 export E2E_HOME_USED="$TEST_ROOT/home-used"
 export E2E_WORKSPACE_RECORD="$TEST_ROOT/workspaces"
+export E2E_SECURITY_HOME_RECORD="$TEST_ROOT/security-homes"
 export TMPDIR="$TEST_ROOT/custom tmp"
 export PATH="$TEST_ROOT/bin:$PATH"
 touch "$TMPDIR/unrelated"
@@ -94,6 +99,19 @@ if ! bash "$ROOT/scripts/e2e.sh" >"$TEST_ROOT/e2e.log" 2>&1; then
 fi
 
 assert_fixtures_cleaned
+# The script also creates a nested security fixture for its own root check;
+# select the security home used by the actual security probes at the top level.
+[[ -f "$E2E_SECURITY_HOME_RECORD" ]] || { printf 'FAIL: security home was not created\n' >&2; exit 1; }
+security_homes=()
+while IFS= read -r home; do
+  if [[ "${home%/*}" == "$TMPDIR" ]]; then
+    security_homes+=("$home")
+  fi
+done <"$E2E_SECURITY_HOME_RECORD"
+[[ ${#security_homes[@]} -eq 1 ]] || { printf 'FAIL: expected one security home directly beneath TMPDIR\n' >&2; exit 1; }
+[[ ! -e "${security_homes[0]}" && ! -L "${security_homes[0]}" ]] \
+  || { printf 'FAIL: security home was not cleaned up\n' >&2; exit 1; }
+printf 'PASS: security home used the supplied TMPDIR and was cleaned up\n'
 grep '^e2e PASS ' "$TEST_ROOT/e2e.log"
 printf 'PASS: custom TMPDIR home and workspace were created and cleaned up\n'
 
