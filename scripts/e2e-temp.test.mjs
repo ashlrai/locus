@@ -50,13 +50,15 @@ function setup(t) {
   const bin = join(root, 'bin');
   mkdirSync(bin);
   // Avoid building binaries and fail immediately after the cleanup trap is
-  // set. Section 2d rehearses `init` and `workspace` inside its subshell, so
-  // the stub answers only those fixture commands; every other command fails.
+  // set. Sections 2d and 2f rehearse `init` inside their subshells and 2f
+  // requires the home to be populated, so the stub's init writes a stamp the
+  // way the real command populates the home; `workspace` writes the allowlist.
+  // Every other command fails.
   writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   const locus = join(bin, 'locus');
   writeFileSync(locus, `#!/bin/sh
 case "$1" in
-  init) exit 0 ;;
+  init) printf 'stub init\\n' > "$LOCUS_HOME/init-stamp" && exit 0 ;;
   workspace) printf '# stub workspace config\\n' > .locus.toml && exit 0 ;;
 esac
 exit 1
