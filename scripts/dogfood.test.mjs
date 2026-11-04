@@ -808,3 +808,33 @@ exit "$?"
   assert.equal(existsSync(probeRoot), false);
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
+
+test('default pack path and project dir stay one argument under a space-containing TMPDIR', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-pack-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'tmp with  spaces');
+  mkdirSync(scratch);
+  const fixtureRoot = writeSuccessFixture(root);
+  const locusBin = join(fixtureRoot, 'target', 'debug', 'locus');
+  const stub = readFileSync(locusBin, 'utf8').replace(
+    "'forensics export') printf '{}\\n' > \"$4\" ;;",
+    "'forensics export') printf '%s\\n' \"$#\" \"$3\" \"$4\" > \"$PACK_RECORD\"; printf '{}\\n' > \"$4\" ;;");
+  assert.notEqual(stub, readFileSync(locusBin, 'utf8'), 'fixture must be patched');
+  writeFileSync(locusBin, stub, { mode: 0o755 });
+
+  const probe = join(root, 'probe');
+  const record = join(root, 'pack-record');
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, PROBE_FILE: probe,
+      FIXTURE_ROOT: root, PACK_RECORD: record },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.equal(dirname(home), scratch);
+  assert.deepEqual(readFileSync(record, 'utf8').trim().split('\n'),
+    ['4', '--out', join(home, 'pack.json')]);
+  assert.ok(result.stdout.includes(`isolated LOCUS_HOME=${home}`));
+  assert.deepEqual(readdirSync(scratch), []);
+});
