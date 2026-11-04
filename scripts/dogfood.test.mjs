@@ -1458,3 +1458,41 @@ esac
   assert.match(basename(home), /^locus-dogfood\.[A-Za-z0-9]{6}$/);
   assert.equal(existsSync(home), false, 'cleanup trap removes the home');
 });
+
+test('multi-tenant probe directory is created as one path under a TMPDIR containing spaces', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-space-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  // Double and trailing spaces would each split into extra mktemp arguments if
+  // the template were ever unquoted.
+  const scratch = join(root, 'tmp  with   spaces ');
+  mkdirSync(scratch);
+  const probe = join(root, 'probe');
+  // Observe the live directory from inside init: it must exist, be a single
+  // child of the exact TMPDIR, and hold LOCUS_HOME.
+  const harness = String.raw`
+source "$1"
+locus() {
+  if [[ "$1" == init ]]; then
+    [[ -d "$PWD" && "${'$'}{PWD%/*}" == "$TMPDIR" && "$PWD" == "$TMPDIR"/locus-mt-dogfood.* && "$LOCUS_HOME" == "$PWD/home" ]] || exit 43
+    printf '%s\n' "$PWD" > "$PROBE_FILE"
+  fi
+  return 1
+}
+set +e
+mt_grant_probe
+exit "$?"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, PROBE_FILE: probe },
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'probe must reach init under the spaced TMPDIR');
+  const probeRoot = readFileSync(probe, 'utf8').trim();
+  assert.equal(dirname(probeRoot), scratch);
+  assert.match(basename(probeRoot), /^locus-mt-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.equal(existsSync(probeRoot), false, 'failure path removes the probe root');
+  assert.deepEqual(readdirSync(scratch), []);
+  assert.deepEqual(readdirSync(root).sort(), ['probe', 'tmp  with   spaces ']);
+});
