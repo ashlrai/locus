@@ -866,6 +866,63 @@ ${source.slice(start, end + endMarker.length)}
   assert.deepEqual(readdirSync(wrongRoot), [], 'the misplaced rehearsal workspace must be removed');
 });
 
+// Section 2e rehearses the same create_locus_home helper as section 2 beneath
+// a nested TMPDIR containing spaces; mktemp must get exactly `-d` and one
+// template, and the subshell trap must remove only its own home.
+function section2e() {
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createHome = source.match(/^create_locus_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('log "2e.');
+  const endMarker = 'ok "LOCUS_HOME creation succeeds beneath a TMPDIR containing spaces"';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(cleanup && createHome && start >= 0 && end > start, 'missing the section 2e rehearsal');
+  return `set -euo pipefail
+${cleanup}
+${createHome}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$1"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+${source.slice(start, end + endMarker.length)}
+`;
+}
+
+test('section 2e rehearses LOCUS_HOME creation beneath a TMPDIR containing spaces', (t) => {
+  const fixture = setup(t);
+  const home = join(fixture.root, 'main home');
+  mkdirSync(home);
+  const result = spawnSync('bash', ['-c', section2e(), 'home-2e', home], { encoding: 'utf8' });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `the 2e rehearsal must succeed: ${result.stderr}`);
+  assert.match(result.stdout, /ok LOCUS_HOME creation succeeds beneath a TMPDIR containing spaces/);
+  const root = join(home, 'home temp root');
+  const recorded = readFileSync(join(root, 'home-path'), 'utf8');
+  assert.equal(dirname(recorded), root, 'rehearsed beneath the space-containing root');
+  assert.match(recorded, /\/locus-e2e-probe\.[^/\s]+$/, 'home name is one unsplit component');
+  assert.throws(() => lstatSync(recorded), { code: 'ENOENT' }, 'rehearsal home must be removed on exit');
+  assert.deepEqual(readdirSync(root), ['home-path'], 'only the rehearsal home is removed');
+  assert.ok(existsSync(home), 'the main home survives the subshell cleanup');
+});
+
+test('an unquoted TMPDIR in home creation stops section 2e', (t) => {
+  const fixture = setup(t);
+  const home = join(fixture.root, 'main home');
+  mkdirSync(home);
+  // Word splitting would hand mktemp the spaced path in pieces.
+  const probe = section2e().replace('mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX"',
+    'mktemp -d ${TMPDIR:-/tmp}/locus-e2e.XXXXXX');
+  assert.notEqual(probe, section2e(), 'the helper template must be mutable for this probe');
+  const result = spawnSync('bash', ['-c', probe, 'home-2e-split', home], { encoding: 'utf8' });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the 2e check must fail the suite');
+  assert.match(result.stderr, /LOCUS_HOME was not created beneath the space-containing TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok LOCUS_HOME creation succeeds/);
+});
+
 for (const exitStatus of [0, 73]) {
   test(`security fixture directories are removed on exit ${exitStatus}`, (t) => {
     const fixture = setup(t);

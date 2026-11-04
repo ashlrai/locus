@@ -69,7 +69,11 @@ ok "locus + locus-mcp release binaries"
 
 # ── 2. Isolated LOCUS_HOME ───────────────────────────────────────────────────
 export LOCUS_HOME
-LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")"
+# Sets LOCUS_HOME to a fresh directory directly beneath the temp root.
+create_locus_home() {
+  LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")"
+}
+create_locus_home
 log "2. LOCUS_HOME=$LOCUS_HOME"
 # Optional background PIDs (HTTP MCP, etc.) cleaned on any exit path.
 HTTP_MCP_PID=""
@@ -174,6 +178,34 @@ workspace_test_dir="$(cat "$workspace_tmp/workspace-path")"
   || die "rehearsed workspace survived exit cleanup"
 [[ -d "$workspace_tmp" ]] || die "workspace cleanup removed the supplied TMPDIR"
 ok "workspace creation succeeds beneath a TMPDIR containing spaces"
+
+# Exercise the same LOCUS_HOME creation as section 2 beneath a temporary root
+# whose name contains spaces. mktemp must receive exactly `-d` and one template,
+# so the whole path stays a single argument. The wrapper then swaps in a probe
+# prefix so the rehearsal never looks like the suite home. The subshell owns
+# its home.
+log "2e. LOCUS_HOME creation honors a space-containing TMPDIR"
+home_tmp="$LOCUS_HOME/home temp root"
+mkdir -p "$home_tmp"
+(
+  export TMPDIR="$home_tmp"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  mktemp() {
+    [[ $# -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]] || exit 1
+    command mktemp "$1" "$TMPDIR/locus-e2e-probe.XXXXXX"
+  }
+  create_locus_home
+  trap 'e2e_cleanup' EXIT
+  [[ -d "$LOCUS_HOME" && "${LOCUS_HOME%/*}" == "$TMPDIR" && \
+    "${LOCUS_HOME##*/}" == locus-e2e-probe.* ]] || exit 1
+  printf '%s' "$LOCUS_HOME" >"$home_tmp/home-path"
+  touch "$LOCUS_HOME/cleanup-sentinel"
+) || die "LOCUS_HOME was not created beneath the space-containing TMPDIR"
+spaced_home="$(cat "$home_tmp/home-path")"
+[[ ! -e "$spaced_home" && ! -L "$spaced_home" ]] \
+  || die "rehearsed LOCUS_HOME survived exit cleanup"
+[[ -d "$home_tmp" ]] || die "home cleanup removed the supplied TMPDIR"
+ok "LOCUS_HOME creation succeeds beneath a TMPDIR containing spaces"
 
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
