@@ -15,10 +15,9 @@ These are script variables, not options for selecting the directory names.
 All five are created directly under `TMPDIR` when it is nonempty, or under
 `/tmp` when it is unset or empty. A supplied `TMPDIR` must already exist and
 be writable; the suite verifies the main home is created directly beneath it
-before continuing. The cleanup-check subshell uses a separate `TMPDIR` inside the
-main home to verify the security home creation and cleanup; a second subshell
-verifies the workspace creation and cleanup beneath a root whose name contains
-spaces.
+before continuing. Cleanup-check subshells create fixtures beneath separate
+`TMPDIR` roots inside the main home, including roots whose names contain
+spaces, and verify each fixture is removed on exit.
 
 After the main home is created, an `EXIT` trap removes the directories that
 have been created and stops background MCP servers. The graph fallback also
