@@ -1026,3 +1026,62 @@ exit "$?"
     assert.equal(existsSync(probeRoot), false);
   });
 }
+
+// The mktemp shim records the template mt_grant_probe passes and redirects
+// anything outside $CONTROLLED into it, so the fallback case never touches /tmp.
+function mtRootSelection(t, tmpdirEnv) {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-select-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const controlled = join(root, 'controlled');
+  mkdirSync(controlled);
+  const template = join(root, 'template');
+  const created = join(root, 'created');
+  // Plain strings, not String.raw: the shim needs bash's ${...} expansions.
+  const harness = [
+    'source "$1"',
+    'mktemp() {',
+    '  local last="${!#}" args=("$@") path',
+    '  printf \'%s\\n\' "$last" > "$TEMPLATE_FILE"',
+    '  [[ "$last" == "$CONTROLLED"/* ]] || args[$(($# - 1))]="$CONTROLLED/${last##*/}"',
+    '  path="$(command mktemp "${args[@]}")" || return',
+    '  printf \'%s\\n\' "$path" > "$CREATED_FILE"',
+    '  printf \'%s\\n\' "$path"',
+    '}',
+    'locus() { return 1; }',
+    // Match the production caller, which disables errexit for this probe.
+    'set +e',
+    'mt_grant_probe',
+    'exit "$?"',
+  ].join('\n');
+  const env = { ...process.env, CONTROLLED: controlled, TEMPLATE_FILE: template, CREATED_FILE: created };
+  delete env.TMPDIR;
+  Object.assign(env, tmpdirEnv(controlled));
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'stubbed probe stops at the init failure');
+  return {
+    controlled,
+    template: readFileSync(template, 'utf8').trim(),
+    created: readFileSync(created, 'utf8').trim(),
+    left: readdirSync(controlled),
+  };
+}
+
+test('multi-tenant probe root is selected and created under an explicit TMPDIR', (t) => {
+  const { controlled, template, created, left } = mtRootSelection(t, (dir) => ({ TMPDIR: dir }));
+  assert.equal(template, `${controlled}/locus-mt-dogfood.XXXXXX`);
+  assert.equal(dirname(created), controlled);
+  assert.match(basename(created), /^locus-mt-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.equal(existsSync(created), false);
+  assert.deepEqual(left, []);
+});
+
+for (const [label, tmpdirEnv] of [['unset', () => ({})], ['empty', () => ({ TMPDIR: '' })]]) {
+  test(`multi-tenant probe root template falls back to /tmp when TMPDIR is ${label}`, (t) => {
+    const { controlled, template, created, left } = mtRootSelection(t, tmpdirEnv);
+    assert.equal(template, '/tmp/locus-mt-dogfood.XXXXXX');
+    assert.equal(dirname(created), controlled);
+    assert.equal(existsSync(created), false);
+    assert.deepEqual(left, []);
+  });
+}
