@@ -175,6 +175,33 @@ workspace_test_dir="$(cat "$workspace_tmp/workspace-path")"
 [[ -d "$workspace_tmp" ]] || die "workspace cleanup removed the supplied TMPDIR"
 ok "workspace creation succeeds beneath a TMPDIR containing spaces"
 
+# Same creation, use and EXIT cleanup as the broken-link security probe, beneath
+# a supplied temporary root with spaces (including a doubled space). The subshell
+# owns its test home so its cleanup cannot remove the main home.
+log "2e. SECURITY_WS creation honors a space-containing TMPDIR"
+security_ws_tmp="$LOCUS_HOME/security  ws temp root"
+mkdir -p "$security_ws_tmp"
+(
+  export TMPDIR="$security_ws_tmp"
+  LOCUS_HOME="$security_ws_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_security_workspace
+  [[ -d "$SECURITY_WS" && "${SECURITY_WS%/*}" == "$TMPDIR" && \
+    "${SECURITY_WS##*/}" == locus-security-ws.* ]] || exit 1
+  # The workspace must stay usable as one word: link into it and enter it.
+  ln -s missing-policy.toml "$SECURITY_WS/.locus.toml"
+  [[ -L "$SECURITY_WS/.locus.toml" && \
+    "$(cd "$SECURITY_WS" && pwd -P)" == "$(cd "$TMPDIR" && pwd -P)/${SECURITY_WS##*/}" ]] || exit 1
+  printf '%s' "$SECURITY_WS" >"$security_ws_tmp/security-workspace-path"
+) || die "SECURITY_WS was not created beneath the space-containing TMPDIR"
+security_ws_test_dir="$(cat "$security_ws_tmp/security-workspace-path")"
+[[ ! -e "$security_ws_test_dir" && ! -L "$security_ws_test_dir" ]] \
+  || die "rehearsed SECURITY_WS survived exit cleanup"
+[[ -d "$security_ws_tmp" ]] || die "SECURITY_WS cleanup removed the supplied TMPDIR"
+ok "SECURITY_WS creation succeeds beneath a TMPDIR containing spaces"
+
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
 
