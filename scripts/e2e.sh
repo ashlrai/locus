@@ -1834,6 +1834,17 @@ fi
 log "24. adversarial release credential/workspace probes"
 create_security_home
 create_security_workspace
+# Same containment rule as LOCUS_HOME and WS_DIR: a supplied TMPDIR owns the
+# security fixtures the probes below populate, so a mktemp regression that
+# relocates either one must stop the suite here.
+if [[ -n "${TMPDIR:-}" ]]; then
+  [[ -d "$SECURITY_HOME" && "${SECURITY_HOME%/*}" == "$TMPDIR" && \
+    "${SECURITY_HOME##*/}" == locus-security-e2e.* && \
+    -d "$SECURITY_WS" && "${SECURITY_WS%/*}" == "$TMPDIR" && \
+    "${SECURITY_WS##*/}" == locus-security-ws.* ]] \
+    || die "security directories were not created directly beneath TMPDIR"
+  ok "security directories are created directly beneath TMPDIR"
+fi
 LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" init >/dev/null
 
 # Issue #175: identical retries are no-ops, but conflicting content must

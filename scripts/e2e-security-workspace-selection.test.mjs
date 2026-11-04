@@ -142,3 +142,164 @@ test('SECURITY_WS is only ever assigned through create_security_workspace', () =
   assert.equal(assigns.length, 1, `unexpected SECURITY_WS creations: ${assigns.join(' | ')}`);
   assert.match(assigns[0], /mktemp -d "\$\{TMPDIR:-\/tmp\}\/locus-security-ws\.XXXXXX"/);
 });
+
+// The script's own section 24 fixture selection: create_security_home and
+// create_security_workspace run under the caller's TMPDIR, then a containment
+// check stops the suite before the probes populate fixtures outside it. The
+// probes below run that block verbatim; stubs provide only log/ok/die and,
+// where noted, a recording or relocating mktemp.
+function securityLifecycle() {
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createHome = source.match(/^create_security_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWs = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup && createHome && createWs, 'e2e.sh must define the security directory lifecycle');
+  return { cleanup, createHome, createWs };
+}
+
+function section24Selection() {
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('log "24.');
+  const endMarker = 'ok "security directories are created directly beneath TMPDIR"\nfi';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, 'e2e.sh must contain the section 24 security selection block');
+  return source.slice(start, end + endMarker.length);
+}
+
+function rehearse24(t, { tempRoot, shim = '', tail = '', extraEnv = {} }) {
+  const root = mkdtempSync(join(tmpdir(), 'locus-secws-24-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const mainHome = join(root, 'main home');
+  mkdirSync(mainHome);
+  const { cleanup, createHome, createWs } = securityLifecycle();
+  const env = { ...process.env, TEST_HOME: mainHome, ...extraEnv };
+  if (tempRoot === undefined) delete env.TMPDIR;
+  else env.TMPDIR = tempRoot;
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${shim}
+${createHome}
+${createWs}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$TEST_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+${section24Selection()}
+${tail}
+`, 'security-24', mainHome], { env, encoding: 'utf8' });
+  return { result, root };
+}
+
+test('section 24 creates the security workspace directly beneath a controlled TMPDIR', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-secws-24-run-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'fixture root [*]');
+  const observed = join(root, 'observed-paths');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+
+  const { result } = rehearse24(t, {
+    tempRoot: scratch,
+    extraEnv: { OBSERVED: observed },
+    tail: `
+# Use the workspace the way the probes do: a policy link must land inside it.
+ln -s missing-policy.toml "$SECURITY_WS/.locus.toml" || exit 71
+[[ -L "$SECURITY_WS/.locus.toml" && \\
+  "$(cd "$SECURITY_WS" && pwd -P)" == "$(cd "$TMPDIR" && pwd -P)/\${SECURITY_WS##*/}" ]] || exit 72
+printf '%s\\n%s' "$SECURITY_HOME" "$SECURITY_WS" > "$OBSERVED"
+`,
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ok security directories are created directly beneath TMPDIR/);
+  const [home, workspace] = readFileSync(observed, 'utf8').split('\n');
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-security-e2e\.[^/\s]+$/);
+  assert.equal(dirname(workspace), scratch, 'the workspace sits directly beneath the controlled TMPDIR');
+  assert.match(workspace, /\/locus-security-ws\.[^/\s]+$/);
+  for (const dir of [home, workspace]) {
+    assert.throws(() => lstatSync(dir), { code: 'ENOENT' }, 'fixtures must be removed on exit');
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'the controlled TMPDIR keeps only its own entries');
+});
+
+test('a security workspace created outside the controlled TMPDIR stops section 24', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-secws-24-misplaced-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'controlled tmp');
+  const wrongRoot = join(root, 'wrong root');
+  const created = join(root, 'ws-created');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  // Answer with the expected name shape but relocate the workspace outside
+  // TMPDIR; the containment check must stop the suite and the exit trap must
+  // still remove the misplaced directory.
+  const shim = `mktemp() {
+  if [[ "\${2:-}" == */locus-security-ws.XXXXXX ]]; then
+    d="$(command mktemp -d "$WRONG_ROOT/locus-security-ws.XXXXXX")"
+    printf '%s' "$d" > "$WS_CREATED"
+    printf '%s\\n' "$d"
+    return
+  fi
+  command mktemp "$@"
+}
+`;
+
+  const { result } = rehearse24(t, {
+    tempRoot: scratch,
+    shim,
+    extraEnv: { WRONG_ROOT: wrongRoot, WS_CREATED: created },
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the containment check must fail the suite');
+  assert.match(result.stderr, /FAIL security directories were not created directly beneath TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok security directories are created directly beneath TMPDIR/);
+  const workspace = readFileSync(created, 'utf8');
+  assert.equal(dirname(workspace), wrongRoot);
+  assert.match(workspace, /\/locus-security-ws\.[^/]+$/);
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' },
+    'the misplaced workspace must be removed by the exit trap');
+  assert.deepEqual(readdirSync(wrongRoot), []);
+  assert.deepEqual(readdirSync(scratch), [], 'the correctly placed security home must be removed too');
+});
+
+for (const mode of ['unset', 'empty']) {
+  test(`section 24 skips the containment check when TMPDIR is ${mode}`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'locus-secws-24-fallback-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const controlled = join(root, 'controlled');
+    const templates = join(root, 'templates');
+    mkdirSync(controlled);
+    // Record the requested templates and redirect creation into a controlled
+    // directory so the probe never writes to the real /tmp.
+    const shim = `mktemp() {
+  printf '%s\\n' "\${2:-}" >> "$TEST_TEMPLATES"
+  if [[ "\${2:-}" == /tmp/locus-security-*.XXXXXX ]]; then
+    command mktemp -d "$CONTROLLED/$(basename "\${2:-}")"
+    return
+  fi
+  command mktemp "$@"
+}
+`;
+
+    const { result } = rehearse24(t, {
+      tempRoot: mode === 'unset' ? undefined : '',
+      shim,
+      extraEnv: { CONTROLLED: controlled, TEST_TEMPLATES: templates },
+    });
+
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
+    assert.doesNotMatch(result.stdout, /ok security directories are created directly beneath TMPDIR/,
+      `the supplied-TMPDIR confirmation must not print when TMPDIR is ${mode}`);
+    assert.deepEqual(readFileSync(templates, 'utf8').trim().split('\n'), [
+      '/tmp/locus-security-e2e.XXXXXX',
+      '/tmp/locus-security-ws.XXXXXX',
+    ], `the script must select the /tmp root when TMPDIR is ${mode}`);
+    assert.deepEqual(readdirSync(controlled), [], 'the redirected fixtures must be cleaned up');
+  });
+}
