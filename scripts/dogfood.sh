@@ -255,6 +255,8 @@ mt_grant_probe() {
   (
     # EXIT traps run after function locals have gone out of scope on exit.
     probe_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-mt-dogfood.XXXXXX")" || exit 1
+    # A relative TMPDIR yields a relative root; the probe cds into it, so pin it.
+    [[ "$probe_root" == /* ]] || probe_root="$PWD/$probe_root"
     mt_pid=""
     mt_cleanup() {
       if [[ -n "$mt_pid" ]]; then

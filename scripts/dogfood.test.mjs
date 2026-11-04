@@ -1,7 +1,7 @@
 // Run: node --test scripts/dogfood.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -1736,4 +1736,37 @@ exit "$?"
   assert.equal(existsSync(probeRoot), false, 'failure path removes the probe root');
   assert.deepEqual(readdirSync(scratch), []);
   assert.deepEqual(readdirSync(root).sort(), ['probe', 'tmp  with   spaces ']);
+});
+
+test('multi-tenant probe keeps LOCUS_HOME inside its root under a relative TMPDIR', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-relative-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, 'rel'));
+  const probe = join(root, 'probe');
+  // The probe cds into its root before init, so a relative TMPDIR would make a
+  // relative LOCUS_HOME resolve under the root a second time.
+  const harness = String.raw`
+source "$1"
+locus() {
+  if [[ "$1" == init ]]; then
+    printf '%s\n' "$PWD" > "$PROBE_FILE"
+    [[ "$LOCUS_HOME" == "$PWD/home" ]] || exit 43
+  fi
+  return 1
+}
+set +e
+mt_grant_probe
+exit "$?"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: 'rel', PROBE_FILE: probe },
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, result.stderr);
+  const probeRoot = readFileSync(probe, 'utf8').trim();
+  assert.equal(realpathSync(dirname(probeRoot)), realpathSync(join(root, 'rel')));
+  assert.equal(existsSync(probeRoot), false);
+  assert.deepEqual(readdirSync(join(root, 'rel')), []);
 });
