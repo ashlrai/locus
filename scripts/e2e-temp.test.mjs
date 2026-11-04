@@ -987,6 +987,48 @@ esac
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
+test('a security home created outside a spaced TMPDIR fails the temporary-root check', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp with  spaces');
+  const wrongRoot = join(fixture.root, 'wrong root');
+  const created = join(fixture.root, 'security-home-created');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  // Same relocation as the workspace case: right name shape, wrong parent. The
+  // section 2c check must stop the suite and the exit trap must remove the home.
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+case "$2" in
+  */locus-security-e2e.XXXXXX)
+    home="$("$REAL_MKTEMP" -d "$WRONG_ROOT/locus-security-e2e.XXXXXX")" || exit $?
+    touch "$home/sentinel" || exit 1
+    printf '%s' "$home" > "$HOME_CREATED" || exit 1
+    printf '%s\\n' "$home"
+    ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+`, { mode: 0o755 });
+
+  const result = run(fixture, scratch, {
+    REAL_MKTEMP: realMktemp, WRONG_ROOT: wrongRoot, HOME_CREATED: created,
+  });
+
+  assert.equal(result.status, 1);
+  assert.equal(result.signal, null);
+  assert.match(result.stdout, /==> 2c\. security directories honor a nondefault TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok  distinct security directories honor nondefault TMPDIR/);
+  assert.match(result.stderr, /FAIL security directories were not created distinctly beneath the supplied TMPDIR/);
+  assert.ok(existsSync(created), 'the relocated home creation was not reached');
+  const home = readFileSync(created, 'utf8');
+  assert.equal(dirname(home), wrongRoot);
+  assert.match(home, /\/locus-security-e2e\.[^/]+$/);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' },
+    'the misplaced security home must be removed on exit');
+  assert.deepEqual(readdirSync(wrongRoot), []);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
 test('repeated security home creation yields distinct directories beneath TMPDIR', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp');
