@@ -653,6 +653,47 @@ ${workspaceSection}
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
 });
 
+// A mktemp regression that relocates the workspace must stop the suite at the
+// section 4 containment check; the exit trap still removes the misplaced
+// directory. Runs the real workspace section, not a copy of its mktemp line.
+test('a WS_DIR created outside TMPDIR fails the temporary-root check', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const wrongRoot = join(fixture.root, 'wrong root');
+  const created = join(fixture.root, 'ws-created');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const start = source.indexOf('WS_DIR="$(mktemp -d "${TMPDIR:-/tmp}/locus-ws.XXXXXX")"');
+  const end = source.indexOf('\n# leave force-pin;', start);
+  assert.ok(cleanup && start >= 0 && end > start, 'missing workspace lifecycle');
+  const probe = `set -euo pipefail
+${cleanup}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+mkdir "$LOCUS_HOME"
+trap 'e2e_cleanup' EXIT
+mktemp() { local d; d="$(command mktemp -d "$WRONG_ROOT/locus-ws.XXXXXX")"; printf '%s' "$d" > "$WS_CREATED"; printf '%s\\n' "$d"; }
+locus() { return 74; }
+log() { :; }; ok() { :; }; die() { printf '%s\\n' "$*" >&2; exit 76; }
+${source.slice(start, end)}
+`;
+  const result = spawnSync('bash', ['-c', probe, 'workspace-misplaced', scratch], {
+    env: { ...process.env, WRONG_ROOT: wrongRoot, WS_CREATED: created }, encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 76, `the check must fail the suite: ${result.stderr}`);
+  assert.match(result.stderr, /WS_DIR was not created directly beneath TMPDIR/);
+  const workspace = readFileSync(created, 'utf8');
+  assert.equal(dirname(workspace), wrongRoot);
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'the misplaced workspace must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
 test('repeated workspace creation yields distinct directories beneath TMPDIR', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp');
