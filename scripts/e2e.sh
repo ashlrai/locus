@@ -204,6 +204,27 @@ workspace_test_dir="$(cat "$workspace_tmp/workspace-path")"
 [[ -d "$workspace_tmp" ]] || die "workspace cleanup removed the supplied TMPDIR"
 ok "workspace creation succeeds beneath a TMPDIR containing spaces"
 
+# A plain custom TMPDIR (no spaces) must also be honored: WS_DIR is a fresh
+# directory beneath it, never the default /tmp, and distinct from the home.
+log "2d2. WS_DIR honors a plain custom TMPDIR"
+ws_root_tmp="$LOCUS_HOME/ws-root"
+mkdir -p "$ws_root_tmp"
+(
+  export TMPDIR="$ws_root_tmp"
+  LOCUS_HOME="$ws_root_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_workspace
+  [[ -d "$WS_DIR" && "$WS_DIR" == "$TMPDIR"/locus-ws.* && \
+    "$WS_DIR" != "$LOCUS_HOME" ]] || exit 1
+  printf '%s' "$WS_DIR" >"$ws_root_tmp/workspace-path"
+) || die "WS_DIR was not created beneath the plain custom TMPDIR"
+ws_root_dir="$(cat "$ws_root_tmp/workspace-path")"
+[[ ! -e "$ws_root_dir" ]] || die "WS_DIR survived exit cleanup"
+[[ -d "$ws_root_tmp" ]] || die "WS_DIR cleanup removed the supplied TMPDIR"
+ok "WS_DIR is created beneath a plain custom TMPDIR and cleaned on exit"
+
 # Same creation, use and EXIT cleanup as the broken-link security probe, beneath
 # a supplied temporary root with spaces (including a doubled space). The subshell
 # owns its test home so its cleanup cannot remove the main home.
