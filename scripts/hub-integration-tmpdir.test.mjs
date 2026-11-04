@@ -162,7 +162,10 @@ test('guide inventories the script templates and fallback', () => {
     ['SMOKE_HOME', 'locus-hub-int.XXXXXX'],
     ['SMOKE_PROJ', 'locus-hub-int-proj.XXXXXX'],
   ]) {
-    assert.ok(source.includes(`${variable}="$(mktemp -d "\${TMPDIR:-/tmp}/${template}")"`));
+    const direct = `${variable}="$(mktemp -d "\${TMPDIR:-/tmp}/${template}")"`;
+    const helperCall = `${variable}="$(make_smoke_dir ${template.slice(0, -'.XXXXXX'.length)})"`;
+    assert.ok(source.includes(direct) || source.includes(helperCall),
+      `${variable} must allocate ${template} beneath \${TMPDIR:-/tmp}`);
     assert.ok(doc.includes(`\`${variable}\` | \`${template}\``));
   }
   assert.ok(source.includes('listing="${TMPDIR:-/tmp}/.locus-hub-int-scan.$$.${RANDOM}"'));
