@@ -1293,6 +1293,36 @@ printf '%s' "$SECURITY_WS" > "$2"
   assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
 });
 
+test('graph home creation selects the custom temporary root or /tmp fallback', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  mkdirSync(scratch);
+  const source = readFileSync(script, 'utf8');
+  const create = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(create, 'missing graph home creation function');
+
+  for (const [label, value, expectedRoot] of [
+    ['custom', scratch, scratch],
+    ['unset', undefined, '/tmp'],
+    ['empty', '', '/tmp'],
+  ]) {
+    const env = { ...process.env };
+    if (value === undefined) delete env.TMPDIR;
+    else env.TMPDIR = value;
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+${create}
+create_graph_home
+trap 'rm -rf "$GRAPH_HOME"' EXIT
+[[ -d "$GRAPH_HOME" && ! -L "$GRAPH_HOME" ]]
+printf '%s' "$GRAPH_HOME"
+`], { env, encoding: 'utf8' });
+    assert.equal(result.status, 0, `${label}: creation must succeed`);
+    assert.equal(dirname(result.stdout), expectedRoot, `${label}: selected root`);
+    assert.match(result.stdout, /\/locus-graph-imp\.[^/]+$/);
+    assert.throws(() => lstatSync(result.stdout), { code: 'ENOENT' }, `${label}: cleanup`);
+  }
+});
+
 test('repeated graph home creation yields distinct directories beneath TMPDIR', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp $literal; [test]');
