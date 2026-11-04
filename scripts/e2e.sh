@@ -1629,6 +1629,11 @@ fi
 log "24. adversarial release credential/workspace probes"
 create_security_home
 create_security_workspace
+if [[ -n "${TMPDIR:-}" ]]; then
+  [[ -d "$SECURITY_HOME" && "${SECURITY_HOME%/*}" == "$TMPDIR" ]] \
+    || die "SECURITY_HOME was not created directly beneath TMPDIR"
+  ok "security home is created directly beneath TMPDIR"
+fi
 LOCUS_HOME="$SECURITY_HOME" "$LOCUS_BIN" init >/dev/null
 
 # Issue #175: identical retries are no-ops, but conflicting content must

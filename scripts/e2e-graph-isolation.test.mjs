@@ -11,7 +11,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const source = readFileSync(join(root, 'scripts/e2e.sh'), 'utf8');
 const graph = source.slice(source.indexOf('# ── 16. graph'), source.indexOf('# ── 17. ci'));
 const cleanup = source.slice(source.indexOf('e2e_cleanup() {'), source.indexOf("trap 'e2e_cleanup' EXIT"));
-assert.ok(graph.includes('GRAPH_HOME=') && cleanup.includes('"${GRAPH_HOME:-}"'));
+const createGraphHome = source.match(/^create_graph_home\(\) \{\n[\s\S]*?^\}\n/m)?.[0];
+assert.ok(createGraphHome, 'e2e.sh must define create_graph_home');
+assert.ok(graph.includes('create_graph_home') && cleanup.includes('"${GRAPH_HOME:-}"'));
 
 for (const scenario of ['same-home', 'success', 'init-failure', 'import-failure', 'cleanup-failure', 'relocated']) {
   test(`graph ${scenario} uses and cleans the expected home`, (t) => {
@@ -66,6 +68,7 @@ locus() {
     *) return 1 ;;
   esac
 }
+${createGraphHome}
 ${cleanup}
 trap 'e2e_cleanup' EXIT
 ${graph}
@@ -141,7 +144,7 @@ GRAPH_HOME="$(mktemp -d "\${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
 }
 
 test('e2e.sh graph home uses the same TMPDIR-or-/tmp template as the stubbed probe', () => {
-  assert.ok(graph.includes('GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"'));
+  assert.ok(createGraphHome.includes('GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"'));
 });
 
 // Runs the real graph section (not a copy of its mktemp line) with a stubbed
@@ -170,6 +173,7 @@ locus() {
     *) return 0 ;;
   esac
 }
+${createGraphHome}
 ${cleanup}
 trap 'e2e_cleanup' EXIT
 ${graph}
