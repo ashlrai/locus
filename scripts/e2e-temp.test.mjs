@@ -49,10 +49,18 @@ function setup(t) {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, 'bin');
   mkdirSync(bin);
-  // Avoid building binaries and fail immediately after the cleanup trap is set.
+  // Avoid building binaries and fail immediately after the cleanup trap is
+  // set. Section 2d rehearses `init` and `workspace` inside its subshell, so
+  // the stub answers only those fixture commands; every other command fails.
   writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   const locus = join(bin, 'locus');
-  writeFileSync(locus, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+  writeFileSync(locus, `#!/bin/sh
+case "$1" in
+  init) exit 0 ;;
+  workspace) printf '# stub workspace config\\n' > .locus.toml && exit 0 ;;
+esac
+exit 1
+`, { mode: 0o755 });
   return { root, bin, locus };
 }
 
@@ -74,7 +82,7 @@ test('successful exit removes the populated isolated home', (t) => {
   // Execute the script's actual home setup and EXIT trap in a successful shell.
   // The full e2e success path is covered separately by e2e.test.mjs.
   const source = readFileSync(script, 'utf8');
-  const start = source.indexOf('export LOCUS_HOME\n');
+  const start = source.indexOf('create_locus_home() {\n');
   const trap = "trap 'e2e_cleanup' EXIT";
   const end = source.indexOf(trap, start);
   assert.ok(start >= 0 && end > start, 'home setup and cleanup trap must exist');
@@ -113,7 +121,7 @@ test('successful home cleanup preserves an inherited home and symlink target', (
   symlinkSync(target, join(scratch, 'target-link'));
 
   const source = readFileSync(script, 'utf8');
-  const start = source.indexOf('export LOCUS_HOME\n');
+  const start = source.indexOf('create_locus_home() {\n');
   const trap = "trap 'e2e_cleanup' EXIT";
   const end = source.indexOf(trap, start);
   assert.ok(start >= 0 && end > start, 'home setup and cleanup trap must exist');
@@ -154,8 +162,12 @@ case "$2" in
   */locus-e2e.XXXXXX)
     home="$("$REAL_MKTEMP" "$@")" || exit 1
     test -d "$home" || exit 1
-    printf '%s' "$home" > "$HOME_CREATED"
-    touch "$home/sentinel"
+    # The section 2g rehearsal selects a nested TMPDIR and calls mktemp again;
+    # record only the suite home, the first locus-e2e directory this run makes.
+    if [ ! -f "$HOME_CREATED" ]; then
+      printf '%s' "$home" > "$HOME_CREATED"
+      touch "$home/sentinel"
+    fi
     printf '%s\n' "$home"
     ;;
   *) exec "$REAL_MKTEMP" "$@" ;;
@@ -221,7 +233,7 @@ exec "$REAL_MKTEMP" "$@"
 `, { mode: 0o755 });
   // Exercise the script's own home creation, parent check, and EXIT cleanup.
   const source = readFileSync(script, 'utf8');
-  const start = source.indexOf('export LOCUS_HOME\n');
+  const start = source.indexOf('create_locus_home() {\n');
   const endMarker = 'ok "isolated home is created directly beneath TMPDIR"\nfi';
   const end = source.indexOf(endMarker, start);
   assert.ok(start >= 0 && end > start, 'home setup and parent check must exist');
@@ -260,7 +272,7 @@ test('home under a spaced TMPDIR is usable and its real path stays beneath the p
   const observed = join(fixture.root, 'observed-home');
   mkdirSync(scratch);
   const source = readFileSync(script, 'utf8');
-  const start = source.indexOf('export LOCUS_HOME\n');
+  const start = source.indexOf('create_locus_home() {\n');
   const endMarker = 'ok "isolated home is created directly beneath TMPDIR"\nfi';
   const end = source.indexOf(endMarker, start);
   assert.ok(start >= 0 && end > start, 'home setup and parent check must exist');
@@ -452,10 +464,11 @@ for (const [label, temp] of [['unset', undefined], ['empty', '']]) {
     const capture = join(fixture.root, 'template');
     mkdirSync(scratch);
     const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
-    // Redirect only the main home; security probes must use their own TMPDIR.
+    // Redirect only the main home, requested at the /tmp fallback root; the
+    // section 2g rehearsal and the security probes use their own TMPDIR.
     writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
 case "$2" in
-  */locus-e2e.XXXXXX)
+  "/tmp/locus-e2e.XXXXXX")
     printf '%s' "$2" > "$PROBE_CAPTURE"
     exec "$REAL_MKTEMP" -d "$PROBE_SCRATCH/locus-e2e.XXXXXX"
     ;;
@@ -810,7 +823,10 @@ die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
 LOCUS_HOME="$1"
 WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
 ${source.slice(start, end + endMarker.length)}
-`, 'workspace-2d', home], { encoding: 'utf8' });
+`, 'workspace-2d', home], {
+    env: { ...process.env, LOCUS_BIN: fixture.locus },
+    encoding: 'utf8',
+  });
 
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, `the 2d rehearsal must succeed: ${result.stderr}`);
@@ -854,7 +870,7 @@ LOCUS_HOME="$1"
 WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
 ${source.slice(start, end + endMarker.length)}
 `, 'workspace-2d-misplaced', home], {
-    env: { ...process.env, WRONG_ROOT: wrongRoot, WS_CREATED: created },
+    env: { ...process.env, LOCUS_BIN: fixture.locus, WRONG_ROOT: wrongRoot, WS_CREATED: created },
     encoding: 'utf8',
   });
 
