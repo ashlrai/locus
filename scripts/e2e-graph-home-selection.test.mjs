@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -15,9 +15,10 @@ const script = join(root, 'scripts', 'e2e.sh');
 // and creates GRAPH_HOME there, and the e2e_cleanup EXIT trap removes it.
 // The probes below run both verbatim; shims provide only a recording mktemp.
 // The section-16 containment check on a relocated home is covered by
-// scripts/e2e-graph-isolation.test.mjs. The last two tests run the script's
-// own section 2i rehearsal, which exercises the same lifecycle beneath a
-// supplied temporary root whose name contains spaces.
+// scripts/e2e-graph-isolation.test.mjs. Two tests run the script's own
+// section 2i rehearsal verbatim; the last group runs the unconditional
+// repeated-creation block from the tail of section 16 verbatim beneath a
+// controlled temporary root, plus a word-split decoy under the exit trap.
 function graphParts() {
   const source = readFileSync(script, 'utf8');
   const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
@@ -386,4 +387,171 @@ test('a TMPDIR with a trailing slash still holds the graph home', (t) => {
   assert.match(home, /\/locus-graph-imp\.[^/\s]+$/);
   assert.throws(() => lstatSync(home), { code: 'ENOENT' });
   assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+// The security-home rehearsals carry a decoy at the first word-split fragment
+// of a spaced TMPDIR (sections 2c2 and 2e); the graph home needs the same
+// proof. An unquoted rm in the exit trap would split the spaced path and
+// delete the sibling named by its first fragment, so the decoy must survive
+// while the real graph home is still removed.
+test('a word-split sibling of a spaced TMPDIR survives graph home cleanup', (t) => {
+  const dir = fixture(t);
+  const decoy = join(dir, 'graph');
+  const scratch = join(dir, 'graph root with  spaces');
+  mkdirSync(decoy);
+  mkdirSync(scratch);
+  writeFileSync(join(decoy, 'decoy-sentinel'), 'keep');
+
+  const { observed, result } = select(t, { tmpdir: scratch });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  const home = readFileSync(observed, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' },
+    'the real graph home must still be removed');
+  assert.equal(readFileSync(join(decoy, 'decoy-sentinel'), 'utf8'), 'keep',
+    'cleanup must not reach the word-split sibling of the spaced root');
+});
+
+// The unconditional repeated-creation block at the tail of section 16 is
+// extracted verbatim (not copied) so its own containment, distinctness and
+// removal checks are the ones under test. Success beneath a space-containing
+// TMPDIR is already covered through the full section-16 slice in
+// scripts/e2e-graph-isolation.test.mjs; the probes below cover a plain
+// controlled root, a trailing-slash root, and the block's two failure modes.
+function repeatedBlock() {
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('create_graph_home; graph_home_a=');
+  const endMarker = 'ok "two graph homes are distinct and live directly beneath the temp root"';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, 'e2e.sh must contain the repeated graph-home block');
+  const block = source.slice(start, end + endMarker.length);
+  assert.ok(block.includes('graph_root="${TMPDIR:-/tmp}"'),
+    'the block must select the temporary root itself');
+  return block;
+}
+
+// Runs the extracted block verbatim under the real EXIT trap, the same way
+// section 16 reaches it after the graph import cleanup.
+function repeatSection(t, { tmpdir, shim = '', extraEnv = {} }) {
+  const dir = fixture(t);
+  const mainHome = join(dir, 'main-home');
+  mkdirSync(mainHome);
+  const { cleanup, createHome } = graphParts();
+  const env = { ...process.env, MAIN_HOME: mainHome, ...extraEnv };
+  if (tmpdir === undefined) delete env.TMPDIR;
+  else env.TMPDIR = tmpdir;
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createHome}
+${shim}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$MAIN_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+${repeatedBlock()}
+`], { env, encoding: 'utf8' });
+  return { dir, result };
+}
+
+test('the verbatim block keeps both repeated homes beneath a controlled TMPDIR', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, 'controlled root');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+
+  const { result } = repeatSection(t, { tmpdir: scratch });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout,
+    /ok two graph homes are distinct and live directly beneath the temp root/);
+  assert.deepEqual(readdirSync(scratch), ['keep'],
+    'the block must remove both homes it created');
+});
+
+// A TMPDIR may end in a slash (macOS hands out such values); the block strips
+// it from both the selected root and each parent before comparing, so a bare
+// equality check would regress here.
+test('the verbatim block honors a controlled TMPDIR with a trailing slash', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, 'controlled root');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+
+  const { result } = repeatSection(t, { tmpdir: `${scratch}/` });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ok two graph homes are distinct/);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+// A mktemp regression that relocates the repeated homes must stop the suite at
+// the block's own containment check. The misplaced pair is left beneath the
+// wrong root (the script header documents leftover temp dirs on failure)
+// while the supplied root stays untouched.
+test('repeated homes created outside the controlled TMPDIR stop the block', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, 'controlled root');
+  const wrongRoot = join(dir, 'wrong root');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const shim = `mktemp() {
+  if [[ "\${2:-}" == */locus-graph-imp.XXXXXX ]]; then
+    command mktemp -d "$WRONG_ROOT/locus-graph-imp.XXXXXX"
+    return
+  fi
+  command mktemp "$@"
+}
+`;
+
+  const { result } = repeatSection(t, {
+    tmpdir: scratch, shim, extraEnv: { WRONG_ROOT: wrongRoot },
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the containment check must fail the suite');
+  assert.match(result.stderr,
+    /FAIL repeated graph homes were not created directly beneath the temp root/);
+  assert.doesNotMatch(result.stdout, /ok two graph homes are distinct/);
+  const misplaced = readdirSync(wrongRoot);
+  assert.equal(misplaced.length, 2, 'both misplaced homes stay beneath the wrong root');
+  assert.ok(misplaced.every((n) => n.startsWith('locus-graph-imp.')));
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+// A regression that hands back one directory twice must die at the
+// distinctness check before either home is removed.
+test('a repeated creation returning the same directory stops the block', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, 'controlled root');
+  const seen = join(dir, 'seen-path');
+  mkdirSync(scratch);
+  const shim = `mktemp() {
+  if [[ "\${2:-}" == */locus-graph-imp.XXXXXX ]]; then
+    [[ -s "$SEEN_PATH" ]] || command mktemp -d "$2" > "$SEEN_PATH"
+    cat "$SEEN_PATH"
+    return
+  fi
+  command mktemp "$@"
+}
+`;
+
+  const { result } = repeatSection(t, {
+    tmpdir: scratch, shim, extraEnv: { SEEN_PATH: seen },
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the distinctness check must fail the suite');
+  assert.match(result.stderr,
+    /FAIL repeated graph home creation returned the same directory/);
+  const dup = readFileSync(seen, 'utf8').trim();
+  assert.equal(dirname(dup), scratch);
+  assert.deepEqual(readdirSync(scratch), [basename(dup)],
+    'only the duplicated home is left beneath the supplied root');
 });
