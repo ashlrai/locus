@@ -1152,6 +1152,7 @@ test('multi-tenant probe directory is created beneath the configured TMPDIR', (t
   const probe = join(root, 'probe');
   const release = join(root, 'release');
   const modeFile = join(root, 'mode');
+  const homeFile = join(root, 'home');
   // The init stub records the probe root (its cwd once the probe has cd'd into
   // it) then parks until RELEASE appears, so the parent can observe the live
   // directory before releasing the probe. Returning 1 stops the probe before
@@ -1161,6 +1162,7 @@ source "$1"
 locus() {
   if [[ "$1" == init ]]; then
     printf '%s\n' "$PWD" > "$PROBE_FILE"
+    printf '%s\n' "$LOCUS_HOME" > "$HOME_FILE"
     local tries=0
     while [[ ! -f "$RELEASE" && $tries -lt 400 ]]; do
       sleep 0.05
@@ -1208,7 +1210,7 @@ wait "$pid" || status=$?
 `;
   const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
     cwd: root,
-    env: { ...process.env, TMPDIR: scratch, PROBE_FILE: probe, MODE_FILE: modeFile, RELEASE: release },
+    env: { ...process.env, TMPDIR: scratch, PROBE_FILE: probe, MODE_FILE: modeFile, HOME_FILE: homeFile, RELEASE: release },
     encoding: 'utf8',
     timeout: 30_000,
   });
@@ -1218,6 +1220,8 @@ wait "$pid" || status=$?
   const probeRoot = readFileSync(probe, 'utf8').trim();
   assert.match(basename(probeRoot), /^locus-mt-dogfood\.[^/]+$/);
   assert.equal(dirname(probeRoot), scratch);
+  assert.equal(readFileSync(homeFile, 'utf8').trim(), join(probeRoot, 'home'),
+    'the probe must use a home inside its isolated root');
   assert.equal(readFileSync(modeFile, 'utf8').trim(), '700',
     'mktemp -d must allocate the probe root with owner-only permissions');
   assert.equal(existsSync(probeRoot), false);
