@@ -1133,6 +1133,88 @@ wait "$p2" || s2=$?
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
+test('multi-tenant probe directory is created beneath the configured TMPDIR', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-live-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const probe = join(root, 'probe');
+  const release = join(root, 'release');
+  const modeFile = join(root, 'mode');
+  // The init stub records the probe root (its cwd once the probe has cd'd into
+  // it) then parks until RELEASE appears, so the parent can observe the live
+  // directory before releasing the probe. Returning 1 stops the probe before
+  // any grant or server work; its EXIT trap removes only the probe root.
+  const harness = String.raw`
+source "$1"
+locus() {
+  if [[ "$1" == init ]]; then
+    printf '%s\n' "$PWD" > "$PROBE_FILE"
+    local tries=0
+    while [[ ! -f "$RELEASE" && $tries -lt 400 ]]; do
+      sleep 0.05
+      tries=$((tries + 1))
+    done
+    return 1
+  fi
+  return 1
+}
+( mt_grant_probe ) & pid=$!
+tries=0
+while [[ ! -s "$PROBE_FILE" && $tries -lt 400 ]]; do
+  sleep 0.05
+  tries=$((tries + 1))
+done
+probe_root=""
+if [[ -s "$PROBE_FILE" ]]; then
+  probe_root="$(cat "$PROBE_FILE")"
+fi
+if [[ -z "$probe_root" ]]; then
+  printf 'probe root was never recorded\n' >&2
+  touch "$RELEASE"
+  exit 43
+fi
+if [[ ! -d "$probe_root" || "${'$'}{probe_root%/*}" != "$TMPDIR" || "$probe_root" != "$TMPDIR"/locus-mt-dogfood.* ]]; then
+  printf 'probe root is not a live directory beneath TMPDIR: %s\n' "$probe_root" >&2
+  touch "$RELEASE"
+  exit 44
+fi
+if ! kill -0 "$pid" 2>/dev/null; then
+  printf 'probe exited before its root was observed\n' >&2
+  touch "$RELEASE"
+  exit 45
+fi
+if [[ "$(uname -s)" == Darwin ]]; then
+  stat -f %Lp "$probe_root" > "$MODE_FILE"
+else
+  stat -c %a "$probe_root" > "$MODE_FILE"
+fi
+touch "$RELEASE"
+status=0
+wait "$pid" || status=$?
+[[ "$status" -eq 1 ]] || exit 46
+[[ ! -e "$probe_root" ]] || exit 47
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, PROBE_FILE: probe, MODE_FILE: modeFile, RELEASE: release },
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  const probeRoot = readFileSync(probe, 'utf8').trim();
+  assert.match(basename(probeRoot), /^locus-mt-dogfood\.[^/]+$/);
+  assert.equal(dirname(probeRoot), scratch);
+  assert.equal(readFileSync(modeFile, 'utf8').trim(), '700',
+    'mktemp -d must allocate the probe root with owner-only permissions');
+  assert.equal(existsSync(probeRoot), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
 test('default pack path and project dir stay one argument under a space-containing TMPDIR', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-pack-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
