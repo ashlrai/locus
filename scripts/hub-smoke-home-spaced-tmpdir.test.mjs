@@ -137,3 +137,15 @@ test('SMOKE_HOME lands beneath the exact requested root, not a word-split fragme
   assert.equal(readFileSync(join(decoy, 'keep'), 'utf8'), 'sentinel');
   assert.deepEqual(readdirSync(scratch), ['sentinel']);
 });
+
+test('SMOKE_HOME stays under a spaced TMPDIR containing shell metacharacters', (t) => {
+  const { scratch, home, argv } = run(t, 'home [*] workspace');
+
+  const mk = argv.filter((line) => line.startsWith('mktemp '));
+  assert.equal(mk.length, 1);
+  assert.equal(mk[0].split(' ').slice(2).join(' '), `${scratch}/locus-hub-smoke.XXXXXX`);
+  assert.equal(dirname(home), scratch);
+  assert.match(basename(home), /^locus-hub-smoke\.[A-Za-z0-9]{6}$/);
+  assert.equal(existsSync(home), false);
+  assert.deepEqual(readdirSync(scratch), ['sentinel']);
+});
