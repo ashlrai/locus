@@ -112,7 +112,7 @@ fi
 
 # Exercise home creation and exit cleanup even when the caller did not set
 # TMPDIR. The subshell owns its home and leaves the supplied root intact.
-log "2b. home creation honors a space-containing TMPDIR"
+log "2g. home creation honors a space-containing TMPDIR"
 home_tmp="$LOCUS_HOME/home temp root"
 mkdir -p "$home_tmp"
 (
