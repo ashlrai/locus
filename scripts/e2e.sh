@@ -231,6 +231,27 @@ security_ws_test_dir="$(cat "$security_ws_tmp/security-workspace-path")"
 [[ -d "$security_ws_tmp" ]] || die "SECURITY_WS cleanup removed the supplied TMPDIR"
 ok "SECURITY_WS creation succeeds beneath a TMPDIR containing spaces"
 
+# The binary must receive a spaced LOCUS_HOME as one path. Everything it writes
+# must land inside that one directory: a split path would create stray siblings
+# beneath the supplied TMPDIR.
+log "2f. LOCUS_HOME inside a space-containing TMPDIR is one path"
+onearg_tmp="$LOCUS_HOME/one arg root"
+mkdir -p "$onearg_tmp"
+(
+  export TMPDIR="$onearg_tmp"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  create_locus_home
+  trap 'e2e_cleanup' EXIT
+  "$LOCUS_BIN" init >/dev/null || exit 1
+  [[ -n "$(ls -A "$LOCUS_HOME")" ]] || exit 1
+  # The only entry beneath TMPDIR is the home itself.
+  [[ "$(find "$TMPDIR" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" == 1 ]] || exit 1
+  printf '%s' "$LOCUS_HOME" >"$onearg_tmp/home-path"
+) || die "spaced LOCUS_HOME was not handled as one path"
+onearg_home="$(cat "$onearg_tmp/home-path")"
+[[ ! -e "$onearg_home" ]] || die "spaced LOCUS_HOME survived exit cleanup"
+ok "spaced LOCUS_HOME is one path for the binary and cleanup"
+
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
 
@@ -933,9 +954,16 @@ for mutation in \
   "notify on" \
   "workspace --default personal --force" \
   "binding add stripped --tenant stripped --provider github --account stripped --credential-ref env:STRIPPED_TOKEN" \
-  "graph export --out $LOCUS_HOME/stripped-graph.locus"
+  "graph export --out @STRIPPED_GRAPH@"
 do
   read -r -a mutation_args <<<"$mutation"
+  # Substitute after word-splitting so a LOCUS_HOME containing spaces (from a
+  # space-containing TMPDIR) stays one argument.
+  for i in "${!mutation_args[@]}"; do
+    if [[ "${mutation_args[$i]}" == "@STRIPPED_GRAPH@" ]]; then
+      mutation_args[$i]="$LOCUS_HOME/stripped-graph.locus"
+    fi
+  done
   if stripped_mutation "${mutation_args[@]}"; then
     die "stripped child upgraded ambient active authority: $mutation"
   fi
