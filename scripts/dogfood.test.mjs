@@ -1335,3 +1335,34 @@ esac
     assert.deepEqual(readdirSync(scratch), ['keep']);
   });
 }
+
+// Unlike the stubbed fallback cases above, nothing is redirected here: the
+// real mktemp runs, so the directory the script creates is the one checked.
+test('dogfood home is really created beneath /tmp when TMPDIR is unset', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-real-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixtureRoot = join(root, 'fixture');
+  const bin = join(fixtureRoot, 'target', 'debug');
+  mkdirSync(join(fixtureRoot, 'scripts'), { recursive: true });
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  const probe = join(root, 'probe');
+  writeFileSync(join(bin, 'locus'), `#!/bin/bash
+case "$1" in
+  init) printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"; [[ -d "$LOCUS_HOME" ]] || exit 88 ;;
+  quickstart) exit 42 ;;
+esac
+`, { mode: 0o755 });
+  const env = { PATH: process.env.PATH, HOME: process.env.HOME, PROBE_FILE: probe };
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root, env, encoding: 'utf8',
+  });
+  const home = readFileSync(probe, 'utf8').trim();
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  assert.equal(result.status, 42);
+  assert.equal(dirname(home), '/tmp');
+  assert.match(basename(home), /^locus-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.equal(existsSync(home), false, 'cleanup trap removes the home');
+});
