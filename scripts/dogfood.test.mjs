@@ -891,3 +891,34 @@ test('default pack path and project dir stay one argument under a space-containi
   assert.ok(result.stdout.includes(`isolated LOCUS_HOME=${home}`));
   assert.deepEqual(readdirSync(scratch), []);
 });
+
+for (const setting of ['unset', 'empty']) {
+  test(`multi-tenant probe root falls back to /tmp when TMPDIR is ${setting}`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'locus-mt-fallback-test-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const probe = join(root, 'probe');
+    const harness = String.raw`
+source "$1"
+locus() {
+  if [[ "$1" == init ]]; then
+    printf '%s\n' "$LOCUS_HOME" > "$PROBE_FILE"
+    return 1
+  fi
+}
+set +e
+mt_grant_probe
+exit "$?"
+`;
+    const env = { ...process.env, PROBE_FILE: probe };
+    if (setting === 'empty') env.TMPDIR = '';
+    else delete env.TMPDIR;
+    const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+      cwd: root, env, encoding: 'utf8',
+    });
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 1);
+    const probeRoot = dirname(readFileSync(probe, 'utf8').trim());
+    assert.match(probeRoot, /^\/tmp\/locus-mt-dogfood\.[^/]+$/);
+    assert.equal(existsSync(probeRoot), false);
+  });
+}
