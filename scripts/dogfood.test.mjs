@@ -369,6 +369,37 @@ test('successful dogfood run ignores an inherited DOGFOOD_HOME and leaves it int
   assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'preserve');
 });
 
+test('two dogfood invocations create distinct homes and each removes its own', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-distinct-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'tmp');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const fixtureRoot = writeSuccessFixture(root);
+
+  const homes = [1, 2].map((n) => {
+    const probe = join(root, `probe-${n}`);
+    const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+      cwd: root,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, PROBE_FILE: probe,
+        FIXTURE_ROOT: root },
+      encoding: 'utf8',
+    });
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 0, `run ${n} must succeed`);
+    assert.match(result.stdout, /DOGFOOD READY/);
+    return readFileSync(probe, 'utf8').trim();
+  });
+
+  assert.notEqual(homes[0], homes[1], 'each invocation must get its own DOGFOOD_HOME');
+  for (const home of homes) {
+    assert.match(home, /\/locus-dogfood\.[^/]+$/);
+    assert.equal(dirname(home), scratch);
+    assert.equal(existsSync(home), false, `removed on exit: ${home}`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
 test('project setup failure removes the allocated dogfood home before initialization', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-setup-failure-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
