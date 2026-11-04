@@ -56,7 +56,7 @@ function setup(t) {
   const locus = join(bin, 'locus');
   writeFileSync(locus, `#!/bin/sh
 case "$1" in
-  init) exit 0 ;;
+  init) : > "$LOCUS_HOME/.stub-init" && exit 0 ;;
   workspace) printf '# stub workspace config\\n' > .locus.toml && exit 0 ;;
 esac
 exit 1
