@@ -175,6 +175,38 @@ security_test_ws="$(cat "$security_tmp/security-workspace-path")"
 [[ -d "$security_tmp" ]] || die "security cleanup removed the supplied TMPDIR"
 ok "distinct security directories honor nondefault TMPDIR and are cleaned on exit"
 
+# SECURITY_HOME under a TMPDIR with several spaces. Cleanup must remove exactly
+# that directory: a decoy at the first word-split fragment of the path must
+# survive, which catches an unquoted rm in the exit trap.
+log "2c2. SECURITY_HOME creation and cleanup honor a space-containing TMPDIR"
+secspace_decoy="$LOCUS_HOME/sec"
+secspace_tmp="$secspace_decoy tmp  root"
+mkdir -p "$secspace_decoy" "$secspace_tmp"
+touch "$secspace_decoy/decoy-sentinel"
+(
+  export TMPDIR="$secspace_tmp"
+  LOCUS_HOME="$secspace_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_security_home
+  [[ "$TMPDIR" == *" "* && -d "$SECURITY_HOME" && \
+    "${SECURITY_HOME%/*}" == "$TMPDIR" && \
+    "${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
+  # Usable, not just present: files must land inside the spaced path.
+  touch "$SECURITY_HOME/cleanup-sentinel"
+  [[ -f "$SECURITY_HOME/cleanup-sentinel" ]] || exit 1
+  printf '%s' "$SECURITY_HOME" >"$secspace_tmp/security-home-path"
+) || die "SECURITY_HOME was not created beneath the space-containing TMPDIR"
+secspace_home="$(cat "$secspace_tmp/security-home-path")"
+[[ "$secspace_home" == *" "* ]] || die "SECURITY_HOME path did not contain spaces"
+[[ ! -e "$secspace_home" && ! -L "$secspace_home" ]] \
+  || die "SECURITY_HOME under a spaced TMPDIR survived exit cleanup"
+[[ -d "$secspace_tmp" ]] || die "SECURITY_HOME cleanup removed the spaced TMPDIR"
+[[ -f "$secspace_decoy/decoy-sentinel" ]] \
+  || die "SECURITY_HOME cleanup removed a word-split sibling of the spaced TMPDIR"
+ok "SECURITY_HOME is created and removed beneath a TMPDIR containing spaces"
+
 # Exercise the same workspace creation and EXIT cleanup used by the allowlist
 # probes, beneath a supplied temporary root whose name contains spaces. The
 # subshell owns its test home so its cleanup cannot remove the main home.
