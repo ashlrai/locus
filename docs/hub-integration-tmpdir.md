@@ -18,6 +18,12 @@ Both directories are direct children of the parent. `mktemp -d` replaces
 files beneath the same parent as `.locus-hub-int-scan.$$.${RANDOM}`; these are
 files, not additional `mktemp` directories.
 
+An unusable parent — a regular file, a missing path, or a directory without
+write permission — fails the first `mktemp` (or, for a relative value, the
+`cd` normalization that resolves it). `set -e` then exits the script nonzero
+before `locus init`, so none of the integration workload runs; `mktemp`'s own
+diagnostic reaches stderr.
+
 An `EXIT` trap attempts to remove both directories and any remaining scan
 listings for the shell's PID, including when setup fails. It does not remove
 the parent itself. Cleanup is best effort and cannot run after an uncatchable
@@ -32,4 +38,6 @@ and directory prefixes against the script. Run
 smoke with a `TMPDIR` containing spaces and shell metacharacters; it observes
 the directories and scan listings while they exist and checks their cleanup.
 `scripts/hub-integration-tmpdir.test.mjs` also covers plain-whitespace values
-(embedded, doubled, leading and trailing spaces).
+(embedded, doubled, leading and trailing spaces) and unusable parents — a
+regular file, a missing absolute path and a missing relative path — where the
+run must exit nonzero before `locus init`.
