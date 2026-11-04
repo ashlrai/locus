@@ -1164,3 +1164,27 @@ printf '%s' "$SECURITY_WS" > "$2"
   }
   assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
 });
+
+test('repeated graph home creation yields distinct directories beneath TMPDIR', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const create = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  const block = source.match(/^create_graph_home; graph_home_a=[\s\S]*?^ok "two graph homes are distinct[^\n]*$/m)?.[0];
+  assert.ok(create && block, 'missing repeated graph home block');
+
+  for (const tmpdir of [scratch, `${scratch}/`]) {
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+ok() { printf 'ok %s\\n' "$*"; }
+${create}
+GRAPH_HOME=""
+${block}
+`], { env: { ...process.env, TMPDIR: tmpdir }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /two graph homes are distinct/);
+    assert.deepEqual(readdirSync(scratch), ['keep'], 'block must clean up both homes');
+  }
+});

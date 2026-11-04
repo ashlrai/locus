@@ -37,6 +37,10 @@ log()  { printf '\n==> %s\n' "$*"; }
 ok()   { printf '  ok  %s\n' "$*"; pass=$((pass + 1)); }
 skip() { printf '  skip %s\n' "$*"; skip=$((skip + 1)); }
 die()  { printf '  FAIL %s\n' "$*" >&2; fail=$((fail + 1)); exit 1; }
+# Sets GRAPH_HOME to a fresh directory directly beneath the temp root.
+create_graph_home() {
+  GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
+}
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
 # Feature detection: true if `locus <cmd> --help` succeeds (subcommand exists).
@@ -1335,7 +1339,7 @@ else
       ok "graph import --force roundtrip"
     else
       # Fresh home for a true write path
-      GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
+      create_graph_home
       # Same containment rule as LOCUS_HOME: a supplied TMPDIR owns the graph home.
       if [[ -n "${TMPDIR:-}" ]]; then
         [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
@@ -1358,6 +1362,26 @@ else
     fi
   fi
 fi
+
+# Repeated graph-home creation (unconditional): two creations with the graph
+# import recipe must yield distinct directories under the selected temp root.
+create_graph_home; graph_home_a="$GRAPH_HOME"
+create_graph_home; graph_home_b="$GRAPH_HOME"
+GRAPH_HOME=""
+graph_root="${TMPDIR:-/tmp}"
+graph_root="${graph_root%/}"
+[[ -d "$graph_home_a" && -d "$graph_home_b" ]] \
+  || die "repeated graph home creation did not create both directories"
+[[ "$graph_home_a" != "$graph_home_b" ]] \
+  || die "repeated graph home creation returned the same directory"
+graph_parent_a="${graph_home_a%/*}"
+graph_parent_b="${graph_home_b%/*}"
+[[ "${graph_parent_a%/}" == "$graph_root" && "${graph_parent_b%/}" == "$graph_root" ]] \
+  || die "repeated graph homes were not created directly beneath the temp root"
+rm -rf "$graph_home_a" "$graph_home_b"
+[[ ! -e "$graph_home_a" && ! -e "$graph_home_b" ]] \
+  || die "repeated graph homes were not removed"
+ok "two graph homes are distinct and live directly beneath the temp root"
 
 # ── 17. ci mint --json (feature-detected) ────────────────────────────────────
 log "17. locus ci mint --json (optional)"
