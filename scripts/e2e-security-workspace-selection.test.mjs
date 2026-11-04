@@ -113,3 +113,32 @@ TEST_ELSEWHERE="$(command mktemp -d)"`);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /FAIL SECURITY_WS was not created beneath the space-containing TMPDIR/);
 });
+
+function createFn() {
+  const create = readFileSync(script, 'utf8').match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(create, 'e2e.sh must define create_security_workspace');
+  return create;
+}
+
+test('SECURITY_WS falls back to /tmp when TMPDIR is unset or empty', (t) => {
+  for (const mode of ['unset', 'empty']) {
+    const env = { ...process.env };
+    if (mode === 'unset') delete env.TMPDIR; else env.TMPDIR = '';
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+${createFn()}
+create_security_workspace
+trap 'rm -rf "$SECURITY_WS"' EXIT
+printf '%s' "$SECURITY_WS"
+`], { env, encoding: 'utf8' });
+    assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
+    assert.match(result.stdout, /^\/tmp\/locus-security-ws\.[A-Za-z0-9]{6}$/, mode);
+    assert.throws(() => lstatSync(result.stdout), { code: 'ENOENT' }, mode);
+  }
+});
+
+test('SECURITY_WS is only ever assigned through create_security_workspace', () => {
+  const lines = readFileSync(script, 'utf8').split('\n');
+  const assigns = lines.filter((l) => /^\s*SECURITY_WS=("\$\(|\$\()/.test(l));
+  assert.equal(assigns.length, 1, `unexpected SECURITY_WS creations: ${assigns.join(' | ')}`);
+  assert.match(assigns[0], /mktemp -d "\$\{TMPDIR:-\/tmp\}\/locus-security-ws\.XXXXXX"/);
+});
