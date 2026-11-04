@@ -473,6 +473,102 @@ test('two dogfood invocations create distinct homes and each removes its own', (
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
+test('dogfood home root is created under a supplied TMPDIR with private permissions', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-perms-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  const fixtureRoot = join(root, 'fixture');
+  const bin = join(fixtureRoot, 'target', 'debug');
+  mkdirSync(scratch);
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(fixtureRoot, 'scripts'));
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus'), `#!/bin/bash
+case "$1" in
+  init)
+    [[ -d "$LOCUS_HOME" && "\${LOCUS_HOME%/*}" == "$TMPDIR" ]] || exit 89
+    [[ "$PWD" == "$LOCUS_HOME/project" ]] || exit 90
+    printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"
+    if [[ "$(uname -s)" == Darwin ]]; then
+      stat -f %Lp "$LOCUS_HOME" > "$MODE_FILE"
+    else
+      stat -c %a "$LOCUS_HOME" > "$MODE_FILE"
+    fi
+    printf 'usable' > "$LOCUS_HOME/sentinel"
+    ;;
+  binding)
+    [[ "$(cat "$LOCUS_HOME/sentinel")" == usable ]] || exit 91
+    ;;
+  --version) ;;
+  quickstart) exit 42 ;;
+  *) exit 92 ;;
+esac
+`, { mode: 0o755 });
+  const probe = join(root, 'probe');
+  const modeFile = join(root, 'mode');
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch,
+      PROBE_FILE: probe, MODE_FILE: modeFile },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 42, 'dogfood should reach the controlled quickstart failure');
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.match(home, /\/locus-dogfood\.[^/]+$/);
+  assert.equal(dirname(home), scratch);
+  assert.equal(readFileSync(modeFile, 'utf8').trim(), '700',
+    'mktemp -d must allocate the dogfood home with owner-only permissions');
+  assert.equal(existsSync(home), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
+test('real-home mode selects no temporary root and preserves the supplied DOGFOOD_HOME', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-real-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary directory with spaces and $metacharacters');
+  const callerHome = join(root, 'caller home');
+  mkdirSync(scratch);
+  mkdirSync(callerHome);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  writeFileSync(join(callerHome, 'keep'), 'preserve');
+  const fixtureRoot = writeSuccessFixture(root);
+  const locusBin = join(fixtureRoot, 'target', 'debug', 'locus');
+  const stub = readFileSync(locusBin, 'utf8').replace(
+    "'forensics export') printf '{}\\n' > \"$4\" ;;",
+    "'forensics export') printf '%s\\n' \"$LOCUS_HOME\" > \"$HOME_RECORD\"; printf '{}\\n' > \"$4\" ;;");
+  assert.notEqual(stub, readFileSync(locusBin, 'utf8'), 'fixture must be patched');
+  writeFileSync(locusBin, stub, { mode: 0o755 });
+
+  const probe = join(root, 'probe');
+  const record = join(root, 'home-record');
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch,
+      PROBE_FILE: probe, FIXTURE_ROOT: root, HOME_RECORD: record,
+      DOGFOOD_USE_REAL_HOME: '1', DOGFOOD_HOME: callerHome, DOGFOOD_PACK: join(root, 'pack.json') },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /using real LOCUS_HOME/);
+  assert.match(result.stdout, /DOGFOOD READY/);
+  assert.equal(readFileSync(record, 'utf8').trim(), callerHome,
+    'real mode must run against the supplied DOGFOOD_HOME, not an allocated root');
+  assert.equal(existsSync(probe), false, 'isolated-home probe path never ran');
+  assert.deepEqual(readdirSync(scratch), ['keep'],
+    'no locus-dogfood.* root is allocated under TMPDIR in real-home mode');
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+  assert.equal(readFileSync(join(callerHome, 'keep'), 'utf8'), 'preserve',
+    'caller-owned home must survive the exit trap');
+});
+
 test('project setup failure removes the allocated dogfood home before initialization', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-setup-failure-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
