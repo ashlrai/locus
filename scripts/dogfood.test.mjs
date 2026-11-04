@@ -94,6 +94,59 @@ sandbox_attestation
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
 });
 
+// The mktemp shim records the template sandbox_attestation passes and redirects
+// anything outside $CONTROLLED into it, so the fallback case never touches /tmp.
+function sandboxRootSelection(t, tmpdirEnv) {
+  const root = mkdtempSync(join(tmpdir(), 'locus-sandbox-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const controlled = join(root, 'controlled');
+  mkdirSync(controlled);
+  const template = join(root, 'template');
+  const created = join(root, 'created');
+  // Plain strings, not String.raw: the shim needs bash's ${...} expansions.
+  const harness = [
+    'source "$1"',
+    'mktemp() {',
+    '  local last="${!#}" args=("$@") path',
+    '  printf \'%s\\n\' "$last" > "$TEMPLATE_FILE"',
+    '  [[ "$last" == "$CONTROLLED"/* ]] || args[$(($# - 1))]="$CONTROLLED/${last##*/}"',
+    '  path="$(command mktemp "${args[@]}")" || return',
+    '  printf \'%s\\n\' "$path" > "$CREATED_FILE"',
+    '  printf \'%s\\n\' "$path"',
+    '}',
+    'locus() { return 0; }',
+    'sandbox_attestation',
+  ].join('\n');
+  const env = { ...process.env, CONTROLLED: controlled, TEMPLATE_FILE: template, CREATED_FILE: created };
+  delete env.TMPDIR;
+  Object.assign(env, tmpdirEnv(controlled));
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'stubbed probe stops at the missing binding');
+  return {
+    controlled,
+    template: readFileSync(template, 'utf8').trim(),
+    created: readFileSync(created, 'utf8').trim(),
+    left: readdirSync(controlled),
+  };
+}
+
+test('sandbox probe root is created under a dedicated TMPDIR and removed', (t) => {
+  const { controlled, template, created, left } = sandboxRootSelection(t, (dir) => ({ TMPDIR: dir }));
+  assert.equal(template, `${controlled}/locus-sandbox-dogfood.XXXXXX`);
+  assert.equal(dirname(created), controlled);
+  assert.match(basename(created), /^locus-sandbox-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.deepEqual(left, []);
+});
+
+for (const [label, tmpdirEnv] of [['unset', () => ({})], ['empty', () => ({ TMPDIR: '' })]]) {
+  test(`sandbox probe root falls back to /tmp when TMPDIR is ${label}`, (t) => {
+    const { template, left } = sandboxRootSelection(t, tmpdirEnv);
+    assert.equal(template, '/tmp/locus-sandbox-dogfood.XXXXXX');
+    assert.deepEqual(left, []);
+  });
+}
+
 test('sandbox probe stops when its temporary directory cannot be allocated', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-sandbox-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
