@@ -436,6 +436,8 @@ if [[ "${USE_REAL}" == "1" ]]; then
 else
   APPLY="${APPLY:-1}"
   DOGFOOD_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-dogfood.XXXXXX")"
+  # A relative TMPDIR yields a relative home; the script cds into it, so pin it.
+  [[ "$DOGFOOD_HOME" == /* ]] || DOGFOOD_HOME="$PWD/$DOGFOOD_HOME"
   export LOCUS_HOME="$DOGFOOD_HOME"
   PACK_OUT="${PACK_OUT:-$DOGFOOD_HOME/pack.json}"
   unset LOCUS_SESSION_ID || true

@@ -1770,3 +1770,39 @@ exit "$?"
   assert.equal(existsSync(probeRoot), false);
   assert.deepEqual(readdirSync(join(root, 'rel')), []);
 });
+
+test('dogfood home stays absolute under a relative TMPDIR', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-relative-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixtureRoot = join(root, 'fixture');
+  const bin = join(fixtureRoot, 'target', 'debug');
+  mkdirSync(join(root, 'rel'));
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(join(fixtureRoot, 'scripts'));
+  writeFileSync(join(fixtureRoot, 'scripts', 'dogfood.sh'), readFileSync(script));
+  writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  writeFileSync(join(bin, 'locus-mcp'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  // The script cds into $LOCUS_HOME/project before init, so a relative TMPDIR
+  // would leave LOCUS_HOME resolving under the project a second time.
+  writeFileSync(join(bin, 'locus'), `#!/bin/bash
+case "$1" in
+  init)
+    printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"
+    [[ "$LOCUS_HOME" == /* && -d "$LOCUS_HOME" && "$PWD" == "$LOCUS_HOME/project" ]] || exit 89
+    ;;
+  quickstart) exit 42 ;;
+esac
+`, { mode: 0o755 });
+  const probe = join(root, 'probe');
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: 'rel', PROBE_FILE: probe },
+    encoding: 'utf8',
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 42, result.stderr);
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.equal(realpathSync(dirname(home)), realpathSync(join(root, 'rel')));
+  assert.equal(existsSync(home), false);
+  assert.deepEqual(readdirSync(join(root, 'rel')), []);
+});
