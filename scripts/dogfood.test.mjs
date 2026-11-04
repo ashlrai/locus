@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -325,6 +325,16 @@ test('dogfood home root is selected and created under an explicit TMPDIR', (t) =
   const { controlled, templates, created, home, left } = dogfoodHomeRootSelection(t, (dir) => ({ TMPDIR: dir }));
   assert.deepEqual(templates, [`${controlled}/locus-dogfood.XXXXXX`]);
   assert.equal(dirname(created), controlled);
+  assert.match(basename(created), /^locus-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.equal(home, created);
+  assert.equal(existsSync(created), false);
+  assert.deepEqual(left, []);
+});
+
+test('dogfood home root stays directly beneath an explicit TMPDIR written with a trailing slash', (t) => {
+  const { controlled, templates, created, home, left } = dogfoodHomeRootSelection(t, (dir) => ({ TMPDIR: `${dir}/` }));
+  assert.deepEqual(templates, [`${controlled}//locus-dogfood.XXXXXX`]);
+  assert.equal(resolve(dirname(created)), controlled);
   assert.match(basename(created), /^locus-dogfood\.[A-Za-z0-9]{6}$/);
   assert.equal(home, created);
   assert.equal(existsSync(created), false);
