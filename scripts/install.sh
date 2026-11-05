@@ -140,7 +140,8 @@ main() {
   mkdir -p -- "$bin_dir" || die 'cannot create install directory; choose a writable --bin-dir'
   # Stage on the destination filesystem before any replacement. Each rename
   # replaces the old inode, so an upgrade also works with a running binary.
-  stage_dir=$(mktemp -d "$bin_dir/.locus-install.XXXXXX")
+  stage_dir=$(mktemp -d "$bin_dir/.locus-install.XXXXXX") \
+    || die 'cannot create staging directory; choose a writable --bin-dir'
   for binary in locus locus-mcp; do
     mv -- "$work_dir/$binary" "$stage_dir/$binary"
     chmod 755 "$stage_dir/$binary"
