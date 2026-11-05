@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Offline regressions for issue #169: an installation directory containing
-# spaces, destinations the installer cannot write, and a failed download.
+# spaces, destinations the installer cannot write, an unsupported operating
+# system, and a failed download.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -124,6 +125,46 @@ unwritable_case 'unwritable-destination' "$test_root/locked dest" \
 # A missing destination under an unwritable parent refuses at creation.
 unwritable_case 'unwritable-parent' "$test_root/locked parent" \
     "$test_root/locked parent/new bin" 'cannot create install directory'
+
+# Issue #169: an unsupported operating system reports failure, exits nonzero,
+# and is refused before any download or install attempt. The stubbed curl
+# leaves a sentinel if invoked; its absence proves the refusal is pre-network.
+unsupported_case() {
+    local name=$1 os=$2 arch=$3
+    local case_dir="$test_root/$name" tmp="$test_root/tmp-$name" status=0
+    local tools="$case_dir/tools" dest="$case_dir/dest dir"
+    mkdir -p "$tools" "$tmp"
+    cat > "$tools/uname" <<'MOCK'
+#!/bin/bash
+case "$1" in
+    -s) printf '%s\n' "$TEST_OS" ;;
+    -m) printf '%s\n' "$TEST_ARCH" ;;
+    *) exit 1 ;;
+esac
+MOCK
+    cat > "$tools/curl" <<'MOCK'
+#!/bin/bash
+printf 'curl should not run on an unsupported platform\n' > "$TEST_CURL_INVOKED"
+exit 1
+MOCK
+    chmod +x "$tools/uname" "$tools/curl"
+    TEST_OS="$os" TEST_ARCH="$arch" TEST_CURL_INVOKED="$case_dir/curl-invoked" \
+        HOME="$test_root/home" TMPDIR="$tmp" PATH="$tools:$PATH" \
+        bash "$root/scripts/install.sh" --version v1.2.3 --bin-dir "$dest" \
+        > "$case_dir/out" 2> "$case_dir/err" || status=$?
+    [[ $status -ne 0 ]] || fail "$name: installer unexpectedly succeeded"
+    grep -Fq "locus installer: unsupported platform: $os/$arch; use a source install" \
+        "$case_dir/err" || fail "$name: missing installer report: $(cat "$case_dir/err")"
+    if grep -Fq 'Installed locus and locus-mcp' "$case_dir/out"; then
+        fail "$name: reported success"
+    fi
+    [[ ! -e "$case_dir/curl-invoked" ]] || fail "$name: download attempted"
+    [[ ! -e "$dest" ]] || fail "$name: destination created"
+    [[ -z "$(ls -A "$tmp")" ]] || fail "$name: temporary files leaked"
+    ok "$name"
+}
+
+unsupported_case 'unsupported-os-freebsd' FreeBSD amd64
 
 # Issue #169: a failed download reports failure, exits nonzero, and leaves no
 # installed executable or staging file in the destination or the temp area.
