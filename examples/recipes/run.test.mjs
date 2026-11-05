@@ -1,7 +1,7 @@
 // node --test examples/recipes
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,6 +51,28 @@ test("a recipe name is not a selector and returns usage", () => {
     assert.equal(r.status, 1);
     assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
     assert.equal(r.stdout, "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unknown recipe name exits nonzero before any recipe runs", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-name-"));
+  try {
+    // `acme` names a binding inside the recipes, but the runner has no recipe
+    // selector: the name is rejected with the usage error and TMPDIR is left
+    // untouched (no recipe workspace was created).
+    const r = spawnSync(process.execPath, [join(here, "run.mjs"), "acme"], {
+      env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    assert.ifError(r.error);
+    assert.notEqual(r.status, 0);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
+    assert.equal(r.stdout, "");
+    assert.equal(readdirSync(root).length, 0, "a recipe workspace was created for an unknown recipe name");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
