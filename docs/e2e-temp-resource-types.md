@@ -32,6 +32,8 @@ Run `node --test scripts/e2e-temp.test.mjs` to check the documented variable
 and prefix inventory against the script and exercise temporary-directory cleanup.
 Run `node --test scripts/e2e-home-selection.test.mjs` for the focused
 `LOCUS_HOME` temporary-root selection checks,
+`node --test scripts/e2e-home-tmpdir-containment.test.mjs` for `LOCUS_HOME`
+containment beneath the controlled `TMPDIR` and fail-closed selection,
 `node --test scripts/e2e-home-spaced-tmpdir.test.mjs` for `LOCUS_HOME`
 allocation beneath a space-containing `TMPDIR`, and
 `node --test scripts/e2e-graph-home-selection.test.mjs` for the `GRAPH_HOME`
