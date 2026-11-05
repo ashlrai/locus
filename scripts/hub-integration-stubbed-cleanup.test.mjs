@@ -11,6 +11,13 @@ import { test } from 'node:test';
 
 const script = join(dirname(fileURLToPath(import.meta.url)), 'hub-integration-test.sh');
 
+test('first temporary directory allocation failure stops integration commands', () => {
+  const result = spawnSync('bash', [join(dirname(script), 'tests/hub-integration-first-mktemp.sh')]);
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'shell regression test must pass');
+});
+
 // Exported bash functions shadow the real commands in the child script. The
 // canned answers satisfy every check; `mcp` fails so the multi-tenant slice
 // soft-skips. The final `locus` call lists SMOKE_HOME/SMOKE_PROJ for the test.
