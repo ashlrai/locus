@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync,
+  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -63,4 +63,53 @@ test('stubbed successful run leaves no temporary project directory', (t) => {
   assert.ok(result.stdout.includes('== hub-smoke OK =='));
   assert.deepEqual(readdirSync(scratch), [], 'no temp project, home or error file may remain');
   assert.equal(existsSync(scratch), true);
+});
+
+test('early command failure removes every allocated temporary path', (t) => {
+  const tmp = mkdtempSync('/tmp/locus-stub-failure-');
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const fakeRoot = join(tmp, 'repo');
+  const scratch = join(tmp, 'scratch with spaces');
+  const bin = join(tmp, 'bin');
+  const record = join(tmp, 'allocations');
+  mkdirSync(join(fakeRoot, 'scripts'), { recursive: true });
+  mkdirSync(bin);
+  mkdirSync(scratch);
+  mkdirSync(join(fakeRoot, 'target', 'debug'), { recursive: true });
+  copyFileSync(script, join(fakeRoot, 'scripts', 'hub-smoke.sh'));
+  writeFileSync(join(fakeRoot, 'target', 'debug', 'locus'), '#!/usr/bin/env bash\nexit 1\n', { mode: 0o755 });
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+
+  const lookup = spawnSync('which', ['mktemp'], { encoding: 'utf8' });
+  assert.equal(lookup.status, 0);
+  writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+path="$("$REAL_MKTEMP" "$@")" || exit 1
+printf '%s\\n' "$path" >> "$ALLOCATIONS"
+printf '%s\\n' "$path"
+`, { mode: 0o755 });
+  // A failed help probe triggers this build, after all allocations.
+  writeFileSync(join(bin, 'cargo'), `#!/usr/bin/env bash
+[[ $(wc -l < "$ALLOCATIONS") -eq 3 ]] || exit 98
+while IFS= read -r path; do [[ -e "$path" ]] || exit 98; done < "$ALLOCATIONS"
+exit 42
+`, { mode: 0o755 });
+
+  const env = { ...process.env, BASH_ENV: '', TMPDIR: scratch,
+    PATH: `${bin}:${process.env.PATH}`, REAL_MKTEMP: lookup.stdout.trim(), ALLOCATIONS: record,
+    LOCUS_CONTROL_CAPABILITY: 'synthetic-test-capability' };
+  const result = spawnSync('bash', [join(fakeRoot, 'scripts', 'hub-smoke.sh')], {
+    env, encoding: 'utf8',
+  });
+
+  assert.equal(result.status, 42);
+  assert.equal(result.signal, null);
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 3);
+  for (const [index, prefix] of ['locus-hub-smoke.', 'locus-hub-proj.', 'locus-hub-smoke-err.'].entries()) {
+    assert.equal(dirname(paths[index]), scratch);
+    assert.ok(paths[index].slice(scratch.length + 1).startsWith(prefix));
+    assert.equal(existsSync(paths[index]), false, `allocation ${index} must be removed`);
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
 });
