@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Offline regressions for issue #169: an installation directory containing
 # spaces, destinations the installer cannot write, an unsupported operating
-# system, and a failed download.
+# system, a failed download, and malformed release archives that must not
+# replace existing executables.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -44,10 +45,10 @@ done
 case "$url" in
     "https://github.com/ashlrai/locus/releases/download/v1.2.3/$TEST_ASSET")
         [[ ${TEST_FAIL_DOWNLOAD:-} != archive ]] || exit 1
-        cp "$TEST_ROOT/${url##*/}" "$out" ;;
+        cp "${INSTALL_TEST_ARCHIVE:-$TEST_ROOT/${url##*/}}" "$out" ;;
     "https://github.com/ashlrai/locus/releases/download/v1.2.3/$TEST_ASSET.sha256")
         [[ ${TEST_FAIL_DOWNLOAD:-} != checksum ]] || exit 1
-        cp "$TEST_ROOT/${url##*/}" "$out" ;;
+        cp "${INSTALL_TEST_SIDECAR:-$TEST_ROOT/${url##*/}}" "$out" ;;
     *) exit 1 ;;
 esac
 MOCK
@@ -173,7 +174,11 @@ failed_download_case() {
     local name=$1 which=$2 message=$3
     local dest="$test_root/failed-$name" tmp="$test_root/tmp-failed-$name" status=0
     mkdir "$dest" "$tmp"
+    # TEST_LOCKED points at a path nothing uses so the root path guard stays
+    # inert; the real tools keep mktemp/mkdir working for this case.
     TEST_ROOT="$test_root" TEST_ASSET="$asset" TEST_FAIL_DOWNLOAD="$which" \
+        TEST_LOCKED="$test_root/unused-locked" \
+        TEST_REAL_MKTEMP="$real_mktemp" TEST_REAL_MKDIR="$real_mkdir" \
         HOME="$test_root/home" TMPDIR="$tmp" PATH="$test_root/tools:$PATH" \
         bash "$root/scripts/install.sh" --version v1.2.3 --bin-dir "$dest" \
         > "$test_root/failed-$name.out" 2> "$test_root/failed-$name.err" || status=$?
@@ -192,5 +197,109 @@ failed_download_case 'archive-download-failure' archive \
     'archive download failed; nothing installed'
 failed_download_case 'checksum-download-failure' checksum \
     'checksum download failed; nothing installed'
+
+# Issue #169: a malformed archive fails closed even when its checksum sidecar
+# matches the served bytes — the installer exits nonzero, never reports
+# success, leaves pre-existing executables untouched, and cleans its temporary
+# area. INSTALL_TEST_ARCHIVE and INSTALL_TEST_SIDECAR point the mock curl at
+# per-case fixtures; the names differ from test-install.sh's exported
+# TEST_ARCHIVE so that harness cannot leak an override into this script.
+malformed="$test_root/malformed"
+mkdir -p "$malformed"
+
+# Bytes that never formed a gzip stream.
+printf 'this is not a release archive\n' > "$malformed/not-gzip.tar.gz"
+
+# A real archive cut short mid-stream.
+head -c $(( $(wc -c < "$test_root/$asset") / 2 )) "$test_root/$asset" \
+    > "$malformed/truncated.tar.gz"
+
+# A valid archive missing the locus-mcp member.
+mkdir -p "$malformed/missing/locus-$target"
+printf '#!/bin/sh\nprintf "locus fixture\\n"\n' \
+    > "$malformed/missing/locus-$target/locus"
+tar -czf "$malformed/missing-member.tar.gz" \
+    -C "$malformed/missing" "locus-$target"
+
+# A valid archive that stores the locus member twice. tar -r appends a second
+# locus entry; listing the member name twice on one command is not portable.
+mkdir -p "$malformed/duplicate/locus-$target"
+printf '#!/bin/sh\nprintf "locus fixture\\n"\n' \
+    > "$malformed/duplicate/locus-$target/locus"
+printf '#!/bin/sh\nprintf "mcp fixture\\n"\n' \
+    > "$malformed/duplicate/locus-$target/locus-mcp"
+tar -cf "$malformed/duplicate.tar" -C "$malformed/duplicate" "locus-$target"
+tar -rf "$malformed/duplicate.tar" \
+    -C "$malformed/duplicate" "locus-$target/locus"
+gzip -c "$malformed/duplicate.tar" > "$malformed/duplicate-member.tar.gz"
+
+# A valid archive whose locus member is a symlink, not a regular file.
+mkdir -p "$malformed/link/locus-$target"
+ln -s locus-mcp "$malformed/link/locus-$target/locus"
+printf '#!/bin/sh\nprintf "mcp fixture\\n"\n' \
+    > "$malformed/link/locus-$target/locus-mcp"
+tar -czf "$malformed/link-member.tar.gz" -C "$malformed/link" "locus-$target"
+
+# A valid archive whose locus member is an empty file.
+mkdir -p "$malformed/empty/locus-$target"
+: > "$malformed/empty/locus-$target/locus"
+printf '#!/bin/sh\nprintf "mcp fixture\\n"\n' \
+    > "$malformed/empty/locus-$target/locus-mcp"
+tar -czf "$malformed/empty-binary.tar.gz" -C "$malformed/empty" "locus-$target"
+
+malformed_archive_case() {
+    local name=$1 archive_file=$2 message=$3
+    local case_dir="$test_root/$name" status=0
+    local dest="$case_dir/dest dir" tmp="$case_dir/tmp" old="$case_dir/old"
+    mkdir -p "$dest" "$tmp" "$old"
+    printf '#!/bin/sh\nprintf "old locus\\n"\n' > "$old/locus"
+    printf '#!/bin/sh\nprintf "old mcp\\n"\n' > "$old/locus-mcp"
+    cp "$old/locus" "$old/locus-mcp" "$dest/"
+    chmod 755 "$dest/locus" "$dest/locus-mcp"
+    local digest
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest=$(sha256sum "$archive_file")
+    else
+        digest=$(shasum -a 256 "$archive_file")
+    fi
+    printf '%s  %s\n' "${digest%% *}" "$asset" > "$case_dir/sidecar"
+    TEST_ROOT="$test_root" TEST_ASSET="$asset" \
+        INSTALL_TEST_ARCHIVE="$archive_file" \
+        INSTALL_TEST_SIDECAR="$case_dir/sidecar" \
+        TEST_LOCKED="$case_dir/locked" \
+        TEST_REAL_MKTEMP="$real_mktemp" TEST_REAL_MKDIR="$real_mkdir" \
+        HOME="$test_root/home" TMPDIR="$tmp" PATH="$test_root/tools:$PATH" \
+        bash "$root/scripts/install.sh" --version v1.2.3 --bin-dir "$dest" \
+        > "$case_dir/out" 2> "$case_dir/err" || status=$?
+    [[ $status -ne 0 ]] || fail "$name: installer unexpectedly succeeded"
+    grep -Fq "locus installer: $message" "$case_dir/err" \
+        || fail "$name: missing installer report: $(cat "$case_dir/err")"
+    if grep -Fq 'Installed locus and locus-mcp' "$case_dir/out"; then
+        fail "$name: reported success"
+    fi
+    cmp "$dest/locus" "$old/locus" || fail "$name: existing locus was replaced"
+    cmp "$dest/locus-mcp" "$old/locus-mcp" \
+        || fail "$name: existing locus-mcp was replaced"
+    [[ -x $dest/locus && -x $dest/locus-mcp ]] \
+        || fail "$name: existing executables lost their mode"
+    [[ $(ls -A "$dest" | wc -l) -eq 2 ]] \
+        || fail "$name: unexpected files in destination"
+    [[ -z "$(ls -A "$tmp")" ]] || fail "$name: temporary files leaked"
+    ok "$name"
+}
+
+malformed_archive_case 'malformed-not-gzip' "$malformed/not-gzip.tar.gz" \
+    'archive must contain locus and locus-mcp'
+malformed_archive_case 'malformed-truncated' "$malformed/truncated.tar.gz" \
+    'archive must contain locus and locus-mcp'
+malformed_archive_case 'malformed-missing-member' \
+    "$malformed/missing-member.tar.gz" 'archive must contain locus and locus-mcp'
+malformed_archive_case 'malformed-duplicate-member' \
+    "$malformed/duplicate-member.tar.gz" \
+    'archive must contain each binary exactly once'
+malformed_archive_case 'malformed-link-member' \
+    "$malformed/link-member.tar.gz" 'archive binaries must be regular files'
+malformed_archive_case 'malformed-empty-binary' \
+    "$malformed/empty-binary.tar.gz" 'archive contains an empty locus'
 
 printf '%d installer tests passed; 0 failed.\n' "$passed"
