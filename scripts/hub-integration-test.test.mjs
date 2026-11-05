@@ -244,6 +244,56 @@ test('failed project allocation cleans the temporary home', (t) => {
   assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
 });
 
+test('a controlled early failure removes both allocated temporary directories', (t) => {
+  const root = mkdtempSync('/tmp/lhi-early-fail-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'scratch with spaces');
+  const record = join(root, 'observed');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+
+  // Fail at the first node --test prerequisite — the earliest point where both
+  // temporary directories exist but LOCUS_HOME is not yet exported, no locus
+  // command has run, and the project has not been entered. The stub populates
+  // both directories first so cleanup must remove non-empty trees.
+  const harness = `
+node() {
+  [[ "$1" == --test ]] || return 74
+  [[ -d "$SMOKE_HOME" && -d "$SMOKE_PROJ" && "$SMOKE_HOME" != "$SMOKE_PROJ" ]] || return 75
+  [[ -z "$(ls -A "$SMOKE_HOME")" && -z "$(ls -A "$SMOKE_PROJ")" ]] || return 76
+  mkdir -p "$SMOKE_HOME/nested" "$SMOKE_PROJ/nested" || return 77
+  : > "$SMOKE_HOME/nested/fixture" || return 78
+  : > "$SMOKE_PROJ/nested/fixture" || return 79
+  printf '%s\\n' "$SMOKE_HOME" "$SMOKE_PROJ" > "$OBSERVED"
+  return 73
+}
+jq() { :; }
+cargo() { :; }
+locus() { :; }
+export -f node jq cargo locus
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'early-failure-test', script], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, OBSERVED: record },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected prerequisite failure must propagate');
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2, 'both temporary directories must be recorded');
+  const [home, project] = paths;
+  assert.equal(dirname(home), scratch);
+  assert.equal(dirname(project), scratch);
+  assert.match(basename(home), /^locus-hub-int\.[^/]+$/);
+  assert.match(basename(project), /^locus-hub-int-proj\.[^/]+$/);
+  assert.equal(existsSync(home), false, 'the populated temporary home must be removed');
+  assert.equal(existsSync(project), false, 'the populated temporary project must be removed');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+});
+
 test('real temporary directories stay under TMPDIR and are removed after init fails', (t) => {
   const root = mkdtempSync('/tmp/lhi-direct-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
