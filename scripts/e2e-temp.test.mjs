@@ -1505,3 +1505,44 @@ printf '%s' "$WS_DIR" > "$RECORD"
   assert.match(ws.slice(scratch.length + 1), /^locus-ws\.[A-Za-z0-9]{6}$/);
   assert.ok(lstatSync(ws).isDirectory());
 });
+
+// Exercise all five allocation helpers together with a real mktemp. The shim
+// rejects split templates before allocation and records each resulting path.
+test('all temporary directory helpers preserve a spaced parent as one argument', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'parent with  spaces');
+  const record = join(fixture.root, 'allocations');
+  mkdirSync(scratch);
+  const source = readFileSync(script, 'utf8');
+  const names = ['create_locus_home', 'create_workspace', 'create_security_home',
+    'create_security_workspace', 'create_graph_home'];
+  const functions = names.map((name) => {
+    const definition = source.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, 'm'))?.[0];
+    assert.ok(definition, `missing ${name}`);
+    return definition;
+  }).join('\n');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/bash
+set -eu
+[[ "$#" == 2 && "$1" == -d && "\${2%/*}" == "$TMPDIR" ]] || exit 71
+created="$("$REAL_MKTEMP" "$@")"
+[[ -d "$created" && "\${created%/*}" == "$TMPDIR" ]] || exit 72
+printf '%s\\n' "$created" >> "$RECORD"
+printf '%s\\n' "$created"
+`, { mode: 0o755 });
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${functions}
+${names.join('\n')}
+`], { env: { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}`,
+    TMPDIR: scratch, REAL_MKTEMP: realMktemp, RECORD: record }, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, names.length);
+  assert.equal(new Set(paths).size, names.length);
+  for (const path of paths) {
+    assert.equal(dirname(path), scratch);
+    assert.ok(lstatSync(path).isDirectory());
+  }
+  assert.deepEqual(paths.map((path) => path.slice(scratch.length + 1).replace(/\.[^.]+$/, '')),
+    ['locus-e2e', 'locus-ws', 'locus-security-e2e', 'locus-security-ws', 'locus-graph-imp']);
+});
