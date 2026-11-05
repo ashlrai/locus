@@ -104,6 +104,7 @@ jobs:
           node --test scripts/install-extract.test.mjs
           node --test scripts/check-crypto.test.mjs
           node --test scripts/install-checksum.test.mjs
+          node --test scripts/install-download.test.mjs
           node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
 
@@ -206,6 +207,7 @@ jobs:
           node --test scripts/install-extract.test.mjs
           node --test scripts/check-crypto.test.mjs
           node --test scripts/install-checksum.test.mjs
+          node --test scripts/install-download.test.mjs
           node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
 
