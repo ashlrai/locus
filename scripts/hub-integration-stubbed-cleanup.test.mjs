@@ -3,7 +3,7 @@
 // functions, so no build, broker or network is needed.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,4 +57,31 @@ test('stubbed successful run removes both temporary directories', (t) => {
   assert.equal(dirname(project), tmp, 'SMOKE_PROJ must be allocated beneath TMPDIR');
   assert.equal(existsSync(project), false, 'SMOKE_PROJ must be removed on exit');
   assert.deepEqual(readdirSync(tmp), [], 'no temporary file or directory may remain');
+});
+
+test('spaced TMPDIR contains both temporary directories and preserves a sibling on cleanup', (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'locus-hub-int-spaced-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const tmp = join(scratch, 'temporary directory with spaces');
+  const record = join(scratch, 'home.record');
+  mkdirSync(tmp);
+  const sibling = join(tmp, 'existing sibling.txt');
+  writeFileSync(sibling, 'keep this file\n');
+
+  const result = spawnSync('bash', ['-c', harness, 'stub-cleanup', script], {
+    env: { ...process.env, TMPDIR: tmp, RECORD: record }, encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+  assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
+  const home = readFileSync(record, 'utf8').trim();
+  const project = /^ok\s+ambient canary absent under (.+locus-hub-int-proj\.\w+)$/m.exec(result.stdout)?.[1];
+  assert.ok(project, 'the run must scan the smoke project');
+  for (const path of [home, project]) {
+    assert.equal(dirname(path), tmp, 'temporary directory must be directly beneath TMPDIR');
+    assert.equal(existsSync(path), false, 'temporary directory must be removed on exit');
+  }
+  assert.deepEqual(readdirSync(tmp), ['existing sibling.txt']);
+  assert.equal(readFileSync(sibling, 'utf8'), 'keep this file\n');
 });
