@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Offline regressions for issue #169: an installation directory containing
-# spaces, and destinations the installer cannot write.
+# spaces, destinations the installer cannot write, and a failed download.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -41,8 +41,11 @@ while (($#)); do
     esac
 done
 case "$url" in
-    "https://github.com/ashlrai/locus/releases/download/v1.2.3/$TEST_ASSET"|\
+    "https://github.com/ashlrai/locus/releases/download/v1.2.3/$TEST_ASSET")
+        [[ ${TEST_FAIL_DOWNLOAD:-} != archive ]] || exit 1
+        cp "$TEST_ROOT/${url##*/}" "$out" ;;
     "https://github.com/ashlrai/locus/releases/download/v1.2.3/$TEST_ASSET.sha256")
+        [[ ${TEST_FAIL_DOWNLOAD:-} != checksum ]] || exit 1
         cp "$TEST_ROOT/${url##*/}" "$out" ;;
     *) exit 1 ;;
 esac
@@ -121,5 +124,32 @@ unwritable_case 'unwritable-destination' "$test_root/locked dest" \
 # A missing destination under an unwritable parent refuses at creation.
 unwritable_case 'unwritable-parent' "$test_root/locked parent" \
     "$test_root/locked parent/new bin" 'cannot create install directory'
+
+# Issue #169: a failed download reports failure, exits nonzero, and leaves no
+# installed executable or staging file in the destination or the temp area.
+# TEST_FAIL_DOWNLOAD names the stubbed request the mock curl refuses.
+failed_download_case() {
+    local name=$1 which=$2 message=$3
+    local dest="$test_root/failed-$name" tmp="$test_root/tmp-failed-$name" status=0
+    mkdir "$dest" "$tmp"
+    TEST_ROOT="$test_root" TEST_ASSET="$asset" TEST_FAIL_DOWNLOAD="$which" \
+        HOME="$test_root/home" TMPDIR="$tmp" PATH="$test_root/tools:$PATH" \
+        bash "$root/scripts/install.sh" --version v1.2.3 --bin-dir "$dest" \
+        > "$test_root/failed-$name.out" 2> "$test_root/failed-$name.err" || status=$?
+    [[ $status -ne 0 ]] || fail "$name: installer unexpectedly succeeded"
+    grep -Fq "locus installer: $message" "$test_root/failed-$name.err" \
+        || fail "$name: missing installer report: $(cat "$test_root/failed-$name.err")"
+    if grep -Fq 'Installed locus and locus-mcp' "$test_root/failed-$name.out"; then
+        fail "$name: reported success"
+    fi
+    [[ -z "$(ls -A "$dest")" ]] || fail "$name: destination changed"
+    [[ -z "$(ls -A "$tmp")" ]] || fail "$name: temporary files leaked"
+    ok "$name"
+}
+
+failed_download_case 'archive-download-failure' archive \
+    'archive download failed; nothing installed'
+failed_download_case 'checksum-download-failure' checksum \
+    'checksum download failed; nothing installed'
 
 printf '%d installer tests passed; 0 failed.\n' "$passed"
