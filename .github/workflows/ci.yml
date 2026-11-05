@@ -65,6 +65,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Installer target selection
+        run: python3 -m unittest discover -s scripts/tests -p 'test_installer_target_selection.py'
+
   # Runs beside fast so Node and Ruby setup stay off the Clippy critical path.
   wrappers:
     name: wrappers · crypto policy
