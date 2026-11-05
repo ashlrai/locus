@@ -306,12 +306,13 @@ Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
 locus init [--with-samples] · quickstart
 locus onboard [--detect-only] [--yes] [--reset]  # guided refs-only tenant setup
 locus client add                      # guided client binding (flags for every prompt)
-locus pin [alias] [--force] [--client claude] [--ns a,b] [--ttl 2h]
-locus enter <alias>                   # firm workflow pin
+locus pin [alias] [--force] [--client claude] [--ns a,b] [--ttl 2h] [--rewrite-configs]
+locus enter [alias]                   # firm workflow pin (default: workspace / autopin)
 locus switch <alias>                  # one-shot leave + enter
 locus leave · renew                   # clear pin; extend expiry (opt-in per binding)
 locus whoami [--json]
 locus status [--oneline] [--json]
+locus fleet-feed · fleet-denials · fleet-preflight  # value-free JSON for hub/workbench polls
 locus exec -- <command> [args...]
 locus exec --expect <alias> -- <cmd>  # refuse (exit 1, child never starts) unless <alias> is pinned
 locus exec --for gh -- gh pr list    # inject only the pinned GitHub credential
@@ -319,10 +320,10 @@ locus run -b <alias> -- <command>     # one-shot; global pin unchanged
 locus binding list|show|add|rm|migrate-credential-refs
 locus capability status|persist|unpersist  # where control authority lives
 locus autopin suggest [--json] [--apply]  # learned per-repo binding from pin history
-locus workspace --default <alias> [--allow a,b] [--require-pin]
+locus workspace --default <alias> [--allow a,b] [--require-pin] [--force]
 locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2; advisory-only WARN exits 0)
 locus doctor --fix [--apply]          # preview safe repairs; --apply makes them, backing up first
-locus watch [--once] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
+locus watch [--once] [--interval 5s] [--require-ok]  # session heartbeat each tick (NDJSON with --json)
 locus dashboard · serve               # local identity UI + API (127.0.0.1)
 locus forensics export                # shareable pack (no secrets)
 locus verify session · claim --text "…"  # verification plane: session pack · claim score
@@ -335,10 +336,10 @@ locus engagement init|close           # client engagement lifecycle (binding + w
 locus offboard <alias> [--apply]      # plan first; --apply removes the client's local records
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
-locus adapter search|install|uninstall|verify-manifest · registry export  # community + release adapters
+locus adapter search|install|uninstall|verify-manifest · registry export|index  # community + release adapters
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex|grok|gemini|generic
-locus mcp [--supervised]              # run the stdio MCP server; --supervised serves pinned provider tools
+locus mcp [--supervised] [--route PROVIDER]  # stdio MCP server; provider tools need supervision
 locus mcp mint|list|revoke            # multi-tenant grant tokens
 locus agent report|setup|doctor       # AI-native readiness (hub JSON)
 locus goal status                     # northstar progress from GOALS.md
