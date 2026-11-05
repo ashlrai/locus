@@ -192,8 +192,12 @@ test('normal exit removes the populated smoke project and temporary home', (t) =
   assert.equal(existsSync(paths[2]), false, 'spaced-TMPDIR probe must be removed');
 });
 
-test('integration smoke uses and cleans TMPDIR with spaces and shell metacharacters', (t) => {
-  const { result, scratch, paths, scanRecord } = runWithTempDir(t, false, ['a [b]', 'c d']);
+for (const [label, parts] of [
+  ['spaces', ['temp directory']],
+  ['spaces and shell metacharacters', ['a [b]', 'c d']],
+]) test(`integration smoke uses and cleans TMPDIR with ${label}`, (t) => {
+  const { result, scratch, paths, scanRecord, cleanupRecord, projectRecord, homeRecord } =
+    runWithTempDir(t, false, parts);
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, 'integration smoke must succeed');
@@ -209,6 +213,10 @@ test('integration smoke uses and cleans TMPDIR with spaces and shell metacharact
   assert.match(result.stdout, /^ok\s+canary scan detects a canary under a spaced path$/m);
   assert.match(result.stdout, /^ok\s+ambient canary absent under /m);
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
+  assert.equal(existsSync(cleanupRecord), true, 'both populated directories must reach cleanup');
+  assert.equal(existsSync(projectRecord), true, 'the populated project must be used before cleanup');
+  assert.equal(readFileSync(homeRecord, 'utf8').trim(), paths[0],
+    'the initialized home must be the directory created under TMPDIR');
   for (const path of paths) {
     assert.equal(existsSync(path), false, `populated temporary directory must be removed: ${path}`);
   }
