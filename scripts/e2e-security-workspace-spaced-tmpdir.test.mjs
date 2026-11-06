@@ -35,14 +35,28 @@ function fixture(t) {
   const scratch = join(root, 'security  ws tmp root');
   const observed = join(root, 'workspace-path');
   const mode = join(root, 'mode');
+  const argc = join(root, 'mktemp-argc');
+  const args = join(root, 'mktemp-args');
   mkdirSync(decoy);
   mkdirSync(scratch);
   writeFileSync(join(decoy, 'decoy-sentinel'), 'decoy');
   writeFileSync(join(scratch, 'keep'), 'unrelated');
-  return { root, decoy, scratch, observed, mode };
+  return { root, decoy, scratch, observed, mode, argc, args };
 }
 
-function probe(f, body, { buggy = false } = {}) {
+// The complete spaced root must reach mktemp inside ONE template argument.
+// The recorder counts and saves each call's arguments before delegating: an
+// unquoted expansion would word-split "security  ws tmp root" into four
+// arguments — an outcome check alone cannot tell that apart from a correct
+// call that happened to create the directory.
+const mktempRecorder = `mktemp() {
+  printf '%s\\n' "$#" > "$MKTEMP_ARGC"
+  printf '%s\\n' "$@" > "$MKTEMP_ARGS"
+  command mktemp "$@"
+}
+`;
+
+function probe(f, body, { buggy = false, shim = '' } = {}) {
   const { cleanup, create } = lifecycle();
   // With `buggy`, the later definition wins: the quoting regression the guard
   // must catch. Every other variable stays quoted so only SECURITY_WS splits.
@@ -53,6 +67,7 @@ function probe(f, body, { buggy = false } = {}) {
 ${cleanup}
 ${create}
 ${override}
+${shim}
 TMPDIR="$1"
 LOCUS_HOME="$TMPDIR/main-home"
 mkdir "$LOCUS_HOME"
@@ -62,7 +77,14 @@ create_security_workspace
 ${body}
 `, 'security-ws-spaced-tmpdir', f.scratch], {
     cwd: f.root,
-    env: { ...process.env, TMPDIR: f.scratch, OBSERVED: f.observed, MODE_RECORD: f.mode },
+    env: {
+      ...process.env,
+      TMPDIR: f.scratch,
+      OBSERVED: f.observed,
+      MODE_RECORD: f.mode,
+      MKTEMP_ARGC: f.argc,
+      MKTEMP_ARGS: f.args,
+    },
     encoding: 'utf8',
   });
 }
@@ -96,6 +118,29 @@ printf '%s' "$SECURITY_WS" > "$OBSERVED"
   assert.deepEqual(readdirSync(f.scratch).sort(), ['keep'], 'the supplied TMPDIR keeps only its own entries');
   assert.equal(readFileSync(join(f.decoy, 'decoy-sentinel'), 'utf8'), 'decoy',
     'cleanup must leave the word-split sibling of the spaced TMPDIR untouched');
+});
+
+test('the complete spaced path reaches mktemp as one template argument', (t) => {
+  const f = fixture(t);
+  const result = probe(f, `[[ -d "$SECURITY_WS" && "\${SECURITY_WS%/*}" == "$TMPDIR" ]] || exit 71
+printf '%s' "$SECURITY_WS" > "$OBSERVED"
+touch "$SECURITY_WS/cleanup-sentinel"
+`, { shim: mktempRecorder });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `probe failed: ${result.stderr}`);
+  assert.equal(readFileSync(f.argc, 'utf8').trim(), '2',
+    'mktemp must be invoked with exactly -d plus one template argument');
+  assert.deepEqual(readFileSync(f.args, 'utf8').split('\n').filter(Boolean),
+    ['-d', `${f.scratch}/locus-security-ws.XXXXXX`],
+    'the full spaced path — doubled space included — is the template argument');
+  const workspace = readFileSync(f.observed, 'utf8');
+  assert.equal(dirname(workspace), f.scratch, 'allocated directly beneath the spaced TMPDIR');
+  assert.match(workspace, /\/locus-security-ws\.[^/\s]+$/, 'the workspace name is one unsplit component');
+  assert.ok(workspace.includes(' '), 'the allocated path must contain spaces for this test to mean anything');
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'the workspace must be removed on exit');
+  assert.deepEqual(readdirSync(f.scratch).sort(), ['keep'], 'the supplied TMPDIR keeps only its own entries');
+  assert.equal(readFileSync(join(f.decoy, 'decoy-sentinel'), 'utf8'), 'decoy');
 });
 
 test('cleanup under a failing exit still removes the workspace beneath a spaced TMPDIR', (t) => {
@@ -132,6 +177,33 @@ printf '%s' "$SECURITY_WS" > "$OBSERVED"
   assert.ok(lstatSync(workspace).isDirectory(),
     'the real workspace leaks — the removal assertion detects this');
   rmSync(workspace, { recursive: true, force: true });
+});
+
+// The same quoting regression on the creation side: an unquoted
+// ${TMPDIR:-/tmp} word-splits the doubled-space root into four template
+// arguments — the first fragment is the decoy sibling — instead of one. The
+// recorder shows exactly what the argc and template assertions above detect;
+// the split call also fails outright, so no workspace can leak.
+test('an unquoted creation splits the spaced root into extra mktemp arguments', (t) => {
+  const f = fixture(t);
+  const buggyCreate = `create_security_workspace() {
+  SECURITY_WS="$(mktemp -d \${TMPDIR:-/tmp}/locus-security-ws.XXXXXX)"
+}`;
+  const result = probe(f, ':', { shim: `${mktempRecorder}\n${buggyCreate}` });
+
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0, 'a word-split template cannot allocate the workspace');
+  assert.equal(readFileSync(f.argc, 'utf8').trim(), '5',
+    'the doubled-space root reached mktemp as four template arguments');
+  const args = readFileSync(f.args, 'utf8').split('\n').filter(Boolean);
+  assert.equal(args[0], '-d');
+  assert.deepEqual(args.slice(1),
+    [f.decoy, 'ws', 'tmp', 'root/locus-security-ws.XXXXXX'],
+    'the doubled space collapsed — the first fragment is the decoy sibling path');
+  assert.equal(readFileSync(join(f.decoy, 'decoy-sentinel'), 'utf8'), 'decoy',
+    'mktemp must fail on the existing decoy, not remove or reuse it');
+  assert.deepEqual(readdirSync(f.scratch).sort(), ['keep'],
+    'no workspace was allocated beneath the spaced TMPDIR');
 });
 
 // The script's own section 2e rehearsal, verbatim. With intact quoting the
