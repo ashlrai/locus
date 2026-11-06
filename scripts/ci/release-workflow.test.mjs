@@ -81,9 +81,13 @@ process.stdout.write(out.stdout); process.stderr.write(out.stderr); process.exit
   writeFileSync(output, ""); writeFileSync(log, "");
   return {
     run(text, name, env = {}) {
-      return spawnSync("bash", ["-c", step(text, name)], {
+      // Bind the three fixture commands explicitly; never put a writable
+      // temporary directory on PATH while executing the real gate body.
+      const commands = 'gh() { "$FIXTURE_GH" "$@"; }\ngit() { "$FIXTURE_GIT" "$@"; }\nsleep() { "$FIXTURE_SLEEP" "$@"; }\n';
+      return spawnSync("/bin/bash", ["-c", commands + step(text, name)], {
         encoding: "utf8", timeout: 15000,
-        env: { ...process.env, PATH: `${root}:${process.env.PATH}`, HOME: root,
+        env: { ...process.env, PATH: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME: root,
+          FIXTURE_GH: join(root, "gh"), FIXTURE_GIT: join(root, "git"), FIXTURE_SLEEP: join(root, "sleep"),
           FIXTURE_CONFIG: join(root, "config.json"), FIXTURE_LOG: log,
           FIXTURE_NODE: runtime, FIXTURE_PARENT_NODE: process.execPath, FIXTURE_SCRIPT: join(root, "gh.cjs"),
           REPO: "ashlrai/locus", BRANCH: "main", SHA: sha, VERSION: "0.7.0",
