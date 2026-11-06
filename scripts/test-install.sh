@@ -446,4 +446,5 @@ if grep -Fq 'Installed locus and locus-mcp' "$TEST_CASE/stdout"; then fail 'repo
 [[ -z "$(find "$TEST_CASE/home/.local/bin" -name '.locus-install.*' -print)" ]] || fail 'destination staging files leaked'
 ok 'reports second rename failure and leaves a partial upgrade'
 
+"$BASH_BIN" "$ROOT/scripts/install-test.sh"
 printf '%d installer tests passed; 0 failed.\n' "$passed"

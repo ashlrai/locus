@@ -26,18 +26,6 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-# Keep the documented prerequisites and verification commands covered by this suite.
-node --test "$ROOT/integrations/phantom/readme.test.mjs"
-node --experimental-strip-types --test "$ROOT/integrations/phantom/mcp-config.test.mjs" "$ROOT/integrations/phantom/mcp-atomic-write.test.mjs" "$ROOT/integrations/phantom/mcp-preflight.test.mjs"
-
-if ! locus agent report --help >/dev/null 2>&1; then
-  echo "building locus with agent report…"
-  (cd "$ROOT" && cargo build -q -p locus-cli)
-fi
-if [[ ! -x "${ROOT}/target/debug/locus" ]]; then
-  (cd "$ROOT" && cargo build -q -p locus-cli)
-fi
-
 SMOKE_HOME=""
 SMOKE_PROJ=""
 MT_SRV_PID=""
@@ -62,6 +50,18 @@ make_smoke_dir() {
 
 SMOKE_HOME="$(make_smoke_dir locus-hub-int)"
 SMOKE_PROJ="$(make_smoke_dir locus-hub-int-proj)"
+
+# Keep the documented prerequisites and verification commands covered by this suite.
+node --test "$ROOT/integrations/phantom/readme.test.mjs"
+node --experimental-strip-types --test "$ROOT/integrations/phantom/mcp-config.test.mjs" "$ROOT/integrations/phantom/mcp-atomic-write.test.mjs" "$ROOT/integrations/phantom/mcp-preflight.test.mjs"
+
+if ! locus agent report --help >/dev/null 2>&1; then
+  echo "building locus with agent report…"
+  (cd "$ROOT" && cargo build -q -p locus-cli)
+fi
+if [[ ! -x "${ROOT}/target/debug/locus" ]]; then
+  (cd "$ROOT" && cargo build -q -p locus-cli)
+fi
 
 export LOCUS_HOME="$SMOKE_HOME"
 unset LOCUS_SESSION_ID || true
