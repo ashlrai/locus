@@ -27,6 +27,7 @@ const DOCS: &[&str] = &[
     "docs/agency-starter.md",
     "docs/workers.md",
     "docs/adapters.md",
+    "docs/copy-paste.md",
 ];
 
 fn repo_root() -> PathBuf {

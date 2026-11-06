@@ -10,6 +10,10 @@ import { test } from 'node:test';
 const script = join(dirname(fileURLToPath(import.meta.url)), 'hub-smoke.sh');
 const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
 
+test('shell regression stops after the first mktemp fails', () => {
+  execFileSync('bash', [join(dirname(script), 'tests/hub-smoke-first-mktemp.sh')], { stdio: 'pipe' });
+});
+
 test('header documents the local smoke command and prerequisites', () => {
   const header = readFileSync(script, 'utf8').split('set -euo pipefail', 1)[0];
   assert.match(header, /repository root[^\n]*\.\/scripts\/hub-smoke\.sh/);
@@ -179,12 +183,16 @@ jq() { : > "$SMOKE_COMMAND_MARKER"; return 1; }
   return { BASH_ENV: guard, SMOKE_COMMAND_MARKER: marker };
 }
 
-test('successful smoke cleans all resources under a custom TMPDIR', (t) => {
+for (const [description, directory] of [
+  ['custom TMPDIR', 'custom tmp'],
+  ['TMPDIR with spaces and shell pattern characters', 'a [*] b'],
+  ['TMPDIR with spaces, quotes, and shell substitution characters', "a '$(false)' b"],
+]) test(`successful smoke uses and cleans a ${description}`, (t) => {
   // The authority broker uses a Unix socket, so keep the temporary path short.
   const root = mkdtempSync('/tmp/lhs-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, 'bin');
-  const scratch = join(root, 'custom tmp');
+  const scratch = join(root, directory);
   const record = join(root, 'created');
   mkdirSync(bin);
   mkdirSync(scratch);
@@ -192,6 +200,10 @@ test('successful smoke cleans all resources under a custom TMPDIR', (t) => {
     'locus-hub-proj.unrelated', 'locus-hub-smoke-err.unrelated'];
   for (const name of sentinels) writeFileSync(join(scratch, name), 'sentinel');
   writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+case "\${1:-}" in
+  -d) [[ $# -eq 2 && "$2" == "$TMPDIR"/locus-hub-*.XXXXXX ]] || exit 72 ;;
+  *)  [[ $# -eq 1 && "$1" == "$TMPDIR"/locus-hub-*.XXXXXX ]] || exit 72 ;;
+esac
 path="$("$REAL_MKTEMP" "$@")" || exit
 case "$path" in
   "$TMPDIR"/locus-hub-smoke.*|"$TMPDIR"/locus-hub-proj.*|"$TMPDIR"/locus-hub-smoke-err.*)
@@ -245,6 +257,55 @@ printf '%s\\n' "$path"
   for (const name of sentinels) assert.equal(readFileSync(join(scratch, name), 'utf8'), 'sentinel');
 });
 
+test('successful smoke cleans its temporary error file after a pin retry', (t) => {
+  // Keep the broker socket path short and isolate the error file from other runs.
+  const root = mkdtempSync('/tmp/lhs-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary files');
+  const record = join(root, 'error-file');
+  const attempts = join(root, 'pin-attempts');
+  const hook = join(root, 'observe-pin.sh');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'locus-hub-smoke-err.unrelated'), 'keep');
+  writeFileSync(hook, `locus() {
+  if [[ "$*" == 'pin personal' ]]; then
+    [[ -f "$SMOKE_ERR" && ! -s "$SMOKE_ERR" ]] || return 90
+    printf 'attempt\\n' >> "$SMOKE_PIN_ATTEMPTS"
+    if [[ $(wc -l < "$SMOKE_PIN_ATTEMPTS") -eq 1 ]]; then
+      printf 'synthetic first pin failure\\n' >&2
+      return 1
+    fi
+    printf 'synthetic pin diagnostic\\n' >&2
+    command locus "$@" || return
+    grep -q '^synthetic pin diagnostic$' "$SMOKE_ERR" || return 91
+    printf '%s\\n' "$SMOKE_ERR" > "$SMOKE_ERR_RECORD"
+  else
+    command locus "$@"
+  fi
+}
+`);
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, TMPDIR: scratch, BASH_ENV: hook, SMOKE_ERR_RECORD: record,
+      SMOKE_PIN_ATTEMPTS: attempts },
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, 'smoke must complete successfully');
+  assert.match(result.stdout, /^== hub-smoke OK ==$/m);
+  assert.doesNotMatch(result.stdout, /^skip\s/m, 'all smoke checks must run');
+  assert.match(result.stderr, /warn: hub-smoke init\/pin attempt 1 failed; retrying/);
+  assert.match(result.stderr, /synthetic first pin failure/);
+  assert.equal(readFileSync(attempts, 'utf8'), 'attempt\nattempt\n');
+  const errorFile = readFileSync(record, 'utf8').trim();
+  assert.equal(dirname(errorFile), scratch);
+  assert.match(errorFile.slice(scratch.length + 1), /^locus-hub-smoke-err\./);
+  assert.equal(existsSync(errorFile), false, 'the observed error file must be removed');
+  assert.equal(readFileSync(join(scratch, 'locus-hub-smoke-err.unrelated'), 'utf8'), 'keep');
+});
+
 test('a spaced TMPDIR holds all three resources until a build failure cleans them', (t) => {
   const root = mkdtempSync('/tmp/lhs-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -267,7 +328,7 @@ test('a spaced TMPDIR holds all three resources until a build failure cleans the
   printf '%s\\t%s\\n' "$kind" "$path" >> "$SMOKE_RECORD"
   printf '%s\\n' "$path"
 }
-jq() { return 0; }
+jq() { cat >/dev/null; }
 locus() { return 1; }
 cargo() {
   local kind path count=0
@@ -428,7 +489,7 @@ for (const [name, scratchName] of [
   writeFileSync(join(scratch, 'unrelated'), 'keep');
   // Intercept even a locally built binary, and fail only after the error file
   // has been created and opened for the init command's stderr.
-  writeFileSync(guard, `jq() { return 0; }
+  writeFileSync(guard, `jq() { cat >/dev/null; }
 sleep() { :; }
 locus() {
   if [[ "$1" == init ]]; then

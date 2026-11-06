@@ -50,7 +50,9 @@ npm's own `--force` is not an override.
 ```bash
 # Install CLI + MCP
 npm install -g locus-cli @ashlrai/locus-mcp
-# or: cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
+# or from current Git main (locus-cli includes both binaries in this source):
+# cargo install --git https://github.com/ashlrai/locus locus-cli --locked
+# Other revisions may package the binaries separately; check that revision.
 
 eval "$(locus hook bash)"      # exports LOCUS_CONTROL_CAPABILITY
 locus pin acme
