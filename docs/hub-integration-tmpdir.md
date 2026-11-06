@@ -42,6 +42,11 @@ the directories and scan listings while they exist and checks their cleanup.
 (embedded, doubled, leading and trailing spaces) and unusable parents — a
 regular file, a missing absolute path and a missing relative path — where the
 run must exit nonzero before `locus init`. Run
+`node --test scripts/hub-integration-home-spaced-tmpdir.test.mjs` for the
+focused `SMOKE_HOME` checks beneath a `TMPDIR` containing spaces: `mktemp -d`
+receives the complete template as a single argument, the directory
+materializes directly beneath the verbatim root — even with doubled spaces or
+glob metacharacters — and the exit cleanup receives the unsplit path. Run
 `node --test scripts/hub-integration-proj-selection.test.mjs` to check that the
 temporary parent alone selects the project root: a supplied `TMPDIR` contains
 `SMOKE_PROJ` verbatim — through a symlink, through `..` segments, and against
