@@ -39,3 +39,32 @@ for case_number in 1 2 3; do
   fi
   printf 'ok: allocation failure case %s\n' "$case_number"
 done
+
+# Inspect the real file at its first use, before the EXIT trap removes it.
+cat > "$fixture/hook" <<'HOOK'
+jq() { :; }
+cargo() { :; }
+locus() {
+  if [[ "${1:-}" == init ]]; then
+    [[ -f "$SMOKE_ERR" && ! -L "$SMOKE_ERR" ]] || exit 74
+    printf '%s\n' "$SMOKE_ERR" > "$RECORD"
+    exit 73
+  fi
+}
+HOOK
+status=0
+env BASH_ENV="$fixture/hook" HOME="$fixture" TMPDIR="$fixture/scratch with spaces" \
+  PATH="$fixture/bin:$PATH" REAL_MKTEMP="$real_mktemp" FAIL_TEMPLATE=none \
+  ATTEMPTS="$fixture/attempts" RECORD="$fixture/record" \
+  bash "$root/scripts/hub-smoke.sh" > "$fixture/stdout" 2> "$fixture/stderr" || status=$?
+[[ "$status" -eq 73 ]] || { echo 'FAIL: error file was not observed at init' >&2; exit 1; }
+IFS= read -r error_file < "$fixture/record"
+[[ "${error_file%/*}" == "$fixture/scratch with spaces" && \
+   "${error_file##*/}" == locus-hub-smoke-err.* && ! -e "$error_file" ]] || {
+  echo 'FAIL: error file was not created under TMPDIR and cleaned up' >&2; exit 1;
+}
+[[ $(find "$fixture/scratch with spaces" -mindepth 1 -maxdepth 1 | wc -l) -eq 1 && \
+   $(cat "$fixture/scratch with spaces/sentinel") == keep ]] || {
+  echo 'FAIL: cleanup changed the supplied TMPDIR' >&2; exit 1;
+}
+echo 'ok: error file uses the supplied TMPDIR and is cleaned up'
