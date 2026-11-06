@@ -116,6 +116,34 @@ test('a supplied TMPDIR with spaces reaches mktemp inside one template argument'
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
+test('a TMPDIR with glob, tab and leading-dash components stays one literal template argument', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, '-tmp * [a-z] ?\tmix');
+  const argc = join(dir, 'argc');
+  const template = join(dir, 'template');
+  mkdirSync(scratch);
+  // Decoys a glob expansion of the root would match.
+  mkdirSync(join(dir, '-tmp x a y'));
+  const shim = `mktemp() {
+  printf '%s' "$#" > "$MKTEMP_ARGC"
+  printf '%s' "$2" > "$MKTEMP_TEMPLATE"
+  command mktemp "$@"
+}
+`;
+
+  const { observed, result } = select(t, {
+    tmpdir: scratch, shim,
+    extraEnv: { MKTEMP_ARGC: argc, MKTEMP_TEMPLATE: template },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(readFileSync(argc, 'utf8'), '2');
+  assert.equal(readFileSync(template, 'utf8'), `${scratch}/locus-graph-imp.XXXXXX`);
+  assert.equal(dirname(readFileSync(observed, 'utf8')), scratch);
+  assert.deepEqual(readdirSync(scratch), [], 'the home is removed by the exit trap');
+  assert.deepEqual(readdirSync(join(dir, '-tmp x a y')), []);
+});
+
 for (const [label, tmpdir] of [['unset', undefined], ['empty', '']]) {
   test(`the graph home root falls back to /tmp when TMPDIR is ${label}`, (t) => {
     const dir = fixture(t);
