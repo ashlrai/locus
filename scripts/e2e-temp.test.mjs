@@ -653,7 +653,7 @@ locus() {
     *) return 74 ;;
   esac
 }
-log() { :; }; ok() { :; }; die() { printf '%s\\n' "$*" >&2; exit 74; }
+log() { :; }; ok() { printf '%s\\n' "$*"; }; die() { printf '%s\\n' "$*" >&2; exit 74; }
 ${workspaceSection}
 `;
   const result = spawnSync('bash', ['-c', probe, 'workspace-root', scratch], {
@@ -663,6 +663,7 @@ ${workspaceSection}
 
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, `the workspace section must succeed: ${result.stderr}`);
+  assert.match(result.stdout, /workspace is created directly beneath TMPDIR/);
   assert.equal(readFileSync(templates, 'utf8').trim(), `${scratch}/locus-ws.XXXXXX`,
     'the section must ask mktemp for a directory rooted at TMPDIR');
   const workspace = readFileSync(wsUsed, 'utf8');
@@ -736,7 +737,7 @@ mkdir "$LOCUS_HOME"
 trap 'e2e_cleanup' EXIT
 mktemp() { local d; d="$(command mktemp -d "$WRONG_ROOT/locus-ws.XXXXXX")"; printf '%s' "$d" > "$WS_CREATED"; printf '%s\\n' "$d"; }
 locus() { return 74; }
-log() { :; }; ok() { :; }; die() { printf '%s\\n' "$*" >&2; exit 76; }
+log() { :; }; ok() { printf '%s\\n' "$*"; }; die() { printf '%s\\n' "$*" >&2; exit 76; }
 ${source.slice(start, end)}
 `;
   const result = spawnSync('bash', ['-c', probe, 'workspace-misplaced', scratch], {
@@ -746,6 +747,7 @@ ${source.slice(start, end)}
   assert.equal(result.signal, null);
   assert.equal(result.status, 76, `the check must fail the suite: ${result.stderr}`);
   assert.match(result.stderr, /WS_DIR was not created directly beneath TMPDIR/);
+  assert.doesNotMatch(result.stdout, /workspace is created directly beneath TMPDIR/);
   const workspace = readFileSync(created, 'utf8');
   assert.equal(dirname(workspace), wrongRoot);
   assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'the misplaced workspace must be removed on exit');
@@ -1575,4 +1577,43 @@ ${names.join('\n')}
   }
   assert.deepEqual(paths.map((path) => path.slice(scratch.length + 1).replace(/\.[^.]+$/, '')),
     ['locus-e2e', 'locus-ws', 'locus-security-e2e', 'locus-security-ws', 'locus-graph-imp']);
+});
+
+// Keep the original whole-script coupling: the graph rehearsal must succeed
+// before a later fresh-quickstart failure, and the outer trap must clean up.
+test('the graph home spaced-parent probe succeeds before fresh quickstart fails and cleans up', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'outer temp');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const result = run(fixture, scratch);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the fixture stops later at fresh quickstart');
+  assert.match(result.stdout, /ok  GRAPH_HOME creation succeeds beneath a TMPDIR containing spaces/);
+  assert.match(result.stderr, /fresh quickstart failed/);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'unrelated');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+test('the graph home spaced-parent probe rejects a misplaced directory in the whole script', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'outer temp');
+  const wrongRoot = join(fixture.root, 'wrong root');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+case "$2" in
+  */locus-graph-imp.XXXXXX) exec "$REAL_MKTEMP" -d "$WRONG_ROOT/locus-graph-imp.XXXXXX" ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+`, { mode: 0o755 });
+  const result = run(fixture, scratch, { REAL_MKTEMP: realMktemp, WRONG_ROOT: wrongRoot });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /GRAPH_HOME was not created beneath the space-containing TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok  GRAPH_HOME creation succeeds/);
+  assert.doesNotMatch(result.stderr, /fresh quickstart failed/);
+  assert.deepEqual(readdirSync(wrongRoot), [], 'exit cleanup removes the misplaced home');
+  assert.deepEqual(readdirSync(scratch), []);
 });
