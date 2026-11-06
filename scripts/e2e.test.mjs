@@ -341,6 +341,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     } else {
       assert.ok(existsSync(cleanedEarly), 'graph home survived until the next section');
       assert.match(result.stdout, /ok  sample exec succeeds without unset-variable warnings/);
+      assert.match(result.stdout, /ok  sample walkthrough exec succeeds without unset-variable warnings/);
       assert.match(result.stdout, /ok  sample exec reports missing credentials/);
       assert.ok(/ok  graph export\/import into fresh LOCUS_HOME/.test(result.stdout), 'fresh import did not pass');
       assert.ok(/e2e PASS/.test(result.stdout), 'e2e did not pass');

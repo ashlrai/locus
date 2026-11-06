@@ -660,6 +660,17 @@ if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
 fi
 ok "sample exec succeeds without unset-variable warnings"
 
+# Replay the standalone sample's pinned, credential-free child.
+sample_exec_stdout="$("$LOCUS_BIN" exec --expect personal --no-resolve -- sh -c \
+  'test "$LOCUS_BINDING" = personal && echo "sample exec succeeded"' \
+  2>"$sample_exec_stderr")" || die "sample walkthrough exec failed"
+[[ "$sample_exec_stdout" == "sample exec succeeded" ]] \
+  || die "sample walkthrough exec produced unexpected output"
+if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
+  die "sample walkthrough exec emitted an unset-variable warning"
+fi
+ok "sample walkthrough exec succeeds without unset-variable warnings"
+
 # Missing references must still be visible; do not hide real credential errors
 # just to make the configured sample path quiet.
 sample_exec_stdout="$(env -u LOCUS_SUPABASE_PERSONAL -u LOCUS_GH_TOKEN_PERSONAL \
