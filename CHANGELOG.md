@@ -13,6 +13,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **SIEM event export ([#457](https://github.com/ashlrai/locus/pull/457)).**
+  `locus events export --format ndjson` emits `locus.siem.v1` records with
+  export-time redaction and a fail-closed secret scan. `--since` filters all
+  export formats using an inclusive RFC3339 timestamp or UTC date. See
+  [observability](docs/observability.md#siem-ndjson).
+
+### Fixed
+
+- **Broker audit records ([#637](https://github.com/ashlrai/locus/pull/637)).**
+  The broker builds and sanitizes audit records from structured fields instead
+  of accepting caller-supplied raw audit lines.
+- **JSON usage errors ([#473](https://github.com/ashlrai/locus/pull/473)).**
+  Usage errors under `--json` emit a `locus.error.v1` envelope on stdout and
+  stderr, including the named usage exit code. See [exit codes](docs/exit-codes.md).
+- **Dry-run help ([#475](https://github.com/ashlrai/locus/pull/475)).**
+  `locus help <command>` now hides `--dry-run` for commands that cannot plan,
+  matching the corresponding command's `--help` output.
+
 ### Continuous integration
 
 - **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
@@ -43,7 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Shell installer proposal ([#169](https://github.com/ashlrai/locus/issues/169)).**
   The issue proposes a one-command shell installer that downloads and verifies
   a release archive, allowing installation on machines without npm or Rust.
-  This note records the proposal; it does not assert release availability.
+  The checkout includes `scripts/install.sh` ([#215](https://github.com/ashlrai/locus/pull/215));
+  installation still depends on release assets for the selected version and platform.
 
 - **Execution latency report ([#170](https://github.com/ashlrai/locus/issues/170)).**
   The issue reports `locus exec -- true` as 3–5x slower than
@@ -1336,7 +1357,11 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 - Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
 - Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
 
-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/ashlrai/locus/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/ashlrai/locus/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/ashlrai/locus/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/ashlrai/locus/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/ashlrai/locus/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/ashlrai/locus/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ashlrai/locus/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ashlrai/locus/releases/tag/v0.4.0
