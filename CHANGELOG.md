@@ -13,7 +13,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Broker-built audit records ([#637](https://github.com/ashlrai/locus/pull/637)).**
+  Callers no longer hand the authority broker a finished audit line to append.
+  The broker's audit request now carries structured fields (`op`, `binding`,
+  `detail`); the broker stamps the timestamp, applies the audit sanitizer and
+  builds the record itself, so an injected or multi-line record cannot reach
+  `audit/events.jsonl` through that path. An executor credential may record
+  only its supervised child launches (`session.exec`,
+  `session.exec.delegated`, `session.run`, `ci.run`); those records are marked
+  `"source": "executor"`, and every other op is refused, so a granted executor
+  can no longer forge control-plane history such as `session.pin` or
+  `approval.grant`. Records written under the control credential carry no
+  marker. When no broker answers, the caller still appends and fsyncs
+  directly with the same record shape.
+
 ### Continuous integration
+
+- **Installer suites in the required gate.**
+  CI now runs the shell-installer Python target-selection tests
+  (`python3 -m unittest` on `scripts/tests`) and the Node
+  `install-extract` and `install-checksum` harnesses, so platform-mapping
+  and checksum regressions fail the required check instead of landing
+  silently. `scripts/install.sh` was made sourceable for these tests:
+  `main` runs only when the script is executed, and the platform mapping
+  lives in a pure `platform_target` function.
 
 - **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
   CI now runs `node apps/web/discoverability.mjs --check` and
@@ -28,7 +53,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removed on success and on failure. The related `docs/` pages describe the
   updated behavior. No product code changed.
 
+- **Repository-wide coverage campaign.** More than a hundred merged bridge
+  PRs added focused tests without changing product behavior: `locus-core`
+  unit tests (empty config defaults, zero budget caps, the fleet-pulse event
+  round-trip, an empty graph envelope round-trip, an empty recipe
+  collection, adapter model APIs), `locus-cli` integration tests (unknown
+  subcommand exit status, workspace version sync, registry manifest
+  consumer, hub-smoke spaced-tmpdir), Node harness tests for the e2e,
+  dogfood, hub-smoke and hub-integration scripts (temp-home selection,
+  cleanup on failure, first-mktemp ordering), and offline installer suites
+  (target selection, archive extraction, checksum failure, destination
+  handling). `scripts/e2e.sh` gained matching live checks, including the
+  security home/workspace-selection paths described in
+  [docs/e2e-test-map.md](docs/e2e-test-map.md).
+
 ### Documentation
+
+- **`docs/registry-manifest-consumer.md` (new).**
+  What a downloaded `locus-adapters-<tag>.json` release manifest is worth:
+  currently unsigned, verified locally with `locus adapter verify-manifest
+  --allow-unsigned`, and what a matching comparison does and does not
+  establish. The operator-signed path (`registry export --sign` plus
+  `adapter trust add`) is documented separately from the CI release
+  process.
+
+- **README and DESIGN reconciliation.** The README CLI block now lists
+  `fleet-feed`, `fleet-denials` and `fleet-preflight` and names the
+  `--rewrite-configs`, `--route`, `--force` and `--interval` flags. DESIGN.md
+  marks its daemon-era control-API sketch as a design sketch: the
+  `tenant`, `session`, `binding edit` and `audit` subcommands it lists did
+  not ship, and the audit commands now show the shipped `locus events`
+  surface.
 
 - **`SUPPORT.md` (new).** Where to get help: install and MCP docs, bug and feature
   issue forms, private security reporting, and contributing. Its relative links are

@@ -274,7 +274,7 @@ Workspace ──defaults_to──► Binding
 Session ──pinned_to──► Binding   (1:1 exclusive mode)
 ```
 
-**Control API (UDS + CLI):**
+**Control API (UDS + CLI), design sketch:**
 
 ```
 locus binding list|show|add|edit|rm
@@ -283,6 +283,14 @@ locus session list|pin|unpin|status
 locus doctor
 locus graph export            # mermaid / json for debugging
 ```
+
+Shipped surface: daemon-less. The pinning shell supervises a per-pin authority
+broker; there is no `daemon.sock`, UDS control API, or `tenants/`/`principals/`
+store. The sketch's `tenant`, `session` and `binding edit` subcommands did not
+ship: pinning is `locus enter|pin|switch|leave|renew` with `whoami`/`status`,
+tenants are a field on each binding, and `graph export` writes an encrypted
+`.locusgraph` file (no mermaid). Current command list: `locus --help`;
+store layout: [docs/architecture.md](docs/architecture.md).
 
 Daemon protocol (length-prefixed JSON over UDS), illustrative:
 
@@ -446,10 +454,13 @@ Append-only JSONL with HMAC chain (same pattern as Phantom audit):
 }
 ```
 
-```
-locus audit show --tenant acme-corp --last 50
-locus audit verify
-locus audit export --since 7d --out acme-week.jsonl
+Shipped commands (`locus audit` did not ship; the record shape is
+`{ts, op, binding, detail}` with an optional `source` marker, and no `seq` /
+`prev_hash` chain yet):
+
+```bash
+locus events --binding acme --last 50                              # audit tail
+locus events export --format ndjson --out acme-week.ndjson         # SIEM export
 ```
 
 ---
@@ -510,7 +521,7 @@ locus setup --client claude
 # }
 ```
 
-**Startup sequence:**
+**Startup sequence (design sketch; shipped flow in [docs/mcp.md](docs/mcp.md)):**
 
 1. Claude spawns `locus-mcp` (stdio).
 2. `locus-mcp` connects to daemon via UDS.
@@ -519,6 +530,13 @@ locus setup --client claude
 5. `tools/list` returns only Acme-scoped tools + `locus_*` control tools.
 6. Agent calls `list_tables` → only Acme Supabase project exists in that worker.
 7. Human runs `locus pin personal` in another terminal → daemon updates session → `tools/list` changed notification → workers recycled.
+
+Shipped: there is no shared daemon. Step 2 is the sealed session in
+`$LOCUS_HOME/sessions/` plus the pinning shell's authority broker; step 7's
+re-pin is picked up on each call because tool surfaces re-read live pin state
+(`listChanged` advertised). Client-launched `locus-mcp` serves control tools
+only; provider tools need `locus mcp --supervised` launched from the pinned
+shell.
 
 **Control tools exposed to the model (carefully):**
 
@@ -554,7 +572,10 @@ Agent B (Cursor) ──stdio──► locus-mcp B ──► session_B ──pin�
                                     workers isolated by PID + private config dirs
 ```
 
-Each `locus-mcp` instance is one client session. Daemon coordinates:
+Each `locus-mcp` instance is one client session. The coordinating "daemon" in
+this sketch shipped as the shared `$LOCUS_HOME` store plus each pin's
+supervised authority broker:
+
 - Per-binding worker pools (or dedicated workers per session for max isolation)
 - No shared mutable global CLI state
 - Audit distinguishes session_A vs session_B
