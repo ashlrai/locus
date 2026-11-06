@@ -41,4 +41,9 @@ the directories and scan listings while they exist and checks their cleanup.
 `scripts/hub-integration-tmpdir.test.mjs` also covers plain-whitespace values
 (embedded, doubled, leading and trailing spaces) and unusable parents — a
 regular file, a missing absolute path and a missing relative path — where the
-run must exit nonzero before `locus init`.
+run must exit nonzero before `locus init`. Run
+`node --test scripts/hub-integration-proj-selection.test.mjs` to check that the
+temporary parent alone selects the project root: a supplied `TMPDIR` contains
+`SMOKE_PROJ` verbatim — through a symlink, through `..` segments, and against
+ambient decoys in the working directory and `HOME` — and `mktemp -d` keeps the
+project private (0700).
