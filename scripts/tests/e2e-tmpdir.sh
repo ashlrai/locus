@@ -39,6 +39,10 @@ export E2E_HOME_USED="$TEST_ROOT/home-used"
 export E2E_WORKSPACE_RECORD="$TEST_ROOT/workspaces"
 export E2E_SECURITY_HOME_RECORD="$TEST_ROOT/security-homes"
 export TMPDIR="$TEST_ROOT/custom tmp"
+# Rehearsal subshells in e2e.sh re-export TMPDIR to a nested root; remember the
+# harness root so the failure injector can tell the suite's own workspace call
+# from a rehearsal's.
+export E2E_OUTER_TMPDIR="$TMPDIR"
 export PATH="$TEST_ROOT/bin:$PATH"
 touch "$TMPDIR/unrelated"
 
@@ -46,9 +50,12 @@ assert_fixtures_cleaned() {
   [[ -f "$E2E_HOME_RECORD" && -f "$E2E_HOME_USED" ]] || { printf 'FAIL: home was not created and used\n' >&2; exit 1; }
   local homes=() home
   while IFS= read -r home; do
-    homes+=("$home")
+    [[ ! -e "$home" && ! -L "$home" ]] || { printf 'FAIL: home was not cleaned up\n' >&2; exit 1; }
+    if [[ "${home%/*}" == "$TMPDIR" ]]; then
+      homes+=("$home")
+    fi
   done <"$E2E_HOME_RECORD"
-  [[ ${#homes[@]} -eq 1 ]] || { printf 'FAIL: expected one home\n' >&2; exit 1; }
+  [[ ${#homes[@]} -eq 1 ]] || { printf 'FAIL: expected one home directly beneath TMPDIR\n' >&2; exit 1; }
   home="${homes[0]}"
   [[ "${home%/*}" == "$TMPDIR" ]] || { printf 'FAIL: home was not created directly beneath TMPDIR\n' >&2; exit 1; }
   [[ "$(cat "$E2E_HOME_USED")" == "$home" ]] || { printf 'FAIL: CLI used a different home\n' >&2; exit 1; }
@@ -90,7 +97,10 @@ if [[ "${1:-}" == workspace ]]; then
   [[ -n "$workspace" && -d "$workspace" && "$PWD" -ef "$workspace" && -d "$LOCUS_HOME" ]] || exit 1
   printf '%s\n' "$LOCUS_HOME" >"$E2E_HOME_USED"
   touch "$LOCUS_HOME/cleanup-sentinel" "$PWD/cleanup-sentinel"
-  if [[ "${E2E_INJECT_FAILURE:-}" == 1 ]]; then
+  # Inject only at the suite's own workspace call: inside a rehearsal subshell
+  # TMPDIR is the nested root, so the selected workspace's parent is the outer
+  # root only for the real fixture.
+  if [[ "${E2E_INJECT_FAILURE:-}" == 1 && "${workspace%/*}" == "${E2E_OUTER_TMPDIR:-}" ]]; then
     "${0%/*}/real-locus" "$@" || exit 1
     [[ -f "$workspace/.locus.toml" && -f "$workspace/cleanup-sentinel" && \
        -f "$LOCUS_HOME/cleanup-sentinel" ]] || exit 1

@@ -108,3 +108,38 @@ fn unreadable_log_fails_without_echoing_paths() {
         .unwrap()
         .contains("secret-path"));
 }
+
+#[test]
+fn a_partial_cursor_page_does_not_claim_later_bytes_are_valid() {
+    let home = tempfile::Builder::new()
+        .prefix("secret-later-page-")
+        .tempdir()
+        .unwrap();
+    fs::create_dir(home.path().join("audit")).unwrap();
+    let event =
+        json!({"ts": "secret-time", "op": "exec.allow", "binding": "secret-binding"}).to_string();
+    let mut contents = format!("{}\n", vec![event; 101].join("\n")).into_bytes();
+    contents.extend_from_slice(&[0xff, b'\n']);
+    let path = home.path().join("audit/events.jsonl");
+    fs::write(&path, &contents).unwrap();
+    let first = feed(home.path(), &["--cursor", "0"]);
+    assert_eq!(first["denials"], json!([]));
+    assert_eq!(first["next_cursor"], 100);
+    assert_eq!(first["has_more"], true);
+    assert!(!first.to_string().contains("secret"));
+    let cursor = first["next_cursor"].as_u64().unwrap().to_string();
+    let next = run(home.path(), &["--cursor", &cursor]);
+    assert!(!next.status.success());
+    assert!(
+        next.stdout.is_empty(),
+        "failed page must not return empty-complete or advance a cursor"
+    );
+    let diagnostic = String::from_utf8(next.stderr).unwrap();
+    assert!(diagnostic.contains("denial feed unavailable"));
+    assert!(!diagnostic.contains("secret"));
+    assert!(
+        fs::read(&path).unwrap() == contents,
+        "paging must not mutate the audit log"
+    );
+    assert!(!home.path().join("daemon.key").exists());
+}
