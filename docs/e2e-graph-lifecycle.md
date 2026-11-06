@@ -32,6 +32,11 @@ script-owned temporary directory, not a setting for choosing a Locus home.
    `locus-graph-imp.*` directory before removing it, and preserve its parent
    and unrelated files.
 
+The suite also checks creation and exit cleanup unconditionally in section 2j,
+using a separate temporary parent and both successful and failing exits. It
+checks that unrelated files survive, and the focused graph test verifies that
+the lifecycle probe detects a missing cleanup.
+
 Section 2i rehearses the same create-use-cleanup path earlier in the suite: a
 subshell selects a temporary root inside the main home whose name contains
 spaces, runs `create_graph_home` and `init` with `LOCUS_HOME` set to the new

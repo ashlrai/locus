@@ -231,7 +231,10 @@ touch "$secspace_decoy/decoy-sentinel"
   [[ "$TMPDIR" == *" "* && -d "$SECURITY_HOME" && \
     "${SECURITY_HOME%/*}" == "$TMPDIR" && \
     "${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
-  # Usable, not just present: files must land inside the spaced path.
+  # Use the nested store path too: the doubled-space root must stay one path.
+  mkdir -p "$SECURITY_HOME/bindings/nested dir" || exit 1
+  printf 'payload' >"$SECURITY_HOME/bindings/nested dir/probe.toml" || exit 1
+  [[ "$(cat "$SECURITY_HOME/bindings/nested dir/probe.toml")" == payload ]] || exit 1
   touch "$SECURITY_HOME/cleanup-sentinel"
   [[ -f "$SECURITY_HOME/cleanup-sentinel" ]] || exit 1
   printf '%s' "$SECURITY_HOME" >"$secspace_tmp/security-home-path"
@@ -246,11 +249,15 @@ secspace_home="$(cat "$secspace_tmp/security-home-path")"
 ok "SECURITY_HOME is created and removed beneath a TMPDIR containing spaces"
 
 # Exercise the same workspace creation and EXIT cleanup used by the allowlist
-# probes, beneath a supplied temporary root whose name contains spaces. The
-# subshell owns its test home so its cleanup cannot remove the main home.
+# probes, beneath a supplied temporary root whose name contains spaces
+# (including a doubled space). The subshell owns its test home so its cleanup
+# cannot remove the main home. A decoy at the first word-split fragment of
+# the root catches an unquoted rm in the exit trap.
 log "2d. workspace creation honors a space-containing TMPDIR"
-workspace_tmp="$LOCUS_HOME/workspace temp root"
-mkdir -p "$workspace_tmp"
+workspace_decoy="$LOCUS_HOME/workspace"
+workspace_tmp="$workspace_decoy  ws temp root"
+mkdir -p "$workspace_decoy" "$workspace_tmp"
+touch "$workspace_decoy/decoy-sentinel"
 (
   export TMPDIR="$workspace_tmp"
   LOCUS_HOME="$workspace_tmp/subshell-home"
@@ -262,16 +269,19 @@ mkdir -p "$workspace_tmp"
     "${WS_DIR##*/}" == locus-ws.* ]] || exit 1
   # The workspace must be usable, not just present: write its allowlist from
   # inside the spaced path and check the file landed there.
-  "$LOCUS_BIN" init >/dev/null
+  "$LOCUS_BIN" init >/dev/null || exit 2
   (cd "$WS_DIR" && "$LOCUS_BIN" workspace --default acme --allow acme >/dev/null) || exit 1
   [[ -s "$WS_DIR/.locus.toml" ]] || exit 1
   printf '%s' "$WS_DIR" >"$workspace_tmp/workspace-path"
   touch "$WS_DIR/cleanup-sentinel"
 ) || die "workspace was not created beneath the space-containing TMPDIR"
 workspace_test_dir="$(cat "$workspace_tmp/workspace-path")"
+[[ "$workspace_test_dir" == *" "* ]] || die "WS_DIR path did not contain spaces"
 [[ ! -e "$workspace_test_dir" && ! -L "$workspace_test_dir" ]] \
   || die "rehearsed workspace survived exit cleanup"
 [[ -d "$workspace_tmp" ]] || die "workspace cleanup removed the supplied TMPDIR"
+[[ -f "$workspace_decoy/decoy-sentinel" ]] \
+  || die "workspace cleanup removed a word-split sibling of the spaced TMPDIR"
 ok "workspace creation succeeds beneath a TMPDIR containing spaces"
 
 # A plain custom TMPDIR (no spaces) must also be honored: WS_DIR is a fresh
@@ -376,6 +386,36 @@ graph_home_test_dir="$(cat "$graph_home_tmp/graph-home-path")"
   || die "rehearsed GRAPH_HOME survived exit cleanup"
 [[ -d "$graph_home_tmp" ]] || die "GRAPH_HOME cleanup removed the supplied TMPDIR"
 ok "GRAPH_HOME creation succeeds beneath a TMPDIR containing spaces"
+
+# Exercise graph home creation and EXIT cleanup even when graph is unavailable
+# or its same-home import succeeds. All resources belong to this subshell.
+log "2j. graph home lifecycle"
+graph_tmp="$LOCUS_HOME/graph temp"
+mkdir -p "$graph_tmp"
+touch "$graph_tmp/keep"
+for graph_exit in 0 73; do
+  graph_status=0
+  (
+    export TMPDIR="$graph_tmp"
+    LOCUS_HOME="$graph_tmp/subshell-home"
+    mkdir -p "$LOCUS_HOME" || exit 1
+    WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+    trap 'e2e_cleanup' EXIT
+    create_graph_home || exit 1
+    [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
+      "${GRAPH_HOME##*/}" == locus-graph-imp.* ]] || exit 1
+    printf '%s' "$GRAPH_HOME" >"$graph_tmp/graph-home-path" || exit 1
+    touch "$GRAPH_HOME/cleanup-sentinel" || exit 1
+    exit "$graph_exit"
+  ) || graph_status=$?
+  [[ "$graph_status" -eq "$graph_exit" ]] || die "graph home lifecycle probe failed"
+  graph_test_home="$(cat "$graph_tmp/graph-home-path")"
+  [[ ! -e "$graph_test_home" && ! -L "$graph_test_home" ]] \
+    || die "graph home survived exit cleanup"
+  [[ -f "$graph_tmp/keep" && -d "$graph_tmp" ]] \
+    || die "graph cleanup removed unrelated resources"
+done
+ok "graph home honors nondefault TMPDIR and is cleaned on exit"
 
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
@@ -636,6 +676,18 @@ if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
   die "sample exec emitted an unset-variable warning"
 fi
 ok "sample exec succeeds without unset-variable warnings"
+
+# Exercise the standalone sample's child as documented, including its check
+# that the isolated environment carries the pinned binding.
+sample_exec_stdout="$(locus exec --expect personal -- sh -c \
+  'test "$LOCUS_BINDING" = personal && echo "sample exec succeeded"' \
+  2>"$sample_exec_stderr")" || die "sample walkthrough exec failed"
+[[ "$sample_exec_stdout" == "sample exec succeeded" ]] \
+  || die "sample walkthrough exec produced unexpected output"
+if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
+  die "sample walkthrough exec emitted an unset-variable warning"
+fi
+ok "sample walkthrough exec succeeds without unset-variable warnings"
 
 # Missing references must still be visible; do not hide real credential errors
 # just to make the configured sample path quiet.
@@ -1159,6 +1211,56 @@ echo "$pinned_names" | grep -q 'github.scope' || die "pinned missing github.scop
 echo "$pinned_names" | grep -q 'vercel.scope' || die "pinned missing vercel.scope"
 ok "pinned tools/list includes provider tools"
 
+# Agent-facing whoami surfaces must report the same credential truth as the
+# CLI: locus exec launches locus-mcp with a scrubbed env, so the credential
+# source variables referenced by the pinned binding are unset for the MCP
+# process itself — every env: reference resolves as absent and must surface
+# as credential.present=false without leaking ref names or values.
+mcp_whoami_out="$(
+  mcp_rpc \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"locus_whoami","arguments":{}}}' \
+    '{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"locus://session"}}'
+)"
+printf '%s' "$mcp_whoami_out" | python3 -c '
+import json, sys
+results = {}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        msg = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if "id" in msg and "result" in msg:
+        results[msg["id"]] = msg["result"]
+call = results.get(2)
+assert call is not None and call.get("isError") is False, call
+who = json.loads(call["content"][0]["text"])
+resource = results.get(3)
+assert resource is not None, "missing locus://session read result"
+contents = resource.get("contents") or []
+assert contents and contents[0].get("uri") == "locus://session", resource
+session = json.loads(contents[0]["text"])
+for body in (who, session):
+    assert body["binding_alias"] == "acme", body
+    assert body["tenant"] == "acme-corp", body
+    assert body["seal_ok"] is True, body
+    providers = {p["provider"]: p for p in body["providers"]}
+    assert set(providers) == {"github", "supabase", "vercel"}, body
+    for name, provider in providers.items():
+        assert "credential_ref" not in provider, provider
+        assert provider["credential"] == {"present": False, "source": "environment"}, \
+            f"unexpected credential metadata for {name}"
+    serialized = json.dumps(body)
+    for canary in ("credential_ref", "GH_TOKEN_ACME", "VERCEL_TOKEN_ACME",
+                   "SUPABASE_ACME", "e2e-sample-", "phm:", "env:"):
+        assert canary not in serialized, (canary, body)
+' || die "MCP whoami surfaces reported incorrect credential presence"
+ok "MCP locus_whoami + locus://session report unset credentials as absent"
+
 # ── 7. Freeze deny project_ref ───────────────────────────────────────────────
 log "7. freeze deny project_ref"
 freeze_out="$(
@@ -1323,6 +1425,24 @@ else
     die "LOCUS_TOUCHID_MOCK=cancel --touchid should fail (exit non-zero)"
   fi
   ok "touchid mock cancel fails closed"
+
+  # --json never prompts: --touchid is interactive-only, so the combination
+  # is refused before confirmation or record mutation — even under the mock.
+  if LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json \
+    >"$LOCUS_HOME/touchid-json.out" 2>&1; then
+    die "--touchid --json should refuse (never prompts)"
+  fi
+  grep -q 'requires an interactive invocation' "$LOCUS_HOME/touchid-json.out" \
+    || die "--touchid --json refusal missing contract message"
+  ok "--touchid --json refuses before prompting"
+
+  locus approve status "$dual_id" --json | python3 -c '
+import json, sys
+r = json.load(sys.stdin)
+assert len(r.get("grants") or []) == 0, r
+assert r.get("authoritative_grants") == 0, r
+'
+  ok "JSON mode refuses touchid without recording a grant"
 
   # A caller-controlled successful mock can only record advisory evidence.
   LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid >/dev/null \
@@ -2019,6 +2139,29 @@ assert d["verdict"] == "UNSAFE", d
 assert d["workspace"]["valid"] is False, d["workspace"]
 '
 ok "broken workspace link blocks force/run and makes doctor UNSAFE"
+
+# Repeated SECURITY_WS creation (unconditional): two invocations of the
+# security workspace recipe must yield distinct directories directly beneath
+# the selected temporary root. The live probe workspace is stashed and
+# restored so the exit trap still removes exactly it.
+security_ws_live="$SECURITY_WS"
+create_security_workspace; security_ws_a="$SECURITY_WS"
+create_security_workspace; security_ws_b="$SECURITY_WS"
+SECURITY_WS="$security_ws_live"
+security_ws_root="${TMPDIR:-/tmp}"
+security_ws_root="${security_ws_root%/}"
+[[ -d "$security_ws_a" && -d "$security_ws_b" ]] \
+  || die "repeated security workspace creation did not create both directories"
+[[ "$security_ws_a" != "$security_ws_b" ]] \
+  || die "repeated security workspace creation returned the same directory"
+security_ws_parent_a="${security_ws_a%/*}"
+security_ws_parent_b="${security_ws_b%/*}"
+[[ "${security_ws_parent_a%/}" == "$security_ws_root" && "${security_ws_parent_b%/}" == "$security_ws_root" ]] \
+  || die "repeated security workspaces were not created directly beneath the temp root"
+rm -rf "$security_ws_a" "$security_ws_b"
+[[ ! -e "$security_ws_a" && ! -e "$security_ws_b" ]] \
+  || die "repeated security workspaces were not removed"
+ok "two security workspaces are distinct and live directly beneath the temp root"
 
 # ── 25. verify claim (feature-detected) ──────────────────────────────────────
 log "25. locus verify claim (optional)"
@@ -2739,6 +2882,11 @@ print("mcp list grants=%d revoked_a_rows=%d live_acme=%d" % (len(rows), len(a_ro
     ok "multi-tenant locus-mcp torn down cleanly"
   fi
 fi
+
+# Drop-in steps (scripts/e2e.d/*.sh): new e2e steps belong there, not above.
+# shellcheck source=scripts/e2e-dropin.sh
+source "$ROOT/scripts/e2e-dropin.sh"
+e2e_run_dropins
 
 printf '\n========================================\n'
 printf 'e2e PASS  (%d checks, %d skipped)\n' "$pass" "$skip"

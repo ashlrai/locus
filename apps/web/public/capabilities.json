@@ -25,6 +25,7 @@
     "local": "cargo install --locked --path crates/locus-cli"
   },
   "commands": [
+    "locus card",
     "locus init",
     "locus quickstart",
     "locus onboard",

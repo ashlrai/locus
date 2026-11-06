@@ -341,6 +341,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     } else {
       assert.ok(existsSync(cleanedEarly), 'graph home survived until the next section');
       assert.match(result.stdout, /ok  sample exec succeeds without unset-variable warnings/);
+      assert.match(result.stdout, /ok  sample walkthrough exec succeeds without unset-variable warnings/);
       assert.match(result.stdout, /ok  sample exec reports missing credentials/);
       assert.ok(/ok  graph export\/import into fresh LOCUS_HOME/.test(result.stdout), 'fresh import did not pass');
       assert.ok(/e2e PASS/.test(result.stdout), 'e2e did not pass');
@@ -672,3 +673,37 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(existsSync(workspace), false, 'security workspace survived exit cleanup');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
 });
+
+for (const [fault, expected] of [
+  ['exit', 'sample walkthrough exec failed'],
+  ['output', 'sample walkthrough exec produced unexpected output'],
+  ['warning', 'sample walkthrough exec emitted an unset-variable warning'],
+]) {
+  test(`sample walkthrough regression rejects ${fault}`, { timeout: 1_800_000 }, (t) => {
+    const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-sample-test-'));
+    t.after(() => rmSync(fixture, { recursive: true, force: true }));
+    const wrapper = join(fixture, 'locus');
+    writeFileSync(wrapper, `#!/bin/bash
+if [[ "\${1:-}" == exec && "\${2:-}" == --expect && "\${3:-}" == personal && "\${4:-}" == -- && "\${5:-}" == sh ]]; then
+  case "$SAMPLE_FAULT" in
+    exit) exit 1 ;;
+    output) printf '%s\\n' 'unexpected output'; exit 0 ;;
+    warning) printf '%s\\n' 'warning: synthetic unset-variable warning' >&2 ;;
+  esac
+fi
+exec '${locus.replaceAll("'", "'\\''")}' "$@"
+`, { mode: 0o755 });
+
+    const result = spawnSync('bash', [script], {
+      cwd: root,
+      env: { ...process.env, LOCUS_BIN: wrapper, SAMPLE_FAULT: fault },
+      encoding: 'utf8',
+      timeout: 1_800_000,
+      maxBuffer: 10 * 1024 * 1024,
+    });
+    assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
+    assert.equal(result.status, 1, `e2e should reject ${fault}`);
+    assert.ok(result.stderr.includes(`FAIL ${expected}`), 'expected failure was not reported');
+    assert.doesNotMatch(result.stdout, /ok  sample walkthrough exec succeeds without unset-variable warnings/);
+  });
+}

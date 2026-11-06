@@ -38,7 +38,14 @@ ordinary failure. The security directories are created at the start of section
 separate security home and workspace inside a custom temporary directory whose
 name contains spaces. It verifies that they are distinct; its exit trap removes
 both, and the parent checks their removal and preservation of the supplied
-temporary directory.
+temporary directory. Sections 2c2 and 2e also exercise the security home and
+workspace separately beneath doubled-space roots while preserving word-split
+decoys. The security-home rehearsal writes and reads a nested binding-store
+path before its exit trap removes the populated fixture.
+
+Run `node --test scripts/e2e-security-home-selection.test.mjs` for the actual
+rehearsal and section-24 selection checks, including either relocated fixture
+and the unset/empty `TMPDIR` fallback.
 
 A termination that prevents the trap from running or a removal error can leave
 files behind. A failure before trap installation can leave the main home, but

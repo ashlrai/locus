@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -417,4 +417,168 @@ test('a TMPDIR with a trailing slash still holds the security workspace', (t) =>
     'the supplied slash is kept verbatim and the workspace is a direct child of the root');
   assert.throws(() => lstatSync(workspace), { code: 'ENOENT' });
   assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+// ── Repeated SECURITY_WS creation ───────────────────────────────────────────
+// The unconditional repeated-creation block at the tail of section 24 is
+// extracted verbatim (not copied) so its own containment, distinctness and
+// removal checks are the ones under test. The probes below run it under the
+// real EXIT trap with SECURITY_WS already naming a live probe workspace —
+// the block must stash and restore it, so the trap removes the live
+// workspace and never the pair the block already removed.
+function repeatedWorkspaceBlock() {
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('security_ws_live="$SECURITY_WS"');
+  const endMarker = 'ok "two security workspaces are distinct and live directly beneath the temp root"';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, 'e2e.sh must contain the repeated security-workspace block');
+  const block = source.slice(start, end + endMarker.length);
+  assert.ok(block.includes('security_ws_root="${TMPDIR:-/tmp}"'),
+    'the block must select the temporary root itself');
+  assert.ok(block.includes('SECURITY_WS="$security_ws_live"'),
+    'the block must restore the live workspace it stashed');
+  return block;
+}
+
+// Runs the extracted block verbatim under the real EXIT trap, the same way
+// section 24 reaches it after the security probes. SECURITY_WS names a live
+// populated workspace when the block starts, as it does in the real script.
+function repeatWorkspaceSection(t, { tempRoot, shim = '', extraEnv = {} }) {
+  const dir = mkdtempSync(join(tmpdir(), 'locus-secws-repeat-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const mainHome = join(dir, 'main home');
+  const liveWs = join(dir, 'live workspace');
+  mkdirSync(mainHome);
+  mkdirSync(liveWs);
+  writeFileSync(join(liveWs, 'probe-marker'), 'live');
+  const { cleanup, createWs } = securityLifecycle();
+  const env = { ...process.env, MAIN_HOME: mainHome, LIVE_WS: liveWs, ...extraEnv };
+  if (tempRoot === undefined) delete env.TMPDIR;
+  else env.TMPDIR = tempRoot;
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${shim}
+${createWs}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$MAIN_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" HTTP_MCP_PID="" MT_MCP_PID=""
+SECURITY_WS="$LIVE_WS"
+trap 'e2e_cleanup' EXIT
+${repeatedWorkspaceBlock()}
+`], { env, encoding: 'utf8' });
+  return { result, dir, liveWs };
+}
+
+test('the verbatim block keeps both repeated workspaces beneath a controlled TMPDIR', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'locus-secws-repeat-run-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const scratch = join(dir, 'controlled root');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+
+  const { result, dir: repeatDir, liveWs } = repeatWorkspaceSection(t, { tempRoot: scratch });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout,
+    /ok two security workspaces are distinct and live directly beneath the temp root/);
+  assert.deepEqual(readdirSync(scratch), ['keep'],
+    'the block must remove both workspaces it created');
+  assert.throws(() => lstatSync(liveWs), { code: 'ENOENT' },
+    'the restored live workspace must be removed by the exit trap');
+  assert.deepEqual(readdirSync(repeatDir), [],
+    'the exit trap removes the suite home and the restored live workspace only');
+});
+
+// A TMPDIR may end in a slash (macOS hands out such values); the block strips
+// it from both the selected root and each parent before comparing, so a bare
+// equality check would regress here.
+test('the verbatim block honors a controlled TMPDIR with a trailing slash', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'locus-secws-repeat-slash-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const scratch = join(dir, 'controlled root');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+
+  const { result, liveWs } = repeatWorkspaceSection(t, { tempRoot: `${scratch}/` });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /ok two security workspaces are distinct/);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.throws(() => lstatSync(liveWs), { code: 'ENOENT' });
+});
+
+// A mktemp regression that relocates the repeated workspaces must stop the
+// suite at the block's own containment check. The misplaced pair is left
+// beneath the wrong root (the script header documents leftover temp dirs on
+// failure) while the supplied root stays untouched and the restored live
+// workspace is still removed by the exit trap.
+test('repeated workspaces created outside the controlled TMPDIR stop the block', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'locus-secws-repeat-misplaced-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const scratch = join(dir, 'controlled root');
+  const wrongRoot = join(dir, 'wrong root');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const shim = `mktemp() {
+  if [[ "\${2:-}" == */locus-security-ws.XXXXXX ]]; then
+    command mktemp -d "$WRONG_ROOT/locus-security-ws.XXXXXX"
+    return
+  fi
+  command mktemp "$@"
+}
+`;
+
+  const { result, liveWs } = repeatWorkspaceSection(t, {
+    tempRoot: scratch, shim, extraEnv: { WRONG_ROOT: wrongRoot },
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the containment check must fail the suite');
+  assert.match(result.stderr,
+    /FAIL repeated security workspaces were not created directly beneath the temp root/);
+  assert.doesNotMatch(result.stdout, /ok two security workspaces are distinct/);
+  const misplaced = readdirSync(wrongRoot);
+  assert.equal(misplaced.length, 2, 'both misplaced workspaces stay beneath the wrong root');
+  assert.ok(misplaced.every((n) => n.startsWith('locus-security-ws.')));
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.throws(() => lstatSync(liveWs), { code: 'ENOENT' },
+    'the restored live workspace must still be removed by the exit trap');
+});
+
+// A regression that hands back one directory twice must die at the
+// distinctness check before either workspace is removed.
+test('a repeated creation returning the same directory stops the block', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'locus-secws-repeat-dup-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const scratch = join(dir, 'controlled root');
+  const seen = join(dir, 'seen-path');
+  mkdirSync(scratch);
+  const shim = `mktemp() {
+  if [[ "\${2:-}" == */locus-security-ws.XXXXXX ]]; then
+    [[ -s "$SEEN_PATH" ]] || command mktemp -d "$2" > "$SEEN_PATH"
+    cat "$SEEN_PATH"
+    return
+  fi
+  command mktemp "$@"
+}
+`;
+
+  const { result, liveWs } = repeatWorkspaceSection(t, {
+    tempRoot: scratch, shim, extraEnv: { SEEN_PATH: seen },
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the distinctness check must fail the suite');
+  assert.match(result.stderr,
+    /FAIL repeated security workspace creation returned the same directory/);
+  const dup = readFileSync(seen, 'utf8').trim();
+  assert.equal(dirname(dup), scratch);
+  assert.deepEqual(readdirSync(scratch), [basename(dup)],
+    'only the duplicated workspace is left beneath the supplied root');
+  assert.throws(() => lstatSync(liveWs), { code: 'ENOENT' });
 });

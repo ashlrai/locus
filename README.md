@@ -496,6 +496,38 @@ Phantom answers "can this secret enter the model?" Locus answers "as whom, again
 
 Issues and pull requests are welcome. Look for [`good first issue`](https://github.com/ashlrai/locus/labels/good%20first%20issue), and read [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately per [SECURITY.md](SECURITY.md).
 
+## Code cards
+
+```sh
+locus card target                    # all matching symbols in the current Git repo
+locus card src/service.ts --body     # cards for every symbol in a file
+locus card target --json --budget 2000
+```
+
+`card` uses the upstream tree-sitter grammars for TypeScript/TSX, Python, Rust,
+and Go. Cards include name, syntax kind, signature, file and line, direct calls,
+caller count and the first five callers, associated tests, the last file-change
+commit, and a SHA-256 hash of the symbol source. `--body` includes that source.
+Uncommitted files have no last-change commit; changes to tracked files retain
+that file's latest committed change. Supported source and repository paths must be UTF-8. Run inside a Git repository; file paths are
+relative to the current directory. Duplicate symbol names return multiple cards.
+
+Calls match terminal names (including member calls); they do not resolve types,
+aliases, dynamic dispatch, or cross-language ambiguity. Tests are associated by
+calls, symbol names, or imports mentioning the symbol within files/functions
+named as tests. These are navigation hints, not a proof of coverage.
+
+Parsed file facts are cached by language, Locus version and file SHA-256 under the worktree's
+Git directory, `locus-card-v1/`. Unchanged files avoid parsing; file reads/hashes,
+relationship matching, and Git metadata are still refreshed. Delete that directory
+to clear the cache. `--dry-run` reads existing caches without writing them.
+
+`--budget` uses UTF-8 bytes as a conservative, model-independent token bound,
+including the final newline. It removes source first, then test/caller lists,
+then signatures/calls, then excess cards. Identity, hashes, and caller counts
+remain; trimmed cards are marked. An impossibly small budget fails explicitly.
+JSON always remains valid.
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).

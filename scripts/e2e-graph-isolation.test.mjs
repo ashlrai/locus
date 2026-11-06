@@ -15,6 +15,31 @@ const createGraphHome = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[
 assert.ok(graph.includes('create_graph_home') && cleanup.includes('"${GRAPH_HOME:-}"'));
 assert.ok(createGraphHome, 'missing create_graph_home function');
 
+test('unconditional lifecycle probe detects a missing graph cleanup', (t) => {
+  const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-probe-'));
+  t.after(() => rmSync(fixture, { recursive: true, force: true }));
+  const probe = source.slice(source.indexOf('# Exercise graph home creation'), source.indexOf('# Helper: run locus'));
+  assert.ok(probe.includes('create_graph_home') && probe.includes('e2e_cleanup'));
+
+  for (const broken of [false, true]) {
+    const home = join(fixture, broken ? 'broken' : 'working');
+    mkdirSync(home);
+    const cleanupUnderTest = broken ? cleanup.replace('"${GRAPH_HOME:-}"', '""') : cleanup;
+    const harness = `set -euo pipefail
+LOCUS_HOME="$1"
+log() { :; }
+ok() { :; }
+die() { exit 1; }
+${cleanupUnderTest}
+${createGraphHome}
+${probe}
+`;
+    const result = spawnSync('bash', ['-c', harness, 'graph-probe', home], { encoding: 'utf8' });
+    assert.equal(result.status, broken ? 1 : 0, 'probe must reject a graph home left behind');
+    assert.equal(result.signal, null);
+  }
+});
+
 for (const scenario of ['same-home', 'success', 'init-failure', 'import-failure', 'cleanup-failure', 'relocated']) {
   test(`graph ${scenario} uses and cleans the expected home`, (t) => {
     const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-section-'));

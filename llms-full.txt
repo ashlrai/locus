@@ -24,6 +24,7 @@ listed verbatim so an agent can jump straight to the right document.
   - Development
   - Part of the Ashlr ecosystem
   - Contributing
+  - Code cards
   - License
 
 ## docs/adapter-sdk.md

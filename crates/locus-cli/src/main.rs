@@ -11,6 +11,7 @@
 #[macro_use]
 mod stdout;
 
+mod card;
 mod cmd_doctor;
 mod cmd_status;
 mod config_rewrite;
@@ -74,6 +75,7 @@ Commands are grouped (in display order):\n  \
   Approvals     approve · notify\n  \
   Audit         events · forensics\n  \
   Local UI      serve · dashboard\n  \
+  Code          card\n  \
   Maintenance   completion · topic · version\n\n\
 Topic help:  locus topic <name>  or  locus help topic <name>\n  \
   Topics: dashboard · forensics · serve · goal · verify · agent · mcp · http · upstream · adapter"
@@ -94,6 +96,17 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Show syntax-based code cards for a symbol or repository-relative path
+    #[command(next_help_heading = "Code navigation")]
+    Card {
+        target: String,
+        /// Conservative token budget (one UTF-8 byte per token)
+        #[arg(long)]
+        budget: Option<usize>,
+        /// Include source in each card
+        #[arg(long)]
+        body: bool,
+    },
     // ───────────────────────────── Setup ─────────────────────────────
     /// Initialize ~/.locus (or LOCUS_HOME)
     #[command(next_help_heading = "Setup")]
@@ -1560,6 +1573,11 @@ fn run() -> Result<()> {
         Commands::Renew => cmd_renew(json, dry_run),
         Commands::Engagement(sub) => cmd_engagement(sub, json, dry_run),
         Commands::Graph(sub) => cmd_graph(sub, json, dry_run),
+        Commands::Card {
+            target,
+            budget,
+            body,
+        } => card::run(&target, budget, body, json, dry_run),
         Commands::Whoami => cmd_whoami(json),
         Commands::FleetFeed => fleet_feed::run(),
         Commands::FleetDenials { cursor } => fleet_denials::run(cursor),
@@ -1772,6 +1790,7 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
         | Commands::FleetFeed
         | Commands::FleetDenials { .. }
         | Commands::Whoami
+        | Commands::Card { .. }
         | Commands::Autopin(AutopinCmd::Suggest { apply: false })
         | Commands::Status { .. }
         | Commands::Watch { .. }

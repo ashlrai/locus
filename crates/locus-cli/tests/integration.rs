@@ -16,6 +16,8 @@ mod autopin_learned_guard;
 mod autopin_suggest;
 #[path = "binding_add_idempotent.rs"]
 mod binding_add_idempotent;
+#[path = "code_card.rs"]
+mod code_card;
 #[path = "coverage_home_isolation.rs"]
 mod coverage_home_isolation;
 #[path = "dead_broker_hint.rs"]
