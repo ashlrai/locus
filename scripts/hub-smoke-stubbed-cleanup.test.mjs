@@ -109,7 +109,12 @@ while IFS= read -r path; do [[ -e "$path" ]] || exit 98; done < "$ALLOCATIONS"
 exit 42
 `, { mode: 0o755 });
 
-  const env = { ...process.env, BASH_ENV: '', TMPDIR: scratch,
+  // The script prepends $HOME/.cargo/bin to PATH ahead of the stub dir, so a
+  // real rustup cargo would shadow the stub. HOME points at an empty dir to
+  // keep the run hermetic.
+  const home = join(tmp, 'home');
+  mkdirSync(home);
+  const env = { ...process.env, BASH_ENV: '', HOME: home, TMPDIR: scratch,
     PATH: `${bin}:${process.env.PATH}`, REAL_MKTEMP: lookup.stdout.trim(), ALLOCATIONS: record,
     LOCUS_CONTROL_CAPABILITY: 'synthetic-test-capability' };
   const result = spawnSync('bash', [join(fakeRoot, 'scripts', 'hub-smoke.sh')], {
