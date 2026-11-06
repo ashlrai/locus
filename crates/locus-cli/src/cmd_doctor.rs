@@ -1,10 +1,11 @@
 //! `locus doctor`: `locus.doctor.v1` JSON and the existing human output.
 
 use super::{
-    add_doctor_envelope, doctor_exit_code, gather_doctor_report, json_out, phantom_preflight,
+    add_doctor_envelope, exit, gather_doctor_report, json_out, phantom_preflight,
     print_doctor_human, store,
 };
 use anyhow::Result;
+use locus_core::DoctorVerdict;
 
 pub(super) fn run(json: bool) -> Result<()> {
     let s = store()?;
@@ -45,4 +46,116 @@ pub(super) fn run(json: bool) -> Result<()> {
     let refused = preflight.as_ref().is_some_and(|p| p.refuse);
     doctor_exit_code(&report, refused).exit_unless_success();
     Ok(())
+}
+
+/// First-run setup advice stays visible without failing a diagnostic command.
+/// Keep an explicit allowlist: new or unknown warnings remain failures, and
+/// neither this exit status nor an advisory finding grants provider access.
+fn doctor_exit_code(report: &locus_core::DoctorReport, refused: bool) -> exit::ExitCode {
+    if report.verdict == DoctorVerdict::Unsafe {
+        return exit::ExitCode::Unsafe;
+    }
+    if refused {
+        return exit::ExitCode::Failure;
+    }
+    if report.verdict == DoctorVerdict::Warn
+        && !report.findings.is_empty()
+        && report.findings.iter().all(|finding| {
+            finding.severity == locus_core::IssueSeverity::Info
+                || (finding.severity == locus_core::IssueSeverity::Warn
+                    && matches!(
+                        finding.code.as_str(),
+                        "approvals_missing"
+                            | "phantom_missing"
+                            | "control_capability_not_exported"
+                            | "executor_authority_unavailable"
+                    ))
+        })
+    {
+        return exit::ExitCode::Success;
+    }
+    exit::ExitCode::from_doctor(report.verdict)
+}
+
+#[cfg(test)]
+mod doctor_exit_tests {
+    use super::{doctor_exit_code, exit};
+    use locus_core::{build_doctor_report, DoctorExternal, DoctorVerdict, Store};
+    use tempfile::tempdir;
+
+    #[test]
+    fn doctor_advisories_do_not_hide_preflight_refusals_or_unknown_findings() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        let mut report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                cwd: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        report.findings.clear();
+        report.issues.clear();
+        report.verdict = DoctorVerdict::Safe;
+        report.push_finding(
+            locus_core::IssueSeverity::Warn,
+            "phantom_missing",
+            "optional installation".into(),
+        );
+        assert_eq!(doctor_exit_code(&report, false), exit::ExitCode::Success);
+        assert_eq!(doctor_exit_code(&report, true), exit::ExitCode::Failure);
+        report.push_finding(
+            locus_core::IssueSeverity::Warn,
+            "future_unknown_warning",
+            "requires operator attention".into(),
+        );
+        assert_eq!(doctor_exit_code(&report, false), exit::ExitCode::Failure);
+        report.push_finding(
+            locus_core::IssueSeverity::Unsafe,
+            "invalid_seal",
+            "invalid seal".into(),
+        );
+        assert_eq!(doctor_exit_code(&report, false), exit::ExitCode::Unsafe);
+        assert_eq!(doctor_exit_code(&report, true), exit::ExitCode::Unsafe);
+    }
+
+    #[test]
+    fn each_advisory_is_allowed_only_at_warning_severity() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path().join("locus-home")).unwrap();
+        let mut report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                cwd: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for code in [
+            "approvals_missing",
+            "phantom_missing",
+            "control_capability_not_exported",
+            "executor_authority_unavailable",
+        ] {
+            report.findings.clear();
+            report.issues.clear();
+            report.verdict = DoctorVerdict::Warn;
+            report.push_finding(locus_core::IssueSeverity::Warn, code, String::new());
+            assert_eq!(
+                doctor_exit_code(&report, false),
+                exit::ExitCode::Success,
+                "{code}"
+            );
+            report.push_finding(locus_core::IssueSeverity::Unsafe, code, String::new());
+            assert_eq!(
+                doctor_exit_code(&report, false),
+                exit::ExitCode::Unsafe,
+                "{code}"
+            );
+        }
+        report.findings.clear();
+        report.verdict = DoctorVerdict::Warn;
+        assert_eq!(doctor_exit_code(&report, false), exit::ExitCode::Failure);
+    }
 }

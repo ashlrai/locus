@@ -12,7 +12,9 @@
 //! - [`PlannedBinding`] — one wizard-produced binding draft, convertible to a
 //!   real [`Binding`](crate::binding::Binding) via [`PlannedBinding::into_binding`].
 //!
-//! Detection is best-effort and read-only. A probe that fails (missing binary,
+//! Detection is best-effort. The GitHub CLI probe executes an external program,
+//! which may have side effects; previews must use the command-free detector.
+//! A probe that fails (missing binary,
 //! unreadable file, malformed JSON) is skipped silently — absence of a
 //! candidate is never an error.
 
@@ -67,11 +69,23 @@ impl DetectedCandidate {
 pub fn detect_ambient_candidates(home: &Path, cwd: &Path) -> Vec<DetectedCandidate> {
     let mut out = Vec::new();
     detect_gh_cli(&mut out);
-    detect_aws_config(home, &mut out);
-    detect_env_vars(&mut out);
-    detect_ashlr_config(home, &mut out);
-    detect_mcp_json(cwd, &mut out);
+    detect_file_and_env_candidates(home, cwd, &mut out);
     dedupe_candidates(out)
+}
+
+/// Detect ambient candidates without executing any external programs.
+/// Use for previews, where even a status command could mutate state.
+pub fn detect_ambient_candidates_read_only(home: &Path, cwd: &Path) -> Vec<DetectedCandidate> {
+    let mut out = Vec::new();
+    detect_file_and_env_candidates(home, cwd, &mut out);
+    dedupe_candidates(out)
+}
+
+fn detect_file_and_env_candidates(home: &Path, cwd: &Path, out: &mut Vec<DetectedCandidate>) {
+    detect_aws_config(home, out);
+    detect_env_vars(out);
+    detect_ashlr_config(home, out);
+    detect_mcp_json(cwd, out);
 }
 
 fn dedupe_candidates(cands: Vec<DetectedCandidate>) -> Vec<DetectedCandidate> {

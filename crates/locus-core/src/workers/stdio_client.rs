@@ -268,7 +268,7 @@ mod tests {
     use std::process::{Command, Stdio};
 
     /// Tiny NDJSON MCP mock via python (or skip if no python).
-    fn mock_server_cmd() -> Option<Command> {
+    fn mock_server_cmd() -> Command {
         let script = r#"
 import sys, json
 def send(o):
@@ -299,19 +299,18 @@ for line in sys.stdin:
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        Some(cmd)
+        cmd
     }
 
     #[test]
     fn handshake_list_and_call() {
-        let Some(mut cmd) = mock_server_cmd() else {
-            return;
-        };
-        let mut child = match cmd.spawn() {
+        let mut cmd = mock_server_cmd();
+        let child = match cmd.spawn() {
             Ok(c) => c,
             Err(_) => return, // no python3
         };
-        let client = McpStdioClient::from_child(&mut child).unwrap();
+        let mut child = super::super::ProcessGuard::new(child);
+        let client = McpStdioClient::from_child(child.child_mut()).unwrap();
         let tools = client.handshake().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
@@ -323,6 +322,5 @@ for line in sys.stdin:
             .and_then(|v| v.as_str())
             .unwrap_or("");
         assert_eq!(text, "hello-locus");
-        let _ = child.kill();
     }
 }

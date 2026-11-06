@@ -38,7 +38,7 @@ Agents inherit **ambient identity**: global `gh auth`, one Supabase MCP token, l
 ┌───▼────────────────────────────────────────────────────────┐
 │  CREDENTIAL PLANE                                             │
 │  CredentialRef → resolve only into policy-gated worker env    │
-│  phm:NAME (Phantom) · env:VAR · test: compiled tests only      │
+│  env:VAR resolves · phm:NAME unavailable · test: tests only   │
 │  Model never sees resolved values                             │
 └───┬────────────────────────────────────────────────────────┘
     │ spawn / inject
@@ -142,23 +142,25 @@ Adapters are the **only** place provider knowledge lives. Guide: [adapters.md](.
 | **3** | Team binding graph, dual-control packs, offboard, remote audit |
 | **4** | Adapter SDK, CI ephemeral pins, sandbox |
 
-Already shipped from phases 2–4: upstream MCP stdio workers, `locus run`, CI ephemeral pins (`locus ci mint|env|run`), the worker sandbox, and the adapter catalog with signed release manifests ([adapter-sdk.md](./adapter-sdk.md)). Roadmap detail: [PLAN.md](../PLAN.md). Threat model: [DESIGN.md §9](../DESIGN.md), [SECURITY.md](../SECURITY.md).
+Already shipped from phases 2–4: upstream MCP stdio workers, `locus run`, CI ephemeral pins (`locus ci mint|env|run`), the worker sandbox, and the adapter catalog with optional manifest signing ([registry trust](./registry-trust.md)). Current release attachments are unsigned. Roadmap detail: [PLAN.md](../PLAN.md). Threat model: [DESIGN.md §9](../DESIGN.md), [SECURITY.md](../SECURITY.md).
 
 ## Composition
 
-```
+```text
 .locus.toml + ~/.locus/bindings
         │
         ▼
-   locus-mcp
+   locus-mcp: policy and scope gates
         │
-        │  CredentialRef phm:NAME
         ▼
-   Phantom vault / proxy   (secrets never in model)
+   isolated worker with supported env: credential
         │
         ▼
    Provider APIs
 ```
+
+Stored `phm:` references do not resolve until a supported scoped bridge exists.
+See [credential compatibility](credential-compatibility.md).
 
 Optional later: fleet gateway discovers **only** Locus, not raw personal MCP servers.
 

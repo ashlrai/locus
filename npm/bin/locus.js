@@ -26,10 +26,13 @@ const { dirname, join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
-const VERSION = "0.5.2";
+const VERSION = "0.7.0";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus";
 const CARGO_PACKAGE = "locus-cli";
+// Minimum Rust for the cargo fallback; must equal the workspace `rust-version`
+// in the repo's Cargo.toml (crates/locus-core/tests/rust_version.rs checks it).
+const MIN_RUST_VERSION = "1.89";
 // `cargo install` takes the crate as a positional argument; it has no --package flag.
 const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} ${CARGO_PACKAGE} --locked`;
 const CACHE_DIR = join(
@@ -68,7 +71,7 @@ function cargoFallbackMessage(runtime = process, reason = "no-prebuilt") {
       : `Could not download the prebuilt locus v${VERSION} binary for ${platform}`;
   return (
     `${why}; building from source with cargo instead. ` +
-    `This can take several minutes and needs Rust (https://rustup.rs).`
+    `This can take several minutes and needs Rust ${MIN_RUST_VERSION} or newer (https://rustup.rs).`
   );
 }
 
@@ -380,7 +383,7 @@ function installViaCargo(binaryPath, options) {
     );
     if (result.status !== 0) {
       throw new Error(
-        `cargo install failed (exit ${result.status}). Install Rust from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
+        `cargo install failed (exit ${result.status}). Install Rust ${MIN_RUST_VERSION} or newer from https://rustup.rs then retry, or run:\n  ${INSTALL_FROM_SOURCE}`
       );
     }
     const path = join(root, "bin", getBinaryFilename());
@@ -414,33 +417,38 @@ async function downloadReleaseBinary(binaryPath, options) {
   const archivePath = join(CACHE_DIR, archiveName);
 
   try {
-    // Checksum is optional until release.yml publishes .sha256 sidecars
-    let expected = null;
+    let expected;
     try {
       const sumBuf = await download(sha256Url);
       expected = parseSha256File(sumBuf, archiveName);
-    } catch {
-      expected = null;
+    } catch (err) {
+      const checksumErr = new Error(
+        `Could not download SHA-256 checksum from ${sha256Url}: ${err.message}. Check your connection and retry.`
+      );
+      checksumErr.code = "LOCUS_NPM_CHECKSUM";
+      throw checksumErr;
+    }
+    if (!expected) {
+      const err = new Error(
+        `Invalid or missing SHA-256 checksum for ${archiveName} at ${sha256Url}. Check the release sidecar and retry.`
+      );
+      err.code = "LOCUS_NPM_CHECKSUM";
+      throw err;
     }
 
     const data = await download(url);
-
-    if (expected) {
-      const actual = crypto.createHash("sha256").update(data).digest("hex");
-      const expectedBuf = Buffer.from(expected, "hex");
-      const actualBuf = Buffer.from(actual, "hex");
-      if (
-        expectedBuf.length !== actualBuf.length ||
-        !crypto.timingSafeEqual(expectedBuf, actualBuf)
-      ) {
-        throw new Error(
-          `SHA-256 mismatch for ${archiveName}: expected ${expected}, got ${actual}`
-        );
-      }
-    } else {
-      console.error(
-        `Warning: no checksum at ${sha256Url} — installing without verification`
+    const actual = crypto.createHash("sha256").update(data).digest("hex");
+    const expectedBuf = Buffer.from(expected, "hex");
+    const actualBuf = Buffer.from(actual, "hex");
+    if (
+      expectedBuf.length !== actualBuf.length ||
+      !crypto.timingSafeEqual(expectedBuf, actualBuf)
+    ) {
+      const err = new Error(
+        `SHA-256 mismatch for ${archiveName}: expected ${expected}, got ${actual}. Check the release assets and retry.`
       );
+      err.code = "LOCUS_NPM_CHECKSUM";
+      throw err;
     }
 
     writeFileSync(archivePath, data);
@@ -491,8 +499,8 @@ async function ensureBinary(options = {}) {
   try {
     return await downloadReleaseBinary(binaryPath, options);
   } catch (err) {
-    // A refusal must not turn into a cargo install that bypasses the guard.
-    if (err.code === "LOCUS_NPM_DOWNGRADE") throw err;
+    // A refusal or failed integrity check must not fall through to cargo.
+    if (err.code === "LOCUS_NPM_DOWNGRADE" || err.code === "LOCUS_NPM_CHECKSUM") throw err;
     console.error(`Failed to download locus: ${err.message}`);
     console.error(cargoFallbackMessage(process, "download-failed"));
     try {

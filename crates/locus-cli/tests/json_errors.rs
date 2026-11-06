@@ -22,7 +22,7 @@ fn locus(home: &Path, cwd: &Path, cap: Option<&str>, args: &[&str]) -> Output {
 fn assert_json_error(out: &Output, needle: &str) {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
-    assert!(out.stdout.is_empty(), "stdout stays clean on failure");
+    assert_eq!(out.stdout, out.stderr, "stdout carries the JSON error");
     let v: Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|e| panic!("--json failure must print JSON on stderr ({e}): {stderr:?}"));
     assert_eq!(v["ok"], false, "{v}");
@@ -158,7 +158,7 @@ fn binding_add_refuses_to_replace_an_existing_alias_without_force() {
 
 /// Issue #175: re-running `binding add` with the same values is a no-op that
 /// exits 0 instead of refusing. The file is not rewritten (bytes and mtime
-/// unchanged); `--json` reports `changed: false`.
+/// unchanged); both output formats identify the existing binding.
 #[test]
 fn binding_add_is_a_noop_when_the_file_already_matches() {
     let home = tempfile::tempdir().unwrap();
@@ -208,6 +208,8 @@ fn binding_add_is_a_noop_when_the_file_already_matches() {
     let v: Value = serde_json::from_str(&String::from_utf8_lossy(&second.stdout)).unwrap();
     assert_eq!(v["ok"], true, "{v}");
     assert_eq!(v["changed"], false, "{v}");
+    let reported = Path::new(v["path"].as_str().expect("binding path"));
+    assert_eq!(reported, toml.canonicalize().unwrap(), "{v}");
     assert_eq!(std::fs::read(&toml).unwrap(), original);
     assert_eq!(
         std::fs::metadata(&toml).unwrap().modified().unwrap(),
@@ -240,7 +242,8 @@ fn binding_add_is_a_noop_when_the_file_already_matches() {
         String::from_utf8_lossy(&human.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&human.stdout).contains("already matches; nothing written"),
+        String::from_utf8_lossy(&human.stdout)
+            .contains("binding 'same' already matches; nothing written"),
         "{}",
         String::from_utf8_lossy(&human.stdout)
     );

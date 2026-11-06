@@ -21,13 +21,16 @@ def recipe():
 class CargoInstallRecipeTest(unittest.TestCase):
     def test_note_records_reported_observation_without_claiming_a_fix(self):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        entry = changelog.split("**Reproduce cargo-install timings", 1)[1]
+        unreleased = changelog.split("## [0.7.0]", 1)[1].split("\n## [", 1)[0]
+        entry = unreleased.split("**Reproduce cargo-install timings", 1)[1]
         note = entry.split("```bash", 1)[0]
         self.assertIn("issues/168", note)
         self.assertIn("`cargo install --git`", note)
         self.assertIn("`locus-core` compiling twice", note)
         self.assertIn("`locus-cli` and `locus-mcp`", note)
-        self.assertIn("no fix\n  is claimed", note)
+        self.assertIn("during the `locus-mcp` install after `locus-cli` finished", note)
+        self.assertIn("unresolved issue", note)
+        self.assertIn("no fix is claimed", note)
 
     def run_recipe(self, fail_at=None):
         with tempfile.TemporaryDirectory() as directory:
@@ -66,7 +69,9 @@ class CargoInstallRecipeTest(unittest.TestCase):
             self.assertIn("--message-format=json", args)
         def value(args, option):
             return args[args.index(option) + 1]
-        self.assertEqual(len({value(args, "--rev") for args in calls}), 1)
+        self.assertEqual({value(args, "--rev") for args in calls},
+                         {"e969d9c44a3c0bff1d0a1fee4deb1b77fb58652e"})
+        self.assertNotIn("git rev-parse HEAD", recipe())
         self.assertEqual(len({value(args, "--git") for args in calls}), 1)
         self.assertNotEqual(value(calls[0], "--target-dir"), value(calls[1], "--target-dir"))
         self.assertEqual(value(calls[1], "--target-dir"), value(calls[2], "--target-dir"))

@@ -14,6 +14,10 @@
 #[allow(dead_code)]
 mod conformance;
 
+#[path = "../../crates/locus-cli/tests/fail_closed_unreadable.rs"]
+mod fail_closed_unreadable;
+use fail_closed_unreadable::{assert_canary_absent, scan, scan_with, walk};
+
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -108,54 +112,6 @@ fn write_binding(home: &Path, alias: &str, credential_ref: &str) {
         body,
     )
     .unwrap();
-}
-
-/// Attach the offending path to a canary-scan IO error.
-fn scan_err(p: &Path, e: io::Error) -> io::Error {
-    io::Error::new(e.kind(), format!("{}: {e}", p.display()))
-}
-
-/// Collect regular files under `d` for the canary scan. Fails closed: a path
-/// that cannot be listed or statted is an error, never a silent skip — an
-/// unreadable directory could be hiding the canary.
-fn walk(d: &Path) -> io::Result<Vec<PathBuf>> {
-    let mut out = Vec::new();
-    for e in fs::read_dir(d).map_err(|e| scan_err(d, e))? {
-        let p = e.map_err(|e| scan_err(d, e))?.path();
-        let m = fs::symlink_metadata(&p).map_err(|e| scan_err(&p, e))?;
-        if m.is_dir() {
-            out.extend(walk(&p)?);
-        } else if m.is_file() {
-            out.push(p);
-        }
-    }
-    Ok(out)
-}
-
-/// Read every discovered file; an incomplete scan is an error.
-fn scan(root: &Path, canary: &str) -> io::Result<bool> {
-    scan_with(root, canary, &mut |path| fs::read(path))
-}
-
-fn scan_with(
-    root: &Path,
-    canary: &str,
-    read: &mut impl FnMut(&Path) -> io::Result<Vec<u8>>,
-) -> io::Result<bool> {
-    let mut found = false;
-    for path in walk(root)? {
-        let bytes = read(&path).map_err(|e| scan_err(&path, e))?;
-        found |= String::from_utf8_lossy(&bytes).contains(canary);
-    }
-    Ok(found)
-}
-
-fn assert_canary_absent(root: &Path, result: io::Result<bool>) {
-    assert!(
-        !result.unwrap_or_else(|e| panic!("canary scan failed: {e}")),
-        "canary found under {}",
-        root.display()
-    );
 }
 
 fn setup(phantom: &Path) -> World {
@@ -329,6 +285,22 @@ fn phantom_and_locus_compose_without_leaking_the_canary() {
     for root in roots {
         assert_canary_absent(&root, scan(&root, &canary));
     }
+}
+
+#[test]
+fn canary_scan_accepts_a_readable_clean_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    fs::create_dir_all(root.join("nested/empty")).unwrap();
+    fs::write(root.join("root-file"), b"ordinary contents\n").unwrap();
+    fs::write(root.join("nested/binary-file"), b"\xffordinary\0contents").unwrap();
+
+    let result = scan(root, "fixture-canary");
+    assert!(
+        matches!(&result, Ok(false)),
+        "clean tree must scan without a match"
+    );
+    assert_canary_absent(root, result);
 }
 
 #[test]

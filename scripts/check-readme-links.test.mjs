@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { readdirSync, readFileSync } from 'node:fs';
+import { mkdtemp, readFile, writeFile, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -13,10 +14,27 @@ test('repository README: every link resolves', async () => {
   assert.deepEqual(await checkMarkdown(README), { failures: [], warnings: [] });
 });
 
-test('README install investigation reports only core artifacts and freshness', async () => {
+test('README distinguishes the proposed shell installer from current options', async () => {
   const readme = await readFile(README, 'utf8');
-  const script = readme.match(/python3 - "\$investigation_dir\/artifacts\.jsonl" <<'PY'\n([\s\S]*?)\nPY/);
-  assert.ok(script, 'README investigation Python command is missing');
+  const install = readme.split('## Install options\n')[1].split('\n## ', 1)[0];
+  const [current, proposal] = install.split('### Proposed shell installer\n');
+  assert.ok(proposal, 'installer proposal is missing');
+  assert.match(current, /brew install ashlrai\/tap\/locus/);
+  assert.match(current, /npm install -g locus-cli @ashlrai\/locus-mcp/);
+  assert.match(proposal, /Issue #169/);
+  assert.match(proposal, /does not establish that a published one-command installation path/);
+  assert.match(proposal, /locus-<target>\.tar\.gz/);
+  assert.match(proposal, /\.sha256/);
+  assert.match(proposal, /Missing or mismatched checksums must stop/);
+  assert.match(proposal, /macOS Apple Silicon and\s+Intel, and Linux x86_64 with glibc/);
+  assert.match(proposal, /unsupported platforms, including Linux\s+ARM/);
+  assert.match(proposal, /### Install from source/);
+});
+
+test('contributor install investigation reports only core artifacts', async () => {
+  const contributing = await readFile(join(repository, 'CONTRIBUTING.md'), 'utf8');
+  const script = contributing.match(/python3 - "\$investigation_dir\/artifacts\.jsonl" <<'PY'\n([\s\S]*?)\nPY/);
+  assert.ok(script, 'CONTRIBUTING investigation Python command is missing');
   const dir = await mkdtemp(join(tmpdir(), 'locus-artifacts-'));
   try {
     const path = join(dir, 'artifacts.jsonl');
@@ -37,7 +55,73 @@ test('README install investigation reports only core artifacts and freshness', a
     assert.equal(lines.length, 2);
     assert.match(lines[0], /liblocus_core-first\.rlib.*'fresh': False/);
     assert.match(lines[1], /liblocus_core-second\.rlib.*'fresh': True/);
-    assert.doesNotMatch(run.stdout, /other\.rlib|\/tmp\//);
+    assert.doesNotMatch(run.stdout, /other\.rlib/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('contributor install investigation recipe records cargo args and stops when cargo fails', async () => {
+  const contributing = await readFile(join(repository, 'CONTRIBUTING.md'), 'utf8');
+  const section = contributing.split('### Investigating repeated compilation during install')[1];
+  const recipe = section?.match(/```bash\n([\s\S]*?)\n```/)?.[1];
+  assert.ok(recipe, 'CONTRIBUTING investigation recipe is missing');
+  const dir = await mkdtemp(join(tmpdir(), 'locus-recipe-'));
+  try {
+    const cargo = join(dir, 'cargo');
+    await writeFile(cargo, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf 'cargo test fixture\n'; exit 0; fi
+printf '%s\n' "$@" > "$CALL_LOG"
+if [ "\${FAIL_INSTALL:-}" = 1 ]; then echo 'fixture failure' >&2; exit 7; fi
+printf '%s\n' '{"reason":"compiler-artifact","package_id":"locus-core fixture","target":{"name":"locus_core","kind":["lib"]},"profile":{},"features":[],"filenames":["/tmp/core.rlib"],"fresh":false}'
+printf 'Compiling locus-core\nFinished \`release\`\n' >&2
+`);
+    await chmod(cargo, 0o755);
+    // macOS mktemp resolves a bare `mktemp -d` under the per-user Darwin temp
+    // directory and ignores TMPDIR, so pin the recipe's investigation dir under
+    // `dir` with a shim instead of relying on TMPDIR alone.
+    const bashEnv = join(dir, 'env.sh');
+    await writeFile(bashEnv, `mktemp() {
+  if [[ "$*" == -d ]]; then
+    command mktemp -d "$RECIPE_WATCH/mktemp.XXXXXX"
+  else
+    command mktemp "$@"
+  fi
+}
+`);
+    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir,
+      BASH_ENV: bashEnv, RECIPE_WATCH: dir, CALL_LOG: join(dir, 'args') };
+    const run = (extra = {}) => spawnSync('bash', ['-c', recipe], {
+      cwd: repository, env: { ...env, ...extra }, encoding: 'utf8',
+    });
+    const filesUnder = (root) => {
+      const out = [];
+      const stack = [root];
+      while (stack.length) {
+        const current = stack.pop();
+        for (const ent of readdirSync(current, { withFileTypes: true })) {
+          const path = join(current, ent.name);
+          if (ent.isDirectory()) stack.push(path);
+          else out.push(path);
+        }
+      }
+      return out;
+    };
+    const success = run();
+    assert.equal(success.status, 0, `${success.stderr}\n${success.stdout}`);
+    const args = (await readFile(env.CALL_LOG, 'utf8')).trim().split('\n');
+    for (const arg of ['--git', '--locked', '--target-dir', '--root', '--message-format=json', 'locus-cli']) {
+      assert.ok(args.includes(arg), `missing ${arg} in ${args.join(' ')}`);
+    }
+    assert.match(args[args.indexOf('--git') + 1], /^file:\/\//);
+    const written = filesUnder(dir);
+    const artifacts = written.find((path) => path.endsWith('artifacts.jsonl'));
+    const log = written.find((path) => path.endsWith('cargo.log'));
+    assert.ok(artifacts && log, `recipe outputs missing: ${written.join(', ')}`);
+    assert.match(readFileSync(artifacts, 'utf8'), /locus_core/);
+    assert.match(readFileSync(log, 'utf8'), /Compiling locus-core/);
+    const failed = run({ FAIL_INSTALL: '1' });
+    assert.equal(failed.status, 7, failed.stderr);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

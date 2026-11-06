@@ -22,7 +22,7 @@ pub(crate) enum ExitCode {
     Unsafe,
     /// Usage error: unknown flag or subcommand, bad value, conflicting flags,
     /// `--dry-run` on a command that cannot plan. Shares 2 with [`Self::Unsafe`];
-    /// a usage error prints no report on stdout, only the error on stderr.
+    /// a usage error prints the error envelope under `--json`.
     Usage,
     /// The child program exists but could not be executed.
     CannotExecute,
@@ -95,7 +95,7 @@ impl ExitCode {
                 "command error or refusal; check commands: degraded (doctor WARN, agent protected, session not ok)"
             }
             Self::Unsafe => "check commands: unsafe (doctor UNSAFE, agent unsafe, status pin invalid/frozen/expired)",
-            Self::Usage => "usage error (bad flag/value, --dry-run on a command that cannot plan); no report on stdout",
+            Self::Usage => "usage error (bad flag/value, --dry-run on a command that cannot plan)",
             Self::CannotExecute => "child program exists but is not executable (exec/run/ci run)",
             Self::NotFound => "child program not found (exec/run/ci run)",
             Self::StdoutClosed => "stdout closed by the reader (128 + SIGPIPE)",

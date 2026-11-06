@@ -2,7 +2,7 @@
 // Run: node --test npm/test
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
-const { mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const test = require("node:test");
@@ -44,6 +44,123 @@ for (const [name, file] of Object.entries(wrappers)) {
     assert.match(mod.cargoFallbackMessage({ platform: "darwin", arch: "arm64" }, "download-failed"), /^Could not download the prebuilt/);
   });
 
+  test(`${name}: setup preserves a newer installed binary`, () => {
+    const home = mkdtempSync(join(tmpdir(), "locus-newer-"));
+    try {
+      const packageDir = join(root, name === "locus" ? "npm" : "npm-mcp");
+      const pkg = join(home, "package");
+      mkdirSync(join(pkg, "bin"), { recursive: true });
+      copyFileSync(join(packageDir, "install.js"), join(pkg, "install.js"));
+      copyFileSync(file, join(pkg, "bin", `${name}.js`));
+      const binary = join(home, ".locus", "bin", name);
+      mkdirSync(join(home, ".locus", "bin"), { recursive: true });
+      const [major, minor, patch] = require(join(packageDir, "package.json")).version.split(".").map(Number);
+      const newer = `${major}.${minor}.${patch + 1}`;
+      const original = `installed ${name} fixture\n`;
+      writeFileSync(binary, original);
+      writeFileSync(`${binary}.version`, `${newer}\n`);
+      const attempts = join(home, "external-attempt");
+      const preload = join(home, "preload.js");
+      writeFileSync(preload, `
+        const fs = require("node:fs");
+        const cp = require("node:child_process");
+        Object.defineProperty(process, "platform", { value: "linux" });
+        Object.defineProperty(process, "arch", { value: "x64" });
+        const block = () => { fs.writeFileSync(${JSON.stringify(attempts)}, "attempted"); throw new Error("unexpected external action"); };
+        cp.spawnSync = block;
+        require("node:https").get = block;
+        cp.execFileSync = (command, args) => {
+          if (command !== ${JSON.stringify(binary)}) return block();
+          if (args.length === 1 && args[0] === "--version") return Buffer.from(${JSON.stringify(`${name} ${newer}\n`)});
+          if (${JSON.stringify(name)} !== "locus-mcp" || args[0] !== "fixture-argument") return block();
+          process.stdout.write("ran installed binary\\n");
+          return Buffer.alloc(0);
+        };
+      `);
+      const run = (script, args = []) => spawnSync(process.execPath, ["--require", preload, script, ...args], {
+        env: { HOME: home, USERPROFILE: home, PATH: "" },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      const setup = run(join(pkg, "install.js"));
+      assert.equal(setup.status, 0, setup.stderr);
+      assert.match(setup.stdout, name === "locus" ? /Refusing to replace.*newer/ : /binary already installed/);
+      assert.equal(readFileSync(binary, "utf8"), original);
+      assert.equal(readFileSync(`${binary}.version`, "utf8"), `${newer}\n`);
+      const result = run(join(pkg, "bin", `${name}.js`), ["fixture-argument"]);
+      assert.equal(result.status, name === "locus" ? 1 : 0, result.stderr);
+      if (name === "locus") assert.match(result.stderr, /Refusing to replace.*newer/);
+      else assert.equal(result.stdout, "ran installed binary\n");
+      assert.equal(readFileSync(binary, "utf8"), original);
+      assert.equal(readFileSync(`${binary}.version`, "utf8"), `${newer}\n`);
+      assert.equal(existsSync(attempts), false, "must not download or invoke cargo");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test(`${name}: with no installed binary, runs its executable from the release bundle`, () => {
+    const home = mkdtempSync(join(tmpdir(), "locus-bundle-"));
+    try {
+      const binary = join(home, ".locus", "bin", name);
+      const preload = join(home, "release-fixture.js");
+      writeFileSync(preload, `
+        const assert = require("node:assert/strict");
+        const crypto = require("node:crypto");
+        const fs = require("node:fs");
+        const path = require("node:path");
+        const cp = require("node:child_process");
+        const { EventEmitter } = require("node:events");
+        Object.defineProperty(process, "platform", { value: "linux" });
+        Object.defineProperty(process, "arch", { value: "x64" });
+        const archive = Buffer.from("release archive fixture");
+        cp.spawnSync = (command) => {
+          assert.equal(command, "which", "must not invoke cargo");
+          return { status: 1, stdout: "" };
+        };
+        cp.execFileSync = (command, args) => {
+          if (command === "tar") {
+            const directory = path.join(args[args.indexOf("-C") + 1], "locus-x86_64-unknown-linux-gnu");
+            fs.mkdirSync(directory);
+            fs.writeFileSync(path.join(directory, "locus"), "bundled locus");
+            fs.writeFileSync(path.join(directory, "locus-mcp"), "bundled locus-mcp");
+            return Buffer.alloc(0);
+          }
+          assert.equal(command, ${JSON.stringify(binary)});
+          assert.deepEqual(args, ["fixture-argument"]);
+          assert.equal(fs.readFileSync(command, "utf8"), ${JSON.stringify(`bundled ${name}`)});
+          process.stdout.write("selected bundle member\\n");
+          return Buffer.alloc(0);
+        };
+        require("node:https").get = (url, callback) => {
+          const request = new EventEmitter();
+          process.nextTick(() => {
+            const response = new EventEmitter();
+            response.statusCode = 200;
+            response.headers = {};
+            callback(response);
+            response.emit("data", url.endsWith(".sha256")
+              ? Buffer.from(crypto.createHash("sha256").update(archive).digest("hex") + "  " + path.basename(url.slice(0, -7)) + "\\n")
+              : archive);
+            response.emit("end");
+          });
+          return request;
+        };
+      `);
+      const result = spawnSync(process.execPath, ["--require", preload, file, "fixture-argument"], {
+        env: { HOME: home, USERPROFILE: home, PATH: "", LOCUS_NPM_NO_LINK: "1" },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.signal, null);
+      assert.equal(result.stdout, "selected bundle member\n");
+      assert.equal(readFileSync(binary, "utf8"), `bundled ${name}`);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test(`${name}: on a platform without a prebuilt binary it explains the cargo fallback before trying it (no network)`, () => {
     const home = mkdtempSync(join(tmpdir(), "locus-wrapper-"));
     try {
@@ -66,6 +183,47 @@ for (const [name, file] of Object.entries(wrappers)) {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  test(`${name}: getPlatformTarget rejects an unsupported architecture by name`, () => {
+    assert.throws(
+      () => mod.getPlatformTarget({ platform: "linux", arch: "riscv64" }),
+      (err) => /^Unsupported platform: linux-riscv64\. Install from source: cargo install /.test(err.message),
+    );
+    assert.throws(() => mod.getPlatformTarget({ platform: "darwin", arch: "ia32" }), /Unsupported platform: darwin-ia32/);
+  });
+
+  for (const [platform, arch] of [["linux", "riscv64"], ["darwin", "ia32"]]) {
+    test(`${name}: on unsupported ${platform}-${arch} it reports the platform and never attempts a download`, () => {
+      const home = mkdtempSync(join(tmpdir(), "locus-unsupported-"));
+      try {
+        const attempts = join(home, "network-attempt");
+        const preload = join(home, "unsupported.js");
+        writeFileSync(preload, `
+          const fs = require("node:fs");
+          Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
+          Object.defineProperty(process, "arch", { value: ${JSON.stringify(arch)} });
+          const record = (what) => () => { fs.appendFileSync(${JSON.stringify(attempts)}, what + "\\n"); throw new Error("unexpected " + what); };
+          for (const mod of ["node:https", "node:http"]) {
+            const m = require(mod);
+            m.get = record(mod + ".get");
+            m.request = record(mod + ".request");
+          }
+        `);
+        const result = spawnSync(process.execPath, ["--require", preload, file, "--help"], {
+          env: { HOME: home, USERPROFILE: home, PATH: join(home, "empty-bin") },
+          encoding: "utf8",
+          timeout: 20_000,
+        });
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, new RegExp(`Failed to download ${name}: Unsupported platform: ${platform}-${arch}\\. Install from source: cargo install `));
+        assert.doesNotMatch(result.stderr, /Downloading/, "must not announce a download");
+        assert.equal(existsSync(attempts), false, "must not open a network connection");
+        assert.equal(existsSync(join(home, ".locus", "bin", name)), false, "must not install a binary");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  }
 }
 
 test("source-install commands use a positional crate (cargo install has no --package flag)", () => {
@@ -231,5 +389,5 @@ test("locus: wrapper drains unread HTTP responses and exits explicitly", () => {
   const download = src.split("function download(")[1].split("\nfunction ")[0];
   assert.equal((download.match(/res\.resume\(\)/g) || []).length, 2, "redirect and non-200 responses must be drained");
   assert.match(src.split("async function main()")[1], /process\.exit\(0\)/);
-  assert.match(readFileSync(join(root, "npm", "install.js"), "utf8"), /process\.exit\(0\)/);
+  assert.match(readFileSync(join(root, "npm", "install.js"), "utf8"), /process\.exit\(process\.exitCode \|\| 0\)/);
 });

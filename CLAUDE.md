@@ -31,7 +31,7 @@ export LOCUS_HOME=/tmp/locus-dev PATH="$PWD/target/debug:$PATH"
 locus quickstart                 # or: init --with-samples, then the hook line, then enter personal
 eval "$(locus hook bash)"        # exports LOCUS_CONTROL_CAPABILITY for whoami/pin/leave
 locus whoami
-locus doctor                     # exits 1 on WARN, e.g. when phantom is not installed
+locus doctor                     # SAFE|WARN|UNSAFE; setup-only WARN (e.g. phantom absent) exits 0, other WARN exits 1
 ```
 
 A later shell sees `no current broker endpoint ... human re-pin required`.
@@ -46,7 +46,7 @@ Only if enter is refused (expired pin, bad seal), run `locus leave --force` firs
 | Crate | Role |
 |-------|------|
 | **locus-core** | Binding, Session, Seal (HMAC), Policy, Store (`~/.locus`), isolation env, CredentialRef resolve, adapters, workers |
-| **locus-cli** | Human control plane. Daily use: `enter`, `switch`, `pin`, `leave`, `renew`, `whoami`, `fleet-feed`, `status`, `exec`, `run`, `binding`. Setup: `init`, `quickstart`, `onboard`, `setup`, `agent`, `doctor`, `hook`, `mcp`, `workspace`, and more. `locus --help` is the full grouped list |
+| **locus-cli** | Human control plane. Daily use: `enter`, `switch`, `pin`, `leave`, `renew`, `whoami`, `fleet-feed`, `fleet-denials`, `fleet-preflight`, `status`, `exec`, `run`, `binding`. Setup: `init`, `quickstart`, `onboard`, `setup`, `agent`, `doctor`, `hook`, `mcp`, `workspace`, and more. `locus --help` is the full grouped list |
 | **locus-mcp** | Stdio MCP multiplexor — tools = control + **pinned binding only** |
 
 Planes (see [docs/architecture.md](./docs/architecture.md)):
