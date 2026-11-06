@@ -125,13 +125,15 @@ class PeerMeasurementInstructionsTest(unittest.TestCase):
         self.assertIn("export RESEND_API_KEY=fixture", text)
         self.assertIn("printf 'RESEND_API_KEY=fixture\\n'", text)
         checks = [line for line in text.splitlines()
-                  if "/bin/sh -c 'test " in line]
+                  if 'test "$RESEND_API_KEY" = fixture' in line]
         self.assertEqual(len(checks), 3)
         self.assertTrue(all("test \"$RESEND_API_KEY\" = fixture" in line
                             for line in checks))
         self.assertTrue(checks[0].startswith('"$locus" exec --strict-creds -- '))
         self.assertTrue(checks[1].startswith('direnv exec '))
-        self.assertTrue(checks[2].startswith('sops exec-env '))
+        self.assertEqual(shlex.split(checks[2]), [
+            "sops", "exec-env", "$work/encrypted.env", 'test "$RESEND_API_KEY" = fixture',
+        ])
 
     def run_measurement(self, failing=None):
         with tempfile.TemporaryDirectory() as directory:
@@ -182,17 +184,17 @@ class PeerMeasurementInstructionsTest(unittest.TestCase):
 class ReadmeComparisonTest(unittest.TestCase):
     def comparison(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        return readme.split("#### Run a Locus and direnv comparison locally\n", 1)[1].split(
+        return readme.split("#### Run the comparison locally\n", 1)[1].split(
             "\n### ", 1
         )[0]
 
     def run_measurement(self, failing=None):
         code = self.comparison().split(
-            "python3 - \"$locus\" \"$work/direnv\" <<'PYBENCH'\n", 1
+            "python3 - \"$locus\" \"$work/direnv\" \"$work/encrypted.env\" <<'PYBENCH'\n", 1
         )[1].split("\nPYBENCH\n", 1)[0]
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            for name in ("locus", "direnv"):
+            for name in ("locus", "direnv", "sops"):
                 fake = root / name
                 fake.write_text(
                     "#!/bin/sh\n"
@@ -203,7 +205,7 @@ class ReadmeComparisonTest(unittest.TestCase):
             env = os.environ.copy()
             env["PATH"] = str(root) + os.pathsep + env.get("PATH", "")
             result = subprocess.run(
-                [sys.executable, "-", str(root / "locus"), "fixture-dir"],
+                [sys.executable, "-", str(root / "locus"), "fixture-dir", "fixture.env"],
                 input=code, text=True, capture_output=True, cwd=root, env=env,
             )
             return result, (root / "calls").read_text().splitlines()
@@ -219,7 +221,11 @@ class ReadmeComparisonTest(unittest.TestCase):
             'direnv allow "$work/direnv/.envrc"',
             """"$locus" exec --strict-creds -- /bin/sh -c 'test "$RESEND_API_KEY" = fixture'""",
             """direnv exec "$work/direnv" /bin/sh -c 'test "$RESEND_API_KEY" = fixture'""",
-            "Four warmup rounds", "32 measured rounds per launcher",
+            'export SOPS_AGE_KEY_FILE="$work/age-key.txt" SOPS_DISABLE_VERSION_CHECK=1',
+            'age-keygen -o "$SOPS_AGE_KEY_FILE"',
+            'sops --encrypt --age "$recipient"',
+            """sops exec-env "$work/encrypted.env" 'test "$RESEND_API_KEY" = fixture'""",
+            "Four warmup rounds", "32 measured rounds per",
             "minimum, median, and maximum wall time in milliseconds",
         ):
             self.assertIn(expected, section)
@@ -227,17 +233,20 @@ class ReadmeComparisonTest(unittest.TestCase):
     def test_balanced_runs_and_reported_statistics(self):
         result, calls = self.run_measurement()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(calls), 72)
+        self.assertEqual(len(calls), 108)
         self.assertEqual(calls.count("locus:exec --strict-creds -- /usr/bin/true"), 36)
         self.assertEqual(calls.count("direnv:exec fixture-dir /usr/bin/true"), 36)
-        self.assertEqual([line.split(":", 1)[0] for line in calls[:8]],
-                         ["locus", "direnv", "direnv", "locus"] * 2)
-        for name in ("locus", "direnv"):
+        self.assertEqual(calls.count("sops:exec-env fixture.env /usr/bin/true"), 36)
+        self.assertEqual([line.split(":", 1)[0] for line in calls[:12]], [
+            "locus", "direnv", "sops", "locus", "direnv", "sops",
+            "direnv", "sops", "locus", "sops", "locus", "direnv",
+        ])
+        for name in ("direct", "locus", "direnv", "sops"):
             self.assertRegex(result.stdout, rf"{name}: n=32 min=\d+\.\d{{3}} "
                              r"median=\d+\.\d{3} max=\d+\.\d{3} ms")
 
     def test_failed_launcher_never_reports_statistics(self):
-        for name in ("locus", "direnv"):
+        for name in ("locus", "direnv", "sops"):
             with self.subTest(name=name):
                 result, _ = self.run_measurement(failing=name)
                 self.assertNotEqual(result.returncode, 0)

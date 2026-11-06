@@ -26,3 +26,4 @@ tempfile = { workspace = true }
 serde_json = { workspace = true }
 locus-core = { workspace = true }
 chrono = { workspace = true }
+jsonschema = { workspace = true }

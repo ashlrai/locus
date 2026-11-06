@@ -44,3 +44,8 @@ fn println_path_exits_quietly_on_closed_stdout() {
 fn completion_path_exits_quietly_on_closed_stdout() {
     assert_quiet_sigpipe_exit(&["completion", "bash"]);
 }
+
+#[test]
+fn json_error_path_exits_quietly_on_closed_stdout() {
+    assert_quiet_sigpipe_exit(&["whoami", "--json"]);
+}

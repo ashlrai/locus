@@ -280,9 +280,9 @@ fn status_and_identity_checks_unpinned() {
         "status prints one line"
     );
 
-    // whoami unpinned is a command error: exit 1, JSON on stderr, stdout clean.
+    // whoami unpinned is a command error: exit 1, JSON on both streams.
     let out = env.run(&["whoami", "--json"]);
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, out.stderr);
     error_doc(&out, 1, "failure");
 
     // verify session: report on stdout, then exit 1 when session_ok is false.
@@ -540,7 +540,13 @@ fn unsigned_release_manifest_requires_explicit_drift_only_verification() {
     let env = Env::new();
     let path = env.project().join("release.json");
     let path_arg = path.to_str().unwrap();
-    let export = env.run(&["adapter", "registry", "export", "--out", path_arg]);
+    // An available signing-key variable does not make an export signed unless
+    // --sign is explicitly requested, as in the release workflow.
+    let export = env.run_with(
+        &["adapter", "registry", "export", "--out", path_arg],
+        None,
+        &[("LOCUS_REGISTRY_SIGNING_KEY", "invalid-test-key")],
+    );
     assert!(export.status.success(), "{}", stderr(&export));
 
     let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
@@ -567,6 +573,24 @@ fn unsigned_release_manifest_requires_explicit_drift_only_verification() {
     let report = doc(&matching, "locus.adapter.verify_manifest.v1");
     assert_eq!(report["signature"], "unsigned");
     assert_eq!(report["ok"], true);
+    assert!(report.get("drift").is_none());
+
+    // Explicit signing fails closed without a key and creates no artifact.
+    let signed_path = env.project().join("signed.json");
+    let signed = env.run_with(
+        &[
+            "adapter",
+            "registry",
+            "export",
+            "--sign",
+            "--out",
+            signed_path.to_str().unwrap(),
+        ],
+        None,
+        &[("LOCUS_REGISTRY_SIGNING_KEY", "")],
+    );
+    assert!(!signed.status.success());
+    assert!(!signed_path.exists());
 
     // Empty signatures are unsigned; a nonempty malformed signature must not
     // be accepted by the drift-only opt-in.
@@ -638,6 +662,43 @@ fn manifest_signer_claim_does_not_authenticate_an_unsigned_or_untrusted_manifest
     let report = doc(&untrusted, "locus.adapter.verify_manifest.v1");
     assert_eq!(report["signature"], "unknown_key");
     assert_eq!(report["ok"], false);
+}
+
+#[test]
+fn unsigned_manifest_comparison_normalizes_catalog_fields_only() {
+    let env = Env::new();
+    let path = env.project().join("release.json");
+    let path_arg = path.to_str().unwrap();
+    assert!(env
+        .run(&["adapter", "registry", "export", "--out", path_arg])
+        .status
+        .success());
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let adapters = manifest["adapters"].as_array_mut().unwrap();
+    adapters.reverse();
+    for adapter in adapters {
+        let id = adapter["id"].as_str().unwrap().to_ascii_uppercase();
+        adapter["id"] = Value::from(format!(" {id} "));
+        for field in ["name", "version", "digest"] {
+            adapter[field] = Value::from(format!(" {} ", adapter[field].as_str().unwrap()));
+        }
+        adapter["tools"].as_array_mut().unwrap().reverse();
+    }
+    // Extra artifact metadata is not part of the manifest comparison.
+    manifest["archive_sha256"] = Value::from("not-checked");
+    std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let out = env.run(&[
+        "adapter",
+        "verify-manifest",
+        path_arg,
+        "--allow-unsigned",
+        "--json",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let report = doc(&out, "locus.adapter.verify_manifest.v1");
+    assert_eq!(report["signature"], "unsigned");
+    assert_eq!(report["ok"], true);
+    assert!(report.get("drift").is_none());
 }
 
 #[test]
@@ -735,7 +796,7 @@ fn unsigned_release_manifest_checks_structure_and_catalog_fields() {
 fn usage_errors_exit_2_with_the_error_envelope() {
     let env = Env::new();
     let out = env.run(&["whoami", "--json", "--no-such-flag"]);
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, out.stderr);
     error_doc(&out, 2, "usage");
     // Human usage errors keep clap's prose and exit 2.
     let out = env.run(&["whoami", "--no-such-flag"]);

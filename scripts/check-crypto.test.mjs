@@ -42,6 +42,12 @@ test('allowlisted files pass, with their reason shown', () => {
   rmSync(root, { recursive: true });
 });
 
+test('multiple crypto kinds retain default code-unit ordering', (t) => {
+  const root = fixture({ 'src/mixed.ts': 'createSign(); ECDSA; Ed25519; generateKeyPairSync();' });
+  t.after(() => rmSync(root, { recursive: true }));
+  assert.deepEqual(scan(root)[0].kinds, ['DH', 'ECDSA/ECDH', 'Ed25519/X25519', 'RSA']);
+});
+
 test('tests, docs and vendored dirs are skipped, and id_rsa paths are not RSA use', () => {
   const root = fixture({
     'src/__tests__/x.test.ts': "ed25519",

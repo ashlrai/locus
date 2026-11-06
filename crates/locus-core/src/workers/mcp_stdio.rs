@@ -17,7 +17,7 @@ use super::sandbox::{
     ENV_WORKER_SANDBOX_BACKEND, ENV_WORKER_SANDBOX_NO_NETWORK,
 };
 use super::stdio_client::{client_key, McpStdioClient};
-use super::{WorkerBackend, WorkerKey, WorkerSlot, WorkerState, WorkerToolResult};
+use super::{ProcessGuard, WorkerBackend, WorkerKey, WorkerSlot, WorkerState, WorkerToolResult};
 use crate::binding::{Binding, ProviderBinding};
 use crate::error::{LocusError, Result};
 use crate::isolation::build_isolated_env_for_provider_opts;
@@ -452,17 +452,11 @@ impl WorkerBackend for McpStdioBackend {
                 })
                 .collect::<Vec<_>>();
             match cmd.spawn() {
-                Ok(mut child) => {
+                Ok(child) => {
                     pid = Some(child.id());
+                    let mut child = ProcessGuard::new(child);
                     // Handshake before storing as Running
-                    let client = match McpStdioClient::from_child(&mut child) {
-                        Ok(client) => client,
-                        Err(error) => {
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return Err(error);
-                        }
-                    };
+                    let client = McpStdioClient::from_child(child.child_mut())?;
                     let child = WatchedChild::start(child, cap)?;
                     match client.handshake() {
                         Ok(_tools) => {

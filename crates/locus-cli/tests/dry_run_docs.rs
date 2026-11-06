@@ -40,15 +40,10 @@ fn command_matrix_matches_the_documented_plan_forms() {
     assert!(!listed.is_empty());
     assert_eq!(listed, forms(matrix, "| Plan |"));
 
-    let readme = include_str!("../../../README.md")
-        .split("### Previewing mutations with `--dry-run`")
-        .nth(1)
-        .expect("README dry-run section")
-        .split("\n---")
-        .next()
-        .unwrap();
-    assert_eq!(forms(readme, "|"), listed);
-    assert!(readme.contains("Leave persistent state unchanged"));
+    assert!(
+        include_str!("../../../docs/README.md").contains("writes no state"),
+        "docs/README.md must say a plan writes no state"
+    );
 }
 
 #[test]
@@ -154,24 +149,36 @@ fn unsupported_exec_preview_does_not_start_the_child() {
 }
 
 #[test]
-fn readme_identifies_unplannable_commands_that_reject_the_flag() {
-    let readme = include_str!("../../../README.md")
-        .split("### Previewing mutations with `--dry-run`")
+fn docs_identify_unplannable_commands_that_reject_the_flag() {
+    let readme = include_str!("../../../docs/README.md");
+    let matrix = include_str!("../../../docs/dry-run-matrix-q8.md")
+        .split("## Unsupported cases")
         .nth(1)
-        .expect("README dry-run section")
-        .split("\n---")
-        .next()
-        .unwrap();
+        .expect("unsupported cases section")
+        .split("\n\n")
+        .nth(1)
+        .expect("unsupported command table");
+    let cases: [(&str, &[&str]); 6] = [
+        ("exec", &["exec", "--", "true"]),
+        ("run", &["run", "-b", "example", "--", "true"]),
+        ("ci run", &["ci", "run", "-b", "example", "--", "true"]),
+        ("mcp", &["mcp"]),
+        ("serve", &["serve"]),
+        ("dashboard", &["dashboard", "--no-open"]),
+    ];
+    let expected: BTreeSet<_> = cases.iter().map(|(name, _)| (*name).to_owned()).collect();
+    assert_eq!(forms(matrix, "| `"), expected);
     let home = tempfile::tempdir().unwrap();
-    for (name, args) in [
-        ("exec", &["exec", "--", "true"][..]),
-        ("run", &["run", "-b", "example", "--", "true"][..]),
-        ("ci run", &["ci", "run", "-b", "example", "--", "true"][..]),
-        ("mcp", &["mcp"][..]),
-        ("serve", &["serve"][..]),
-        ("dashboard", &["dashboard", "--no-open"][..]),
-    ] {
+    for (name, args) in cases {
         assert!(readme.contains(&format!("`{name}`")), "missing {name}");
+        let mut help_args: Vec<_> = name.split_whitespace().collect();
+        help_args.push("--help");
+        let help = locus(&help_args, home.path());
+        assert!(help.status.success(), "help failed for {name}");
+        assert!(
+            !String::from_utf8_lossy(&help.stdout).contains("--dry-run"),
+            "{name} advertises --dry-run"
+        );
         let mut preview = vec!["--dry-run"];
         preview.extend_from_slice(args);
         let output = locus(&preview, home.path());
@@ -190,5 +197,57 @@ fn fleet_read_only_commands_are_in_the_full_matrix_and_help() {
         let output = locus(&[name, "--help"], home.path());
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("--dry-run"));
+    }
+}
+
+#[test]
+fn manual_verification_procedure_runs_from_the_checkout() {
+    let doc = include_str!("../../../docs/dry-run-verification.md");
+    let script = doc
+        .split("```bash\n")
+        .nth(1)
+        .expect("manual verification script")
+        .split("\n```")
+        .next()
+        .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(script)
+        .env("LOCUS_BIN", env!("CARGO_BIN_EXE_locus"))
+        .env("HOME", home.path())
+        .output()
+        .expect("run manual verification");
+    assert!(
+        output.status.success(),
+        "manual verification failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("PASS: help, planned actions"));
+}
+
+#[test]
+fn acceptance_checklist_is_discoverable_and_cites_existing_docs() {
+    let overview = include_str!("../../../docs/README.md");
+    assert!(overview.contains("(dry-run-acceptance.md)"));
+    let checklist = include_str!("../../../docs/dry-run-acceptance.md");
+    for section in [
+        "## Scope and mutation avoidance",
+        "## Useful output",
+        "## Error handling",
+        "## Evidence for review",
+    ] {
+        assert!(checklist.contains(section), "missing {section}");
+    }
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+    for source in [
+        "dry-run-matrix-q8.md",
+        "dry-run-verification.md",
+        "agent-contract.md",
+        "exit-codes.md",
+        "README.md",
+    ] {
+        assert!(checklist.contains(source), "missing citation: {source}");
+        assert!(docs.join(source).is_file(), "missing source: {source}");
     }
 }
