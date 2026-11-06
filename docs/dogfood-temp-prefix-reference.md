@@ -31,3 +31,8 @@ checks the same containment boundary for the multi-tenant probe root during a
 real `DOGFOOD_MT=1` run: it shares the supplied `TMPDIR` with the live dogfood
 home, ignores `TMP`, `TEMP` and the working directory, and fails closed on a
 missing `TMPDIR` without retrying beneath `/tmp`.
+Run `bash scripts/tests/dogfood-tmpdir.sh` for the pure-shell check that the
+isolated home is created beneath an explicit `TMPDIR`: it records the only
+`mktemp` template the script requests, observes the live home inside the
+supplied root, and verifies the exit trap removes it while preserving
+unrelated content.
