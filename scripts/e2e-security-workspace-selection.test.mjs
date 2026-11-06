@@ -303,3 +303,118 @@ for (const mode of ['unset', 'empty']) {
     assert.deepEqual(readdirSync(controlled), [], 'the redirected fixtures must be cleaned up');
   });
 }
+
+// ── Temporary-root selection edges ──────────────────────────────────────────
+// The selection contract is ${TMPDIR:-/tmp}: a supplied TMPDIR is the
+// containment boundary the caller chose. The probes below run
+// create_security_workspace and e2e_cleanup verbatim through the edges the
+// happy-path checks above do not reach — an unusable root, an inherited
+// SECURITY_WS value, and the trailing-slash TMPDIR macOS hands out.
+
+// Runs create_security_workspace under the real EXIT trap inside `root`,
+// records the selected path on success, and returns the spawn result. The
+// reset line mirrors the script's own initialization before fixture creation;
+// the trap's removal of LOCUS_HOME doubles as a cleanup witness.
+function selectWorkspace({ root, tmpdir, tail = '', extraEnv = {} }) {
+  const observed = join(root, 'observed-workspace');
+  const mainHome = join(root, 'locus home');
+  mkdirSync(mainHome);
+  const { cleanup, createWs } = securityLifecycle();
+  const env = { ...process.env, MAIN_HOME: mainHome, OBSERVED: observed, ...extraEnv };
+  if (tmpdir === undefined) delete env.TMPDIR;
+  else env.TMPDIR = tmpdir;
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createWs}
+LOCUS_HOME="$MAIN_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+create_security_workspace
+${tail}
+printf '%s' "$SECURITY_WS" > "$OBSERVED"
+`], { env, encoding: 'utf8' });
+  return { observed, result };
+}
+
+// A supplied TMPDIR must name an existing directory: a missing one — or a
+// plain file standing in its place — fails loudly instead of silently
+// selecting a different root, and nothing is created in its place.
+for (const mode of ['missing', 'a plain file']) {
+  test(`a supplied TMPDIR that is ${mode} fails selection without creating anything`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'locus-secws-bad-root-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const scratch = join(root, 'supplied tmp');
+    if (mode === 'a plain file') writeFileSync(scratch, 'not a directory');
+
+    const { observed, result } = selectWorkspace({ root, tmpdir: scratch });
+
+    assert.equal(result.signal, null);
+    assert.notEqual(result.status, 0, `creation under ${mode} TMPDIR must fail`);
+    assert.match(result.stderr, /mktemp/, 'the failure must come from the allocation itself');
+    assert.throws(() => lstatSync(observed), { code: 'ENOENT' }, 'no workspace may be recorded');
+    if (mode === 'missing') {
+      assert.throws(() => lstatSync(scratch), { code: 'ENOENT' }, 'the missing root must not be created');
+      assert.deepEqual(readdirSync(root), [], 'the exit trap still removed the suite home');
+    } else {
+      assert.equal(readFileSync(scratch, 'utf8'), 'not a directory', 'the plain file is untouched');
+      assert.deepEqual(readdirSync(root), ['supplied tmp'], 'the exit trap still removed the suite home');
+    }
+  });
+}
+
+// An inherited SECURITY_WS value must not change the selected root: the
+// workspace is still allocated beneath the supplied TMPDIR, and the inherited
+// directory survives the exit trap untouched.
+test('an inherited SECURITY_WS does not change the selected root', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-secws-inherited-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'custom tmp');
+  const inherited = join(root, 'inherited workspace');
+  mkdirSync(scratch);
+  mkdirSync(inherited);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(inherited, 'keep'), 'inherited');
+
+  const { observed, result } = selectWorkspace({
+    root, tmpdir: scratch, extraEnv: { SECURITY_WS: inherited },
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  const workspace = readFileSync(observed, 'utf8');
+  assert.equal(dirname(workspace), scratch,
+    'the selected root is the supplied TMPDIR, not the inherited workspace');
+  assert.notEqual(workspace, inherited);
+  assert.match(workspace, /\/locus-security-ws\.[^/\s]+$/);
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' },
+    'the selected workspace must be removed on exit');
+  assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited',
+    'the inherited workspace must survive untouched');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'the supplied TMPDIR keeps only its own entries');
+});
+
+// macOS hands out a TMPDIR with a trailing slash. The workspace must still
+// land directly beneath that root, and the containment comparison
+// (`${SECURITY_WS%/*}` equals "$TMPDIR") must keep holding for the
+// unnormalized value.
+test('a TMPDIR with a trailing slash still holds the security workspace', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-secws-slash-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'custom tmp');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+
+  const { observed, result } = selectWorkspace({
+    root,
+    tmpdir: `${scratch}/`,
+    tail: '[[ -d "$SECURITY_WS" && "${SECURITY_WS%/*}" == "$TMPDIR" ]] || exit 76',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  const workspace = readFileSync(observed, 'utf8');
+  assert.ok(workspace.startsWith(`${scratch}//locus-security-ws.`),
+    'the supplied slash is kept verbatim and the workspace is a direct child of the root');
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' });
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
