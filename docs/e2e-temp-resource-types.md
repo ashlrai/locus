@@ -14,10 +14,11 @@ These are script variables, not options for selecting the directory names.
 
 All five are created directly under `TMPDIR` when it is nonempty, or under
 `/tmp` when it is unset or empty. A supplied `TMPDIR` must already exist and
-be writable; the suite verifies the main home is created directly beneath it
-before continuing. Cleanup-check subshells create fixtures beneath separate
-`TMPDIR` roots inside the main home, including roots whose names contain
-spaces, and verify each fixture is removed on exit.
+be writable; the suite verifies the main home, the allowlist workspace and
+the security fixtures are created directly beneath it before continuing.
+Cleanup-check subshells create fixtures beneath separate `TMPDIR` roots
+inside the main home, including roots whose names contain spaces, and verify
+each fixture is removed on exit.
 
 After the main home is created, an `EXIT` trap removes the directories that
 have been created and stops background MCP servers. The graph fallback also
@@ -30,8 +31,18 @@ behind. Inspect leftovers before removing them, and do not remove the parent
 Run `node --test scripts/e2e-temp.test.mjs` to check the documented variable
 and prefix inventory against the script and exercise temporary-directory cleanup.
 Run `node --test scripts/e2e-home-selection.test.mjs` for the focused
-`LOCUS_HOME` temporary-root selection checks, and
+`LOCUS_HOME` temporary-root selection checks,
+`node --test scripts/e2e-home-tmpdir-containment.test.mjs` for `LOCUS_HOME`
+containment beneath the controlled `TMPDIR` and fail-closed selection,
+`node --test scripts/e2e-home-spaced-tmpdir.test.mjs` for `LOCUS_HOME`
+allocation beneath a space-containing `TMPDIR`,
+`node --test scripts/e2e-home-repeated.test.mjs` for repeated `LOCUS_HOME`
+allocations yielding distinct directories beneath the selected root, and
 `node --test scripts/e2e-graph-home-selection.test.mjs` for the `GRAPH_HOME`
+equivalent,
+`node --test scripts/e2e-security-workspace-spaced-tmpdir.test.mjs` for the
+`SECURITY_WS` space-containing `TMPDIR` checks, and
+`node --test scripts/e2e-workspace-spaced-tmpdir.test.mjs` for the `WS_DIR`
 equivalent.
 Run `scripts/tests/e2e-tmpdir.sh` to exercise the full suite under a custom
 `TMPDIR`, including an injected failure after workspace creation.

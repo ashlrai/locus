@@ -21,7 +21,12 @@ import { fileURLToPath } from "node:url";
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
 const CARGO_VERSION = /(\[workspace\.package\][^[]*?\nversion\s*=\s*")([^"]+)(")/;
-const NPM_PACKAGES = ["npm/package.json", "npm-mcp/package.json"];
+const PACKAGE_MANIFESTS = ["npm/package.json", "npm-mcp/package.json", "apps/web/package.json"];
+const WRAPPERS = ["npm/bin/locus.js", "npm-mcp/bin/locus-mcp.js"];
+const PATH_DEPENDENCIES = [
+  ["Cargo.toml", "locus-core", "crates/locus-core"],
+  ["crates/locus-cli/Cargo.toml", "locus-mcp", "../locus-mcp"],
+];
 const SERVER_JSON = "server.json";
 
 const read = (root, rel) => readFileSync(join(root, rel), "utf8");
@@ -30,6 +35,13 @@ export function cargoVersion(root) {
   const m = read(root, "Cargo.toml").match(CARGO_VERSION);
   if (!m) throw new Error("Cargo.toml: no [workspace.package] version");
   return m[2];
+}
+
+function pathDependencyVersion(text, name, path) {
+  const line = text.split("\n").find((line) => line.startsWith(`${name} = `) && line.includes(`path = "${path}"`));
+  const version = line?.match(/\bversion\s*=\s*"([^"]+)"/)?.[1];
+  if (!version) throw new Error(`missing version for path dependency ${name} (${path})`);
+  return version;
 }
 
 // Workspace crates are the Cargo.lock packages with no `source` line.
@@ -48,7 +60,15 @@ export function carriers(root) {
   for (const b of lockBlocks(read(root, "Cargo.lock"))) {
     if (b.local) out.push([`Cargo.lock ${b.name}`, b.version]);
   }
-  for (const rel of NPM_PACKAGES) out.push([rel, JSON.parse(read(root, rel)).version]);
+  for (const [rel, name, path] of PATH_DEPENDENCIES) {
+    out.push([`${rel} path dependency ${name}`, pathDependencyVersion(read(root, rel), name, path)]);
+  }
+  for (const rel of PACKAGE_MANIFESTS) out.push([rel, JSON.parse(read(root, rel)).version]);
+  for (const rel of WRAPPERS) {
+    const version = read(root, rel).match(/^const VERSION = "([^"]+)";/m)?.[1];
+    if (!version) throw new Error(`${rel}: missing VERSION constant`);
+    out.push([`${rel} VERSION`, version]);
+  }
   const server = JSON.parse(read(root, SERVER_JSON));
   out.push([`${SERVER_JSON} version`, server.version]);
   (server.packages ?? []).forEach((p, i) => out.push([`${SERVER_JSON} packages[${i}] ${p.identifier}`, p.version]));
@@ -68,6 +88,8 @@ export function check(root, tag) {
 
 export function sync(root, version) {
   if (!SEMVER.test(version)) throw new Error(`"${version}" is not X.Y.Z`);
+  // Read and validate the known carrier formats before making any edits.
+  carriers(root);
   const edit = (rel, fn) => {
     const before = read(root, rel);
     const after = fn(before);
@@ -79,10 +101,20 @@ export function sync(root, version) {
       .map((b) => (b.local ? b.text.replace(/^(version = ")[^"]+(")/m, `$1${version}$2`) : b.text))
       .join(""),
   );
-  for (const rel of [...NPM_PACKAGES, SERVER_JSON]) {
+  for (const [rel, name, path] of PATH_DEPENDENCIES) {
+    edit(rel, (text) => text.split("\n").map((line) =>
+      line.startsWith(`${name} = `) && line.includes(`path = "${path}"`)
+        ? line.replace(/(\bversion\s*=\s*")[^"]+("|$)/, `$1${version}$2`)
+        : line,
+    ).join("\n"));
+  }
+  for (const rel of [...PACKAGE_MANIFESTS, SERVER_JSON]) {
     // Top-level and server.json packages[] versions: every `"version": "X"` at
     // the 2- or 6-space indent these files use, never a dependency range.
     edit(rel, (t) => t.replace(/^( {2}| {6})("version": ")\d+\.\d+\.\d+(")/gm, `$1$2${version}$3`));
+  }
+  for (const rel of WRAPPERS) {
+    edit(rel, (text) => text.replace(/^(const VERSION = ")[^"]+(";)/m, `$1${version}$2`));
   }
   return check(root);
 }
@@ -110,6 +142,7 @@ function main(argv) {
   try {
     if (cmd === "version") return console.log(cargoVersion(root));
     if (cmd === "check") {
+      if (rest.length && (rest.length !== 2 || rest[0] !== "--tag")) fail("usage: release-version.mjs check [--tag vX.Y.Z]");
       const i = rest.indexOf("--tag");
       const problems = check(root, i >= 0 ? rest[i + 1] : undefined);
       if (problems.length) fail(problems.map((p) => `::error::version drift: ${p}`).join("\n"));

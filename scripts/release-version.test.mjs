@@ -9,12 +9,17 @@ import { carriers, check, cargoVersion, nextVersion, sync } from "./release-vers
 
 const repo = fileURLToPath(new URL("..", import.meta.url));
 const script = fileURLToPath(new URL("./release-version.mjs", import.meta.url));
+const fixtureFiles = [
+  "Cargo.toml", "Cargo.lock", "server.json", "npm/package.json", "npm-mcp/package.json",
+  "apps/web/package.json", "npm/bin/locus.js", "npm-mcp/bin/locus-mcp.js",
+  "crates/locus-cli/Cargo.toml", "scripts/freshness/published.json",
+];
 
 // A copy of the real carriers, so the tests track the repo's actual formats.
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), "release-version-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const rel of ["Cargo.toml", "Cargo.lock", "server.json", "npm/package.json", "npm-mcp/package.json"]) {
+  for (const rel of fixtureFiles) {
     mkdirSync(join(root, rel, ".."), { recursive: true });
     cpSync(join(repo, rel), join(root, rel));
   }
@@ -25,9 +30,9 @@ test("the repository's carriers are consistent", () => {
   assert.deepEqual(check(repo), []);
 });
 
-test("every carrier kind is covered: Cargo, each workspace crate, both npm packages, server.json", () => {
+test("every source carrier kind is covered including path dependencies and wrapper constants", () => {
   const labels = carriers(repo).map(([l]) => l);
-  for (const want of ["Cargo.toml [workspace.package]", "Cargo.lock locus-cli", "Cargo.lock locus-core", "Cargo.lock locus-mcp", "npm/package.json", "npm-mcp/package.json", "server.json version", "server.json packages[0] @ashlrai/locus-mcp"]) {
+  for (const want of ["Cargo.toml [workspace.package]", "Cargo.lock locus-cli", "Cargo.lock locus-core", "Cargo.lock locus-mcp", "npm/package.json", "npm-mcp/package.json", "apps/web/package.json", "npm/bin/locus.js VERSION", "npm-mcp/bin/locus-mcp.js VERSION", "Cargo.toml path dependency locus-core", "crates/locus-cli/Cargo.toml path dependency locus-mcp", "server.json version", "server.json packages[0] @ashlrai/locus-mcp"]) {
     assert.ok(labels.includes(want), `missing carrier: ${want}`);
   }
   assert.ok(!labels.some((l) => l.startsWith("Cargo.lock") && !/locus-(cli|core|mcp)$/.test(l)), "registry crates must not be treated as carriers");
@@ -36,13 +41,46 @@ test("every carrier kind is covered: Cargo, each workspace crate, both npm packa
 test("sync moves every carrier and leaves registry crates and dependency ranges alone", (t) => {
   const root = fixture(t);
   const lockBefore = readFileSync(join(root, "Cargo.lock"), "utf8");
+  const publishedBefore = readFileSync(join(root, "scripts/freshness/published.json"), "utf8");
   assert.deepEqual(sync(root, "9.8.7"), []);
   assert.equal(cargoVersion(root), "9.8.7");
   for (const [label, v] of carriers(root)) assert.equal(v, "9.8.7", label);
   const lockAfter = readFileSync(join(root, "Cargo.lock"), "utf8");
   const changed = lockAfter.split("\n").filter((l, i) => l !== lockBefore.split("\n")[i]);
   assert.equal(changed.length, 3, "only the three workspace crate versions change");
+  assert.equal(readFileSync(join(root, "scripts/freshness/published.json"), "utf8"), publishedBefore,
+    "a source version change must not claim publication");
   assert.deepEqual(check(root), []);
+  const synced = fixtureFiles.map((rel) => readFileSync(join(root, rel), "utf8"));
+  assert.deepEqual(sync(root, "9.8.7"), []);
+  assert.deepEqual(fixtureFiles.map((rel) => readFileSync(join(root, rel), "utf8")), synced,
+    "sync is byte-for-byte idempotent");
+});
+
+test("check detects drift in web, wrapper and local dependency versions", (t) => {
+  const root = fixture(t);
+  for (const [rel, from, to, label] of [
+    ["apps/web/package.json", /("version": ")[^"]+/, '$10.0.1', "apps/web/package.json"],
+    ["npm/bin/locus.js", /const VERSION = "[^"]+/, 'const VERSION = "0.0.1', "npm/bin/locus.js VERSION"],
+    ["npm-mcp/bin/locus-mcp.js", /const VERSION = "[^"]+/, 'const VERSION = "0.0.1', "npm-mcp/bin/locus-mcp.js VERSION"],
+    ["Cargo.toml", /(locus-core = \{[^\n]*version = ")[^"]+/, '$10.0.1', "Cargo.toml path dependency locus-core"],
+    ["crates/locus-cli/Cargo.toml", /(locus-mcp = \{[^\n]*version = ")[^"]+/, '$10.0.1', "crates/locus-cli/Cargo.toml path dependency locus-mcp"],
+  ]) {
+    const file = join(root, rel);
+    const before = readFileSync(file, "utf8");
+    writeFileSync(file, before.replace(from, to));
+    assert.deepEqual(check(root), [`${label} is 0.0.1, Cargo is ${cargoVersion(root)}`]);
+    writeFileSync(file, before);
+  }
+});
+
+test("sync changes local path versions while preserving registry dependency versions", (t) => {
+  const root = fixture(t);
+  const manifest = join(root, "crates/locus-cli/Cargo.toml");
+  const dependency = '\nrelease-test-registry = { version = "4.5.6" }\n';
+  writeFileSync(manifest, readFileSync(manifest, "utf8") + dependency);
+  assert.deepEqual(sync(root, "9.8.7"), []);
+  assert.ok(readFileSync(manifest, "utf8").endsWith(dependency));
 });
 
 test("check names every drifted carrier and a wrong tag", (t) => {
@@ -88,4 +126,5 @@ test("CLI: check passes on the repo, fails closed on a wrong tag, next reads std
   const next = spawnSync("node", [script, "next"], { env, input: "bridge(RQ-A): x\n", encoding: "utf8" });
   assert.equal(next.stdout.trim(), nextVersion(v, ["bridge(RQ-A): x"]));
   assert.equal(spawnSync("node", [script, "nope"], { env }).status, 1);
+  assert.equal(spawnSync("node", [script, "check", "--tag"], { env }).status, 1);
 });

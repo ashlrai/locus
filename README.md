@@ -159,9 +159,9 @@ Credential refs in a binding are pointers, never raw tokens.
 
 ### One pin is the only account
 
-<img src="docs/assets/feature-pin.svg" alt="personal is pinned and its tools are on. acme is not this pin. An agent can ask to pin and cannot pin." width="720" />
+<img src="docs/assets/feature-pin.svg" alt="personal is pinned and its provider tools require supervision. acme is not this pin. An agent can ask to pin and cannot pin." width="720" />
 
-Unpinned sessions get control tools only. There is no fallthrough to a personal account. `locus_request_pin` asks a person to pin. It does not pin.
+Unpinned sessions get control tools only. Provider tools also require a supervised launch bound to the pin. There is no fallthrough to a personal account. `locus_request_pin` asks a person to pin. It does not pin.
 
 ### The child does not inherit the other client
 

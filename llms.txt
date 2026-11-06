@@ -143,7 +143,6 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
 - [Adapter registry release manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-trust.md)
 - [Consuming an unsigned adapter registry manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-consumer-guidance.md)
 - [Unsigned adapter registry manifest FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-manifest-faq.md)
-- [Release automation](https://github.com/ashlrai/locus/blob/main/docs/release-automation.md)
 - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
 - [Session budget caps (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/session-budget.md)
 - [Shell completions](https://github.com/ashlrai/locus/blob/main/docs/shell-completions.md)

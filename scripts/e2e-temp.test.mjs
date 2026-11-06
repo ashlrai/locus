@@ -839,8 +839,11 @@ printf '%s' "$WS_DIR" > "$2"
 });
 
 // Runs the script's real section 2d: a subshell rehearses create_workspace
-// beneath a nested temporary root whose name contains spaces, verifies the
-// workspace sits directly beneath that root, and its exit trap removes it.
+// beneath a nested temporary root whose name contains spaces (including a
+// doubled space), verifies the workspace sits directly beneath that root, and
+// its exit trap removes it while sparing a decoy at the root's first
+// word-split fragment. LOCUS_HOME is exported so the rehearsal's `init` stub
+// populates the subshell home the way the real command would.
 test('section 2d rehearses workspace creation beneath a TMPDIR containing spaces', (t) => {
   const fixture = setup(t);
   const home = join(fixture.root, 'main home');
@@ -859,7 +862,7 @@ ${createWorkspace}
 log() { :; }
 ok() { printf 'ok %s\\n' "$*"; }
 die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
-LOCUS_HOME="$1"
+export LOCUS_HOME="$1"
 WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
 ${source.slice(start, end + endMarker.length)}
 `, 'workspace-2d', home], {
@@ -870,14 +873,17 @@ ${source.slice(start, end + endMarker.length)}
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, `the 2d rehearsal must succeed: ${result.stderr}`);
   assert.match(result.stdout, /ok workspace creation succeeds beneath a TMPDIR containing spaces/);
-  const root = join(home, 'workspace temp root');
+  const root = join(home, 'workspace  ws temp root');
   const recorded = readFileSync(join(root, 'workspace-path'), 'utf8');
   assert.equal(dirname(recorded), root, 'rehearsed beneath the space-containing root');
   assert.match(recorded, /\/locus-ws\.[^/\s]+$/, 'workspace name is one unsplit component');
+  assert.ok(recorded.includes(' '), 'the recorded workspace path keeps the spaced root');
   assert.throws(() => lstatSync(recorded), { code: 'ENOENT' },
     'the rehearsal workspace must be removed on subshell exit');
   assert.deepEqual(readdirSync(root), ['workspace-path'],
     'the subshell trap must also remove its own home');
+  assert.ok(existsSync(join(home, 'workspace', 'decoy-sentinel')),
+    'the decoy at the root\'s first word-split fragment must survive cleanup');
 });
 
 // A mktemp regression that relocates the rehearsal workspace must stop the
@@ -1348,6 +1354,30 @@ printf '%s' "$SECURITY_WS" > "$2"
   assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
 });
 
+test('repeated security workspace block yields distinct directories beneath TMPDIR', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const create = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  const block = source.match(/^security_ws_live="\$SECURITY_WS"[\s\S]*?^ok "two security workspaces are distinct[^\n]*$/m)?.[0];
+  assert.ok(create && block, 'missing repeated security workspace block');
+
+  for (const tmpdir of [scratch, `${scratch}/`]) {
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+ok() { printf 'ok %s\\n' "$*"; }
+${create}
+SECURITY_WS=""
+${block}
+`], { env: { ...process.env, TMPDIR: tmpdir }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /two security workspaces are distinct/);
+    assert.deepEqual(readdirSync(scratch), ['keep'], 'block must clean up both workspaces');
+  }
+});
+
 test('graph home creation selects the custom temporary root or /tmp fallback', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp $literal; [test]');
@@ -1504,4 +1534,45 @@ printf '%s' "$WS_DIR" > "$RECORD"
   assert.equal(dirname(ws), scratch, 'every character of the TMPDIR prefix survives');
   assert.match(ws.slice(scratch.length + 1), /^locus-ws\.[A-Za-z0-9]{6}$/);
   assert.ok(lstatSync(ws).isDirectory());
+});
+
+// Exercise all five allocation helpers together with a real mktemp. The shim
+// rejects split templates before allocation and records each resulting path.
+test('all temporary directory helpers preserve a spaced parent as one argument', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'parent with  spaces');
+  const record = join(fixture.root, 'allocations');
+  mkdirSync(scratch);
+  const source = readFileSync(script, 'utf8');
+  const names = ['create_locus_home', 'create_workspace', 'create_security_home',
+    'create_security_workspace', 'create_graph_home'];
+  const functions = names.map((name) => {
+    const definition = source.match(new RegExp(`^${name}\\(\\) \\{[\\s\\S]*?^\\}`, 'm'))?.[0];
+    assert.ok(definition, `missing ${name}`);
+    return definition;
+  }).join('\n');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/bash
+set -eu
+[[ "$#" == 2 && "$1" == -d && "\${2%/*}" == "$TMPDIR" ]] || exit 71
+created="$("$REAL_MKTEMP" "$@")"
+[[ -d "$created" && "\${created%/*}" == "$TMPDIR" ]] || exit 72
+printf '%s\\n' "$created" >> "$RECORD"
+printf '%s\\n' "$created"
+`, { mode: 0o755 });
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${functions}
+${names.join('\n')}
+`], { env: { ...process.env, PATH: `${fixture.bin}:${process.env.PATH}`,
+    TMPDIR: scratch, REAL_MKTEMP: realMktemp, RECORD: record }, encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr);
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, names.length);
+  assert.equal(new Set(paths).size, names.length);
+  for (const path of paths) {
+    assert.equal(dirname(path), scratch);
+    assert.ok(lstatSync(path).isDirectory());
+  }
+  assert.deepEqual(paths.map((path) => path.slice(scratch.length + 1).replace(/\.[^.]+$/, '')),
+    ['locus-e2e', 'locus-ws', 'locus-security-e2e', 'locus-security-ws', 'locus-graph-imp']);
 });
