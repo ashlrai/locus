@@ -200,7 +200,10 @@ fn a_different_add_still_requires_force() {
     // each must refuse without --force and leave everything untouched.
     for change in [
         &["--org", "other-org"][..],
+        &["--repos", "acme/other-repo"][..],
+        &["--project-ref", "other-project"][..],
         &["--read-only"][..],
+        &["--default-ttl", "1h"][..],
         &["--description", "operator change"][..],
     ] {
         let out = f.add("binding", change, true);
@@ -215,6 +218,9 @@ fn a_different_add_still_requires_force() {
     assert!(fs::read_to_string(f.binding())
         .unwrap()
         .contains("other-org"));
+    let binding =
+        locus_core::Binding::parse_toml(&fs::read_to_string(f.binding()).unwrap()).unwrap();
+    assert_eq!(binding.providers[0].scope.orgs, ["other-org"]);
     assert_ne!(
         snapshot(&f.audit()).0,
         audit_before.0,
