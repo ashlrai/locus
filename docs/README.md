@@ -20,7 +20,11 @@ For archive requirements and unresolved release decisions, see [installer archiv
 For the one-command goal, its prerequisite exclusions, and unresolved platform and installation-location decisions, see [archive installer requirements](archive-installer-requirements.md).
 For testable archive installation outcomes, see [installer acceptance cases](installer-acceptance-cases.md).
 For release acceptance and delivery assumptions, see [archive installer acceptance](archive-installer-acceptance.md).
+For the evidence to record when accepting an archive installer candidate, see [archive installer acceptance evidence](installer-archive-acceptance.md).
+For the installer's prerequisites and the questions the issue leaves open, see [installer prerequisites](installer-prerequisites.md).
+For open OS and architecture decisions, see the [installer platform questions](installer-platform-questions.md).
 For open error-contract decisions, see [installer error questions](installer-error-questions.md).
+For the temporary directories and files created by the dogfood script and the Hub smoke helper, and what cleanup does and does not cover, see [dogfood temporary resources](dogfood-temporary-resources.md).
 For troubleshooting, see [shell installer failure cases](shell-installer-failure-cases.md).
 
 ## Previewing changes with `--dry-run`
