@@ -12,6 +12,13 @@ const script = join(root, 'scripts/hub-smoke.sh');
 const doc = readFileSync(join(root, 'docs/hub-smoke-temp-failures.md'), 'utf8');
 const source = readFileSync(script, 'utf8');
 const allocations = [...source.matchAll(/if ! (SMOKE_\w+)="\$\(mktemp( -d)? "\$\{TMPDIR:-\/tmp\}\/([^"]+)"\)"; then\n  echo "([^"]+)" >&2\n  exit 1\nfi/g)];
+// Keep the failure cases independent of source parsing: removing an allocation
+// or changing its error handling must not silently remove its regression test.
+const failureCases = [
+  ['SMOKE_HOME', 'locus-hub-smoke.XXXXXX', 'error: hub-smoke could not create temporary home'],
+  ['SMOKE_PROJ', 'locus-hub-proj.XXXXXX', 'error: hub-smoke could not create temporary project directory'],
+  ['SMOKE_ERR', 'locus-hub-smoke-err.XXXXXX', 'error: hub-smoke could not create temporary error file'],
+];
 
 test('failure guide tracks allocation order, diagnostics and cleanup', () => {
   const rows = doc.split('\n').filter((line) => /^\| `SMOKE_/.test(line));
@@ -32,34 +39,66 @@ test('failure guide tracks allocation order, diagnostics and cleanup', () => {
   }
 });
 
-for (const [index, [, variable, , template, diagnostic]] of allocations.entries()) {
+for (const [index, [variable, template, diagnostic]] of failureCases.entries()) {
   test(`${variable} allocation failure stops later allocations and cleans earlier paths`, (t) => {
     const fixture = mkdtempSync(join(tmpdir(), 'hub-smoke-failures-'));
     t.after(() => rmSync(fixture, { recursive: true, force: true }));
     const bin = join(fixture, 'bin');
     const scratch = join(fixture, 'scratch with spaces');
     const record = join(fixture, 'attempts');
+    const created = join(fixture, 'created');
+    const marker = join(fixture, 'smoke-command-ran');
+    const hook = join(fixture, 'guard.sh');
     mkdirSync(bin);
     mkdirSync(scratch);
     writeFileSync(join(scratch, 'keep'), 'sentinel');
+    writeFileSync(join(scratch, 'locus-hub-smoke.unrelated'), 'matching prefix');
+    mkdirSync(join(scratch, 'unrelated'));
+    writeFileSync(join(scratch, 'unrelated', 'nested'), 'untouched');
+    writeFileSync(hook, `locus() { : > "$SMOKE_MARKER"; return 1; }
+cargo() { : > "$SMOKE_MARKER"; return 1; }
+jq() { : > "$SMOKE_MARKER"; return 1; }
+`);
     // Resolve the real utility before intercepting it, without exposing environment values.
     const lookup = spawnSync('which', ['mktemp'], { encoding: 'utf8' });
     assert.equal(lookup.status, 0);
-    writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash\nprintf '%s\\n' "\${!#}" >> "$ATTEMPTS"\nif [[ "\${!#}" == */"$FAIL_TEMPLATE" ]]; then exit 1; fi\nexec "$REAL_MKTEMP" "$@"\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
+printf '%s\\n' "\${!#}" >> "$ATTEMPTS"
+if [[ "\${!#}" == */"$FAIL_TEMPLATE" ]]; then exit 1; fi
+path="$("$REAL_MKTEMP" "$@")" || exit 1
+[[ "$1" == -d && -d "$path" ]] || exit 1
+mkdir "$path/nested"
+printf 'payload\n' > "$path/nested/file"
+printf '%s\\n' "$path" >> "$CREATED"
+printf '%s\\n' "$path"
+`, { mode: 0o755 });
     const result = spawnSync('bash', [script], {
-      env: { ...process.env, BASH_ENV: '', TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
-        ATTEMPTS: record, FAIL_TEMPLATE: template, REAL_MKTEMP: lookup.stdout.trim() },
+      env: { ...process.env, BASH_ENV: hook, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
+        ATTEMPTS: record, CREATED: created, FAIL_TEMPLATE: template, REAL_MKTEMP: lookup.stdout.trim(),
+        SMOKE_MARKER: marker },
       encoding: 'utf8',
+      timeout: 15_000,
     });
+    assert.equal(result.error, undefined);
     assert.equal(result.status, 1);
     assert.equal(result.signal, null);
     assert.equal(result.stdout, '');
     assert.equal(result.stderr.trim(), diagnostic);
     const attempts = readFileSync(record, 'utf8').trim().split('\n');
     assert.deepEqual(attempts.map((path) => path.slice(scratch.length + 1)),
-      allocations.slice(0, index + 1).map((allocation) => allocation[3]));
-    assert.deepEqual(readdirSync(scratch), ['keep']);
+      failureCases.slice(0, index + 1).map((allocation) => allocation[1]));
+    assert.equal(existsSync(marker), false, 'smoke commands must not run');
+    const paths = existsSync(created) ? readFileSync(created, 'utf8').trim().split('\n') : [];
+    assert.equal(paths.length, index, 'every prior allocation must have created a directory');
+    for (const [prior, path] of paths.entries()) {
+      assert.equal(dirname(path), scratch);
+      assert.ok(path.slice(scratch.length + 1).startsWith(failureCases[prior][1].replace('XXXXXX', '')));
+      assert.equal(existsSync(path), false, `created directory ${prior} must be removed`);
+    }
+    assert.deepEqual(readdirSync(scratch).sort(), ['keep', 'locus-hub-smoke.unrelated', 'unrelated']);
     assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+    assert.equal(readFileSync(join(scratch, 'locus-hub-smoke.unrelated'), 'utf8'), 'matching prefix');
+    assert.equal(readFileSync(join(scratch, 'unrelated', 'nested'), 'utf8'), 'untouched');
     assert.ok(existsSync(scratch));
   });
 }

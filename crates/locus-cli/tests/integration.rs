@@ -36,6 +36,8 @@ mod dry_run_docs_coverage;
 mod dry_run_no_side_effects;
 #[path = "dry_run_review_matrix.rs"]
 mod dry_run_review_matrix;
+#[path = "dry_run_snapshot_scope.rs"]
+mod dry_run_snapshot_scope;
 #[path = "exec_exit_codes.rs"]
 mod exec_exit_codes;
 #[path = "exec_expect.rs"]
@@ -54,6 +56,8 @@ mod fleet_feed_q8;
 mod fleet_preflight_q8;
 #[path = "handshake_conformance.rs"]
 mod handshake_conformance;
+#[path = "hub_smoke_tmpdir_spaces.rs"]
+mod hub_smoke_tmpdir_spaces;
 #[path = "issue171_matrix.rs"]
 mod issue171_matrix;
 #[path = "json_errors.rs"]
@@ -82,6 +86,8 @@ mod readme_commands;
 mod readme_quickstart;
 #[path = "registry_manifest_ci_role.rs"]
 mod registry_manifest_ci_role;
+#[path = "registry_manifest_consumer.rs"]
+mod registry_manifest_consumer;
 #[path = "registry_manifest_consumer_checklist.rs"]
 mod registry_manifest_consumer_checklist;
 #[path = "registry_manifest_current_state.rs"]
@@ -98,6 +104,8 @@ mod registry_trust_actors;
 mod registry_trust_faq;
 #[path = "registry_unsigned_consumer_guidance.rs"]
 mod registry_unsigned_consumer_guidance;
+#[path = "registry_unsigned_manifest_faq.rs"]
+mod registry_unsigned_manifest_faq;
 #[path = "regress_closed_issues.rs"]
 mod regress_closed_issues;
 #[path = "sample_exec_quiet.rs"]

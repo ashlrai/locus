@@ -16,7 +16,7 @@ When spawning:
 
 1. Ambient identity env is scrubbed (`AWS_PROFILE`, `GH_TOKEN`, …).
 2. Only the pinned binding’s `LOCUS_*` surface is injected.
-3. Optional `resolve_secrets` pulls `phm:` / `env:` into the child only.
+3. Optional `resolve_secrets` injects supported `env:` credentials into the child only. `phm:` resolution fails closed; see [credential compatibility](credential-compatibility.md).
 4. Private `GH_CONFIG_DIR` / AWS config paths under the session worker home.
 5. Optional **sandbox** (below) when `LOCUS_WORKER_SANDBOX=1` or `upstream.sandbox = true`.
 
@@ -112,7 +112,7 @@ the addressed provider's scoped credential.
 [[binding.providers]]
 provider = "github"
 account = "acme"
-credential_ref = "phm:GH_TOKEN_ACME"
+credential_ref = "env:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"] }
 # Sandbox-compatible npx recipe — expands to command/args + hardened defaults:
 upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }

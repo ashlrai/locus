@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="280" viewBox="0 0 1200 280" role="img" aria-labelledby="howTitle howDesc">
+  <title id="howTitle">How Locus works</title>
+  <desc id="howDesc">A person enters a binding. The session is sealed to that binding. MCP tools and locus exec then see only that binding.</desc>
+  <rect width="1200" height="280" fill="#0b0b14"/>
+  <g font-family="ui-sans-serif, system-ui, sans-serif">
+    <rect x="24" y="36" width="320" height="208" rx="16" fill="#14141c" stroke="#2a2a36"/>
+    <text x="48" y="78" fill="#71717a" font-size="14" font-family="ui-monospace, Menlo, Consolas, monospace">01</text>
+    <text x="48" y="118" fill="#f4f4f5" font-size="22" font-weight="650">A person pins</text>
+    <text x="48" y="156" fill="#a1a1aa" font-size="16">locus enter acme</text>
+    <text x="48" y="186" fill="#a1a1aa" font-size="16">Agents cannot pin.</text>
+    <text x="48" y="210" fill="#a1a1aa" font-size="16">They can only ask.</text>
+
+    <rect x="440" y="36" width="320" height="208" rx="16" fill="#14141c" stroke="#2a2a36"/>
+    <text x="464" y="78" fill="#71717a" font-size="14" font-family="ui-monospace, Menlo, Consolas, monospace">02</text>
+    <text x="464" y="118" fill="#f4f4f5" font-size="22" font-weight="650">The session is sealed</text>
+    <text x="464" y="156" fill="#a1a1aa" font-size="16">HMAC seal, one binding.</text>
+    <text x="464" y="186" fill="#a1a1aa" font-size="16">A live broker checks it.</text>
+    <text x="464" y="210" fill="#a1a1aa" font-size="16">Wrong seal, deny.</text>
+
+    <rect x="856" y="36" width="320" height="208" rx="16" fill="#14141c" stroke="#2a2a36"/>
+    <text x="880" y="78" fill="#71717a" font-size="14" font-family="ui-monospace, Menlo, Consolas, monospace">03</text>
+    <text x="880" y="118" fill="#f4f4f5" font-size="22" font-weight="650">Tools follow the pin</text>
+    <text x="880" y="156" fill="#a1a1aa" font-size="16">MCP catalog is this pin.</text>
+    <text x="880" y="186" fill="#a1a1aa" font-size="16">locus exec scrubs the rest.</text>
+    <text x="880" y="210" fill="#a1a1aa" font-size="16">Frozen scope stays frozen.</text>
+  </g>
+  <path d="M348 140 H432" stroke="#3f3f46" stroke-width="2"/>
+  <path d="M764 140 H848" stroke="#3f3f46" stroke-width="2"/>
+</svg>

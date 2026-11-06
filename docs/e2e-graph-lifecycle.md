@@ -13,6 +13,8 @@ script-owned temporary directory, not a setting for choosing a Locus home.
    `GRAPH_HOME` a new directory from `mktemp -d`, using the template
    `locus-graph-imp.XXXXXX` directly under a nonempty `TMPDIR`, or `/tmp` if
    `TMPDIR` is unset or empty. A supplied `TMPDIR` must exist and be writable.
+   Under a supplied `TMPDIR` the script then verifies the new directory is
+   directly beneath it and named `locus-graph-imp.*`, and stops otherwise.
    No graph home is created when the graph section is skipped or either
    same-home import succeeds.
 3. **Use.** The fallback runs `locus init` and then `locus graph import` with
@@ -20,7 +22,8 @@ script-owned temporary directory, not a setting for choosing a Locus home.
    export from the main home and receives the same graph passphrase. Either
    command failing stops the suite rather than skipping the fallback.
 4. **Cleanup.** After a successful fallback import, `rm -rf` immediately
-   removes the graph home. The variable remains set, so the suite's `EXIT`
+   removes the graph home, and the suite checks that no directory or symlink
+   remains before proceeding. The variable remains set, so the suite's `EXIT`
    trap attempts to remove it again; the trap also removes it if initialization
    or import fails after creation. The main home and export are removed by
    the same trap. The trap runs on normal shell exit, including ordinary
@@ -29,13 +32,21 @@ script-owned temporary directory, not a setting for choosing a Locus home.
    `locus-graph-imp.*` directory before removing it, and preserve its parent
    and unrelated files.
 
-The suite also checks creation and exit cleanup unconditionally in section 2d,
-using a separate temporary parent and both successful and failing exits. It
-checks that unrelated files survive. The focused graph test runs the actual
-section with simulated import outcomes and verifies that the lifecycle probe
-detects a missing cleanup:
-`node --test scripts/e2e-graph-isolation.test.mjs`. The temporary resource
-test, `node --test scripts/e2e-temp.test.mjs`, checks that an inherited
-`GRAPH_HOME` survives early exit. The graph fallback tests in
+Section 2i rehearses the same create-use-cleanup path earlier in the suite: a
+subshell selects a temporary root inside the main home whose name contains
+spaces, runs `create_graph_home` and `init` with `LOCUS_HOME` set to the new
+home there, and leaves removal to its own `EXIT` trap. The rehearsal runs the
+subshell twice — once exiting 0 and once exiting 73 after the populated home
+is recorded — and the suite verifies each home is removed, the intended exit
+status propagates, and the supplied root and an unrelated sentinel survive.
+
+The focused graph test runs the actual section with simulated import outcomes:
+`node --test scripts/e2e-graph-isolation.test.mjs`. The temporary-root
+selection checks run `create_graph_home` under the real exit trap, and the
+same file runs the real section 2i rehearsal beneath a space-containing
+`TMPDIR`: `node --test scripts/e2e-graph-home-selection.test.mjs`. The
+temporary resource test, `node --test scripts/e2e-temp.test.mjs`, checks that
+an inherited `GRAPH_HOME` survives early exit. The graph fallback tests in
 [`scripts/e2e.test.mjs`](../scripts/e2e.test.mjs) exercise the real release CLI
-and cleanup on success and failure.
+and cleanup on success and failure; one intercepts `rm` to confirm the
+populated import home is removed during the run, not only by the exit trap.
