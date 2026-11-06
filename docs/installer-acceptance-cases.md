@@ -53,7 +53,7 @@ installations, to inject faults.
 | Supply an empty, malformed, wrong-name, duplicate or mismatched sidecar. | Verification fails before tar reads the archive; no replacement. | Offline fixture. |
 | Supply a corrupt archive or omit, empty, duplicate, link, or replace a required binary member with a directory; simulate extraction failure. | Installer rejects the archive or extraction; neither destination is replaced. | Offline fixture. |
 | Make either destination a symlink or directory, or make the install directory a file. | Installer rejects it without replacing the other binary or modifying the symlink target. | Offline fixture checks the second destination; verify both names on a native host. |
-| Cause an unwritable destination or a staging failure. | Nonzero status, no success message, and no final replacement; cleanup is attempted. | Permission-dependent behavior requires a controlled native check. |
+| Cause an unwritable destination or a staging failure. | Nonzero status, no success message, and no final replacement; cleanup is attempted. | Offline fixture covers the unwritable destination. |
 | Inject failure on the second final rename. | Nonzero status and cleanup; the first binary may already be replaced and the second remains old. Fix the cause and rerun, then check both versions. | Offline fixture. The two renames are not an atomic pair and rollback is not guaranteed. |
 
 A matching SHA-256 sidecar checks consistency, not publisher authenticity if

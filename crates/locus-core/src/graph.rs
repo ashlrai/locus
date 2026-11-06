@@ -438,6 +438,29 @@ mod tests {
     }
 
     #[test]
+    fn empty_graph_builds_and_roundtrips() {
+        let env = GraphEnvelope::build(vec![], vec![], GraphMeta::default()).unwrap();
+        assert_eq!(env.version, GRAPH_VERSION);
+        assert!(env.bindings.is_empty());
+        assert!(env.workspaces.is_empty());
+
+        let bytes = env.to_json_bytes().unwrap();
+        let env2 = GraphEnvelope::from_json_bytes(&bytes).unwrap();
+        assert!(env2.bindings.is_empty());
+        assert!(env2.workspaces.is_empty());
+        assert_eq!(env2.version, GRAPH_VERSION);
+
+        // Querying the empty graph by alias or workspace name finds nothing.
+        assert!(!env2.bindings.iter().any(|b| b.alias == "acme"));
+        assert!(!env2.workspaces.iter().any(|w| w.name == "acme"));
+
+        // Survives the encrypted file path too.
+        let file = encrypt_graph(&bytes, "test").unwrap();
+        let env3 = GraphEnvelope::from_json_bytes(&decrypt_graph(&file, "test").unwrap()).unwrap();
+        assert!(env3.bindings.is_empty() && env3.workspaces.is_empty());
+    }
+
+    #[test]
     fn empty_passphrase_rejected() {
         assert!(encrypt_graph(b"x", "").is_err());
         assert!(decrypt_graph(MAGIC, "").is_err());

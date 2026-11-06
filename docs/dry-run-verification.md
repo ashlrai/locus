@@ -104,18 +104,22 @@ assert not home.exists()
 PY
 
 # Only fixture setup writes state. Capture fresh baselines for each preview.
-locus_test init --with-samples > /dev/null
-# init's authority broker is supervised only by that one invocation: once it
-# returns, the broker publishes then retires its endpoint asynchronously
-# (`runtime/authority.json` -> `authority-retired.json`, ~250ms supervisor
-# poll). Wait for the retirement record before baselining so broker lifecycle
-# cannot race a preview window — authority files themselves stay fully in
-# scope. If a still-supervised broker stays up, the baseline simply includes it.
+# Keep a short-lived supervisor alive until init returns. Without the trailing
+# status/exit, Bash can exec the final command in locus_test's subshell, making
+# this script the broker's supervisor and keeping it alive through cleanup.
+(locus_test init --with-samples > /dev/null; status=$?; exit "$status")
+# Wait for retirement before baselining so broker lifecycle cannot race a
+# preview window. Authority files themselves stay fully in scope.
 for _ in $(seq 1 80); do
   [ -e "$scratch/state/locus/runtime/authority-retired.json" ] &&
     [ ! -e "$scratch/state/locus/runtime/authority.json" ] && break
   sleep 0.25
 done
+if [ ! -e "$scratch/state/locus/runtime/authority-retired.json" ] ||
+   [ -e "$scratch/state/locus/runtime/authority.json" ]; then
+  echo 'FAIL: fixture authority broker did not retire' >&2
+  exit 1
+fi
 for scenario in workspace remove pin missing; do
   snapshot "$scratch/before.json"
   case "$scenario" in
