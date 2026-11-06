@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-06
+
+### Added
+
+- Export events as SIEM NDJSON with the `locus.siem.v1` schema and redacted fields.
+- Expanded coverage for dry runs, isolated temporary homes, installer failures, and registry manifest guidance.
+
 ### Continuous integration
 
 - **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
