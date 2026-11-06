@@ -6,6 +6,9 @@ use crate::approval::{
 };
 use crate::authority_anchor::{self, ValidationMode};
 use crate::autopin::{self, AutoPinTarget};
+#[cfg(test)]
+use crate::autopin_write::write_default_binding_with_sync;
+use crate::autopin_write::{read_locus_toml_nofollow, write_default_binding};
 use crate::binding::{validate_name_component, Binding, BindingSummary, ProviderBinding};
 use crate::config::{self, LocusConfig};
 use crate::credential::{credential_metadata, CredentialMetadata};
@@ -1345,7 +1348,7 @@ impl Store {
     /// symlink pointing outside the store must never be followed into a
     /// recursive delete). Removal failures are swallowed: cleanup is
     /// best-effort and must never block a teardown.
-    fn remove_worker_home_if_safe(&self, worker_home: &str) {
+    pub(crate) fn remove_worker_home_if_safe(&self, worker_home: &str) {
         let wh = PathBuf::from(worker_home);
         if !wh.exists() {
             return;
@@ -3045,30 +3048,31 @@ impl Store {
     // ── Audit ─────────────────────────────────────────────────────────────
 
     pub fn audit(&self, op: &str, binding: &str, detail: Option<serde_json::Value>) -> Result<()> {
-        use std::io::{Read, Seek, SeekFrom, Write};
-        let event = serde_json::json!({
-            "ts": chrono::Utc::now().to_rfc3339(),
-            "op": op,
-            "binding": binding,
-            "detail": detail.map(sanitize_audit_value),
-        });
-        let mut f = fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(self.audit_path())?;
-        f.lock()?;
-        let len = f.metadata()?.len();
-        if len > 0 {
-            f.seek(SeekFrom::Start(len - 1))?;
-            let mut tail = [0u8; 1];
-            f.read_exact(&mut tail)?;
-            if tail[0] != b'\n' {
-                f.write_all(b"\n")?;
-            }
+        self.audit_line_direct(&audit_event_line(op, binding, detail, None))
+    }
+
+    /// The same audit record appended through the live authority broker: the
+    /// broker writes the line, acknowledges it, then fsyncs the file on its
+    /// own thread — the fsync never lands on this process's exit path. Any
+    /// broker-side failure falls back to a direct append + fsync, so the
+    /// record and its durability are identical either way.
+    pub fn audit_via_broker(
+        &self,
+        op: &str,
+        binding: &str,
+        detail: Option<serde_json::Value>,
+    ) -> Result<()> {
+        if authority_anchor::audit_event(&self.home, op, binding, detail.clone()).is_ok() {
+            return Ok(());
         }
-        writeln!(f, "{event}")?;
-        f.sync_all()?;
+        self.audit_line_direct(&audit_event_line(op, binding, detail, None))
+    }
+
+    /// Direct append + fsync (the pre-broker path; also the broker's own
+    /// fallback when no broker answers).
+    fn audit_line_direct(&self, line: &str) -> Result<()> {
+        let file = append_audit_line(&self.home, line)?;
+        file.sync_all()?;
         Ok(())
     }
 
@@ -3446,6 +3450,60 @@ impl Store {
     pub fn workspace_for(&self, cwd: &Path) -> Result<Option<(PathBuf, WorkspaceConfig)>> {
         find_workspace(cwd)
     }
+}
+
+/// One finished audit event as a JSON line (no trailing newline): timestamp
+/// plus the sanitized op/binding/detail fields.
+/// Build one audit record. `source` marks a record the authority broker wrote
+/// on behalf of a non-control (executor) caller; direct and control writes
+/// carry no marker.
+pub(crate) fn audit_event_line(
+    op: &str,
+    binding: &str,
+    detail: Option<serde_json::Value>,
+    source: Option<&str>,
+) -> String {
+    let mut record = serde_json::json!({
+        "ts": chrono::Utc::now().to_rfc3339(),
+        "op": op,
+        "binding": binding,
+        "detail": detail.map(sanitize_audit_value),
+    });
+    if let Some(source) = source {
+        record["source"] = source.into();
+    }
+    record.to_string()
+}
+
+/// Append one audit line to `audit/events.jsonl` under `home`: create the
+/// file if needed, flock it, terminate a partial trailing line, then write.
+/// Returns the still-locked open file so the caller chooses when to fsync —
+/// `Store::audit` fsyncs inline, while the authority broker fsyncs after it
+/// has answered the append request.
+pub(crate) fn append_audit_line(home: &Path, line: &str) -> Result<fs::File> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let path = audit_events_path(home);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(&path)?;
+    f.lock()?;
+    let len = f.metadata()?.len();
+    if len > 0 {
+        f.seek(SeekFrom::Start(len - 1))?;
+        let mut tail = [0u8; 1];
+        f.read_exact(&mut tail)?;
+        if tail[0] != b'\n' {
+            f.write_all(b"\n")?;
+        }
+    }
+    f.write_all(line.as_bytes())?;
+    f.write_all(b"\n")?;
+    Ok(f)
 }
 
 fn sanitize_audit_value(value: serde_json::Value) -> serde_json::Value {
@@ -4065,124 +4123,6 @@ fn git_toplevel(cwd: &Path) -> Result<Option<PathBuf>> {
             .map_err(|_| LocusError::msg("git returned a non-UTF-8 toplevel"))?,
     );
     Ok(Some(path))
-}
-
-/// Read an existing `.locus.toml` through one `O_NOFOLLOW` fd, checked with
-/// `fstat` to be a regular file, so a symlink swapped in can never be read.
-/// `Ok(None)` when absent.
-fn read_locus_toml_nofollow(file: &Path) -> Result<Option<(String, fs::Permissions)>> {
-    use std::io::Read;
-    let mut o = fs::OpenOptions::new();
-    o.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        o.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-    }
-    let mut f = match o.open(file) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        #[cfg(unix)]
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
-            return Err(LocusError::msg(format!(
-                "{} is a symlink; refusing to write through it",
-                file.display()
-            )))
-        }
-        Err(e) => return Err(e.into()),
-    };
-    let metadata = f.metadata()?;
-    if !metadata.is_file() {
-        return Err(LocusError::msg(format!(
-            "{} is not a regular file; refusing to write it",
-            file.display()
-        )));
-    }
-    let mut text = String::new();
-    f.read_to_string(&mut text)?;
-    Ok(Some((text, metadata.permissions())))
-}
-
-/// Atomically set `default_binding` in a `.locus.toml`, keeping other keys.
-fn write_default_binding(file: &Path, binding: &Binding) -> Result<()> {
-    write_default_binding_with_sync(file, binding, |dir| {
-        #[cfg(unix)]
-        fs::File::open(dir)?.sync_all()?;
-        #[cfg(not(unix))]
-        let _ = dir;
-        Ok(())
-    })
-}
-
-fn write_default_binding_with_sync(
-    file: &Path,
-    binding: &Binding,
-    sync_parent: impl FnOnce(&Path) -> std::io::Result<()>,
-) -> Result<()> {
-    use std::io::Write;
-    let existing = read_locus_toml_nofollow(file)?;
-    // Recheck the policy from the exact read used to build the update: a
-    // policy changed since planning must not allow a blocked winner through.
-    if let Some((text, _)) = &existing {
-        let cfg = WorkspaceConfig::parse(text)?;
-        if !cfg.allows(&binding.alias) && !cfg.allows(&binding.id) {
-            return Err(LocusError::binding_not_allowed(
-                &binding.alias,
-                file,
-                &cfg.allowed_bindings,
-            ));
-        }
-    }
-    let mut table = match &existing {
-        Some((text, _)) => toml::from_str::<toml::Table>(text)
-            .map_err(|e| LocusError::msg(format!("{}: {e}", file.display())))?,
-        None => {
-            let mut t = toml::Table::new();
-            t.insert("version".into(), toml::Value::Integer(1));
-            t
-        }
-    };
-    table.insert(
-        "default_binding".into(),
-        toml::Value::String(binding.alias.clone()),
-    );
-    let text = toml::to_string_pretty(&table)
-        .map_err(|e| LocusError::msg(format!("serialize .locus.toml: {e}")))?;
-    let dir = file
-        .parent()
-        .ok_or_else(|| LocusError::msg("workspace file has no parent"))?;
-    let mut nonce = [0u8; 8];
-    rand::thread_rng().fill_bytes(&mut nonce);
-    let tmp = dir.join(format!(".locus.toml.{}.tmp", hex::encode(nonce)));
-    let mut o = fs::OpenOptions::new();
-    o.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::fs::PermissionsExt;
-        let mode = existing
-            .as_ref()
-            .map(|(_, permissions)| permissions.mode() & 0o777)
-            .unwrap_or(0o644);
-        o.mode(mode).custom_flags(libc::O_NOFOLLOW);
-    }
-    let res = (|| -> std::io::Result<()> {
-        let mut f = o.open(&tmp)?;
-        f.write_all(text.as_bytes())?;
-        if let Some((_, permissions)) = existing {
-            // fchmod restores bits removed by umask using the same fd whose
-            // contents are synced below; never chmod through the target path.
-            f.set_permissions(permissions)?;
-        }
-        f.sync_all()?;
-        fs::rename(&tmp, file)?;
-        // File fsync alone does not make its new directory entry durable.
-        sync_parent(dir)
-    })();
-    if res.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    res.map_err(Into::into)
 }
 
 /// `audit/events.jsonl` under `home` — free function so read-only observers
@@ -4892,6 +4832,25 @@ credential_ref = "ghp_UNSAFE/CANARY"
             assert!(!audit.contains(canary));
         }
         assert!(audit.contains("<redacted>"));
+    }
+
+    #[test]
+    fn audit_via_broker_falls_back_to_direct_write_without_a_broker() {
+        // No broker owns this home: the append must land identically via the
+        // direct path, and later events must still append after it.
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .audit_via_broker("probe", "fallback", Some(serde_json::json!({"exit": 0})))
+            .unwrap();
+        store.audit("probe2", "direct", None).unwrap();
+        let events = store.read_audit_events().unwrap();
+        let ops: Vec<_> = events.iter().map(|event| event.op.as_str()).collect();
+        assert!(ops.contains(&"probe"), "{ops:?}");
+        assert!(ops.contains(&"probe2"), "{ops:?}");
+        let event = events.iter().find(|event| event.op == "probe").unwrap();
+        assert_eq!(event.binding, "fallback");
+        assert_eq!(event.detail.as_ref().unwrap()["exit"], 0);
     }
 
     #[cfg(unix)]

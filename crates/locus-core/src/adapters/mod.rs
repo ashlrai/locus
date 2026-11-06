@@ -15,6 +15,9 @@ mod stripe;
 mod supabase;
 mod vercel;
 
+#[cfg(test)]
+mod model_api_tests;
+
 use crate::binding::{Binding, ProviderBinding};
 use crate::error::{LocusError, Result};
 use crate::policy::{evaluate, Decision, PolicyVerdict};

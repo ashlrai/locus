@@ -65,6 +65,9 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Installer target selection
+        run: python3 -m unittest discover -s scripts/tests -p 'test_installer_target_selection.py'
+
   # Runs beside fast so Node and Ruby setup stay off the Clippy critical path.
   wrappers:
     name: wrappers · crypto policy
@@ -94,7 +97,16 @@ jobs:
           node --check npm-mcp/install.js
           node --check npm-mcp/bin/locus-mcp.js
           node --test npm/test
+          node --test scripts/release-version.test.mjs scripts/ci/release-workflow.test.mjs
+          node scripts/release-version.mjs check
+          # Keep generated agent indexes aligned with the current source docs.
+          node apps/web/discoverability.mjs --check
+          # Exercise the dependency-free public-site contract in the required gate.
+          node --test apps/web
+          node --test scripts/install-extract.test.mjs
           node --test scripts/check-crypto.test.mjs
+          node --test scripts/install-checksum.test.mjs
+          node --test scripts/install-download.test.mjs
           node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
 
@@ -194,7 +206,10 @@ jobs:
           node --check npm-mcp/install.js
           node --check npm-mcp/bin/locus-mcp.js
           node --test npm/test
+          node --test scripts/install-extract.test.mjs
           node --test scripts/check-crypto.test.mjs
+          node --test scripts/install-checksum.test.mjs
+          node --test scripts/install-download.test.mjs
           node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
 
@@ -212,6 +227,19 @@ jobs:
 
       - name: Release build
         run: cargo build --workspace --release
+
+      # The release guide requires this shell suite in addition to Rust tests.
+      # It uses disposable Locus homes, synthetic fixtures and loopback servers.
+      # Its summary reports optional feature skips; green is not zero-skips proof.
+      - name: Release end-to-end gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for tool in bash cargo python3 curl git jq; do
+            command -v "$tool" >/dev/null || { echo "missing e2e prerequisite: $tool" >&2; exit 1; }
+          done
+          node --test scripts/ci/e2e-release-gate.test.mjs
+          bash scripts/e2e.sh
 
       # npm wrappers at the Cargo version and packable; release locus-mcp keeps
       # the MCP surface Phantom's companion smoke drives. About 1s.

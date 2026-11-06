@@ -26,17 +26,6 @@ if ! command -v node >/dev/null 2>&1; then
   exit 1
 fi
 
-# Keep the documented prerequisites and verification commands covered by this suite.
-node --test "$ROOT/integrations/phantom/readme.test.mjs"
-
-if ! locus agent report --help >/dev/null 2>&1; then
-  echo "building locus with agent report…"
-  (cd "$ROOT" && cargo build -q -p locus-cli)
-fi
-if [[ ! -x "${ROOT}/target/debug/locus" ]]; then
-  (cd "$ROOT" && cargo build -q -p locus-cli)
-fi
-
 SMOKE_HOME=""
 SMOKE_PROJ=""
 MT_SRV_PID=""
@@ -47,8 +36,32 @@ cleanup() {
 }
 trap cleanup EXIT
 
-SMOKE_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int.XXXXXX")"
-SMOKE_PROJ="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-int-proj.XXXXXX")"
+# The script cd's into the smoke project, so a relative TMPDIR would make the
+# EXIT trap look for the temporary directories from the wrong place.
+if [[ -n "${TMPDIR:-}" && "$TMPDIR" != /* ]]; then
+  TMPDIR="$(cd -- "$TMPDIR" && pwd)"
+  export TMPDIR
+fi
+
+# make_smoke_dir NAME — create a unique directory under ${TMPDIR:-/tmp}.
+make_smoke_dir() {
+  mktemp -d "${TMPDIR:-/tmp}/$1.XXXXXX"
+}
+
+SMOKE_HOME="$(make_smoke_dir locus-hub-int)"
+SMOKE_PROJ="$(make_smoke_dir locus-hub-int-proj)"
+
+# Keep the documented prerequisites and verification commands covered by this suite.
+node --test "$ROOT/integrations/phantom/readme.test.mjs"
+node --experimental-strip-types --test "$ROOT/integrations/phantom/mcp-config.test.mjs" "$ROOT/integrations/phantom/mcp-atomic-write.test.mjs" "$ROOT/integrations/phantom/mcp-preflight.test.mjs"
+
+if ! locus agent report --help >/dev/null 2>&1; then
+  echo "building locus with agent report…"
+  (cd "$ROOT" && cargo build -q -p locus-cli)
+fi
+if [[ ! -x "${ROOT}/target/debug/locus" ]]; then
+  (cd "$ROOT" && cargo build -q -p locus-cli)
+fi
 
 export LOCUS_HOME="$SMOKE_HOME"
 unset LOCUS_SESSION_ID || true
@@ -866,10 +879,6 @@ for (const k of ["allowDispatch", "blockers", "report"]) {
 }
 console.log("ok    live: hub-gate shape {allowDispatch,blockers,report}");
 NODE
-live_ec=$?
-if [[ "$live_ec" -ne 0 ]]; then
-  fail=1
-fi
 
 # ---------------------------------------------------------------------------
 # 5. registerLocusInMcpConfig via node fs (mirrors pure merge + write)
@@ -1290,6 +1299,17 @@ fi
 #    Regression: detection must hold under paths containing spaces; a walk
 #    that word-splits or skips such files would pass a tree hiding a leak.
 # ---------------------------------------------------------------------------
+# SMOKE_HOME creation must succeed beneath a TMPDIR that contains spaces.
+SPACED_TMP="$SMOKE_PROJ/tmp with spaces"
+mkdir -p -- "$SPACED_TMP"
+spaced_home="$(TMPDIR="$SPACED_TMP" make_smoke_dir locus-hub-int 2>/dev/null)" || spaced_home=""
+if [[ -n "$spaced_home" && -d "$spaced_home" && "$spaced_home" == "$SPACED_TMP"/locus-hub-int.* ]]; then
+  ok "SMOKE_HOME created beneath TMPDIR containing spaces"
+else
+  bad "SMOKE_HOME creation failed beneath TMPDIR containing spaces"
+fi
+rm -rf -- "$SPACED_TMP"
+
 SPACED_ROOT="$SMOKE_PROJ/canary scan/nested dir"
 mkdir -p "$SPACED_ROOT"
 printf 'ordinary contents\n' >"$SPACED_ROOT/clean file"

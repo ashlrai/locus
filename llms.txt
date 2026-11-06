@@ -1,0 +1,166 @@
+# Locus
+
+> Your coding agent can't act as the wrong account. AI-native identity plane for coding agents: pin a binding and every CLI command, MCP tool and agent session is sealed to that tenant until a human re-pins. Wrong account, impossible.
+
+Identity is resolved at the gate, not in the prompt. Bindings hold principal, tenant, CredentialRefs and policy; sessions are HMAC-sealed to exactly one binding, and agents cannot pin. Sibling product: Phantom (phm.dev) keeps real secret values out of model context.
+
+## Agent start
+
+One command:
+
+```bash
+npm install -g locus-cli @ashlrai/locus-mcp
+```
+
+Then, in one shell:
+
+```bash
+export LOCUS_HOME="$(mktemp -d)"
+locus quickstart
+eval "$(locus hook bash)"
+locus enter personal
+locus whoami --json
+locus status --json
+locus doctor --json
+locus exec --expect personal --no-resolve -- echo ok
+```
+
+Claude Code (`.mcp.json`) and Cursor (`~/.cursor/mcp.json`):
+
+```json
+{ "mcpServers": { "locus": { "command": "locus", "args": ["mcp", "--supervised"] } } }
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.locus]
+command = "locus"
+args = ["mcp", "--supervised"]
+```
+
+Provider tools need `locus mcp --supervised`, a live pin, and the control capability from `locus hook` in the shell that launches the client. `locus-mcp` with no args serves control tools only. Agents cannot pin. `locus exec --expect acme -- echo ok` exits 1 (`pin_mismatch`) and does not start the child.
+
+- [Copy-paste examples](https://github.com/ashlrai/locus/blob/main/docs/copy-paste.md)
+- [Agent contract](https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md)
+- [MCP setup](https://github.com/ashlrai/locus/blob/main/docs/mcp.md)
+
+## Start
+
+- [README](https://github.com/ashlrai/locus/blob/main/README.md): install options, 30-second start, MCP wiring
+- [AGENTS.md](https://github.com/ashlrai/locus/blob/main/AGENTS.md): agent operating rules and invariants
+- [capabilities.json](https://locus.dev/capabilities.json): machine-readable capabilities, install and commands
+- [server.json](https://locus.dev/server.json): MCP registry manifest for io.github.ashlrai/locus-mcp
+
+## Guides
+
+- [Adapter SDK](https://github.com/ashlrai/locus/blob/main/docs/adapter-sdk.md)
+- [Writing a provider adapter](https://github.com/ashlrai/locus/blob/main/docs/adapters.md)
+- [Agency certainty - identity vs epistemic layers](https://github.com/ashlrai/locus/blob/main/docs/agency-certainty.md)
+- [Agency Starter](https://github.com/ashlrai/locus/blob/main/docs/agency-starter.md)
+- [Agent contract: JSON schemas, exit codes, --dry-run](https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md)
+- [Architecture](https://github.com/ashlrai/locus/blob/main/docs/architecture.md)
+- [Archive installer acceptance](https://github.com/ashlrai/locus/blob/main/docs/archive-installer-acceptance.md)
+- [Archive installer requirements](https://github.com/ashlrai/locus/blob/main/docs/archive-installer-requirements.md)
+- [Ashlr companion handshake (v1)](https://github.com/ashlrai/locus/blob/main/docs/ashlr-handshake.md)
+- [Autopin review checklist](https://github.com/ashlrai/locus/blob/main/docs/autopin-review-checklist.md)
+- [locus autopin suggest output](https://github.com/ashlrai/locus/blob/main/docs/autopin-suggest-output.md)
+- [Benchmarks](https://github.com/ashlrai/locus/blob/main/docs/BENCHMARKS.md)
+- [Recovering a pin after its broker exits](https://github.com/ashlrai/locus/blob/main/docs/broker-recovery-q8.md)
+- [Building both executables](https://github.com/ashlrai/locus/blob/main/docs/build-q8.md)
+- [Route a provider CLI](https://github.com/ashlrai/locus/blob/main/docs/cli-routing.md)
+- [Conflict drivers - deterministic resolution for high-churn paths](https://github.com/ashlrai/locus/blob/main/docs/conflict-drivers.md)
+- [Copy-paste examples](https://github.com/ashlrai/locus/blob/main/docs/copy-paste.md)
+- [Signed credential injection audit (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/credential-audit.md)
+- [Credential compatibility](https://github.com/ashlrai/locus/blob/main/docs/credential-compatibility.md)
+- [doctor --fix](https://github.com/ashlrai/locus/blob/main/docs/doctor-fix.md)
+- [Multi-account dogfood (personal + client)](https://github.com/ashlrai/locus/blob/main/docs/dogfood-multi-account.md)
+- [Dogfood probe cleanup](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-cleanup.md)
+- [Dogfood probe directory roles](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-roles.md)
+- [Dogfood temporary-directory creation failures](https://github.com/ashlrai/locus/blob/main/docs/dogfood-temp-failures.md)
+- [Dogfood temporary-directory prefixes](https://github.com/ashlrai/locus/blob/main/docs/dogfood-temp-prefix-reference.md)
+- [Dry-run acceptance checklist](https://github.com/ashlrai/locus/blob/main/docs/dry-run-acceptance.md)
+- [Dry-run command matrix](https://github.com/ashlrai/locus/blob/main/docs/dry-run-matrix-q8.md)
+- [Dry-run review matrix (help surface)](https://github.com/ashlrai/locus/blob/main/docs/dry-run-review-matrix.md)
+- [Manual dry-run verification](https://github.com/ashlrai/locus/blob/main/docs/dry-run-verification.md)
+- [E2E graph import isolation](https://github.com/ashlrai/locus/blob/main/docs/e2e-graph-isolation.md)
+- [GRAPHHOME lifecycle in the E2E suite](https://github.com/ashlrai/locus/blob/main/docs/e2e-graph-lifecycle.md)
+- [E2E security directories](https://github.com/ashlrai/locus/blob/main/docs/e2e-security-directories.md)
+- [E2E security isolation fixtures](https://github.com/ashlrai/locus/blob/main/docs/e2e-security-isolation.md)
+- [E2E temporary directory types](https://github.com/ashlrai/locus/blob/main/docs/e2e-temp-resource-types.md)
+- [End-to-end test map](https://github.com/ashlrai/locus/blob/main/docs/e2e-test-map.md)
+- [locus exec latency](https://github.com/ashlrai/locus/blob/main/docs/exec-latency.md)
+- [Stable CLI exit codes](https://github.com/ashlrai/locus/blob/main/docs/exit-codes.md)
+- [Firm mode - multi-client agencies](https://github.com/ashlrai/locus/blob/main/docs/firm-mode.md)
+- [First run](https://github.com/ashlrai/locus/blob/main/docs/FIRST-RUN.md)
+- [Gateway base URL for locus exec (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/gateway-base-url.md)
+- [Model gateways and base URLs (audit note)](https://github.com/ashlrai/locus/blob/main/docs/gateway-base-urls.md)
+- [Hub integration smoke isolation](https://github.com/ashlrai/locus/blob/main/docs/hub-integration-isolation.md)
+- [Hub integration smoke temporary lifecycle](https://github.com/ashlrai/locus/blob/main/docs/hub-integration-temp-lifecycle.md)
+- [Hub integration test temporary paths](https://github.com/ashlrai/locus/blob/main/docs/hub-integration-tmpdir.md)
+- [Phantom ↔ Locus integration contract](https://github.com/ashlrai/locus/blob/main/docs/hub-integration.md)
+- [Hub smoke interruption and cleanup](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-interruption.md)
+- [Hub smoke output](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-output.md)
+- [Hub smoke prerequisites](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-prerequisites.md)
+- [Hub smoke resource map](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-resource-map.md)
+- [Hub smoke temporary resource roles](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-resource-roles.md)
+- [Hub smoke temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-resources.md)
+- [Hub smoke temporary-resource failures](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-temp-failures.md)
+- [Hub smoke temporary path lifecycle](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-temp-lifecycle.md)
+- [Hub smoke temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-temp-resources.md)
+- [Hub test temporary resources](https://github.com/ashlrai/locus/blob/main/docs/hub-test-temp-comparison.md)
+- [Archive installer acceptance cases](https://github.com/ashlrai/locus/blob/main/docs/installer-acceptance-cases.md)
+- [Shell installer acceptance checklist](https://github.com/ashlrai/locus/blob/main/docs/installer-acceptance.md)
+- [Installer archive requirements](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-requirements.md)
+- [Installer error questions](https://github.com/ashlrai/locus/blob/main/docs/installer-error-questions.md)
+- [Shell installer failure matrix](https://github.com/ashlrai/locus/blob/main/docs/installer-failure-matrix.md)
+- [Shell installer platform matrix](https://github.com/ashlrai/locus/blob/main/docs/installer-platform-matrix.md)
+- [Shell installer requirements](https://github.com/ashlrai/locus/blob/main/docs/installer-requirements.md)
+- [Shell installer user journey](https://github.com/ashlrai/locus/blob/main/docs/installer-user-journey.md)
+- [locus-mcp - Claude Code, Cursor, and friends](https://github.com/ashlrai/locus/blob/main/docs/mcp.md)
+- [Minimum supported Rust version](https://github.com/ashlrai/locus/blob/main/docs/MSRV.md)
+- [Observability](https://github.com/ashlrai/locus/blob/main/docs/observability.md)
+- [Onboarding - 3 clients × 3 tenants](https://github.com/ashlrai/locus/blob/main/docs/onboarding.md)
+- [Local agent peers and message relay](https://github.com/ashlrai/locus/blob/main/docs/peers.md)
+- [Locus for Phantom-enrolled repos](https://github.com/ashlrai/locus/blob/main/docs/phantom-enrolled-repos.md)
+- [Phantom preflight in locus doctor](https://github.com/ashlrai/locus/blob/main/docs/phantom-preflight.md)
+- [Using Locus with Phantom](https://github.com/ashlrai/locus/blob/main/docs/PHANTOM-USAGE.md)
+- [Policy & approvals](https://github.com/ashlrai/locus/blob/main/docs/policy.md)
+- [Post-quantum readiness](https://github.com/ashlrai/locus/blob/main/docs/PQ-READINESS.md)
+- [Locus documentation](https://github.com/ashlrai/locus/blob/main/docs/README.md)
+- [CI's role in adapter registry manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-ci-role.md)
+- [Release manifest consumer checklist](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer-checklist.md)
+- [Consuming the adapter registry release manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer.md)
+- [Adapter registry manifest: current state](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-current-state.md)
+- [Adapter registry manifest provenance](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-provenance.md)
+- [Adapter registry manifest verification: open questions](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-verification-questions.md)
+- [Verifying an adapter registry release manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-verification.md)
+- [Adapter registry signing: open questions](https://github.com/ashlrai/locus/blob/main/docs/registry-signing-open-questions.md)
+- [Adapter registry signing status](https://github.com/ashlrai/locus/blob/main/docs/registry-signing-status.md)
+- [Adapter registry trust actors](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-actors.md)
+- [Adapter registry trust: CI status](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-ci-status.md)
+- [Adapter registry trust FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-trust-faq.md)
+- [Adapter registry release manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-trust.md)
+- [Consuming an unsigned adapter registry manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-consumer-guidance.md)
+- [Unsigned adapter registry manifest FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-manifest-faq.md)
+- [Release automation](https://github.com/ashlrai/locus/blob/main/docs/release-automation.md)
+- [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+- [Session budget caps (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/session-budget.md)
+- [Shell completions](https://github.com/ashlrai/locus/blob/main/docs/shell-completions.md)
+- [Shell installer archive selection](https://github.com/ashlrai/locus/blob/main/docs/shell-installer-archive-selection.md)
+- [Shell installer failure cases](https://github.com/ashlrai/locus/blob/main/docs/shell-installer-failure-cases.md)
+- [Shell installer issue checklist](https://github.com/ashlrai/locus/blob/main/docs/shell-installer-issue-checklist.md)
+- [Grant-scoped swarm broker](https://github.com/ashlrai/locus/blob/main/docs/swarm-broker.md)
+- [Locus swarm broker: child jobs](https://github.com/ashlrai/locus/blob/main/docs/swarm-child-jobs.md)
+- [Hub scripts: temporary parent and prefixes](https://github.com/ashlrai/locus/blob/main/docs/temp-parent-reference.md)
+- [Verification plane](https://github.com/ashlrai/locus/blob/main/docs/verification-plane.md)
+- [Worker backends](https://github.com/ashlrai/locus/blob/main/docs/workers.md)
+
+## Reference
+
+- [DESIGN.md](https://github.com/ashlrai/locus/blob/main/DESIGN.md): full architecture and threat model
+- [docs/agent-contract.md](https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md): JSON schemas, exit codes, dry-run
+- [llms-full.txt](https://locus.dev/llms-full.txt): complete heading index of README and docs
+- [PLAN.md](https://github.com/ashlrai/locus/blob/main/PLAN.md): roadmap
+- [SECURITY.md](https://github.com/ashlrai/locus/blob/main/SECURITY.md): vulnerability reporting
+- [Site](https://locus.dev/)

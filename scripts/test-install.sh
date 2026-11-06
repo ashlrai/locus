@@ -77,6 +77,10 @@ MOCK
 cat > "$TEST_ROOT/tools/tar" <<'MOCK'
 #!/bin/bash
 printf '%s\n' called >> "$TEST_CASE/tar-calls"
+if [[ "$1" == -xOzf && "${3##*/}" == "${TEST_FAIL_UNPACK:-}" ]]; then
+    echo 'simulated extraction failure' >&2
+    exit 1
+fi
 exec "$TEST_REAL_TAR" "$@"
 MOCK
 cat > "$TEST_ROOT/hash" <<'MOCK'
@@ -107,13 +111,14 @@ new_case() {
     TEST_VERSION=v1.2.3
     TEST_LATEST_URL=https://github.com/ashlrai/locus/releases/tag/v1.2.3
     TEST_FAIL_DOWNLOAD=
+    TEST_FAIL_UNPACK=
     TEST_ARCHIVE="$TEST_CASE/release.tar.gz"
     TEST_CHECKSUM="$TEST_CASE/release.sha256"
     TEST_REAL_TAR=$REAL_TAR
     TEST_REAL_HASH=$HASH_BIN
     TEST_REAL_HASH_KIND=${HASH_BIN##*/}
     export TEST_CASE TEST_OS TEST_ARCH TEST_TARGET TEST_VERSION TEST_LATEST_URL
-    export TEST_FAIL_DOWNLOAD TEST_ARCHIVE TEST_CHECKSUM TEST_REAL_TAR TEST_REAL_HASH TEST_REAL_HASH_KIND
+    export TEST_FAIL_DOWNLOAD TEST_FAIL_UNPACK TEST_ARCHIVE TEST_CHECKSUM TEST_REAL_TAR TEST_REAL_HASH TEST_REAL_HASH_KIND
 }
 
 fixture() {
@@ -230,6 +235,25 @@ assert_binaries "$TEST_CASE/custom bin"
 ok 'normalizes version and supports destination with spaces'
 
 new_case; fixture
+HOME='' TMPDIR="$TEST_CASE/tmp" PATH="$TEST_CASE/bin" \
+    "$BASH_BIN" "$INSTALLER" --version v1.2.3 > "$TEST_CASE/stdout" 2> "$TEST_CASE/stderr" && fail 'unset HOME accepted without destination'
+grep -q 'HOME is unset' "$TEST_CASE/stderr" || fail 'missing HOME guidance'
+[[ ! -e "$TEST_CASE/downloads" ]] || fail 'missing HOME triggered a download'
+HOME='' TMPDIR="$TEST_CASE/tmp" PATH="$TEST_CASE/bin" \
+    "$BASH_BIN" "$INSTALLER" --version v1.2.3 --bin-dir "$TEST_CASE/custom" > "$TEST_CASE/stdout" 2> "$TEST_CASE/stderr" || fail 'explicit destination required HOME'
+assert_binaries "$TEST_CASE/custom"
+assert_clean
+ok 'requires HOME only for the default destination'
+
+new_case; fixture
+HOME="$TEST_CASE/home" TMPDIR="$TEST_CASE/tmp" PATH="$TEST_CASE/bin:$TEST_CASE/home/.local/bin" \
+    "$BASH_BIN" "$INSTALLER" --version v1.2.3 > "$TEST_CASE/stdout" 2> "$TEST_CASE/stderr" || fail 'installation with destination on PATH failed'
+assert_binaries "$TEST_CASE/home/.local/bin"
+assert_clean
+if grep -q 'Add this directory to your PATH' "$TEST_CASE/stdout"; then fail 'unnecessary PATH guidance'; fi
+ok 'omits PATH guidance when destination is already on PATH'
+
+new_case; fixture
 rm "$TEST_CASE/bin/sha256sum"
 success --version v1.2.3
 grep -q '^shasum$' "$TEST_CASE/hash-calls" || fail 'shasum fallback not used'
@@ -263,10 +287,12 @@ for args in help unknown missing-version missing-destination bad-version; do
 done
 
 for platform in Linux-arm64 Linux-aarch64 Windows-x86_64 FreeBSD-x86_64 Darwin-ppc; do
-    new_case
+    new_case; seed_install
     TEST_OS=${platform%-*}; TEST_ARCH=${platform##*-}
     rejection --version v1.2.3
     [[ ! -e "$TEST_CASE/downloads" ]] || fail 'unsupported platform downloaded'
+    assert_preserved
+    grep -Fq "unsupported platform: $TEST_OS/$TEST_ARCH; use a source install" "$TEST_CASE/stderr" || fail 'missing unsupported platform error'
     ok "rejects unsupported $platform"
 done
 
@@ -275,6 +301,13 @@ for download in archive checksum latest; do
     TEST_FAIL_DOWNLOAD=$download
     rejection
     assert_preserved
+    [[ ! -e "$TEST_CASE/tar-calls" ]] || fail 'failed download opened archive'
+    case "$download" in
+        latest) message='could not resolve the latest release' ;;
+        archive) message='archive download failed; nothing installed' ;;
+        checksum) message='checksum download failed; nothing installed' ;;
+    esac
+    grep -Fq "$message" "$TEST_CASE/stderr" || fail "missing $download error message"
     ok "preserves existing installation on $download download failure"
 done
 
@@ -298,6 +331,12 @@ for sidecar in empty malformed wrong-name duplicate mismatch; do
     rejection --version v1.2.3
     assert_preserved
     [[ ! -e "$TEST_CASE/tar-calls" ]] || fail 'archive opened before checksum validation'
+    case "$sidecar" in
+        empty|duplicate) message='checksum sidecar must contain exactly one record' ;;
+        malformed|wrong-name) message='invalid checksum sidecar; nothing installed' ;;
+        mismatch) message='SHA-256 checksum mismatch; nothing installed' ;;
+    esac
+    grep -Fq "$message" "$TEST_CASE/stderr" || fail "missing $sidecar checksum error"
     ok "rejects $sidecar checksum before tar"
 done
 
@@ -331,6 +370,16 @@ for broken in missing empty symlink hardlink directory duplicate corrupt; do
     ok "rejects $broken binary archive before replacing installation"
 done
 
+for binary in locus locus-mcp; do
+    new_case; fixture; seed_install
+    TEST_FAIL_UNPACK=$binary
+    rejection --version v1.2.3
+    assert_preserved
+    grep -Fq "could not unpack $binary" "$TEST_CASE/stderr" || fail "missing $binary extraction error"
+    if grep -Fq 'Installed locus and locus-mcp' "$TEST_CASE/stdout"; then fail 'reported success after extraction failure'; fi
+    ok "preserves existing installation when extracting $binary fails"
+done
+
 new_case; fixture
 printf 'archive must not write this file\n' > "$TEST_CASE/absolute-victim"
 "$REAL_TAR" -czPf "$TEST_ARCHIVE" -C "$TEST_CASE/stage" "locus-$TEST_TARGET" "$TEST_CASE/absolute-victim"
@@ -340,6 +389,16 @@ success --version v1.2.3
 assert_binaries "$TEST_CASE/home/.local/bin"
 [[ ! -e "$TEST_CASE/absolute-victim" ]] || fail 'unrelated absolute archive member was extracted'
 ok 'streams only binaries without extracting unrelated absolute paths'
+
+new_case; fixture
+printf 'archive must not write this file\n' > "$TEST_CASE/traversal-victim"
+"$REAL_TAR" -czPf "$TEST_ARCHIVE" -C "$TEST_CASE/stage" "locus-$TEST_TARGET" ../traversal-victim
+checksum
+rm "$TEST_CASE/traversal-victim"
+(cd "$TEST_CASE/stage" && success --version v1.2.3)
+assert_binaries "$TEST_CASE/home/.local/bin"
+[[ ! -e "$TEST_CASE/traversal-victim" ]] || fail 'unrelated traversal archive member was extracted'
+ok 'streams only binaries without extracting unrelated traversal paths'
 
 for destination in symlink directory; do
     new_case; fixture; seed_install
@@ -364,4 +423,28 @@ rejection --version v1.2.3 --bin-dir "$TEST_CASE/not-a-directory"
 [[ "$(cat "$TEST_CASE/not-a-directory")" == 'existing file' ]] || fail 'non-directory destination changed'
 ok 'rejects install directory that is an existing file'
 
+new_case; fixture; seed_install
+REAL_MV=$(command -v mv)
+export REAL_MV
+rm "$TEST_CASE/bin/mv"
+cat > "$TEST_CASE/bin/mv" <<'MOCK'
+#!/bin/bash
+for arg in "$@"; do
+    if [[ "$arg" == "$TEST_CASE/home/.local/bin/locus-mcp" ]]; then
+        echo 'simulated final rename failure' >&2
+        exit 1
+    fi
+done
+exec "$REAL_MV" "$@"
+MOCK
+chmod +x "$TEST_CASE/bin/mv"
+rejection --version v1.2.3
+cmp "$TEST_CASE/home/.local/bin/locus" "$TEST_CASE/stage/locus-$TEST_TARGET/locus" || fail 'first binary was not replaced'
+[[ "$(cat "$TEST_CASE/home/.local/bin/locus-mcp")" == 'old mcp' ]] || fail 'second binary changed despite rename failure'
+grep -Fq 'simulated final rename failure' "$TEST_CASE/stderr" || fail 'missing rename error'
+if grep -Fq 'Installed locus and locus-mcp' "$TEST_CASE/stdout"; then fail 'reported success after rename failure'; fi
+[[ -z "$(find "$TEST_CASE/home/.local/bin" -name '.locus-install.*' -print)" ]] || fail 'destination staging files leaked'
+ok 'reports second rename failure and leaves a partial upgrade'
+
+"$BASH_BIN" "$ROOT/scripts/install-test.sh"
 printf '%d installer tests passed; 0 failed.\n' "$passed"

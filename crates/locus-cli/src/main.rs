@@ -68,7 +68,7 @@ Every CLI exec and MCP tool call is hard-scoped to that pin.\n\
 Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
-  Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard\n  \
+  Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard · offboard\n  \
   Daily use     enter · switch · pin · leave · renew · whoami · fleet-feed · fleet-denials · fleet-preflight · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
@@ -439,6 +439,23 @@ enum Commands {
     /// Guided client onboarding — walk through adding a client binding
     #[command(next_help_heading = "Setup", subcommand)]
     Client(ClientCmd),
+
+    /// Offboard a client: remove its binding, approvals, pin history and grants
+    ///
+    /// Default prints a `locus.plan.v1` plan of every local record the
+    /// client's alias owns and writes nothing; `--apply` performs the
+    /// removals under the operator control capability. Audit events and
+    /// audit archives are kept (evidence, not operable state); the offboard
+    /// itself is audited as `client.offboard`. Workspace `.locus.toml`
+    /// files and Phantom secrets are never touched.
+    #[command(next_help_heading = "Setup")]
+    Offboard {
+        /// Client binding alias to offboard
+        alias: String,
+        /// Perform the removals (default: print the plan only)
+        #[arg(long)]
+        apply: bool,
+    },
 
     /// Built-in upstream MCP recipes (command/args for common servers)
     ///
@@ -825,7 +842,7 @@ enum EngagementCmd {
 
 #[derive(Subcommand, Debug)]
 enum EventsAction {
-    /// Export audit events as JSON lines (fleet pulse) or OTLP logs JSON
+    /// Export audit events as JSON lines (fleet pulse), SIEM NDJSON or OTLP logs JSON
     Export {
         /// Max events from the end of the log (`--limit` also accepted)
         #[arg(long, alias = "limit", default_value_t = 200)]
@@ -836,7 +853,13 @@ enum EventsAction {
         /// Filter by binding alias
         #[arg(long)]
         binding: Option<String>,
-        /// Emit OTLP-compatible Logs JSON instead of fleet-pulse JSON lines
+        /// Only events at or after this time — RFC3339 or YYYY-MM-DD
+        #[arg(long, value_name = "TS")]
+        since: Option<String>,
+        /// Output format: `fleet` (default), `ndjson` (SIEM), `otlp`
+        #[arg(long, value_enum, conflicts_with = "otlp")]
+        format: Option<CliEventsExportFormat>,
+        /// Emit OTLP-compatible Logs JSON (alias for `--format otlp`)
         #[arg(long)]
         otlp: bool,
         /// Write to file (default: stdout when sink=local)
@@ -869,6 +892,27 @@ impl From<CliEventsExportSink> for EventsExportSink {
         match s {
             CliEventsExportSink::Local => EventsExportSink::Local,
             CliEventsExportSink::Webhook => EventsExportSink::Webhook,
+        }
+    }
+}
+
+/// CLI mirror of the `events export --format` choices (clap ValueEnum).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+enum CliEventsExportFormat {
+    /// Fleet-pulse JSON lines, schema `locus.audit.v1` (default)
+    Fleet,
+    /// SIEM NDJSON, schema `locus.siem.v1` — stable fields, deep redaction
+    Ndjson,
+    /// OTLP-compatible Logs JSON document (same as `--otlp`)
+    Otlp,
+}
+
+impl From<CliEventsExportFormat> for EventsExportFormat {
+    fn from(f: CliEventsExportFormat) -> Self {
+        match f {
+            CliEventsExportFormat::Fleet => EventsExportFormat::JsonLines,
+            CliEventsExportFormat::Ndjson => EventsExportFormat::Siem,
+            CliEventsExportFormat::Otlp => EventsExportFormat::Otlp,
         }
     }
 }
@@ -1162,13 +1206,20 @@ fn main() {
     if handshake::answer_if_requested(&argv, env!("CARGO_PKG_VERSION")) {
         return;
     }
+    JSON_ERRORS.store(
+        argv_requests_json(argv),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     // A closed stdout (`locus doctor | head -1`) exits 141 instead of panicking.
     match stdout::catch_stdout_closed(run) {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
             let e = stale_pin_recovery_fallback(e);
             if JSON_ERRORS.load(std::sync::atomic::Ordering::Relaxed) {
-                emit_json_error(&e, error_exit_code(&e));
+                if stdout::catch_stdout_closed(|| emit_json_error(&e, error_exit_code(&e))).is_err()
+                {
+                    exit::ExitCode::StdoutClosed.exit();
+                }
             } else {
                 eprintln!("{} {e:#}", "error:".red().bold());
             }
@@ -1290,7 +1341,7 @@ fn child_exit_code(status: &std::process::ExitStatus) -> i32 {
     1
 }
 
-/// Set once `--json` is parsed so a failing command reports its error as JSON.
+/// Set from CLI-owned arguments so early failures also report errors as JSON.
 static JSON_ERRORS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Machine-readable form of a top-level CLI error, matching the `ok` field the
@@ -1310,12 +1361,14 @@ fn error_envelope(error: String, code: exit::ExitCode) -> serde_json::Value {
     })
 }
 
-/// Print the JSON error as one line on stderr. Stdout keeps the existing
-/// `--json` stream contract (at most one JSON document, e.g. the
-/// `verify session` pack printed before its non-zero exit); errors stay on
-/// stderr, now parseable instead of a human `error:` line.
+/// Keep diagnostics on stderr and supply a stdout document when the command
+/// failed before emitting its report. Never append a second stdout document.
 fn emit_json_error(e: &anyhow::Error, code: exit::ExitCode) {
-    eprintln!("{}", json_error_payload(e, code));
+    let payload = json_error_payload(e, code);
+    if !stdout::has_written() {
+        println!("{payload}");
+    }
+    eprintln!("{payload}");
 }
 
 /// `--json` given before any `--` (after it, the flag belongs to the child).
@@ -1330,12 +1383,7 @@ fn argv_requests_json<I: IntoIterator<Item = String>>(args: I) -> bool {
 /// prints on stderr. Help and version output are not errors and pass through.
 fn json_parse_error_payload(e: &clap::Error) -> Option<serde_json::Value> {
     use clap::error::ErrorKind;
-    if matches!(
-        e.kind(),
-        ErrorKind::DisplayHelp
-            | ErrorKind::DisplayVersion
-            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-    ) {
+    if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) {
         return None;
     }
     let text = e.render().to_string();
@@ -1363,6 +1411,7 @@ fn json_parse_error_payload(e: &clap::Error) -> Option<serde_json::Value> {
 fn exit_on_parse_error<I: IntoIterator<Item = String>>(e: clap::Error, args: I) -> ! {
     if argv_requests_json(args) {
         if let Some(payload) = json_parse_error_payload(&e) {
+            println!("{payload}");
             eprintln!("{payload}");
             std::process::exit(e.exit_code());
         }
@@ -1382,7 +1431,13 @@ fn argv_targets_unplannable(args: &[std::ffi::OsString]) -> bool {
         .skip(1)
         .filter_map(|a| a.to_str())
         .filter(|a| !a.starts_with('-'));
-    match words.next() {
+    // `locus help <cmd>` renders <cmd>'s help; inspect <cmd> so the flag is
+    // hidden there exactly as `locus <cmd> --help` hides it.
+    let target = match words.next() {
+        Some("help") => words.next(),
+        other => other,
+    };
+    match target {
         Some("exec" | "run" | "serve" | "dashboard") => true,
         // `mcp` alone is the server; `mcp mint/list/revoke` plan normally.
         Some("mcp") => {
@@ -1451,7 +1506,6 @@ fn run() -> Result<()> {
         Ok(cli) => cli,
         Err(e) => exit_on_parse_error(e, env::args().skip(1)),
     };
-    JSON_ERRORS.store(cli.json, std::sync::atomic::Ordering::Relaxed);
     let json = cli.json;
     let dry_run = cli.dry_run;
     if dry_run && dry_run_support(&cli.command) == DryRunSupport::Unsupported {
@@ -1550,6 +1604,7 @@ fn run() -> Result<()> {
         },
         Commands::Binding(sub) => cmd_binding(sub, json, dry_run),
         Commands::Client(sub) => cmd_client(sub, json, dry_run),
+        Commands::Offboard { alias, apply } => cmd_offboard(&alias, apply, json, dry_run),
         Commands::Upstream(sub) => cmd_upstream(sub, json),
         Commands::Adapter(sub) => cmd_adapter(sub, json, dry_run),
         Commands::Onboard {
@@ -1588,6 +1643,8 @@ fn run() -> Result<()> {
                 last,
                 op,
                 binding,
+                since,
+                format,
                 otlp,
                 out,
                 service_name,
@@ -1598,6 +1655,8 @@ fn run() -> Result<()> {
                     last,
                     op,
                     binding,
+                    since,
+                    format: format.map(Into::into),
                     otlp,
                     out,
                     service_name,
@@ -1678,6 +1737,7 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
         | Commands::Binding(BindingCmd::Rm { .. })
         | Commands::Binding(BindingCmd::MigrateCredentialRefs { .. })
         | Commands::Client(_)
+        | Commands::Offboard { .. }
         | Commands::Autopin(AutopinCmd::Suggest { apply: true })
         | Commands::Ci(CiCmd::Mint { .. })
         | Commands::Ci(CiCmd::Env { .. })
@@ -1862,6 +1922,7 @@ fn cmd_topic(name: Option<&str>, json: bool) -> Result<()> {
              Pair with:\n\
                locus events --last N [--op …] [--binding …]\n\
                locus events export [--otlp] [--out file]  # fleet pulse / OTLP logs\n\
+               locus events export --format ndjson --since 2026-08-09T00:00:00Z  # SIEM lines\n\
                locus events export --sink webhook [--url URL]  # SIEM webhook (or LOCUS_AUDIT_WEBHOOK_URL)",
         ),
         (
@@ -2582,7 +2643,8 @@ fn write_sample_bindings(s: &Store) -> Result<()> {
 # CredentialRefs are explicit env:VAR pointers. Never put raw tokens here.
 # Supply those variables outside agent context before supervised execution.
 # phm: references currently require an unavailable scoped bridge.
-# Then: locus enter personal && locus whoami && locus doctor
+# Try a credential-free smoke: locus exec --no-resolve -- true
+# Then configure credentials and scopes before provider work.
 
 [binding]
 id = "bnd_personal"
@@ -2969,7 +3031,7 @@ fn cmd_enter(
     println!(
         "   {}  ·  {}  ·  {}",
         "locus whoami".dimmed(),
-        "locus exec -- <cmd>".dimmed(),
+        "locus exec --no-resolve -- true".dimmed(),
         "locus leave".dimmed()
     );
     Ok(())
@@ -3300,7 +3362,7 @@ fn cmd_pin(
         println!("   providers {}", providers_n);
         println!();
         println!("   {}", "locus whoami".dimmed());
-        println!("   {}", "locus exec -- <cmd>".dimmed());
+        println!("   {}", "locus exec --no-resolve -- true".dimmed());
         if session.is_namespaced() {
             println!(
                 "   {}",
@@ -3329,6 +3391,8 @@ fn namespaced_pin_aliases(alias: Option<&str>, ns_raw: &str) -> Result<Vec<Strin
     Ok(aliases)
 }
 
+const RECOVERY_HINT_PREFIX: &str = "recover (operator shell; control capability required): ";
+
 /// Route wedged-session control errors to the recovery hatch.
 ///
 /// When `leave` / `status` / `doctor` / `exec` fail closed on the ACTIVE
@@ -3349,7 +3413,7 @@ fn wedged_session_recovery_for(err: anyhow::Error, alias: Option<&str>) -> anyho
     if let Some(stale_err) = wedged {
         let alias = recovery_alias(alias);
         let recipe = locus_core::recovery::recovery_for_error(stale_err, alias.as_deref());
-        anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
+        anyhow!("{err:#}\n  {RECOVERY_HINT_PREFIX}{recipe}")
     } else {
         err
     }
@@ -3377,6 +3441,13 @@ fn recovery_alias(requested: Option<&str>) -> Option<String> {
 /// authority error (never a bare JSON error, which can come from anywhere).
 /// Message only: the error itself still fails closed.
 fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
+    stale_pin_recovery_fallback_with_alias(err, || store().ok().and_then(|s| active_alias_hint(&s)))
+}
+
+fn stale_pin_recovery_fallback_with_alias(
+    err: anyhow::Error,
+    alias_hint: impl FnOnce() -> Option<String>,
+) -> anyhow::Error {
     let stale = err.chain().find_map(|cause| {
         cause.downcast_ref::<locus_core::LocusError>().filter(|e| {
             locus_core::recovery::is_stale_pin_error(e)
@@ -3386,14 +3457,59 @@ fn stale_pin_recovery_fallback(err: anyhow::Error) -> anyhow::Error {
     let Some(stale_err) = stale else {
         return err;
     };
-    if format!("{err:#}").contains("locus leave --force") {
+    if format!("{err:#}").contains(RECOVERY_HINT_PREFIX) {
         return err;
     }
-    let Some(alias) = store().ok().and_then(|s| active_alias_hint(&s)) else {
+    let Some(alias) = alias_hint() else {
         return err;
     };
     let recipe = locus_core::recovery::recovery_for_error(stale_err, Some(&alias));
-    anyhow!("{err:#}\n  recover (operator shell; control capability required): {recipe}")
+    anyhow!("{err:#}\n  {RECOVERY_HINT_PREFIX}{recipe}")
+}
+
+#[cfg(test)]
+mod stale_pin_fallback_tests {
+    use super::*;
+
+    #[test]
+    fn dead_broker_error_mentioning_force_still_gets_enter_first_hint() {
+        let err = anyhow::Error::new(locus_core::LocusError::AuthorityAnchorUnavailable(
+            "previous advice mentioned locus leave --force".into(),
+        ));
+        let message = format!(
+            "{:#}",
+            stale_pin_recovery_fallback_with_alias(err, || Some("personal".into()))
+        );
+        let hint = message.split_once(RECOVERY_HINT_PREFIX).unwrap().1;
+        assert!(
+            hint.find("locus enter personal").unwrap() < hint.find("locus leave --force").unwrap()
+        );
+        assert!(hint.contains("If enter refuses an invalid or unreadable pin"));
+    }
+
+    #[test]
+    fn expired_pin_gets_force_first_hint_even_if_error_mentions_force() {
+        let err = anyhow::Error::new(locus_core::LocusError::SessionExpired("yesterday".into()));
+        let message = format!(
+            "{:#}",
+            stale_pin_recovery_fallback_with_alias(err, || Some("personal".into()))
+        );
+        let hint = message.split_once(RECOVERY_HINT_PREFIX).unwrap().1;
+        assert!(
+            hint.find("locus leave --force").unwrap() < hint.find("locus enter personal").unwrap()
+        );
+    }
+
+    #[test]
+    fn existing_hint_is_not_duplicated() {
+        let err = anyhow::Error::new(locus_core::LocusError::AuthorityAnchorMismatch)
+            .context(format!("{RECOVERY_HINT_PREFIX}already supplied"));
+        let message = format!(
+            "{:#}",
+            stale_pin_recovery_fallback_with_alias(err, || panic!("hint already present"))
+        );
+        assert_eq!(message.matches(RECOVERY_HINT_PREFIX).count(), 1);
+    }
 }
 
 /// Alias of the active session file, for recovery hints only (never trusted
@@ -4330,7 +4446,7 @@ fn cmd_exec(
     let spawned = run_child(&mut child, program);
     trace.mark("spawn_wait");
     let (exit, spawn_error) = child_audit_fields(&spawned);
-    s.audit(
+    s.audit_via_broker(
         "session.exec",
         &session.binding_alias,
         Some(serde_json::json!({
@@ -4594,7 +4710,7 @@ fn cmd_ci_run(
 
     let spawned = run_child(&mut child, program);
     let (exit, spawn_error) = child_audit_fields(&spawned);
-    s.audit(
+    s.audit_via_broker(
         "ci.run",
         &session.binding_alias,
         Some(serde_json::json!({
@@ -4769,7 +4885,7 @@ fn cmd_run(
 
     let spawned = run_child(&mut child, program);
     let (exit, spawn_error) = child_audit_fields(&spawned);
-    s.audit(
+    s.audit_via_broker(
         "session.run",
         &session.binding_alias,
         Some(serde_json::json!({
@@ -4837,7 +4953,7 @@ fn run_exact_session_child(
 
     let spawned = run_child(&mut child, program);
     let (exit, spawn_error) = child_audit_fields(&spawned);
-    s.audit(
+    s.audit_via_broker(
         audit_op,
         &session.binding_alias,
         Some(json!({
@@ -6469,6 +6585,175 @@ fn cmd_client(sub: ClientCmd, json: bool, dry_run: bool) -> Result<()> {
     }
 }
 
+/// `locus offboard <alias>`: the default (and `--dry-run`) is a read-only
+/// `locus.plan.v1` plan of every local record the client owns; `--apply`
+/// performs the removals under the control capability.
+fn cmd_offboard(alias: &str, apply: bool, json: bool, dry_run: bool) -> Result<()> {
+    if apply && dry_run {
+        return Err(UsageError("--apply cannot be combined with --dry-run".into()).into());
+    }
+    // `open_existing` for both paths: offboard never bootstraps a home, and
+    // its read-only inventory must not create the migration lock on a run
+    // the capability gate then refuses.
+    let s = dry_run::existing_store()?;
+    if apply {
+        let outcome = locus_core::offboard_apply(&s, alias).map_err(|e| {
+            if matches!(e, LocusError::BindingNotFound(_)) {
+                with_alias_suggestions(&s, e)
+            } else {
+                e.into()
+            }
+        })?;
+        if json {
+            return json_out::print(
+                json_out::OFFBOARD,
+                &serde_json::json!({ "ok": true, "outcome": outcome }),
+            );
+        }
+        return print_offboard_outcome(&outcome);
+    }
+    let inv = locus_core::offboard_inventory(&s, alias)?;
+    if inv.is_empty() {
+        return Err(with_alias_suggestions(
+            &s,
+            LocusError::BindingNotFound(alias.into()),
+        ));
+    }
+    {
+        let mut plan = dry_run::Plan::new(format!("locus offboard {alias} --apply"));
+        if inv.active_pin {
+            plan.change(
+                "unpin",
+                alias,
+                Some("leave the active pin for this client".into()),
+            );
+        }
+        if let Some(binding) = &inv.binding {
+            let detail = match &binding.tenant {
+                Some(tenant) => format!(
+                    "binding {alias} — tenant {tenant}, {} provider(s)",
+                    binding.providers.len()
+                ),
+                None => format!("binding {alias}"),
+            };
+            plan.delete_file(&binding.path, Some(detail));
+        }
+        for grant in &inv.mcp_grants {
+            plan.delete_file(&grant.path, Some(format!("MCP grant {}", grant.grant_id)));
+        }
+        for approval in &inv.approvals {
+            plan.delete_file(
+                &approval.path,
+                Some(format!(
+                    "approval {} — {} {}",
+                    approval.id, approval.tool, approval.status
+                )),
+            );
+        }
+        for session in &inv.sessions {
+            plan.delete_file(
+                &session.path,
+                Some(format!("sealed session {}", session.session_id)),
+            );
+        }
+        if let Some(meta) = &inv.engagement_meta {
+            plan.delete_file(meta, Some(format!("engagement meta for {alias}")));
+        }
+        if !inv.pin_history.is_empty() {
+            plan.change(
+                "update",
+                locus_core::pin_history::path(s.home())
+                    .display()
+                    .to_string(),
+                Some(format!(
+                    "drop {} pin-history entr{} for {alias}",
+                    inv.pin_history.len(),
+                    if inv.pin_history.len() == 1 {
+                        "y"
+                    } else {
+                        "ies"
+                    }
+                )),
+            );
+        }
+        for template in &inv.kept_workspace_templates {
+            plan.note(format!(
+                "workspace template '{template}' still references {alias}; edit or remove it manually"
+            ));
+        }
+        for archive in &inv.kept_archives {
+            plan.note(format!(
+                "audit archive {} is kept (evidence)",
+                archive.display()
+            ));
+        }
+        plan.note("audit events for this client are kept; the offboard itself is audited");
+        plan.note("nothing is removed without --apply");
+        plan.needs_control()
+            .with("alias", alias)
+            .with("inventory", &inv)
+            .emit(json)
+    }
+}
+
+/// Human summary of an applied offboard — counts, statuses and kept items
+/// only, never a credential reference or grant secret.
+fn print_offboard_outcome(outcome: &locus_core::OffboardOutcome) -> Result<()> {
+    println!(
+        "{} offboarded {}",
+        "ok".green().bold(),
+        outcome.alias.cyan().bold()
+    );
+    if outcome.left_active_pin {
+        println!("   pin       left the active session");
+    }
+    if outcome.removed_binding {
+        println!("   binding   removed");
+    }
+    if outcome.revoked_mcp_grants > 0 {
+        println!("   grants    {} revoked", outcome.revoked_mcp_grants);
+    }
+    if outcome.removed_approvals > 0 {
+        println!("   approvals {} removed", outcome.removed_approvals);
+    }
+    if outcome.removed_sessions > 0 {
+        println!("   sessions  {} removed", outcome.removed_sessions);
+    }
+    if outcome.dropped_pin_history_entries > 0 {
+        println!(
+            "   history   {} pin-history entr{} dropped",
+            outcome.dropped_pin_history_entries,
+            if outcome.dropped_pin_history_entries == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
+    }
+    if outcome.removed_engagement_meta {
+        println!("   engagement meta removed");
+    }
+    for template in &outcome.kept_workspace_templates {
+        println!(
+            "   {} workspace template '{template}' still references {}; edit or remove it manually",
+            "note:".yellow(),
+            outcome.alias
+        );
+    }
+    for archive in &outcome.kept_archives {
+        println!(
+            "   {} audit archive {} is kept (evidence)",
+            "note:".yellow(),
+            archive.display()
+        );
+    }
+    println!(
+        "   {}",
+        "audit events kept; revoke provider access + rotate Phantom secrets manually".dimmed()
+    );
+    Ok(())
+}
+
 /// Resolved answers for a binding-add flow (flags + prompts). Everything
 /// downstream of the prompt loop is pure and unit-testable.
 #[derive(Debug, Clone, Default)]
@@ -6764,6 +7049,14 @@ fn scope_prompts(provider: &str) -> &'static [(&'static str, bool)] {
     }
 }
 
+fn binding_target_exists(path: &std::path::Path) -> Result<bool> {
+    match path.symlink_metadata() {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("cannot inspect {}", path.display())),
+    }
+}
+
 /// Shared handler for `locus binding add` (guided_default=false) and
 /// `locus client add` (guided_default=true). The write path is exactly
 /// `Store::save_binding` — validation, bindings lock, reserved-alias check,
@@ -6892,7 +7185,7 @@ fn cmd_binding_add(mut args: BindingAddArgs, guided_default: bool, json: bool) -
     // credential ref would change under every workspace that names it.
     // symlink_metadata: a dangling symlink is an existing entry too.
     let target = s.bindings_dir().join(format!("{}.toml", answers.alias));
-    let exists = target.symlink_metadata().is_ok();
+    let exists = binding_target_exists(&target)?;
     let identical = exists && !args.force && s.binding_matches(&b)?;
 
     if args.dry_run {
@@ -7324,79 +7617,6 @@ fn add_doctor_envelope(value: &mut serde_json::Value, preflight_refused: bool) {
     obj.insert("status".into(), status.into());
     obj.insert("native_status".into(), native.into());
     obj.insert("checks".into(), checks.into());
-}
-
-/// First-run setup advice stays visible without failing a diagnostic command.
-/// Keep an explicit allowlist: new or unknown warnings remain failures, and
-/// neither this exit status nor an advisory finding grants provider access.
-fn doctor_exit_code(report: &locus_core::DoctorReport, refused: bool) -> exit::ExitCode {
-    if report.verdict == DoctorVerdict::Unsafe {
-        return exit::ExitCode::Unsafe;
-    }
-    if refused {
-        return exit::ExitCode::Failure;
-    }
-    if report.verdict == DoctorVerdict::Warn
-        && !report.findings.is_empty()
-        && report.findings.iter().all(|finding| {
-            finding.severity == locus_core::IssueSeverity::Info
-                || (finding.severity == locus_core::IssueSeverity::Warn
-                    && matches!(
-                        finding.code.as_str(),
-                        "approvals_missing"
-                            | "phantom_missing"
-                            | "control_capability_not_exported"
-                            | "executor_authority_unavailable"
-                    ))
-        })
-    {
-        return exit::ExitCode::Success;
-    }
-    exit::ExitCode::from_doctor(report.verdict)
-}
-
-#[cfg(test)]
-mod doctor_exit_tests {
-    use super::{doctor_exit_code, exit};
-    use locus_core::{build_doctor_report, DoctorExternal, DoctorVerdict, Store};
-    use tempfile::tempdir;
-
-    #[test]
-    fn doctor_advisories_do_not_hide_preflight_refusals_or_unknown_findings() {
-        let dir = tempdir().unwrap();
-        let store = Store::open(dir.path().join("locus-home")).unwrap();
-        let mut report = build_doctor_report(
-            &store,
-            DoctorExternal {
-                cwd: Some(dir.path().to_path_buf()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        report.findings.clear();
-        report.issues.clear();
-        report.verdict = DoctorVerdict::Safe;
-        report.push_finding(
-            locus_core::IssueSeverity::Warn,
-            "phantom_missing",
-            "optional installation".into(),
-        );
-        assert_eq!(doctor_exit_code(&report, false), exit::ExitCode::Success);
-        assert_eq!(doctor_exit_code(&report, true), exit::ExitCode::Failure);
-        report.push_finding(
-            locus_core::IssueSeverity::Warn,
-            "future_unknown_warning",
-            "requires operator attention".into(),
-        );
-        assert_eq!(doctor_exit_code(&report, false), exit::ExitCode::Failure);
-        report.push_finding(
-            locus_core::IssueSeverity::Unsafe,
-            "invalid_seal",
-            "invalid seal".into(),
-        );
-        assert_eq!(doctor_exit_code(&report, false), exit::ExitCode::Unsafe);
-        assert_eq!(doctor_exit_code(&report, true), exit::ExitCode::Unsafe);
-    }
 }
 
 /// `locus autopin suggest [--apply]`. `--apply --dry-run` plans the
@@ -9810,7 +10030,7 @@ fn cmd_events(last: usize, op: Option<String>, binding: Option<String>, json: bo
     Ok(())
 }
 
-/// Export audit events as fleet-pulse JSON lines or OTLP logs JSON.
+/// Export audit events as fleet-pulse JSON lines, SIEM NDJSON or OTLP logs JSON.
 ///
 /// `--sink webhook` POSTs the same redacted body (no secrets). Unset URL fails
 /// soft (skip, exit 0). Secret-looking bodies fail closed (error, no POST).
@@ -9819,6 +10039,8 @@ fn cmd_events_export(args: EventsExportArgs, json: bool, dry_run: bool) -> Resul
         last,
         op,
         binding,
+        since,
+        format,
         otlp,
         out,
         service_name,
@@ -9831,11 +10053,11 @@ fn cmd_events_export(args: EventsExportArgs, json: bool, dry_run: bool) -> Resul
         store()?
     };
     let all = s.read_audit_events()?;
-    let format = if otlp {
+    let format = format.unwrap_or(if otlp {
         EventsExportFormat::Otlp
     } else {
         EventsExportFormat::JsonLines
-    };
+    });
     let body = export_events(
         &all,
         &EventsExportOptions {
@@ -9843,6 +10065,7 @@ fn cmd_events_export(args: EventsExportArgs, json: bool, dry_run: bool) -> Resul
             op,
             binding,
             format,
+            since,
             service_name: Some(service_name),
         },
     )?;
@@ -9852,10 +10075,10 @@ fn cmd_events_export(args: EventsExportArgs, json: bool, dry_run: bool) -> Resul
         let detail = format!(
             "{} bytes, {}",
             body.len(),
-            if otlp {
-                "OTLP JSON".to_string()
-            } else {
-                format!("{lines} JSON line(s)")
+            match format {
+                EventsExportFormat::Otlp => "OTLP JSON".to_string(),
+                EventsExportFormat::Siem => format!("{lines} SIEM NDJSON line(s)"),
+                EventsExportFormat::JsonLines => format!("{lines} JSON line(s)"),
             }
         );
         let mut plan = dry_run::Plan::new("locus events export");
@@ -9932,6 +10155,8 @@ struct EventsExportArgs {
     last: usize,
     op: Option<String>,
     binding: Option<String>,
+    since: Option<String>,
+    format: Option<EventsExportFormat>,
     otlp: bool,
     out: Option<PathBuf>,
     service_name: String,
@@ -11522,10 +11747,29 @@ mod alias_ux_tests {
 #[cfg(test)]
 mod ttl_and_client_add_tests {
     use super::{
-        binding_from_answers, human_dur, missing_add_flags, parse_mint_ttl, parse_pin_ttl,
-        resolve_add_answers, scope_prompts, split_repos, AddAnswers, BindingAddArgs,
+        binding_from_answers, binding_target_exists, human_dur, missing_add_flags, parse_mint_ttl,
+        parse_pin_ttl, resolve_add_answers, scope_prompts, split_repos, AddAnswers, BindingAddArgs,
     };
     use locus_core::Store;
+
+    #[test]
+    fn binding_target_check_distinguishes_missing_from_inspection_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file");
+        assert!(!binding_target_exists(&file).unwrap());
+        std::fs::write(&file, "fixture").unwrap();
+        assert!(binding_target_exists(&file).unwrap());
+        assert!(binding_target_exists(&file.join("child")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binding_target_check_counts_dangling_symlinks_as_existing() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &link).unwrap();
+        assert!(binding_target_exists(&link).unwrap());
+    }
 
     fn full_args() -> BindingAddArgs {
         BindingAddArgs {
@@ -12236,6 +12480,47 @@ credential_ref = "env:GH_TOKEN"
         ));
     }
 
+    /// Wire contract (events-schema bet): the NDJSON heartbeat a hub router
+    /// consumes conforms to schema/locus-events.v1.schema.json $defs.watchTick.
+    #[test]
+    fn watch_heartbeat_validates_against_event_schema() {
+        let mut schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../schema/locus-events.v1.schema.json"))
+                .unwrap();
+        schema["$ref"] = serde_json::json!("#/$defs/watchTick");
+        schema.as_object_mut().unwrap().remove("oneOf");
+        let validator = jsonschema::options()
+            .should_validate_formats(true)
+            .build(&schema)
+            .unwrap();
+
+        let base = WatchHeartbeat {
+            kind: "watch".into(),
+            session_ok: true,
+            whoami: Some("acme".into()),
+            doctor_verdict: "SAFE".into(),
+            safe_next: "ready".into(),
+            pinned: true,
+            frozen: false,
+        };
+        // With and without `whoami` (unpinned tick omits it).
+        for hb in [
+            base.clone(),
+            WatchHeartbeat {
+                whoami: None,
+                session_ok: false,
+                doctor_verdict: "UNSAFE".into(),
+                safe_next: "enter".into(),
+                pinned: false,
+                ..base
+            },
+        ] {
+            let line = serde_json::to_string(&hb).unwrap();
+            let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+            assert!(validator.is_valid(&v), "{line}");
+        }
+    }
+
     #[test]
     fn watch_pack_attaches_control_capability_findings() {
         let dir = tempdir().unwrap();
@@ -12566,7 +12851,7 @@ mod agent_contract_tests {
     }
 
     #[test]
-    fn readme_plan_forms_match_the_cli_classifier() {
+    fn documented_plan_forms_match_the_cli_classifier() {
         // Arguments after each documented form satisfy clap without executing
         // the command or requiring credentials, a store, or network access.
         let examples: BTreeMap<&str, &[&str]> = BTreeMap::from([
@@ -12588,6 +12873,7 @@ mod agent_contract_tests {
             ("binding rm", &["example"]),
             ("binding migrate-credential-refs", &["example"]),
             ("client add", &[]),
+            ("offboard", &["example"]),
             ("autopin suggest --apply", &[]),
             ("capability persist", &[]),
             ("capability unpersist", &[]),
@@ -12616,10 +12902,10 @@ mod agent_contract_tests {
             ("events export", &[]),
             ("forensics export", &[]),
         ]);
-        let table = include_str!("../../../README.md")
+        let table = include_str!("../../../docs/README.md")
             .split("| Area | Command forms |")
             .nth(1)
-            .expect("README dry-run command table")
+            .expect("docs dry-run command table")
             .split("\n\n")
             .next()
             .unwrap();
@@ -12633,6 +12919,43 @@ mod agent_contract_tests {
             let mut args: Vec<_> = form.split_whitespace().collect();
             args.extend_from_slice(suffix);
             assert_eq!(class(&args), DryRunSupport::Plans, "{form}");
+        }
+    }
+
+    #[test]
+    fn unplannable_detection_covers_the_help_subcommand() {
+        use super::argv_targets_unplannable;
+        let argv = |tail: &[&str]| -> Vec<std::ffi::OsString> {
+            let mut v = vec![std::ffi::OsString::from("locus")];
+            v.extend(tail.iter().map(std::ffi::OsString::from));
+            v
+        };
+        // `locus help <cmd>` renders <cmd>'s help and must hide the flag for
+        // the same commands `locus <cmd> --help` hides it for.
+        for tail in [
+            &["help", "exec"][..],
+            &["help", "run"][..],
+            &["help", "serve"][..],
+            &["help", "dashboard"][..],
+            &["help", "mcp"][..],
+            &["help", "ci", "run"][..],
+            &["exec"][..],
+            &["ci", "run"][..],
+        ] {
+            assert!(argv_targets_unplannable(&argv(tail)), "{tail:?}");
+        }
+        for tail in [
+            &["help"][..],
+            &["help", "pin"][..],
+            &["help", "ci"][..],
+            &["help", "mcp", "mint"][..],
+            &["help", "mcp", "list"][..],
+            &["help", "topic", "agent-contract"][..],
+            &["pin"][..],
+            &["mcp", "mint"][..],
+            &["ci", "env", "-b", "x"][..],
+        ] {
+            assert!(!argv_targets_unplannable(&argv(tail)), "{tail:?}");
         }
     }
 

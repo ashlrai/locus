@@ -654,9 +654,8 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                     ),
                 ));
             }
-            // Supervisor-anchor wedge: the session's authority anchor cannot
-            // be reached (supervisor/broker gone). Name the teardown hatch —
-            // normal leave also fails closed in this state.
+            // A dead supervisor/broker permits direct re-entry; retain forced
+            // teardown as a manual fallback for an invalid or unreadable pin.
             "authority_anchor_unavailable" => {
                 let cause = anchor_loss
                     .as_deref()

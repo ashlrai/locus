@@ -260,8 +260,8 @@ operator path the seal and one broker validate happen once, then the grant
 confirmed with `strace`. Drift compares the binding just loaded for this
 exec to the pin fingerprint. A file edit after that load is caught on the
 next exec. A drift that would freeze asks the broker again before it
-writes. `--expect` still refuses before the child starts. The audit `fsync`
-stays on this write.
+writes. `--expect` still refuses before the child starts. A later change
+moved the audit `fsync` off the client path entirely; see below.
 
 `cargo bench -p locus-core --bench exec_authority` prints the median of
 `Store::require_active` in process. It does not fail CI. On this machine
@@ -285,5 +285,37 @@ on this disk (0.251 ms to 1.321 ms in this sample).
 | `scrub_resolve` | 0.056 | 0.047 / 0.086 | Ambient scrub and secret resolution |
 | `executor_grant` | 0.209 | 0.179 / 0.614 | Broker `BeginControl` and `GrantExecutor` |
 | `spawn_wait` | 0.525 | 0.491 / 0.744 | Spawn and wait, including the stderr banner write into the pipe |
-| `audit` | 0.798 | 0.251 / 1.321 | Append the audit line and `fsync` |
+| `audit` | 0.798 | 0.251 / 1.321 | Append the audit line and `fsync` (since moved to the broker; below) |
 | `total` | 2.542 | 1.747 / 3.423 | Process start through the audit mark |
+
+## Broker-delegated audit (issue #170 follow-up)
+
+In the table above `audit` was the largest remaining phase — almost all of
+it the `fsync` (`~0.8ms` on that Linux host; `~4.6ms` on an Apple-silicon
+Mac, where it was ~40% of the traced total). The post-child audit record
+now goes to the authority broker over the same authenticated, bounded
+request channel already used for `Validate` and `GrantExecutor`: the broker
+appends the pre-sanitized line to `audit/events.jsonl` under its own home,
+answers, then `fsync`s on its own thread. The exec process waits only for
+the append acknowledgement — one extra broker round trip (~0.2–1ms) instead
+of a synchronous flush — and the file offset/lock ordering are unchanged.
+The broker rejects lines that are empty, contain a newline, or do not parse
+as a JSON object, so a malformed record cannot corrupt the log. If the
+broker cannot serve the append, the caller falls back to the original
+direct write + `fsync`; audit durability never depends on the broker being
+reachable. Preflight checks are untouched: seal, authority validate, drift
+compare and the executor grant all still gate the child.
+
+Coverage: `Store::audit` keeps the direct path for non-hot call sites and
+is the fallback; `Store::audit_via_broker` is used at the post-child audit
+points in `exec`, `run`, `ci run` and the delegated exec path.
+`store::tests::audit_via_broker_falls_back_to_direct_write_without_a_broker`
+covers the fallback; the `exec_exit_codes`/`exec_for`/`mcp_supervised`
+integration tests cover the live broker append, including the executor
+credential path.
+
+`crates/locus-cli/tests/exec_startup_budget.rs` gates the regression:
+median overhead `median(exec) − median(--version) − median(direct true)`
+must stay under 30ms, and the traced `audit` phase under 4ms. It is an
+ignored release benchmark like `exec_perf::exec_startup_ceiling`; run it on
+an idle host with `LOCUS_EXEC_BENCH_BIN` pointing at a release binary.

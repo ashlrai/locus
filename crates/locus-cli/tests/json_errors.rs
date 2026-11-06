@@ -22,7 +22,7 @@ fn locus(home: &Path, cwd: &Path, cap: Option<&str>, args: &[&str]) -> Output {
 fn assert_json_error(out: &Output, needle: &str) {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
-    assert!(out.stdout.is_empty(), "stdout stays clean on failure");
+    assert_eq!(out.stdout, out.stderr, "stdout carries the JSON error");
     let v: Value = serde_json::from_str(stderr.trim())
         .unwrap_or_else(|e| panic!("--json failure must print JSON on stderr ({e}): {stderr:?}"));
     assert_eq!(v["ok"], false, "{v}");

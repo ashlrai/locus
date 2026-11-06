@@ -16,6 +16,7 @@ pub mod approval;
 mod authority_anchor;
 pub mod autopin;
 pub mod autopin_suggest;
+mod autopin_write;
 pub mod binding;
 pub mod budget;
 pub mod config;
@@ -35,6 +36,7 @@ pub mod inherit_env;
 pub mod isolation;
 pub mod loopback;
 pub mod marketplace;
+pub mod offboard;
 pub mod onboard;
 pub mod peers;
 pub mod pin_history;
@@ -43,6 +45,7 @@ pub mod recipes;
 pub mod recovery;
 pub mod seal;
 pub mod session;
+pub mod siem_export;
 pub mod store;
 pub mod swarm;
 pub mod ticket;
@@ -159,6 +162,9 @@ pub use marketplace::{
     validate_index_url, CommunityAdapterManifest, CommunityIndex, CommunityIndexEntry, IndexSource,
     InstallReport, InstalledAdapter, SearchHit, ADAPTERS_DIR,
 };
+pub use offboard::{
+    apply as offboard_apply, inventory as offboard_inventory, OffboardInventory, OffboardOutcome,
+};
 pub use onboard::steps;
 pub use onboard::{
     detect_ambient_candidates, scope_fields_for_provider, suggest_alias, suggest_credential_ref,
@@ -174,6 +180,10 @@ pub use session::{
     binding_fingerprint, namespace_tool, parse_ttl, split_namespaced_tool, PinSource, Session,
     SessionAuthority, SessionAuthorityAnchor, SessionBackingIdentity, SessionBackingType,
     SessionMode, CURRENT_SEAL_VERSION,
+};
+pub use siem_export::{
+    events_since, export_siem_ndjson, parse_since, redact_siem_value, SiemEvent, SiemExportOptions,
+    SIEM_SCHEMA,
 };
 pub use store::{
     audit_events_path, is_safe_mcp_grant_id, locus_home, parse_mcp_grant_token, renew_bounds,
