@@ -113,6 +113,7 @@ test('SMOKE_HOME is a live directory under /tmp when TMPDIR is unset', (t) => {
   const record = join(scratch, 'allocated');
   const observed = join(scratch, 'observed');
   const unsetHarness = harness.replace('"${LOCUS_HOME%/*}" == "$TMPDIR"', '"${LOCUS_HOME%/*}" == /tmp');
+  assert.notEqual(unsetHarness, harness, 'the parent-directory check must be rewritten to expect /tmp');
 
   const result = spawnSync('bash', ['-c', unsetHarness, 'smoke-home-default', script], {
     env: { PATH: process.env.PATH, HOME: process.env.HOME, RECORD: record, OBSERVED: observed },
