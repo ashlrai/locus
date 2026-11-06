@@ -5,9 +5,9 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const test = require("node:test");
 
-test("unreleased changelog distinguishes npm wrapper upgrade behavior", () => {
+test("0.7.0 changelog distinguishes npm wrapper upgrade behavior", () => {
   const changelog = readFileSync(join(__dirname, "../..", "CHANGELOG.md"), "utf8");
-  const unreleased = changelog.split("## [Unreleased]")[1].split("\n## [")[0];
+  const unreleased = changelog.split("## [0.7.0]")[1].split("\n## [")[0];
   const note = unreleased.split("**npm wrapper upgrades")[1].split("\n- **")[0]
     .replace(/\s+/g, " ");
 
