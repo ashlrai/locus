@@ -246,11 +246,15 @@ secspace_home="$(cat "$secspace_tmp/security-home-path")"
 ok "SECURITY_HOME is created and removed beneath a TMPDIR containing spaces"
 
 # Exercise the same workspace creation and EXIT cleanup used by the allowlist
-# probes, beneath a supplied temporary root whose name contains spaces. The
-# subshell owns its test home so its cleanup cannot remove the main home.
+# probes, beneath a supplied temporary root whose name contains spaces
+# (including a doubled space). The subshell owns its test home so its cleanup
+# cannot remove the main home. A decoy at the first word-split fragment of
+# the root catches an unquoted rm in the exit trap.
 log "2d. workspace creation honors a space-containing TMPDIR"
-workspace_tmp="$LOCUS_HOME/workspace temp root"
-mkdir -p "$workspace_tmp"
+workspace_decoy="$LOCUS_HOME/workspace"
+workspace_tmp="$workspace_decoy  ws temp root"
+mkdir -p "$workspace_decoy" "$workspace_tmp"
+touch "$workspace_decoy/decoy-sentinel"
 (
   export TMPDIR="$workspace_tmp"
   LOCUS_HOME="$workspace_tmp/subshell-home"
@@ -262,16 +266,19 @@ mkdir -p "$workspace_tmp"
     "${WS_DIR##*/}" == locus-ws.* ]] || exit 1
   # The workspace must be usable, not just present: write its allowlist from
   # inside the spaced path and check the file landed there.
-  "$LOCUS_BIN" init >/dev/null
+  "$LOCUS_BIN" init >/dev/null || exit 2
   (cd "$WS_DIR" && "$LOCUS_BIN" workspace --default acme --allow acme >/dev/null) || exit 1
   [[ -s "$WS_DIR/.locus.toml" ]] || exit 1
   printf '%s' "$WS_DIR" >"$workspace_tmp/workspace-path"
   touch "$WS_DIR/cleanup-sentinel"
 ) || die "workspace was not created beneath the space-containing TMPDIR"
 workspace_test_dir="$(cat "$workspace_tmp/workspace-path")"
+[[ "$workspace_test_dir" == *" "* ]] || die "WS_DIR path did not contain spaces"
 [[ ! -e "$workspace_test_dir" && ! -L "$workspace_test_dir" ]] \
   || die "rehearsed workspace survived exit cleanup"
 [[ -d "$workspace_tmp" ]] || die "workspace cleanup removed the supplied TMPDIR"
+[[ -f "$workspace_decoy/decoy-sentinel" ]] \
+  || die "workspace cleanup removed a word-split sibling of the spaced TMPDIR"
 ok "workspace creation succeeds beneath a TMPDIR containing spaces"
 
 # A plain custom TMPDIR (no spaces) must also be honored: WS_DIR is a fresh
