@@ -189,6 +189,11 @@ test('JSON-LD SoftwareApplication parses and matches repo sources', () => {
   assert.equal(data.offers?.priceCurrency, 'USD');
 });
 
+test('repo root llms indexes match the site copies', () => {
+  assert.equal(readFileSync(join(REPO_ROOT, 'llms.txt'), 'utf8'), read('llms.txt'));
+  assert.equal(readFileSync(join(REPO_ROOT, 'llms-full.txt'), 'utf8'), read('llms-full.txt'));
+});
+
 test('llms.txt and llms-full.txt have H1, sections and links', () => {
   for (const name of ['llms.txt', 'llms-full.txt']) {
     const text = read(name);

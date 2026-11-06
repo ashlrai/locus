@@ -16,21 +16,21 @@ brew tap ashlrai/locus
 brew install locus
 ```
 
-Until the first tag + formula publish, install from source (requires Rust 1.89
-or newer, the workspace's `rust-version`):
+To install from current Git main instead of the tap (requires Rust 1.89 or
+newer), use the current source's `locus-cli` package, which installs both binaries:
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --git https://github.com/ashlrai/locus locus-cli locus-mcp --locked
+cargo install --git https://github.com/ashlrai/locus locus-cli --locked
 ```
 
-Or test the local formula (requires a matching tag / valid `sha256`, or use `--HEAD`):
+The mirrored formula below targets an older source release with separate binary
+packages. Its two-install recipe may collide on `--HEAD`, because current main
+bundles both binaries in `locus-cli`. Test that path separately before use.
+For the pinned formula, a matching tag and valid `sha256` are required:
 
 ```bash
-# HEAD (no tag/sha needed)
-brew install --HEAD --formula ./integrations/homebrew/Formula/locus.rb
-
-# After tagging v0.1.0 and filling in sha256:
+# Test the mirrored v0.5.0 formula:
 brew install --formula ./integrations/homebrew/Formula/locus.rb
 locus --version
 brew uninstall locus
