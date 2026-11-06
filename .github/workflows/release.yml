@@ -9,6 +9,9 @@ on:
   pull_request:
     paths:
       - ".github/workflows/release.yml"
+      - ".github/workflows/auto-tag.yml"
+      - "scripts/release-version*.mjs"
+      - "scripts/ci/release-workflow.test.mjs"
   # Manual path (one command):
   #   gh workflow run release.yml -R ashlrai/locus -f version=X.Y.Z
   # The tag vX.Y.Z must already exist (auto-tag.yml creates it). The run
@@ -38,11 +41,13 @@ env:
 
 jobs:
   full-suite-evidence:
-    # Release gate: the full suite (macOS and Windows included) must have
+    # Release gate: the Linux full suite and MSRV checks must have
     # passed in a manual workflow_dispatch run of CI on this exact sha.
     name: Full suite green on release sha
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    outputs:
+      sha: ${{ steps.tag.outputs.sha || github.sha }}
     permissions:
       actions: read
     steps:
@@ -58,6 +63,7 @@ jobs:
           # ls-remote lists the tag and, for annotated tags, its peeled ^{}
           # commit line right after it; the last match is always the commit.
           sha=$(git ls-remote --exit-code "https://github.com/$REPO.git" "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | tail -1 | cut -f1)
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid release commit"; exit 1; }
           echo "tag v$VERSION -> $sha"
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
 
@@ -72,8 +78,8 @@ jobs:
           set -euo pipefail
           # PR dry runs never publish, so they need no full-suite evidence.
           if [ "$EVENT" = "pull_request" ]; then echo "PR dry run: evidence not required"; exit 0; fi
-          n="$(gh api "repos/${REPO}/actions/workflows/${CI_WORKFLOW}/runs?event=workflow_dispatch&head_sha=${SHA}&status=success&per_page=1" --jq '.total_count')"
-          if [ "${n:-0}" -lt 1 ]; then
+          n="$(gh api "repos/${REPO}/actions/workflows/${CI_WORKFLOW}/runs?event=workflow_dispatch&head_sha=${SHA}&status=success&per_page=100" --jq '[.workflow_runs[] | select(.event == "workflow_dispatch" and .status == "completed" and .conclusion == "success" and .head_sha == "'"$SHA"'")] | length')"
+          if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ]; then
             echo "::error::No successful workflow_dispatch run of ${CI_WORKFLOW} on ${SHA}. Run 'gh workflow run ${CI_WORKFLOW} --ref <this ref>', wait for green, then release."
             exit 1
           fi
@@ -113,8 +119,21 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Manual dispatch builds the tag, not the dispatch ref.
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/v{0}', inputs.version) || github.ref }}
+          ref: ${{ needs.full-suite-evidence.outputs.sha }}
           persist-credentials: false
+
+      - name: Check source version carriers
+        if: env.SKIP_BUILD != 'true'
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = pull_request ]; then
+            node scripts/release-version.mjs check
+          else
+            node scripts/release-version.mjs check --tag "$RELEASE_TAG"
+          fi
 
       - name: Install Rust toolchain
         if: env.SKIP_BUILD != 'true'
@@ -183,13 +202,13 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [full-suite-evidence, build]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/v{0}', inputs.version) || github.ref }}
+          ref: ${{ needs.full-suite-evidence.outputs.sha }}
           persist-credentials: false
 
       - name: Download all artifacts
@@ -248,7 +267,7 @@ jobs:
           # A tag push names it after the tag; the PR dry run's ref (`79/merge`)
           # has a slash, so slashes become dashes. On manual dispatch
           # RELEASE_TAG carries the v<version> tag, not the dispatch ref.
-          cargo run --release --locked -p locus-cli -- adapter registry export \
+          cargo run --release --locked -p locus-cli --bin locus -- adapter registry export \
             --out "release-assets/locus-adapters-${RELEASE_TAG//\//-}.json"
 
       # TODO(registry-signing): once a LOCUS_REGISTRY_SIGNING_KEY repo secret
@@ -261,7 +280,7 @@ jobs:
       #     shell: bash
       #     run: |
       #       set -euo pipefail
-      #       cargo run --release --locked -p locus-cli -- adapter registry export --sign \
+      #       cargo run --release --locked -p locus-cli --bin locus -- adapter registry export --sign \
       #         --key-id root \
       #         --out "release-assets/locus-adapters-${GITHUB_REF_NAME}.json"
       #
@@ -287,7 +306,7 @@ jobs:
   # workflow release.yml, no environment.
   npm-publish:
     name: Publish npm packages (${{ matrix.dir }})
-    needs: release
+    needs: [full-suite-evidence, release]
     if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
@@ -302,7 +321,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/v{0}', inputs.version) || github.ref }}
+          ref: ${{ needs.full-suite-evidence.outputs.sha }}
           persist-credentials: false
 
       - name: Set up Node

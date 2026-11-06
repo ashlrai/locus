@@ -6,26 +6,84 @@ Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
 `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
 `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
 
-## Automatic releases
+## Qualify and publish through the release workflows
 
-Merge a version bump PR once its checks are green and
-[auto-tag.yml](../.github/workflows/auto-tag.yml) creates `v<version>` from
-`Cargo.toml`'s `[workspace.package] version` on that exact commit, after
-every required check on it is green. The tag push (or one automatic
-dispatch) then runs release.yml, which builds, verifies and publishes. No
-manual step, no designated release caller, no PUBLISH_HOLD.
+Use the existing release candidate after feature integration lands. Do not open
+another version-only PR. The sanctioned publisher is
+[auto-tag.yml](../.github/workflows/auto-tag.yml), reconciled from PR #611.
+It requires both required GitHub Actions checks and successful manual full-suite
+CI on the exact current main commit before minting its repository-scoped App
+token or creating a tag. Scheduled or merge-queue CI alone cannot authorize a
+tag. Tags are create-only; an existing tag is never moved.
 
-Manual equivalents, one command each:
+Host/root owns code publication, final CI dispatch and artifact publication.
+The host must verify the existing release App installation/configuration and
+npm trusted publishers. Missing configuration is a blocker, not permission to
+add credentials, change protections or use a raw tag push. The privileged
+auto-tag job never checks out or executes candidate code.
+
+1. Reconcile the existing candidate with current main and its useful feature
+   integration. Run `node scripts/release-version.mjs sync X.Y.Z` to synchronize
+   Cargo versions, local path dependencies, wrapper constants, npm/web package
+   manifests and root `server.json`. This local command writes source files;
+   it does not publish or update `scripts/freshness/published.json`. Keep new
+   Unreleased entries, author the dated changelog and reconcile the doctor
+   snapshot separately. Run freshness/discoverability generators and review
+   their output before publishing the code through the normal host publisher.
+2. After the candidate merges, record its exact main SHA. The authorized host
+   dispatches full CI (this starts Actions work):
+
+   ```bash
+   release_sha=$(gh api repos/ashlrai/locus/commits/main --jq .sha)
+   gh workflow run ci.yml -R ashlrai/locus --ref main
+   gh api "repos/ashlrai/locus/actions/workflows/ci.yml/runs?event=workflow_dispatch&head_sha=${release_sha}&per_page=100" --jq '.workflow_runs[] | {id,head_sha,status,conclusion,html_url}'
+   ```
+
+   Require completed/success on that exact SHA and inspect the full-suite/e2e
+   summaries. If main moved before dispatch, stop and qualify current main.
+   No successful release qualification is implied by a local test run.
+3. The successful same-repository manual CI completion on main re-evaluates
+   auto-tag. For an unchanged manifest or a manual retry, the authorized host
+   invokes the same publisher, after verifying the exact green SHA:
+
+   ```bash
+   gh workflow run auto-tag.yml -R ashlrai/locus --ref main
+   ```
+
+   This creates the absent version tag only after both gates pass. If main
+   moves, the workflow refuses to tag. Requalify rather than bypassing the gate.
+4. Auto-tag confirms the tag-triggered release started and dispatches it once
+   if needed. For a failed release, the host may retry the existing tag:
+
+   ```bash
+   gh workflow run release.yml -R ashlrai/locus --ref main -f version=X.Y.Z
+   ```
+
+   This publishes artifacts and npm packages. It requires the tag to exist,
+   resolves it to a commit, requires the same manual full-suite evidence, and
+   checks out that exact SHA in all build/publish jobs. It cannot mint a tag
+   from the dispatch branch. On failure, inspect the run and repair through
+   normal review; never move a tag to replace already published bytes.
+5. Verify archives, checksums, unsigned manifest, both npm versions/integrities
+   and gitHead, then clean-home installation/runtime. Only after acceptance
+   update the published pin through the normal code publisher. Verify website,
+   Homebrew and MCP registry separately. Missing usage data remains unknown.
+
+Read-only source checks:
 
 ```bash
-gh workflow run auto-tag.yml -R ashlrai/locus                  # tag main's manifest version if absent and checks are green
-gh workflow run release.yml -R ashlrai/locus -f version=X.Y.Z  # publish an existing vX.Y.Z tag
+node scripts/release-version.mjs check
+node scripts/release-version.mjs check --tag vX.Y.Z
+node scripts/freshness/check.mjs
+node apps/web/discoverability.mjs --check
+node --test scripts/release-version.test.mjs scripts/ci/release-workflow.test.mjs
 ```
 
-Every release gate still applies on the manual path: release.yml requires a
-successful `workflow_dispatch` run of `ci.yml` on the tag's commit first.
-If none exists yet, run `gh workflow run ci.yml -R ashlrai/locus`, wait for
-green, then dispatch the release.
+The helper and workflow tests originate in PR #731. Its alternate automatic
+release gate accepting merge-queue evidence is intentionally excluded. The
+release workflow retains tag/manual publication and a PR dry run that builds
+and checks Linux assets without publishing. Registry export explicitly selects
+`--bin locus` because `locus-cli` also supplies `locus-mcp`.
 
 ## 0.6.0 release candidate — prepared 2026-10-31
 
@@ -76,7 +134,12 @@ cargo fmt --all -- --check
 - [ ] CI green on `main`
 - [ ] e2e green locally (`scripts/e2e.sh`)
 
-## Checklist — v0.5.1 (launch: Oct 20)
+## Historical checklists
+
+The following checklists record past releases. Their raw tag commands are
+historical; use the qualified workflows above for current releases.
+
+### Checklist - v0.5.1 (launch: Oct 20)
 
 1. [x] Bump version → **0.5.1** (Cargo workspace + lock, npm, npm-mcp, apps/web, bin wrapper `VERSION`)
 2. [x] `CHANGELOG.md` section for 0.5.1 (npm wrapper hang #64, quickstart → enter #66)
@@ -97,7 +160,7 @@ cargo fmt --all -- --check
 5. [ ] Update `integrations/homebrew/Formula/locus.rb` + the live tap with the v0.5.1 source/asset sha256 (commands below)
 6. [ ] Smoke: `npm i -g locus-cli@0.5.1` in a clean HOME → `locus quickstart` → `eval "$(locus hook zsh)"` → `locus enter acme`
 
-## Checklist — v0.5.0
+### Checklist - v0.5.0
 
 1. [x] Bump version → **0.5.0** (Cargo workspace + npm + bin wrappers)
 2. [x] `CHANGELOG.md` section for 0.5.0 (signed adapter-registry release manifests + fail-closed `verify-manifest`, hub MT drop-in `withLocusMcpTenant`, MT conformance e2e, Bearer-only HTTP auth, stdio frame cap, catalog deny annotation, watch heartbeat control-capability findings)
@@ -134,7 +197,7 @@ cargo fmt --all -- --check
    locus --version   # or extracted binary
    ```
 
-## Checklist — v0.4.0 (shipped)
+### Checklist - v0.4.0 (shipped)
 
 1. [x] Bump version → **0.4.0** (Cargo workspace + npm + bin wrappers)
 2. [x] `CHANGELOG.md` section for 0.4.0 (multi-tenant MCP multiplexor + grants, Anthropic/OpenAI adapters, `locus switch`, leave --force audit fix, worker-home deletion hardening, …)
@@ -171,7 +234,7 @@ cargo fmt --all -- --check
    locus --version   # or extracted binary
    ```
 
-## Checklist — v0.3.0 (shipped)
+### Checklist - v0.3.0 (shipped)
 
 1. [x] Bump version → **0.3.0** (Cargo workspace + npm + bin wrappers)
 2. [x] `CHANGELOG.md` section for 0.3.0 (TTL auto-leave, client add, MCP session pin-anchoring, Grok/Claude wiring, verify_session, control capability, …)
@@ -208,7 +271,7 @@ cargo fmt --all -- --check
    locus --version   # or extracted binary
    ```
 
-## Checklist — v0.2.0 (shipped)
+### Checklist - v0.2.0 (shipped)
 
 1. [x] Bump version → **0.2.0** (Cargo workspace + npm + bin wrappers)
 2. [x] `CHANGELOG.md` section for 0.2.0 (dashboard, forensics, HTTP MCP, agent, goal, verify, …)
@@ -244,20 +307,6 @@ cargo fmt --all -- --check
    gh release download v0.2.0 -p 'locus-*.tar.gz' -D /tmp/locus-rel
    locus --version   # or extracted binary
    ```
-
-## Tag and push
-
-Tags must match `v*` so [`.github/workflows/release.yml`](../.github/workflows/release.yml) runs.
-
-```bash
-# From a clean main at the release commit:
-git tag -a v0.2.0 -m "Locus v0.2.0"
-git push origin v0.2.0
-```
-
-Annotated tags are preferred (`-a`). Lightweight tags also trigger the workflow.
-
-**Do not move or force-push an existing published tag.** Hotfix → bump patch and re-tag.
 
 ### Prior release (v0.1.0) — reference digests
 
@@ -322,8 +371,11 @@ block in `locus.rb` and fill per-target sha256 digests.
 
 ### npm wrappers
 
-Bump `VERSION` / `package.json` version in `npm/` and `npm-mcp/` if needed, then
-publish from those packages (they download the matching release binary).
+The qualified `release.yml` workflow publishes both packages through npm
+trusted OIDC after the GitHub Release exists. Keep versions synchronized in
+the candidate before qualification. For a failed publish, inspect the workflow
+and use the existing-tag retry above; do not publish packages separately from
+the sanctioned flow. Verify both registry versions, integrity and gitHead.
 
 ## Verify a release
 
@@ -337,7 +389,8 @@ tar -xzf /tmp/locus-rel/locus-aarch64-apple-darwin.tar.gz -C /tmp
 /tmp/locus-aarch64-apple-darwin/locus --version
 ```
 
-## Hotfix / re-tag policy
+## Hotfix policy
 
-Do **not** move an existing published tag. Bump patch (`v0.1.2`), document in
-CHANGELOG, tag, and push. Never `--force` a tag that already has release assets.
+Do **not** move an existing published tag. Prepare a fresh patch candidate with
+a changelog through normal review, then qualify and publish it through the
+workflows above. Never force a tag that already has release assets.
