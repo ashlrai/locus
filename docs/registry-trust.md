@@ -4,6 +4,23 @@
 > This page covers the **release manifest**: a per-release, signable snapshot of
 > the built-in adapter set.
 
+## Trust boundary at a glance
+
+The current `locus-adapters-<tag>.json` release manifest is **unsigned**. CI
+exports it without `--sign`; its presence on a release and its catalog digests
+do not authenticate the publisher or the release artifacts. As recorded in
+the [0.5.0 changelog](../CHANGELOG.md#050--2026-08-16), signing support exists,
+but provisioning a release signing key, publishing a trusted registry root,
+and enabling CI signing are future work.
+
+By default, `locus adapter verify-manifest` rejects the unsigned asset. With
+`--allow-unsigned`, it checks catalog agreement with the binary running the
+command; it does not establish the origin or integrity of either file. Assess
+both sources independently. The flag does not accept a bad signature or drift.
+An operator can sign a separate manifest today, but that does not mean CI signs
+the release asset; a trusted signature authenticates catalog material, not the
+binary or archive. The details and limits follow below.
+
 For a concise consumer walkthrough, see
 [Verifying an adapter registry release manifest](./registry-manifest-verification.md).
 For a concise status of today's asset and the signing roadmap, see the
