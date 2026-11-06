@@ -1348,6 +1348,30 @@ printf '%s' "$SECURITY_WS" > "$2"
   assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
 });
 
+test('repeated security workspace block yields distinct directories beneath TMPDIR', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const create = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  const block = source.match(/^security_ws_live="\$SECURITY_WS"[\s\S]*?^ok "two security workspaces are distinct[^\n]*$/m)?.[0];
+  assert.ok(create && block, 'missing repeated security workspace block');
+
+  for (const tmpdir of [scratch, `${scratch}/`]) {
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+ok() { printf 'ok %s\\n' "$*"; }
+${create}
+SECURITY_WS=""
+${block}
+`], { env: { ...process.env, TMPDIR: tmpdir }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /two security workspaces are distinct/);
+    assert.deepEqual(readdirSync(scratch), ['keep'], 'block must clean up both workspaces');
+  }
+});
+
 test('graph home creation selects the custom temporary root or /tmp fallback', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp $literal; [test]');

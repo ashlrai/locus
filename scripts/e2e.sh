@@ -2020,6 +2020,29 @@ assert d["workspace"]["valid"] is False, d["workspace"]
 '
 ok "broken workspace link blocks force/run and makes doctor UNSAFE"
 
+# Repeated SECURITY_WS creation (unconditional): two invocations of the
+# security workspace recipe must yield distinct directories directly beneath
+# the selected temporary root. The live probe workspace is stashed and
+# restored so the exit trap still removes exactly it.
+security_ws_live="$SECURITY_WS"
+create_security_workspace; security_ws_a="$SECURITY_WS"
+create_security_workspace; security_ws_b="$SECURITY_WS"
+SECURITY_WS="$security_ws_live"
+security_ws_root="${TMPDIR:-/tmp}"
+security_ws_root="${security_ws_root%/}"
+[[ -d "$security_ws_a" && -d "$security_ws_b" ]] \
+  || die "repeated security workspace creation did not create both directories"
+[[ "$security_ws_a" != "$security_ws_b" ]] \
+  || die "repeated security workspace creation returned the same directory"
+security_ws_parent_a="${security_ws_a%/*}"
+security_ws_parent_b="${security_ws_b%/*}"
+[[ "${security_ws_parent_a%/}" == "$security_ws_root" && "${security_ws_parent_b%/}" == "$security_ws_root" ]] \
+  || die "repeated security workspaces were not created directly beneath the temp root"
+rm -rf "$security_ws_a" "$security_ws_b"
+[[ ! -e "$security_ws_a" && ! -e "$security_ws_b" ]] \
+  || die "repeated security workspaces were not removed"
+ok "two security workspaces are distinct and live directly beneath the temp root"
+
 # ── 25. verify claim (feature-detected) ──────────────────────────────────────
 log "25. locus verify claim (optional)"
 if ! has_cmd verify && ! has_cmd_path verify claim; then
