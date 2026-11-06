@@ -86,9 +86,13 @@ test('early command failure removes every allocated temporary path', (t) => {
   const fakeRoot = join(tmp, 'repo');
   const scratch = join(tmp, 'scratch with spaces');
   const bin = join(tmp, 'bin');
+  const home = join(tmp, 'home');
   const record = join(tmp, 'allocations');
   mkdirSync(join(fakeRoot, 'scripts'), { recursive: true });
   mkdirSync(bin);
+  // Throwaway HOME keeps the real ~/.cargo/bin off the script's PATH prepend,
+  // so the cargo stub below is the one the script finds.
+  mkdirSync(home);
   mkdirSync(scratch);
   mkdirSync(join(fakeRoot, 'target', 'debug'), { recursive: true });
   copyFileSync(script, join(fakeRoot, 'scripts', 'hub-smoke.sh'));
@@ -109,7 +113,7 @@ while IFS= read -r path; do [[ -e "$path" ]] || exit 98; done < "$ALLOCATIONS"
 exit 42
 `, { mode: 0o755 });
 
-  const env = { ...process.env, BASH_ENV: '', TMPDIR: scratch,
+  const env = { ...process.env, BASH_ENV: '', HOME: home, TMPDIR: scratch,
     PATH: `${bin}:${process.env.PATH}`, REAL_MKTEMP: lookup.stdout.trim(), ALLOCATIONS: record,
     LOCUS_CONTROL_CAPABILITY: 'synthetic-test-capability' };
   const result = spawnSync('bash', [join(fakeRoot, 'scripts', 'hub-smoke.sh')], {
