@@ -21,7 +21,7 @@ and [agent contract](agent-contract.md#--dry-run) define the output and limits.
   made, and no control broker is started. Review paths beyond the snapshot as
   well: a filesystem snapshot alone cannot prove absence of transient writes
   or external effects. See the [manual verification procedure](dry-run-verification.md)
-  and [README preview contract](../README.md#previewing-mutations-with---dry-run).
+  and [dry-run overview](README.md#previewing-changes-with---dry-run).
 - [ ] Preserve the documented exceptions: `setup --print` and `setup --client
   generic` print configuration; accepted-and-ignored commands retain normal
   behavior, including store creation and fail-closed drift freezing. Do not

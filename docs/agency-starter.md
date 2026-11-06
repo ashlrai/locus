@@ -1,6 +1,6 @@
 # Agency Starter
 
-Credential compatibility in this unreleased source checkout: use explicitly supplied `env:VAR` references for execution. The kit’s retained `phm:` references are migration metadata and cannot resolve through Secrets v0.7.9; replace them deliberately for supervised env-backed use. See [credential compatibility](./credential-compatibility.md).
+Credential compatibility: use explicitly supplied `env:VAR` references for execution. The kit’s retained `phm:` references are migration metadata and cannot resolve through Secrets v0.7.9; replace them deliberately for supervised env-backed use. See [credential compatibility](./credential-compatibility.md).
 
 
 Operational guide for a contract firm (or founder with N clients) running **Locus** so agents cannot act in the wrong tenant.
@@ -16,7 +16,7 @@ Principal (you / contractor)
     acts_as → Binding (personal | client-a | client-a-ro | client-b)
                  for → Tenant
                  includes → Provider accounts (Supabase / GH / Vercel)
-                 uses → CredentialRefs only (phm:…)
+                 uses → CredentialRefs only (env:…)
                  constrained_by → Policy + Scope freeze
 Workspace (.locus.toml) defaults_to → Binding allowlist
 Session sealed_to → exactly one Binding
@@ -38,7 +38,7 @@ flags missing/invalid/mismatched capabilities with the exact fix.
 ```bash
 locus init
 cp examples/agency-starter/bindings/*.toml ~/.locus/bindings/
-# edit project_ref / team_id / orgs; keep phm: refs
+# edit project_ref / team_id / orgs; replace phm: refs with env: refs for execution
 cp examples/agency-starter/config.example.toml ~/.locus/config.toml   # optional
 
 # In each client monorepo:
@@ -46,7 +46,7 @@ cp examples/agency-starter/workspaces/client-a.locus.toml /path/to/client-a/.loc
 cp examples/agency-starter/workspaces/client-b.locus.toml /path/to/client-b/.locus.toml
 ```
 
-Create Phantom secrets named like the binding refs (`phm:SUPABASE_CLIENT_A`, …). Never put values in TOML or git.
+Supply the referenced environment variables outside agent context. Never put values in TOML or git.
 
 Onboarding a new client without hand-editing TOML: `locus client add <alias>`
 walks alias → tenant → provider → scope → credential *pointer* (`phm:NAME` /
@@ -71,7 +71,7 @@ Rules:
 1. **Separate CredentialRefs per tenant** — never reuse personal PAT on a client binding.
 2. **Freeze hard scopes** — `project_ref`, `team_id`, org/repo allowlists are the fence.
 3. **Prod-capable tools** stay on `require_approval` (+ `dual_control` for firm mode).
-4. **Phantom names** encode tenant: `phm:SUPABASE_CLIENT_A`, not `phm:SUPABASE`.
+4. **Credential variable names** encode tenant: `env:SUPABASE_CLIENT_A`, not `env:SUPABASE`.
 
 ## Workspace fence
 
@@ -164,7 +164,7 @@ Append-only JSONL under `$LOCUS_HOME/audit/events.jsonl`. Never contains resolve
 
 1. `locus leave` — no live pin to that alias  
 2. `locus binding rm client-a` (+ ro pair)  
-3. Rotate/revoke `phm:…_CLIENT_A*` (Phantom + providers)  
+3. Rotate/revoke the client credentials in the secret store and providers
 4. Remove org/team/project invites  
 5. Strip client repo `.locus.toml` if custody ends  
 6. Export audit: `locus events --binding client-a --last 10000 --json`  
@@ -200,7 +200,7 @@ dual-IDE UI confirmation remains operator-manual.
 ## Operator checklist
 
 - [ ] One binding (or full+ro pair) per client tenant  
-- [ ] CredentialRefs only; Phantom namespaced by tenant  
+- [ ] CredentialRefs only; namespaced by tenant
 - [ ] Client repos: `.locus.toml` allowlist + `require_pin`  
 - [ ] Destructive globs on `require_approval` (+ dual-control)  
 - [ ] Shell hook; `whoami` / `doctor` before risky sessions  

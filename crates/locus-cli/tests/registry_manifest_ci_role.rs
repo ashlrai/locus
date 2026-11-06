@@ -4,6 +4,7 @@ use std::path::Path;
 use std::process::Command;
 
 const DOC: &str = include_str!("../../../docs/registry-manifest-ci-role.md");
+const STATUS: &str = include_str!("../../../docs/registry-trust-ci-status.md");
 
 #[test]
 fn sources_and_follow_up_guides_exist() {
@@ -21,6 +22,21 @@ fn sources_and_follow_up_guides_exist() {
         ),
     ] {
         assert!(DOC.contains(&format!("]({link})")), "missing {link}");
+        assert!(root.join(file).is_file(), "missing {file}");
+    }
+}
+
+#[test]
+fn ci_status_links_to_its_sources() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (link, file) in [
+        (
+            "./registry-trust.md#current-release-status",
+            "docs/registry-trust.md",
+        ),
+        ("../CHANGELOG.md#050--2026-08-16", "CHANGELOG.md"),
+    ] {
+        assert!(STATUS.contains(&format!("]({link})")), "missing {link}");
         assert!(root.join(file).is_file(), "missing {file}");
     }
 }
@@ -50,24 +66,34 @@ fn documented_check_accepts_only_matching_unsigned_catalog() {
     assert!(manifest.get("signature").is_none());
     assert!(manifest.get("signed_by").is_none());
 
-    let example = DOC
-        .split("```bash\n")
-        .nth(1)
-        .unwrap()
-        .split("\n```")
-        .next()
-        .unwrap();
-    let args: Vec<_> = example.split_whitespace().collect();
-    assert_eq!(args.first(), Some(&"locus"));
-    let output = run(&args[1..]);
-    assert!(output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("unsigned") && stdout.contains("none"));
+    let examples: Vec<Vec<&str>> = [DOC, STATUS]
+        .iter()
+        .map(|doc| {
+            let example = doc
+                .split("```bash\n")
+                .nth(1)
+                .unwrap()
+                .split("\n```")
+                .next()
+                .unwrap();
+            let args: Vec<_> = example.split_whitespace().collect();
+            assert_eq!(args.first(), Some(&"locus"));
+            args
+        })
+        .collect();
+    for args in &examples {
+        let output = run(&args[1..]);
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("unsigned") && stdout.contains("none"));
+    }
     assert!(!run(&["adapter", "verify-manifest", "release.json"])
         .status
         .success());
 
     manifest["locus_version"] = "0.0.0-drift".into();
     std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    assert!(!run(&args[1..]).status.success());
+    for args in &examples {
+        assert!(!run(&args[1..]).status.success());
+    }
 }

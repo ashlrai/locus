@@ -1211,6 +1211,16 @@ mod tests {
     }
 
     #[test]
+    fn unknown_adapter_is_missing_from_catalog_and_dispatch() {
+        let name = "unknown-provider";
+        assert!(list_adapters()
+            .unwrap()
+            .iter()
+            .all(|entry| entry.id != name));
+        assert!(crate::adapters::adapter_for(name).is_none());
+    }
+
+    #[test]
     fn cached_builtin_catalog_preserves_embedded_data_and_caller_ownership() {
         let embedded = parse_manifest(MANIFEST_TOML).unwrap();
         let mut caller_copy = builtin_manifest().unwrap();

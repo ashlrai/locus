@@ -21,7 +21,7 @@ def recipe():
 class CargoInstallRecipeTest(unittest.TestCase):
     def test_note_records_reported_observation_without_claiming_a_fix(self):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = changelog.split("## [Unreleased]", 1)[1].split("## [0.5.2]", 1)[0]
+        unreleased = changelog.split("## [0.7.0]", 1)[1].split("\n## [", 1)[0]
         entry = unreleased.split("**Reproduce cargo-install timings", 1)[1]
         note = entry.split("```bash", 1)[0]
         self.assertIn("issues/168", note)
@@ -69,7 +69,9 @@ class CargoInstallRecipeTest(unittest.TestCase):
             self.assertIn("--message-format=json", args)
         def value(args, option):
             return args[args.index(option) + 1]
-        self.assertEqual(len({value(args, "--rev") for args in calls}), 1)
+        self.assertEqual({value(args, "--rev") for args in calls},
+                         {"e969d9c44a3c0bff1d0a1fee4deb1b77fb58652e"})
+        self.assertNotIn("git rev-parse HEAD", recipe())
         self.assertEqual(len({value(args, "--git") for args in calls}), 1)
         self.assertNotEqual(value(calls[0], "--target-dir"), value(calls[1], "--target-dir"))
         self.assertEqual(value(calls[1], "--target-dir"), value(calls[2], "--target-dir"))

@@ -3048,7 +3048,7 @@ impl Store {
     // ── Audit ─────────────────────────────────────────────────────────────
 
     pub fn audit(&self, op: &str, binding: &str, detail: Option<serde_json::Value>) -> Result<()> {
-        self.audit_line_direct(&audit_event_line(op, binding, detail))
+        self.audit_line_direct(&audit_event_line(op, binding, detail, None))
     }
 
     /// The same audit record appended through the live authority broker: the
@@ -3062,11 +3062,10 @@ impl Store {
         binding: &str,
         detail: Option<serde_json::Value>,
     ) -> Result<()> {
-        let line = audit_event_line(op, binding, detail);
-        if authority_anchor::audit_line(&self.home, &line).is_ok() {
+        if authority_anchor::audit_event(&self.home, op, binding, detail.clone()).is_ok() {
             return Ok(());
         }
-        self.audit_line_direct(&line)
+        self.audit_line_direct(&audit_event_line(op, binding, detail, None))
     }
 
     /// Direct append + fsync (the pre-broker path; also the broker's own
@@ -3455,14 +3454,25 @@ impl Store {
 
 /// One finished audit event as a JSON line (no trailing newline): timestamp
 /// plus the sanitized op/binding/detail fields.
-fn audit_event_line(op: &str, binding: &str, detail: Option<serde_json::Value>) -> String {
-    serde_json::json!({
+/// Build one audit record. `source` marks a record the authority broker wrote
+/// on behalf of a non-control (executor) caller; direct and control writes
+/// carry no marker.
+pub(crate) fn audit_event_line(
+    op: &str,
+    binding: &str,
+    detail: Option<serde_json::Value>,
+    source: Option<&str>,
+) -> String {
+    let mut record = serde_json::json!({
         "ts": chrono::Utc::now().to_rfc3339(),
         "op": op,
         "binding": binding,
         "detail": detail.map(sanitize_audit_value),
-    })
-    .to_string()
+    });
+    if let Some(source) = source {
+        record["source"] = source.into();
+    }
+    record.to_string()
 }
 
 /// Append one audit line to `audit/events.jsonl` under `home`: create the
