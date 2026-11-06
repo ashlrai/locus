@@ -20,3 +20,10 @@ can leave a directory behind. Inspect any leftover directory before removing it,
 especially if a run wrote diagnostic artifacts there.
 
 For allocation failures and their effects on readiness, see [temporary-directory failure handling](dogfood-temp-failures.md).
+
+`node --test scripts/dogfood.test.mjs` covers selection, lifecycle and cleanup
+for all three roots. `node --test scripts/dogfood-home-tmpdir-containment.test.mjs`
+checks that a supplied `TMPDIR` physically contains the isolated dogfood home,
+that selection ignores `TMP`, `TEMP`, the working directory and an inherited
+`DOGFOOD_HOME`, and that a missing `TMPDIR` fails closed instead of falling
+back to another root.
