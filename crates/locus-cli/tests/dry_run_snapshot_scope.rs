@@ -18,7 +18,7 @@ fn snapshot_ignores_reads_and_external_output_but_detects_state_writes() {
         .args([
             "-c",
             r#"
-import os, subprocess, sys
+import contextlib, io, os, sys
 from pathlib import Path
 script, root = sys.argv[1], Path(sys.argv[2])
 state = root / 'state'
@@ -32,8 +32,18 @@ directory = state / 'existing-directory'
 directory.mkdir()
 directory.chmod(0o755)
 
+# Compile the exact documented snapshot once; each exec gets fresh globals.
+# Keep the interpreter and immutable code fixture across the mutation matrix.
+code = compile(Path(script).read_text(), script, 'exec')
 def snapshot():
-    return subprocess.check_output([sys.executable, script, str(state)])
+    previous = sys.argv
+    sys.argv = [script, str(state)]
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            exec(code, {'__name__': '__main__'})
+        return output.getvalue().encode()
+    finally:
+        sys.argv = previous
 
 def changed(action):
     before = snapshot()

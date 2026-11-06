@@ -649,9 +649,11 @@ mod tests {
     }
     #[test]
     fn concurrent_first_writers_share_one_key_and_keep_every_record() {
+        // The repository is read-only; only the history home must be fresh
+        // for each first-writer race.
+        let repo = git_repo_with_remote("git@github.com:acme-corp/app.git");
         for _ in 0..20 {
             let home = tempfile::tempdir().unwrap();
-            let repo = git_repo_with_remote("git@github.com:acme-corp/app.git");
             let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
             let threads: Vec<_> = (0..8)
                 .map(|t| {

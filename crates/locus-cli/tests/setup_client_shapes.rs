@@ -148,10 +148,11 @@ fn read_entry(format: Format, text: &str) -> (String, String, String, bool, bool
 
 #[test]
 fn every_client_shape_is_written_merged_and_idempotent() {
+    // Each shape has its own config path; bootstrap authority only once.
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = capability(home.path(), cwd.path());
     for shape in SHAPES {
-        let home = tempfile::tempdir().unwrap();
-        let cwd = tempfile::tempdir().unwrap();
-        let cap = capability(home.path(), cwd.path());
         let file = (shape.path)(home.path(), cwd.path());
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, seed(shape.format)).unwrap();
@@ -200,15 +201,18 @@ fn every_client_shape_is_written_merged_and_idempotent() {
             "{}: exactly locus and other, no duplicate",
             shape.client
         );
+        // Keep later cases independent, especially after malformed input.
+        std::fs::remove_file(&file).unwrap();
     }
 }
 
 #[test]
 fn every_client_shape_refuses_a_malformed_config_untouched() {
+    // Each shape has its own config path; bootstrap authority only once.
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let cap = capability(home.path(), cwd.path());
     for shape in SHAPES {
-        let home = tempfile::tempdir().unwrap();
-        let cwd = tempfile::tempdir().unwrap();
-        let cap = capability(home.path(), cwd.path());
         let file = (shape.path)(home.path(), cwd.path());
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         std::fs::write(&file, malformed(shape.format)).unwrap();
@@ -229,5 +233,7 @@ fn every_client_shape_refuses_a_malformed_config_untouched() {
             "{}: malformed config left untouched",
             shape.client
         );
+        // Keep later cases independent, especially after malformed input.
+        std::fs::remove_file(&file).unwrap();
     }
 }

@@ -1580,7 +1580,10 @@ for line in sys.stdin:
         // Immediate reap: last_used is fresh → keep
         assert_eq!(mgr.reap_idle(Some(Duration::from_secs(60))).unwrap(), 0);
         assert_eq!(mgr.list().len(), 2);
-        std::thread::sleep(Duration::from_millis(40));
+        // Age the fixture clock instead of waiting for wall time.
+        for last_used in mgr.last_used.values_mut() {
+            *last_used = Instant::now() - Duration::from_millis(40);
+        }
         let n = mgr.reap_idle(Some(Duration::from_millis(20))).unwrap();
         assert_eq!(n, 2);
         assert!(mgr.list().is_empty());
