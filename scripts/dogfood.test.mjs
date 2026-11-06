@@ -1738,10 +1738,11 @@ exit "$?"
   assert.deepEqual(readdirSync(root).sort(), ['probe', 'tmp  with   spaces ']);
 });
 
-test('multi-tenant probe keeps LOCUS_HOME inside its root under a relative TMPDIR', (t) => {
+test('multi-tenant probe keeps LOCUS_HOME inside its root under a relative TMPDIR containing spaces', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-mt-relative-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  mkdirSync(join(root, 'rel'));
+  const relativeParent = 'relative tmp  directory';
+  mkdirSync(join(root, relativeParent));
   const probe = join(root, 'probe');
   // The probe cds into its root before init, so a relative TMPDIR would make a
   // relative LOCUS_HOME resolve under the root a second time.
@@ -1760,15 +1761,16 @@ exit "$?"
 `;
   const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
     cwd: root,
-    env: { ...process.env, TMPDIR: 'rel', PROBE_FILE: probe },
+    env: { ...process.env, TMPDIR: relativeParent, PROBE_FILE: probe },
     encoding: 'utf8',
   });
   assert.equal(result.signal, null);
   assert.equal(result.status, 1, result.stderr);
   const probeRoot = readFileSync(probe, 'utf8').trim();
-  assert.equal(realpathSync(dirname(probeRoot)), realpathSync(join(root, 'rel')));
+  assert.equal(realpathSync(dirname(probeRoot)), realpathSync(join(root, relativeParent)));
+  assert.match(basename(probeRoot), /^locus-mt-dogfood\.[A-Za-z0-9]{6}$/);
   assert.equal(existsSync(probeRoot), false);
-  assert.deepEqual(readdirSync(join(root, 'rel')), []);
+  assert.deepEqual(readdirSync(join(root, relativeParent)), []);
 });
 
 test('dogfood home stays absolute under a relative TMPDIR', (t) => {
