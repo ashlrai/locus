@@ -13,9 +13,14 @@ repository.workspace = true
 name = "locus"
 path = "src/main.rs"
 
+[[bin]]
+name = "locus-mcp"
+path = "src/mcp.rs"
+
 [dependencies]
 locus-core = { workspace = true }
 libc = { workspace = true }
+locus-mcp = { path = "../locus-mcp", version = "0.7.0" }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 anyhow = { workspace = true }
@@ -37,6 +42,7 @@ toml_edit = "0.22"
 sha2 = { workspace = true }
 toml = { workspace = true }
 tower = { workspace = true, features = ["util"] }
+jsonschema = { workspace = true }
 
 # Shared phantom+locus merge-queue test; skips when PHANTOM_BIN is unset.
 [[test]]
@@ -46,3 +52,19 @@ path = "../../tests/integration/phantom_locus.rs"
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+
+[[test]]
+name = "packaged_binaries"
+path = "tests/packaged_binaries.rs"
+
+[[test]]
+name = "cli-unknown-command"
+path = "tests/cli-unknown-command.rs"
+
+[[test]]
+name = "cli_help_exit"
+path = "tests/cli_help_exit.rs"
+
+[[test]]
+name = "workspace_version_sync"
+path = "tests/workspace_version_sync.rs"

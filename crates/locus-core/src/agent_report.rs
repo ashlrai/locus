@@ -264,9 +264,8 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
 
     let mut findings: Vec<String> = Vec::new();
 
-    // A pin that exists but no longer verifies (not frozen: that has its own
-    // re-pin flow) needs the human force-leave + re-enter recovery, since a
-    // plain re-pin fails closed on the wedged session.
+    // A pin that no longer verifies needs a human recovery selected by cause;
+    // frozen pins have their own re-pin flow.
     let recovery = pin
         .as_ref()
         .filter(|p| {

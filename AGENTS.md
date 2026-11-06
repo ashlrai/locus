@@ -6,6 +6,40 @@
 
 Sibling: [Phantom](https://phm.dev) answers *can this secret enter the model?* Locus answers *as whom, against which tenant, right now?*
 
+## Using Locus from an agent
+
+You cannot pin. Ask a person to pin, then use the tools. Indexes: [llms.txt](./llms.txt), [llms-full.txt](./llms-full.txt), [docs/copy-paste.md](./docs/copy-paste.md), [docs/agent-contract.md](./docs/agent-contract.md).
+
+One command, then a throwaway home. Run it as one shell so the pin's broker stays alive:
+
+```bash
+npm install -g locus-cli @ashlrai/locus-mcp
+export LOCUS_HOME="$(mktemp -d)"
+locus quickstart
+eval "$(locus hook bash)"
+locus enter personal
+locus whoami --json
+locus status --json
+locus doctor --json
+locus exec --expect personal --no-resolve -- echo ok
+```
+
+`locus exec --expect acme -- echo ok` exits 1 with `pin_mismatch`. The child does not start.
+
+Claude Code (`.mcp.json`) and Cursor (`~/.cursor/mcp.json`). Codex uses the TOML below. Provider tools need the supervised command, a live pin, and the control capability in the shell that launches the client. Restart the client after a re-pin.
+
+```json
+{ "mcpServers": { "locus": { "command": "locus", "args": ["mcp", "--supervised"] } } }
+```
+
+```toml
+[mcp_servers.locus]
+command = "locus"
+args = ["mcp", "--supervised"]
+```
+
+`locus setup --client generic` prints the control-tools entry (`locus-mcp`, no provider tools) and writes nothing. `locus setup --client claude --print` does the same for one client.
+
 ## What this repo is
 
 Rust workspace (`locus-core`, `locus-cli`, `locus-mcp`) implementing:
@@ -33,16 +67,17 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Binaries: `./target/release/locus`, `./target/release/locus-mcp`.
 
-Local install:
+Local install from this checkout (`locus-cli` installs both binaries):
 
 ```bash
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --locked --path crates/locus-cli
 ```
 
 CI enforces fmt + clippy `-D warnings` + test + release build (see `.github/workflows/ci.yml`).
 
 ### Safe local smoke (never touch real `~/.locus` in tests)
+
+The product quickstart is [Using Locus from an agent](#using-locus-from-an-agent). This block is for work on the repo.
 
 Run it as one shell script (one Bash call). The pin's authority broker lives
 only as long as the shell that pinned, so a pin made in one tool call is gone
@@ -135,7 +170,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/adapters.md](./docs/adapters.
 
 - Do **not** paste secrets into chat, commits, issues, or MCP tool args.
 - Use explicit `env:VAR` references for supported resolution; values must be supplied outside agent context. `phm:NAME` references remain readable but fail closed until a supported scoped bridge exists. Do not invoke or capture `phantom reveal` to emulate one.
-- This checkout’s compatibility change is unreleased; published Locus v0.5.0 still has the incompatible legacy reveal adapter. See [credential compatibility](./docs/credential-compatibility.md).
+- Published Locus v0.5.0 has the incompatible legacy reveal adapter; v0.6.0 fails closed for `phm:` credential resolution. See [credential compatibility](./docs/credential-compatibility.md).
 - `test:VALUE` is available only inside compiled unit tests and is rejected by production binaries.
 - If a secret lands in git history, rotate it; do not only delete the file.
 

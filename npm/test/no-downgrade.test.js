@@ -2,7 +2,7 @@
 // preloaded transport/process doubles prevent network access or real cargo installs.
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
-const { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } = require("node:fs");
+const { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const test = require("node:test");
@@ -21,8 +21,16 @@ test("an older wrapper preserves a newer executable even with an old sidecar (#1
   // Node is a real executable whose --version output is accepted by the wrapper.
   // The package requires Node >=16, so its version is newer than this wrapper.
   assert.equal(compareVersions(process.version, version), 1);
-  copyFileSync(process.execPath, binary);
-  chmodSync(binary, 0o755);
+  // Link rather than copy: shared builds (e.g. Homebrew) resolve @rpath
+  // entries such as libnode.dylib relative to the real executable, so a copied
+  // node cannot answer --version outside its prefix and the probe falls back
+  // to the stale sidecar. Fall back to a copy where symlinks are unavailable.
+  try {
+    symlinkSync(process.execPath, binary);
+  } catch {
+    copyFileSync(process.execPath, binary);
+    chmodSync(binary, 0o755);
+  }
   copyFileSync(join(__dirname, "..", "bin", "locus.js"), wrapper);
   writeFileSync(`${binary}.version`, "0.1.0\n");
   const original = readFileSync(binary);
@@ -98,6 +106,8 @@ function fixture(t, { installed = "99.0.0", sidecar, companion, pathVersion, cha
     const cp = require("node:child_process");
     const { join } = require("node:path");
     const { EventEmitter } = require("node:events");
+    const crypto = require("node:crypto");
+    const path = require("node:path");
     Object.defineProperty(process, "platform", { value: "linux" });
     Object.defineProperty(process, "arch", { value: "x64" });
     const binary = ${JSON.stringify(binary)};
@@ -131,10 +141,15 @@ function fixture(t, { installed = "99.0.0", sidecar, companion, pathVersion, cha
       const request = new EventEmitter();
       queueMicrotask(() => {
         const response = new EventEmitter();
-        response.statusCode = url.endsWith(".sha256") ? 404 : 200;
+        response.statusCode = 200;
+        response.headers = {};
         response.resume = () => {};
         callback(response);
-        if (response.statusCode === 200) {
+        if (url.endsWith(".sha256")) {
+          const hash = crypto.createHash("sha256").update("archive fixture").digest("hex");
+          response.emit("data", Buffer.from(hash + "  " + path.basename(url.slice(0, -7)) + "\\n"));
+          response.emit("end");
+        } else {
           if (${JSON.stringify(changedDuringDownload)} && fs.existsSync(binary)) {
             fs.writeFileSync(binary + ".version", "99.0.0\\n");
           }

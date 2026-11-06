@@ -16,12 +16,21 @@
 //! std's panic.
 
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static WRITTEN: AtomicBool = AtomicBool::new(false);
+
+/// Whether this process has already started a stdout document.
+pub(crate) fn has_written() -> bool {
+    WRITTEN.load(Ordering::Relaxed)
+}
 
 /// Unwind payload for "stdout reader went away".
 pub(crate) struct StdoutClosed;
 
 /// Write formatted output to stdout; a closed pipe unwinds with [`StdoutClosed`].
 pub(crate) fn write_stdout(args: std::fmt::Arguments<'_>) {
+    WRITTEN.store(true, Ordering::Relaxed);
     let mut out = io::stdout().lock();
     if let Err(e) = out.write_fmt(args) {
         on_stdout_error(e);
@@ -30,6 +39,7 @@ pub(crate) fn write_stdout(args: std::fmt::Arguments<'_>) {
 
 /// Write raw bytes to stdout (e.g. generated completions) with the same handling.
 pub(crate) fn write_stdout_bytes(bytes: &[u8]) {
+    WRITTEN.store(true, Ordering::Relaxed);
     let mut out = io::stdout().lock();
     if let Err(e) = out.write_all(bytes).and_then(|()| out.flush()) {
         on_stdout_error(e);

@@ -4,13 +4,41 @@
 > This page covers the **release manifest**: a per-release, signable snapshot of
 > the built-in adapter set.
 
+For a concise consumer walkthrough, see
+[Verifying an adapter registry release manifest](./registry-manifest-verification.md).
+For a concise status of today's asset and the signing roadmap, see the
+[current-state summary](./registry-manifest-current-state.md).
+For a pre-flight review list, see the
+[consumer checklist](./registry-manifest-consumer-checklist.md).
+For guidance on deciding what an unsigned comparison establishes, see
+[unsigned consumer guidance](./registry-unsigned-consumer-guidance.md).
+For quick answers about the current unsigned release and future signing, see
+the [unsigned manifest FAQ](./registry-unsigned-manifest-faq.md).
+For common trust questions, see the [registry trust FAQ](./registry-trust-faq.md).
+For the release workflow's responsibilities and limits, see
+[CI's role](./registry-manifest-ci-role.md).
+For the current CI trust status and outstanding signing work, see
+[registry trust CI status](./registry-trust-ci-status.md).
+For how the release attachment is produced and what its origin establishes,
+see [manifest provenance](./registry-manifest-provenance.md).
+For the responsibilities of each party, see
+[registry trust actors](./registry-trust-actors.md).
+For unresolved release verification decisions, see the
+[verification questions](./registry-manifest-verification-questions.md).
+For a concise distinction between release status and future signing, see
+[registry signing status](./registry-signing-status.md).
+For the open decisions of the unsigned-to-signed transition itself, see
+[registry signing open questions](./registry-signing-open-questions.md).
+
 ## Current release status
 
-The release workflow runs `locus adapter registry export` without `--sign`
-and attaches the resulting **unsigned** `locus-adapters-<tag>.json` to a
-tag-push release. CI signing is **not active**: the workflow describes it as
-a TODO contingent on provisioning a registry signing key and publishing its
-public key. The archive SHA-256 sidecars check the archives for integrity;
+The current release workflow runs `locus adapter registry export` without
+`--sign` and attaches the resulting **unsigned** `locus-adapters-<tag>.json`
+to a tag-push release. The repository does not provide a configured CI
+signing setup or a published registry root for this artifact. Provisioning a
+signing key, publishing its public key, and enabling CI signing are future
+work; the commented workflow example is a TODO, not an active step. The
+archive SHA-256 sidecars check the archives for integrity;
 they do not authenticate their publisher or sign the manifest.
 
 By default, `verify-manifest` rejects the unsigned release asset. Passing
@@ -78,8 +106,9 @@ authenticate the binary or establish that it came from a particular release.
 The entry digests compare catalog metadata; they are not hashes of the binary
 or release archives and do not verify executable code. Archive SHA-256
 sidecars are separate checks, and an unauthenticated checksum does not establish
-publisher identity. For provenance, use an operator-signed manifest and a
-public key obtained through a trusted channel, as described below.
+publisher identity. An operator-signed manifest can authenticate its catalog
+material when its public key is obtained through a trusted channel, as
+described below; this does not establish provenance of the binary or archive.
 
 ### Tampering example
 
@@ -138,9 +167,9 @@ also includes `signature` and `signed_by` fields.
 
 | Party | Holds | Does |
 |-------|-------|------|
-| **Operator** (registry root) | ed25519 **private** seed | Can sign a manifest locally and distribute it out of band |
-| **Consumer** (any Locus install) | ed25519 **public** key, pinned in the local trust store | Can verify an operator-signed manifest and compare it with the running binary |
-| **CI** | nothing | Attaches the **unsigned** canonical manifest as a release asset (no signing secret is provisioned; see the `TODO(registry-signing)` block in `.github/workflows/release.yml`) |
+| **Operator** (optional local signing) | Operator-supplied ed25519 **private** seed | Can sign a separate manifest locally and distribute it out of band |
+| **Consumer** (optional local verification) | Operator's ed25519 **public** key, independently obtained and pinned in the local trust store | Can verify that operator-signed manifest and compare it with the running binary |
+| **CI** (current workflow) | No signing key used by the export step | Attaches the **unsigned** manifest; CI signing and a registry root are future work (`TODO(registry-signing)` in `.github/workflows/release.yml`) |
 
 Trust keys are the same store used by `locus adapter verify`
 (merged, env wins on same id):
@@ -157,6 +186,9 @@ would hold the forging secret — `verify-manifest` reports such signatures as
 
 ### Operator: optionally sign and distribute a manifest
 
+These commands illustrate a separate operator-managed process. They do not
+refer to an existing Locus release signing key, public key, or trust setup.
+
 ```bash
 # Signing key: base64 (or 64-hex) of the 32-byte ed25519 seed, in a local file.
 # Locus never generates, prints, or logs private key material.
@@ -171,7 +203,7 @@ locus adapter registry export --sign --out locus-adapters-v0.5.0.json
 `--sign` **refuses** to export when no key is available — there is no silent
 fallback to unsigned output. Without `--sign` the export is the same canonical
 JSON, just unsigned (what CI attaches to each GitHub release as
-`locus-adapters-<tag>.json`).
+`locus-adapters-<tag>.json` in the current workflow).
 
 Distribute the matching public key through a trusted channel; consumers pin it once:
 

@@ -32,6 +32,11 @@ const IO_TIMEOUT: Duration = Duration::from_secs(2);
 /// 3s proved flaky under CI load after heavy `cargo test` + large debug binaries.
 const START_TIMEOUT: Duration = Duration::from_secs(10);
 const TEST_START_TIMEOUT: Duration = Duration::from_secs(15);
+/// Coverage-instrumented binaries (`cargo llvm-cov` sets `--cfg coverage`) run
+/// every basic block through counter updates; identity hashing and process
+/// introspection during broker startup can take an order of magnitude longer
+/// than an ordinary debug build, so the handoff window needs real headroom.
+const COVERAGE_START_TIMEOUT: Duration = Duration::from_secs(120);
 /// Optional override: `LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS` (clamped 500–120_000).
 const BROKER_START_TIMEOUT_ENV: &str = "LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS";
 const CONTROL_TTL: Duration = Duration::from_secs(2);
@@ -97,6 +102,11 @@ struct ServerStartup {
     epoch: String,
     endpoint_generation: u64,
     launcher_executable: String,
+    /// Measured by the launcher before spawn so the broker does not re-hash its
+    /// own binary inside the startup window: the child verifies only metadata
+    /// (device/inode/length/mtime) against this recorded identity, which is
+    /// exactly what [`authenticate_server`] re-checks for every connection.
+    launcher_identity: ExecutableIdentity,
     supervisor: SupervisorIdentity,
     control_capability: String,
 }
@@ -150,6 +160,14 @@ enum AnchorRequest {
         epoch: String,
         generation: u64,
         subject_digest: String,
+    },
+    /// Structured fields only: the broker stamps the timestamp, sanitizes
+    /// the detail and marks the record's source itself, so a caller can
+    /// never inject a raw audit line.
+    Audit {
+        op: String,
+        binding: String,
+        detail: Option<serde_json::Value>,
     },
     Revoke {
         challenge: String,
@@ -477,6 +495,39 @@ pub(crate) fn grant_executor(
         })
     } else {
         Err(control_error(response, "executor grant refused"))
+    }
+}
+
+/// Ask the live broker to build and append one audit record to
+/// `audit/events.jsonl`. The response acknowledges that the record is in the
+/// log file; the fsync completes inside the broker after it responds, off the
+/// caller's exit path. Fails when no usable broker endpoint answers — the
+/// caller then appends and fsyncs directly (same record shape, same
+/// durability on the slower path).
+pub(crate) fn audit_event(
+    home: &Path,
+    op: &str,
+    binding: &str,
+    detail: Option<serde_json::Value>,
+) -> Result<()> {
+    let (auth, _mode) = validation_auth()?;
+    let endpoint = read_endpoint(home).map_err(no_current_endpoint)?;
+    let response = request(
+        &endpoint,
+        &AnchorRequest::Audit {
+            op: op.to_string(),
+            binding: binding.to_string(),
+            detail,
+        },
+        &auth,
+    )?;
+    if response.ok {
+        Ok(())
+    } else {
+        Err(control_error(
+            response,
+            "authority broker refused the audit append",
+        ))
     }
 }
 
@@ -874,11 +925,16 @@ fn start_broker(
         LocusError::AuthorityAnchorUnavailable(format!("cannot locate current executable: {error}"))
     })?;
     let executable = fs::canonicalize(executable)?;
+    // Hash the launcher here, outside the handoff window: under
+    // `-C instrument-coverage` a debug `sha2` pass over a large binary can
+    // outlast the broker start timeout all by itself.
+    let launcher_identity = executable_identity(&executable)?;
     let startup = ServerStartup {
         home: canonical_home(home)?,
         epoch: random_hex(16),
         endpoint_generation: random_u64(),
         launcher_executable: executable.display().to_string(),
+        launcher_identity,
         supervisor: platform::capture_supervisor_identity()?,
         control_capability: hex::encode(auth.key),
     };
@@ -887,9 +943,14 @@ fn start_broker(
             .or_else(|_| retry_current_endpoint(home, auth, may_restart));
     }
 
-    let mut child = Command::new(&executable)
-        .env_clear()
-        .env(SERVER_ENV, "1")
+    let mut command = Command::new(&executable);
+    command.env_clear().env(SERVER_ENV, "1");
+    // Keep coverage runtime output where the operator/CI directed it; a
+    // stripped env would drop `default.profraw` into the inherited cwd.
+    if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+        command.env("LLVM_PROFILE_FILE", profile);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // Drain stderr so a chatty failure cannot block on a full pipe, and so
@@ -1046,8 +1107,34 @@ fn run_server(
     let owner_executable = fs::canonicalize(&startup.launcher_executable).map_err(|error| {
         LocusError::AuthorityAnchorUnavailable(format!("invalid broker launcher: {error}"))
     })?;
-    let owner_executable_identity = executable_identity(&owner_executable)?;
-    if !platform::supervisor_matches_identity(&startup.supervisor)? {
+    // The launcher already hashed its own image; this broker only confirms
+    // the executable on disk still matches that measurement. A full re-hash
+    // inside the startup window can exceed the handoff timeout under
+    // `-C instrument-coverage`.
+    if !executable_metadata_matches(&owner_executable, &startup.launcher_identity)? {
+        return Err(LocusError::AuthorityAnchorUnavailable(
+            "broker launcher executable changed during startup".into(),
+        ));
+    }
+    let owner_executable_identity = startup.launcher_identity.clone();
+    // When the supervisor is the launcher itself (the common case: the broker
+    // is spawned by `current_exe`), the supervisor's executable identity is
+    // the measurement the launcher just made of the same file. Re-hashing it
+    // here would only repeat that work inside the startup window — under
+    // `-C instrument-coverage` a second pass over a large binary can outlast
+    // the handoff timeout. `supervisor_loss_reason` re-checks liveness,
+    // executable path, on-disk metadata and uid without hashing; equality of
+    // the recorded identities proves the file is the one already measured.
+    let supervisor_is_launcher = startup.supervisor.executable
+        == owner_executable.display().to_string()
+        && startup.supervisor.executable_identity == startup.launcher_identity;
+    if supervisor_is_launcher {
+        if let Some(reason) = platform::supervisor_loss_reason(&startup.supervisor) {
+            return Err(LocusError::AuthorityAnchorUnavailable(format!(
+                "authority supervisor identity is no longer current: {reason}"
+            )));
+        }
+    } else if !platform::supervisor_matches_identity(&startup.supervisor)? {
         return Err(LocusError::AuthorityAnchorUnavailable(
             "authority supervisor identity is no longer current".into(),
         ));
@@ -1123,7 +1210,9 @@ fn run_server(
                 let identity = broker_identity.clone();
                 let error_home = home.clone();
                 thread::spawn(move || {
-                    if let Err(error) = serve_connection(connection, &identity, &state, &retired) {
+                    if let Err(error) =
+                        serve_connection(connection, &identity, &state, &retired, &error_home)
+                    {
                         record_broker_error(&error_home, &error);
                     }
                     clients.fetch_sub(1, Ordering::AcqRel);
@@ -1147,6 +1236,7 @@ fn serve_connection(
     broker: &BrokerIdentity,
     state: &Arc<Mutex<AnchorState>>,
     retired: &Arc<AtomicBool>,
+    home: &Path,
 ) -> Result<()> {
     platform::set_deadlines(&connection, IO_TIMEOUT)?;
     let peer = connection_peer_identity(&connection)?;
@@ -1177,15 +1267,93 @@ fn serve_connection(
             &key,
         );
     }
-    let response = handle_request(
-        &mut guard,
-        &peer,
-        &envelope.credential,
-        envelope.request,
-        retired,
-    );
-    drop(guard);
-    write_authenticated_response(&mut connection, &envelope.nonce, response, &key)
+    // An audit append never touches authority state: the broker writes the
+    // record and acknowledges it, then fsyncs the file after responding so
+    // the caller's exit path never waits on the disk flush. The append and
+    // its audit-file flock wait happen with the state lock released so a
+    // blocked audit write cannot stall unrelated authority requests.
+    let mut audit_file = None;
+    let response = if let AnchorRequest::Audit {
+        op,
+        binding,
+        detail,
+    } = &envelope.request
+    {
+        let epoch = guard.epoch.clone();
+        drop(guard);
+        match audit_append(home, &envelope.credential, op, binding, detail) {
+            Ok(file) => {
+                audit_file = Some(file);
+                AnchorResponse {
+                    ok: true,
+                    epoch: Some(epoch),
+                    generation: None,
+                    challenge: None,
+                    executor_capability: None,
+                    error: None,
+                    error_code: None,
+                }
+            }
+            Err(_) => response_error("authority audit append failed"),
+        }
+    } else {
+        let response = handle_request(
+            &mut guard,
+            &peer,
+            &envelope.credential,
+            envelope.request,
+            retired,
+        );
+        drop(guard);
+        response
+    };
+    let written = write_authenticated_response(&mut connection, &envelope.nonce, response, &key);
+    if let Some(file) = audit_file {
+        let _ = file.sync_all();
+    }
+    written
+}
+
+/// Ops an executor credential may record: the exact-session child launches
+/// it supervises. Anything else (pin, leave, approvals, ...) is control-plane
+/// history an executor must not be able to write.
+const EXECUTOR_AUDIT_OPS: &[&str] = &[
+    "session.exec",
+    "session.exec.delegated",
+    "session.run",
+    "ci.run",
+];
+
+/// Build and append one audit record on the broker's behalf. The broker owns
+/// the timestamp and the record shape; records written for an executor
+/// credential are limited to [`EXECUTOR_AUDIT_OPS`] and carry
+/// `"source":"executor"`. The returned file still holds the flock and is
+/// fsync'd by [`serve_connection`] after the response is sent.
+fn audit_append(
+    home: &Path,
+    credential: &RequestCredential,
+    op: &str,
+    binding: &str,
+    detail: &Option<serde_json::Value>,
+) -> Result<fs::File> {
+    let source = match credential {
+        RequestCredential::Control => None,
+        RequestCredential::Executor { .. } => {
+            if !EXECUTOR_AUDIT_OPS.contains(&op) {
+                return Err(LocusError::AuthorityAnchorUnavailable(
+                    "executor may not record this audit op".into(),
+                ));
+            }
+            Some("executor")
+        }
+    };
+    if op.is_empty() || binding.is_empty() {
+        return Err(LocusError::AuthorityAnchorUnavailable(
+            "invalid audit record".into(),
+        ));
+    }
+    let line = crate::store::audit_event_line(op, binding, detail.clone(), source);
+    crate::store::append_audit_line(home, &line)
 }
 
 fn request_key(state: &AnchorState, credential: &RequestCredential) -> Option<[u8; 32]> {
@@ -1203,7 +1371,7 @@ fn credential_allows_request(credential: &RequestCredential, request: &AnchorReq
         RequestCredential::Executor { .. } => {
             matches!(
                 request,
-                AnchorRequest::Ping | AnchorRequest::Validate { .. }
+                AnchorRequest::Ping | AnchorRequest::Validate { .. } | AnchorRequest::Audit { .. }
             )
         }
     }
@@ -1444,6 +1612,12 @@ fn handle_request(
             }
             retired.store(true, Ordering::Release);
             response_ok(state, None)
+        }
+        // Audit appends are served by `serve_connection` before dispatch —
+        // they never touch authority state. Reachable only if that ordering
+        // changes; fail closed rather than panic.
+        AnchorRequest::Audit { .. } => {
+            response_error("authority audit append is not a state operation")
         }
     }
 }
@@ -1896,7 +2070,9 @@ fn broker_start_timeout() -> Duration {
             return Duration::from_millis(ms.clamp(500, 120_000));
         }
     }
-    if is_test_harness() {
+    if cfg!(coverage) {
+        COVERAGE_START_TIMEOUT
+    } else if is_test_harness() {
         TEST_START_TIMEOUT
     } else {
         START_TIMEOUT
@@ -2591,6 +2767,73 @@ mod tests {
     }
 
     #[test]
+    fn broker_builds_audit_records_and_marks_or_rejects_executor_ones() {
+        let dir = tempdir().unwrap();
+        let endpoint = broker(dir.path());
+        let lease = issue(dir.path(), "ses_audit", "active", TEST_SUBJECT).unwrap();
+        let capability =
+            grant_executor(dir.path(), &lease, "ses_audit", "active", TEST_SUBJECT).unwrap();
+        let audit = |op: &str| AnchorRequest::Audit {
+            op: op.into(),
+            binding: "bench".into(),
+            detail: Some(serde_json::json!({"exit": 0})),
+        };
+
+        // Control appends an unmarked, broker-built record.
+        assert!(
+            request(&endpoint, &audit("session.exec"), &auth())
+                .unwrap()
+                .ok
+        );
+        // An executor may record its child launches; the broker marks them.
+        assert!(
+            request(&endpoint, &audit("ci.run"), &executor_auth(&capability))
+                .unwrap()
+                .ok
+        );
+        // An executor cannot forge control-plane history or empty records.
+        for op in ["session.pin", "session.leave", "approval.grant", ""] {
+            let response = request(&endpoint, &audit(op), &executor_auth(&capability)).unwrap();
+            assert!(!response.ok, "executor forged audit op {op:?}");
+        }
+        let empty = AnchorRequest::Audit {
+            op: "session.exec".into(),
+            binding: String::new(),
+            detail: None,
+        };
+        assert!(!request(&endpoint, &empty, &auth()).unwrap().ok);
+
+        let log = fs::read_to_string(crate::store::audit_events_path(dir.path())).unwrap();
+        let records: Vec<serde_json::Value> = log
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2, "{log}");
+        assert_eq!(records[0]["op"], "session.exec");
+        assert!(records[0].get("source").is_none());
+        assert_eq!(records[1]["op"], "ci.run");
+        assert_eq!(records[1]["source"], "executor");
+        assert!(records.iter().all(|r| r["ts"].as_str().is_some()));
+
+        // Executor audit power reaches nothing else: a control operation is
+        // still refused.
+        let forbidden = request(
+            &endpoint,
+            &AnchorRequest::Revoke {
+                challenge: random_hex(32),
+                session_id: "ses_audit".into(),
+                backing_type: "active".into(),
+                epoch: lease.epoch,
+                generation: lease.generation,
+            },
+            &executor_auth(&capability),
+        )
+        .unwrap();
+        assert!(!forbidden.ok);
+        retire(dir.path());
+    }
+
+    #[test]
     fn endpoint_owner_substitution_is_rejected_by_server_peer_authentication() {
         let dir = tempdir().unwrap();
         let endpoint = broker(dir.path());
@@ -2626,8 +2869,17 @@ mod tests {
         release.join().unwrap();
         let endpoint = endpoint.expect("broker must start once the lock frees up");
         ping(dir.path(), &endpoint, &auth()).unwrap();
+        // The bound proves the start did not wait out the broker timeout
+        // (15s under test, 120s under coverage). Instrumented hashing of a
+        // large test binary can cost seconds by itself, so coverage gets
+        // headroom while still catching a full-timeout wait.
+        let bound = if cfg!(coverage) {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(5)
+        };
         assert!(
-            elapsed < Duration::from_secs(5),
+            elapsed < bound,
             "start waited {elapsed:?} for an endpoint that could not appear"
         );
         retire(dir.path());

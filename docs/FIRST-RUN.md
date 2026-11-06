@@ -68,7 +68,7 @@ Published npm `0.5.1` ELF, `LOCUS_HOME` under `/tmp`, stdin not a terminal (`std
 | `graph export` with no `LOCUS_GRAPH_PASSPHRASE` | 1 | 0.002 s | passphrase required for non-interactive export |
 | `init --with-samples --json` a second time | 0 | 0.024 s | `ok` true, `samples` true, `config_written` false |
 
-In that 0.5.1 run, `whoami --json` reported `credential.present: true` for a stored ref even though the variable was unset. The current implementation reports whether the credential can be resolved in the `whoami` process: an unset `env:` variable reports `false`. Phantom refs currently report `false` because the scoped credential bridge is unavailable. Neither the ref name nor its value is included in the result.
+In that 0.5.1 run, `whoami --json` reported `credential.present: true` for a stored ref even though the variable was unset. The current implementation reports whether the credential can be resolved in the `whoami` process: an unset `env:` variable reports `false`, while a variable set to an empty string reports `true`. Presence does not guarantee that a credential is valid or usable by a provider. Phantom refs currently report `false` because the scoped credential bridge is unavailable. Neither the ref name nor its value is included in the result.
 
 ### Dry-run and idempotent setup
 

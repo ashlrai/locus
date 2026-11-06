@@ -288,14 +288,22 @@ fn append_locked(
     if lines.len() > max {
         lines.drain(..lines.len() - max);
     }
+    rewrite_locked(home, p, &lines)
+}
+
+/// Atomic log replacement under the writer lock: fresh `create_new` +
+/// `O_NOFOLLOW` temp in the same directory, fsync, rename over the log.
+fn rewrite_locked(home: &Path, p: &Path, lines: &[String]) -> std::io::Result<()> {
     let mut nonce = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut nonce);
     let tmp = home.join(format!(".{FILE_NAME}.{}.tmp", hex::encode(nonce)));
     let res = (|| {
         let mut f = open_opts(true).open(&tmp)?;
-        let mut buf = lines.join("\n");
-        buf.push('\n');
-        f.write_all(buf.as_bytes())?;
+        if !lines.is_empty() {
+            let mut buf = lines.join("\n");
+            buf.push('\n');
+            f.write_all(buf.as_bytes())?;
+        }
         f.sync_all()?;
         fs::rename(&tmp, p)
     })();
@@ -303,6 +311,43 @@ fn append_locked(
         let _ = fs::remove_file(&tmp);
     }
     res
+}
+
+/// Remove every entry naming `alias` (as the pinned or the expected alias).
+///
+/// Rewrites the log under the writer lock only when something matched and
+/// returns the number of dropped entries; a log with no match keeps its
+/// bytes. Malformed lines are kept verbatim — a line that does not parse is
+/// not an entry "for" the client. Never creates the log. Deletion stays
+/// available while recording is disabled: scrubbing history is a privacy
+/// operation, not a write the `enabled` switch governs.
+pub fn remove_alias(home: &Path, alias: &str) -> std::io::Result<usize> {
+    if !path(home).exists() {
+        return Ok(0);
+    }
+    with_lock(home, |p| {
+        let mut dropped = 0usize;
+        let kept: Vec<String> = read_nofollow_or_empty(p)?
+            .lines()
+            .filter(|l| {
+                let named = serde_json::from_str::<HistoryEntry>(l)
+                    .ok()
+                    .is_some_and(|e| {
+                        e.alias.as_deref() == Some(alias) || e.expected.as_deref() == Some(alias)
+                    });
+                if named {
+                    dropped += 1;
+                }
+                !named
+            })
+            .map(str::to_string)
+            .collect();
+        if dropped == 0 {
+            return Ok(0);
+        }
+        rewrite_locked(home, p, &kept)?;
+        Ok(dropped)
+    })
 }
 
 /// Read a snapshot without creating a lock or any other files (skips malformed
@@ -524,6 +569,43 @@ mod tests {
         let raw = fs::read_to_string(path(&h)).unwrap();
         assert_eq!(raw.lines().count(), 100);
         assert_eq!(read(&h).len(), 100, "every line parses");
+    }
+
+    #[test]
+    fn remove_alias_drops_pinned_and_expected_and_keeps_other_lines() {
+        let home = tempfile::tempdir().unwrap();
+        for (event, alias, expected) in [
+            ("pin", Some("acme"), None),
+            ("pin", Some("beta"), None),
+            ("pin_mismatch", Some("beta"), Some("acme")),
+            ("leave", Some("acme"), None),
+        ] {
+            let e = entry_for(KEY, event, alias, expected, None);
+            append(home.path(), &e, 100).unwrap();
+        }
+        // A malformed line is not an entry "for" the client: it is kept.
+        let raw = fs::read_to_string(path(home.path())).unwrap();
+        fs::write(path(home.path()), format!("{raw}{{not json}}\n")).unwrap();
+
+        assert_eq!(remove_alias(home.path(), "acme").unwrap(), 3);
+        let after = fs::read_to_string(path(home.path())).unwrap();
+        assert_eq!(after.lines().count(), 2);
+        let left = read(home.path());
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].alias.as_deref(), Some("beta"));
+        assert!(after.contains("{not json}"));
+
+        // A second run is a no-op and leaves bytes untouched.
+        assert_eq!(remove_alias(home.path(), "acme").unwrap(), 0);
+        assert_eq!(fs::read_to_string(path(home.path())).unwrap(), after);
+    }
+
+    #[test]
+    fn remove_alias_on_a_missing_log_writes_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(remove_alias(home.path(), "acme").unwrap(), 0);
+        assert!(!path(home.path()).exists());
+        assert!(!home.path().join(LOCK_FILE).exists());
     }
 
     #[test]
