@@ -26,4 +26,8 @@ for all three roots. `node --test scripts/dogfood-home-tmpdir-containment.test.m
 checks that a supplied `TMPDIR` physically contains the isolated dogfood home,
 that selection ignores `TMP`, `TEMP`, the working directory and an inherited
 `DOGFOOD_HOME`, and that a missing `TMPDIR` fails closed instead of falling
-back to another root.
+back to another root. `node --test scripts/dogfood-mt-tmpdir-containment.test.mjs`
+checks the same containment boundary for the multi-tenant probe root during a
+real `DOGFOOD_MT=1` run: it shares the supplied `TMPDIR` with the live dogfood
+home, ignores `TMP`, `TEMP` and the working directory, and fails closed on a
+missing `TMPDIR` without retrying beneath `/tmp`.
