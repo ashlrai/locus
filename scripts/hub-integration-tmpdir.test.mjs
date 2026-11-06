@@ -106,6 +106,58 @@ exec bash "$1"
   });
 }
 
+// An unusable TMPDIR — not a directory, or simply absent — must abort the run
+// before any integration work: real mktemp fails (or, for a relative value,
+// the `cd` normalization does), `set -e` turns that into a nonzero exit, and
+// the script never reaches `locus init`.
+for (const [label, unusableTmpdir, extraCheck] of [
+  ['a regular file', (scratch) => {
+    const file = join(scratch, 'tmpdir file');
+    writeFileSync(file, 'sentinel');
+    return file;
+  }, (tmpdir) => assert.equal(readFileSync(tmpdir, 'utf8'), 'sentinel',
+    'cleanup must not touch the TMPDIR path itself')],
+  ['a missing absolute path', (scratch) => join(scratch, 'missing', 'nested'),
+    (tmpdir) => assert.equal(existsSync(tmpdir), false,
+      'cleanup must not create the missing parent')],
+  ['a missing relative path', () => 'missing relative',
+    (tmpdir, scratch) => assert.equal(existsSync(join(scratch, tmpdir)), false,
+      'the failed normalization must not leave a directory behind')],
+]) {
+  test(`unusable TMPDIR (${label}) exits nonzero without running the integration workload`, (t) => {
+    const scratch = mkdtempSync('/tmp/locus-tmpdir-unusable-');
+    t.after(() => rmSync(scratch, { recursive: true, force: true }));
+    const calls = join(scratch, 'locus-calls');
+    const home = join(scratch, 'home');
+    mkdirSync(home);
+    const tmpdir = unusableTmpdir(scratch);
+
+    const recordCalls = `
+node() { :; }
+jq() { :; }
+cargo() { :; }
+locus() { printf '%s\\n' "$*" >> "$CALLS"; }
+export -f node jq cargo locus
+exec bash "$1"
+`;
+    const result = spawnSync('bash', ['-c', recordCalls, 'unusable-tmpdir', script], {
+      cwd: scratch,
+      env: { PATH: process.env.PATH, HOME: home, TMPDIR: tmpdir, CALLS: calls },
+      encoding: 'utf8',
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 1, 'an unusable TMPDIR must abort the run');
+    assert.equal(result.stdout, '', 'no banner or check output may print');
+    assert.match(result.stderr, /mktemp|cd:/, 'the failing step must report to stderr');
+    const observed = existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n') : [];
+    assert.deepEqual(observed, [], 'no Locus command may run before allocation succeeds');
+    assert.deepEqual(readdirSync(scratch).filter((entry) => entry.startsWith('locus-hub-int')), [],
+      'no smoke directory may be created');
+    extraCheck(tmpdir, scratch);
+  });
+}
+
 test('custom TMPDIR creates and cleans both directories without touching a glob-matching neighbor', (t) => {
   const scratch = mkdtempSync('/tmp/locus-tmpdir-test-');
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -162,7 +214,10 @@ test('guide inventories the script templates and fallback', () => {
     ['SMOKE_HOME', 'locus-hub-int.XXXXXX'],
     ['SMOKE_PROJ', 'locus-hub-int-proj.XXXXXX'],
   ]) {
-    assert.ok(source.includes(`${variable}="$(mktemp -d "\${TMPDIR:-/tmp}/${template}")"`));
+    const direct = `${variable}="$(mktemp -d "\${TMPDIR:-/tmp}/${template}")"`;
+    const helperCall = `${variable}="$(make_smoke_dir ${template.slice(0, -'.XXXXXX'.length)})"`;
+    assert.ok(source.includes(direct) || source.includes(helperCall),
+      `${variable} must allocate ${template} beneath \${TMPDIR:-/tmp}`);
     assert.ok(doc.includes(`\`${variable}\` | \`${template}\``));
   }
   assert.ok(source.includes('listing="${TMPDIR:-/tmp}/.locus-hub-int-scan.$$.${RANDOM}"'));

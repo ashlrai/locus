@@ -760,17 +760,26 @@ listed verbatim so an agent can jump straight to the right document.
   - Can someone sign a manifest today?
   - What is future work?
 
+## docs/release-automation.md
+
+- [Release automation](https://github.com/ashlrai/locus/blob/main/docs/release-automation.md)
+  - Historical proposal from PR #731
+  - Chain
+  - Owner action (needed to turn on the Release PR link)
+  - Gate decision for the Security Hardening Engineer
+
 ## docs/RELEASE.md
 
 - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+  - Qualify and publish through the release workflows
   - 0.6.0 release candidate - prepared 2026-10-31
   - Preconditions
-  - Checklist - v0.5.1 (launch: Oct 20)
-  - Checklist - v0.5.0
-  - Checklist - v0.4.0 (shipped)
-  - Checklist - v0.3.0 (shipped)
-  - Checklist - v0.2.0 (shipped)
-  - Tag and push
+  - Historical checklists
+    - Checklist - v0.5.1 (launch: Oct 20)
+    - Checklist - v0.5.0
+    - Checklist - v0.4.0 (shipped)
+    - Checklist - v0.3.0 (shipped)
+    - Checklist - v0.2.0 (shipped)
     - Prior release (v0.1.0) - reference digests
   - What release.yml publishes
   - After the tag (Homebrew / npm)
@@ -778,7 +787,7 @@ listed verbatim so an agent can jump straight to the right document.
     - Homebrew (optional prebuilt)
     - npm wrappers
   - Verify a release
-  - Hotfix / re-tag policy
+  - Hotfix policy
 
 ## docs/session-budget.md
 

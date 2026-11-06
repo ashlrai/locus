@@ -17,7 +17,7 @@ const script = join(root, 'scripts', 'e2e.sh');
 // where noted, a recording mktemp.
 function homeSection() {
   const source = readFileSync(script, 'utf8');
-  const begin = source.indexOf('export LOCUS_HOME\n');
+  const begin = source.indexOf('create_locus_home() {\n');
   const endMarker = 'ok "isolated home is created directly beneath TMPDIR"\nfi';
   const end = source.indexOf(endMarker, begin);
   assert.ok(begin >= 0 && end > begin,
