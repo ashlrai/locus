@@ -46,6 +46,8 @@ function fixture(t, { installed = "99.0.0", sidecar, pathVersion, changedDuringD
     const cp = require("node:child_process");
     const { join } = require("node:path");
     const { EventEmitter } = require("node:events");
+    const crypto = require("node:crypto");
+    const path = require("node:path");
     Object.defineProperty(process, "platform", { value: "linux" });
     Object.defineProperty(process, "arch", { value: "x64" });
     const binary = ${JSON.stringify(binary)};
@@ -76,10 +78,15 @@ function fixture(t, { installed = "99.0.0", sidecar, pathVersion, changedDuringD
       const request = new EventEmitter();
       queueMicrotask(() => {
         const response = new EventEmitter();
-        response.statusCode = url.endsWith(".sha256") ? 404 : 200;
+        response.statusCode = 200;
+        response.headers = {};
         response.resume = () => {};
         callback(response);
-        if (response.statusCode === 200) {
+        if (url.endsWith(".sha256")) {
+          const hash = crypto.createHash("sha256").update("archive fixture").digest("hex");
+          response.emit("data", Buffer.from(hash + "  " + path.basename(url.slice(0, -7)) + "\\n"));
+          response.emit("end");
+        } else {
           if (${JSON.stringify(changedDuringDownload)}) cacheVersion = "99.0.0";
           response.emit("data", Buffer.from("archive fixture"));
           response.emit("end");

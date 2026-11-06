@@ -19,12 +19,11 @@ in the prompt — agents never pin and never see secrets.
 
 ## 0. Prerequisites
 
-Install both binaries and put them on `PATH`:
+Install both binaries from the current source checkout and put them on `PATH` (`locus-cli` includes both targets):
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --locked --path crates/locus-cli
 which locus locus-mcp
 ```
 
@@ -33,10 +32,10 @@ which locus locus-mcp
 Then initialize the store:
 
 ```bash
-locus quickstart
+locus init
 ```
 
-`quickstart` (like `locus init`) **auto-mints the operator control
+`locus init` **auto-mints the operator control
 capability** (`LOCUS_CONTROL_CAPABILITY`) when none exists, persists it 0600
 under `~/.locus/`, and adopts it for the current process. In every *new*
 shell, load it without echoing the value:
@@ -81,11 +80,12 @@ locus binding add cmp \
   --tenant cash-margin-partners \
   --provider supabase \
   --account cmp-ops \
-  --project-ref <CMP_PROJECT_REF> \
+  --project-ref "$CMP_PROJECT_REF" \
   --credential-ref env:SUPABASE_CMP \
   --read-only
 ```
 
+Set `CMP_PROJECT_REF` to the intended project ref before running the example.
 `--project-ref` / `--team-id` / `--org` become **frozen scopes**: agent calls
 that try a different selector are denied, not redirected.
 
@@ -111,8 +111,8 @@ locus workspace --default cmp --allow cmp --require-pin
 ```
 
 Repeat with `--default ashlr --allow ashlr` and `--default personal --allow
-personal` in the other trees. This is what MCP auto-pin and `locus enter`
-(with no alias) resolve against.
+personal` in the other trees. `locus enter` with no alias can resolve the
+workspace default. MCP auto-pin is advisory and never pins on an agent's behalf.
 
 ## 3. Wire the three agent clients
 
@@ -132,6 +132,11 @@ client + path** if the registration did not stick. Add `--workspace` to also
 write a `.locus.toml` stub, and `--mcp-bin /abs/path/locus-mcp` if the GUI
 launcher has a minimal `PATH`. Restart the client so the tool catalog
 reloads.
+
+These registrations launch `locus-mcp` directly and expose control tools only.
+To use provider tools, register `locus mcp --supervised` as described in
+[MCP setup](./mcp.md#supervised-launch-provider-tools), and launch the client
+from the hooked shell that entered the pin.
 
 ### Grok Build
 
@@ -174,9 +179,9 @@ locus whoami           # confirm tenant + providers + frozen scopes before any w
 locus leave            # clear identity when done
 ```
 
-Switching tenants is `locus leave` (or just `locus enter <other-alias>`) —
-the MCP catalog follows the new pin on the next `tools/list`; restart the
-client if it caches tools. `locus status --oneline` gives a prompt-friendly
+Switch tenants with `locus switch <other-alias>`, then restart the supervised
+MCP server or client: its executor grant is bound to the original pin.
+`locus status --oneline` gives a prompt-friendly
 `alias:tenant` marker, and `locus run -b personal -- <cmd>` runs one command
 under a temporary pin without touching the global one.
 
@@ -185,7 +190,7 @@ What the agent sees vs. cannot do:
 | Surface | Behavior |
 |---------|----------|
 | Unpinned | Control tools only (`locus_whoami`, `locus_safe_next`, `locus_request_pin`, …) — no ambient fallthrough to personal accounts |
-| Pinned | Control tools + provider tools for **that binding only**; wrong-tenant tools do not appear |
+| Pinned and supervised | Control tools + provider tools for **that binding only**; wrong-tenant tools do not appear |
 | Pinning | Agents **cannot** pin; `locus_request_pin` returns instructions for the human |
 | Scope | Frozen selectors (`project_ref`, `team_id`, `org`) reject alternates |
 | Secrets | Never in MCP responses — credentials resolve into worker env only |
@@ -232,7 +237,7 @@ runs a mint → verify → revoke probe against a throwaway home.
 | Session frozen (binding drift) | Binding changed under a live pin — doctor/watch freezes it, fail closed. `locus doctor`, then `locus leave` + `locus enter <alias>` to re-seal |
 | Stale / missing client config | Re-run `locus agent setup --apply --client <client>` (post-write verification names the failing client + path) or `locus setup --client <client>`; restart the client |
 | Capability missing / mismatched | `eval "$(locus hook zsh)"` in this shell; `locus doctor` prints the exact fix; `locus quickstart` mints one only when none exists |
-| Agent only sees `locus_*` tools | No valid pin — enter/pin first; seal may be expired or tampered (fail closed) |
+| Agent only sees `locus_*` tools | Check the pin with `locus whoami`; if valid, register `locus mcp --supervised` and restart the client |
 | `binding not found` | Typo — the error lists known aliases with a nearest-match suggestion |
 | `mcp_registered.grok` is `false` | Re-run `locus agent setup --apply --client grok` (writes `~/.grok/config.toml`); for a nonstandard path set `LOCUS_GROK_MCP_CONFIG` |
 | `phm:` refs unresolved | Unsupported scoped Secrets integration; supply an explicit `env:VAR` reference. Doctor never reveals or probes named secrets |

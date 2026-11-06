@@ -44,9 +44,9 @@ Because the Phantom proxy URL changes every session, this route passes it throug
 
 ## `phm:` credential references
 
-A binding can name a Phantom secret with `--credential-ref phm:NAME`. `LOCUS_PHANTOM_PROJECT`, when set, names the Phantom vault directory used for every `phm:` reference.
+A binding can name a Phantom secret with `--credential-ref phm:NAME`. These references remain metadata until a supported scoped bridge exists; see [credential compatibility](credential-compatibility.md).
 
-Current status: `phm:` references do not resolve with Phantom Secrets 0.7.9 ([phantom-enrolled-repos.md](phantom-enrolled-repos.md)). The run starts with the provider variables unset, `--strict-creds` fails before the child runs, and `locus doctor` reports `WARN` with `[unresolved_phm]`. No new resolver is planned: getting a plaintext value out of Phantom is exactly what this setup avoids. For model keys, use `phantom exec` placeholders with `[exec] inherit_env`. For provider bindings, use `env:` references and supply the value from your own environment, outside agent context.
+Current status: `phm:` references do not resolve with Phantom Secrets 0.7.9 ([phantom-enrolled-repos.md](phantom-enrolled-repos.md)). Credential-resolving CLI launches fail before the child runs, and `locus doctor` reports `WARN` with `[unresolved_phm]`. A scoped bridge must not capture plaintext reveal output. For model keys, use `phantom exec` placeholders with `[exec] inherit_env`. For provider bindings, use `env:` references and supply the value from your own environment, outside agent context.
 
 Do not use `phantom reveal` to feed a key to Locus or to an agent, and do not capture its output.
 

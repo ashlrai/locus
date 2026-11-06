@@ -1,9 +1,9 @@
 # Changelog
 
 <!-- fresh:begin release -->
-Latest release: [v0.5.2](https://github.com/ashlrai/locus/releases/tag/v0.5.2) (2026-10-26).
+Latest release: [v0.6.2](https://github.com/ashlrai/locus/releases/tag/v0.6.2) (2026-11-01).
 
-`locus renew` and expired-pin recovery (#193), the global `--dry-run` preview, exact-loopback HTTP (#187) and index URL redaction (#185).
+npm package READMEs use version-neutral installation commands to avoid stale pinned releases.
 <!-- fresh:end -->
 
 All notable changes to this project will be documented in this file.
@@ -13,12 +13,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-06
+
+Highlights: SIEM NDJSON audit export, safer npm wrapper upgrades, idempotent `binding add`, and hardened workspace autopin writes.
+
+### Added
+
+- **SIEM event export ([#457](https://github.com/ashlrai/locus/pull/457)).**
+  `locus events export --format ndjson` emits `locus.siem.v1` records with
+  export-time redaction and a fail-closed secret scan. `--since` filters all
+  export formats using an inclusive RFC3339 timestamp or UTC date. See
+  [observability](docs/observability.md#siem-ndjson). Credential-shaped keys
+  and `phm:`, `env:` and `test:` locators are deeply redacted; contract tests
+  pin the exported event schema for downstream parsers.
+
+### Fixed
+
+- **Broker audit records ([#637](https://github.com/ashlrai/locus/pull/637)).**
+  The broker builds and sanitizes audit records from structured fields instead
+  of accepting caller-supplied raw audit lines.
+- **JSON usage errors ([#473](https://github.com/ashlrai/locus/pull/473)).**
+  Usage errors under `--json` emit a `locus.error.v1` envelope on stdout and
+  stderr, including the named usage exit code. See [exit codes](docs/exit-codes.md).
+- **Dry-run help ([#475](https://github.com/ashlrai/locus/pull/475)).**
+  `locus help <command>` now hides `--dry-run` for commands that cannot plan,
+  matching the corresponding command's `--help` output.
+
+### Security
+
+- Workspace autopin updates read the existing `.locus.toml` through a single no-follow descriptor and use a private atomic write path, preventing a swapped symlink from being read.
+
+### Internal
+
+- The MCP tool catalog and call gate moved into `lib.rs` so integration tests can exercise them directly. Dry-run, JSON-failure, README-command and registry-manifest documentation coverage was expanded.
+
+### Continuous integration
+
+- **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
+  CI now runs `node apps/web/discoverability.mjs --check` and
+  `node --test apps/web`, so `apps/web/public/llms.txt` and `llms-full.txt`
+  cannot drift from the source docs.
+
+### Tests
+
+- **Temporary-directory cleanup coverage ([#587](https://github.com/ashlrai/locus/pull/587), [#600](https://github.com/ashlrai/locus/pull/600)).**
+  The e2e, dogfood and hub-smoke scripts now assert that their temporary homes
+  and workspaces (including the graph-import home and `DOGFOOD_HOME`) are
+  removed on success and on failure. The related `docs/` pages describe the
+  updated behavior. No product code changed.
+
 ### Documentation
+
+- **`SUPPORT.md` (new).** Where to get help: install and MCP docs, bug and feature
+  issue forms, private security reporting, and contributing. Its relative links are
+  checked by `scripts/check-support-links.sh`, which exits 1 when one does not resolve.
+
+- **Doctor exit status in the development guide.** `CLAUDE.md` said `locus doctor`
+  exits 1 on any WARN, including a missing Phantom. Since 0.5.2 a WARN made only
+  of setup advisories (`phantom_missing`, `approvals_missing`,
+  `control_capability_not_exported`, `executor_authority_unavailable`) exits 0,
+  while other warnings still exit 1 and unsafe conditions exit 2.
 
 - **Shell installer proposal ([#169](https://github.com/ashlrai/locus/issues/169)).**
   The issue proposes a one-command shell installer that downloads and verifies
   a release archive, allowing installation on machines without npm or Rust.
-  This note records the proposal; it does not assert release availability.
+  The checkout includes `scripts/install.sh` ([#215](https://github.com/ashlrai/locus/pull/215));
+  installation still depends on release assets for the selected version and platform;
+  this note does not assert release availability.
 
 - **Execution latency report ([#170](https://github.com/ashlrai/locus/issues/170)).**
   The issue reports `locus exec -- true` as 3–5x slower than
@@ -34,15 +95,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unresolved issue: the cause and whether this represents identical compiler
   work remain unverified; no fix is claimed. See [the benchmark record](docs/BENCHMARKS.md).
 
-  From a checkout, compare one install of both packages with two separate
-  installs. This uses the same committed revision, lockfile, release profile,
-  toolchain, and a fresh target and install root for each case; it installs no
-  binaries into the usual Cargo bin directory. `/usr/bin/time -p` reports wall
+  From a checkout with the first-run commit in its Git object database, compare
+  one install of both packages with two separate installs at that historical
+  revision. It had separate binary targets; current `locus-cli` includes both
+  binaries, so the old same-root two-package recipe would collide on current
+  source. This measures the historical revision, not current build performance.
+  Each case uses the same pinned revision, lockfile, release profile, toolchain,
+  and a fresh target and install root; it installs no binaries into the usual
+  Cargo bin directory. `/usr/bin/time -p` reports wall
   time as `real` in each log; add the two separate-install times for their total.
 
   ```bash
   set -e
-  revision=$(git rev-parse HEAD)
+  revision=e969d9c44a3c0bff1d0a1fee4deb1b77fb58652e
   repo="file://$(pwd -P)"
   work=$(mktemp -d)
   /usr/bin/time -p cargo install --git "$repo" --rev "$revision" --locked \
@@ -61,8 +126,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ```
 
   The second separate install intentionally shares its target directory with
-  the first; neither case reuses the other's build artifacts. The Git source is
-  committed `HEAD`, so uncommitted edits are excluded. Record the revision,
+  the first; neither case reuses the other's build artifacts. The pinned Git
+  revision excludes uncommitted edits. If it is absent from a shallow checkout,
+  obtain that public commit before running. Record the revision,
   OS/architecture, `cargo --version`, `rustc --version`, and cache/network
   conditions. Run both orders and repeat with new directories: Cargo's download
   cache and the OS cache can make later runs warmer, and timings include install
@@ -121,7 +187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **npm wrapper upgrades ([#177](https://github.com/ashlrai/locus/issues/177)).**
-  In this unreleased checkout, both wrappers compare versions using SemVer
+  In the 0.7.0 candidate, both wrappers compare versions using SemVer
   precedence, probing the binary with `--version` before falling back to its
   adjacent `.version` file. By default, an equal cached version is reused; an
   older one can be upgraded. With a newer or unversioned cache, `locus-cli`
@@ -156,6 +222,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notes now state the same `rust-version` the workspace declares, and
   `crates/locus-core/tests/rust_version.rs` keeps `cargo metadata`, member
   crate manifests and the documented install requirements in agreement with it.
+
+## [0.6.2] - 2026-11-01
+
+Highlights: npm package READMEs use version-neutral installation commands to avoid stale pinned releases.
+
+### Fixed
+
+- Package README install commands no longer embed an older release pin in immutable npm tarballs. Public documentation retains the separately verified published-version pin.
+
+## [0.6.1] - 2026-10-31
+
+Highlights: Native npm wrapper downloads now fail closed when release checksums cannot be verified.
+
+### Fixed
+
+- Both npm wrappers reject missing, malformed, unreachable or mismatched SHA-256 sidecars before installing or replacing a native binary. Checksum failures do not fall back to Cargo; the CLI eager postinstall fails rather than silently deferring the error. Explicit source installation remains available. The sidecars detect corruption, not publisher authenticity.
 
 ## [0.6.0] - 2026-10-31
 
@@ -1290,7 +1372,12 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 - Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
 - Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
 
-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/ashlrai/locus/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ashlrai/locus/compare/v0.6.2...v0.7.0
+[0.6.2]: https://github.com/ashlrai/locus/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/ashlrai/locus/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/ashlrai/locus/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/ashlrai/locus/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/ashlrai/locus/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ashlrai/locus/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ashlrai/locus/releases/tag/v0.4.0

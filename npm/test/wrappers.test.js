@@ -183,6 +183,47 @@ for (const [name, file] of Object.entries(wrappers)) {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  test(`${name}: getPlatformTarget rejects an unsupported architecture by name`, () => {
+    assert.throws(
+      () => mod.getPlatformTarget({ platform: "linux", arch: "riscv64" }),
+      (err) => /^Unsupported platform: linux-riscv64\. Install from source: cargo install /.test(err.message),
+    );
+    assert.throws(() => mod.getPlatformTarget({ platform: "darwin", arch: "ia32" }), /Unsupported platform: darwin-ia32/);
+  });
+
+  for (const [platform, arch] of [["linux", "riscv64"], ["darwin", "ia32"]]) {
+    test(`${name}: on unsupported ${platform}-${arch} it reports the platform and never attempts a download`, () => {
+      const home = mkdtempSync(join(tmpdir(), "locus-unsupported-"));
+      try {
+        const attempts = join(home, "network-attempt");
+        const preload = join(home, "unsupported.js");
+        writeFileSync(preload, `
+          const fs = require("node:fs");
+          Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
+          Object.defineProperty(process, "arch", { value: ${JSON.stringify(arch)} });
+          const record = (what) => () => { fs.appendFileSync(${JSON.stringify(attempts)}, what + "\\n"); throw new Error("unexpected " + what); };
+          for (const mod of ["node:https", "node:http"]) {
+            const m = require(mod);
+            m.get = record(mod + ".get");
+            m.request = record(mod + ".request");
+          }
+        `);
+        const result = spawnSync(process.execPath, ["--require", preload, file, "--help"], {
+          env: { HOME: home, USERPROFILE: home, PATH: join(home, "empty-bin") },
+          encoding: "utf8",
+          timeout: 20_000,
+        });
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, new RegExp(`Failed to download ${name}: Unsupported platform: ${platform}-${arch}\\. Install from source: cargo install `));
+        assert.doesNotMatch(result.stderr, /Downloading/, "must not announce a download");
+        assert.equal(existsSync(attempts), false, "must not open a network connection");
+        assert.equal(existsSync(join(home, ".locus", "bin", name)), false, "must not install a binary");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  }
 }
 
 test("source-install commands use a positional crate (cargo install has no --package flag)", () => {
@@ -348,5 +389,5 @@ test("locus: wrapper drains unread HTTP responses and exits explicitly", () => {
   const download = src.split("function download(")[1].split("\nfunction ")[0];
   assert.equal((download.match(/res\.resume\(\)/g) || []).length, 2, "redirect and non-200 responses must be drained");
   assert.match(src.split("async function main()")[1], /process\.exit\(0\)/);
-  assert.match(readFileSync(join(root, "npm", "install.js"), "utf8"), /process\.exit\(0\)/);
+  assert.match(readFileSync(join(root, "npm", "install.js"), "utf8"), /process\.exit\(process\.exitCode \|\| 0\)/);
 });

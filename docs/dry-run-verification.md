@@ -11,7 +11,7 @@ Build `locus` from this checkout (`cargo build -p locus-cli`), then run the
 following as one Bash script from the repository root. It requires Python 3 and
 uses a disposable home, Locus store and project. Set `LOCUS_BIN` to the absolute
 path to another binary if needed. The script runs `init --with-samples` once to
-create the fixture; its output is suppressed because initialization creates a
+create the fixture; its standard output is suppressed because initialization creates a
 control capability. No real credentials or pin are needed.
 
 ```bash
@@ -22,15 +22,26 @@ scratch=$(cd "$(mktemp -d)" && pwd -P)
 trap 'rm -rf "$scratch"' EXIT
 mkdir -p "$scratch/state/user" "$scratch/state/project"
 
+# Keep LLVM runtime writes outside the observed tree, even after env -i.
+# Resolve an inherited relative path before changing the CLI's working directory.
+profile_file=$(python3 - "${LLVM_PROFILE_FILE:-$scratch/locus-%p-%m.profraw}" <<'PYPROFILE'
+import os, sys
+print(os.path.abspath(sys.argv[1]))
+PYPROFILE
+)
+
 # Isolate the CLI from the operator's home, identity and workspace.
 locus_test() {
   (cd "$scratch/state/project" && env -i PATH="$PATH" \
     HOME="$scratch/state/user" USERPROFILE="$scratch/state/user" \
     LOCUS_HOME="$scratch/state/locus" NO_COLOR=1 LOCUS_NON_INTERACTIVE=1 \
+    LLVM_PROFILE_FILE="$profile_file" \
     "$LOCUS_BIN" "$@")
 }
 
-# Snapshot paths, types, permissions, mtimes, symlink targets and file hashes.
+# Snapshot persistent paths, types, permissions, file mtimes, targets and hashes.
+# Directory timestamps are bookkeeping; child paths detect directory mutations.
+# Access/creation/change times are deliberately outside this comparison.
 # The snapshot files and plan output are outside the tree being observed.
 cat > "$scratch/snapshot.py" <<'PY'
 import hashlib, json, os, stat, sys
@@ -41,7 +52,9 @@ for base, dirs, files in os.walk(root, followlinks=False):
     for name in sorted(dirs + files):
         p = Path(base) / name
         s = p.lstat()
-        entry = [stat.S_IFMT(s.st_mode), stat.S_IMODE(s.st_mode), s.st_mtime_ns]
+        entry = [stat.S_IFMT(s.st_mode), stat.S_IMODE(s.st_mode)]
+        if not stat.S_ISDIR(s.st_mode):
+            entry.append(s.st_mtime_ns)
         if stat.S_ISLNK(s.st_mode):
             entry.append(os.readlink(p))
         elif stat.S_ISREG(s.st_mode):
@@ -54,6 +67,14 @@ unchanged() {
   snapshot "$scratch/after.json"
   if ! cmp -s "$scratch/before.json" "$scratch/after.json"; then
     echo 'FAIL: paths, contents or metadata changed during preview' >&2
+    python3 - "$scratch/before.json" "$scratch/after.json" <<'PYDIFF' >&2
+import json, sys
+before, after = (json.load(open(p, encoding='utf-8')) for p in sys.argv[1:])
+for path in sorted(before.keys() | after.keys()):
+    if before.get(path) != after.get(path):
+        # Report fixture paths only, never file contents or credential material.
+        print('Changed path:', path)
+PYDIFF
     exit 1
   fi
 }
@@ -83,7 +104,22 @@ assert not home.exists()
 PY
 
 # Only fixture setup writes state. Capture fresh baselines for each preview.
-locus_test init --with-samples > /dev/null 2>&1
+# Keep a short-lived supervisor alive until init returns. Without the trailing
+# status/exit, Bash can exec the final command in locus_test's subshell, making
+# this script the broker's supervisor and keeping it alive through cleanup.
+(locus_test init --with-samples > /dev/null; status=$?; exit "$status")
+# Wait for retirement before baselining so broker lifecycle cannot race a
+# preview window. Authority files themselves stay fully in scope.
+for _ in $(seq 1 80); do
+  [ -e "$scratch/state/locus/runtime/authority-retired.json" ] &&
+    [ ! -e "$scratch/state/locus/runtime/authority.json" ] && break
+  sleep 0.25
+done
+if [ ! -e "$scratch/state/locus/runtime/authority-retired.json" ] ||
+   [ -e "$scratch/state/locus/runtime/authority.json" ]; then
+  echo 'FAIL: fixture authority broker did not retire' >&2
+  exit 1
+fi
 for scenario in workspace remove pin missing; do
   snapshot "$scratch/before.json"
   case "$scenario" in
@@ -128,8 +164,12 @@ echo 'PASS: help, planned actions, failed precondition and unchanged state'
 
 A nonzero exit, failed assertion, or changed snapshot is a failure; investigate
 before trusting the preview. The snapshot compares paths, file bytes (by hash),
-file types, modes and modification times, but cannot detect transient writes
-that are completely undone or side effects outside the isolated tree. It also
+file types, modes and non-directory modification times. Directory timestamps
+and access/change/creation times are excluded: they are not persistent file
+contents or permissions. New or removed directories still change the path set;
+coverage output has no blanket filename exemption inside state. The snapshot
+cannot detect transient writes that are completely undone, directory timestamp
+changes alone, or side effects outside the isolated tree. It also
 does not establish that a later real operation is authorized or will succeed.
 Do not run the fixture setup in a real Locus home. Read-only commands can accept
 and ignore `--dry-run` and retain normal side effects; print-only setup forms and

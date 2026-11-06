@@ -2,9 +2,37 @@
 
 <!-- fresh:begin install -->
 ```bash
-npm install -g locus-cli@0.5.2 @ashlrai/locus-mcp@0.5.2
+npm install -g locus-cli@0.6.2 @ashlrai/locus-mcp@0.6.2
 ```
 <!-- fresh:end -->
+
+## Agent setup
+
+An agent cannot pin. A person runs the [30-second start](../README.md#30-second-start), then the client launches the supervised server from that shell.
+
+Print the control-tools entry (`locus-mcp`) without writing a config:
+
+```bash
+locus setup --client claude --print
+locus setup --client cursor --print
+locus setup --client codex --print
+```
+
+Provider tools use `locus mcp --supervised`. Claude Code (`.mcp.json`) and Cursor (`~/.cursor/mcp.json`):
+
+```json
+{ "mcpServers": { "locus": { "command": "locus", "args": ["mcp", "--supervised"] } } }
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.locus]
+command = "locus"
+args = ["mcp", "--supervised"]
+```
+
+More blocks: [copy-paste.md](copy-paste.md). The rest of this page is the full client matrix.
 
 `locus-mcp` is a **stdio MCP server** that exposes Locus control tools and **only** the provider tools for the **currently pinned** binding (provider tools need a supervised launch; see [below](#provider-tools-need-a-supervised-launch)). It is the agent-facing half of the identity plane.
 
@@ -22,10 +50,11 @@ Credential-free upstream declarations are permitted and remain usable.
 
 ## Install
 
+From the current source checkout, `locus-cli` installs both `locus` and `locus-mcp`:
+
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo install --path crates/locus-cli
-cargo install --path crates/locus-mcp
+cargo install --locked --path crates/locus-cli
 ```
 
 Or use release binaries from GitHub Releases (`locus` + `locus-mcp` for your target).
@@ -518,11 +547,14 @@ Each tick is a JSON-RPC `notifications/message` with values-free `data`:
   "doctor_verdict": "SAFE",
   "safe_next": "ready",
   "pinned": true,
-  "frozen": false
+  "frozen": false,
+  "version": "0.5.2"
 }
 ```
 
-`X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets. Ticks run the same external probes as `locus doctor` (Phantom on PATH, unresolved `phm:` refs), so `session_ok: true` is a real verdict on a healthy pin — not a conservative constant.
+`X-Locus-Streamable: sse-session`. Interval default 5s (`LOCUS_MCP_SSE_INTERVAL` or `?interval=`). Never includes secrets. Operator ticks run the same external probes as `locus doctor` (Phantom on PATH, unresolved `phm:` refs), so their `session_ok` reflects doctor and safe-next readiness. Tenant ticks instead report the grant-scoped drift result: `doctor_verdict` is synthesized as `SAFE` or `UNSAFE`, and `safe_next` is `proceed` or `remint_grant`.
+
+Wire contract: `params.data` validates against [`schema/locus-events.v1.schema.json`](../schema/locus-events.v1.schema.json) `$defs.sessionTick` (tenant ticks add `scope`/`grant_id`/`issues`). This closed schema describes the current emitted shape: it requires the emitting binary `version` and rejects unknown fields, so older or future tick shapes may not validate. The binary version is not schema negotiation.
 
 Cross-process `Mcp-Session-Id` resume is **on** when workers share the same `LOCUS_HOME` (or `LOCUS_MCP_SESSION_DIR`). Multi-tenant remote multiplexor remains open.
 
@@ -814,7 +846,8 @@ export LOCUS_MCP_AUTO_PIN=0
 
 1. **Policy** (`binding.policy`) may deny or require external authority before the adapter runs. Local `confirm`, approval ids, CLI labels, HTTP tokens, and dashboard actions are advisory only.
 2. **Scope freeze** rejects args that conflict with frozen selectors (e.g. another Supabase `project_ref`).  
-3. Results are synthetic/identity-oriented in phase 1 — safe to explore without mutating cloud resources.
+3. Provider calls may reach live upstream services. Check the active binding,
+   tool, and policy before making a call.
 
 Agent best practice: call `locus_whoami` or `locus_safe_next` before any infrastructure work. If unpinned or wrong tenant, ask the human to `locus pin <alias>`. When blocked (approval, freeze, doctor), prefer `locus_safe_next` for the single next action.
 
@@ -822,8 +855,7 @@ Agent best practice: call `locus_whoami` or `locus_safe_next` before any infrast
 
 ```bash
 locus switch acme     # one-shot: leave-if-pinned + enter, target validated FIRST
-locus pin personal    # human action
-# restart or rely on next tools/list — catalog follows the new pin
+# Restart the supervised MCP server or client to grant the new pin.
 locus leave           # unbind; agent loses provider tools
 ```
 
@@ -858,8 +890,8 @@ Do **not** also register unrestricted personal Supabase/GitHub MCP servers along
 ```bash
 locus doctor
 locus status
-LOCUS_HOME=/tmp/locus-debug locus pin personal
-# point a test MCP client at locus-mcp with LOCUS_HOME set the same way
+# Use a hooked operator shell and the same LOCUS_HOME as the client.
+# A person can enter the intended binding before launching the client.
 ```
 
 ## Security properties (MCP-specific)

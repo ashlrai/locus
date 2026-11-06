@@ -22,7 +22,7 @@ Secrets v0.7.9 protects `reveal` with a trusted-terminal boundary. The legacy Lo
 
 A supported integration needs a separately reviewed, tenant-scoped, value-blind execution contract. Installation, stored reference presence, and a readable Secrets configuration do not establish that contract or grant execution authority. No bridge or runtime is activated by this change.
 
-The v0.5.2 source tag already contains this fail-closed correction. Published Locus v0.5.0 contains the legacy adapter; this behavior is not newly introduced by the 0.6.0 release candidate. Existing `phm:` bindings are preserved for owner review rather than automatically rewritten.
+The v0.5.2 source tag already contains this fail-closed correction. Published Locus v0.5.0 contains the legacy adapter; this behavior is not newly introduced by the 0.6.0 release. Existing `phm:` bindings are preserved for owner review rather than automatically rewritten.
 
 ## Configuration validation
 

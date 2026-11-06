@@ -57,4 +57,6 @@ registry root, and enabling CI signing. Consumers would still need to obtain
 and trust that public key independently and verify the signature. Signing the
 current manifest format would authenticate its canonical catalog material,
 not the release artifacts or their provenance, and would not prevent replay.
-No timeline or current CI signing guarantee is implied.
+No timeline or current CI signing guarantee is implied. The unresolved
+decisions for that transition are tracked in
+[registry signing open questions](./registry-signing-open-questions.md).
