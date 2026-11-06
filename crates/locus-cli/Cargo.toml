@@ -62,5 +62,9 @@ name = "cli-unknown-command"
 path = "tests/cli-unknown-command.rs"
 
 [[test]]
+name = "cli_help_exit"
+path = "tests/cli_help_exit.rs"
+
+[[test]]
 name = "workspace_version_sync"
 path = "tests/workspace_version_sync.rs"
