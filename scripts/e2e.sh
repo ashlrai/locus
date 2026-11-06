@@ -359,29 +359,45 @@ ok "spaced LOCUS_HOME is one path for the binary and cleanup"
 # Same creation, use and EXIT cleanup as the graph import fallback home,
 # beneath a supplied temporary root with spaces (including a doubled space).
 # The subshell owns its test home so its cleanup cannot remove the main home.
+# Each pass populates the home the way the fallback does, records it, and then
+# exits — once successfully and once with status 73 — so the EXIT trap is
+# rehearsed on a nonzero exit too. An unrelated sentinel beneath the supplied
+# root must survive both passes.
 log "2i. GRAPH_HOME creation honors a space-containing TMPDIR"
 graph_home_tmp="$LOCUS_HOME/graph  home temp root"
 mkdir -p "$graph_home_tmp"
-(
-  export TMPDIR="$graph_home_tmp"
-  LOCUS_HOME="$graph_home_tmp/subshell-home"
-  mkdir -p "$LOCUS_HOME"
-  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
-  trap 'e2e_cleanup' EXIT
-  create_graph_home
-  [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
-    "${GRAPH_HOME##*/}" == locus-graph-imp.* ]] || exit 1
-  # The fallback runs init and import with LOCUS_HOME="$GRAPH_HOME": the
-  # spaced path must reach the binary as one path and populate the home.
-  LOCUS_HOME="$GRAPH_HOME" "$LOCUS_BIN" init >/dev/null || exit 1
-  [[ -n "$(ls -A "$GRAPH_HOME")" ]] || exit 1
-  printf '%s' "$GRAPH_HOME" >"$graph_home_tmp/graph-home-path"
-  touch "$GRAPH_HOME/cleanup-sentinel"
-) || die "GRAPH_HOME was not created beneath the space-containing TMPDIR"
-graph_home_test_dir="$(cat "$graph_home_tmp/graph-home-path")"
-[[ ! -e "$graph_home_test_dir" && ! -L "$graph_home_test_dir" ]] \
-  || die "rehearsed GRAPH_HOME survived exit cleanup"
-[[ -d "$graph_home_tmp" ]] || die "GRAPH_HOME cleanup removed the supplied TMPDIR"
+touch "$graph_home_tmp/keep"
+for graph_exit in 0 73; do
+  graph_home_status=0
+  (
+    export TMPDIR="$graph_home_tmp"
+    LOCUS_HOME="$graph_home_tmp/subshell-home"
+    mkdir -p "$LOCUS_HOME"
+    WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+    trap 'e2e_cleanup' EXIT
+    create_graph_home
+    [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
+      "${GRAPH_HOME##*/}" == locus-graph-imp.* ]] || exit 1
+    # The fallback runs init and import with LOCUS_HOME="$GRAPH_HOME": the
+    # spaced path must reach the binary as one path and populate the home.
+    LOCUS_HOME="$GRAPH_HOME" "$LOCUS_BIN" init >/dev/null || exit 1
+    [[ -n "$(ls -A "$GRAPH_HOME")" ]] || exit 1
+    printf '%s' "$GRAPH_HOME" >"$graph_home_tmp/graph-home-path"
+    touch "$GRAPH_HOME/cleanup-sentinel"
+    exit "$graph_exit"
+  ) || graph_home_status=$?
+  # Internal rehearsal failures exit 1; the intended exits are 0 and 73.
+  if [[ "$graph_home_status" -eq 1 ]]; then
+    die "GRAPH_HOME was not created beneath the space-containing TMPDIR"
+  fi
+  [[ "$graph_home_status" -eq "$graph_exit" ]] \
+    || die "GRAPH_HOME rehearsal exited with status $graph_home_status instead of $graph_exit"
+  graph_home_test_dir="$(cat "$graph_home_tmp/graph-home-path")"
+  [[ ! -e "$graph_home_test_dir" && ! -L "$graph_home_test_dir" ]] \
+    || die "rehearsed GRAPH_HOME survived exit cleanup"
+  [[ -f "$graph_home_tmp/keep" && -d "$graph_home_tmp" ]] \
+    || die "GRAPH_HOME cleanup removed unrelated resources"
+done
 ok "GRAPH_HOME creation succeeds beneath a TMPDIR containing spaces"
 
 # Helper: run locus with the test home

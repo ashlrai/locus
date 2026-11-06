@@ -1,7 +1,7 @@
 // Run: node --test scripts/e2e-graph-home-selection.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -271,8 +271,25 @@ exit 1
 // Runs the real section 2i (not a copy of its subshell) against a prepared
 // main home. The block owns the subshell trap itself, so the main home and
 // the nested temporary root stay inspectable after the spawn exits.
-function rehearse2i(home, locus, { shim = '', extraEnv = {} } = {}) {
-  const { cleanup, createHome } = graphParts();
+function rehearse2i(home, locus, { shim = '', extraEnv = {}, omitGraphCleanup = false, skipGraphCleanupOn73 = false } = {}) {
+  const parts = graphParts();
+  let cleanup = parts.cleanup;
+  if (omitGraphCleanup) {
+    cleanup = cleanup.replace('"${GRAPH_HOME:-}"', '""');
+    assert.ok(cleanup !== parts.cleanup, 'mutation must remove the graph cleanup argument');
+  }
+  if (skipGraphCleanupOn73) {
+    // Controlled defect: the trap skips GRAPH_HOME only when the pending exit
+    // status is 73, so the nonzero rehearsal pass leaves its populated home
+    // while the successful pass still cleans its own.
+    cleanup = cleanup
+      .replace('e2e_cleanup() {', 'e2e_cleanup() {\n  local _e2e_rc=$?')
+      .replace('rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"',
+        'if [[ "$_e2e_rc" -eq 73 ]]; then\n    rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"\n  else\n    rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"\n  fi');
+    assert.ok(cleanup.includes('local _e2e_rc=$?') && cleanup.includes('"$_e2e_rc" -eq 73'),
+      'mutation must skip graph cleanup only on exit status 73');
+  }
+  const { createHome } = parts;
   return spawnSync('bash', ['-c', `set -euo pipefail
 ${cleanup}
 ${shim}
@@ -320,8 +337,8 @@ test('section 2i creates the graph home beneath the space-containing TMPDIR', (t
   assert.equal(readFileSync(argc, 'utf8'), '2',
     'mktemp must receive exactly -d and one template');
   assert.deepEqual(readFileSync(templates, 'utf8').trim().split('\n'),
-    [`${selected}/locus-graph-imp.XXXXXX`],
-    'the subshell-selected root must reach mktemp inside one template argument');
+    [`${selected}/locus-graph-imp.XXXXXX`, `${selected}/locus-graph-imp.XXXXXX`],
+    'each rehearsal pass must reach mktemp inside one template argument beneath the subshell-selected root');
   const recorded = readFileSync(join(selected, 'graph-home-path'), 'utf8');
   assert.equal(dirname(recorded), selected,
     'the rehearsal home is created directly beneath the supplied TMPDIR');
@@ -329,12 +346,90 @@ test('section 2i creates the graph home beneath the space-containing TMPDIR', (t
     'the home name is one unsplit component');
   assert.throws(() => lstatSync(recorded), { code: 'ENOENT' },
     'the populated rehearsal home must be removed on subshell exit');
-  assert.deepEqual(readdirSync(selected), ['graph-home-path'],
-    'only the recorded home path may remain beneath the supplied root');
+  assert.deepEqual(readdirSync(selected).sort(), ['graph-home-path', 'keep'],
+    'only the recorded home path and the unrelated sentinel may remain beneath the supplied root');
   assert.deepEqual(readdirSync(outer), [],
     'the outer TMPDIR must not receive the graph home');
   assert.deepEqual(readdirSync(home), ['graph  home temp root'],
     'the subshell trap must leave the main home and the supplied root intact');
+});
+
+// Exercise the actual rehearsal against a narrowly broken cleanup and an init
+// failure after the graph home is populated. Both must stop the suite.
+test('section 2i detects omitted cleanup and cleans a populated home on init failure', (t) => {
+  const dir = fixture(t);
+  for (const scenario of ['working', 'omitted-cleanup', 'init-failure']) {
+    const base = join(dir, scenario);
+    const home = join(base, 'main');
+    mkdirSync(home, { recursive: true });
+    const locus = stubLocus(base);
+    if (scenario === 'init-failure') {
+      writeFileSync(locus, '#!/bin/sh\nprintf payload > "$LOCUS_HOME/init-stamp"\nexit 73\n', { mode: 0o755 });
+    }
+    const record = join(base, 'created');
+    const shim = `mktemp() { local d; d="$(command mktemp "$@")" || return; printf '%s' "$d" > "$CREATED"; printf '%s\\n' "$d"; }`;
+    const result = rehearse2i(home, locus, { shim, extraEnv: { CREATED: record },
+      omitGraphCleanup: scenario === 'omitted-cleanup' });
+    assert.equal(result.signal, null);
+    assert.equal(result.status, scenario === 'working' ? 0 : 1, result.stderr);
+    const graphHome = readFileSync(record, 'utf8');
+    if (scenario === 'omitted-cleanup') {
+      assert.match(result.stderr, /rehearsed GRAPH_HOME survived exit cleanup/);
+      assert.equal(readFileSync(join(graphHome, 'init-stamp'), 'utf8'), 'stub init\n');
+    } else {
+      assert.throws(() => lstatSync(graphHome), { code: 'ENOENT' });
+      if (scenario === 'init-failure') assert.match(result.stderr, /GRAPH_HOME was not created beneath/);
+    }
+    assert.ok(readdirSync(home).includes('graph  home temp root'));
+  }
+});
+
+// The rehearsal must also cover a nonzero subshell exit: status 73 after the
+// populated graph home is observed has to run the same EXIT cleanup. The
+// positive control runs the actual helper and expects both allocated homes
+// removed; a cleanup that skips GRAPH_HOME only for status 73 leaves the
+// second home behind and must fail the suite.
+test('section 2i removes the populated graph home on a nonzero exit and detects a status-73 cleanup skip', (t) => {
+  const dir = fixture(t);
+  const shim = `mktemp() { local d; d="$(command mktemp "$@")" || return; printf '%s\\n' "$d" >> "$CREATED"; printf '%s\\n' "$d"; }`;
+
+  const okBase = join(dir, 'clean');
+  const okHome = join(okBase, 'main home');
+  mkdirSync(okHome, { recursive: true });
+  const okRecord = join(okBase, 'created');
+  const okResult = rehearse2i(okHome, stubLocus(okBase), {
+    shim, extraEnv: { CREATED: okRecord },
+  });
+  assert.equal(okResult.signal, null);
+  assert.equal(okResult.status, 0, okResult.stderr);
+  const okHomes = readFileSync(okRecord, 'utf8').trim().split('\n');
+  assert.equal(okHomes.length, 2, 'both rehearsal passes must allocate a graph home');
+  for (const homePath of okHomes) {
+    assert.throws(() => lstatSync(homePath), { code: 'ENOENT' },
+      'each populated rehearsal home must be removed on subshell exit');
+  }
+  assert.ok(readdirSync(join(okHome, 'graph  home temp root')).includes('keep'),
+    'the unrelated sentinel must survive both passes');
+
+  const badBase = join(dir, 'skip-73');
+  const badHome = join(badBase, 'main home');
+  mkdirSync(badHome, { recursive: true });
+  const badRecord = join(badBase, 'created');
+  const badResult = rehearse2i(badHome, stubLocus(badBase), {
+    shim, extraEnv: { CREATED: badRecord }, skipGraphCleanupOn73: true,
+  });
+  assert.equal(badResult.signal, null);
+  assert.equal(badResult.status, 1, badResult.stderr);
+  assert.match(badResult.stderr, /rehearsed GRAPH_HOME survived exit cleanup/);
+  const badHomes = readFileSync(badRecord, 'utf8').trim().split('\n');
+  assert.equal(badHomes.length, 2, 'both rehearsal passes must allocate a graph home');
+  assert.throws(() => lstatSync(badHomes[0]), { code: 'ENOENT' },
+    'the exit-0 pass must still clean its graph home');
+  const survivor = badHomes[1];
+  assert.equal(dirname(survivor), join(badHome, 'graph  home temp root'));
+  assert.equal(readFileSync(join(survivor, 'init-stamp'), 'utf8'), 'stub init\n',
+    'the surviving home is the populated exit-73 rehearsal home');
+  assert.ok(existsSync(join(survivor, 'cleanup-sentinel')));
 });
 
 // A mktemp regression that relocates the rehearsal graph home outside the
@@ -375,8 +470,8 @@ test('a rehearsal graph home created outside the supplied TMPDIR stops section 2
   assert.throws(() => lstatSync(misplaced), { code: 'ENOENT' },
     'the misplaced graph home must be removed by the subshell exit trap');
   assert.deepEqual(readdirSync(wrongRoot), []);
-  assert.deepEqual(readdirSync(join(home, 'graph  home temp root')), [],
-    'the rehearsal exits before recording a home path');
+  assert.deepEqual(readdirSync(join(home, 'graph  home temp root')), ['keep'],
+    'the rehearsal exits before recording a home path; the sentinel remains');
 });
 
 // TMPDIR must name an existing directory: a missing one fails loudly instead
