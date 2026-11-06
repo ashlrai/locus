@@ -13,13 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-06
+
+Highlights: SIEM NDJSON audit export, safer npm wrapper upgrades, idempotent `binding add`, and hardened workspace autopin writes.
+
 ### Added
 
 - **SIEM event export ([#457](https://github.com/ashlrai/locus/pull/457)).**
   `locus events export --format ndjson` emits `locus.siem.v1` records with
   export-time redaction and a fail-closed secret scan. `--since` filters all
   export formats using an inclusive RFC3339 timestamp or UTC date. See
-  [observability](docs/observability.md#siem-ndjson).
+  [observability](docs/observability.md#siem-ndjson). Credential-shaped keys
+  and `phm:`, `env:` and `test:` locators are deeply redacted; contract tests
+  pin the exported event schema for downstream parsers.
 
 ### Fixed
 
@@ -32,6 +38,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dry-run help ([#475](https://github.com/ashlrai/locus/pull/475)).**
   `locus help <command>` now hides `--dry-run` for commands that cannot plan,
   matching the corresponding command's `--help` output.
+
+### Security
+
+- Workspace autopin updates read the existing `.locus.toml` through a single no-follow descriptor and use a private atomic write path, preventing a swapped symlink from being read.
+
+### Internal
+
+- The MCP tool catalog and call gate moved into `lib.rs` so integration tests can exercise them directly. Dry-run, JSON-failure, README-command and registry-manifest documentation coverage was expanded.
 
 ### Continuous integration
 
@@ -64,7 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The issue proposes a one-command shell installer that downloads and verifies
   a release archive, allowing installation on machines without npm or Rust.
   The checkout includes `scripts/install.sh` ([#215](https://github.com/ashlrai/locus/pull/215));
-  installation still depends on release assets for the selected version and platform.
+  installation still depends on release assets for the selected version and platform;
+  this note does not assert release availability.
 
 - **Execution latency report ([#170](https://github.com/ashlrai/locus/issues/170)).**
   The issue reports `locus exec -- true` as 3–5x slower than
@@ -172,7 +187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **npm wrapper upgrades ([#177](https://github.com/ashlrai/locus/issues/177)).**
-  In this unreleased checkout, both wrappers compare versions using SemVer
+  In the 0.7.0 candidate, both wrappers compare versions using SemVer
   precedence, probing the binary with `--version` before falling back to its
   adjacent `.version` file. By default, an equal cached version is reused; an
   older one can be upgraded. With a newer or unversioned cache, `locus-cli`
@@ -1357,7 +1372,8 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 - Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
 - Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
 
-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/ashlrai/locus/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ashlrai/locus/compare/v0.6.2...v0.7.0
 [0.6.2]: https://github.com/ashlrai/locus/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/ashlrai/locus/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/ashlrai/locus/compare/v0.5.2...v0.6.0

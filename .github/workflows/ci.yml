@@ -97,6 +97,8 @@ jobs:
           node --check npm-mcp/install.js
           node --check npm-mcp/bin/locus-mcp.js
           node --test npm/test
+          node --test scripts/release-version.test.mjs scripts/ci/release-workflow.test.mjs
+          node scripts/release-version.mjs check
           # Keep generated agent indexes aligned with the current source docs.
           node apps/web/discoverability.mjs --check
           # Exercise the dependency-free public-site contract in the required gate.
