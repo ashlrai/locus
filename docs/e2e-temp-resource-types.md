@@ -35,7 +35,9 @@ Run `node --test scripts/e2e-home-selection.test.mjs` for the focused
 `node --test scripts/e2e-home-tmpdir-containment.test.mjs` for `LOCUS_HOME`
 containment beneath the controlled `TMPDIR` and fail-closed selection,
 `node --test scripts/e2e-home-spaced-tmpdir.test.mjs` for `LOCUS_HOME`
-allocation beneath a space-containing `TMPDIR`, and
+allocation beneath a space-containing `TMPDIR`,
+`node --test scripts/e2e-home-repeated.test.mjs` for repeated `LOCUS_HOME`
+allocations yielding distinct directories beneath the selected root, and
 `node --test scripts/e2e-graph-home-selection.test.mjs` for the `GRAPH_HOME`
 equivalent,
 `node --test scripts/e2e-security-workspace-spaced-tmpdir.test.mjs` for the
