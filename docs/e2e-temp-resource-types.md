@@ -37,9 +37,11 @@ containment beneath the controlled `TMPDIR` and fail-closed selection,
 `node --test scripts/e2e-home-spaced-tmpdir.test.mjs` for `LOCUS_HOME`
 allocation beneath a space-containing `TMPDIR`, and
 `node --test scripts/e2e-graph-home-selection.test.mjs` for the `GRAPH_HOME`
-equivalent, and
+equivalent,
 `node --test scripts/e2e-security-workspace-spaced-tmpdir.test.mjs` for the
-`SECURITY_WS` space-containing `TMPDIR` checks.
+`SECURITY_WS` space-containing `TMPDIR` checks, and
+`node --test scripts/e2e-workspace-spaced-tmpdir.test.mjs` for the `WS_DIR`
+equivalent.
 Run `scripts/tests/e2e-tmpdir.sh` to exercise the full suite under a custom
 `TMPDIR`, including an injected failure after workspace creation.
 See the [security directories](e2e-security-directories.md) for the

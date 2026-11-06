@@ -839,8 +839,11 @@ printf '%s' "$WS_DIR" > "$2"
 });
 
 // Runs the script's real section 2d: a subshell rehearses create_workspace
-// beneath a nested temporary root whose name contains spaces, verifies the
-// workspace sits directly beneath that root, and its exit trap removes it.
+// beneath a nested temporary root whose name contains spaces (including a
+// doubled space), verifies the workspace sits directly beneath that root, and
+// its exit trap removes it while sparing a decoy at the root's first
+// word-split fragment. LOCUS_HOME is exported so the rehearsal's `init` stub
+// populates the subshell home the way the real command would.
 test('section 2d rehearses workspace creation beneath a TMPDIR containing spaces', (t) => {
   const fixture = setup(t);
   const home = join(fixture.root, 'main home');
@@ -859,7 +862,7 @@ ${createWorkspace}
 log() { :; }
 ok() { printf 'ok %s\\n' "$*"; }
 die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
-LOCUS_HOME="$1"
+export LOCUS_HOME="$1"
 WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
 ${source.slice(start, end + endMarker.length)}
 `, 'workspace-2d', home], {
@@ -870,14 +873,17 @@ ${source.slice(start, end + endMarker.length)}
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, `the 2d rehearsal must succeed: ${result.stderr}`);
   assert.match(result.stdout, /ok workspace creation succeeds beneath a TMPDIR containing spaces/);
-  const root = join(home, 'workspace temp root');
+  const root = join(home, 'workspace  ws temp root');
   const recorded = readFileSync(join(root, 'workspace-path'), 'utf8');
   assert.equal(dirname(recorded), root, 'rehearsed beneath the space-containing root');
   assert.match(recorded, /\/locus-ws\.[^/\s]+$/, 'workspace name is one unsplit component');
+  assert.ok(recorded.includes(' '), 'the recorded workspace path keeps the spaced root');
   assert.throws(() => lstatSync(recorded), { code: 'ENOENT' },
     'the rehearsal workspace must be removed on subshell exit');
   assert.deepEqual(readdirSync(root), ['workspace-path'],
     'the subshell trap must also remove its own home');
+  assert.ok(existsSync(join(home, 'workspace', 'decoy-sentinel')),
+    'the decoy at the root\'s first word-split fragment must survive cleanup');
 });
 
 // A mktemp regression that relocates the rehearsal workspace must stop the
