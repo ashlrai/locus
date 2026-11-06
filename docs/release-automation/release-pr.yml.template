@@ -1,0 +1,92 @@
+# HISTORICAL INACTIVE PROPOSAL FROM PR #731. NOT APPROVED FOR ACTIVATION.
+# Preserved original text below is not current operational instruction.
+# Keep this file under docs. Do not copy/activate it without a new normal source
+# and security review preserving the exact-source manual full-suite gate,
+# immutable tags and the currently qualified repository-scoped App policy.
+# The force-with-lease/auto-merge design below has not been re-authorized.
+# Current sanctioned release procedure: docs/RELEASE.md.
+#
+# NOT ACTIVE. Install by copying to .github/workflows/release-pr.yml after the
+# Security Hardening Engineer reviews it and the owner completes the "Owner
+# action" list in docs/release-automation.md. It adds the first workflow in
+# this repo that writes to it, via a GitHub App token (never GITHUB_TOKEN, whose
+# pushes and PRs do not trigger CI and would strand the PR in the merge queue).
+#
+# On each merge to main that changes shipped code since the last tag, it opens
+# or updates ONE release PR (branch release/next) that bumps every version
+# carrier with scripts/release-version.mjs, then enables auto-merge so the
+# merge queue lands it once CI Gate is green. That merge changes Cargo.toml,
+# which fires release.yml (plan -> build -> release -> npm-publish).
+name: Release PR
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "npm/**"
+      - "npm-mcp/**"
+      - "Cargo.toml"
+
+permissions: {}
+
+# One run at a time; a newer merge re-evaluates, so none is cancelled mid-push.
+concurrency:
+  group: release-pr-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release-pr:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Mint ashlr-release App token (contents + pull-requests write, this repo only)
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.ASHLR_RELEASE_APP_ID }}
+          private-key: ${{ secrets.ASHLR_RELEASE_APP_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ steps.app.outputs.token }}
+
+      - name: Open or update the release PR
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current="$(node scripts/release-version.mjs version)"
+          last="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
+          # Shipped code since the last tag decides the bump; docs-only or
+          # CI-only merges never cut a release.
+          next="$(git log --format=%s "${last}..HEAD" -- crates npm npm-mcp Cargo.toml | node scripts/release-version.mjs next)"
+          if [ "$next" = "$current" ] && [ "v${current}" != "$last" ]; then
+            echo "Version ${current} is already bumped past ${last}; its release PR or release is in flight."; exit 0
+          fi
+          if [ "$next" = "$current" ]; then echo "No shipped changes since ${last}."; exit 0; fi
+          git config user.name "ashlr-release[bot]"
+          git config user.email "ashlr-release[bot]@users.noreply.github.com"
+          git switch -C release/next
+          node scripts/release-version.mjs sync "$next"
+          node scripts/release-version.mjs check
+          git commit -am "chore(release): v${next}"
+          git push --force-with-lease origin release/next
+          pr="$(gh pr list --head release/next --state open --json number --jq '.[0].number // empty')"
+          if [ -z "$pr" ]; then
+            gh pr create --head release/next --base main --title "chore(release): v${next}" \
+              --body "Automated version bump to v${next}. Merging fires release.yml: GitHub Release, then npm (trusted publishing)."
+          else
+            gh pr edit "$pr" --title "chore(release): v${next}"
+          fi
+          # The merge queue lands it once CI Gate is green.
+          gh pr merge release/next --auto --squash
