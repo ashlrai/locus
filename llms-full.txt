@@ -760,6 +760,14 @@ listed verbatim so an agent can jump straight to the right document.
   - Can someone sign a manifest today?
   - What is future work?
 
+## docs/release-automation.md
+
+- [Release automation](https://github.com/ashlrai/locus/blob/main/docs/release-automation.md)
+  - Historical proposal from PR #731
+  - Chain
+  - Owner action (needed to turn on the Release PR link)
+  - Gate decision for the Security Hardening Engineer
+
 ## docs/RELEASE.md
 
 - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
