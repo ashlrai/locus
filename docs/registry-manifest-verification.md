@@ -5,6 +5,8 @@ a snapshot of the built-in adapter catalog, not a signature on a release. CI
 exports it without `--sign`; no release registry signing key or published
 registry root is configured. For the format, trust store, and optional
 operator signing procedure, see [registry-trust.md](./registry-trust.md).
+Provisioning a release signing key, publishing its public key as a registry
+root, and enabling CI signing remain future work.
 
 ## Check an unsigned manifest
 
@@ -14,14 +16,14 @@ operator signing procedure, see [registry-trust.md](./registry-trust.md).
 2. Run the local comparison, substituting the actual asset name:
 
    ```bash
-   locus adapter verify-manifest locus-adapters-<tag>.json --allow-unsigned
+   locus adapter verify-manifest locus-adapters-v0.6.2.json --allow-unsigned
    ```
 
-   Quote the filename if it contains shell-special characters; do not type the
-   angle brackets literally. Add `--json` for a machine-readable report. A
-   matching unsigned asset reports `signature unsigned` and `drift none` and
-   exits zero. Without `--allow-unsigned`, an unsigned asset fails even if the
-   catalog matches. A nonzero exit requires investigation.
+   Replace `v0.6.2` with the actual release tag and quote the filename if it
+   contains shell-special characters. Add `--json` for a machine-readable
+   report. A matching unsigned asset reports `signature unsigned` and
+   `drift none` and exits zero. Without `--allow-unsigned`, an unsigned asset
+   fails even if the catalog matches. A nonzero exit requires investigation.
 3. The parser rejects invalid JSON, an unsupported schema, empty or duplicate
    adapter IDs, and ambiguous canonical-material separators. The drift check
    compares the Locus version and adapter IDs, names, versions, tool lists, and
@@ -43,14 +45,14 @@ Release archives have separate `.sha256` sidecars. From the directory
 containing both the archive and its corresponding sidecar, for example:
 
 ```bash
-sha256sum -c locus-<target>.tar.gz.sha256
+sha256sum -c locus-x86_64-unknown-linux-gnu.tar.gz.sha256
 ```
 
 On systems with `shasum` instead, use
-`shasum -a 256 -c locus-<target>.tar.gz.sha256`. Replace `<target>` with the
-actual target in the filename. This checks that the archive bytes match the
-digest in the sidecar; it does not authenticate either file. Someone who can
-replace both can make the check pass. The manifest neither references nor
+`shasum -a 256 -c locus-x86_64-unknown-linux-gnu.tar.gz.sha256`. Replace the
+example filename with the actual sidecar. This checks that the archive bytes
+match the digest in the sidecar; it does not authenticate either file. Someone
+who can replace both can make the check pass. The manifest neither references nor
 checks archives, executables, sidecars, or npm packages, and does not bind a
 tag, commit, or build process. Obtain and assess artifacts through trusted
 channels independently.

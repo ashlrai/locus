@@ -2,10 +2,10 @@
 
 Static landing page for [Locus](https://github.com/ashlrai/locus).
 
-- **Tagline:** AI-native identity plane · Wrong account, impossible.
-- **v0.2 surfaces:** local dashboard, forensics, HTTP MCP, goal status
+- **Tagline:** Wrong account, impossible.
+- **First screen:** one-command install, JSON commands, MCP snippets for Claude, Cursor, and Codex, plus an illustrated pin switch.
 - **Stack:** pure HTML + CSS in `public/index.html` (no build step)
-- **Aesthetic:** dark monochrome terminal — sibling positioning vs [Phantom](https://phm.dev)
+- **Aesthetic:** dark monochrome terminal, sibling positioning vs [Phantom](https://phm.dev)
 
 ## Local
 
@@ -118,4 +118,4 @@ JSON-LD all point there. The site itself stays a no-build static deploy.
 
 - No secrets, no analytics, no framework lock-in.
 - Links point at `https://github.com/ashlrai/locus` and `https://phm.dev`.
-- Keep the page intentional: monochrome, tight type, terminal snippets — not generic “AI purple.”
+- Keep the page intentional: monochrome, tight type, terminal snippets. Not generic AI purple.

@@ -146,10 +146,12 @@ dogfood_gate_self_test() {
 
 sandbox_attestation() {
   local probe_root
-  probe_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-sandbox-dogfood.XXXXXX")"
+  probe_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-sandbox-dogfood.XXXXXX")" || return 1
 
   (
-    trap 'rm -rf "$probe_root"' EXIT
+    # Function locals may be out of scope when an EXIT trap runs after exit.
+    sandbox_cleanup_root="$probe_root"
+    trap 'rm -rf "$sandbox_cleanup_root"' EXIT
     export LOCUS_HOME="$probe_root/home"
     unset LOCUS_SESSION_ID LOCUS_DOGFOOD_SANDBOX_UNUSED || true
 
@@ -253,6 +255,8 @@ mt_grant_probe() {
   (
     # EXIT traps run after function locals have gone out of scope on exit.
     probe_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-mt-dogfood.XXXXXX")" || exit 1
+    # A relative TMPDIR yields a relative root; the probe cds into it, so pin it.
+    [[ "$probe_root" == /* ]] || probe_root="$PWD/$probe_root"
     mt_pid=""
     mt_cleanup() {
       if [[ -n "$mt_pid" ]]; then
@@ -432,6 +436,8 @@ if [[ "${USE_REAL}" == "1" ]]; then
 else
   APPLY="${APPLY:-1}"
   DOGFOOD_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-dogfood.XXXXXX")"
+  # A relative TMPDIR yields a relative home; the script cds into it, so pin it.
+  [[ "$DOGFOOD_HOME" == /* ]] || DOGFOOD_HOME="$PWD/$DOGFOOD_HOME"
   export LOCUS_HOME="$DOGFOOD_HOME"
   PACK_OUT="${PACK_OUT:-$DOGFOOD_HOME/pack.json}"
   unset LOCUS_SESSION_ID || true

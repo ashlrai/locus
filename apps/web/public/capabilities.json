@@ -1,6 +1,6 @@
 {
   "name": "Locus",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "versionScope": "source checkout; commands/tools may not exist in the published package",
   "publishedVersion": "0.6.2",
   "description": "AI-native identity plane for coding agents. Pin a binding; every CLI command, MCP tool and agent session is sealed to that tenant until a human re-pins.",
@@ -22,7 +22,7 @@
     "npm": "npm install -g locus-cli@0.6.2 @ashlrai/locus-mcp@0.6.2",
     "npx": "npx locus-cli@0.6.2 --help",
     "cargo": "cargo install --git https://github.com/ashlrai/locus locus-cli --locked",
-    "local": "cargo install --path crates/locus-cli && cargo install --path crates/locus-mcp"
+    "local": "cargo install --locked --path crates/locus-cli"
   },
   "commands": [
     "locus init",
