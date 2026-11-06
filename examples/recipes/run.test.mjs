@@ -1,9 +1,9 @@
 // node --test examples/recipes
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -51,6 +51,28 @@ test("a recipe name is not a selector and returns usage", () => {
     assert.equal(r.status, 1);
     assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
     assert.equal(r.stdout, "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unknown recipe name exits nonzero before any recipe runs", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-name-"));
+  try {
+    // `acme` names a binding inside the recipes, but the runner has no recipe
+    // selector: the name is rejected with the usage error and TMPDIR is left
+    // untouched (no recipe workspace was created).
+    const r = spawnSync(process.execPath, [join(here, "run.mjs"), "acme"], {
+      env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    assert.ifError(r.error);
+    assert.notEqual(r.status, 0);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
+    assert.equal(r.stdout, "");
+    assert.equal(readdirSync(root).length, 0, "a recipe workspace was created for an unknown recipe name");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -104,6 +126,36 @@ test("recipes resolve paths containing spaces", () => {
     assert.ifError(r.error);
     assert.equal(r.status, 0, "recipe runner failed in a directory containing spaces");
     assert.ok(/^COMPLETE: locus recipes \(4 checks\)$/m.test(r.stdout), "recipe runner did not complete all four checks");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recipes run from a working directory outside the repository", { skip: !built && "no target/{release,debug}/locus" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-cwd-"));
+  try {
+    // Recipe resolution must not consult the caller's cwd: run the repo's
+    // runner from a directory that carries a workspace policy refusing every
+    // recipe binding, with the recipe workspace in a separate sibling tmp.
+    const outside = join(root, "outside-the-repo");
+    const work = join(root, "recipe-tmp");
+    mkdirSync(outside);
+    mkdirSync(work);
+    const rel = relative(repo, outside);
+    assert.ok(rel.startsWith("..") || isAbsolute(rel), "the outside directory must not be inside the repository");
+    const decoy = 'version = 1\ndefault_binding = "decoy"\nallowed_bindings = ["decoy"]\nrequire_pin = true\n';
+    writeFileSync(join(outside, ".locus.toml"), decoy);
+    const r = spawnSync(process.execPath, [join(here, "run.mjs"), "--locus", built], {
+      cwd: outside,
+      env: { ...process.env, TMPDIR: work, TMP: work, TEMP: work },
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    assert.ifError(r.error);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^COMPLETE: locus recipes \(4 checks\)$/m);
+    assert.deepEqual(readdirSync(outside), [".locus.toml"], "the caller's working directory was written to");
+    assert.equal(readFileSync(join(outside, ".locus.toml"), "utf8"), decoy, "the caller's workspace policy was modified");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="480" viewBox="0 0 1200 480" role="img" aria-labelledby="heroTitle heroDesc">
+  <title id="heroTitle">Locus pins one client</title>
+  <desc id="heroDesc">A terminal pinned to personal. A command for the acme client is refused with pin_mismatch.</desc>
+  <rect width="1200" height="480" rx="28" fill="#0b0b14"/>
+  <rect x="36" y="36" width="1128" height="408" rx="20" fill="#111118" stroke="#2a2a36"/>
+  <circle cx="72" cy="72" r="7" fill="#3a3a48"/>
+  <circle cx="96" cy="72" r="7" fill="#3a3a48"/>
+  <circle cx="120" cy="72" r="7" fill="#3a3a48"/>
+  <text x="156" y="78" fill="#8a8a98" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16">locus whoami</text>
+  <text x="72" y="150" fill="#f4f4f5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="42" font-weight="700">locus</text>
+  <text x="72" y="196" fill="#a1a1aa" font-family="ui-sans-serif, system-ui, sans-serif" font-size="22">Wrong account, impossible.</text>
+  <text x="72" y="268" fill="#86efac" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">$ locus enter personal</text>
+  <text x="72" y="304" fill="#d4d4d8" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">ok  entered personal</text>
+  <text x="72" y="360" fill="#86efac" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">$ locus exec --expect acme -- echo ok</text>
+  <text x="72" y="396" fill="#fca5a5" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20">refused  pin_mismatch  exit 1</text>
+</svg>

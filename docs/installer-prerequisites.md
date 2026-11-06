@@ -13,8 +13,8 @@ settled by the issue or proof that release assets are published:
 
 - Bash and the commands `curl`, `tar`, `uname`, `mktemp`, `mkdir`, `chmod`,
   `mv`, `rm`, and `tr`, plus either `sha256sum` or `shasum`. Curl must support
-  the script's HTTPS and TLS options, and tar must support its gzip and
-  extraction options.
+  the script's HTTPS and TLS options (`--proto '=https'`, `--tlsv1.2`), and tar
+  must support its gzip and extraction options.
 - HTTPS access to GitHub releases, with the selected archive and its `.sha256`
   sidecar available under the same release tag. The default `latest` selection
   also requires resolving the latest release URL.
