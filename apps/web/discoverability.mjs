@@ -199,6 +199,47 @@ function llmsTxt({ info, docs }) {
     '',
     'Identity is resolved at the gate, not in the prompt. Bindings hold principal, tenant, CredentialRefs and policy; sessions are HMAC-sealed to exactly one binding, and agents cannot pin. Sibling product: Phantom (phm.dev) keeps real secret values out of model context.',
     '',
+    '## Agent start',
+    '',
+    'One command:',
+    '',
+    '```bash',
+    'npm install -g locus-cli @ashlrai/locus-mcp',
+    '```',
+    '',
+    'Then, in one shell:',
+    '',
+    '```bash',
+    'export LOCUS_HOME="$(mktemp -d)"',
+    'locus quickstart',
+    'eval "$(locus hook bash)"',
+    'locus enter personal',
+    'locus whoami --json',
+    'locus status --json',
+    'locus doctor --json',
+    'locus exec --expect personal --no-resolve -- echo ok',
+    '```',
+    '',
+    'Claude Code (`.mcp.json`) and Cursor (`~/.cursor/mcp.json`):',
+    '',
+    '```json',
+    '{ "mcpServers": { "locus": { "command": "locus", "args": ["mcp", "--supervised"] } } }',
+    '```',
+    '',
+    'Codex (`~/.codex/config.toml`):',
+    '',
+    '```toml',
+    '[mcp_servers.locus]',
+    'command = "locus"',
+    'args = ["mcp", "--supervised"]',
+    '```',
+    '',
+    'Provider tools need `locus mcp --supervised`, a live pin, and the control capability from `locus hook` in the shell that launches the client. `locus-mcp` with no args serves control tools only. Agents cannot pin. `locus exec --expect acme -- echo ok` exits 1 (`pin_mismatch`) and does not start the child.',
+    '',
+    `- [Copy-paste examples](${REPO_BLOB}/docs/copy-paste.md)`,
+    `- [Agent contract](${REPO_BLOB}/docs/agent-contract.md)`,
+    `- [MCP setup](${REPO_BLOB}/docs/mcp.md)`,
+    '',
     '## Start',
     '',
     `- [README](${REPO_BLOB}/README.md): install options, 30-second start, MCP wiring`,
@@ -603,6 +644,19 @@ export function run(root = REPO_ROOT, { check = false, out = console.log } = {})
   };
   for (const [rel, text] of Object.entries(files)) write(rel, text);
   for (const [rel, buf] of Object.entries(binaries)) write(rel, buf);
+
+  // Repo-root copies so an agent that clones the repo finds the same indexes
+  // the site serves. llms.txt is the curated start. llms-full.txt is the
+  // heading index.
+  for (const name of ['llms.txt', 'llms-full.txt']) {
+    const path = join(root, name);
+    const text = files[name];
+    const current = existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+    if (current !== text) {
+      if (check) stale.push(name);
+      else { writeFileSync(path, text); out(`wrote ${name}`); }
+    }
+  }
 
   // AGENTS.md mirrors the repo file with dash characters normalized, so the
   // whole public tree stays free of em/en dashes.

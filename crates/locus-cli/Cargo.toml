@@ -20,7 +20,7 @@ path = "src/mcp.rs"
 [dependencies]
 locus-core = { workspace = true }
 libc = { workspace = true }
-locus-mcp = { path = "../locus-mcp", version = "0.7.0" }
+locus-mcp = { path = "../locus-mcp", version = "0.6.2" }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 anyhow = { workspace = true }
@@ -56,3 +56,11 @@ path = "tests/integration.rs"
 [[test]]
 name = "packaged_binaries"
 path = "tests/packaged_binaries.rs"
+
+[[test]]
+name = "cli-unknown-command"
+path = "tests/cli-unknown-command.rs"
+
+[[test]]
+name = "workspace_version_sync"
+path = "tests/workspace_version_sync.rs"

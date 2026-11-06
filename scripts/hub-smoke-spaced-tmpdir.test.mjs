@@ -28,7 +28,7 @@ test('smoke preserves a spaced, glob-like TMPDIR and cleans its own resources', 
   printf '%s\\n' "$path"
 }
 cargo() { return 0; }
-jq() { printf '%s\\n' grant; }
+jq() { cat >/dev/null; printf '%s\\n' grant; }
 locus() {
   if [[ "\${1:-}" == init ]]; then
     local path count=0

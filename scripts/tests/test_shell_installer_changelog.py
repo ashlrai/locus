@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class ShellInstallerChangelogTest(unittest.TestCase):
     def test_unreleased_documentation_describes_the_proposal(self):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = changelog.split("## [0.7.0]", 1)[1].split("\n## [", 1)[0]
+        unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
         documentation = unreleased.split("### Documentation", 1)[1].split("\n### ", 1)[0]
         note = documentation.split("**Shell installer proposal", 1)[1].split("\n\n", 1)[0]
 

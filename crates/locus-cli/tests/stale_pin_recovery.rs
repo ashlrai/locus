@@ -17,7 +17,7 @@ fn changelog_dead_broker_recipes_match_the_current_hint() {
     let changelog = include_str!("../../../CHANGELOG.md");
     let current = locus_core::recovery::dead_broker_recovery_for_shell(None, "bash");
     let unreleased = changelog
-        .split_once("## [0.7.0]")
+        .split_once("## [Unreleased]")
         .unwrap()
         .1
         .split("## [0.5.2]")
@@ -25,7 +25,7 @@ fn changelog_dead_broker_recipes_match_the_current_hint() {
         .unwrap();
     let entry = unreleased
         .split_once("**Dead-broker recovery (")
-        .expect("0.7.0 recovery entry exists")
+        .expect("unreleased recovery entry exists")
         .1
         .split("\n- ")
         .next()

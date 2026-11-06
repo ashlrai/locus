@@ -13,30 +13,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-11-02
-
-Highlights: SIEM NDJSON audit export, smarter npm wrapper upgrades, idempotent `binding add`, and a hardened workspace autopin write path.
-
 ### Added
 
-- **SIEM export.** `locus events export --format ndjson [--since <ts>]` emits one `locus.siem.v1` event per line with stable field names. `--since` accepts RFC 3339 or `YYYY-MM-DD`. Credential-shaped keys and locator references (`phm:`, `env:`, `test:`) are deep-redacted, and the export fails closed if the finished body still matches a secret pattern.
-- **Event schema contract tests** pin the exported audit event shape so downstream parsers can rely on it.
+- **SIEM event export ([#457](https://github.com/ashlrai/locus/pull/457)).**
+  `locus events export --format ndjson` emits `locus.siem.v1` records with
+  export-time redaction and a fail-closed secret scan. `--since` filters all
+  export formats using an inclusive RFC3339 timestamp or UTC date. See
+  [observability](docs/observability.md#siem-ndjson).
 
-### Security
+### Fixed
 
-- Workspace `.locus.toml` updates made by autopin now go through one private atomic write path that reads the existing file through a single no-follow descriptor, so a symlink swapped in for the file is not read.
+- **Broker audit records ([#637](https://github.com/ashlrai/locus/pull/637)).**
+  The broker builds and sanitizes audit records from structured fields instead
+  of accepting caller-supplied raw audit lines.
+- **JSON usage errors ([#473](https://github.com/ashlrai/locus/pull/473)).**
+  Usage errors under `--json` emit a `locus.error.v1` envelope on stdout and
+  stderr, including the named usage exit code. See [exit codes](docs/exit-codes.md).
+- **Dry-run help ([#475](https://github.com/ashlrai/locus/pull/475)).**
+  `locus help <command>` now hides `--dry-run` for commands that cannot plan,
+  matching the corresponding command's `--help` output.
 
-### Internal
+### Continuous integration
 
-- The `locus-mcp` tool catalog and call gate moved from `main.rs` into `lib.rs` with no behavior change, so integration tests can exercise it directly.
-- Expanded dry-run, JSON-failure, README-command and registry-manifest documentation tests.
+- **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
+  CI now runs `node apps/web/discoverability.mjs --check` and
+  `node --test apps/web`, so `apps/web/public/llms.txt` and `llms-full.txt`
+  cannot drift from the source docs.
+
+### Tests
+
+- **Temporary-directory cleanup coverage ([#587](https://github.com/ashlrai/locus/pull/587), [#600](https://github.com/ashlrai/locus/pull/600)).**
+  The e2e, dogfood and hub-smoke scripts now assert that their temporary homes
+  and workspaces (including the graph-import home and `DOGFOOD_HOME`) are
+  removed on success and on failure. The related `docs/` pages describe the
+  updated behavior. No product code changed.
 
 ### Documentation
+
+- **`SUPPORT.md` (new).** Where to get help: install and MCP docs, bug and feature
+  issue forms, private security reporting, and contributing. Its relative links are
+  checked by `scripts/check-support-links.sh`, which exits 1 when one does not resolve.
+
+- **Doctor exit status in the development guide.** `CLAUDE.md` said `locus doctor`
+  exits 1 on any WARN, including a missing Phantom. Since 0.5.2 a WARN made only
+  of setup advisories (`phantom_missing`, `approvals_missing`,
+  `control_capability_not_exported`, `executor_authority_unavailable`) exits 0,
+  while other warnings still exit 1 and unsafe conditions exit 2.
 
 - **Shell installer proposal ([#169](https://github.com/ashlrai/locus/issues/169)).**
   The issue proposes a one-command shell installer that downloads and verifies
   a release archive, allowing installation on machines without npm or Rust.
-  This note records the proposal; it does not assert release availability.
+  The checkout includes `scripts/install.sh` ([#215](https://github.com/ashlrai/locus/pull/215));
+  installation still depends on release assets for the selected version and platform.
 
 - **Execution latency report ([#170](https://github.com/ashlrai/locus/issues/170)).**
   The issue reports `locus exec -- true` as 3–5x slower than
@@ -144,7 +172,7 @@ Highlights: SIEM NDJSON audit export, smarter npm wrapper upgrades, idempotent `
 ### Changed
 
 - **npm wrapper upgrades ([#177](https://github.com/ashlrai/locus/issues/177)).**
-  Starting in 0.7.0, both wrappers compare versions using SemVer
+  In this unreleased checkout, both wrappers compare versions using SemVer
   precedence, probing the binary with `--version` before falling back to its
   adjacent `.version` file. By default, an equal cached version is reused; an
   older one can be upgraded. With a newer or unversioned cache, `locus-cli`
@@ -1329,7 +1357,11 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 - Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
 - Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
 
-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/ashlrai/locus/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/ashlrai/locus/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/ashlrai/locus/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/ashlrai/locus/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/ashlrai/locus/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/ashlrai/locus/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ashlrai/locus/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ashlrai/locus/releases/tag/v0.4.0

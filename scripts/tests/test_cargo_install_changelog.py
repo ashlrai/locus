@@ -21,7 +21,7 @@ def recipe():
 class CargoInstallRecipeTest(unittest.TestCase):
     def test_note_records_reported_observation_without_claiming_a_fix(self):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
-        unreleased = changelog.split("## [0.7.0]", 1)[1].split("## [0.5.2]", 1)[0]
+        unreleased = changelog.split("## [Unreleased]", 1)[1].split("## [0.5.2]", 1)[0]
         entry = unreleased.split("**Reproduce cargo-install timings", 1)[1]
         note = entry.split("```bash", 1)[0]
         self.assertIn("issues/168", note)
