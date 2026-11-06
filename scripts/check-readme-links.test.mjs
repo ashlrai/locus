@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readdirSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, writeFile, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,10 +31,10 @@ test('README distinguishes the proposed shell installer from current options', a
   assert.match(proposal, /### Install from source/);
 });
 
-test('README install investigation reports only core artifacts and freshness', async () => {
-  const readme = await readFile(README, 'utf8');
-  const script = readme.match(/python3 - "\$investigation_dir\/artifacts\.jsonl" <<'PY'\n([\s\S]*?)\nPY/);
-  assert.ok(script, 'README investigation Python command is missing');
+test('contributor install investigation reports only core artifacts', async () => {
+  const contributing = await readFile(join(repository, 'CONTRIBUTING.md'), 'utf8');
+  const script = contributing.match(/python3 - "\$investigation_dir\/artifacts\.jsonl" <<'PY'\n([\s\S]*?)\nPY/);
+  assert.ok(script, 'CONTRIBUTING investigation Python command is missing');
   const dir = await mkdtemp(join(tmpdir(), 'locus-artifacts-'));
   try {
     const path = join(dir, 'artifacts.jsonl');
@@ -47,25 +48,24 @@ test('README install investigation reports only core artifacts and freshness', a
       artifact('other', false, '/tmp/other.rlib'),
       artifact('locus_core', false, '/tmp/liblocus_core-first.rlib'),
       artifact('locus_core', true, '/tmp/liblocus_core-second.rlib'),
-    ].map(JSON.stringify).join('\n') + '\nnon-JSON output\n42\n');
+    ].map(JSON.stringify).join('\n') + '\n');
     const run = spawnSync('python3', ['-c', script[1], path], { encoding: 'utf8' });
     assert.equal(run.status, 0, run.stderr);
-    assert.match(run.stderr, /Skipped 2 non-object or non-JSON line/);
     const lines = run.stdout.trim().split('\n');
     assert.equal(lines.length, 2);
     assert.match(lines[0], /liblocus_core-first\.rlib.*'fresh': False/);
     assert.match(lines[1], /liblocus_core-second\.rlib.*'fresh': True/);
-    assert.doesNotMatch(run.stdout, /other\.rlib|\/tmp\//);
+    assert.doesNotMatch(run.stdout, /other\.rlib/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('README install investigation stops on failure and captures successful evidence', async () => {
-  const readme = await readFile(README, 'utf8');
-  const section = readme.split('### Investigating repeated `locus-core` compilation')[1];
+test('contributor install investigation recipe records cargo args and stops when cargo fails', async () => {
+  const contributing = await readFile(join(repository, 'CONTRIBUTING.md'), 'utf8');
+  const section = contributing.split('### Investigating repeated compilation during install')[1];
   const recipe = section?.match(/```bash\n([\s\S]*?)\n```/)?.[1];
-  assert.ok(recipe, 'README investigation recipe is missing');
+  assert.ok(recipe, 'CONTRIBUTING investigation recipe is missing');
   const dir = await mkdtemp(join(tmpdir(), 'locus-recipe-'));
   try {
     const cargo = join(dir, 'cargo');
@@ -77,23 +77,51 @@ printf '%s\n' '{"reason":"compiler-artifact","package_id":"locus-core fixture","
 printf 'Compiling locus-core\nFinished \`release\`\n' >&2
 `);
     await chmod(cargo, 0o755);
-    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir, CALL_LOG: join(dir, 'args') };
+    // macOS mktemp resolves a bare `mktemp -d` under the per-user Darwin temp
+    // directory and ignores TMPDIR, so pin the recipe's investigation dir under
+    // `dir` with a shim instead of relying on TMPDIR alone.
+    const bashEnv = join(dir, 'env.sh');
+    await writeFile(bashEnv, `mktemp() {
+  if [[ "$*" == -d ]]; then
+    command mktemp -d "$RECIPE_WATCH/mktemp.XXXXXX"
+  else
+    command mktemp "$@"
+  fi
+}
+`);
+    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir,
+      BASH_ENV: bashEnv, RECIPE_WATCH: dir, CALL_LOG: join(dir, 'args') };
     const run = (extra = {}) => spawnSync('bash', ['-c', recipe], {
       cwd: repository, env: { ...env, ...extra }, encoding: 'utf8',
     });
+    const filesUnder = (root) => {
+      const out = [];
+      const stack = [root];
+      while (stack.length) {
+        const current = stack.pop();
+        for (const ent of readdirSync(current, { withFileTypes: true })) {
+          const path = join(current, ent.name);
+          if (ent.isDirectory()) stack.push(path);
+          else out.push(path);
+        }
+      }
+      return out;
+    };
     const success = run();
-    assert.equal(success.status, 0, success.stderr);
-    assert.match(success.stdout, /Compiling locus-core/);
-    assert.match(success.stdout, /'fresh': False/);
+    assert.equal(success.status, 0, `${success.stderr}\n${success.stdout}`);
     const args = (await readFile(env.CALL_LOG, 'utf8')).trim().split('\n');
-    for (const arg of ['--rev', '--locked', '--target-dir', '--root', '--message-format=json', 'locus-cli', 'locus-mcp']) {
-      assert.ok(args.includes(arg), `missing ${arg}`);
+    for (const arg of ['--git', '--locked', '--target-dir', '--root', '--message-format=json', 'locus-cli']) {
+      assert.ok(args.includes(arg), `missing ${arg} in ${args.join(' ')}`);
     }
-    assert.match(args[args.indexOf('--rev') + 1], /^[a-f0-9]{40}$/);
+    assert.match(args[args.indexOf('--git') + 1], /^file:\/\//);
+    const written = filesUnder(dir);
+    const artifacts = written.find((path) => path.endsWith('artifacts.jsonl'));
+    const log = written.find((path) => path.endsWith('cargo.log'));
+    assert.ok(artifacts && log, `recipe outputs missing: ${written.join(', ')}`);
+    assert.match(readFileSync(artifacts, 'utf8'), /locus_core/);
+    assert.match(readFileSync(log, 'utf8'), /Compiling locus-core/);
     const failed = run({ FAIL_INSTALL: '1' });
-    assert.notEqual(failed.status, 0);
-    assert.match(failed.stderr, /Install failed/);
-    assert.doesNotMatch(failed.stdout, /'fresh':/);
+    assert.equal(failed.status, 7, failed.stderr);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

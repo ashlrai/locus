@@ -25,18 +25,21 @@ fn source_section_links_resolve() {
     let mut count = 0;
     for suffix in GUIDE.split(prefix).skip(1) {
         let anchor = suffix.split(')').next().unwrap();
-        let found = SOURCE.lines().filter(|line| line.starts_with('#')).any(|line| {
-            let heading = line.trim_start_matches('#').trim().to_ascii_lowercase();
-            let slug: String = heading
-                .chars()
-                .filter_map(|ch| match ch {
-                    ' ' => Some('-'),
-                    '-' | 'a'..='z' | '0'..='9' => Some(ch),
-                    _ => None,
-                })
-                .collect();
-            slug == anchor
-        });
+        let found = SOURCE
+            .lines()
+            .filter(|line| line.starts_with('#'))
+            .any(|line| {
+                let heading = line.trim_start_matches('#').trim().to_ascii_lowercase();
+                let slug: String = heading
+                    .chars()
+                    .filter_map(|ch| match ch {
+                        ' ' => Some('-'),
+                        '-' | 'a'..='z' | '0'..='9' => Some(ch),
+                        _ => None,
+                    })
+                    .collect();
+                slug == anchor
+            });
         assert!(found, "missing source section: {anchor}");
         count += 1;
     }

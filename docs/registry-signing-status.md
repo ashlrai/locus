@@ -19,6 +19,17 @@ SHA-256 sidecars check archive bytes, but do not authenticate their publisher.
 See the [verification walkthrough](./registry-manifest-verification.md) for
 the procedure and its limits.
 
+After independently assessing the sources of the manifest and corresponding
+release CLI, a consumer can compare the catalog locally:
+
+```bash
+locus adapter verify-manifest release.json --allow-unsigned
+```
+
+Here `release.json` is the downloaded manifest, and the CLI should be from the
+same release version. A match reports `signature unsigned` and `drift none`;
+this is catalog agreement, not a verified signature or proof of provenance.
+
 ## Available capability and future work
 
 An operator can already sign a separate manifest with an operator-provided
@@ -26,6 +37,8 @@ Ed25519 key and verify it using an independently trusted public key. This is
 an optional operator-managed process, not the release workflow. A valid
 signature authenticates the signed catalog material to the key holder; it
 does not authenticate the executable or prove release provenance or freshness.
+The consumer must independently establish the key holder's identity and
+authority to sign.
 See the [trust model](./registry-trust.md#trust-model) and
 [verification guarantees](./registry-trust.md#what-verify-manifest-proves).
 

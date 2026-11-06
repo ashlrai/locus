@@ -22,11 +22,17 @@ as described in the [probe roles guide](dogfood-probe-roles.md).
 
 The traps run when their subshells exit normally or through handled failure
 paths, including early exits after the traps are installed. The script does not
-install signal-specific handlers for these probes: uncatchable termination,
+install signal-specific handlers for these probes. A regression test sends
+SIGTERM directly to the multi-tenant probe subshell after its server starts and
+checks that the trap stops the server and removes the root. This does not
+establish cleanup when only the parent receives a signal. An uncatchable termination,
 termination before trap installation, or a failed removal can leave artifacts
 behind. Inspect leftovers before deleting them; a trap is not a guarantee that
 every child process or file was removed. Build artifacts and resources outside
 the probe roots are outside these traps.
 
 Run `node --test scripts/dogfood.test.mjs` for the probe cleanup regression
-checks.
+checks. The success case uses real local HTTP requests against a controlled
+server to exercise mint, tenantless and granted requests, revocation, and the
+final roster check. It verifies that the server has stopped and the temporary
+root is gone before the probe returns, while neighboring files remain intact.

@@ -8,6 +8,11 @@ description = "Core types and control plane for Locus"
 authors.workspace = true
 repository.workspace = true
 
+# `cargo llvm-cov` builds the workspace with `--cfg coverage`; the broker start
+# timeout scales under it, so declare the cfg or unexpected_cfgs trips -D warnings.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(coverage)"] }
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

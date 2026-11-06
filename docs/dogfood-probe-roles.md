@@ -15,8 +15,9 @@ state from each other; they are not three names for the same Locus home.
 The sandbox and multi-tenant probes run in subshells with their own homes and
 do not replace the main pin. The multi-tenant probe also changes into its own
 root so a caller's workspace allowlist cannot affect its synthetic binding.
-The fixture makes no credential lookup or network request; the multi-tenant
-HTTP checks use a local server.
+The fixture makes no credential lookup or network request. The sandbox probe
+rejects its synthetic credential locator if it appears in either captured
+stdout or stderr; the multi-tenant HTTP checks use a local server.
 
 By default the main flow uses the isolated home and applies agent setup there.
 `DOGFOOD_USE_REAL_HOME=1` instead avoids allocating the main directory, uses
@@ -38,7 +39,6 @@ the optional client probe inspects client installations. A diagnostic
 are not removed by these directory traps.
 
 For the concise prefix inventory, see the [temporary-directory reference](dogfood-temp-prefix-reference.md).
-For the two probes' checks and purposes, see [dogfood probe purposes](dogfood-probe-purposes.md).
 For trap order and cleanup limitations, see [dogfood probe cleanup](dogfood-probe-cleanup.md).
 Run `node --test scripts/dogfood.test.mjs` to check the inventory, probe roles,
 and existing cleanup paths.

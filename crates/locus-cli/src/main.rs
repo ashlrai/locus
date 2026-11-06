@@ -12851,7 +12851,7 @@ mod agent_contract_tests {
     }
 
     #[test]
-    fn readme_plan_forms_match_the_cli_classifier() {
+    fn documented_plan_forms_match_the_cli_classifier() {
         // Arguments after each documented form satisfy clap without executing
         // the command or requiring credentials, a store, or network access.
         let examples: BTreeMap<&str, &[&str]> = BTreeMap::from([
@@ -12902,10 +12902,10 @@ mod agent_contract_tests {
             ("events export", &[]),
             ("forensics export", &[]),
         ]);
-        let table = include_str!("../../../README.md")
+        let table = include_str!("../../../docs/README.md")
             .split("| Area | Command forms |")
             .nth(1)
-            .expect("README dry-run command table")
+            .expect("docs dry-run command table")
             .split("\n\n")
             .next()
             .unwrap();
