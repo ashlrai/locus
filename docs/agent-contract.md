@@ -35,6 +35,7 @@ whose first key is `schema`. Key on it:
 | `locus whoami` | `locus.whoami.v1` |
 | `locus fleet-feed` (always JSON) | `locus.fleet_feed.v1` |
 | `locus fleet-denials` (always JSON) | `locus.fleet_denials.v1` |
+| `locus fleet-outcomes` (always JSON) | `locus.fleet_outcomes.v1` |
 | `locus status` | `locus.status.v1` |
 | `locus verify session` | `locus.verify.session.v1` |
 | `locus verify claim` | `locus.verify.claim.v1` |
@@ -135,7 +136,7 @@ a new command does not compile until it picks one.
 | Class | Behaviour | Commands |
 | --- | --- | --- |
 | Plans | Performs read-only preflight checks, prints a `locus.plan.v1` plan, writes nothing (see print-only setup exception below) | `init`, `quickstart`, `onboard`, `setup`, `workspace`, `enter`, `switch`, `pin`, `leave`, `renew`, `engagement init/close`, `graph export/import`, `binding add/rm/migrate-credential-refs`, `client add`, `offboard`, `autopin suggest --apply`, `capability persist/unpersist`, `ci mint/env`, `mcp mint/revoke`, `agent setup`, `doctor --fix`, `adapter install/uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add/remove`, `approve grant/deny`, `notify on/off`, `events export`, `forensics export` |
-| Read-only | Accepted and ignored: the command runs exactly as without the flag (see below) | `whoami`, `status`, `doctor`, `watch`, `hook`, `goal`, `verify`, `upstream`, `completion`, `topic`, `version`, `fleet-preflight`, `fleet-feed`, `fleet-denials`, `events`, `agent doctor/report`, `binding list/show`, `graph list`, `capability status`, `notify status`, `approve list/status/wait`, `mcp list`, `autopin suggest`, `adapter search/list/verify/verify-manifest`, `adapter trust list`, `adapter registry index list` |
+| Read-only | Accepted and ignored: the command runs exactly as without the flag (see below) | `whoami`, `status`, `doctor`, `watch`, `hook`, `goal`, `verify`, `upstream`, `completion`, `topic`, `version`, `fleet-preflight`, `fleet-feed`, `fleet-denials`, `fleet-outcomes`, `events`, `agent doctor/report`, `binding list/show`, `graph list`, `capability status`, `notify status`, `approve list/status/wait`, `mcp list`, `autopin suggest`, `adapter search/list/verify/verify-manifest`, `adapter trust list`, `adapter registry index list` |
 | Unsupported | Not accepted, exactly as before the global flag: `exec --dry-run -- …` fails exec's own argument check (exit 1); every other placement, and the other commands, are a clap usage error (exit 2, `unexpected argument '--dry-run' found`) | `exec`, `run`, `ci run`, `mcp` (server), `serve`, `dashboard` |
 
 Read-only commands make no requested change, but they keep two side effects
@@ -216,6 +217,15 @@ confirmations take their safe default (`adapter uninstall` without `--yes`
 declines), and `graph export/import` require `LOCUS_GRAPH_PASSPHRASE`.
 Destructive commands keep their explicit flags (`binding rm --yes`,
 `adapter install --yes`) whether or not a terminal is present.
+
+`fleet-outcomes` answers "did the recent commands work?" in one call: the last
+100 audit records' `exec` / `ci` outcomes (`position`, `kind`, `result` =
+`succeeded|failed|spawn_failed|unknown`, `exit`), `counts`, and
+`pending_approvals`. Missing data is explicit: no log gives `"log": "missing"`
+with empty lists, an outcome with no exit code is `unknown`, and
+`pending_approvals` is `null` only when the approvals directory is unreadable
+(an absent directory is `0`). It is read-only and never initializes
+`LOCUS_HOME`; no commands, bindings, timestamps or error text are emitted.
 
 `fleet-denials` projects only fixed denial kinds and numeric audit positions. It
 scans the latest 100 parsed records by default; `--cursor N` scans up to 100

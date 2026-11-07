@@ -192,7 +192,12 @@ fn fleet_read_only_commands_are_in_the_full_matrix_and_help() {
     let matrix = include_str!("../../../docs/dry-run-matrix-q8.md");
     let read_only = forms(matrix, "| Accepted, ignored |");
     let home = tempfile::tempdir().unwrap();
-    for name in ["fleet-preflight", "fleet-feed", "fleet-denials"] {
+    for name in [
+        "fleet-preflight",
+        "fleet-feed",
+        "fleet-denials",
+        "fleet-outcomes",
+    ] {
         assert!(read_only.contains(name), "missing {name}");
         let output = locus(&[name, "--help"], home.path());
         assert!(output.status.success());
