@@ -42,7 +42,7 @@ The [first-run investigation](./docs/BENCHMARKS.md) for [issue #168](https://git
 To inspect a current checkout, run this from its root. The current `locus-cli` package installs both binaries; this single-package command measures that path, not the historical two-package install. It uses a fresh build directory and install root, so it neither relies on an existing target cache nor installs binaries into your usual Cargo bin directory:
 
 ```bash
-investigation_dir=$(mktemp -d)
+investigation_dir=$(mktemp -d "${TMPDIR:-/tmp}/locus-install.XXXXXX")
 cargo install --git "file://$(pwd)" locus-cli --locked \
   --root "$investigation_dir/install" --target-dir "$investigation_dir/target" \
   --message-format=json > "$investigation_dir/artifacts.jsonl" 2> "$investigation_dir/cargo.log"

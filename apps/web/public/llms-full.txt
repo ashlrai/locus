@@ -490,6 +490,13 @@ listed verbatim so an agent can jump straight to the right document.
   - Outcomes that need explicit evidence
   - Evidence and scope
 
+## docs/installer-archive-questions.md
+
+- [Installer archive questions](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-questions.md)
+  - Archive selection
+  - Installation
+  - Evidence boundary
+
 ## docs/installer-archive-requirements.md
 
 - [Installer archive requirements](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-requirements.md)

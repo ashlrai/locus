@@ -103,7 +103,9 @@ Highlights: SIEM NDJSON audit export, safer npm wrapper upgrades, idempotent `bi
 
 - **Broker audit records ([#637](https://github.com/ashlrai/locus/pull/637)).**
   The broker builds and sanitizes audit records from structured fields instead
-  of accepting caller-supplied raw audit lines.
+  of accepting caller-supplied raw audit lines. Executor-authenticated requests
+  are limited to child-launch operations and marked `source: executor`; they
+  cannot record control-plane operations through the broker.
 - **JSON usage errors ([#473](https://github.com/ashlrai/locus/pull/473)).**
   Usage errors under `--json` emit a `locus.error.v1` envelope on stdout and
   stderr, including the named usage exit code. See [exit codes](docs/exit-codes.md).
@@ -118,7 +120,6 @@ Highlights: SIEM NDJSON audit export, safer npm wrapper upgrades, idempotent `bi
 ### Internal
 
 - The MCP tool catalog and call gate moved into `lib.rs` so integration tests can exercise them directly. Dry-run, JSON-failure, README-command and registry-manifest documentation coverage was expanded.
-
 ### Continuous integration
 
 - **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
@@ -127,6 +128,12 @@ Highlights: SIEM NDJSON audit export, safer npm wrapper upgrades, idempotent `bi
   cannot drift from the source docs.
 
 ### Tests
+
+- **Adapter model API coverage ([#660](https://github.com/ashlrai/locus/pull/660)).**
+  Added coverage for model API adapter behavior and scope handling.
+- **Temporary root and repeated creation coverage ([#666](https://github.com/ashlrai/locus/pull/666), [#667](https://github.com/ashlrai/locus/pull/667)).**
+  Added checks for repeated dogfood home creation and hub-smoke temporary
+  directory selection with spaces in the path.
 
 - **Temporary-directory cleanup coverage ([#587](https://github.com/ashlrai/locus/pull/587), [#600](https://github.com/ashlrai/locus/pull/600)).**
   The e2e, dogfood and hub-smoke scripts now assert that their temporary homes

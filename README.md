@@ -41,7 +41,7 @@ npm install -g locus-cli @ashlrai/locus-mcp
 
 Homebrew and Cargo are in [Install options](#install-options). At the v0.6.2 release, the live Homebrew tap installs v0.6.1, so use npm for v0.6.2.
 
-Read state as JSON. The first key is `schema`. Failures on stderr use `locus.error.v1`. No command prints a secret.
+Read state as JSON. The first key is `schema`. Failures on stderr use `locus.error.v1`. These status commands do not print secret values. Some operator commands, such as `locus mcp mint`, print a credential once; handle that output privately.
 
 ```bash
 locus whoami --json
@@ -117,7 +117,7 @@ What the extra steps are for:
 - **Broker.** The shell that pins supervises an authority broker. `locus enter personal` works after `quickstart`, including when quickstart ran in a shell that has already exited.
 - **Recovery.** If the next command says `human re-pin required` or `no current broker endpoint`, use [Recovering after the broker exits](#recovering-after-the-broker-exits).
 
-![locus quickstart pins a sample binding; locus whoami shows the sealed session and its scoped providers](docs/assets/locus-demo.gif)
+The sample commands above include `enter` after the hook so the current shell supervises the pin. A broker started by `quickstart` does not survive the process that started it.
 
 ## How it works
 
@@ -306,12 +306,13 @@ Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
 locus init [--with-samples] · quickstart
 locus onboard [--detect-only] [--yes] [--reset]  # guided refs-only tenant setup
 locus client add                      # guided client binding (flags for every prompt)
-locus pin [alias] [--force] [--client claude] [--ns a,b] [--ttl 2h]
-locus enter <alias>                   # firm workflow pin
+locus pin [alias] [--force] [--client claude] [--ns a,b] [--ttl 2h] [--rewrite-configs]
+locus enter [alias]                   # explicit alias, workspace default, or configured autopin
 locus switch <alias>                  # one-shot leave + enter
 locus leave · renew                   # clear pin; extend expiry (opt-in per binding)
 locus whoami [--json]
 locus status [--oneline] [--json]
+locus fleet-feed · fleet-denials · fleet-preflight  # value-free JSON for hub/workbench polls
 locus exec -- <command> [args...]
 locus exec --expect <alias> -- <cmd>  # refuse (exit 1, child never starts) unless <alias> is pinned
 locus exec --for gh -- gh pr list    # inject only the pinned GitHub credential
@@ -319,10 +320,10 @@ locus run -b <alias> -- <command>     # one-shot; global pin unchanged
 locus binding list|show|add|rm|migrate-credential-refs
 locus capability status|persist|unpersist  # where control authority lives
 locus autopin suggest [--json] [--apply]  # learned per-repo binding from pin history
-locus workspace --default <alias> [--allow a,b] [--require-pin]
+locus workspace --default <alias> [--allow a,b] [--require-pin] [--force]
 locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2; advisory-only WARN exits 0)
 locus doctor --fix [--apply]          # preview safe repairs; --apply makes them, backing up first
-locus watch [--once] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
+locus watch [--once] [--interval 5s] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
 locus dashboard · serve               # local identity UI + API (127.0.0.1)
 locus forensics export                # shareable pack (no secrets)
 locus verify session · claim --text "…"  # verification plane: session pack · claim score
@@ -335,10 +336,11 @@ locus engagement init|close           # client engagement lifecycle (binding + w
 locus offboard <alias> [--apply]      # plan first; --apply removes the client's local records
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
-locus adapter search|install|uninstall|verify-manifest · registry export  # community + release adapters
+locus adapter search|install|uninstall|verify-manifest  # community + release adapters
+locus adapter registry export|index    # release manifest and community indexes
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex|grok|gemini|generic
-locus mcp [--supervised]              # run the stdio MCP server; --supervised serves pinned provider tools
+locus mcp [--supervised] [--route <provider>]  # supervised provider tools; --route can repeat
 locus mcp mint|list|revoke            # multi-tenant grant tokens
 locus agent report|setup|doctor       # AI-native readiness (hub JSON)
 locus goal status                     # northstar progress from GOALS.md

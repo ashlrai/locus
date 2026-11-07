@@ -11,5 +11,7 @@ Type "locus quickstart" Sleep 400ms Enter
 Sleep 3s
 Type 'eval "$(locus hook bash)"' Sleep 300ms Enter
 Sleep 1s
+Type "locus enter personal" Sleep 300ms Enter
+Sleep 2s
 Type "locus whoami" Sleep 300ms Enter
 Sleep 3s

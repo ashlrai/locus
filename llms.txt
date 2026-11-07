@@ -116,6 +116,7 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
 - [Archive installer acceptance cases](https://github.com/ashlrai/locus/blob/main/docs/installer-acceptance-cases.md)
 - [Shell installer acceptance checklist](https://github.com/ashlrai/locus/blob/main/docs/installer-acceptance.md)
 - [Archive installer acceptance evidence](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-acceptance.md)
+- [Installer archive questions](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-questions.md)
 - [Installer archive requirements](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-requirements.md)
 - [Installer error questions](https://github.com/ashlrai/locus/blob/main/docs/installer-error-questions.md)
 - [Shell installer failure matrix](https://github.com/ashlrai/locus/blob/main/docs/installer-failure-matrix.md)

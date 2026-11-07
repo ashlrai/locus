@@ -31,3 +31,19 @@ fn locus_core_version_matches_workspace_package() {
         "locus-core dependency version must match workspace package version"
     );
 }
+
+#[test]
+fn locus_mcp_version_matches_workspace_package() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+    let workspace = std::fs::read_to_string(root).expect("read root Cargo.toml");
+    let cli = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .expect("read CLI Cargo.toml");
+    let package_version = section_line(&workspace, "workspace.package", "version =");
+    let mcp_dependency = section_line(&cli, "dependencies", "locus-mcp =");
+
+    assert_eq!(
+        quoted_version(package_version),
+        quoted_version(mcp_dependency),
+        "locus-mcp dependency version must match workspace package version"
+    );
+}
