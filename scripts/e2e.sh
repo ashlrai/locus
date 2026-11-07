@@ -112,7 +112,7 @@ fi
 
 # Exercise home creation and exit cleanup even when the caller did not set
 # TMPDIR. The subshell owns its home and leaves the supplied root intact.
-log "2b. home creation honors a space-containing TMPDIR"
+log "2g. home creation honors a space-containing TMPDIR"
 home_tmp="$LOCUS_HOME/home temp root"
 mkdir -p "$home_tmp"
 (
@@ -123,6 +123,11 @@ mkdir -p "$home_tmp"
   [[ -d "$LOCUS_HOME" && "${LOCUS_HOME%/*}" == "$TMPDIR" && \
     "${LOCUS_HOME##*/}" == locus-e2e.* ]] || exit 1
   printf '%s' "$LOCUS_HOME" >"$home_tmp/home-path"
+  # Use the home, not just create it: a nested path under the spaced root must
+  # round-trip through quoted expansions without splitting.
+  mkdir -p "$LOCUS_HOME/bindings/nested dir" || exit 2
+  printf 'payload' >"$LOCUS_HOME/bindings/nested dir/f.toml" || exit 3
+  [[ "$(cat "$LOCUS_HOME/bindings/nested dir/f.toml")" == payload ]] || exit 4
   touch "$LOCUS_HOME/cleanup-sentinel"
 ) || die "home was not created beneath the space-containing TMPDIR"
 home_test_dir="$(cat "$home_tmp/home-path")"
@@ -130,6 +135,39 @@ home_test_dir="$(cat "$home_tmp/home-path")"
   || die "rehearsed home survived exit cleanup"
 [[ -d "$home_tmp" ]] || die "home cleanup removed the supplied TMPDIR"
 ok "home creation succeeds beneath a TMPDIR containing spaces and is cleaned on exit"
+
+# Rehearse the suite's own allocation path (export + create_locus_home + the
+# TMPDIR containment check above) beneath a supplied root with several spaces,
+# including a doubled space. The allocated home must be usable as one path by
+# the binary, and exit cleanup must remove exactly the home: a decoy at the
+# first word-split fragment of the root catches an unquoted rm in the trap.
+log "2h. LOCUS_HOME allocation honors a space-containing TMPDIR"
+alloc_decoy="$LOCUS_HOME/home"
+alloc_tmp="$alloc_decoy  alloc tmp root"
+mkdir -p "$alloc_decoy" "$alloc_tmp"
+touch "$alloc_decoy/decoy-sentinel"
+(
+  export TMPDIR="$alloc_tmp"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  create_locus_home
+  trap 'e2e_cleanup' EXIT
+  [[ "$TMPDIR" == *" "* && -d "$LOCUS_HOME" && \
+    "${LOCUS_HOME%/*}" == "$TMPDIR" && \
+    "${LOCUS_HOME##*/}" == locus-e2e.* ]] || exit 1
+  # Allocation must succeed, not just land: the binary uses the home unmodified.
+  "$LOCUS_BIN" init >/dev/null || exit 2
+  [[ -n "$(ls -A "$LOCUS_HOME")" ]] || exit 3
+  printf '%s' "$LOCUS_HOME" >"$alloc_tmp/home-path"
+  touch "$LOCUS_HOME/cleanup-sentinel"
+) || die "LOCUS_HOME was not allocated beneath the space-containing TMPDIR"
+alloc_home="$(cat "$alloc_tmp/home-path")"
+[[ "$alloc_home" == *" "* ]] || die "allocated LOCUS_HOME path did not contain spaces"
+[[ ! -e "$alloc_home" && ! -L "$alloc_home" ]] \
+  || die "allocated LOCUS_HOME under a spaced TMPDIR survived exit cleanup"
+[[ -d "$alloc_tmp" ]] || die "LOCUS_HOME cleanup removed the spaced TMPDIR"
+[[ -f "$alloc_decoy/decoy-sentinel" ]] \
+  || die "LOCUS_HOME cleanup removed a word-split sibling of the spaced TMPDIR"
+ok "LOCUS_HOME allocation succeeds beneath a TMPDIR containing spaces"
 
 create_security_home() {
   SECURITY_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-security-e2e.XXXXXX")"
@@ -175,12 +213,53 @@ security_test_ws="$(cat "$security_tmp/security-workspace-path")"
 [[ -d "$security_tmp" ]] || die "security cleanup removed the supplied TMPDIR"
 ok "distinct security directories honor nondefault TMPDIR and are cleaned on exit"
 
+# SECURITY_HOME under a TMPDIR with several spaces. Cleanup must remove exactly
+# that directory: a decoy at the first word-split fragment of the path must
+# survive, which catches an unquoted rm in the exit trap.
+log "2c2. SECURITY_HOME creation and cleanup honor a space-containing TMPDIR"
+secspace_decoy="$LOCUS_HOME/sec"
+secspace_tmp="$secspace_decoy tmp  root"
+mkdir -p "$secspace_decoy" "$secspace_tmp"
+touch "$secspace_decoy/decoy-sentinel"
+(
+  export TMPDIR="$secspace_tmp"
+  LOCUS_HOME="$secspace_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_security_home
+  [[ "$TMPDIR" == *" "* && -d "$SECURITY_HOME" && \
+    "${SECURITY_HOME%/*}" == "$TMPDIR" && \
+    "${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
+  # The probes pass the home to the binary as LOCUS_HOME; a nested store path
+  # beneath the spaced root must round-trip as one path.
+  mkdir -p "$SECURITY_HOME/bindings/nested dir" || exit 1
+  printf 'payload' >"$SECURITY_HOME/bindings/nested dir/probe.toml" || exit 1
+  [[ "$(cat "$SECURITY_HOME/bindings/nested dir/probe.toml")" == payload ]] || exit 1
+  # Usable, not just present: files must land inside the spaced path.
+  touch "$SECURITY_HOME/cleanup-sentinel"
+  [[ -f "$SECURITY_HOME/cleanup-sentinel" ]] || exit 1
+  printf '%s' "$SECURITY_HOME" >"$secspace_tmp/security-home-path"
+) || die "SECURITY_HOME was not created beneath the space-containing TMPDIR"
+secspace_home="$(cat "$secspace_tmp/security-home-path")"
+[[ "$secspace_home" == *" "* ]] || die "SECURITY_HOME path did not contain spaces"
+[[ ! -e "$secspace_home" && ! -L "$secspace_home" ]] \
+  || die "SECURITY_HOME under a spaced TMPDIR survived exit cleanup"
+[[ -d "$secspace_tmp" ]] || die "SECURITY_HOME cleanup removed the spaced TMPDIR"
+[[ -f "$secspace_decoy/decoy-sentinel" ]] \
+  || die "SECURITY_HOME cleanup removed a word-split sibling of the spaced TMPDIR"
+ok "SECURITY_HOME is created and removed beneath a TMPDIR containing spaces"
+
 # Exercise the same workspace creation and EXIT cleanup used by the allowlist
-# probes, beneath a supplied temporary root whose name contains spaces. The
-# subshell owns its test home so its cleanup cannot remove the main home.
+# probes, beneath a supplied temporary root whose name contains spaces
+# (including a doubled space). The subshell owns its test home so its cleanup
+# cannot remove the main home. A decoy at the first word-split fragment of
+# the root catches an unquoted rm in the exit trap.
 log "2d. workspace creation honors a space-containing TMPDIR"
-workspace_tmp="$LOCUS_HOME/workspace temp root"
-mkdir -p "$workspace_tmp"
+workspace_decoy="$LOCUS_HOME/workspace"
+workspace_tmp="$workspace_decoy  ws temp root"
+mkdir -p "$workspace_decoy" "$workspace_tmp"
+touch "$workspace_decoy/decoy-sentinel"
 (
   export TMPDIR="$workspace_tmp"
   LOCUS_HOME="$workspace_tmp/subshell-home"
@@ -192,24 +271,51 @@ mkdir -p "$workspace_tmp"
     "${WS_DIR##*/}" == locus-ws.* ]] || exit 1
   # The workspace must be usable, not just present: write its allowlist from
   # inside the spaced path and check the file landed there.
-  "$LOCUS_BIN" init >/dev/null
+  "$LOCUS_BIN" init >/dev/null || exit 2
   (cd "$WS_DIR" && "$LOCUS_BIN" workspace --default acme --allow acme >/dev/null) || exit 1
   [[ -s "$WS_DIR/.locus.toml" ]] || exit 1
   printf '%s' "$WS_DIR" >"$workspace_tmp/workspace-path"
   touch "$WS_DIR/cleanup-sentinel"
 ) || die "workspace was not created beneath the space-containing TMPDIR"
 workspace_test_dir="$(cat "$workspace_tmp/workspace-path")"
+[[ "$workspace_test_dir" == *" "* ]] || die "WS_DIR path did not contain spaces"
 [[ ! -e "$workspace_test_dir" && ! -L "$workspace_test_dir" ]] \
   || die "rehearsed workspace survived exit cleanup"
 [[ -d "$workspace_tmp" ]] || die "workspace cleanup removed the supplied TMPDIR"
+[[ -f "$workspace_decoy/decoy-sentinel" ]] \
+  || die "workspace cleanup removed a word-split sibling of the spaced TMPDIR"
 ok "workspace creation succeeds beneath a TMPDIR containing spaces"
+
+# A plain custom TMPDIR (no spaces) must also be honored: WS_DIR is a fresh
+# directory beneath it, never the default /tmp, and distinct from the home.
+log "2d2. WS_DIR honors a plain custom TMPDIR"
+ws_root_tmp="$LOCUS_HOME/ws-root"
+mkdir -p "$ws_root_tmp"
+(
+  export TMPDIR="$ws_root_tmp"
+  LOCUS_HOME="$ws_root_tmp/subshell-home"
+  mkdir -p "$LOCUS_HOME"
+  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  trap 'e2e_cleanup' EXIT
+  create_workspace
+  [[ -d "$WS_DIR" && "$WS_DIR" == "$TMPDIR"/locus-ws.* && \
+    "$WS_DIR" != "$LOCUS_HOME" ]] || exit 1
+  printf '%s' "$WS_DIR" >"$ws_root_tmp/workspace-path"
+) || die "WS_DIR was not created beneath the plain custom TMPDIR"
+ws_root_dir="$(cat "$ws_root_tmp/workspace-path")"
+[[ ! -e "$ws_root_dir" ]] || die "WS_DIR survived exit cleanup"
+[[ -d "$ws_root_tmp" ]] || die "WS_DIR cleanup removed the supplied TMPDIR"
+ok "WS_DIR is created beneath a plain custom TMPDIR and cleaned on exit"
 
 # Same creation, use and EXIT cleanup as the broken-link security probe, beneath
 # a supplied temporary root with spaces (including a doubled space). The subshell
-# owns its test home so its cleanup cannot remove the main home.
+# owns its test home so its cleanup cannot remove the main home. A decoy at the
+# first word-split fragment of the root catches an unquoted rm in the exit trap.
 log "2e. SECURITY_WS creation honors a space-containing TMPDIR"
-security_ws_tmp="$LOCUS_HOME/security  ws temp root"
-mkdir -p "$security_ws_tmp"
+security_ws_decoy="$LOCUS_HOME/security"
+security_ws_tmp="$security_ws_decoy  ws temp root"
+mkdir -p "$security_ws_decoy" "$security_ws_tmp"
+touch "$security_ws_decoy/decoy-sentinel"
 (
   export TMPDIR="$security_ws_tmp"
   LOCUS_HOME="$security_ws_tmp/subshell-home"
@@ -226,9 +332,12 @@ mkdir -p "$security_ws_tmp"
   printf '%s' "$SECURITY_WS" >"$security_ws_tmp/security-workspace-path"
 ) || die "SECURITY_WS was not created beneath the space-containing TMPDIR"
 security_ws_test_dir="$(cat "$security_ws_tmp/security-workspace-path")"
+[[ "$security_ws_test_dir" == *" "* ]] || die "SECURITY_WS path did not contain spaces"
 [[ ! -e "$security_ws_test_dir" && ! -L "$security_ws_test_dir" ]] \
   || die "rehearsed SECURITY_WS survived exit cleanup"
 [[ -d "$security_ws_tmp" ]] || die "SECURITY_WS cleanup removed the supplied TMPDIR"
+[[ -f "$security_ws_decoy/decoy-sentinel" ]] \
+  || die "SECURITY_WS cleanup removed a word-split sibling of the spaced TMPDIR"
 ok "SECURITY_WS creation succeeds beneath a TMPDIR containing spaces"
 
 # The binary must receive a spaced LOCUS_HOME as one path. Everything it writes
@@ -251,6 +360,50 @@ mkdir -p "$onearg_tmp"
 onearg_home="$(cat "$onearg_tmp/home-path")"
 [[ ! -e "$onearg_home" ]] || die "spaced LOCUS_HOME survived exit cleanup"
 ok "spaced LOCUS_HOME is one path for the binary and cleanup"
+
+# Same creation, use and EXIT cleanup as the graph import fallback home,
+# beneath a supplied temporary root with spaces (including a doubled space).
+# The subshell owns its test home so its cleanup cannot remove the main home.
+# Each pass populates the home the way the fallback does, records it, and then
+# exits — once successfully and once with status 73 — so the EXIT trap is
+# rehearsed on a nonzero exit too. An unrelated sentinel beneath the supplied
+# root must survive both passes.
+log "2i. GRAPH_HOME creation honors a space-containing TMPDIR"
+graph_home_tmp="$LOCUS_HOME/graph  home temp root"
+mkdir -p "$graph_home_tmp"
+touch "$graph_home_tmp/keep"
+for graph_exit in 0 73; do
+  graph_home_status=0
+  (
+    export TMPDIR="$graph_home_tmp"
+    LOCUS_HOME="$graph_home_tmp/subshell-home"
+    mkdir -p "$LOCUS_HOME"
+    WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+    trap 'e2e_cleanup' EXIT
+    create_graph_home
+    [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
+      "${GRAPH_HOME##*/}" == locus-graph-imp.* ]] || exit 1
+    # The fallback runs init and import with LOCUS_HOME="$GRAPH_HOME": the
+    # spaced path must reach the binary as one path and populate the home.
+    LOCUS_HOME="$GRAPH_HOME" "$LOCUS_BIN" init >/dev/null || exit 1
+    [[ -n "$(ls -A "$GRAPH_HOME")" ]] || exit 1
+    printf '%s' "$GRAPH_HOME" >"$graph_home_tmp/graph-home-path"
+    touch "$GRAPH_HOME/cleanup-sentinel"
+    exit "$graph_exit"
+  ) || graph_home_status=$?
+  # Internal rehearsal failures exit 1; the intended exits are 0 and 73.
+  if [[ "$graph_home_status" -eq 1 ]]; then
+    die "GRAPH_HOME was not created beneath the space-containing TMPDIR"
+  fi
+  [[ "$graph_home_status" -eq "$graph_exit" ]] \
+    || die "GRAPH_HOME rehearsal exited with status $graph_home_status instead of $graph_exit"
+  graph_home_test_dir="$(cat "$graph_home_tmp/graph-home-path")"
+  [[ ! -e "$graph_home_test_dir" && ! -L "$graph_home_test_dir" ]] \
+    || die "rehearsed GRAPH_HOME survived exit cleanup"
+  [[ -f "$graph_home_tmp/keep" && -d "$graph_home_tmp" ]] \
+    || die "GRAPH_HOME cleanup removed unrelated resources"
+done
+ok "GRAPH_HOME creation succeeds beneath a TMPDIR containing spaces"
 
 # Helper: run locus with the test home
 locus() { "$LOCUS_BIN" "$@"; }
@@ -313,7 +466,7 @@ ok "fresh quickstart doctor rejects an invalid workspace policy"
 
 # Issue #175: repeat the same add without rewriting the binding, and keep
 # rejecting a different binding at the same alias without --force.
-log "2g. binding add is idempotent"
+log "2b. binding add is idempotent"
 ADD_HOME="$LOCUS_HOME/binding-add-test"
 add_binding() {
   LOCUS_HOME="$ADD_HOME" "$LOCUS_BIN" --json binding add e2e-add \
@@ -511,6 +664,17 @@ if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
   die "sample exec emitted an unset-variable warning"
 fi
 ok "sample exec succeeds without unset-variable warnings"
+
+# Replay the standalone sample's pinned, credential-free child.
+sample_exec_stdout="$("$LOCUS_BIN" exec --expect personal --no-resolve -- sh -c \
+  'test "$LOCUS_BINDING" = personal && echo "sample exec succeeded"' \
+  2>"$sample_exec_stderr")" || die "sample walkthrough exec failed"
+[[ "$sample_exec_stdout" == "sample exec succeeded" ]] \
+  || die "sample walkthrough exec produced unexpected output"
+if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
+  die "sample walkthrough exec emitted an unset-variable warning"
+fi
+ok "sample walkthrough exec succeeds without unset-variable warnings"
 
 # Missing references must still be visible; do not hide real credential errors
 # just to make the configured sample path quiet.
@@ -1742,7 +1906,9 @@ fi
 log "24. adversarial release credential/workspace probes"
 create_security_home
 create_security_workspace
-# Same containment rule as LOCUS_HOME: a supplied TMPDIR owns the security fixtures.
+# Same containment rule as LOCUS_HOME and WS_DIR: a supplied TMPDIR owns the
+# security fixtures the probes below populate, so a mktemp regression that
+# relocates either one must stop the suite here.
 if [[ -n "${TMPDIR:-}" ]]; then
   [[ -d "$SECURITY_HOME" && "${SECURITY_HOME%/*}" == "$TMPDIR" && \
     "${SECURITY_HOME##*/}" == locus-security-e2e.* && \
@@ -1892,6 +2058,29 @@ assert d["verdict"] == "UNSAFE", d
 assert d["workspace"]["valid"] is False, d["workspace"]
 '
 ok "broken workspace link blocks force/run and makes doctor UNSAFE"
+
+# Repeated SECURITY_WS creation (unconditional): two invocations of the
+# security workspace recipe must yield distinct directories directly beneath
+# the selected temporary root. The live probe workspace is stashed and
+# restored so the exit trap still removes exactly it.
+security_ws_live="$SECURITY_WS"
+create_security_workspace; security_ws_a="$SECURITY_WS"
+create_security_workspace; security_ws_b="$SECURITY_WS"
+SECURITY_WS="$security_ws_live"
+security_ws_root="${TMPDIR:-/tmp}"
+security_ws_root="${security_ws_root%/}"
+[[ -d "$security_ws_a" && -d "$security_ws_b" ]] \
+  || die "repeated security workspace creation did not create both directories"
+[[ "$security_ws_a" != "$security_ws_b" ]] \
+  || die "repeated security workspace creation returned the same directory"
+security_ws_parent_a="${security_ws_a%/*}"
+security_ws_parent_b="${security_ws_b%/*}"
+[[ "${security_ws_parent_a%/}" == "$security_ws_root" && "${security_ws_parent_b%/}" == "$security_ws_root" ]] \
+  || die "repeated security workspaces were not created directly beneath the temp root"
+rm -rf "$security_ws_a" "$security_ws_b"
+[[ ! -e "$security_ws_a" && ! -e "$security_ws_b" ]] \
+  || die "repeated security workspaces were not removed"
+ok "two security workspaces are distinct and live directly beneath the temp root"
 
 # ── 25. verify claim (feature-detected) ──────────────────────────────────────
 log "25. locus verify claim (optional)"

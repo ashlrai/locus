@@ -6,7 +6,8 @@ unset **or empty**, Bash selects `/tmp`; otherwise it uses the supplied path.
 The parent must already exist and allow the script to create files and
 directories. Use an absolute path: the script changes working directory, so
 a relative `TMPDIR` can resolve differently during scans and cleanup. Paths
-containing spaces are supported.
+containing spaces are supported, and so is a trailing slash — the form macOS
+exports — which simply doubles the separator in the `mktemp` template.
 
 | Resource | Template beneath the parent | Purpose |
 | --- | --- | --- |
@@ -40,4 +41,14 @@ the directories and scan listings while they exist and checks their cleanup.
 `scripts/hub-integration-tmpdir.test.mjs` also covers plain-whitespace values
 (embedded, doubled, leading and trailing spaces) and unusable parents — a
 regular file, a missing absolute path and a missing relative path — where the
-run must exit nonzero before `locus init`.
+run must exit nonzero before `locus init`. Run
+`node --test scripts/hub-integration-home-spaced-tmpdir.test.mjs` for the
+focused `SMOKE_HOME` checks beneath a `TMPDIR` containing spaces: `mktemp -d`
+receives the complete template as a single argument, the directory
+materializes directly beneath the verbatim root — even with doubled spaces or
+glob metacharacters — and the exit cleanup receives the unsplit path. Run
+`node --test scripts/hub-integration-proj-selection.test.mjs` to check that the
+temporary parent alone selects the project root: a supplied `TMPDIR` contains
+`SMOKE_PROJ` verbatim — through a symlink, through `..` segments, and against
+ambient decoys in the working directory and `HOME` — and `mktemp -d` keeps the
+project private (0700).
