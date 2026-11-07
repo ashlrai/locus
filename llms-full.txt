@@ -231,6 +231,15 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [Dogfood probe cleanup](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-cleanup.md)
 
+## docs/dogfood-probe-isolation.md
+
+- [Dogfood probe root isolation](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-isolation.md)
+  - Creation
+  - Use
+  - Cleanup
+  - Readiness effect
+  - Related
+
 ## docs/dogfood-probe-roles.md
 
 - [Dogfood probe directory roles](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-roles.md)
@@ -242,6 +251,10 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/dogfood-temp-prefix-reference.md
 
 - [Dogfood temporary-directory prefixes](https://github.com/ashlrai/locus/blob/main/docs/dogfood-temp-prefix-reference.md)
+
+## docs/dogfood-temporary-resources.md
+
+- [Dogfood temporary resources](https://github.com/ashlrai/locus/blob/main/docs/dogfood-temporary-resources.md)
 
 ## docs/dry-run-acceptance.md
 
@@ -393,13 +406,6 @@ listed verbatim so an agent can jump straight to the right document.
   - Validation
   - Related docs
 
-## docs/hub-smoke-cleanup-review.md
-
-- [Hub smoke cleanup review](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-cleanup-review.md)
-  - Temporary resources and cleanup paths
-  - Early exits
-  - Residual gaps
-
 ## docs/hub-smoke-interruption.md
 
 - [Hub smoke interruption and cleanup](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-interruption.md)
@@ -463,6 +469,12 @@ listed verbatim so an agent can jump straight to the right document.
   - Verification and failure cases
   - Evidence
 
+## docs/installer-archive-acceptance.md
+
+- [Archive installer acceptance evidence](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-acceptance.md)
+  - Outcomes that need explicit evidence
+  - Evidence and scope
+
 ## docs/installer-archive-requirements.md
 
 - [Installer archive requirements](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-requirements.md)
@@ -490,6 +502,19 @@ listed verbatim so an agent can jump straight to the right document.
   - Selected release targets
   - Prerequisites and alternatives
   - Unresolved decisions and evidence gaps
+
+## docs/installer-platform-questions.md
+
+- [Shell installer platform support questions](https://github.com/ashlrai/locus/blob/main/docs/installer-platform-questions.md)
+  - Current evidence
+  - Decisions needed
+  - Evidence before a support claim
+
+## docs/installer-prerequisites.md
+
+- [Shell installer prerequisites](https://github.com/ashlrai/locus/blob/main/docs/installer-prerequisites.md)
+  - Prerequisites of the repository implementation
+  - Open questions from the issue
 
 ## docs/installer-requirements.md
 
@@ -658,6 +683,15 @@ listed verbatim so an agent can jump straight to the right document.
   - 4. What a pass does not establish (current limits)
   - 5. Optional: an operator-signed manifest
 
+## docs/registry-manifest-consumer.md
+
+- [Consuming the adapter registry release manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer.md)
+  - Current status: unsigned
+  - What the manifest is
+  - What you can verify
+  - What you cannot verify
+  - Operator-signed manifests
+
 ## docs/registry-manifest-current-state.md
 
 - [Adapter registry manifest: current state](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-current-state.md)
@@ -758,17 +792,26 @@ listed verbatim so an agent can jump straight to the right document.
   - Can someone sign a manifest today?
   - What is future work?
 
+## docs/release-automation.md
+
+- [Release automation](https://github.com/ashlrai/locus/blob/main/docs/release-automation.md)
+  - Historical proposal from PR #731
+  - Chain
+  - Owner action (needed to turn on the Release PR link)
+  - Gate decision for the Security Hardening Engineer
+
 ## docs/RELEASE.md
 
 - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+  - Qualify and publish through the release workflows
   - 0.6.0 release candidate - prepared 2026-10-31
   - Preconditions
-  - Checklist - v0.5.1 (launch: Oct 20)
-  - Checklist - v0.5.0
-  - Checklist - v0.4.0 (shipped)
-  - Checklist - v0.3.0 (shipped)
-  - Checklist - v0.2.0 (shipped)
-  - Tag and push
+  - Historical checklists
+    - Checklist - v0.5.1 (launch: Oct 20)
+    - Checklist - v0.5.0
+    - Checklist - v0.4.0 (shipped)
+    - Checklist - v0.3.0 (shipped)
+    - Checklist - v0.2.0 (shipped)
     - Prior release (v0.1.0) - reference digests
   - What release.yml publishes
   - After the tag (Homebrew / npm)
@@ -776,7 +819,7 @@ listed verbatim so an agent can jump straight to the right document.
     - Homebrew (optional prebuilt)
     - npm wrappers
   - Verify a release
-  - Hotfix / re-tag policy
+  - Hotfix policy
 
 ## docs/session-budget.md
 
