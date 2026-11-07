@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Broker audit record hardening ([#637](https://github.com/ashlrai/locus/pull/637)).**
+  The broker constructs and timestamps audit records from structured fields.
+  Executor-authenticated requests are limited to child-launch operations and
+  marked with `source: executor`; they cannot submit raw audit lines or record
+  control-plane operations through the broker.
+
 ### Continuous integration
 
 - **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
@@ -21,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot drift from the source docs.
 
 ### Tests
+
+- **Adapter model API coverage ([#660](https://github.com/ashlrai/locus/pull/660)).**
+  Added coverage for model API adapter behavior and scope handling.
+- **Temporary root and repeated creation coverage ([#666](https://github.com/ashlrai/locus/pull/666), [#667](https://github.com/ashlrai/locus/pull/667)).**
+  Added checks for repeated dogfood home creation and hub-smoke temporary
+  directory selection with spaces in the path.
 
 - **Temporary-directory cleanup coverage ([#587](https://github.com/ashlrai/locus/pull/587), [#600](https://github.com/ashlrai/locus/pull/600)).**
   The e2e, dogfood and hub-smoke scripts now assert that their temporary homes
