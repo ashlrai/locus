@@ -9,20 +9,19 @@ listed verbatim so an agent can jump straight to the right document.
 ## README
 
 - [README](https://github.com/ashlrai/locus/blob/main/README.md)
+  - For agents
   - 30-second start
-  - Connect your agent (MCP)
+  - How it works
+  - Features
+  - Measured reach of the wrong client's credentials
+  - FAQ
+  - Star Locus
   - Install options
-  - More of the CLI
-  - Measured: wrong-client credential reachability
-  - How isolation works
-  - MCP (Claude Code / Cursor)
-  - How Locus plugs into Phantom
-  - Core concepts
   - CLI
-  - Roadmap
-  - Development
-  - Daily firm workflow
+  - When the pin breaks
   - Security model
+  - Docs
+  - Development
   - Part of the Ashlr ecosystem
   - Contributing
   - License
@@ -181,6 +180,16 @@ listed verbatim so an agent can jump straight to the right document.
   - Caveats
   - Tests
 
+## docs/copy-paste.md
+
+- [Copy-paste examples](https://github.com/ashlrai/locus/blob/main/docs/copy-paste.md)
+  - Install
+  - Pin a sample and read JSON
+  - Preview without writing
+  - MCP config, print only
+  - MCP config, provider tools
+  - Same shell, switch clients
+
 ## docs/credential-audit.md
 
 - [Signed credential injection audit (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/credential-audit.md)
@@ -233,6 +242,10 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/dogfood-temp-prefix-reference.md
 
 - [Dogfood temporary-directory prefixes](https://github.com/ashlrai/locus/blob/main/docs/dogfood-temp-prefix-reference.md)
+
+## docs/dogfood-temporary-resources.md
+
+- [Dogfood temporary resources](https://github.com/ashlrai/locus/blob/main/docs/dogfood-temporary-resources.md)
 
 ## docs/dry-run-acceptance.md
 
@@ -447,6 +460,12 @@ listed verbatim so an agent can jump straight to the right document.
   - Verification and failure cases
   - Evidence
 
+## docs/installer-archive-acceptance.md
+
+- [Archive installer acceptance evidence](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-acceptance.md)
+  - Outcomes that need explicit evidence
+  - Evidence and scope
+
 ## docs/installer-archive-requirements.md
 
 - [Installer archive requirements](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-requirements.md)
@@ -475,6 +494,19 @@ listed verbatim so an agent can jump straight to the right document.
   - Prerequisites and alternatives
   - Unresolved decisions and evidence gaps
 
+## docs/installer-platform-questions.md
+
+- [Shell installer platform support questions](https://github.com/ashlrai/locus/blob/main/docs/installer-platform-questions.md)
+  - Current evidence
+  - Decisions needed
+  - Evidence before a support claim
+
+## docs/installer-prerequisites.md
+
+- [Shell installer prerequisites](https://github.com/ashlrai/locus/blob/main/docs/installer-prerequisites.md)
+  - Prerequisites of the repository implementation
+  - Open questions from the issue
+
 ## docs/installer-requirements.md
 
 - [Shell installer requirements](https://github.com/ashlrai/locus/blob/main/docs/installer-requirements.md)
@@ -493,6 +525,7 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/mcp.md
 
 - [locus-mcp - Claude Code, Cursor, and friends](https://github.com/ashlrai/locus/blob/main/docs/mcp.md)
+  - Agent setup
   - Install
   - Replace npx registrations during pin
   - Human workflow (pin first)
@@ -641,6 +674,15 @@ listed verbatim so an agent can jump straight to the right document.
   - 4. What a pass does not establish (current limits)
   - 5. Optional: an operator-signed manifest
 
+## docs/registry-manifest-consumer.md
+
+- [Consuming the adapter registry release manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-consumer.md)
+  - Current status: unsigned
+  - What the manifest is
+  - What you can verify
+  - What you cannot verify
+  - Operator-signed manifests
+
 ## docs/registry-manifest-current-state.md
 
 - [Adapter registry manifest: current state](https://github.com/ashlrai/locus/blob/main/docs/registry-manifest-current-state.md)
@@ -741,17 +783,26 @@ listed verbatim so an agent can jump straight to the right document.
   - Can someone sign a manifest today?
   - What is future work?
 
+## docs/release-automation.md
+
+- [Release automation](https://github.com/ashlrai/locus/blob/main/docs/release-automation.md)
+  - Historical proposal from PR #731
+  - Chain
+  - Owner action (needed to turn on the Release PR link)
+  - Gate decision for the Security Hardening Engineer
+
 ## docs/RELEASE.md
 
 - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+  - Qualify and publish through the release workflows
   - 0.6.0 release candidate - prepared 2026-10-31
   - Preconditions
-  - Checklist - v0.5.1 (launch: Oct 20)
-  - Checklist - v0.5.0
-  - Checklist - v0.4.0 (shipped)
-  - Checklist - v0.3.0 (shipped)
-  - Checklist - v0.2.0 (shipped)
-  - Tag and push
+  - Historical checklists
+    - Checklist - v0.5.1 (launch: Oct 20)
+    - Checklist - v0.5.0
+    - Checklist - v0.4.0 (shipped)
+    - Checklist - v0.3.0 (shipped)
+    - Checklist - v0.2.0 (shipped)
     - Prior release (v0.1.0) - reference digests
   - What release.yml publishes
   - After the tag (Homebrew / npm)
@@ -759,7 +810,7 @@ listed verbatim so an agent can jump straight to the right document.
     - Homebrew (optional prebuilt)
     - npm wrappers
   - Verify a release
-  - Hotfix / re-tag policy
+  - Hotfix policy
 
 ## docs/session-budget.md
 

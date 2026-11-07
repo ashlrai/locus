@@ -43,7 +43,19 @@ fn run(home: &Path, args: &[&str], code: i32) -> Value {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    // Coverage instrumentation (`cargo llvm-cov` exports CARGO_LLVM_COV /
+    // LLVM_PROFILE_FILE to test processes) makes every basic block update
+    // counters, so the authority broker's executable hashing can exceed the
+    // ordinary 10s budget even though the command is making progress. A hang
+    // is still caught — the deadline is only relaxed, never removed.
+    let budget = if std::env::var_os("CARGO_LLVM_COV").is_some()
+        || std::env::var_os("LLVM_PROFILE_FILE").is_some()
+    {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_secs(10)
+    };
+    let deadline = Instant::now() + budget;
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             child.kill().unwrap();
@@ -168,5 +180,11 @@ fn json_touchid_is_refused_before_confirmation_or_mutation() {
             .unwrap()
             .contains("--touchid requires an interactive invocation"));
         assert_eq!(std::fs::read(&path).unwrap(), original);
+        let status = run(home.path(), &["approve", "status", &record.id, "--json"], 0);
+        assert!(
+            status["grants"].is_null() || status["grants"].as_array().is_some_and(Vec::is_empty)
+        );
+        assert_eq!(status["advisory_assertions"], 0);
+        assert_eq!(status["authoritative_grants"], 0);
     }
 }

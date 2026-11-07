@@ -32,4 +32,7 @@ every child process or file was removed. Build artifacts and resources outside
 the probe roots are outside these traps.
 
 Run `node --test scripts/dogfood.test.mjs` for the probe cleanup regression
-checks.
+checks. The success case uses real local HTTP requests against a controlled
+server to exercise mint, tenantless and granted requests, revocation, and the
+final roster check. It verifies that the server has stopped and the temporary
+root is gone before the probe returns, while neighboring files remain intact.
