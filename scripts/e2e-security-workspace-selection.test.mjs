@@ -304,6 +304,119 @@ for (const mode of ['unset', 'empty']) {
   });
 }
 
+// ── Section 24 broken-link probes ───────────────────────────────────────────
+// The verbatim probe block: the live SECURITY_WS receives its .locus.toml
+// symlink, pin/run must fail closed inside it, and --json doctor must report
+// UNSAFE — then the ok line prints and the EXIT trap removes the populated
+// workspace. LOCUS_BIN is a private fixture that accepts only the three
+// exact probe argv shapes and requires the broken link in the working
+// directory, the same precondition the real binary fails closed on.
+function brokenLinkProbeBlock() {
+  const source = readFileSync(script, 'utf8');
+  const section24 = source.indexOf('log "24.');
+  const start = source.indexOf('ln -s missing-policy.toml "$SECURITY_WS/.locus.toml"', section24);
+  const endMarker = 'ok "broken workspace link blocks force/run and makes doctor UNSAFE"';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(section24 >= 0 && start > section24 && end > start,
+    'e2e.sh must contain the section 24 broken-link probe block');
+  return source.slice(start, end + endMarker.length);
+}
+
+test('section 24 broken-link probes use the live workspace and clean it up', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-secws-probe-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'controlled tmp');
+  const bin = join(root, 'bin');
+  const mainHome = join(root, 'main home');
+  const wsCreated = join(root, 'security-ws-created');
+  const doctorUsed = join(root, 'security-ws-doctor-used');
+  const argvLog = join(root, 'locus-argv.log');
+  mkdirSync(scratch);
+  mkdirSync(bin);
+  mkdirSync(mainHome);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(bin, 'locus'), `#!/bin/bash
+printf '%s\\t%s\\n' "$PWD" "$*" >> "$LOCUS_ARGV_LOG"
+case "$*" in
+  "pin env-probe --force" | "run -b env-probe --force -- true")
+    if [[ "\${1:-}" == pin ]]; then
+      [[ "$#" -eq 3 && "$1" == pin && "$2" == env-probe && "$3" == --force ]] || exit 98
+    else
+      [[ "$#" -eq 6 && "$1" == run && "$2" == -b && "$3" == env-probe && "$4" == --force && "$5" == -- && "$6" == true ]] || exit 98
+    fi
+    [[ -L .locus.toml ]] || exit 98
+    printf 'workspace policy is broken or unreadable\\n' >&2
+    exit 1
+    ;;
+  "--json doctor")
+    [[ "$#" -eq 2 && "$1" == --json && "$2" == doctor ]] || exit 99
+    [[ -L .locus.toml ]] || exit 99
+    printf '%s' "$PWD" > "$DOCTOR_USED_RECORD"
+    touch cleanup-sentinel || exit 97
+    printf '%s\\n' '{"verdict":"UNSAFE","ok":false,"workspace":{"valid":false}}'
+    exit 2
+    ;;
+  *) exit 96 ;;
+esac
+`, { mode: 0o755 });
+
+  const collapsed = spawnSync(join(bin, 'locus'), ['--json doctor'], {
+    cwd: mainHome, env: { ...process.env, LOCUS_ARGV_LOG: argvLog,
+      DOCTOR_USED_RECORD: doctorUsed }, encoding: 'utf8', timeout: 15_000,
+  });
+  assert.ifError(collapsed.error);
+  assert.equal(collapsed.signal, null);
+  assert.equal(collapsed.status, 99, 'the fixture must reject a collapsed two-token argv');
+  assert.throws(() => readFileSync(doctorUsed), { code: 'ENOENT' },
+    'a rejected fixture call cannot record doctor use');
+  writeFileSync(argvLog, '');
+
+  const { cleanup, createHome, createWs } = securityLifecycle();
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createHome}
+${createWs}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$TEST_HOME"
+LOCUS_BIN="$FAKE_LOCUS"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+${section24Selection()}
+printf '%s' "$SECURITY_WS" > "$WS_CREATED"
+${brokenLinkProbeBlock()}
+`], {
+    timeout: 15_000,
+    env: { ...process.env, TMPDIR: scratch, TEST_HOME: mainHome,
+      FAKE_LOCUS: join(bin, 'locus'), WS_CREATED: wsCreated,
+      DOCTOR_USED_RECORD: doctorUsed, LOCUS_ARGV_LOG: argvLog },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, `the probe block must succeed: ${result.stderr}`);
+  assert.match(result.stdout, /ok security directories are created directly beneath TMPDIR/);
+  assert.match(result.stdout, /ok broken workspace link blocks force\/run and makes doctor UNSAFE/);
+  const workspace = readFileSync(wsCreated, 'utf8');
+  assert.equal(dirname(workspace), scratch, 'the probe workspace sits beneath the controlled TMPDIR');
+  assert.match(workspace, /\/locus-security-ws\.[^/\s]+$/);
+  const calls = readFileSync(argvLog, 'utf8').trim().split('\n').map((line) => line.split('\t'));
+  assert.deepEqual(calls.map(([, argv]) => argv), [
+    'pin env-probe --force',
+    'run -b env-probe --force -- true',
+    '--json doctor',
+  ], 'the block must issue exactly the three probe commands, in order');
+  for (const [pwd] of calls) {
+    assert.equal(pwd, workspace, 'every probe must run inside the live security workspace');
+  }
+  assert.equal(readFileSync(doctorUsed, 'utf8'), workspace,
+    'security doctor used a different workspace');
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' },
+    'security workspace and its contents must be removed on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'the controlled TMPDIR keeps only its own entries');
+});
+
 // ── Temporary-root selection edges ──────────────────────────────────────────
 // The selection contract is ${TMPDIR:-/tmp}: a supplied TMPDIR is the
 // containment boundary the caller chose. The probes below run

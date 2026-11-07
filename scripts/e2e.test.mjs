@@ -604,6 +604,7 @@ test('security workspace creation lands at the intended path beneath a spaced TM
   const created = join(fixture, 'security-ws-created');
   const templates = join(fixture, 'security-ws-templates');
   const entered = join(fixture, 'security-ws-entered');
+  const used = join(fixture, 'security-ws-used');
   mkdirSync(scratch);
   mkdirSync(bin);
   writeFileSync(join(scratch, 'keep'), 'unrelated');
@@ -626,12 +627,20 @@ exec "$REAL_MKTEMP" "$@"
 `, { mode: 0o755 });
   // The broken-link probes run inside the created workspace; recording the
   // first one proves the script uses the directory mktemp actually created.
+  // The doctor probe is the last command to run there: it must still find the
+  // broken .locus.toml link, record the populated workspace, and fall through
+  // to the real binary so its UNSAFE verdict is what the suite observes.
   const wrapper = join(bin, 'locus');
   writeFileSync(wrapper, `#!/bin/bash
 if [[ "\${1:-}" == pin && "\${2:-}" == env-probe && "\${3:-}" == --force && \
   -f "$SECURITY_WS_CREATED" && "$PWD" == "$(cat "$SECURITY_WS_CREATED")" ]]; then
   [[ -L "$PWD/.locus.toml" ]] || exit 1
   printf '%s' "$PWD" > "$SECURITY_WS_ENTERED"
+fi
+if [[ "\${1:-}" == --json && "\${2:-}" == doctor && "$PWD" == "$PROBE_SCRATCH"/locus-security-ws.* ]]; then
+  [[ -L .locus.toml ]] || exit 1
+  printf '%s' "$PWD" > "$SECURITY_WS_USED"
+  touch cleanup-sentinel || exit 1
 fi
 exec '${locus.replaceAll("'", "'\\''")}' "$@"
 `, { mode: 0o755 });
@@ -641,7 +650,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
       LOCUS_BIN: wrapper, REAL_MKTEMP: realMktemp, PROBE_SCRATCH: scratch,
       SECURITY_WS_CREATED: created, SECURITY_WS_TEMPLATES: templates,
-      SECURITY_WS_ENTERED: entered },
+      SECURITY_WS_ENTERED: entered, SECURITY_WS_USED: used },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -649,6 +658,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
   assert.equal(result.status, 0, 'e2e should exit successfully');
   assert.match(result.stdout, /e2e PASS  \(\d+ checks, \d+ skipped\)/);
+  assert.match(result.stdout, /ok  broken workspace link blocks force\/run and makes doctor UNSAFE/);
   assert.ok(existsSync(templates), 'no locus-security-ws template reached mktemp');
   // Sections 2c and 2e rehearse creation beneath their own nested spaced
   // TMPDIRs before the probes create the real fixture beneath the suite TMPDIR.
@@ -670,6 +680,11 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.ok(existsSync(entered), 'the broken-link probe never ran inside the created workspace');
   assert.equal(readFileSync(entered, 'utf8'), workspace,
     'the script used a different workspace than mktemp created');
+  assert.ok(existsSync(used), 'the broken-link doctor probe did not run inside the security workspace');
+  assert.equal(readFileSync(used, 'utf8'), workspace,
+    'security doctor used a different workspace');
   assert.equal(existsSync(workspace), false, 'security workspace survived exit cleanup');
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' },
+    'security workspace and its contents must be removed on exit');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
 });
