@@ -61,6 +61,7 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
 - [Agent contract: JSON schemas, exit codes, --dry-run](https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md)
 - [Architecture](https://github.com/ashlrai/locus/blob/main/docs/architecture.md)
 - [Archive installer acceptance](https://github.com/ashlrai/locus/blob/main/docs/archive-installer-acceptance.md)
+- [Archive installer design questions](https://github.com/ashlrai/locus/blob/main/docs/archive-installer-design-questions.md)
 - [Archive installer requirements](https://github.com/ashlrai/locus/blob/main/docs/archive-installer-requirements.md)
 - [Ashlr companion handshake (v1)](https://github.com/ashlrai/locus/blob/main/docs/ashlr-handshake.md)
 - [Autopin review checklist](https://github.com/ashlrai/locus/blob/main/docs/autopin-review-checklist.md)

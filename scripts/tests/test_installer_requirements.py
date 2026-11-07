@@ -28,6 +28,17 @@ class InstallerRequirementsTest(unittest.TestCase):
             with self.subTest(link=link):
                 self.assertTrue((DOC.parent / link.split("#", 1)[0]).is_file())
 
+    def test_issue_scope_and_release_evidence_are_distinct(self):
+        text = DOC.read_text(encoding="utf-8")
+        outcome = text.split("## Stated outcome and constraints", 1)[1].split("##", 1)[0]
+        evidence = text.split("## Evidence needed for the proposed path", 1)[1].split("##", 1)[0]
+        self.assertRegex(outcome, r"one-command shell installation path")
+        self.assertRegex(outcome, r"release archive")
+        self.assertRegex(outcome, r"neither npm nor Rust")
+        self.assertIn("not claims", evidence)
+        self.assertIn("supported native hosts", evidence)
+        self.assertIn("missing or invalid verification material", evidence)
+
 
 if __name__ == "__main__":
     unittest.main()
