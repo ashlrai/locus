@@ -406,6 +406,13 @@ listed verbatim so an agent can jump straight to the right document.
   - Validation
   - Related docs
 
+## docs/hub-smoke-cleanup-review.md
+
+- [Hub smoke cleanup review](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-cleanup-review.md)
+  - Temporary resources and cleanup paths
+  - Early exits
+  - Residual gaps
+
 ## docs/hub-smoke-interruption.md
 
 - [Hub smoke interruption and cleanup](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-interruption.md)
