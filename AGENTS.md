@@ -67,6 +67,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Binaries: `./target/release/locus`, `./target/release/locus-mcp`.
 
+New end-to-end steps go in a new `scripts/e2e.d/NN-topic.sh` file (see `scripts/e2e.d/README.md`), not in `scripts/e2e.sh`; `bash scripts/check-e2e-dropin.sh` proves the mechanism.
+
 Local install from this checkout (`locus-cli` installs both binaries):
 
 ```bash
