@@ -197,13 +197,25 @@ test('section 24 creates the security workspace directly beneath a controlled TM
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const scratch = join(root, 'fixture root [*]');
   const observed = join(root, 'observed-paths');
+  const templates = join(root, 'templates');
   mkdirSync(scratch);
   writeFileSync(join(scratch, 'keep'), 'unrelated');
+  // Record the requested templates, then let the real command create the
+  // directories it was given: both fixtures must be asked for beneath the
+  // supplied TMPDIR, in creation order.
+  const shim = `mktemp() { printf '%s\\n' "$2" >> "$TEST_TEMPLATES"; command mktemp "$@"; }
+`;
 
   const { result } = rehearse24(t, {
     tempRoot: scratch,
-    extraEnv: { OBSERVED: observed },
+    shim,
+    extraEnv: { OBSERVED: observed, TEST_TEMPLATES: templates },
     tail: `
+# Retain the original720 independent writability/distinct-inode and populated
+# cleanup assertions as well as the current workspace policy-link probe.
+[[ -d "$SECURITY_HOME" && -w "$SECURITY_HOME" && -d "$SECURITY_WS" && \\
+  ! "$SECURITY_HOME" -ef "$SECURITY_WS" ]] || exit 71
+touch "$SECURITY_HOME/cleanup-sentinel" "$SECURITY_WS/cleanup-sentinel" || exit 72
 # Use the workspace the way the probes do: a policy link must land inside it.
 ln -s missing-policy.toml "$SECURITY_WS/.locus.toml" || exit 71
 [[ -L "$SECURITY_WS/.locus.toml" && \\
@@ -215,11 +227,17 @@ printf '%s\\n%s' "$SECURITY_HOME" "$SECURITY_WS" > "$OBSERVED"
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /ok security directories are created directly beneath TMPDIR/);
+  assert.deepEqual(readFileSync(templates, 'utf8').trim().split('\n'), [
+    `${scratch}/locus-security-e2e.XXXXXX`,
+    `${scratch}/locus-security-ws.XXXXXX`,
+  ], 'both security fixtures must be requested beneath the supplied TMPDIR');
   const [home, workspace] = readFileSync(observed, 'utf8').split('\n');
   assert.equal(dirname(home), scratch);
-  assert.match(home, /\/locus-security-e2e\.[^/\s]+$/);
+  assert.match(home, /\/locus-security-e2e\.[A-Za-z0-9]{6}$/,
+    'the mktemp prefix and suffix shape hold');
   assert.equal(dirname(workspace), scratch, 'the workspace sits directly beneath the controlled TMPDIR');
-  assert.match(workspace, /\/locus-security-ws\.[^/\s]+$/);
+  assert.match(workspace, /\/locus-security-ws\.[A-Za-z0-9]{6}$/,
+    'the mktemp prefix and suffix shape hold');
   for (const dir of [home, workspace]) {
     assert.throws(() => lstatSync(dir), { code: 'ENOENT' }, 'fixtures must be removed on exit');
   }
@@ -234,6 +252,7 @@ test('a security workspace created outside the controlled TMPDIR stops section 2
   const created = join(root, 'ws-created');
   mkdirSync(scratch);
   mkdirSync(wrongRoot);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
   // Answer with the expected name shape but relocate the workspace outside
   // TMPDIR; the containment check must stop the suite and the exit trap must
   // still remove the misplaced directory.
@@ -264,7 +283,8 @@ test('a security workspace created outside the controlled TMPDIR stops section 2
   assert.throws(() => lstatSync(workspace), { code: 'ENOENT' },
     'the misplaced workspace must be removed by the exit trap');
   assert.deepEqual(readdirSync(wrongRoot), []);
-  assert.deepEqual(readdirSync(scratch), [], 'the correctly placed security home must be removed too');
+  assert.deepEqual(readdirSync(scratch), ['keep'],
+    'cleanup removes both fixtures and preserves unrelated files');
 });
 
 for (const mode of ['unset', 'empty']) {
