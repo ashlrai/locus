@@ -29,6 +29,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#804](https://github.com/ashlrai/locus/pull/804),
   [#595](https://github.com/ashlrai/locus/pull/595),
   [#597](https://github.com/ashlrai/locus/pull/597)).
+## [0.7.1] - 2026-11-07
+
+Highlights: clearer `locus status` empty state, deeper MCP and CLI regression
+coverage, and expanded e2e, dogfood and hub-smoke suites plus installer and
+probe documentation. No provider, seal, policy or credential behavior changed.
+
+### Fixed
+
+- **`locus status` empty state ([#814](https://github.com/ashlrai/locus/pull/814)).**
+  With no pin, `status` now says `no pin` and names the one next step
+  (`locus enter <alias>`, workspace-required variant under `require_pin`)
+  instead of a bare `!` glyph, so the hint reads plainly in every renderer.
+
+### Tests
+
+- **MCP credential-ref hygiene ([#418](https://github.com/ashlrai/locus/pull/418)).**
+  New scrubbed-environment `locus-mcp` tests assert that whoami and session
+  surfaces never echo `env:` credential references, and the sample-walkthrough
+  e2e gained coverage. `json_tty` output coverage was extended.
+- **CLI regression tests.** `cli_help_exit` pins help/usage exit behavior
+  ([#643](https://github.com/ashlrai/locus/pull/643)), `fleet_denials_q8`
+  covers fleet denial output ([#380](https://github.com/ashlrai/locus/pull/380)),
+  `binding_add_idempotent` grew cases ([#427](https://github.com/ashlrai/locus/pull/427)),
+  and `status_doctor_output` pins the readable empty state
+  ([#814](https://github.com/ashlrai/locus/pull/814)).
+- **e2e coverage.** Security home and workspace selection suites grew distinct-
+  home and spaced-tmpdir cases ([#719](https://github.com/ashlrai/locus/pull/719),
+  [#597](https://github.com/ashlrai/locus/pull/597)); graph home selection and
+  `e2e.sh` were reworked ([#537](https://github.com/ashlrai/locus/pull/537));
+  temp-home rehearsal and temp resource cleanup assertions were added
+  ([#674](https://github.com/ashlrai/locus/pull/674),
+  [#595](https://github.com/ashlrai/locus/pull/595)).
+- **hub-smoke error paths.** Distinct-directory and allocation failure cases
+  were expanded ([#804](https://github.com/ashlrai/locus/pull/804),
+  [#722](https://github.com/ashlrai/locus/pull/722)), and a cleanup-review
+  pass documents and tests interruption cleanup
+  ([#619](https://github.com/ashlrai/locus/pull/619)).
+
+### Documentation
+
+- **Installer runbook set ([#482](https://github.com/ashlrai/locus/pull/482)).**
+  New pages cover archive acceptance, platform questions and prerequisites for
+  `scripts/install.sh`, with matching test fixtures, plus a dogfood temporary-
+  resources page.
+- **Dogfood probe isolation ([#617](https://github.com/ashlrai/locus/pull/617)).**
+  `docs/dogfood-probe-isolation.md` records how probe homes stay isolated, with
+  new `dogfood.test.mjs` assertions.
+- **Release automation proposal ([#731](https://github.com/ashlrai/locus/pull/731)).**
+  `docs/release-automation.md` preserves the historical release-PR design as an
+  inactive template; the sanctioned publisher remains the qualified
+  auto-tag/release chain in [RELEASE.md](docs/RELEASE.md).
+- **e2e directory docs.** Security-directory and temp-resource pages and the
+  e2e test map now describe the current suite layout
+  ([#657](https://github.com/ashlrai/locus/pull/657),
+  [#719](https://github.com/ashlrai/locus/pull/719)).
 
 ## [0.7.0] - 2026-11-06
 
