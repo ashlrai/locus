@@ -66,7 +66,7 @@ fragment alone is not equivalent to running the suite.
 | 21 | `forensics export` | Check an optional export has recognizable structure and omits secrets and credential locators. |
 | 22 | `goal status` | Check optional progress output in JSON or text. |
 | 23 | `topic` / `help topic dashboard` | Smoke-test optional topic help. |
-| 24 | Release CLI credential and workspace probes | Check security fixtures sit beneath a supplied `TMPDIR`, then conflicting adds, rejection of `test:` credentials, legacy migration, Phantom fail-closed behavior, non-disclosure and broken workspace links. |
+| 24 | Release CLI credential and workspace probes | Check security fixtures sit beneath a supplied `TMPDIR`, then conflicting adds, rejection of `test:` credentials, legacy migration, Phantom fail-closed behavior, non-disclosure, broken workspace links, and repeated security workspace creation yielding distinct directories that are removed. |
 | 25 | `verify claim --json` | Check optional claim scoring and secret hygiene. |
 | 26 | `verify session --json` | Check optional session report shape, exit status and secret hygiene. |
 | 26b | `watch --once --json`, `--require-ok` | Check optional session heartbeat shape and fail-closed status. |
