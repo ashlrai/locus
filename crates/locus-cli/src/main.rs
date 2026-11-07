@@ -3991,7 +3991,11 @@ fn cmd_whoami(json: bool) -> Result<()> {
         );
         println!(
             "            {}",
-            "session_frozen: re-pin — run `locus leave` then `locus pin <alias>`".yellow()
+            format!(
+                "session_frozen: re-pin — run `locus enter {}`; if enter refuses, `locus leave --force` first",
+                w.binding_alias
+            )
+            .yellow()
         );
     }
     if w.mode == "namespaced" || !w.namespaces.is_empty() {

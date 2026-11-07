@@ -1241,6 +1241,83 @@ fn locus_heartbeat_and_enter_hint() {
     assert_eq!(body["binding"], "acme");
 }
 
+/// Expired pin: every agent-facing surface must name the working recovery —
+/// `locus leave --force` then `locus enter` — never a bare `locus pin`, which
+/// the store refuses for an expired pin (SessionExpired).
+#[test]
+fn expired_pin_surfaces_name_force_leave_recovery() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    store.pin("acme", dir.path(), None, false).unwrap();
+    // Authentic but expired: reseal keeps the HMAC valid while TTL has passed.
+    let path = store.active_session_path();
+    let mut s: locus_core::Session =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    s.pinned_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    s.expires_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    s.reseal(&store.seal_key().unwrap());
+    std::fs::write(&path, serde_json::to_vec(&s).unwrap()).unwrap();
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    // locus_safe_next: the command field is what agents relay to the human —
+    // it must be the teardown recipe, and the executor-authority override
+    // must not mask a re_pin verdict with `locus mcp --supervised`.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_safe_next", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&resp);
+    assert!(is_err, "safe_next should flag not-ready: {text}");
+    let body: Value = serde_json::from_str(&text).expect("safe_next json");
+    assert_eq!(body["action"], "re_pin", "{body}");
+    let command = body["command"].as_str().unwrap_or("");
+    assert!(command.contains("locus leave --force"), "{command}");
+    assert!(command.contains("locus enter acme"), "{command}");
+    assert!(!command.contains("locus pin acme"), "{command}");
+
+    // locus_heartbeat hint names the same teardown.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_heartbeat", "arguments": {} }),
+    );
+    let (text, _) = McpClient::tool_text(&resp);
+    let body: Value = serde_json::from_str(&text).expect("heartbeat json");
+    assert_eq!(body["expired"], true, "{body}");
+    let hint = body["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("locus leave --force"), "{hint}");
+    assert!(hint.contains("locus enter"), "{hint}");
+
+    // locus_whoami reports the pin as present-but-expired — not `pinned:
+    // false`, which reads as "no pin, just pin again".
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_whoami", "arguments": {} }),
+    );
+    let (text, _) = McpClient::tool_text(&resp);
+    let body: Value = serde_json::from_str(&text).expect("whoami json");
+    assert_eq!(body["pinned"], true, "{body}");
+    assert_eq!(body["expired"], true, "{body}");
+    let hint = body["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("locus leave --force"), "{hint}");
+    assert!(hint.contains("locus enter acme"), "{hint}");
+
+    // Provider gate: session_expired hint names the working recovery.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&resp);
+    assert!(is_err, "provider call should fail: {text}");
+    let body: Value = serde_json::from_str(&text).expect("provider error json");
+    assert_eq!(body["error"], "session_expired", "{body}");
+    let hint = body["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("locus leave --force"), "{hint}");
+    assert!(hint.contains("locus enter acme"), "{hint}");
+}
+
 #[test]
 fn frozen_session_tools_list_control_only_and_call_errors() {
     let dir = tempdir().unwrap();

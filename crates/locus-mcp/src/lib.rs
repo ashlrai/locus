@@ -3388,6 +3388,25 @@ fn whoami_error_body(e: &locus_core::LocusError) -> Value {
             "hint": EXECUTOR_AUTHORITY_HINT,
         });
     }
+    // A pin file exists but cannot be used (expired TTL, bad seal, dead
+    // broker, unreadable session): report it as pinned-but-broken. `pinned:
+    // false` reads as "no pin — just pin again", which names commands the
+    // store refuses for exactly these states.
+    if locus_core::recovery::is_stale_pin_error(e) {
+        let alias = store()
+            .ok()
+            .and_then(|s| s.active_session().ok().flatten())
+            .map(|sess| sess.binding_alias);
+        return json!({
+            "pinned": true,
+            "expired": matches!(e, locus_core::LocusError::SessionExpired(_)),
+            "error": e.to_string(),
+            "hint": format!(
+                "Pin present but unusable — human recovery: {}",
+                locus_core::recovery::recovery_for_error(e, alias.as_deref())
+            ),
+        });
+    }
     json!({
         "pinned": false,
         "error": e.to_string(),
@@ -3810,7 +3829,7 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
                 json!({
                     "error": "invalid_seal",
                     "issues": drift.issues,
-                    "hint": "Session seal is invalid. Human must re-pin: `locus leave` then `locus pin <alias>`.",
+                    "hint": "Session seal is invalid — `locus pin`/`enter` refuse it until cleared. Human: `locus leave --force` then `locus enter <alias>`.",
                 }),
                 true,
             ));
@@ -3820,7 +3839,7 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
                 json!({
                     "error": "session_frozen: re-pin",
                     "reason": drift.issues,
-                    "hint": "Binding changed under the active pin. Human must run `locus leave` then `locus pin <alias>`.",
+                    "hint": "Binding changed under the active pin. Human: `locus enter <alias>` re-pins directly; if enter refuses, `locus leave --force` first.",
                 }),
                 true,
             ));
@@ -3838,11 +3857,15 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
                     true,
                 ));
             }
+            let recovery = locus_core::recovery::stale_pin_recovery(drift.binding_alias.as_deref());
             return Ok(tool_text(
                 json!({
                     "error": "session_expired",
                     "issues": drift.issues,
-                    "hint": "Pin TTL expired. Human must re-pin: `locus pin <alias>`.",
+                    "hint": format!(
+                        "Pin TTL expired — `locus pin`/`enter` refuse an expired pin until it is \
+                         cleared. Human: {recovery}"
+                    ),
                 }),
                 true,
             ));
@@ -3872,7 +3895,7 @@ fn handle_tools_call(params: &Value, scope: &RequestScope) -> std::result::Resul
             json!({
                 "error": "session_frozen: re-pin",
                 "reason": session.frozen_reason,
-                "hint": "Human must re-pin after binding drift."
+                "hint": "Binding changed under the active pin. Human: `locus enter <alias>` re-pins directly; if enter refuses, `locus leave --force` first."
             }),
             true,
         ));
@@ -4265,7 +4288,11 @@ fn call_control(
                 compute_safe_next(&s, &cwd()).map_err(|e| rpc_error(-32000, e.to_string()))?;
             let mut body = attach_report(serde_json::to_value(&next).unwrap_or(json!({})));
             let mut is_err = !next.ready;
-            if anchor_mismatch_active {
+            // A `re_pin` verdict is not masked: the pin is observably broken
+            // (expired / bad seal / frozen) and neither `locus enter
+            // <anchored>` nor a supervised launch can clear it — the human
+            // recovery wins.
+            if anchor_mismatch_active && next.action != "re_pin" {
                 // Session-local override: the only safe next action is to
                 // re-initialize this client (or restore the anchored pin).
                 let anchored_alias = anchor_report
@@ -4277,19 +4304,21 @@ fn call_control(
                 body["ready"] = json!(false);
                 body["command"] = json!(format!("locus enter {anchored_alias}"));
                 is_err = true;
-            } else if let Some(issues) = scope_drift(&s, scope)
-                .ok()
-                .map(|d| d.issues)
-                .filter(|issues| !next.ready && has_executor_authority_issue(issues))
-            {
-                // Plain client entry: the pin is unobservable from this
-                // process. `locus doctor` (operator capability) reports
-                // healthy, so pointing there loops; name the real fix.
-                body["action"] = json!("launch_supervised");
-                body["command"] = json!("locus mcp --supervised");
-                body["message"] = json!(EXECUTOR_AUTHORITY_HINT);
-                body["issues"] = json!(issues);
-                is_err = true;
+            } else if next.action != "re_pin" {
+                if let Some(issues) = scope_drift(&s, scope)
+                    .ok()
+                    .map(|d| d.issues)
+                    .filter(|issues| !next.ready && has_executor_authority_issue(issues))
+                {
+                    // Plain client entry: the pin is unobservable from this
+                    // process. `locus doctor` (operator capability) reports
+                    // healthy, so pointing there loops; name the real fix.
+                    body["action"] = json!("launch_supervised");
+                    body["command"] = json!("locus mcp --supervised");
+                    body["message"] = json!(EXECUTOR_AUTHORITY_HINT);
+                    body["issues"] = json!(issues);
+                    is_err = true;
+                }
             }
             // Informational: isError only when not ready so agents notice the gate.
             Ok(tool_text(body, is_err))
@@ -4377,11 +4406,11 @@ fn call_control(
             } else if !drift.pinned {
                 Some("not pinned — human: `locus enter <alias>` (or `locus pin <alias>`)")
             } else if drift.frozen {
-                Some("session frozen after drift — human: `locus leave` then `locus pin <alias>`")
+                Some("session frozen after drift — human: `locus enter <alias>` re-pins directly; if enter refuses, `locus leave --force` first")
             } else if !drift.seal_ok {
-                Some("invalid seal — human must re-pin")
+                Some("invalid seal — `locus pin`/`enter` refuse it until cleared — human: `locus leave --force` then `locus enter <alias>`")
             } else if drift.expired {
-                Some("pin TTL expired — human must re-pin")
+                Some("pin TTL expired — `locus pin`/`enter` refuse it until cleared — human: `locus leave --force` then `locus enter <alias>`")
             } else if has_executor_authority_issue(&drift.issues) {
                 Some(EXECUTOR_AUTHORITY_HINT)
             } else {
