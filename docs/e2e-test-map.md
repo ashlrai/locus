@@ -31,7 +31,14 @@ fragment alone is not equivalent to running the suite.
 | --- | --- | --- |
 | 1 | `cargo build --release -p locus-cli -p locus-mcp --locked` | Build and check both release executables. |
 | 2 | `mktemp`, cleanup trap | Create an isolated Locus home directly beneath the requested temporary root and arrange cleanup. |
-| 2c | Security directory creation under a custom `TMPDIR` | Check the security fixtures respect a path with spaces, a repeated workspace creation stays distinct, and all are removed on exit. |
+| 2g | Suite home creation under a space-containing `TMPDIR` | Check the home fixture respects a path with spaces and is removed on exit. |
+| 2h | `LOCUS_HOME` allocation and `init` under a space-containing `TMPDIR` | Check the allocated home reaches the binary as one path and is removed on exit, sparing a word-split sibling of the root. |
+| 2c | Security home creation under a custom `TMPDIR` | Check the security fixture respects a path with spaces and is removed on exit. |
+| 2c2 | `SECURITY_HOME` creation under a space-containing `TMPDIR` | Check the security home fixture respects a path with spaces, round-trips a nested store path, and is removed on exit, sparing a word-split sibling of the root. |
+| 2d | Workspace creation under a space-containing `TMPDIR` | Check the workspace fixture respects a path with spaces and is removed on exit, sparing a word-split sibling of the root. |
+| 2e | `SECURITY_WS` creation under a space-containing `TMPDIR` | Check the security workspace fixture respects a path with spaces and is removed on exit, sparing a word-split sibling of the root. |
+| 2f | `init` inside a home under a space-containing `TMPDIR` | Check the binary receives the spaced home as one path, writes only inside it, and removes it on exit. |
+| 2i | `GRAPH_HOME` creation under a space-containing `TMPDIR` | Check the graph home fixture respects a path with spaces and is removed on exit, on both a successful and a nonzero (73) subshell exit while an unrelated sentinel survives. |
 | 2a | `quickstart`, `doctor`, `doctor --json` | Check fresh-install advisories and reject invalid workspace policy. |
 | 2b | `binding add` twice, then with conflicting content | Verify an identical add preserves the file and timestamp and a conflict is rejected. |
 | 3 | `init --with-samples`, `pin`, `whoami --json`, `exec` | Check sample pins, exclusive identity, credential presence metadata, binding add idempotence and missing-reference warnings. |
@@ -59,7 +66,7 @@ fragment alone is not equivalent to running the suite.
 | 21 | `forensics export` | Check an optional export has recognizable structure and omits secrets and credential locators. |
 | 22 | `goal status` | Check optional progress output in JSON or text. |
 | 23 | `topic` / `help topic dashboard` | Smoke-test optional topic help. |
-| 24 | Release CLI credential and workspace probes | Check conflicting adds, rejection of `test:` credentials, legacy migration, Phantom fail-closed behavior, non-disclosure and broken workspace links. |
+| 24 | Release CLI credential and workspace probes | Check security fixtures sit beneath a supplied `TMPDIR`, then conflicting adds, rejection of `test:` credentials, legacy migration, Phantom fail-closed behavior, non-disclosure and broken workspace links. |
 | 25 | `verify claim --json` | Check optional claim scoring and secret hygiene. |
 | 26 | `verify session --json` | Check optional session report shape, exit status and secret hygiene. |
 | 26b | `watch --once --json`, `--require-ok` | Check optional session heartbeat shape and fail-closed status. |

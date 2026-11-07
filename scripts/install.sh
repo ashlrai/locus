@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Install both release binaries without touching credentials or shell profiles.
-set -euo pipefail
 
 die() { printf 'locus installer: %s\n' "$*" >&2; exit 1; }
 
@@ -18,6 +17,19 @@ USAGE
 
 valid_version() {
   [[ $1 =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]
+}
+
+# Pure mapping from uname output to the published archive target. Returns a
+# nonzero status for unsupported combinations without consulting the host.
+platform_target() {
+  local target
+  case "$1/$2" in
+    Darwin/arm64|Darwin/aarch64) target=aarch64-apple-darwin ;;
+    Darwin/x86_64|Darwin/amd64) target=x86_64-apple-darwin ;;
+    Linux/x86_64|Linux/amd64) target=x86_64-unknown-linux-gnu ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$target"
 }
 
 main() {
@@ -59,12 +71,8 @@ main() {
 
   os=$(uname -s)
   arch=$(uname -m)
-  case "$os/$arch" in
-    Darwin/arm64|Darwin/aarch64) target=aarch64-apple-darwin ;;
-    Darwin/x86_64|Darwin/amd64) target=x86_64-apple-darwin ;;
-    Linux/x86_64|Linux/amd64) target=x86_64-unknown-linux-gnu ;;
-    *) die "unsupported platform: $os/$arch; use a source install" ;;
-  esac
+  target=$(platform_target "$os" "$arch") \
+    || die "unsupported platform: $os/$arch; use a source install"
 
   local releases=https://github.com/ashlrai/locus/releases resolved
   if [[ $version == latest ]]; then
@@ -132,7 +140,8 @@ main() {
   mkdir -p -- "$bin_dir" || die 'cannot create install directory; choose a writable --bin-dir'
   # Stage on the destination filesystem before any replacement. Each rename
   # replaces the old inode, so an upgrade also works with a running binary.
-  stage_dir=$(mktemp -d "$bin_dir/.locus-install.XXXXXX")
+  stage_dir=$(mktemp -d "$bin_dir/.locus-install.XXXXXX") \
+    || die 'cannot create staging directory; choose a writable --bin-dir'
   for binary in locus locus-mcp; do
     mv -- "$work_dir/$binary" "$stage_dir/$binary"
     chmod 755 "$stage_dir/$binary"
@@ -154,14 +163,17 @@ download() {
     --connect-timeout 15 --max-time 300 --retry 2 "$@"
 }
 
-work_dir=''
-stage_dir=''
 cleanup() {
   [[ -z $work_dir ]] || rm -rf -- "$work_dir"
   [[ -z $stage_dir ]] || rm -rf -- "$stage_dir"
   return 0
 }
-trap cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-main "$@"
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+  set -euo pipefail
+  work_dir=''
+  stage_dir=''
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  main "$@"
+fi

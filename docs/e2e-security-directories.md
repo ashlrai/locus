@@ -14,8 +14,11 @@ synthetic credential references and values, not live credentials.
 
 Both are created with `mktemp -d` directly beneath a nonempty `TMPDIR`, or
 `/tmp` when it is unset or empty. A supplied `TMPDIR` must already exist and
-be writable. These variables are assigned by the script; they are not inputs
-for choosing existing directories. The probes use `SECURITY_HOME` as
+be writable; the suite verifies both fixtures sit directly beneath it before
+the probes run, the same containment check applied to the main home and the
+allowlist workspace. A misplaced fixture stops the suite while the exit trap
+still removes it. These variables are assigned by the script; they are not
+inputs for choosing existing directories. The probes use `SECURITY_HOME` as
 `LOCUS_HOME` explicitly, including when commands run from `SECURITY_WS`.
 
 The security home supports checks that identical binding additions are
@@ -34,16 +37,18 @@ alongside the other suite-owned temporary directories, on normal exit or an
 ordinary failure. The security directories are created at the start of section
 24 and remain until that trap runs. In section 2c a subshell creates a
 separate security home and workspace inside a custom temporary directory whose
-name contains spaces, then creates the workspace a second time. It verifies
-that all three directories are distinct. The superseded workspace is removed
-explicitly because the exit trap removes only the latest `SECURITY_WS`
-assignment; the trap removes the rest, and the parent checks their removal and
-preservation of the supplied temporary directory.
+name contains spaces. It verifies that they are distinct; its exit trap removes
+both, and the parent checks their removal and preservation of the supplied
+temporary directory. Sections 2e and 2c2 rehearse the security workspace and
+the security home separately, each beneath its own supplied root whose name
+contains spaces, with the same exit-trap cleanup.
 
 A termination that prevents the trap from running or a removal error can leave
 files behind. A failure before trap installation can leave the main home, but
 the security directories have not yet been created. Inspect any leftover
 `locus-security-e2e.*` and `locus-security-ws.*` directories before removing
-them; do not remove the parent `TMPDIR` or unrelated files. See the
+them; do not remove the parent `TMPDIR` or unrelated files. Run
+`node --test scripts/e2e-security-home-selection.test.mjs` for the focused
+`SECURITY_HOME` temporary-root selection and containment checks. See the
 [temporary resource reference](e2e-temp-resource-types.md) for all directory
 types and the [test map](e2e-test-map.md) for the full suite and prerequisites.
