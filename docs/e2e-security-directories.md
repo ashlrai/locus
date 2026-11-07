@@ -35,7 +35,12 @@ After the main home is created, the script installs an `EXIT` trap. It stops
 any tracked background MCP servers and removes the security home and workspace
 alongside the other suite-owned temporary directories, on normal exit or an
 ordinary failure. The security directories are created at the start of section
-24 and remain until that trap runs. In section 2c a subshell creates a
+24 and remain until that trap runs. Later in section 24 the script creates the
+workspace twice more in the same shell and requires the pair to be distinct
+directories directly beneath the selected root. The trap removes only the
+workspace `SECURITY_WS` currently names, so the live workspace is restored
+first and both extra directories are removed explicitly; the script then
+checks that they are gone. In section 2c a subshell creates a
 separate security home and workspace inside a custom temporary directory whose
 name contains spaces. It verifies that they are distinct; its exit trap removes
 both, and the parent checks their removal and preservation of the supplied
