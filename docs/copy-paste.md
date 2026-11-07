@@ -27,7 +27,7 @@ locus capability status
 locus exec --expect personal --no-resolve -- echo ok
 ```
 
-`locus quickstart` writes sample `personal` and `acme` bindings and mints `LOCUS_CONTROL_CAPABILITY`. The hook exports that capability and does not print it. `--no-resolve` skips credential resolution. The child prints `ok`.
+`locus quickstart` writes sample `personal` and `acme` bindings and mints `LOCUS_CONTROL_CAPABILITY`. The hook exports that capability and does not print it. `--no-resolve` skips credential resolution and refuses to start the child if an upstream would resolve credentials. With the sample bindings, the child prints `ok`. Existing bindings are not replaced by quickstart.
 
 `locus doctor --json` can exit 0 with `verdict` `WARN` and `ok` false when the only findings are setup advice (for example Phantom is not installed). That is not a finished setup.
 

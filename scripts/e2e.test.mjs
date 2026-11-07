@@ -11,7 +11,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(root, 'scripts', 'e2e.sh');
 const locus = join(root, 'target', 'release', 'locus');
 
-test('temporary home is removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
+test('temporary home and workspace are removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-success-test-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
   const scratch = join(fixture, 'custom tmp $literal; [test]');
@@ -20,6 +20,8 @@ test('temporary home is removed after a successful e2e exit', { timeout: 1_800_0
   const homeCreated = join(fixture, 'home-created');
   const homeUsed = join(fixture, 'home-used');
   const cleanupObserved = join(fixture, 'cleanup-observed');
+  const workspaceCreated = join(fixture, 'workspace-created');
+  const workspaceUsed = join(fixture, 'workspace-used');
   const wrapper = join(bin, 'locus');
   mkdirSync(scratch);
   mkdirSync(inherited);
@@ -41,18 +43,16 @@ fi
 exec "$REAL_RM" "$@"
 `, { mode: 0o755 });
   writeFileSync(join(bin, 'mktemp'), `#!/bin/bash
-if [[ "$#" -eq 2 && "$1" == -d && "$2" == "$TMPDIR/locus-e2e.XXXXXX" ]]; then
-  home="$("$REAL_MKTEMP" "$@")" || exit $?
-  [[ -d "$home" ]] || exit 1
-  # Rehearsal subshells re-export TMPDIR to a nested root; record only the
-  # suite home, requested beneath the outer root.
-  if [[ "$2" == "$SUITE_TMPDIR/locus-e2e.XXXXXX" ]]; then
-    printf '%s' "$home" > "$HOME_CREATED"
-  fi
-  printf '%s\\n' "$home"
-else
-  exec "$REAL_MKTEMP" "$@"
-fi
+case "\${2:-}" in
+  "$SUITE_TMPDIR/locus-e2e.XXXXXX") record="$HOME_CREATED" ;;
+  "$SUITE_TMPDIR/locus-ws.XXXXXX") record="$WORKSPACE_CREATED" ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+[[ "$#" -eq 2 && "$1" == -d ]] || exit 1
+created="$("$REAL_MKTEMP" "$@")" || exit $?
+[[ -d "$created" ]] || exit 1
+printf '%s' "$created" > "$record"
+printf '%s\\n' "$created"
 `, { mode: 0o755 });
   // Rehearsal subshells re-export TMPDIR to a nested root; observe the home
   // only at the suite's own workspace call, where LOCUS_HOME still names the
@@ -61,6 +61,9 @@ fi
 if [[ "\${1:-}" == workspace && "$LOCUS_HOME" == "$SUITE_TMPDIR"/locus-e2e.* ]]; then
   [[ -d "$LOCUS_HOME" ]] || exit 1
   printf '%s' "$LOCUS_HOME" > "$HOME_USED"
+  [[ -d "$PWD" && "$PWD" == "$(cat "$WORKSPACE_CREATED")" ]] || exit 1
+  printf '%s' "$PWD" > "$WORKSPACE_USED"
+  touch "$PWD/cleanup-sentinel" || exit 1
   touch "$LOCUS_HOME/cleanup-sentinel" || exit 1
 fi
 exec '${locus.replaceAll("'", "'\\''")}' "$@"
@@ -71,8 +74,8 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
       SUITE_TMPDIR: scratch,
       LOCUS_HOME: inherited, LOCUS_BIN: wrapper, HOME_CREATED: homeCreated,
-      HOME_USED: homeUsed, CLEANUP_OBSERVED: cleanupObserved, REAL_MKTEMP: realMktemp,
-      REAL_RM: realRm },
+      HOME_USED: homeUsed, CLEANUP_OBSERVED: cleanupObserved, WORKSPACE_CREATED: workspaceCreated,
+      WORKSPACE_USED: workspaceUsed, REAL_MKTEMP: realMktemp, REAL_RM: realRm },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
@@ -89,6 +92,13 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   assert.ok(existsSync(cleanupObserved), 'exit cleanup did not receive the populated home');
   assert.equal(readFileSync(cleanupObserved, 'utf8'), home);
   assert.throws(() => lstatSync(home), { code: 'ENOENT' }, 'temporary home survived exit cleanup');
+  assert.ok(existsSync(workspaceCreated), 'mktemp did not create the workspace');
+  assert.ok(existsSync(workspaceUsed), 'the workspace command did not enter the workspace');
+  const workspace = readFileSync(workspaceCreated, 'utf8');
+  assert.equal(readFileSync(workspaceUsed, 'utf8'), workspace, 'CLI used a different workspace');
+  assert.equal(dirname(workspace), scratch);
+  assert.match(workspace, /\/locus-ws\.[^/]+$/);
+  assert.equal(existsSync(workspace), false, 'workspace survived exit cleanup');
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
   assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited',
     'cleanup must preserve the inherited home');

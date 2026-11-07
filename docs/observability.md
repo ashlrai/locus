@@ -21,7 +21,10 @@ Each line:
 | `ts` | RFC3339 UTC |
 | `op` | e.g. `session.pin`, `mcp.scope_freeze`, `mcp.require_approval`, `approval.advisory` |
 | `binding` | Binding alias (or empty for global ops) |
-| `detail` | Optional JSON — digests and ids only, never raw tokens |
+| `detail` | Optional JSON: sanitized details, such as digests and IDs |
+| `source` | `executor` for broker-written records authenticated with an executor capability; absent on other records |
+
+The broker constructs its own audit records and timestamps. An executor capability can request only `session.exec`, `session.exec.delegated`, `session.run`, and `ci.run` records; it cannot write control-plane operations through the broker. When the broker is unavailable, the local fallback appends directly.
 
 ```bash
 locus events --last 50
