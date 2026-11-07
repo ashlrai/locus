@@ -89,6 +89,18 @@ jobs:
         if: steps.scope.outputs.code == 'true'
         run: ./scripts/hub-smoke.sh
 
+      # Real end-to-end proof for the temp-path contract: a TMPDIR containing
+      # spaces and shell glob characters must not split the script's mktemp
+      # paths; the script still removes everything it created.
+      - name: Hub contract smoke (TMPDIR with spaces)
+        if: steps.scope.outputs.code == 'true'
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d)/hub smoke [*]"
+          mkdir "$scratch"
+          TMPDIR="$scratch" ./scripts/hub-smoke.sh
+          [ -z "$(ls -A "$scratch")" ] || { echo "leftover paths under spaced TMPDIR" >&2; ls -la "$scratch" >&2; exit 1; }
+
       - name: End-to-end shell pack
         if: steps.scope.outputs.code == 'true'
         run: ./scripts/e2e.sh

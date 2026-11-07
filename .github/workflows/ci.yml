@@ -110,6 +110,25 @@ jobs:
           node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
 
+      # Hermetic shell-suite tests (locus, cargo and jq are mocked, so no Rust
+      # toolchain or broker is needed): the hub scripts must create and clean
+      # their mktemp paths under TMPDIR — including a TMPDIR containing spaces
+      # and shell glob characters — without splitting them or touching
+      # unrelated neighbors.
+      - name: Hub scripts temporary-path discipline
+        run: |
+          node --test \
+            scripts/hub-smoke-spaced-tmpdir.test.mjs \
+            scripts/hub-smoke-temp-failures.test.mjs \
+            scripts/hub-smoke-temp-lifecycle.test.mjs \
+            scripts/hub-smoke-error-cleanup.test.mjs \
+            scripts/hub-smoke-error-failure.test.mjs \
+            scripts/hub-smoke-interruption.test.mjs \
+            scripts/hub-integration-tmpdir.test.mjs \
+            scripts/hub-integration-temp-lifecycle.test.mjs \
+            scripts/hub-test-temp-comparison.test.mjs \
+            scripts/temp-parent-reference.test.mjs
+
   # Tier-1 worker sandbox tests: pre-merge whenever the PR touches the sandbox,
   # locus-core, the lockfile or CI, and on every daily and dispatch run. The
   # job always runs and reports success, so the gate keeps exact keys.
