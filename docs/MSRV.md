@@ -4,6 +4,9 @@ Locus requires **Rust 1.89 or newer** and a matching Cargo toolchain for
 source builds. The workspace declares this minimum in `Cargo.toml`; each
 member inherits it.
 
+The floor also covers `std::fs::File::lock`, used by credential migration;
+that standard-library API was stabilized in Rust 1.89.
+
 The minimum is verified against the committed lockfile on the current host by
 checking the whole workspace, including test and example targets:
 

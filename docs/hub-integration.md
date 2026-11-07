@@ -596,6 +596,9 @@ Exact steps: [`integrations/phantom/fleet-preflight.md`](../integrations/phantom
 
 ## Validation
 
+For the composition smoke's prerequisites and exit and skip behavior, see
+[hub integration smoke prerequisites](hub-integration-prerequisites.md).
+
 See [hub smoke prerequisites](./hub-smoke-prerequisites.md) for setup and environment, and [hub smoke output](./hub-smoke-output.md) for the individual outcomes.
 The [temporary resource comparison](./hub-test-temp-comparison.md) covers
 both scripts' paths and cleanup; the [integration smoke lifecycle](./hub-integration-temp-lifecycle.md)
