@@ -846,7 +846,8 @@ export LOCUS_MCP_AUTO_PIN=0
 
 1. **Policy** (`binding.policy`) may deny or require external authority before the adapter runs. Local `confirm`, approval ids, CLI labels, HTTP tokens, and dashboard actions are advisory only.
 2. **Scope freeze** rejects args that conflict with frozen selectors (e.g. another Supabase `project_ref`).  
-3. Results are synthetic/identity-oriented in phase 1 — safe to explore without mutating cloud resources.
+3. Provider calls may reach live upstream services. Check the active binding,
+   tool, and policy before making a call.
 
 Agent best practice: call `locus_whoami` or `locus_safe_next` before any infrastructure work. If unpinned or wrong tenant, ask the human to `locus pin <alias>`. When blocked (approval, freeze, doctor), prefer `locus_safe_next` for the single next action.
 
@@ -854,8 +855,7 @@ Agent best practice: call `locus_whoami` or `locus_safe_next` before any infrast
 
 ```bash
 locus switch acme     # one-shot: leave-if-pinned + enter, target validated FIRST
-locus pin personal    # human action
-# restart or rely on next tools/list — catalog follows the new pin
+# Restart the supervised MCP server or client to grant the new pin.
 locus leave           # unbind; agent loses provider tools
 ```
 
@@ -890,8 +890,8 @@ Do **not** also register unrestricted personal Supabase/GitHub MCP servers along
 ```bash
 locus doctor
 locus status
-LOCUS_HOME=/tmp/locus-debug locus pin personal
-# point a test MCP client at locus-mcp with LOCUS_HOME set the same way
+# Use a hooked operator shell and the same LOCUS_HOME as the client.
+# A person can enter the intended binding before launching the client.
 ```
 
 ## Security properties (MCP-specific)

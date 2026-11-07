@@ -176,3 +176,17 @@ test('SMOKE_ERR lands beneath the selected TMPDIR, not ambient roots', (t) => {
     assert.equal(readFileSync(join(decoy, 'keep'), 'utf8'), 'sentinel');
   }
 });
+
+test('SMOKE_ERR is created as one file beneath a space-containing, glob-like TMPDIR', (t) => {
+  const f = fixture(t);
+  const selected = join(f.root, 'tmp dir [a] *');
+  const split = join(f.root, 'tmp');
+  mkdirSync(selected);
+  mkdirSync(split);
+  writeFileSync(join(split, 'keep'), 'sentinel');
+  run(f, { env: { TMPDIR: selected, SELECTED: selected } });
+  const created = assertErrorFile(f, selected);
+  assert.equal(dirname(created), selected, 'the spaced root is used verbatim, not word-split');
+  assert.deepEqual(readdirSync(selected), [], 'selected root is clean after the EXIT trap');
+  assert.deepEqual(readdirSync(split), ['keep'], 'no fragment lands beneath the split-off parent');
+});

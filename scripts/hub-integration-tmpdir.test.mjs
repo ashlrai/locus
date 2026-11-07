@@ -151,8 +151,7 @@ exec bash "$1"
     assert.equal(result.stdout, '', 'no banner or check output may print');
     assert.match(result.stderr, /mktemp|cd:/, 'the failing step must report to stderr');
     const observed = existsSync(calls) ? readFileSync(calls, 'utf8').trim().split('\n') : [];
-    assert.deepEqual(observed, ['agent report --help'],
-      'the pre-allocation probe may run, but init, pin and every check must not');
+    assert.deepEqual(observed, [], 'no Locus command may run before allocation succeeds');
     assert.deepEqual(readdirSync(scratch).filter((entry) => entry.startsWith('locus-hub-int')), [],
       'no smoke directory may be created');
     extraCheck(tmpdir, scratch);
