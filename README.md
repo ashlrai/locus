@@ -33,7 +33,7 @@ npm package READMEs use version-neutral installation commands to avoid stale pin
 
 ## For agents
 
-One command installs both binaries:
+Install the CLI and MCP packages:
 
 ```bash
 npm install -g locus-cli @ashlrai/locus-mcp
@@ -328,7 +328,7 @@ locus forensics export                # shareable pack (no secrets)
 locus verify session · claim --text "…"  # verification plane: session pack · claim score
 locus approve list|grant|status|wait|deny  # require_approval / dual-control
 locus notify status|on|off            # desktop banners OFF by default
-locus events --last N · events export # audit tail / fleet pulse / OTLP
+locus events --last N · events export # audit tail / fleet pulse / SIEM / OTLP
 locus graph list|export|import        # encrypted binding graph share (no secrets)
 locus ci mint|env|run                 # short-lived sealed sessions for pipelines
 locus engagement init|close           # client engagement lifecycle (binding + workspace)
@@ -475,7 +475,8 @@ Roadmap and goals: [GOALS.md](./GOALS.md), [PLAN.md](./PLAN.md), [DESIGN.md](./D
 | 1 `locus-mcp`, credential resolve, adapters, scope freeze | done |
 | 2 Firm UX, doctor, run, graph, ci | done (0.1.1) |
 | 0.2 to 0.6 Dashboard, forensics, HTTP MCP, agent report, switch, registry | 0.6.2 released |
-| 3 Remote binding graph sync, dual-control packs, SIEM export | next |
+| 3 SIEM NDJSON export | available in source (0.7.0) |
+| 3 Remote binding graph sync, dual-control packs | planned |
 
 Agency kit: [examples/agency-starter](./examples/agency-starter/) and [docs/agency-starter.md](./docs/agency-starter.md). Recipes: [examples/recipes](./examples/recipes/).
 
