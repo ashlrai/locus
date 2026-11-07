@@ -42,8 +42,8 @@ matched. An archive that fails checksum verification never reaches tar.
 | Condition | User-visible outcome and destination state | Evidence / follow-up |
 | --- | --- | --- |
 | Either binary destination is an existing symlink or directory | Reports `refusing symlink or directory destination`; neither binary is replaced. | Offline tests cover the second binary and check the first remains unchanged. |
-| Install directory is a file or cannot be created | Reports `cannot create install directory; choose a writable --bin-dir`, potentially with a `mkdir` error; no binary replacement. | Offline existing-file test; actual permission failures remain **unverified**. |
-| Destination staging directory cannot be created, or staging move/chmod fails | Underlying utility reports an error; no final replacement has started. Temporary cleanup is attempted. | Exact diagnostics and permission-dependent behavior are **unverified**. |
+| Install directory is a file or cannot be created, including under an unwritable parent | Reports `cannot create install directory; choose a writable --bin-dir`, potentially with a `mkdir` error; no binary replacement. | Offline existing-file and unwritable-parent tests. |
+| Destination staging directory cannot be created, or staging move/chmod fails | An unwritable destination reports `cannot create staging directory; choose a writable --bin-dir`; other staging failures report the underlying utility error. No final replacement has started; temporary cleanup is attempted. | Offline unwritable-destination test; move/chmod errors remain utility-reported. |
 | Final rename fails | Underlying `mv` reports an error; there is no rollback. The first binary may already have been replaced when the second fails, leaving mixed versions. Temporary cleanup is attempted. | Offline injected second-rename failure checks the partial upgrade, failure status and cleanup; other filesystem failures are **unverified**. |
 
 After a partial upgrade, fix the destination problem and rerun the installer,

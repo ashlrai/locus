@@ -84,7 +84,7 @@ test('pin failure removes the used temporary error file', (t) => {
   writeFileSync(join(scratch, 'locus-hub-smoke-err.unrelated'), 'keep');
   // locus init succeeds but locus pin fails, so each retry writes the pin's
   // stderr into the already-created error file before the run aborts.
-  writeFileSync(hook, `jq() { return 0; }
+  writeFileSync(hook, `jq() { cat >/dev/null; }
 cargo() { return 0; }
 sleep() { :; }
 locus() {
