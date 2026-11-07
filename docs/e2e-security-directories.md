@@ -14,8 +14,10 @@ synthetic credential references and values, not live credentials.
 
 Both are created with `mktemp -d` directly beneath a nonempty `TMPDIR`, or
 `/tmp` when it is unset or empty. A supplied `TMPDIR` must already exist and
-be writable. These variables are assigned by the script; they are not inputs
-for choosing existing directories. The probes use `SECURITY_HOME` as
+be writable; the suite verifies both fixtures sit directly beneath it before
+the probes run, the same containment check applied to the main home and the
+allowlist workspace. These variables are assigned by the script; they are not
+inputs for choosing existing directories. The probes use `SECURITY_HOME` as
 `LOCUS_HOME` explicitly, including when commands run from `SECURITY_WS`.
 
 The security home supports checks that identical binding additions are

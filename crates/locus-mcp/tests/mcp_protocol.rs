@@ -61,7 +61,21 @@ impl McpClient {
         extra_env: &[(&str, &str)],
         args: &[&str],
     ) -> Self {
+        Self::spawn_args_with_scrub(locus_home, framing, cwd, extra_env, args, false)
+    }
+
+    fn spawn_args_with_scrub(
+        locus_home: &std::path::Path,
+        framing: Framing,
+        cwd: Option<&std::path::Path>,
+        extra_env: &[(&str, &str)],
+        args: &[&str],
+        scrub: bool,
+    ) -> Self {
         let mut cmd = Command::new(mcp_bin());
+        if scrub {
+            cmd.env_clear().env("HOME", locus_home);
+        }
         cmd.args(args)
             .env("LOCUS_HOME", locus_home)
             // Default off so tests without workspace defaults stay unpinned.
@@ -1479,6 +1493,78 @@ fn resource_doctor_reports_malformed_binding_instead_of_erroring() {
         findings.iter().any(|f| f["code"] == "binding_invalid"),
         "{body}"
     );
+}
+
+#[test]
+fn scrubbed_environment_whoami_and_session_hide_credential_refs() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    let mut binding = store.load_binding("acme").unwrap();
+    for provider in &mut binding.providers {
+        provider.credential_ref = match provider.provider.as_str() {
+            "github" => "env:GH_TOKEN_ACME",
+            "vercel" => "env:VERCEL_TOKEN_ACME",
+            "supabase" => "env:SUPABASE_ACME",
+            other => panic!("unexpected provider: {other}"),
+        }
+        .into();
+    }
+    store.save_binding(&binding).unwrap();
+    store
+        .pin("acme", dir.path(), Some("scrubbed-mcp".into()), false)
+        .unwrap();
+
+    // A fresh child receives only the explicitly supplied control environment.
+    let mut client =
+        McpClient::spawn_args_with_scrub(dir.path(), Framing::Ndjson, None, &[], &[], true);
+    handshake(&mut client);
+    let who = client.request(
+        "tools/call",
+        json!({"name": "locus_whoami", "arguments": {}}),
+    );
+    assert_eq!(who["result"]["isError"], false, "{who}");
+    let (who_text, _) = McpClient::tool_text(&who);
+    let session = client.request("resources/read", json!({"uri": "locus://session"}));
+    assert_eq!(
+        session["result"]["contents"][0]["uri"], "locus://session",
+        "{session}"
+    );
+    let session_text = parse_resource_text(&session);
+    for text in [&who_text, &session_text] {
+        let body: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["binding_alias"], "acme");
+        assert_eq!(body["tenant"], "acme-corp");
+        assert_eq!(body["seal_ok"], true);
+        let providers = body["providers"].as_array().unwrap();
+        let mut names: Vec<_> = providers
+            .iter()
+            .map(|p| p["provider"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["github", "supabase", "vercel"]);
+        for provider in providers {
+            assert!(provider.get("credential_ref").is_none());
+            assert_eq!(
+                provider["credential"],
+                json!({"present": false, "source": "environment"})
+            );
+        }
+        for canary in [
+            "credential_ref",
+            "GH_TOKEN_ACME",
+            "VERCEL_TOKEN_ACME",
+            "SUPABASE_ACME",
+            "e2e-sample-",
+            "phm:",
+            "env:",
+        ] {
+            assert!(
+                !text.contains(canary),
+                "identity surface leaked {canary}: {text}"
+            );
+        }
+    }
 }
 
 #[test]
