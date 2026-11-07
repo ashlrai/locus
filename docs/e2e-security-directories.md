@@ -14,8 +14,10 @@ synthetic credential references and values, not live credentials.
 
 Both are created with `mktemp -d` directly beneath a nonempty `TMPDIR`, or
 `/tmp` when it is unset or empty. A supplied `TMPDIR` must already exist and
-be writable. These variables are assigned by the script; they are not inputs
-for choosing existing directories. The probes use `SECURITY_HOME` as
+be writable; the suite verifies both fixtures sit directly beneath it before
+the probes run, the same containment check applied to the main home and the
+allowlist workspace. These variables are assigned by the script; they are not
+inputs for choosing existing directories. The probes use `SECURITY_HOME` as
 `LOCUS_HOME` explicitly, including when commands run from `SECURITY_WS`.
 
 The security home supports checks that identical binding additions are
@@ -36,9 +38,7 @@ ordinary failure. The security directories are created at the start of section
 separate security home and workspace inside a custom temporary directory whose
 name contains spaces. It verifies that they are distinct; its exit trap removes
 both, and the parent checks their removal and preservation of the supplied
-temporary directory. Sections 2e and 2h rehearse the security workspace and
-the security home separately, each beneath its own supplied root whose name
-contains spaces, with the same exit-trap cleanup.
+temporary directory.
 
 A termination that prevents the trap from running or a removal error can leave
 files behind. A failure before trap installation can leave the main home, but

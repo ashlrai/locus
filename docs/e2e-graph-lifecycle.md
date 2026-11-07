@@ -32,10 +32,21 @@ script-owned temporary directory, not a setting for choosing a Locus home.
    `locus-graph-imp.*` directory before removing it, and preserve its parent
    and unrelated files.
 
+Section 2i rehearses the same create-use-cleanup path earlier in the suite: a
+subshell selects a temporary root inside the main home whose name contains
+spaces, runs `create_graph_home` and `init` with `LOCUS_HOME` set to the new
+home there, and leaves removal to its own `EXIT` trap. The rehearsal runs the
+subshell twice — once exiting 0 and once exiting 73 after the populated home
+is recorded — and the suite verifies each home is removed, the intended exit
+status propagates, and the supplied root and an unrelated sentinel survive.
+
 The focused graph test runs the actual section with simulated import outcomes:
-`node --test scripts/e2e-graph-isolation.test.mjs`. The temporary resource
-test, `node --test scripts/e2e-temp.test.mjs`, checks that an inherited
-`GRAPH_HOME` survives early exit. The graph fallback tests in
+`node --test scripts/e2e-graph-isolation.test.mjs`. The temporary-root
+selection checks run `create_graph_home` under the real exit trap, and the
+same file runs the real section 2i rehearsal beneath a space-containing
+`TMPDIR`: `node --test scripts/e2e-graph-home-selection.test.mjs`. The
+temporary resource test, `node --test scripts/e2e-temp.test.mjs`, checks that
+an inherited `GRAPH_HOME` survives early exit. The graph fallback tests in
 [`scripts/e2e.test.mjs`](../scripts/e2e.test.mjs) exercise the real release CLI
 and cleanup on success and failure; one intercepts `rm` to confirm the
 populated import home is removed during the run, not only by the exit trap.

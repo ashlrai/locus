@@ -36,18 +36,6 @@ function section2c() {
   return source.slice(start, end + endMarker.length);
 }
 
-// The script's own section 2h rehearsal: a subshell exports a nested,
-// doubled-space TMPDIR, creates only the security home beneath it, exercises
-// the nested store path the probes use, and relies on its EXIT trap.
-function section2h() {
-  const source = readFileSync(script, 'utf8');
-  const start = source.indexOf('log "2h.');
-  const endMarker = 'ok "SECURITY_HOME creation succeeds beneath a TMPDIR containing spaces"';
-  const end = source.indexOf(endMarker, start);
-  assert.ok(start >= 0 && end > start, 'e2e.sh must contain the section 2h rehearsal');
-  return source.slice(start, end + endMarker.length);
-}
-
 function fixture(t) {
   const dir = mkdtempSync(join(tmpdir(), 'locus-e2e-security-home-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -279,84 +267,32 @@ ${section2c()}
   assert.deepEqual(readdirSync(wrongRoot), []);
 });
 
-// Runs the real section 2h (not a copy of its subshell) against a prepared
-// main home. The block owns the subshell trap itself, so the main home and
-// the nested temporary root stay inspectable after the spawn exits.
-function rehearse2h(home, { shim = '', extraEnv = {} } = {}) {
-  const { cleanup, createHome } = securityParts();
-  return spawnSync('bash', ['-c', `set -euo pipefail
-${cleanup}
-${shim}
-${createHome}
-log() { :; }
-ok() { printf 'ok %s\\n' "$*"; }
-die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
-LOCUS_HOME="$1"
-WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
-${section2h()}
-`, 'security-home-2h', home], { env: { ...process.env, ...extraEnv }, encoding: 'utf8' });
+// The section 24 selection block: both fixtures are created beneath the
+// caller's TMPDIR, then a containment check stops the suite before the probes
+// populate them. A mktemp regression that relocates the security home must
+// trip that check; the exit trap still removes the misplaced directory.
+function section24Selection() {
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('log "24.');
+  const endMarker = 'ok "security directories are created directly beneath TMPDIR"\nfi';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, 'e2e.sh must contain the section 24 security selection block');
+  return source.slice(start, end + endMarker.length);
 }
 
-test('section 2h creates the security home beneath the space-containing TMPDIR', (t) => {
+test('a security home created outside the controlled TMPDIR stops section 24', (t) => {
   const dir = fixture(t);
-  const home = join(dir, 'main home');
-  const outer = join(dir, 'outer tmp');
-  const templates = join(dir, 'mktemp-templates');
-  const argc = join(dir, 'mktemp-argc');
-  mkdirSync(home);
-  mkdirSync(outer);
-  // Record the requested templates and argument count, then let the real
-  // command create the directory it was given. The outer TMPDIR stays visible
-  // to prove the subshell-selected root is what reaches mktemp.
-  const shim = `mktemp() {
-  printf '%s\\n' "$2" >> "$MKTEMP_TEMPLATES"
-  printf '%s' "$#" > "$MKTEMP_ARGC"
-  command mktemp "$@"
-}
-`;
-
-  const result = rehearse2h(home, {
-    shim,
-    extraEnv: { TMPDIR: outer, MKTEMP_TEMPLATES: templates, MKTEMP_ARGC: argc },
-  });
-
-  assert.equal(result.signal, null);
-  assert.equal(result.status, 0, `the 2h rehearsal must succeed: ${result.stderr}`);
-  assert.match(result.stdout,
-    /ok SECURITY_HOME creation succeeds beneath a TMPDIR containing spaces/);
-  const selected = join(home, 'security  home temp root');
-  assert.equal(readFileSync(argc, 'utf8'), '2',
-    'mktemp must receive exactly -d and one template');
-  assert.deepEqual(readFileSync(templates, 'utf8').trim().split('\n'),
-    [`${selected}/locus-security-e2e.XXXXXX`],
-    'the subshell-selected root must reach mktemp inside one template argument');
-  const recorded = readFileSync(join(selected, 'security-home-path'), 'utf8');
-  assert.equal(dirname(recorded), selected,
-    'the rehearsal home is created directly beneath the exact supplied path');
-  assert.match(recorded, /\/locus-security-e2e\.[^/\s]+$/,
-    'the home name is one unsplit component');
-  assert.throws(() => lstatSync(recorded), { code: 'ENOENT' },
-    'the populated rehearsal home must be removed on subshell exit');
-  assert.deepEqual(readdirSync(selected), ['security-home-path'],
-    'only the recorded home path may remain beneath the supplied root');
-  assert.deepEqual(readdirSync(outer), [],
-    'the outer TMPDIR must not receive the security home');
-  assert.deepEqual(readdirSync(home), ['security  home temp root'],
-    'the subshell trap must leave the main home and the supplied root intact');
-});
-
-// A mktemp regression that relocates the rehearsal security home outside the
-// selected root must stop the suite at the 2h subshell; the subshell trap
-// still removes the misplaced directory before the failure reaches the caller.
-test('a rehearsal security home created outside the supplied TMPDIR stops section 2h', (t) => {
-  const dir = fixture(t);
-  const home = join(dir, 'main home');
+  const scratch = join(dir, 'controlled tmp');
   const wrongRoot = join(dir, 'wrong root');
-  const created = join(dir, 'security-home-created');
-  mkdirSync(home);
+  const mainHome = join(dir, 'main home');
+  const created = join(dir, 'home-created');
+  mkdirSync(scratch);
   mkdirSync(wrongRoot);
-  const shim = `mktemp() {
-  local d
+  mkdirSync(mainHome);
+  const { cleanup, createHome, createWs } = securityParts();
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+mktemp() {
   if [[ "\${2:-}" == */locus-security-e2e.XXXXXX ]]; then
     d="$(command mktemp -d "$WRONG_ROOT/locus-security-e2e.XXXXXX")"
     printf '%s' "$d" > "$HOME_CREATED"
@@ -365,23 +301,29 @@ test('a rehearsal security home created outside the supplied TMPDIR stops sectio
   fi
   command mktemp "$@"
 }
-`;
-
-  const result = rehearse2h(home, {
-    shim,
-    extraEnv: { WRONG_ROOT: wrongRoot, HOME_CREATED: created },
+${createHome}
+${createWs}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$TEST_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+${section24Selection()}
+`, 'security-24-misplaced-home', mainHome], {
+    env: { ...process.env, TMPDIR: scratch, TEST_HOME: mainHome, WRONG_ROOT: wrongRoot, HOME_CREATED: created },
+    encoding: 'utf8',
   });
 
   assert.equal(result.signal, null);
   assert.equal(result.status, 1, 'the containment check must fail the suite');
-  assert.match(result.stderr, /FAIL SECURITY_HOME was not created beneath the space-containing TMPDIR/);
-  assert.doesNotMatch(result.stdout, /ok SECURITY_HOME creation succeeds/);
-  const misplaced = readFileSync(created, 'utf8');
-  assert.equal(dirname(misplaced), wrongRoot);
-  assert.match(misplaced, /\/locus-security-e2e\.[^/]+$/);
-  assert.throws(() => lstatSync(misplaced), { code: 'ENOENT' },
-    'the misplaced security home must be removed by the subshell exit trap');
+  assert.match(result.stderr, /FAIL security directories were not created directly beneath TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok security directories are created directly beneath TMPDIR/);
+  const home = readFileSync(created, 'utf8');
+  assert.equal(dirname(home), wrongRoot);
+  assert.match(home, /\/locus-security-e2e\.[^/]+$/);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' },
+    'the misplaced security home must be removed by the exit trap');
   assert.deepEqual(readdirSync(wrongRoot), []);
-  assert.deepEqual(readdirSync(join(home, 'security  home temp root')), [],
-    'the rehearsal exits before recording a home path');
+  assert.deepEqual(readdirSync(scratch), [], 'the correctly placed workspace must be removed too');
 });
