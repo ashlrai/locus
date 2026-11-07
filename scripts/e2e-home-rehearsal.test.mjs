@@ -36,12 +36,12 @@ function fixture(t) {
 // Runs the real section 2g with LOCUS_HOME pointing at a prepared main home.
 // The block owns the subshell trap itself, so the main home and its nested
 // temporary root stay inspectable after the spawn exits.
-function rehearse(home, { shim = '', extraEnv = {} } = {}) {
+function rehearse(home, { shim = '', extraEnv = {}, homeCreator } = {}) {
   const { cleanup, createHome, rehearsal } = rehearsalParts();
   return spawnSync('bash', ['-c', `set -euo pipefail
 ${cleanup}
 ${shim}
-${createHome}
+${homeCreator ?? createHome}
 log() { :; }
 ok() { printf 'ok %s\\n' "$*"; }
 die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
@@ -138,4 +138,54 @@ test('a rehearsal home created outside the selected TMPDIR stops the suite', (t)
   assert.deepEqual(readdirSync(wrongRoot), []);
   assert.deepEqual(readdirSync(join(home, 'home temp root')), [],
     'the rehearsal exits before recording a home path');
+});
+
+// The rehearsal also uses the home: a nested, space-containing path under it
+// must accept a write and read back intact. A failing write stops the suite
+// and the subshell trap still removes the home.
+test('a rehearsal home that cannot be used stops the suite', (t) => {
+  const dir = fixture(t);
+  const home = join(dir, 'main home');
+  const outer = join(dir, 'outer tmp');
+  mkdirSync(home);
+  mkdirSync(outer);
+  const shim = `mkdir() {
+  if [[ "\${2:-}" == */bindings/nested\\ dir ]]; then return 1; fi
+  command mkdir "$@"
+}
+`;
+
+  const result = rehearse(home, { shim, extraEnv: { TMPDIR: outer } });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /FAIL home was not created beneath the space-containing TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok home creation succeeds/);
+  assert.deepEqual(readdirSync(join(home, 'home temp root')), ['home-path'],
+    'the failed home must be removed by the subshell exit trap');
+});
+
+// Preserve original701's fault injection against the current actual helper
+// and section 2g. The existing positive case checks the exact mktemp argv;
+// the rehearsal itself uses the real prefix and exercises nested file I/O.
+test('an unquoted TMPDIR in the actual home helper stops section 2g', (t) => {
+  const dir = fixture(t);
+  const home = join(dir, 'main home');
+  mkdirSync(home);
+  const { createHome } = rehearsalParts();
+  const quoted = 'mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX"';
+  const homeCreator = createHome.replace(quoted,
+    'mktemp -d ${TMPDIR:-/tmp}/locus-e2e.XXXXXX');
+  assert.notEqual(homeCreator, createHome,
+    'the real helper must be changed by the word-splitting probe');
+
+  const result = rehearse(home, { homeCreator });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'word splitting must stop the actual rehearsal');
+  assert.match(result.stderr, /FAIL home was not created beneath the space-containing TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok home creation succeeds/);
+  assert.deepEqual(readdirSync(join(home, 'home temp root')), [],
+    'a failed allocation must not record or retain a rehearsal home');
+  assert.ok(lstatSync(home).isDirectory(), 'the unrelated main home survives');
 });

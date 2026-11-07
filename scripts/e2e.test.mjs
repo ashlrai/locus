@@ -267,9 +267,12 @@ for (const failure of ['none', 'init', 'import']) {
     writeFileSync(join(scratch, 'keep'), 'unrelated');
 
     // Force both same-home attempts to fail, then observe the real fresh-home import.
+    // Inject only at the suite's own graph home: the section 2i rehearsal
+    // re-exports TMPDIR to a nested root, so only a home directly beneath the
+    // OUTER root is the fallback fixture this test means to steer.
     const wrapper = join(bin, 'locus');
     writeFileSync(wrapper, `#!/bin/bash
-if [[ "\${1:-}" == init && "$LOCUS_HOME" == "$TMPDIR"/locus-graph-imp.* ]]; then
+if [[ "\${1:-}" == init && "$LOCUS_HOME" == "$E2E_OUTER_TMPDIR"/locus-graph-imp.* ]]; then
   [[ -d "$LOCUS_HOME" && "$LOCUS_GRAPH_PASSPHRASE" == e2e-test ]] || exit 1
   printf '%s' "$LOCUS_HOME" > "$GRAPH_INIT_RECORD"
   [[ "$GRAPH_FAILURE" != init ]] || exit 1
@@ -303,6 +306,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
       env: {
         ...process.env,
         TMPDIR: scratch,
+        E2E_OUTER_TMPDIR: scratch,
         LOCUS_BIN: wrapper,
         GRAPH_HOME_RECORD: observed,
         GRAPH_IMPORT_RECORD: imported,
@@ -337,6 +341,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
     } else {
       assert.ok(existsSync(cleanedEarly), 'graph home survived until the next section');
       assert.match(result.stdout, /ok  sample exec succeeds without unset-variable warnings/);
+      assert.match(result.stdout, /ok  sample walkthrough exec succeeds without unset-variable warnings/);
       assert.match(result.stdout, /ok  sample exec reports missing credentials/);
       assert.ok(/ok  graph export\/import into fresh LOCUS_HOME/.test(result.stdout), 'fresh import did not pass');
       assert.ok(/e2e PASS/.test(result.stdout), 'e2e did not pass');
@@ -371,14 +376,17 @@ if [[ "$#" -eq 2 && "$1" == -rf && "$2" == "$TMPDIR"/locus-graph-imp.* ]]; then
 fi
 exec "$REAL_RM" "$@"
 `, { mode: 0o755 });
+  // Inject only at the suite's own graph home (directly beneath the OUTER
+  // root): the section 2i rehearsal re-exports TMPDIR to a nested root before
+  // the passphrase is exported, so a nested home is not this test's fixture.
   const wrapper = join(bin, 'locus');
   writeFileSync(wrapper, `#!/bin/bash
-if [[ "\${1:-}" == init && "$LOCUS_HOME" == "$TMPDIR"/locus-graph-imp.* ]]; then
+if [[ "\${1:-}" == init && "$LOCUS_HOME" == "$E2E_OUTER_TMPDIR"/locus-graph-imp.* ]]; then
   [[ -d "$LOCUS_HOME" && "$LOCUS_GRAPH_PASSPHRASE" == e2e-test ]] || exit 1
   printf '%s' "$LOCUS_HOME" > "$GRAPH_INIT_RECORD"
 fi
 if [[ "\${1:-}" == graph && "\${2:-}" == import ]]; then
-  if [[ "$LOCUS_HOME" != "$TMPDIR"/locus-graph-imp.* ]]; then
+  if [[ "$LOCUS_HOME" != "$E2E_OUTER_TMPDIR"/locus-graph-imp.* ]]; then
     if [[ "\${4:-}" == --force ]]; then
       printf 'force\\n' >> "$GRAPH_ATTEMPTS_RECORD"
     else
@@ -396,8 +404,9 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
   const result = spawnSync('bash', [script], {
     cwd: root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
-      LOCUS_BIN: wrapper, REAL_RM: realRm, GRAPH_INIT_RECORD: initialized,
-      GRAPH_ATTEMPTS_RECORD: attempts, GRAPH_RM_OBSERVED: rmObserved },
+      E2E_OUTER_TMPDIR: scratch, LOCUS_BIN: wrapper, REAL_RM: realRm,
+      GRAPH_INIT_RECORD: initialized, GRAPH_ATTEMPTS_RECORD: attempts,
+      GRAPH_RM_OBSERVED: rmObserved },
     encoding: 'utf8',
     timeout: 1_800_000,
     maxBuffer: 10 * 1024 * 1024,
