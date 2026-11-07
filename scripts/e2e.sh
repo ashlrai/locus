@@ -2802,6 +2802,11 @@ print("mcp list grants=%d revoked_a_rows=%d live_acme=%d" % (len(rows), len(a_ro
   fi
 fi
 
+# Drop-in steps (scripts/e2e.d/*.sh): new e2e steps belong there, not above.
+# shellcheck source=scripts/e2e-dropin.sh
+source "$ROOT/scripts/e2e-dropin.sh"
+e2e_run_dropins
+
 printf '\n========================================\n'
 printf 'e2e PASS  (%d checks, %d skipped)\n' "$pass" "$skip"
 printf 'LOCUS_HOME was %s (cleaned)\n' "$LOCUS_HOME"
