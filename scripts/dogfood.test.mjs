@@ -8,6 +8,23 @@ import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
 const script = join(dirname(fileURLToPath(import.meta.url)), 'dogfood.sh');
+const scriptsDir = dirname(script);
+
+// Original #482: one combined guide must name every mktemp template of both
+// scripts. Exact per-script equality is asserted by the current owner tests below
+// and in hub-smoke.test.mjs; this keeps the original superset/non-empty contract.
+test('temporary resource guide covers each dogfood and Hub mktemp template', () => {
+  const guide = readFileSync(join(scriptsDir, '../docs/dogfood-temporary-resources.md'), 'utf8');
+  for (const name of ['dogfood.sh', 'hub-smoke.sh']) {
+    const source = readFileSync(join(scriptsDir, name), 'utf8');
+    const templates = [...source.matchAll(/\bmktemp\s+(?:-d\s+)?"\$\{TMPDIR:-\/tmp\}\/([^"/]+\.XXXXXX)"/g)]
+      .map((match) => match[1]);
+    assert.ok(templates.length > 0, `no temporary resource templates found in ${name}`);
+    for (const template of templates) {
+      assert.ok(guide.includes(`\`${template}`), `${name}: guide missing ${template}`);
+    }
+  }
+});
 
 test('temporary directory reference covers every dogfood script template', () => {
   const source = readFileSync(script, 'utf8');

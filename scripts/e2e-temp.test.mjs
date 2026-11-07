@@ -653,7 +653,7 @@ locus() {
     *) return 74 ;;
   esac
 }
-log() { :; }; ok() { :; }; die() { printf '%s\\n' "$*" >&2; exit 74; }
+log() { :; }; ok() { printf '%s\\n' "$*"; }; die() { printf '%s\\n' "$*" >&2; exit 74; }
 ${workspaceSection}
 `;
   const result = spawnSync('bash', ['-c', probe, 'workspace-root', scratch], {
@@ -663,6 +663,7 @@ ${workspaceSection}
 
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, `the workspace section must succeed: ${result.stderr}`);
+  assert.match(result.stdout, /workspace is created directly beneath TMPDIR/);
   assert.equal(readFileSync(templates, 'utf8').trim(), `${scratch}/locus-ws.XXXXXX`,
     'the section must ask mktemp for a directory rooted at TMPDIR');
   const workspace = readFileSync(wsUsed, 'utf8');
@@ -736,7 +737,7 @@ mkdir "$LOCUS_HOME"
 trap 'e2e_cleanup' EXIT
 mktemp() { local d; d="$(command mktemp -d "$WRONG_ROOT/locus-ws.XXXXXX")"; printf '%s' "$d" > "$WS_CREATED"; printf '%s\\n' "$d"; }
 locus() { return 74; }
-log() { :; }; ok() { :; }; die() { printf '%s\\n' "$*" >&2; exit 76; }
+log() { :; }; ok() { printf '%s\\n' "$*"; }; die() { printf '%s\\n' "$*" >&2; exit 76; }
 ${source.slice(start, end)}
 `;
   const result = spawnSync('bash', ['-c', probe, 'workspace-misplaced', scratch], {
@@ -746,6 +747,7 @@ ${source.slice(start, end)}
   assert.equal(result.signal, null);
   assert.equal(result.status, 76, `the check must fail the suite: ${result.stderr}`);
   assert.match(result.stderr, /WS_DIR was not created directly beneath TMPDIR/);
+  assert.doesNotMatch(result.stdout, /workspace is created directly beneath TMPDIR/);
   const workspace = readFileSync(created, 'utf8');
   assert.equal(dirname(workspace), wrongRoot);
   assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'the misplaced workspace must be removed on exit');
@@ -839,8 +841,11 @@ printf '%s' "$WS_DIR" > "$2"
 });
 
 // Runs the script's real section 2d: a subshell rehearses create_workspace
-// beneath a nested temporary root whose name contains spaces, verifies the
-// workspace sits directly beneath that root, and its exit trap removes it.
+// beneath a nested temporary root whose name contains spaces (including a
+// doubled space), verifies the workspace sits directly beneath that root, and
+// its exit trap removes it while sparing a decoy at the root's first
+// word-split fragment. LOCUS_HOME is exported so the rehearsal's `init` stub
+// populates the subshell home the way the real command would.
 test('section 2d rehearses workspace creation beneath a TMPDIR containing spaces', (t) => {
   const fixture = setup(t);
   const home = join(fixture.root, 'main home');
@@ -859,7 +864,7 @@ ${createWorkspace}
 log() { :; }
 ok() { printf 'ok %s\\n' "$*"; }
 die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
-LOCUS_HOME="$1"
+export LOCUS_HOME="$1"
 WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
 ${source.slice(start, end + endMarker.length)}
 `, 'workspace-2d', home], {
@@ -870,14 +875,17 @@ ${source.slice(start, end + endMarker.length)}
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, `the 2d rehearsal must succeed: ${result.stderr}`);
   assert.match(result.stdout, /ok workspace creation succeeds beneath a TMPDIR containing spaces/);
-  const root = join(home, 'workspace temp root');
+  const root = join(home, 'workspace  ws temp root');
   const recorded = readFileSync(join(root, 'workspace-path'), 'utf8');
   assert.equal(dirname(recorded), root, 'rehearsed beneath the space-containing root');
   assert.match(recorded, /\/locus-ws\.[^/\s]+$/, 'workspace name is one unsplit component');
+  assert.ok(recorded.includes(' '), 'the recorded workspace path keeps the spaced root');
   assert.throws(() => lstatSync(recorded), { code: 'ENOENT' },
     'the rehearsal workspace must be removed on subshell exit');
   assert.deepEqual(readdirSync(root), ['workspace-path'],
     'the subshell trap must also remove its own home');
+  assert.ok(existsSync(join(home, 'workspace', 'decoy-sentinel')),
+    'the decoy at the root\'s first word-split fragment must survive cleanup');
 });
 
 // A mktemp regression that relocates the rehearsal workspace must stop the
@@ -954,6 +962,45 @@ exit "$2"
     assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must remove fixtures and preserve unrelated files');
   });
 }
+
+test('an unhandled failure after security workspace creation triggers cleanup', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  const record = join(fixture.root, 'security-workspace');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const createWorkspace = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(cleanup, 'missing e2e cleanup function');
+  assert.ok(createWorkspace, 'missing security workspace creation function');
+  const probe = `set -euo pipefail
+${cleanup}
+${createWorkspace}
+TMPDIR="$1"
+LOCUS_HOME="$TMPDIR/main-home"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+mkdir "$LOCUS_HOME"
+trap 'e2e_cleanup' EXIT
+create_security_workspace
+[[ -d "$SECURITY_WS" && "\${SECURITY_WS%/*}" == "$TMPDIR" ]] || exit 91
+touch "$SECURITY_WS/sentinel"
+printf '%s' "$SECURITY_WS" > "$2"
+(exit 73)
+touch "$3"
+`;
+  const marker = join(fixture.root, 'continued');
+  const result = spawnSync('bash', ['-c', probe, 'security-workspace-failure', scratch, record, marker],
+    { encoding: 'utf8', timeout: 15_000 });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected command failure must survive cleanup');
+  const workspace = readFileSync(record, 'utf8');
+  assert.equal(dirname(workspace), scratch);
+  assert.match(workspace, /\/locus-security-ws\.[^/]+$/);
+  assert.equal(existsSync(workspace), false, 'populated security workspace survived failure cleanup');
+  assert.equal(existsSync(marker), false, 'execution continued after the injected failure');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+});
 
 // Stubbed mktemp records the template the script's real WS_DIR line asks for,
 // so nothing is created in the real /tmp for the fallback cases.
@@ -1348,6 +1395,30 @@ printf '%s' "$SECURITY_WS" > "$2"
   assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
 });
 
+test('repeated security workspace block yields distinct directories beneath TMPDIR', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const create = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
+  const block = source.match(/^security_ws_live="\$SECURITY_WS"[\s\S]*?^ok "two security workspaces are distinct[^\n]*$/m)?.[0];
+  assert.ok(create && block, 'missing repeated security workspace block');
+
+  for (const tmpdir of [scratch, `${scratch}/`]) {
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+ok() { printf 'ok %s\\n' "$*"; }
+${create}
+SECURITY_WS=""
+${block}
+`], { env: { ...process.env, TMPDIR: tmpdir }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /two security workspaces are distinct/);
+    assert.deepEqual(readdirSync(scratch), ['keep'], 'block must clean up both workspaces');
+  }
+});
+
 test('graph home creation selects the custom temporary root or /tmp fallback', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp $literal; [test]');
@@ -1545,4 +1616,43 @@ ${names.join('\n')}
   }
   assert.deepEqual(paths.map((path) => path.slice(scratch.length + 1).replace(/\.[^.]+$/, '')),
     ['locus-e2e', 'locus-ws', 'locus-security-e2e', 'locus-security-ws', 'locus-graph-imp']);
+});
+
+// Keep the original whole-script coupling: the graph rehearsal must succeed
+// before a later fresh-quickstart failure, and the outer trap must clean up.
+test('the graph home spaced-parent probe succeeds before fresh quickstart fails and cleans up', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'outer temp');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const result = run(fixture, scratch);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the fixture stops later at fresh quickstart');
+  assert.match(result.stdout, /ok  GRAPH_HOME creation succeeds beneath a TMPDIR containing spaces/);
+  assert.match(result.stderr, /fresh quickstart failed/);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'unrelated');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
+test('the graph home spaced-parent probe rejects a misplaced directory in the whole script', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'outer temp');
+  const wrongRoot = join(fixture.root, 'wrong root');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+case "$2" in
+  */locus-graph-imp.XXXXXX) exec "$REAL_MKTEMP" -d "$WRONG_ROOT/locus-graph-imp.XXXXXX" ;;
+  *) exec "$REAL_MKTEMP" "$@" ;;
+esac
+`, { mode: 0o755 });
+  const result = run(fixture, scratch, { REAL_MKTEMP: realMktemp, WRONG_ROOT: wrongRoot });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /GRAPH_HOME was not created beneath the space-containing TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok  GRAPH_HOME creation succeeds/);
+  assert.doesNotMatch(result.stderr, /fresh quickstart failed/);
+  assert.deepEqual(readdirSync(wrongRoot), [], 'exit cleanup removes the misplaced home');
+  assert.deepEqual(readdirSync(scratch), []);
 });
