@@ -38,7 +38,7 @@ Agents inherit **ambient identity**: global `gh auth`, one Supabase MCP token, l
 ┌───▼────────────────────────────────────────────────────────┐
 │  CREDENTIAL PLANE                                             │
 │  CredentialRef → resolve only into policy-gated worker env    │
-│  phm:NAME (Phantom) · env:VAR · test: compiled tests only      │
+│  env:VAR resolves · phm:NAME unavailable · test: tests only   │
 │  Model never sees resolved values                             │
 └───┬────────────────────────────────────────────────────────┘
     │ spawn / inject
@@ -146,19 +146,21 @@ Already shipped from phases 2–4: upstream MCP stdio workers, `locus run`, CI e
 
 ## Composition
 
-```
+```text
 .locus.toml + ~/.locus/bindings
         │
         ▼
-   locus-mcp
+   locus-mcp: policy and scope gates
         │
-        │  CredentialRef phm:NAME
         ▼
-   Phantom vault / proxy   (secrets never in model)
+   isolated worker with supported env: credential
         │
         ▼
    Provider APIs
 ```
+
+Stored `phm:` references do not resolve until a supported scoped bridge exists.
+See [credential compatibility](credential-compatibility.md).
 
 Optional later: fleet gateway discovers **only** Locus, not raw personal MCP servers.
 

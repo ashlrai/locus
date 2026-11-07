@@ -266,3 +266,64 @@ ${section2c()}
     'the misplaced security home must be removed by the subshell exit trap');
   assert.deepEqual(readdirSync(wrongRoot), []);
 });
+
+// The section 24 selection block: both fixtures are created beneath the
+// caller's TMPDIR, then a containment check stops the suite before the probes
+// populate them. A mktemp regression that relocates the security home must
+// trip that check; the exit trap still removes the misplaced directory.
+function section24Selection() {
+  const source = readFileSync(script, 'utf8');
+  const start = source.indexOf('log "24.');
+  const endMarker = 'ok "security directories are created directly beneath TMPDIR"\nfi';
+  const end = source.indexOf(endMarker, start);
+  assert.ok(start >= 0 && end > start, 'e2e.sh must contain the section 24 security selection block');
+  return source.slice(start, end + endMarker.length);
+}
+
+test('a security home created outside the controlled TMPDIR stops section 24', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, 'controlled tmp');
+  const wrongRoot = join(dir, 'wrong root');
+  const mainHome = join(dir, 'main home');
+  const created = join(dir, 'home-created');
+  mkdirSync(scratch);
+  mkdirSync(wrongRoot);
+  mkdirSync(mainHome);
+  const { cleanup, createHome, createWs } = securityParts();
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+mktemp() {
+  if [[ "\${2:-}" == */locus-security-e2e.XXXXXX ]]; then
+    d="$(command mktemp -d "$WRONG_ROOT/locus-security-e2e.XXXXXX")"
+    printf '%s' "$d" > "$HOME_CREATED"
+    printf '%s\\n' "$d"
+    return
+  fi
+  command mktemp "$@"
+}
+${createHome}
+${createWs}
+log() { :; }
+ok() { printf 'ok %s\\n' "$*"; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+LOCUS_HOME="$TEST_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+${section24Selection()}
+`, 'security-24-misplaced-home', mainHome], {
+    env: { ...process.env, TMPDIR: scratch, TEST_HOME: mainHome, WRONG_ROOT: wrongRoot, HOME_CREATED: created },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the containment check must fail the suite');
+  assert.match(result.stderr, /FAIL security directories were not created directly beneath TMPDIR/);
+  assert.doesNotMatch(result.stdout, /ok security directories are created directly beneath TMPDIR/);
+  const home = readFileSync(created, 'utf8');
+  assert.equal(dirname(home), wrongRoot);
+  assert.match(home, /\/locus-security-e2e\.[^/]+$/);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' },
+    'the misplaced security home must be removed by the exit trap');
+  assert.deepEqual(readdirSync(wrongRoot), []);
+  assert.deepEqual(readdirSync(scratch), [], 'the correctly placed workspace must be removed too');
+});

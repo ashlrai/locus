@@ -192,8 +192,12 @@ test('normal exit removes the populated smoke project and temporary home', (t) =
   assert.equal(existsSync(paths[2]), false, 'spaced-TMPDIR probe must be removed');
 });
 
-test('integration smoke uses and cleans TMPDIR with spaces and shell metacharacters', (t) => {
-  const { result, scratch, paths, scanRecord } = runWithTempDir(t, false, ['a [b]', 'c d']);
+for (const [label, parts] of [
+  ['spaces', ['temp directory']],
+  ['spaces and shell metacharacters', ['a [b]', 'c d']],
+]) test(`integration smoke uses and cleans TMPDIR with ${label}`, (t) => {
+  const { result, scratch, paths, scanRecord, cleanupRecord, projectRecord, homeRecord } =
+    runWithTempDir(t, false, parts);
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, 'integration smoke must succeed');
@@ -206,9 +210,15 @@ test('integration smoke uses and cleans TMPDIR with spaces and shell metacharact
     'the spaced-TMPDIR probe allocates beneath the project');
   assert.ok(result.stdout.includes(`registerLocusInMcpConfig merge write (${paths[1]}/hub-merged.mcp.json)`));
   assert.match(result.stdout, /^ok\s+mt: live drop-in slice /m);
+  assert.match(result.stdout, /^ok\s+SMOKE_HOME created beneath TMPDIR containing spaces$/m,
+    'the spaced-TMPDIR home probe must pass during a green run');
   assert.match(result.stdout, /^ok\s+canary scan detects a canary under a spaced path$/m);
   assert.match(result.stdout, /^ok\s+ambient canary absent under /m);
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
+  assert.equal(existsSync(cleanupRecord), true, 'both populated directories must reach cleanup');
+  assert.equal(existsSync(projectRecord), true, 'the populated project must be used before cleanup');
+  assert.equal(readFileSync(homeRecord, 'utf8').trim(), paths[0],
+    'the initialized home must be the directory created under TMPDIR');
   for (const path of paths) {
     assert.equal(existsSync(path), false, `populated temporary directory must be removed: ${path}`);
   }
@@ -224,6 +234,109 @@ test('integration smoke uses and cleans TMPDIR with spaces and shell metacharact
   assert.equal(readFileSync(join(scratch, '.locus-hub-int-scan.unrelated'), 'utf8'), 'hidden sentinel');
 });
 
+// The in-script probe allocates a home beneath "$SMOKE_PROJ/tmp with spaces"
+// and must fail the run when creation does not land a directory under that
+// exact root. A stub run reaches the probe with every earlier section green,
+// and the shim makes make_smoke_dir either fail outright or report success
+// for a directory under a word-split fragment of the spaced root.
+for (const [label, mode] of [
+  ['failing', 'fail'],
+  ['misplaced', 'misplace'],
+]) test(`a ${label} home allocation beneath a spaced TMPDIR fails the run`, (t) => {
+  const root = mkdtempSync('/tmp/lhi-probe-fail-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'scratch with spaces');
+  const state = join(root, 'pin-state');
+  const misplaced = join(root, 'misplaced');
+  mkdirSync(scratch);
+  mkdirSync(state);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+  writeFileSync(join(scratch, '.locus-hub-int-scan.unrelated'), 'hidden sentinel');
+
+  const mintEnv = '"env":{"LOCUS_BINDING_ID":"bid-personal","LOCUS_BINDING":"personal","LOCUS_SESSION_ID":"ses_stub","LOCUS_TENANT":"personal","LOCUS_SEAL":"hmac-sha256:stub","LOCUS_WORKER_HOME":"/tmp/stub-worker","LOCUS_EXECUTOR_CAPABILITY":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"';
+  const mint = (expires) => `{"binding":"personal","binding_id":"bid-personal","session_id":"ses_stub","tenant":"personal","seal":"hmac-sha256:stub","worker_home":"/tmp/stub-worker","expires_at":"${expires}","secrets_resolved":false,${mintEnv},"LOCUS_EXPIRES_AT":"${expires}"}}`;
+  const harness = `
+node() {
+  if [[ -n "${'$'}{HUB_INT_MCP_OUT:-}" ]]; then
+    printf '%s\\n' '{"mcpServers":{"phantom":{"command":"phantom-mcp","args":[]},"locus":{"command":"locus-mcp","args":[]}}}' > "$HUB_INT_MCP_OUT"
+  fi
+  [[ "${'$'}{HUB_MINT_JSON:-}" != *1970-01-01* ]]
+}
+cargo() { :; }
+locus() {
+  case "${'$'}{1:-}" in
+    init) : > "$LOCUS_HOME/initialized" ;;
+    pin) rm -f "$STUB_STATE/left" ;;
+    leave) : > "$STUB_STATE/left" ;;
+    status)
+      if [[ "${'$'}{2:-}" == --oneline ]]; then
+        if [[ -f "$STUB_STATE/left" ]]; then printf 'unpinned\\n'; else printf 'personal:tenant\\n'; fi
+      else printf '%s\\n' '{}'; fi ;;
+    agent)
+      if [[ -f "$STUB_STATE/left" ]]; then
+        printf '%s\\n' '{"status":"protected","ready":false,"status_oneline":"unpinned","required_servers":["locus","phantom"],"mcp_command":"locus-mcp"}'
+      else
+        printf '%s\\n' '{"status":"ready","ready":true,"status_oneline":"personal:tenant","required_servers":["locus","phantom"],"mcp_command":"locus-mcp"}'
+      fi ;;
+    ci)
+      if [[ "${'$'}{2:-}" == mint ]]; then
+        if [[ " $* " == *' --ttl '* ]]; then
+          printf '%s\\n' '${mint('1970-01-01T00:00:00Z')}'
+        else
+          printf '%s\\n' '${mint('2030-01-01T00:00:00Z')}'
+        fi
+      else printf '%s\\n' '{}'; fi ;;
+    mcp) return 1 ;;
+    *) printf '%s\\n' '{}' ;;
+  esac
+}
+mktemp() {
+  if [[ "$TMPDIR" == "$SMOKE_PROJ/tmp with spaces" ]]; then
+    [[ "$PROBE_MODE" == misplace ]] || return 1
+    mkdir -p -- "$SMOKE_PROJ/tmp" || return
+    local created
+    created="$(command mktemp -d "$SMOKE_PROJ/tmp/locus-hub-int.XXXXXX")" || return
+    printf '%s\\n' "$created" >> "$MISPLACED"
+    printf '%s\\n' "$created"
+    return
+  fi
+  command mktemp "$@"
+}
+export -f node cargo locus mktemp
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'probe-failure-test', script], {
+    env: { ...process.env, TMPDIR: scratch, STUB_STATE: state,
+      PROBE_MODE: mode, MISPLACED: misplaced },
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the probe failure must exit through the fail flag');
+  assert.doesNotMatch(result.stdout, /^ok\s+SMOKE_HOME created beneath TMPDIR containing spaces$/m);
+  assert.match(result.stdout, /^FAIL\s+SMOKE_HOME creation failed beneath TMPDIR containing spaces$/m);
+  assert.match(result.stdout, /^== hub-integration-test FAILED ==$/m);
+  assert.equal((result.stdout.match(/^FAIL\s/gm) || []).length, 1,
+    'the spaced-TMPDIR probe must be the only failing check');
+  assert.match(result.stdout, /^ok\s+ambient canary absent under /m,
+    'checks after the probe must still run');
+
+  if (mode === 'misplace') {
+    const created = readFileSync(misplaced, 'utf8').trim().split('\n');
+    assert.equal(created.length, 1, 'the shim must report one misplaced home');
+    assert.match(created[0],
+      new RegExp(`^${scratch}/locus-hub-int-proj\\.[^/]+/tmp/locus-hub-int\\.[^/]+$`),
+      'the reported path must sit under the first word-split fragment, not the spaced root');
+    assert.equal(existsSync(created[0]), false, 'the misplaced home must be removed with the project');
+  }
+  assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep'],
+    'cleanup must leave only the sentinels under TMPDIR');
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
+  assert.equal(readFileSync(join(scratch, '.locus-hub-int-scan.unrelated'), 'utf8'), 'hidden sentinel');
+});
+
 test('failed project allocation cleans the temporary home', (t) => {
   const { result, scratch, paths, projectAttempt } = runWithTempDir(t, true);
   assert.equal(result.error, undefined);
@@ -234,6 +347,56 @@ test('failed project allocation cleans the temporary home', (t) => {
   assert.equal(existsSync(paths[0]), false, 'the populated temporary home must be removed');
   assert.match(paths[0], new RegExp(`^${scratch}/locus-hub-int\\.[^/]+$`));
   assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
+});
+
+test('a controlled early failure removes both allocated temporary directories', (t) => {
+  const root = mkdtempSync('/tmp/lhi-early-fail-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'scratch with spaces');
+  const record = join(root, 'observed');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'sentinel');
+
+  // Fail at the first node --test prerequisite — the earliest point where both
+  // temporary directories exist but LOCUS_HOME is not yet exported, no locus
+  // command has run, and the project has not been entered. The stub populates
+  // both directories first so cleanup must remove non-empty trees.
+  const harness = `
+node() {
+  [[ "$1" == --test ]] || return 74
+  [[ -d "$SMOKE_HOME" && -d "$SMOKE_PROJ" && "$SMOKE_HOME" != "$SMOKE_PROJ" ]] || return 75
+  [[ -z "$(ls -A "$SMOKE_HOME")" && -z "$(ls -A "$SMOKE_PROJ")" ]] || return 76
+  mkdir -p "$SMOKE_HOME/nested" "$SMOKE_PROJ/nested" || return 77
+  : > "$SMOKE_HOME/nested/fixture" || return 78
+  : > "$SMOKE_PROJ/nested/fixture" || return 79
+  printf '%s\\n' "$SMOKE_HOME" "$SMOKE_PROJ" > "$OBSERVED"
+  return 73
+}
+jq() { :; }
+cargo() { :; }
+locus() { :; }
+export -f node jq cargo locus
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', harness, 'early-failure-test', script], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, OBSERVED: record },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the injected prerequisite failure must propagate');
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2, 'both temporary directories must be recorded');
+  const [home, project] = paths;
+  assert.equal(dirname(home), scratch);
+  assert.equal(dirname(project), scratch);
+  assert.match(basename(home), /^locus-hub-int\.[^/]+$/);
+  assert.match(basename(project), /^locus-hub-int-proj\.[^/]+$/);
+  assert.equal(existsSync(home), false, 'the populated temporary home must be removed');
+  assert.equal(existsSync(project), false, 'the populated temporary project must be removed');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'sentinel');
 });
 
 test('real temporary directories stay under TMPDIR and are removed after init fails', (t) => {
