@@ -161,8 +161,13 @@ enum AnchorRequest {
         generation: u64,
         subject_digest: String,
     },
+    /// Structured fields only: the broker stamps the timestamp, sanitizes
+    /// the detail and marks the record's source itself, so a caller can
+    /// never inject a raw audit line.
     Audit {
-        line: String,
+        op: String,
+        binding: String,
+        detail: Option<serde_json::Value>,
     },
     Revoke {
         challenge: String,
@@ -493,19 +498,26 @@ pub(crate) fn grant_executor(
     }
 }
 
-/// Ask the live broker to append one finished audit line to
+/// Ask the live broker to build and append one audit record to
 /// `audit/events.jsonl`. The response acknowledges that the record is in the
 /// log file; the fsync completes inside the broker after it responds, off the
 /// caller's exit path. Fails when no usable broker endpoint answers — the
-/// caller then appends and fsyncs directly (identical record, identical
+/// caller then appends and fsyncs directly (same record shape, same
 /// durability on the slower path).
-pub(crate) fn audit_line(home: &Path, line: &str) -> Result<()> {
+pub(crate) fn audit_event(
+    home: &Path,
+    op: &str,
+    binding: &str,
+    detail: Option<serde_json::Value>,
+) -> Result<()> {
     let (auth, _mode) = validation_auth()?;
     let endpoint = read_endpoint(home).map_err(no_current_endpoint)?;
     let response = request(
         &endpoint,
         &AnchorRequest::Audit {
-            line: line.to_string(),
+            op: op.to_string(),
+            binding: binding.to_string(),
+            detail,
         },
         &auth,
     )?;
@@ -1261,10 +1273,15 @@ fn serve_connection(
     // its audit-file flock wait happen with the state lock released so a
     // blocked audit write cannot stall unrelated authority requests.
     let mut audit_file = None;
-    let response = if let AnchorRequest::Audit { line } = &envelope.request {
+    let response = if let AnchorRequest::Audit {
+        op,
+        binding,
+        detail,
+    } = &envelope.request
+    {
         let epoch = guard.epoch.clone();
         drop(guard);
-        match audit_append(home, line) {
+        match audit_append(home, &envelope.credential, op, binding, detail) {
             Ok(file) => {
                 audit_file = Some(file);
                 AnchorResponse {
@@ -1297,23 +1314,46 @@ fn serve_connection(
     written
 }
 
-/// Append one audit line on the broker's behalf: one JSON object per line —
-/// non-empty, no embedded newline, parses as an object — so a malformed or
-/// multi-line record can never corrupt the log shape. The returned file
-/// still holds the flock and is fsync'd by [`serve_connection`] after the
-/// response is sent.
-fn audit_append(home: &Path, line: &str) -> Result<fs::File> {
-    let valid = !line.is_empty()
-        && !line.contains('\n')
-        && serde_json::from_str::<serde_json::Value>(line)
-            .map(|value| value.is_object())
-            .unwrap_or(false);
-    if !valid {
+/// Ops an executor credential may record: the exact-session child launches
+/// it supervises. Anything else (pin, leave, approvals, ...) is control-plane
+/// history an executor must not be able to write.
+const EXECUTOR_AUDIT_OPS: &[&str] = &[
+    "session.exec",
+    "session.exec.delegated",
+    "session.run",
+    "ci.run",
+];
+
+/// Build and append one audit record on the broker's behalf. The broker owns
+/// the timestamp and the record shape; records written for an executor
+/// credential are limited to [`EXECUTOR_AUDIT_OPS`] and carry
+/// `"source":"executor"`. The returned file still holds the flock and is
+/// fsync'd by [`serve_connection`] after the response is sent.
+fn audit_append(
+    home: &Path,
+    credential: &RequestCredential,
+    op: &str,
+    binding: &str,
+    detail: &Option<serde_json::Value>,
+) -> Result<fs::File> {
+    let source = match credential {
+        RequestCredential::Control => None,
+        RequestCredential::Executor { .. } => {
+            if !EXECUTOR_AUDIT_OPS.contains(&op) {
+                return Err(LocusError::AuthorityAnchorUnavailable(
+                    "executor may not record this audit op".into(),
+                ));
+            }
+            Some("executor")
+        }
+    };
+    if op.is_empty() || binding.is_empty() {
         return Err(LocusError::AuthorityAnchorUnavailable(
             "invalid audit record".into(),
         ));
     }
-    crate::store::append_audit_line(home, line)
+    let line = crate::store::audit_event_line(op, binding, detail.clone(), source);
+    crate::store::append_audit_line(home, &line)
 }
 
 fn request_key(state: &AnchorState, credential: &RequestCredential) -> Option<[u8; 32]> {
@@ -2727,60 +2767,53 @@ mod tests {
     }
 
     #[test]
-    fn broker_audit_appends_one_line_and_rejects_malformed_records() {
+    fn broker_builds_audit_records_and_marks_or_rejects_executor_ones() {
         let dir = tempdir().unwrap();
         let endpoint = broker(dir.path());
         let lease = issue(dir.path(), "ses_audit", "active", TEST_SUBJECT).unwrap();
         let capability =
             grant_executor(dir.path(), &lease, "ses_audit", "active", TEST_SUBJECT).unwrap();
+        let audit = |op: &str| AnchorRequest::Audit {
+            op: op.into(),
+            binding: "bench".into(),
+            detail: Some(serde_json::json!({"exit": 0})),
+        };
 
-        // The control credential appends one record.
-        let exec_line =
-            "{\"ts\":\"t\",\"op\":\"session.exec\",\"binding\":\"bench\",\"detail\":{\"exit\":0}}"
-                .to_string();
-        let response = request(
-            &endpoint,
-            &AnchorRequest::Audit {
-                line: exec_line.clone(),
-            },
-            &auth(),
-        )
-        .unwrap();
-        assert!(response.ok, "{response:?}");
-
-        // A granted executor credential appends too — the delegated exec's
-        // post-child audit uses its executor capability, not control.
-        let delegated_line =
-            "{\"ts\":\"t\",\"op\":\"delegated.exec\",\"binding\":\"bench\",\"detail\":null}"
-                .to_string();
-        let response = request(
-            &endpoint,
-            &AnchorRequest::Audit {
-                line: delegated_line.clone(),
-            },
-            &executor_auth(&capability),
-        )
-        .unwrap();
-        assert!(response.ok, "{response:?}");
-
-        // Malformed records are refused: empty, an embedded newline (extra
-        // injected line), and non-object JSON.
-        for line in [
-            String::new(),
-            format!("{exec_line}\n{{\"op\":\"forged\"}}"),
-            "[1,2]".to_string(),
-            "not json".to_string(),
-        ] {
-            let response = request(&endpoint, &AnchorRequest::Audit { line }, &auth()).unwrap();
-            assert!(!response.ok, "malformed audit record accepted");
-        }
-
-        // Exactly the two good records landed, byte-identical, in order.
-        let log = fs::read_to_string(crate::store::audit_events_path(dir.path())).unwrap();
-        assert_eq!(
-            log.lines().collect::<Vec<_>>(),
-            [exec_line.as_str(), delegated_line.as_str()]
+        // Control appends an unmarked, broker-built record.
+        assert!(
+            request(&endpoint, &audit("session.exec"), &auth())
+                .unwrap()
+                .ok
         );
+        // An executor may record its child launches; the broker marks them.
+        assert!(
+            request(&endpoint, &audit("ci.run"), &executor_auth(&capability))
+                .unwrap()
+                .ok
+        );
+        // An executor cannot forge control-plane history or empty records.
+        for op in ["session.pin", "session.leave", "approval.grant", ""] {
+            let response = request(&endpoint, &audit(op), &executor_auth(&capability)).unwrap();
+            assert!(!response.ok, "executor forged audit op {op:?}");
+        }
+        let empty = AnchorRequest::Audit {
+            op: "session.exec".into(),
+            binding: String::new(),
+            detail: None,
+        };
+        assert!(!request(&endpoint, &empty, &auth()).unwrap().ok);
+
+        let log = fs::read_to_string(crate::store::audit_events_path(dir.path())).unwrap();
+        let records: Vec<serde_json::Value> = log
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2, "{log}");
+        assert_eq!(records[0]["op"], "session.exec");
+        assert!(records[0].get("source").is_none());
+        assert_eq!(records[1]["op"], "ci.run");
+        assert_eq!(records[1]["source"], "executor");
+        assert!(records.iter().all(|r| r["ts"].as_str().is_some()));
 
         // Executor audit power reaches nothing else: a control operation is
         // still refused.

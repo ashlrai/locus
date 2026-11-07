@@ -73,7 +73,7 @@ test('pin failure removes the initialized temporary home', (t) => {
   mkdirSync(scratch);
   writeFileSync(join(scratch, 'locus-hub-smoke.unrelated'), 'sentinel');
   // Fail pin only after init has populated the actual exported home.
-  writeFileSync(hook, `jq() { return 0; }
+  writeFileSync(hook, `jq() { cat >/dev/null; }
 cargo() { return 0; }
 sleep() { :; }
 locus() {
