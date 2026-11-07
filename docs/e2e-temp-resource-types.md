@@ -41,6 +41,8 @@ allocation beneath a space-containing `TMPDIR`,
 allocations yielding distinct directories beneath the selected root, and
 `node --test scripts/e2e-graph-home-selection.test.mjs` for the `GRAPH_HOME`
 equivalent,
+`node --test scripts/e2e-security-home-selection.test.mjs` for the focused
+`SECURITY_HOME` temporary-root selection checks,
 `node --test scripts/e2e-security-workspace-spaced-tmpdir.test.mjs` for the
 `SECURITY_WS` space-containing `TMPDIR` checks, and
 `node --test scripts/e2e-workspace-spaced-tmpdir.test.mjs` for the `WS_DIR`

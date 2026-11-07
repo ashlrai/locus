@@ -231,6 +231,11 @@ touch "$secspace_decoy/decoy-sentinel"
   [[ "$TMPDIR" == *" "* && -d "$SECURITY_HOME" && \
     "${SECURITY_HOME%/*}" == "$TMPDIR" && \
     "${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
+  # The probes pass the home to the binary as LOCUS_HOME; a nested store path
+  # beneath the spaced root must round-trip as one path.
+  mkdir -p "$SECURITY_HOME/bindings/nested dir" || exit 1
+  printf 'payload' >"$SECURITY_HOME/bindings/nested dir/probe.toml" || exit 1
+  [[ "$(cat "$SECURITY_HOME/bindings/nested dir/probe.toml")" == payload ]] || exit 1
   # Usable, not just present: files must land inside the spaced path.
   touch "$SECURITY_HOME/cleanup-sentinel"
   [[ -f "$SECURITY_HOME/cleanup-sentinel" ]] || exit 1
