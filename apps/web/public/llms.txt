@@ -101,6 +101,7 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
 - [Hub integration smoke temporary lifecycle](https://github.com/ashlrai/locus/blob/main/docs/hub-integration-temp-lifecycle.md)
 - [Hub integration test temporary paths](https://github.com/ashlrai/locus/blob/main/docs/hub-integration-tmpdir.md)
 - [Phantom ↔ Locus integration contract](https://github.com/ashlrai/locus/blob/main/docs/hub-integration.md)
+- [Hub smoke cleanup review](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-cleanup-review.md)
 - [Hub smoke interruption and cleanup](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-interruption.md)
 - [Hub smoke output](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-output.md)
 - [Hub smoke prerequisites](https://github.com/ashlrai/locus/blob/main/docs/hub-smoke-prerequisites.md)
