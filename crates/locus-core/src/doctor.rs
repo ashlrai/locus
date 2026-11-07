@@ -639,7 +639,11 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
                 findings.push(issue(
                     IssueSeverity::Warn,
                     "session_expired",
-                    "active pin is expired — re-pin before acting",
+                    format!(
+                        "active pin is expired — `locus pin`/`enter` refuse it until cleared; \
+                         human: {}",
+                        crate::recovery::stale_pin_recovery(active_alias.as_deref())
+                    ),
                 ));
             }
             "executor_authority_unavailable" if anchor_capability_absent => {
@@ -1504,6 +1508,43 @@ mod tests {
         assert!(pin.expires_in_secs > 0 && pin.expires_in_secs <= 300);
         assert!(!pin.expired);
         assert_ne!(report.verdict, DoctorVerdict::Unsafe);
+    }
+
+    #[test]
+    fn doctor_expired_pin_names_force_leave_recovery() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        // Authentic but expired — `locus pin`/`enter` refuse it (SessionExpired)
+        // until `locus leave --force` clears it.
+        let path = store.active_session_path();
+        let mut s: crate::Session =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        s.pinned_at = Utc::now() - Duration::hours(2);
+        s.expires_at = Utc::now() - Duration::minutes(5);
+        s.reseal(&store.seal_key().unwrap());
+        std::fs::write(&path, serde_json::to_vec(&s).unwrap()).unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        let f = report
+            .findings
+            .iter()
+            .find(|f| f.code == "session_expired")
+            .expect("session_expired finding");
+        assert!(f.message.contains("locus leave --force"), "{}", f.message);
+        assert!(f.message.contains("locus enter acme"), "{}", f.message);
+        assert!(!f.message.contains("locus pin acme"), "{}", f.message);
     }
 
     #[test]

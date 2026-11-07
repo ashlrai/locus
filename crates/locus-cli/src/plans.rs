@@ -265,7 +265,8 @@ pub(super) fn plan_renew(json: bool) -> Result<()> {
         Ok(Some(cur)) => {
             if cur.is_expired() {
                 bail!(
-                    "pin expired at {}; renew refused, human re-pin required (`locus enter {}`)",
+                    "pin expired at {}; renew refused — clear it with `locus leave --force`, \
+                     then `locus enter {}` (human re-pin required)",
                     cur.expires_at.to_rfc3339(),
                     cur.binding_alias
                 );
