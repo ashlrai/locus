@@ -151,6 +151,17 @@ for (const [name, overrides] of [
   });
 }
 
+test("push defers missing manual evidence without qualifying or hiding API errors", (t) => {
+  const missing = fixture(t, { runs: [] });
+  const result = missing.run(auto, evidence, { TRIGGER: "push" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /workflow_run trigger re-evaluates/);
+  assert.doesNotMatch(missing.output(), /qualified=true/);
+  const failed = fixture(t, { fail: "/actions/" });
+  assert.notEqual(failed.run(auto, evidence, { TRIGGER: "push" }).status, 0);
+  assert.doesNotMatch(failed.output(), /qualified=true/);
+});
+
 test("exact successful manual evidence qualifies both gates; PR dry run needs none", (t) => {
   const f = fixture(t);
   assert.equal(f.run(auto, evidence).status, 0);

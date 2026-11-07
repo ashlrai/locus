@@ -139,7 +139,15 @@ jobs:
         run: |
           set -euo pipefail
           n=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?event=workflow_dispatch&head_sha=$SHA&status=success&per_page=100" --jq '[.workflow_runs[] | select(.event == "workflow_dispatch" and .status == "completed" and .conclusion == "success" and .head_sha == "'"$SHA"'")] | length')
-          if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ]; then
+          if ! [[ "$n" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid manual CI evidence count; refusing to tag."
+            exit 1
+          fi
+          if [ "$n" -lt 1 ]; then
+            if [ "$TRIGGER" = push ]; then
+              echo "::notice::No successful manual full-suite CI on $SHA yet; the workflow_run trigger re-evaluates after a successful manual run."
+              exit 0
+            fi
             echo "::error::No successful manual full-suite CI on $SHA; host must qualify this exact main commit before tagging."
             exit 1
           fi
