@@ -38,7 +38,7 @@ No environment variable needs to be set specifically for this smoke test.
 | --- | --- |
 | `HOME` | Used to add `$HOME/.cargo/bin` to `PATH`. |
 | `PATH` | Prepended with the checkout's debug and release directories and `$HOME/.cargo/bin`. |
-| `TMPDIR` | Optional; temporary home, project, and error file are created here, defaulting to `/tmp`. It must be a writable directory. |
+| `TMPDIR` | Optional; temporary home, project, and error file are created here, defaulting to `/tmp`. It must be a writable directory. Spaces and shell pattern characters in the path are supported. |
 | `LOCUS_CONTROL_CAPABILITY` | An existing nonempty value is reused; otherwise the script generates one from `/dev/urandom`. Do not print it. |
 | `LOCUS_AUTHORITY_BROKER_START_TIMEOUT_MS` | Optional; defaults to `15000` milliseconds. Core clamps the value. Initialization and pinning are retried up to three times. |
 | `LOCUS_HOME` | Overridden with the temporary home for Locus commands; the caller's home is not used for bindings. |
