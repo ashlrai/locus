@@ -13,22 +13,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+## [0.7.2] - 2026-11-08
 
-- Unpinned human-readable `locus status` now says `no pin` and gives the
-  enter command; workspaces requiring a pin include that requirement in the
-  message. Machine-readable and `--oneline` output are unchanged
-  ([#814](https://github.com/ashlrai/locus/pull/814)).
+Highlights: a policy-glob fix that stops multibyte tool names bypassing `?`
+rules, documentation reconciled with the shipped daemon-less architecture and
+the current CLI surface, and wider test coverage across Seatbelt sandbox
+paths, MCP protocol handling and workspace version sync. No credential, seal
+or scope-freeze behavior changed.
 
-### Documentation and tests
+### Security
 
-- Documented hub-smoke cleanup review and dogfood probe isolation
-  ([#619](https://github.com/ashlrai/locus/pull/619),
-  [#617](https://github.com/ashlrai/locus/pull/617)). Expanded temporary
-  workspace and error-file isolation coverage
-  ([#804](https://github.com/ashlrai/locus/pull/804),
-  [#595](https://github.com/ashlrai/locus/pull/595),
-  [#597](https://github.com/ashlrai/locus/pull/597)).
+- **Policy glob `?` on multibyte tool names ([#824](https://github.com/ashlrai/locus/pull/824)).**
+  `?` in allow, deny and `require_approval` tool patterns now matches exactly
+  one Unicode scalar value instead of one byte. A tool name containing
+  multibyte characters can no longer slip past a rule such as `provider.?`;
+  `*` matching is unchanged.
+
+### Documentation
+
+- **Shipped reality versus design sketch ([#825](https://github.com/ashlrai/locus/pull/825)).**
+  DESIGN.md now labels its daemon, `tenants/` store, `locus audit` and mermaid
+  sections as unshipped sketches beside the shipped flow (per-pin supervised
+  broker, `locus events`, `.locusgraph` export). The README command list was
+  brought in line with `locus --help`, including `--rewrite-configs`, the
+  `fleet-*` commands, `locus adapter registry` subcommands and
+  `locus mcp --route`.
+- **Installer and agent-facing pages ([#823](https://github.com/ashlrai/locus/pull/823)).**
+  New `docs/archive-installer-design-questions.md` page plus
+  installer-requirements clarifications, with regenerated `llms.txt` discovery
+  indexes.
+- **Temporary-path contract ([#827](https://github.com/ashlrai/locus/pull/827)).**
+  `docs/temp-parent-reference.md` records the single-quoted `mktemp` contract
+  for parents containing spaces or glob characters, and
+  `scripts/fast-check.sh` now honors `TMPDIR` in its own `mktemp` call.
+
+### Continuous integration
+
+- **Auto-tag evidence wait ([#821](https://github.com/ashlrai/locus/pull/821)).**
+  On the push trigger, missing manual full-suite CI evidence is now a notice
+  that the `workflow_run` trigger re-evaluates instead of an immediate
+  failure; an unreadable evidence count still fails closed.
+
+### Tests
+
+- **Seatbelt availability gating ([#828](https://github.com/ashlrai/locus/pull/828)).**
+  macOS real-sandbox tests now skip when `sandbox_apply` is refused (MDM
+  policy, nested Seatbelt, VMs without Seatbelt support) instead of failing on
+  unreachable assertions, and `doctor --fix` phm-name and MCP protocol
+  coverage grew.
+- **Workspace version sync ([#825](https://github.com/ashlrai/locus/pull/825)).**
+  A CLI test pins the `locus-mcp` path-dependency version to the workspace
+  package version so release bumps cannot drift.
+
+### Internal
+
+- Recorded CIFIX2 drain triage evidence under `.bridge-evidence/`
+  ([#822](https://github.com/ashlrai/locus/pull/822)).
+
 ## [0.7.1] - 2026-11-07
 
 Highlights: clearer `locus status` empty state, deeper MCP and CLI regression
