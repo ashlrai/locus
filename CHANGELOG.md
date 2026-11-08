@@ -13,22 +13,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
+### Fixed
 
-- Unpinned human-readable `locus status` now says `no pin` and gives the
-  enter command; workspaces requiring a pin include that requirement in the
-  message. Machine-readable and `--oneline` output are unchanged
-  ([#814](https://github.com/ashlrai/locus/pull/814)).
+- Policy glob `?` now matches one Unicode scalar value rather than one byte,
+  so deny and approval rules also match non-ASCII tool names
+  ([#824](https://github.com/ashlrai/locus/pull/824)).
+- Recovery guidance for expired, invalid and frozen pins now names the
+  appropriate human recovery steps. MCP reports stale pins as broken rather
+  than absent ([#819](https://github.com/ashlrai/locus/pull/819)).
 
 ### Documentation and tests
 
-- Documented hub-smoke cleanup review and dogfood probe isolation
-  ([#619](https://github.com/ashlrai/locus/pull/619),
-  [#617](https://github.com/ashlrai/locus/pull/617)). Expanded temporary
-  workspace and error-file isolation coverage
-  ([#804](https://github.com/ashlrai/locus/pull/804),
-  [#595](https://github.com/ashlrai/locus/pull/595),
-  [#597](https://github.com/ashlrai/locus/pull/597)).
+- Documented archive installer design questions and expanded workspace
+  selection and installer coverage
+  ([#823](https://github.com/ashlrai/locus/pull/823),
+  [#825](https://github.com/ashlrai/locus/pull/825)).
+- Improved macOS sandbox test preflight and expanded doctor and MCP regression
+  coverage ([#828](https://github.com/ashlrai/locus/pull/828)).
+- Fixed auto-tag workflow handling and added release workflow coverage
+  ([#821](https://github.com/ashlrai/locus/pull/821)).
+
 ## [0.7.1] - 2026-11-07
 
 Highlights: clearer `locus status` empty state, deeper MCP and CLI regression
