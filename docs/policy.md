@@ -137,7 +137,9 @@ Because rules are ordered, a more-specific `allow` listed **above** a broader `r
 ### Glob syntax
 
 - `*` — any characters (greedy)
-- `?` — single character
+- `?` matches one Unicode scalar value, not one byte or one grapheme cluster. For
+  example, `?` matches `é`, while decomposed `e` plus a combining accent
+  requires `??`.
 - Case-sensitive on the tool name (`supabase.table.delete`, `vercel.deploy.prod`)
 
 ## Approval flow

@@ -326,7 +326,8 @@ locus doctor --fix [--apply]          # preview safe repairs; --apply makes them
 locus watch [--once] [--interval 5s] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
 locus dashboard · serve               # local identity UI + API (127.0.0.1)
 locus forensics export                # shareable pack (no secrets)
-locus verify session · claim --text "…"  # verification plane: session pack · claim score
+locus verify session                  # verification plane: session pack
+locus verify claim --text "…"         # claim score
 locus approve list|grant|status|wait|deny  # require_approval / dual-control
 locus notify status|on|off            # desktop banners OFF by default
 locus events --last N · events export # audit tail / fleet pulse / SIEM / OTLP
@@ -477,7 +478,7 @@ Roadmap and goals: [GOALS.md](./GOALS.md), [PLAN.md](./PLAN.md), [DESIGN.md](./D
 | 1 `locus-mcp`, credential resolve, adapters, scope freeze | done |
 | 2 Firm UX, doctor, run, graph, ci | done (0.1.1) |
 | 0.2 to 0.6 Dashboard, forensics, HTTP MCP, agent report, switch, registry | 0.6.2 released |
-| 3 SIEM NDJSON export | available in source (0.7.0) |
+| 3 SIEM NDJSON export | available in source since 0.7.0 |
 | 3 Remote binding graph sync, dual-control packs | planned |
 
 Agency kit: [examples/agency-starter](./examples/agency-starter/) and [docs/agency-starter.md](./docs/agency-starter.md). Recipes: [examples/recipes](./examples/recipes/).
