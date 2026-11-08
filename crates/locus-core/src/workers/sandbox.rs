@@ -1344,9 +1344,28 @@ mod tests {
         );
     }
 
+    /// Some hosts ship `/usr/bin/sandbox-exec` yet refuse `sandbox_apply`
+    /// (MDM policy, an outer Seatbelt, a VM without Seatbelt support). On
+    /// them every real-sandbox assertion is unreachable: allow-cases fail
+    /// and deny-cases pass without a sandbox ever applying. Skip instead.
+    #[cfg(target_os = "macos")]
+    fn seatbelt_apply_permitted() -> bool {
+        std::process::Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn daemon_key_is_not_readable_inside_real_sandbox() {
+        if !seatbelt_apply_permitted() {
+            return;
+        }
         let (dir, worker_home, work_dir, _executable, _backend) = fixture();
         let daemon_key = dir.path().join("custom-locus-home").join("daemon.key");
         let spawn = resolve_sandbox_spawn(
@@ -1374,6 +1393,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn user_root_node_layout_cannot_read_daemon_key_in_real_sandbox() {
+        if !seatbelt_apply_permitted() {
+            return;
+        }
         let dir = tempdir().unwrap();
         let user_root = dir.path().join("user-root");
         let work_dir = user_root.join("project");
@@ -1421,6 +1443,9 @@ mod tests {
         use std::process::Stdio;
         use std::time::Duration;
 
+        if !seatbelt_apply_permitted() {
+            return;
+        }
         let (_dir, worker_home, work_dir, _executable, _backend) = fixture();
         let spawn = resolve_sandbox_spawn(
             "/usr/bin/nc",
@@ -1458,6 +1483,9 @@ mod tests {
         use std::os::unix::net::UnixListener;
         use std::time::{Duration, Instant};
 
+        if !seatbelt_apply_permitted() {
+            return;
+        }
         let (dir, worker_home, work_dir, _executable, _backend) = fixture();
         let socket_path = dir.path().join("docker.sock");
         let listener = UnixListener::bind(&socket_path).unwrap();
@@ -1501,7 +1529,7 @@ mod tests {
     #[test]
     fn live_docker_socket_is_denied_in_real_sandbox_when_present() {
         let socket_path = Path::new("/var/run/docker.sock");
-        if !socket_path.exists() {
+        if !socket_path.exists() || !seatbelt_apply_permitted() {
             return;
         }
         let (_dir, worker_home, work_dir, _executable, _backend) = fixture();
@@ -1527,6 +1555,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn outbound_network_policy_allows_provider_connections() {
+        if !seatbelt_apply_permitted() {
+            return;
+        }
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port().to_string();
         let (_dir, worker_home, work_dir, _executable, _backend) = fixture();
@@ -1560,6 +1591,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn no_network_policy_blocks_outbound_connections() {
+        if !seatbelt_apply_permitted() {
+            return;
+        }
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port().to_string();
         let (_dir, worker_home, work_dir, _executable, _backend) = fixture();
@@ -1596,6 +1630,9 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn available_npx_keeps_canonical_provenance_inside_real_sandbox() {
+        if !seatbelt_apply_permitted() {
+            return;
+        }
         let (_dir, worker_home, work_dir, _executable, _backend) = fixture();
         if resolve_executable("npx", &work_dir, std::env::var("PATH").ok().as_deref()).is_err() {
             return;

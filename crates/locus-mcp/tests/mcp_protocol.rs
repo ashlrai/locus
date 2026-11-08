@@ -1049,6 +1049,10 @@ fn broker_session_gates_sandbox_start_and_scopes_each_provider_environment() {
         std::path::Path::new("/usr/bin/sandbox-exec").is_file(),
         "native Seatbelt backend is required for this integration regression"
     );
+    if !seatbelt_apply_permitted() {
+        eprintln!("skip: host refuses sandbox_apply; Seatbelt sandbox cannot run here");
+        return;
+    }
 
     let dir = tempdir().unwrap();
     let home = dir.path().join("locus-home");
@@ -2259,9 +2263,27 @@ require_pin = true
     assert!(store.active_session().unwrap().is_none());
 }
 
+/// `/usr/bin/sandbox-exec` can exist while `sandbox_apply` is refused by
+/// host policy (MDM, an outer Seatbelt, a VM without Seatbelt support).
+/// Sandboxed-worker assertions are then unreachable; skip instead.
+#[cfg(target_os = "macos")]
+fn seatbelt_apply_permitted() -> bool {
+    std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 /// A metadata-only Phantom probe; any credential operation leaves a marker.
+/// The third tuple element is whether the `phantom`-named shim actually
+/// executed — some hosts refuse that filename by policy, making every
+/// `phantom_on_path` assertion unreachable.
 #[cfg(unix)]
-fn phantom_version_fixture(dir: &std::path::Path) -> (String, PathBuf) {
+fn phantom_version_fixture(dir: &std::path::Path) -> (String, PathBuf, bool) {
     use std::os::unix::fs::PermissionsExt;
     let shim_dir = dir.join("shim-bin");
     std::fs::create_dir_all(&shim_dir).unwrap();
@@ -2272,9 +2294,18 @@ fn phantom_version_fixture(dir: &std::path::Path) -> (String, PathBuf) {
     )
     .unwrap();
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shim_runs = std::process::Command::new(&shim)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
     (
         format!("{}:/usr/bin:/bin", shim_dir.display()),
         dir.join("phantom-credential-operation"),
+        shim_runs,
     )
 }
 
@@ -2300,7 +2331,11 @@ fn locus_verify_session_session_ok_true_on_healthy_pin() {
     store
         .pin("acme", dir.path(), Some("mcp-verify".into()), false)
         .unwrap();
-    let (path_env, marker) = phantom_version_fixture(dir.path());
+    let (path_env, marker, shim_runs) = phantom_version_fixture(dir.path());
+    if !shim_runs {
+        eprintln!("skip: host refuses to exec a file named `phantom`");
+        return;
+    }
     let mut client = McpClient::spawn_opts(
         dir.path(),
         Framing::Ndjson,
@@ -2364,7 +2399,11 @@ fn locus_verify_session_session_ok_false_for_unsupported_phantom_even_installed(
             false,
         )
         .unwrap();
-    let (path_env, marker) = phantom_version_fixture(dir.path());
+    let (path_env, marker, shim_runs) = phantom_version_fixture(dir.path());
+    if !shim_runs {
+        eprintln!("skip: host refuses to exec a file named `phantom`");
+        return;
+    }
     let mut client = McpClient::spawn_opts(
         dir.path(),
         Framing::Ndjson,
