@@ -1487,6 +1487,41 @@ wait "$pid" || status=$?
   assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
 });
 
+test('successful dogfood run passes a spaced TMPDIR as one mktemp template and cleans up', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-spaces-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary  directory with spaces');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const fixtureRoot = writeSuccessFixture(root);
+  const record = join(root, 'mktemp-args');
+  const probe = join(root, 'probe');
+  writeFileSync(join(fixtureRoot, 'target', 'debug', 'mktemp'), `#!/bin/bash
+if [[ ! -e "$MKTEMP_RECORD" ]]; then
+  printf '%s\\n' "$#" "$@" > "$MKTEMP_RECORD"
+fi
+exec /usr/bin/mktemp "$@"
+`, { mode: 0o755 });
+
+  const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch,
+      PROBE_FILE: probe, FIXTURE_ROOT: root, MKTEMP_RECORD: record },
+    encoding: 'utf8',
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /DOGFOOD READY/);
+  assert.deepEqual(readFileSync(record, 'utf8').trim().split('\n'),
+    ['2', '-d', `${scratch}/locus-dogfood.XXXXXX`]);
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.equal(dirname(home), scratch);
+  assert.match(basename(home), /^locus-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.equal(existsSync(home), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
 test('default pack path and project dir stay one argument under a space-containing TMPDIR', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-pack-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
