@@ -9,7 +9,7 @@
 // recording locus (plus, where noted, a recording mktemp).
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -223,4 +223,51 @@ PATH=/usr/bin:/bin mktemp "$@"
   assert.equal(existsSync(missing), false, 'the missing root must not be created for it');
   assert.deepEqual(readdirSync(controlled), [],
     'no fallback directory may be allocated beneath another root');
+});
+
+// The parent already holds other people's directories, including one named
+// exactly like the script's own (locus-dogfood.XXXXXX) and one that is a
+// symlink to a directory outside the parent. Cleanup may remove only the home
+// this run created — never a lookalike sibling, the parent, or a link target.
+test('cleanup removes only the home it created from a preexisting parent', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-preexisting-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const parent = join(root, 'preexisting parent');
+  const outside = join(root, 'outside');
+  mkdirSync(join(parent, 'sentinel', 'nested'), { recursive: true });
+  mkdirSync(join(parent, 'locus-dogfood.PREEXIST'));
+  mkdirSync(outside);
+  writeFileSync(join(parent, 'sentinel', 'nested', 'data'), 'unrelated');
+  writeFileSync(join(parent, 'locus-dogfood.PREEXIST', 'data'), 'lookalike');
+  writeFileSync(join(outside, 'data'), 'linked');
+  symlinkSync(outside, join(parent, 'locus-dogfood.LINKED'));
+  const before = readdirSync(parent).sort();
+
+  const probe = join(root, 'probe');
+  const dogfood = fixture(root, `#!/usr/bin/env bash
+case "$1" in
+  init) printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE" ;;
+  binding) ;;
+  --version) ;;
+  quickstart) exit 42 ;;
+  *) exit 92 ;;
+esac
+`);
+  const result = spawnSync('bash', [dogfood], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: parent, PROBE_FILE: probe },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 42, `the run must reach the controlled quickstart failure: ${result.stderr}`);
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.equal(dirname(home), parent);
+  assert.ok(!before.includes(basename(home)), 'the run must create a new directory');
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' }, 'the created home must be removed');
+  assert.deepEqual(readdirSync(parent).sort(), before,
+    'every preexisting entry, lookalikes and links included, must remain');
+  assert.equal(readFileSync(join(parent, 'sentinel', 'nested', 'data'), 'utf8'), 'unrelated');
+  assert.equal(readFileSync(join(parent, 'locus-dogfood.PREEXIST', 'data'), 'utf8'), 'lookalike');
+  assert.equal(readFileSync(join(outside, 'data'), 'utf8'), 'linked');
 });
