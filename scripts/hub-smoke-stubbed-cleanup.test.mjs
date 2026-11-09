@@ -37,12 +37,14 @@ esac
 exit 0
 `;
 
-test('stubbed successful run removes its populated temporary resources only', (t) => {
+test('stubbed successful run preserves spaced temporary paths and removes only its resources', (t) => {
   // Short path: keeps any socket path small and the listing below easy to read.
   const tmp = mkdtempSync('/tmp/locus-stub-test-');
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const fakeRoot = join(tmp, 'repo');
-  const scratch = join(tmp, 'scratch');
+  const scratch = join(tmp, 'scratch with spaces');
+  const hook = join(tmp, 'hook');
+  const calls = join(tmp, 'calls');
   mkdirSync(join(fakeRoot, 'scripts'), { recursive: true });
   mkdirSync(join(fakeRoot, 'target', 'debug'), { recursive: true });
   mkdirSync(join(fakeRoot, 'schema'));
@@ -50,6 +52,24 @@ test('stubbed successful run removes its populated temporary resources only', (t
   mkdirSync(join(fakeRoot, 'integrations', 'phantom'), { recursive: true });
   mkdirSync(scratch);
   writeFileSync(join(scratch, 'unrelated'), 'keep');
+  writeFileSync(hook, `
+mktemp() {
+  case "$1" in
+    -d) [[ $# -eq 2 && "\${2%/*}" == "$TMPDIR" ]] || return 91 ;;
+    *)  [[ $# -eq 1 && "\${1%/*}" == "$TMPDIR" ]] || return 91 ;;
+  esac
+  printf 'mktemp\\n' >> "$CALLS"
+  command mktemp "$@"
+}
+rm() {
+  if [[ "\${1:-}" == -rf ]]; then
+    [[ $# -eq 5 && "$2" == -- && "\${3%/*}" == "$TMPDIR" &&
+       "\${4%/*}" == "$TMPDIR" && "\${5%/*}" == "$TMPDIR" ]] || return 92
+    printf 'cleanup\\n' >> "$CALLS"
+  fi
+  command rm "$@"
+}
+`);
   copyFileSync(script, join(fakeRoot, 'scripts', 'hub-smoke.sh'));
   const bin = join(fakeRoot, 'target', 'debug', 'locus');
   writeFileSync(bin, stub);
@@ -63,11 +83,13 @@ test('stubbed successful run removes its populated temporary resources only', (t
   }
 
   const result = spawnSync('bash', [join(fakeRoot, 'scripts', 'hub-smoke.sh')], {
-    env: { ...process.env, TMPDIR: scratch, RESOURCE_LOG: join(tmp, 'resources') }, encoding: 'utf8',
+    env: { ...process.env, BASH_ENV: hook, TMPDIR: scratch, CALLS: calls,
+      RESOURCE_LOG: join(tmp, 'resources') }, encoding: 'utf8',
   });
 
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   assert.ok(result.stdout.includes('== hub-smoke OK =='));
+  assert.equal(readFileSync(calls, 'utf8'), 'mktemp\nmktemp\nmktemp\ncleanup\n');
   const resources = readFileSync(join(tmp, 'resources'), 'utf8').trimEnd().split('\n');
   assert.equal(resources.length, 3);
   for (const [index, prefix] of ['locus-hub-smoke.', 'locus-hub-proj.', 'locus-hub-smoke-err.'].entries()) {
