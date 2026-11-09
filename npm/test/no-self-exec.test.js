@@ -12,6 +12,30 @@ const { delimiter, join, resolve } = require("node:path");
 
 const wrapper = process.env.LOCUS_WRAPPER_UNDER_TEST || resolve(__dirname, "..", "bin", "locus.js");
 
+test("requiring each npm wrapper does not start a child process", async () => {
+  const childProcess = require("node:child_process");
+  const methods = ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"];
+  const originals = Object.fromEntries(methods.map((method) => [method, childProcess[method]]));
+  const calls = [];
+  try {
+    for (const method of methods) {
+      childProcess[method] = () => {
+        calls.push(method);
+        throw new Error(`unexpected child_process.${method} during import`);
+      };
+    }
+    for (const path of [wrapper, resolve(__dirname, "..", "..", "npm-mcp", "bin", "locus-mcp.js")]) {
+      delete require.cache[require.resolve(path)];
+      assert.doesNotThrow(() => require(path), `import failed: ${path}`);
+    }
+    // Allow promise callbacks scheduled during module initialization to run.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(calls, [], "imports must not start child processes");
+  } finally {
+    Object.assign(childProcess, originals);
+  }
+});
+
 test("locus: a `locus` on PATH that is this wrapper is never executed (no self-exec loop)", { skip: process.platform === "win32" && "npm -g uses .cmd shims on Windows" }, () => {
   const home = mkdtempSync(join(tmpdir(), "locus-noloop-"));
   try {
