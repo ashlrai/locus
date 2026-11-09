@@ -1,0 +1,228 @@
+diff --git a/apps/web/public/llms-full.txt b/apps/web/public/llms-full.txt
+index 0bad5c31957eec3938cd797aeef243bdf0a4e0e5..b9398969649cc36ca2d6e1d85dba68f2ffc05931 100644
+--- a/apps/web/public/llms-full.txt
++++ b/apps/web/public/llms-full.txt
+@@ -760,6 +760,14 @@ listed verbatim so an agent can jump straight to the right document.
+   - Can someone sign a manifest today?
+   - What is future work?
+ 
++## docs/release-automation.md
++
++- [Release automation](https://github.com/ashlrai/locus/blob/main/docs/release-automation.md)
++  - Historical proposal from PR #731
++  - Chain
++  - Owner action (needed to turn on the Release PR link)
++  - Gate decision for the Security Hardening Engineer
++
+ ## docs/RELEASE.md
+ 
+ - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+diff --git a/apps/web/public/llms.txt b/apps/web/public/llms.txt
+index a9046ba5c9690df732ac18d163438969b58d8eeb..de4cbaacc8a24fba952d9593366673cb80adf604 100644
+--- a/apps/web/public/llms.txt
++++ b/apps/web/public/llms.txt
+@@ -143,6 +143,7 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
+ - [Adapter registry release manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-trust.md)
+ - [Consuming an unsigned adapter registry manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-consumer-guidance.md)
+ - [Unsigned adapter registry manifest FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-manifest-faq.md)
++- [Release automation](https://github.com/ashlrai/locus/blob/main/docs/release-automation.md)
+ - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+ - [Session budget caps (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/session-budget.md)
+ - [Shell completions](https://github.com/ashlrai/locus/blob/main/docs/shell-completions.md)
+diff --git a/docs/release-automation.md b/docs/release-automation.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..597a87c7efd8dfbc3cb23068dc5e06545819c0fe
+--- /dev/null
++++ b/docs/release-automation.md
+@@ -0,0 +1,62 @@
++# Release automation
++
++The active qualified release chain is documented in [Releasing Locus](RELEASE.md). Auto-tag requires required checks and successful manual full-suite CI on the exact current main commit before minting a repository-scoped App token. Publication builds the existing immutable tag. A merge-queue CI result alone cannot authorize a release.
++
++## Historical proposal from PR #731
++
++The original design below is preserved for review. Its statements labelled Active and its installation steps describe the historical proposal, not current configuration or authorization. The merge-group/direct-main publication plan was superseded by the stricter qualified chain above. The release-PR opener remains an inactive template under docs; it is not installed or approved for activation. Any future implementation needs normal source/security review against current required checks, exact-source full-suite proof and immutable tags. No credentials, permissions, settings or workflow activation are changed by preserving this proposal.
++
++<details><summary>Original historical proposal (inactive)</summary>
++
++# Release automation
++
++Goal: every release-ready merge to `main` reaches GitHub Releases and npm
++(`locus-cli`, `@ashlrai/locus-mcp`) with no human step, so npm never lags the
++repo. At 0.6.2 npm matched the repo while 243+ commits sat unreleased, because
++nothing bumped the version.
++
++## Chain
++
++```
++merge to main ──► Release PR (bumps all carriers) ──► merge queue (CI Gate green)
++   └─ release.yml: plan ─► build ─► GitHub Release + tag ─► npm publish (OIDC)
++```
++
++| Link | State | Where |
++|------|-------|-------|
++| `release.yml` auto-release on a Cargo version change | **Active** | `.github/workflows/release.yml` |
++| One version across Cargo, lock, npm, `server.json` (`check` in CI Gate) | **Active** | `scripts/release-version.mjs` |
++| Release PR opener + auto-merge | **Inactive template** | `docs/release-automation/release-pr.yml.template` |
++
++Why not release-please: merge subjects here are `bridge(RQ-…)`, not
++conventional commits, so release-please would never find a release-worthy
++commit. `release-version.mjs next` bumps patch for any shipped-code merge, and
++minor for `feat` or a breaking `!`.
++
++## Owner action (needed to turn on the Release PR link)
++
++The template is the first workflow that would write to this repo, so it is not
++installed. It needs, in this order:
++
++1. Security Hardening Engineer review of this change (release workflow trigger
++   and the `plan` gate) and of the template.
++2. A GitHub App `ashlr-release` installed on this repo only, with Contents and
++   Pull requests write; repository variable `ASHLR_RELEASE_APP_ID` and secret
++   `ASHLR_RELEASE_APP_KEY`. An App token is required: PRs and pushes made with
++   `GITHUB_TOKEN` do not trigger CI, which would strand the PR in the queue.
++3. Settings: allow auto-merge; keep CI Gate required in the merge-queue ruleset.
++4. `git mv docs/release-automation/release-pr.yml.template .github/workflows/release-pr.yml`
++   in a PR that is reviewed like any workflow change.
++5. npm trusted publishers for both packages (owner `ashlrai`, repo `locus`,
++   workflow `release.yml`, no environment) — already required by the existing
++   publish job.
++
++## Gate decision for the Security Hardening Engineer
++
++A manual `v*` tag still needs a green **full-suite** `workflow_dispatch` CI run
++on the sha. An automatic release accepts the **merge queue's CI Gate run** on
++the sha instead (the full suite runs 6 AM / 6 PM ET and is not per-merge). If
++that is too weak, require a dispatch run for both paths by deleting
++`merge_group` from `events=` in the `plan` job.
++
++</details>
+diff --git a/docs/release-automation/release-pr.yml.template b/docs/release-automation/release-pr.yml.template
+new file mode 100644
+index 0000000000000000000000000000000000000000..603bdf168215c150b059e78bf9af4fb3d3d3293e
+--- /dev/null
++++ b/docs/release-automation/release-pr.yml.template
+@@ -0,0 +1,92 @@
++# HISTORICAL INACTIVE PROPOSAL FROM PR #731. NOT APPROVED FOR ACTIVATION.
++# Preserved original text below is not current operational instruction.
++# Keep this file under docs. Do not copy/activate it without a new normal source
++# and security review preserving the exact-source manual full-suite gate,
++# immutable tags and the currently qualified repository-scoped App policy.
++# The force-with-lease/auto-merge design below has not been re-authorized.
++# Current sanctioned release procedure: docs/RELEASE.md.
++#
++# NOT ACTIVE. Install by copying to .github/workflows/release-pr.yml after the
++# Security Hardening Engineer reviews it and the owner completes the "Owner
++# action" list in docs/release-automation.md. It adds the first workflow in
++# this repo that writes to it, via a GitHub App token (never GITHUB_TOKEN, whose
++# pushes and PRs do not trigger CI and would strand the PR in the merge queue).
++#
++# On each merge to main that changes shipped code since the last tag, it opens
++# or updates ONE release PR (branch release/next) that bumps every version
++# carrier with scripts/release-version.mjs, then enables auto-merge so the
++# merge queue lands it once CI Gate is green. That merge changes Cargo.toml,
++# which fires release.yml (plan -> build -> release -> npm-publish).
++name: Release PR
++
++on:
++  push:
++    branches: [main]
++    paths:
++      - "crates/**"
++      - "npm/**"
++      - "npm-mcp/**"
++      - "Cargo.toml"
++
++permissions: {}
++
++# One run at a time; a newer merge re-evaluates, so none is cancelled mid-push.
++concurrency:
++  group: release-pr-${{ github.repository }}
++  cancel-in-progress: false
++
++jobs:
++  release-pr:
++    runs-on: ubuntu-latest
++    timeout-minutes: 10
++    permissions:
++      contents: read
++    steps:
++      - name: Mint ashlr-release App token (contents + pull-requests write, this repo only)
++        id: app
++        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
++        with:
++          app-id: ${{ vars.ASHLR_RELEASE_APP_ID }}
++          private-key: ${{ secrets.ASHLR_RELEASE_APP_KEY }}
++          owner: ${{ github.repository_owner }}
++          repositories: ${{ github.event.repository.name }}
++          permission-contents: write
++          permission-pull-requests: write
++
++      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          fetch-depth: 0
++          fetch-tags: true
++          token: ${{ steps.app.outputs.token }}
++
++      - name: Open or update the release PR
++        env:
++          GH_TOKEN: ${{ steps.app.outputs.token }}
++        shell: bash
++        run: |
++          set -euo pipefail
++          current="$(node scripts/release-version.mjs version)"
++          last="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
++          # Shipped code since the last tag decides the bump; docs-only or
++          # CI-only merges never cut a release.
++          next="$(git log --format=%s "${last}..HEAD" -- crates npm npm-mcp Cargo.toml | node scripts/release-version.mjs next)"
++          if [ "$next" = "$current" ] && [ "v${current}" != "$last" ]; then
++            echo "Version ${current} is already bumped past ${last}; its release PR or release is in flight."; exit 0
++          fi
++          if [ "$next" = "$current" ]; then echo "No shipped changes since ${last}."; exit 0; fi
++          git config user.name "ashlr-release[bot]"
++          git config user.email "ashlr-release[bot]@users.noreply.github.com"
++          git switch -C release/next
++          node scripts/release-version.mjs sync "$next"
++          node scripts/release-version.mjs check
++          git commit -am "chore(release): v${next}"
++          git push --force-with-lease origin release/next
++          pr="$(gh pr list --head release/next --state open --json number --jq '.[0].number // empty')"
++          if [ -z "$pr" ]; then
++            gh pr create --head release/next --base main --title "chore(release): v${next}" \
++              --body "Automated version bump to v${next}. Merging fires release.yml: GitHub Release, then npm (trusted publishing)."
++          else
++            gh pr edit "$pr" --title "chore(release): v${next}"
++          fi
++          # The merge queue lands it once CI Gate is green.
++          gh pr merge release/next --auto --squash
+diff --git a/llms-full.txt b/llms-full.txt
+index 0bad5c31957eec3938cd797aeef243bdf0a4e0e5..b9398969649cc36ca2d6e1d85dba68f2ffc05931 100644
+--- a/llms-full.txt
++++ b/llms-full.txt
+@@ -760,6 +760,14 @@ listed verbatim so an agent can jump straight to the right document.
+   - Can someone sign a manifest today?
+   - What is future work?
+ 
++## docs/release-automation.md
++
++- [Release automation](https://github.com/ashlrai/locus/blob/main/docs/release-automation.md)
++  - Historical proposal from PR #731
++  - Chain
++  - Owner action (needed to turn on the Release PR link)
++  - Gate decision for the Security Hardening Engineer
++
+ ## docs/RELEASE.md
+ 
+ - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+diff --git a/llms.txt b/llms.txt
+index a9046ba5c9690df732ac18d163438969b58d8eeb..de4cbaacc8a24fba952d9593366673cb80adf604 100644
+--- a/llms.txt
++++ b/llms.txt
+@@ -143,6 +143,7 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
+ - [Adapter registry release manifests](https://github.com/ashlrai/locus/blob/main/docs/registry-trust.md)
+ - [Consuming an unsigned adapter registry manifest](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-consumer-guidance.md)
+ - [Unsigned adapter registry manifest FAQ](https://github.com/ashlrai/locus/blob/main/docs/registry-unsigned-manifest-faq.md)
++- [Release automation](https://github.com/ashlrai/locus/blob/main/docs/release-automation.md)
+ - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
+ - [Session budget caps (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/session-budget.md)
+ - [Shell completions](https://github.com/ashlrai/locus/blob/main/docs/shell-completions.md)

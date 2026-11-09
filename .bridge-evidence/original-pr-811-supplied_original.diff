@@ -1,0 +1,2709 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 9bc59e6a19e3f216f022db4eea3f84384a6de8bf..095801e0288ccbf320c56d1d830aab7a12862ade 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -67,6 +67,8 @@ cargo clippy --workspace --all-targets -- -D warnings
+ 
+ Binaries: `./target/release/locus`, `./target/release/locus-mcp`.
+ 
++New end-to-end steps go in a new `scripts/e2e.d/NN-topic.sh` file (see `scripts/e2e.d/README.md`), not in `scripts/e2e.sh`; `bash scripts/check-e2e-dropin.sh` proves the mechanism.
++
+ Local install from this checkout (`locus-cli` installs both binaries):
+ 
+ ```bash
+diff --git a/Cargo.lock b/Cargo.lock
+index 76356b1606e4993e812e1d6c2145993c951cb43b..0aaf59b0cb505b17190761e2914dd1d2fb883787 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1060,6 +1060,11 @@ dependencies = [
+  "toml_edit",
+  "tower",
+  "tower-http",
++ "tree-sitter",
++ "tree-sitter-go",
++ "tree-sitter-python",
++ "tree-sitter-rust",
++ "tree-sitter-typescript",
+ ]
+ 
+ [[package]]
+@@ -1512,6 +1517,18 @@ dependencies = [
+  "serde_json",
+ ]
+ 
++[[package]]
++name = "regex"
++version = "1.13.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
++dependencies = [
++ "aho-corasick",
++ "memchr",
++ "regex-automata",
++ "regex-syntax",
++]
++
+ [[package]]
+ name = "regex-automata"
+ version = "0.4.18"
+@@ -1672,6 +1689,7 @@ version = "1.0.151"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+ dependencies = [
++ "indexmap",
+  "itoa",
+  "memchr",
+  "serde",
+@@ -1785,6 +1803,12 @@ version = "1.2.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+ 
++[[package]]
++name = "streaming-iterator"
++version = "0.1.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2b2231b7c3057d5e4ad0156fb3dc807d900806020c5ffa3ee6ff2c8c76fb8520"
++
+ [[package]]
+ name = "strsim"
+ version = "0.11.1"
+@@ -2008,6 +2032,66 @@ dependencies = [
+  "once_cell",
+ ]
+ 
++[[package]]
++name = "tree-sitter"
++version = "0.25.10"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "78f873475d258561b06f1c595d93308a7ed124d9977cb26b148c2084a4a3cc87"
++dependencies = [
++ "cc",
++ "regex",
++ "regex-syntax",
++ "serde_json",
++ "streaming-iterator",
++ "tree-sitter-language",
++]
++
++[[package]]
++name = "tree-sitter-go"
++version = "0.25.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c8560a4d2f835cc0d4d2c2e03cbd0dde2f6114b43bc491164238d333e28b16ea"
++dependencies = [
++ "cc",
++ "tree-sitter-language",
++]
++
++[[package]]
++name = "tree-sitter-language"
++version = "0.1.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d0af592be68c579aa78a16846bd19422978c3c52e438523d45ff5d1bff1f9d4a"
++
++[[package]]
++name = "tree-sitter-python"
++version = "0.25.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6bf85fd39652e740bf60f46f4cda9492c3a9ad75880575bf14960f775cb74a1c"
++dependencies = [
++ "cc",
++ "tree-sitter-language",
++]
++
++[[package]]
++name = "tree-sitter-rust"
++version = "0.24.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
++dependencies = [
++ "cc",
++ "tree-sitter-language",
++]
++
++[[package]]
++name = "tree-sitter-typescript"
++version = "0.23.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
++dependencies = [
++ "cc",
++ "tree-sitter-language",
++]
++
+ [[package]]
+ name = "typenum"
+ version = "1.20.1"
+diff --git a/README.md b/README.md
+index 865cb5a7cfe6c91c30361a0865bc303b06d77135..b56f51dad460e0f5badec5296503c9372314f963 100644
+--- a/README.md
++++ b/README.md
+@@ -496,6 +496,38 @@ Phantom answers "can this secret enter the model?" Locus answers "as whom, again
+ 
+ Issues and pull requests are welcome. Look for [`good first issue`](https://github.com/ashlrai/locus/labels/good%20first%20issue), and read [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately per [SECURITY.md](SECURITY.md).
+ 
++## Code cards
++
++```sh
++locus card target                    # all matching symbols in the current Git repo
++locus card src/service.ts --body     # cards for every symbol in a file
++locus card target --json --budget 2000
++```
++
++`card` uses the upstream tree-sitter grammars for TypeScript/TSX, Python, Rust,
++and Go. Cards include name, syntax kind, signature, file and line, direct calls,
++caller count and the first five callers, associated tests, the last file-change
++commit, and a SHA-256 hash of the symbol source. `--body` includes that source.
++Uncommitted files have no last-change commit; changes to tracked files retain
++that file's latest committed change. Supported source and repository paths must be UTF-8. Run inside a Git repository; file paths are
++relative to the current directory. Duplicate symbol names return multiple cards.
++
++Calls match terminal names (including member calls); they do not resolve types,
++aliases, dynamic dispatch, or cross-language ambiguity. Tests are associated by
++calls, symbol names, or imports mentioning the symbol within files/functions
++named as tests. These are navigation hints, not a proof of coverage.
++
++Parsed file facts are cached by language, Locus version and file SHA-256 under the worktree's
++Git directory, `locus-card-v1/`. Unchanged files avoid parsing; file reads/hashes,
++relationship matching, and Git metadata are still refreshed. Delete that directory
++to clear the cache. `--dry-run` reads existing caches without writing them.
++
++`--budget` uses UTF-8 bytes as a conservative, model-independent token bound,
++including the final newline. It removes source first, then test/caller lists,
++then signatures/calls, then excess cards. Identity, hashes, and caller counts
++remain; trimmed cards are marked. An impossibly small budget fails explicitly.
++JSON always remains valid.
++
+ ## License
+ 
+ MIT. See [LICENSE](./LICENSE).
+diff --git a/apps/web/public/AGENTS.md b/apps/web/public/AGENTS.md
+index a49f038ac90993bcf6ab69e6c661e05d245d21e3..1d3a84f6aff32268913bfc85cb9efe83ba27abd0 100644
+--- a/apps/web/public/AGENTS.md
++++ b/apps/web/public/AGENTS.md
+@@ -67,6 +67,8 @@ cargo clippy --workspace --all-targets -- -D warnings
+ 
+ Binaries: `./target/release/locus`, `./target/release/locus-mcp`.
+ 
++New end-to-end steps go in a new `scripts/e2e.d/NN-topic.sh` file (see `scripts/e2e.d/README.md`), not in `scripts/e2e.sh`; `bash scripts/check-e2e-dropin.sh` proves the mechanism.
++
+ Local install from this checkout (`locus-cli` installs both binaries):
+ 
+ ```bash
+diff --git a/apps/web/public/capabilities.json b/apps/web/public/capabilities.json
+index 944d8db1dae5d00da2c7c1b6af607bc07ea5dd71..38e63dcaf6f7cfac5327d81f4a081f85a28c228c 100644
+--- a/apps/web/public/capabilities.json
++++ b/apps/web/public/capabilities.json
+@@ -25,6 +25,7 @@
+     "local": "cargo install --locked --path crates/locus-cli"
+   },
+   "commands": [
++    "locus card",
+     "locus init",
+     "locus quickstart",
+     "locus onboard",
+diff --git a/apps/web/public/llms-full.txt b/apps/web/public/llms-full.txt
+index 2b30cb37bd69a0620b1fa7c89862f9318890a7c0..1609e5c6db3e2fa3060b6378a9fb9b59a9bcf818 100644
+--- a/apps/web/public/llms-full.txt
++++ b/apps/web/public/llms-full.txt
+@@ -24,6 +24,7 @@ listed verbatim so an agent can jump straight to the right document.
+   - Development
+   - Part of the Ashlr ecosystem
+   - Contributing
++  - Code cards
+   - License
+ 
+ ## docs/adapter-sdk.md
+diff --git a/crates/locus-cli/Cargo.toml b/crates/locus-cli/Cargo.toml
+index fdb22fb77ebdacbb86def9177a9fbf1c5ee69937..13b5298a575cdc4f7496910e5d0b2fae31212eed 100644
+--- a/crates/locus-cli/Cargo.toml
++++ b/crates/locus-cli/Cargo.toml
+@@ -38,8 +38,14 @@ tempfile = { workspace = true }
+ # dep via `toml` 0.8, so this adds no new lockfile entries).
+ toml_edit = "0.22"
+ 
+-[dev-dependencies]
+ sha2 = { workspace = true }
++tree-sitter = "0.25"
++tree-sitter-typescript = "0.23"
++tree-sitter-python = "0.25"
++tree-sitter-rust = "0.24"
++tree-sitter-go = "0.25"
++
++[dev-dependencies]
+ toml = { workspace = true }
+ tower = { workspace = true, features = ["util"] }
+ jsonschema = { workspace = true }
+diff --git a/crates/locus-cli/src/card.rs b/crates/locus-cli/src/card.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b2d19015fb45272bb463db39cffaf79111755c9
+--- /dev/null
++++ b/crates/locus-cli/src/card.rs
+@@ -0,0 +1,793 @@
++//! Syntax-only repository cards. No provider credentials or code execution.
++use anyhow::{bail, Context, Result};
++use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
++use std::{
++    collections::BTreeSet,
++    fs,
++    path::{Component, Path, PathBuf},
++    process::Command,
++};
++use tree_sitter::{Node, Parser};
++
++#[derive(Clone, Debug, Serialize, Deserialize)]
++struct Symbol {
++    name: String,
++    kind: String,
++    signature: String,
++    line: usize,
++    calls: Vec<String>,
++    body_hash: String,
++    body: String,
++}
++#[derive(Serialize)]
++struct Card {
++    trimmed: bool,
++    #[serde(flatten)]
++    symbol: Symbol,
++    file: String,
++    callers_count: usize,
++    callers: Vec<String>,
++    tests: Vec<String>,
++    last_change: Option<String>,
++}
++fn hash(bytes: &[u8]) -> String {
++    format!("{:x}", Sha256::digest(bytes))
++}
++fn text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
++    &source[node.byte_range()]
++}
++fn language(ext: &str) -> Option<tree_sitter::Language> {
++    Some(match ext {
++        "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
++        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
++        "py" => tree_sitter_python::LANGUAGE.into(),
++        "rs" => tree_sitter_rust::LANGUAGE.into(),
++        "go" => tree_sitter_go::LANGUAGE.into(),
++        _ => return None,
++    })
++}
++fn is_symbol(kind: &str) -> bool {
++    matches!(
++        kind,
++        "function_declaration"
++            | "function_definition"
++            | "function_item"
++            | "method_definition"
++            | "method_declaration"
++            | "class_declaration"
++            | "class_definition"
++            | "struct_item"
++            | "enum_item"
++            | "trait_item"
++            | "interface_declaration"
++            | "type_alias_declaration"
++            | "type_spec"
++    )
++}
++fn definition(node: Node<'_>) -> bool {
++    is_symbol(node.kind())
++        || (node.kind() == "variable_declarator"
++            && node.child_by_field_name("value").is_some_and(|value| {
++                matches!(value.kind(), "arrow_function" | "function_expression")
++            }))
++}
++fn calls(node: Node<'_>, source: &str, out: &mut BTreeSet<String>) {
++    let mut cursor = node.walk();
++    for child in node.named_children(&mut cursor) {
++        if definition(child) {
++            continue;
++        }
++        if matches!(child.kind(), "call_expression" | "call") {
++            if let Some(function) = child.child_by_field_name("function") {
++                out.insert(text(function, source).to_owned());
++            }
++        }
++        calls(child, source, out);
++    }
++}
++fn extract(node: Node<'_>, source: &str, out: &mut Vec<Symbol>) {
++    if definition(node) {
++        if let Some(name) = node.child_by_field_name("name") {
++            let body = node.child_by_field_name("body").or_else(|| {
++                node.child_by_field_name("value")
++                    .and_then(|v| v.child_by_field_name("body"))
++            });
++            let end = body.map_or(node.end_byte(), |b| b.start_byte());
++            let mut direct = BTreeSet::new();
++            calls(node, source, &mut direct);
++            let code = text(node, source);
++            out.push(Symbol {
++                name: text(name, source).into(),
++                kind: node.kind().into(),
++                signature: source[node.start_byte()..end].trim().into(),
++                line: node.start_position().row + 1,
++                calls: direct.into_iter().collect(),
++                body_hash: hash(code.as_bytes()),
++                body: code.into(),
++            });
++        }
++    }
++    let mut cursor = node.walk();
++    for child in node.named_children(&mut cursor) {
++        extract(child, source, out);
++    }
++}
++fn parse(source: &str, ext: &str) -> Result<Vec<Symbol>> {
++    let mut parser = Parser::new();
++    parser.set_language(&language(ext).context("unsupported language")?)?;
++    let tree = parser
++        .parse(source, None)
++        .context("tree-sitter parse cancelled")?;
++    let mut symbols = Vec::new();
++    extract(tree.root_node(), source, &mut symbols);
++    Ok(symbols)
++}
++fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
++    let mut command = Command::new("git");
++    // Cards describe this checkout, even when launched from a shell carrying
++    // another repository's Git context. Signature display can invoke gpg, so
++    // explicitly disable it on this syntax-only surface.
++    for variable in [
++        "GIT_DIR",
++        "GIT_WORK_TREE",
++        "GIT_COMMON_DIR",
++        "GIT_INDEX_FILE",
++        "GIT_OBJECT_DIRECTORY",
++        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
++        "GIT_CEILING_DIRECTORIES",
++        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
++        "GIT_NAMESPACE",
++    ] {
++        command.env_remove(variable);
++    }
++    let output = command
++        .current_dir(root)
++        .args([
++            "-c",
++            "log.showSignature=false",
++            "-c",
++            "core.fsmonitor=false",
++        ])
++        .args(args)
++        .output()?;
++    if !output.status.success() {
++        bail!(
++            "git {} failed: {}",
++            args[0],
++            String::from_utf8_lossy(&output.stderr)
++        );
++    }
++    Ok(output.stdout)
++}
++fn source_path(root: &Path, file: &str) -> Option<PathBuf> {
++    let mut path = root.to_path_buf();
++    // Checking only the final file would still follow a replaced parent
++    // directory into another checkout. Refuse symlinks at every component.
++    for component in Path::new(file).components() {
++        let Component::Normal(part) = component else {
++            return None;
++        };
++        path.push(part);
++        if fs::symlink_metadata(&path).ok()?.file_type().is_symlink() {
++            return None;
++        }
++    }
++    let canonical = path.canonicalize().ok()?;
++    (canonical.starts_with(root) && fs::metadata(&canonical).ok()?.is_file()).then_some(canonical)
++}
++fn terminal_name(call: &str) -> &str {
++    call.rsplit(['.', ':']).next().unwrap_or(call)
++}
++fn is_test(file: &str, name: &str, body: &str) -> bool {
++    file.split('/')
++        .any(|p| matches!(p, "test" | "tests" | "__tests__"))
++        || file.contains("test_")
++        || file.contains("_test.")
++        || file.contains(".test.")
++        || file.contains(".spec.")
++        || name.starts_with("test")
++        || name.starts_with("Test")
++        || body.contains("#[test]")
++}
++fn cards(root: &Path, target: &str, include_body: bool, cache: bool) -> Result<Vec<Card>> {
++    let canonical_root = root.canonicalize()?;
++    let root = canonical_root.as_path();
++    let files = git(
++        root,
++        &[
++            "ls-files",
++            "-z",
++            "--cached",
++            "--others",
++            "--exclude-standard",
++        ],
++    )?;
++    let cache_dir = root.join(".git");
++    // Worktrees have a .git file: resolve the private git directory through git.
++    let git_dir = String::from_utf8(git(root, &["rev-parse", "--absolute-git-dir"])?)?;
++    let cache_dir = if cache_dir.is_dir() {
++        cache_dir
++    } else {
++        git_dir.strip_suffix('\n').unwrap_or(&git_dir).into()
++    }
++    .join("locus-card-v1");
++    let mut index = Vec::new();
++    // An unmerged index lists the same path once for each conflict stage.
++    let paths: BTreeSet<_> = files.split(|b| *b == 0).filter(|b| !b.is_empty()).collect();
++    for file in paths {
++        let file = std::str::from_utf8(file).context("non-UTF-8 repository path")?;
++        let Some(path) = source_path(root, file) else {
++            continue;
++        };
++        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
++        if language(ext).is_none() {
++            continue;
++        }
++        let bytes = fs::read(&path).with_context(|| format!("read {file}"))?;
++        let source = std::str::from_utf8(&bytes).with_context(|| format!("UTF-8 source {file}"))?;
++        // Parser and extraction changes shipped in another CLI version must
++        // not reuse otherwise-valid facts from an older implementation.
++        let key = cache_dir.join(format!(
++            "{}-{}-{}.json",
++            env!("CARGO_PKG_VERSION"),
++            ext,
++            hash(&bytes)
++        ));
++        let cached = fs::read(&key)
++            .ok()
++            .and_then(|b| serde_json::from_slice::<Vec<Symbol>>(&b).ok());
++        let symbols = match cached {
++            Some(s) => s,
++            None => {
++                let s = parse(source, ext)?;
++                if cache {
++                    fs::create_dir_all(&cache_dir)?;
++                    let mut tmp = tempfile::NamedTempFile::new_in(&cache_dir)?;
++                    serde_json::to_writer(&mut tmp, &s)?;
++                    tmp.persist(&key).map_err(|e| e.error)?;
++                }
++                s
++            }
++        };
++        index.push((file.to_owned(), symbols, source.to_owned()));
++    }
++    let target = target.strip_prefix("./").unwrap_or(target);
++    let mut result = Vec::new();
++    for (file, symbols, _) in &index {
++        for symbol in symbols {
++            if symbol.name != target && file != target {
++                continue;
++            }
++            let mut callers = BTreeSet::new();
++            let mut tests = BTreeSet::new();
++            for (other_file, others, source) in &index {
++                for other in others {
++                    let location = format!("{}:{}:{}", other_file, other.line, other.name);
++                    if other.calls.iter().any(|c| terminal_name(c) == symbol.name) {
++                        callers.insert(location.clone());
++                    }
++                    if (is_test(other_file, &other.name, &other.body)
++                        || (other.line > 1
++                            && source
++                                .lines()
++                                .nth(other.line - 2)
++                                .is_some_and(|l| l.trim() == "#[test]")))
++                        && (other.calls.iter().any(|c| terminal_name(c) == symbol.name)
++                            || other.name.contains(&symbol.name)
++                            || source.lines().any(|l| {
++                                (l.trim_start().starts_with("import ")
++                                    || l.trim_start().starts_with("from ")
++                                    || l.trim_start().starts_with("use "))
++                                    && l.contains(&symbol.name)
++                            }))
++                    {
++                        tests.insert(location);
++                    }
++                }
++            }
++            let commit = git(root, &["log", "-1", "--format=%H", "--", file])
++                .ok()
++                .and_then(|b| String::from_utf8(b).ok())
++                .filter(|s| !s.trim().is_empty())
++                .map(|s| s.trim().to_owned());
++            let mut symbol = symbol.clone();
++            if !include_body {
++                symbol.body.clear();
++            }
++            result.push(Card {
++                trimmed: false,
++                symbol,
++                file: file.clone(),
++                callers_count: callers.len(),
++                callers: callers.into_iter().take(5).collect(),
++                tests: tests.into_iter().collect(),
++                last_change: commit,
++            });
++        }
++    }
++    if result.is_empty() {
++        bail!("no supported symbol or path matches {target:?}");
++    }
++    Ok(result)
++}
++fn render(cards: &[Card], json: bool) -> Result<String> {
++    if json {
++        return Ok(serde_json::to_string(cards)?);
++    }
++    let mut rendered = Vec::new();
++    for card in cards {
++        let symbol = &card.symbol;
++        let mut output = format!(
++            "{}{} [{}]\n{}\n{}:{}\ncalls: {}\ncallers: {} ({})\ntests: {}\nlast-change: {}\nbody-hash: {}",
++            symbol.name,
++            if card.trimmed { " (trimmed)" } else { "" },
++            symbol.kind,
++            symbol.signature,
++            card.file,
++            symbol.line,
++            symbol.calls.join(", "),
++            card.callers_count,
++            card.callers.join(", "),
++            card.tests.join(", "),
++            card.last_change.as_deref().unwrap_or("uncommitted"),
++            symbol.body_hash,
++        );
++        if !symbol.body.is_empty() {
++            output.push('\n');
++            output.push_str(&symbol.body);
++        }
++        rendered.push(output);
++    }
++    Ok(rendered.join("\n\n"))
++}
++fn bounded(mut cards: Vec<Card>, budget: Option<usize>, json: bool) -> Result<String> {
++    // A byte is a conservative upper bound on tokens, independent of model tokenizer.
++    loop {
++        let output = render(&cards, json)?;
++        if budget.is_none_or(|n| output.len() < n) {
++            return Ok(output);
++        }
++        for card in &mut cards {
++            card.trimmed = true;
++        }
++        if cards.iter().any(|c| !c.symbol.body.is_empty()) {
++            for c in &mut cards {
++                c.symbol.body.clear();
++            }
++        } else if cards
++            .iter()
++            .any(|c| !c.tests.is_empty() || !c.callers.is_empty())
++        {
++            for c in &mut cards {
++                c.tests.clear();
++                c.callers.clear();
++            }
++        } else if cards
++            .iter()
++            .any(|c| !c.symbol.signature.is_empty() || !c.symbol.calls.is_empty())
++        {
++            for c in &mut cards {
++                c.symbol.signature.clear();
++                c.symbol.calls.clear();
++            }
++        } else if cards.len() > 1 {
++            cards.pop();
++        } else {
++            bail!(
++                "budget too small for card identity and hashes (need at least {} tokens)",
++                output.len() + 1
++            );
++        }
++    }
++}
++pub fn run(
++    target: &str,
++    budget: Option<usize>,
++    body: bool,
++    json: bool,
++    dry_run: bool,
++) -> Result<()> {
++    let cwd = std::env::current_dir()?;
++    let root = String::from_utf8(git(&cwd, &["rev-parse", "--show-toplevel"])?)?;
++    let root = Path::new(root.strip_suffix('\n').unwrap_or(&root));
++    let target_path = cwd.join(target);
++    let target_path = if target_path.is_file() {
++        target_path.canonicalize()?
++    } else {
++        std::path::PathBuf::from(target)
++    };
++    let target = target_path
++        .strip_prefix(root)
++        .ok()
++        .and_then(|p| p.to_str())
++        .unwrap_or(target);
++    println!(
++        "{}",
++        bounded(cards(root, target, body, !dry_run)?, budget, json)?
++    );
++    Ok(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn fixture() -> tempfile::TempDir {
++        let dir = tempfile::tempdir().unwrap();
++        git(dir.path(), &["init", "--quiet"]).unwrap();
++        for (ext, source) in [
++            ("ts", include_str!("../tests/fixtures/card/sample.ts")),
++            ("py", include_str!("../tests/fixtures/card/sample.py")),
++            ("rs", include_str!("../tests/fixtures/card/sample.rs")),
++            ("go", include_str!("../tests/fixtures/card/sample.go")),
++        ] {
++            fs::write(dir.path().join(format!("sample.{ext}")), source).unwrap();
++        }
++        dir
++    }
++    #[test]
++    fn unmerged_index_stages_produce_one_card_per_symbol() {
++        use std::{io::Write, process::Stdio};
++        let dir = tempfile::tempdir().unwrap();
++        git(dir.path(), &["init", "--quiet"]).unwrap();
++        fs::write(
++            dir.path().join("sample.py"),
++            "def target():\n    helper()\n",
++        )
++        .unwrap();
++        let object =
++            String::from_utf8(git(dir.path(), &["hash-object", "-w", "sample.py"]).unwrap())
++                .unwrap();
++        let mut index = Command::new("git")
++            .current_dir(dir.path())
++            .args(["update-index", "--index-info"])
++            .stdin(Stdio::piped())
++            .spawn()
++            .unwrap();
++        let stages: String = (1..=3)
++            .map(|stage| format!("100644 {} {stage}\tsample.py\n", object.trim()))
++            .collect();
++        index
++            .stdin
++            .take()
++            .unwrap()
++            .write_all(stages.as_bytes())
++            .unwrap();
++        assert!(index.wait().unwrap().success());
++        let files = git(dir.path(), &["ls-files", "-z", "--cached"]).unwrap();
++        assert_eq!(
++            files.split(|b| *b == 0).filter(|b| !b.is_empty()).count(),
++            3
++        );
++        let result = cards(dir.path(), "target", true, false).unwrap();
++        assert_eq!(result.len(), 1);
++        assert_eq!(result[0].file, "sample.py");
++        assert_eq!(result[0].symbol.calls, ["helper"]);
++    }
++
++    #[test]
++    fn legacy_and_other_version_caches_do_not_override_parser_facts() {
++        let dir = tempfile::tempdir().unwrap();
++        git(dir.path(), &["init", "--quiet"]).unwrap();
++        let source = "def target():\n    helper()\n";
++        fs::write(dir.path().join("sample.py"), source).unwrap();
++        let mut stale = parse(source, "py").unwrap();
++        stale[0].calls = vec!["stale_parser_fact".into()];
++        stale[0].body_hash = "stale-body-hash".into();
++        let cache = dir.path().join(".git/locus-card-v1");
++        fs::create_dir(&cache).unwrap();
++        let digest = hash(source.as_bytes());
++        for name in [
++            format!("py-{digest}.json"),
++            format!("{}-other-py-{digest}.json", env!("CARGO_PKG_VERSION")),
++        ] {
++            fs::write(cache.join(name), serde_json::to_vec(&stale).unwrap()).unwrap();
++        }
++        let result = cards(dir.path(), "target", true, true).unwrap();
++        assert_eq!(result.len(), 1);
++        assert_eq!(result[0].symbol.calls, ["helper"]);
++        assert_eq!(
++            result[0].symbol.body_hash,
++            hash(source.trim_end().as_bytes())
++        );
++        let current = cache.join(format!("{}-py-{digest}.json", env!("CARGO_PKG_VERSION")));
++        let cached: Vec<Symbol> = serde_json::from_slice(&fs::read(current).unwrap()).unwrap();
++        assert_eq!(cached[0].calls, ["helper"]);
++    }
++
++    #[test]
++    fn languages_relationships_cache_and_invalidation() {
++        let dir = fixture();
++        let first = cards(dir.path(), "target", true, true).unwrap();
++        assert_eq!(first.len(), 4);
++        for card in &first {
++            assert_eq!(card.symbol.calls, ["helper"]);
++            assert_eq!(card.callers_count, 4);
++            assert_eq!(card.tests.len(), 4);
++            assert!(card.symbol.signature.contains("target"));
++            assert_eq!(card.symbol.body_hash.len(), 64);
++            assert!(card.last_change.is_none());
++        }
++        let cache = dir.path().join(".git/locus-card-v1");
++        let entries: Vec<_> = fs::read_dir(&cache)
++            .unwrap()
++            .map(|e| {
++                let p = e.unwrap().path();
++                let modified = fs::metadata(&p).unwrap().modified().unwrap();
++                (p, modified)
++            })
++            .collect();
++        assert_eq!(entries.len(), 4);
++        assert_eq!(
++            render(&first, true).unwrap(),
++            render(&cards(dir.path(), "target", true, true).unwrap(), true).unwrap()
++        );
++        for (path, modified) in entries {
++            assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), modified);
++        }
++        fs::write(
++            dir.path().join("sample.py"),
++            "def target(x):\n    return changed(x)\n",
++        )
++        .unwrap();
++        let next = cards(dir.path(), "sample.py", false, true).unwrap();
++        assert_eq!(next[0].symbol.calls, ["changed"]);
++        assert_ne!(
++            next[0].symbol.body_hash,
++            first
++                .iter()
++                .find(|c| c.file == "sample.py")
++                .unwrap()
++                .symbol
++                .body_hash
++        );
++        assert!(cards(dir.path(), "absent", false, true).is_err());
++    }
++    #[test]
++    fn budget_preserves_json_and_identity() {
++        let dir = fixture();
++        let all = cards(dir.path(), "target", true, false).unwrap();
++        let full = render(&all, true).unwrap().len();
++        let output = bounded(all, Some(full - 1), true).unwrap();
++        assert!(output.len() < full - 1);
++        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
++        assert_eq!(value[0]["name"], "target");
++        assert_eq!(value[0]["body"], "");
++        assert!(bounded(
++            cards(dir.path(), "target", true, false).unwrap(),
++            Some(1),
++            true
++        )
++        .is_err());
++        assert!(!dir.path().join(".git/locus-card-v1").exists());
++    }
++    #[test]
++    fn nested_calls_are_owned_by_their_function() {
++        let parsed = parse(
++            "def outer():\n    def inner():\n        hidden()\n    visible()\n",
++            "py",
++        )
++        .unwrap();
++        assert_eq!(parsed[0].calls, ["visible"]);
++        assert_eq!(parsed[1].calls, ["hidden"]);
++    }
++}
++
++#[cfg(test)]
++mod additional_tests {
++    use super::*;
++    #[test]
++    fn methods_arrow_functions_and_tsx() {
++        for (ext, source, expected) in [
++            ("ts", "const arrow = (x: number) => helper(x);", "arrow"),
++            (
++                "tsx",
++                "function View() { return <div>{helper()}</div>; }",
++                "View",
++            ),
++            (
++                "go",
++                "package p\ntype T struct {}\nfunc (t T) Method() { helper() }",
++                "Method",
++            ),
++            (
++                "rs",
++                "struct T; impl T { fn method(&self) { helper(); } }",
++                "method",
++            ),
++            (
++                "py",
++                "class T:\n    def method(self):\n        helper()\n",
++                "method",
++            ),
++        ] {
++            let parsed = parse(source, ext).unwrap();
++            let symbol = parsed.iter().find(|s| s.name == expected).unwrap();
++            assert_eq!(symbol.calls, ["helper"]);
++        }
++    }
++    #[test]
++    fn cli_flags_and_read_only_classification() {
++        use clap::Parser;
++        let cli = crate::Cli::try_parse_from([
++            "locus", "card", "symbol", "--body", "--json", "--budget", "500",
++        ])
++        .unwrap();
++        assert!(cli.json);
++        assert!(matches!(
++            cli.command,
++            crate::Commands::Card {
++                body: true,
++                budget: Some(500),
++                ..
++            }
++        ));
++    }
++    #[test]
++    fn imports_and_top_five_callers_refresh() {
++        let dir = tempfile::tempdir().unwrap();
++        git(dir.path(), &["init", "--quiet"]).unwrap();
++        fs::write(dir.path().join("main.py"), "def target():\n    pass\n").unwrap();
++        fs::write(
++            dir.path().join("test_import.py"),
++            "from main import target\ndef test_alias():\n    pass\n",
++        )
++        .unwrap();
++        let first = cards(dir.path(), "target", false, true).unwrap();
++        assert_eq!(first[0].tests.len(), 1);
++        let source: String = (0..7)
++            .map(|n| format!("def caller{n}():\n    target()\n"))
++            .collect();
++        fs::write(dir.path().join("callers.py"), source).unwrap();
++        let next = cards(dir.path(), "target", false, true).unwrap();
++        assert_eq!(next[0].callers_count, 7);
++        assert_eq!(next[0].callers.len(), 5);
++        let full = render(&next, false).unwrap().len();
++        let trimmed = bounded(next, Some(full), false).unwrap();
++        assert!(trimmed.len() < full);
++        assert!(trimmed.contains("target"));
++    }
++}
++
++#[cfg(test)]
++mod call_ownership_tests {
++    use super::*;
++    #[test]
++    fn local_initializer_calls_belong_to_the_function() {
++        let symbols = parse("function outer() { const value = helper(); const inner = () => hidden(); return value; }", "ts").unwrap();
++        assert_eq!(symbols.len(), 2);
++        assert_eq!(symbols[0].calls, ["helper"]);
++        assert_eq!(symbols[1].calls, ["hidden"]);
++    }
++}
++
++#[cfg(test)]
++mod isolation_tests {
++    use super::*;
++
++    #[test]
++    fn git_location_overrides_do_not_escape_repository() {
++        const CHILD: &str = "LOCUS_CARD_GIT_ISOLATION_CHILD";
++        if std::env::var_os(CHILD).is_some() {
++            let dir = tempfile::tempdir().unwrap();
++            git(dir.path(), &["init", "--quiet"]).unwrap();
++            fs::write(dir.path().join("local.py"), "def local():\n    pass\n").unwrap();
++            let root =
++                String::from_utf8(git(dir.path(), &["rev-parse", "--show-toplevel"]).unwrap())
++                    .unwrap();
++            assert_eq!(
++                Path::new(root.trim()).canonicalize().unwrap(),
++                dir.path().canonicalize().unwrap()
++            );
++            assert_eq!(
++                cards(dir.path(), "local", false, false).unwrap()[0].file,
++                "local.py"
++            );
++            return;
++        }
++        let other = tempfile::tempdir().unwrap();
++        git(other.path(), &["init", "--quiet"]).unwrap();
++        fs::write(
++            other.path().join("external.py"),
++            "def external():\n    pass\n",
++        )
++        .unwrap();
++        let out = Command::new(std::env::current_exe().unwrap())
++            .args([
++                "--exact",
++                "card::isolation_tests::git_location_overrides_do_not_escape_repository",
++            ])
++            .env(CHILD, "1")
++            .env("GIT_DIR", other.path().join(".git"))
++            .env("GIT_COMMON_DIR", other.path().join(".git"))
++            .env("GIT_WORK_TREE", other.path())
++            .env("GIT_INDEX_FILE", other.path().join(".git/index"))
++            .env("GIT_OBJECT_DIRECTORY", other.path().join(".git/objects"))
++            .output()
++            .unwrap();
++        assert!(
++            out.status.success(),
++            "{}\n{}",
++            String::from_utf8_lossy(&out.stdout),
++            String::from_utf8_lossy(&out.stderr)
++        );
++        assert!(String::from_utf8_lossy(&out.stdout).contains("1 passed"));
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn source_symlinks_and_replaced_parent_directories_are_not_read() {
++        use std::os::unix::fs::symlink;
++        let dir = tempfile::tempdir().unwrap();
++        let outside = tempfile::tempdir().unwrap();
++        git(dir.path(), &["init", "--quiet"]).unwrap();
++        fs::write(dir.path().join("local.py"), "def local():\n    pass\n").unwrap();
++        fs::create_dir(dir.path().join("nested")).unwrap();
++        fs::write(
++            dir.path().join("nested/external.py"),
++            "def external():\n    pass\n",
++        )
++        .unwrap();
++        git(dir.path(), &["add", "nested/external.py"]).unwrap();
++        fs::remove_dir_all(dir.path().join("nested")).unwrap();
++        // Invalid source must never be read through either kind of symlink.
++        fs::write(outside.path().join("external.py"), [0xff]).unwrap();
++        symlink(outside.path(), dir.path().join("nested")).unwrap();
++        symlink(
++            outside.path().join("external.py"),
++            dir.path().join("direct.py"),
++        )
++        .unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        assert!(source_path(&root, "nested/external.py").is_none());
++        assert!(source_path(&root, "direct.py").is_none());
++        assert!(source_path(&root, "../external.py").is_none());
++        assert_eq!(cards(dir.path(), "local", false, false).unwrap().len(), 1);
++        assert!(cards(dir.path(), "external", false, false).is_err());
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn history_does_not_execute_configured_signature_program() {
++        use std::{io::Write, os::unix::fs::PermissionsExt, process::Stdio};
++        let dir = tempfile::tempdir().unwrap();
++        git(dir.path(), &["init", "--quiet"]).unwrap();
++        fs::write(dir.path().join("local.py"), "def local():\n    pass\n").unwrap();
++        git(dir.path(), &["add", "local.py"]).unwrap();
++        let tree = String::from_utf8(git(dir.path(), &["write-tree"]).unwrap()).unwrap();
++        let signed = format!("tree {}\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n synthetic\n -----END PGP SIGNATURE-----\n\nfixture\n", tree.trim());
++        let mut writer = Command::new("git")
++            .current_dir(dir.path())
++            .args(["hash-object", "-t", "commit", "-w", "--stdin"])
++            .stdin(Stdio::piped())
++            .stdout(Stdio::piped())
++            .spawn()
++            .unwrap();
++        writer
++            .stdin
++            .take()
++            .unwrap()
++            .write_all(signed.as_bytes())
++            .unwrap();
++        let output = writer.wait_with_output().unwrap();
++        assert!(output.status.success());
++        let commit = String::from_utf8(output.stdout).unwrap();
++        git(dir.path(), &["update-ref", "HEAD", commit.trim()]).unwrap();
++        let program = dir.path().join("signature-check");
++        fs::write(
++            &program,
++            "#!/bin/sh\ntouch signature-was-executed\nexit 1\n",
++        )
++        .unwrap();
++        fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
++        git(
++            dir.path(),
++            &["config", "gpg.program", program.to_str().unwrap()],
++        )
++        .unwrap();
++        git(dir.path(), &["config", "log.showSignature", "true"]).unwrap();
++        let result = cards(dir.path(), "local", false, false).unwrap();
++        assert_eq!(result[0].last_change.as_deref(), Some(commit.trim()));
++        assert!(!dir.path().join("signature-was-executed").exists());
++    }
++}
+diff --git a/crates/locus-cli/src/main.rs b/crates/locus-cli/src/main.rs
+index 53b21d6d2becffed1a8d9d7590464a7508fdf3ee..3f7e00f8ea83f80d2d78c8ed570a27a3b492f9e0 100644
+--- a/crates/locus-cli/src/main.rs
++++ b/crates/locus-cli/src/main.rs
+@@ -11,6 +11,7 @@
+ #[macro_use]
+ mod stdout;
+ 
++mod card;
+ mod cmd_doctor;
+ mod cmd_status;
+ mod config_rewrite;
+@@ -74,6 +75,7 @@ Commands are grouped (in display order):\n  \
+   Approvals     approve · notify\n  \
+   Audit         events · forensics\n  \
+   Local UI      serve · dashboard\n  \
++  Code          card\n  \
+   Maintenance   completion · topic · version\n\n\
+ Topic help:  locus topic <name>  or  locus help topic <name>\n  \
+   Topics: dashboard · forensics · serve · goal · verify · agent · mcp · http · upstream · adapter"
+@@ -94,6 +96,17 @@ struct Cli {
+ 
+ #[derive(Subcommand, Debug)]
+ enum Commands {
++    /// Show syntax-based code cards for a symbol or repository-relative path
++    #[command(next_help_heading = "Code navigation")]
++    Card {
++        target: String,
++        /// Conservative token budget (one UTF-8 byte per token)
++        #[arg(long)]
++        budget: Option<usize>,
++        /// Include source in each card
++        #[arg(long)]
++        body: bool,
++    },
+     // ───────────────────────────── Setup ─────────────────────────────
+     /// Initialize ~/.locus (or LOCUS_HOME)
+     #[command(next_help_heading = "Setup")]
+@@ -1560,6 +1573,11 @@ fn run() -> Result<()> {
+         Commands::Renew => cmd_renew(json, dry_run),
+         Commands::Engagement(sub) => cmd_engagement(sub, json, dry_run),
+         Commands::Graph(sub) => cmd_graph(sub, json, dry_run),
++        Commands::Card {
++            target,
++            budget,
++            body,
++        } => card::run(&target, budget, body, json, dry_run),
+         Commands::Whoami => cmd_whoami(json),
+         Commands::FleetFeed => fleet_feed::run(),
+         Commands::FleetDenials { cursor } => fleet_denials::run(cursor),
+@@ -1772,6 +1790,7 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
+         | Commands::FleetFeed
+         | Commands::FleetDenials { .. }
+         | Commands::Whoami
++        | Commands::Card { .. }
+         | Commands::Autopin(AutopinCmd::Suggest { apply: false })
+         | Commands::Status { .. }
+         | Commands::Watch { .. }
+diff --git a/crates/locus-cli/tests/code_card.rs b/crates/locus-cli/tests/code_card.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ecf9217835dd6336a4b05bc7c8fd7283cc2da1bd
+--- /dev/null
++++ b/crates/locus-cli/tests/code_card.rs
+@@ -0,0 +1,145 @@
++//! Exercise code cards through the public CLI from a nested repository cwd.
++use serde_json::Value;
++use std::{
++    fs,
++    path::PathBuf,
++    process::{Command, Output},
++};
++
++struct Fixture {
++    home: tempfile::TempDir,
++    repo: PathBuf,
++}
++
++impl Fixture {
++    fn new() -> Self {
++        let home = tempfile::tempdir().unwrap();
++        // Preserve Git output path whitespace as well as NUL-delimited filenames.
++        let repo = home.path().join("repo with space\n");
++        fs::create_dir_all(repo.join("nested")).unwrap();
++        fs::create_dir(repo.join("src")).unwrap();
++        let out = Command::new("git")
++            .args(["init", "--quiet"])
++            .current_dir(&repo)
++            .env_clear()
++            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
++            .env("HOME", home.path())
++            .output()
++            .unwrap();
++        assert!(
++            out.status.success(),
++            "{}",
++            String::from_utf8_lossy(&out.stderr)
++        );
++        fs::write(repo.join("src/module\nfixture.py"),
++            "def helper(x):\n    return x + 1\n\ndef target(x):\n    return helper(x)\n\ndef test_target():\n    return target(1)\n").unwrap();
++        Self { home, repo }
++    }
++
++    fn run(&self, args: &[&str]) -> Output {
++        Command::new(env!("CARGO_BIN_EXE_locus"))
++            .arg("card")
++            .args(args)
++            .current_dir(self.repo.join("nested"))
++            .env_clear()
++            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
++            .env("HOME", self.home.path())
++            .env("LOCUS_HOME", self.home.path().join("locus"))
++            .env("NO_COLOR", "1")
++            .output()
++            .unwrap()
++    }
++
++    fn json(&self, args: &[&str]) -> Value {
++        let out = self.run(args);
++        assert!(
++            out.status.success(),
++            "{}",
++            String::from_utf8_lossy(&out.stderr)
++        );
++        assert!(out.stderr.is_empty());
++        serde_json::from_slice(&out.stdout).unwrap()
++    }
++
++    fn cache(&self) -> PathBuf {
++        self.repo.join(".git/locus-card-v1")
++    }
++}
++
++#[test]
++fn nested_symbol_and_newline_file_targets_return_code_and_relationships() {
++    let fixture = Fixture::new();
++    let cards = fixture.json(&["target", "--body", "--json"]);
++    assert_eq!(cards.as_array().unwrap().len(), 1);
++    let card = &cards[0];
++    assert_eq!(card["name"], "target");
++    assert_eq!(card["file"], "src/module\nfixture.py");
++    assert_eq!(card["calls"], serde_json::json!(["helper"]));
++    assert_eq!(card["callers_count"], 1);
++    assert_eq!(card["tests"].as_array().unwrap().len(), 1);
++    assert!(card["body"].as_str().unwrap().contains("return helper(x)"));
++    assert_eq!(card["body_hash"].as_str().unwrap().len(), 64);
++    assert!(card["last_change"].is_null());
++    let file = fixture.json(&["../src/module\nfixture.py", "--json"]);
++    assert_eq!(file.as_array().unwrap().len(), 3);
++    assert!(file.as_array().unwrap().iter().all(|c| c["body"] == ""));
++    let text = fixture.run(&["target", "--body"]);
++    assert!(text.status.success());
++    assert!(String::from_utf8_lossy(&text.stdout).contains("return helper(x)"));
++}
++
++#[test]
++fn dry_run_avoids_cache_and_normal_run_creates_it() {
++    let fixture = Fixture::new();
++    let preview = fixture.json(&["target", "--json", "--dry-run"]);
++    assert_eq!(preview[0]["name"], "target");
++    assert!(!fixture.cache().exists());
++    assert!(!fixture.home.path().join("locus").exists());
++    let normal = fixture.json(&["target", "--json"]);
++    assert_eq!(preview, normal);
++    assert!(fs::read_dir(fixture.cache()).unwrap().next().is_some());
++    assert!(!fixture.home.path().join("locus").exists());
++}
++
++#[test]
++fn budget_counts_final_newline_and_errors_stay_machine_readable() {
++    let fixture = Fixture::new();
++    let full = fixture.run(&["target", "--body", "--json"]);
++    assert!(full.status.success());
++    let budget = full.stdout.len() - 1;
++    let out = fixture.run(&[
++        "target",
++        "--body",
++        "--json",
++        "--budget",
++        &budget.to_string(),
++    ]);
++    assert!(
++        out.status.success(),
++        "{}",
++        String::from_utf8_lossy(&out.stderr)
++    );
++    assert_eq!(out.stdout.last(), Some(&b'\n'));
++    assert!(
++        out.stdout.len() <= budget,
++        "final newline exceeds byte budget"
++    );
++    let trimmed: Value = serde_json::from_slice(&out.stdout).unwrap();
++    assert_eq!(trimmed[0]["trimmed"], true);
++    assert_eq!(trimmed[0]["name"], "target");
++    assert_eq!(
++        trimmed[0]["body_hash"],
++        serde_json::from_slice::<Value>(&full.stdout).unwrap()[0]["body_hash"]
++    );
++    for args in [
++        vec!["absent", "--json"],
++        vec!["target", "--json", "--budget", "1"],
++    ] {
++        let out = fixture.run(&args);
++        assert!(!out.status.success());
++        assert_eq!(out.stdout, out.stderr);
++        let error: Value = serde_json::from_slice(&out.stdout).unwrap();
++        assert_eq!(error["ok"], false);
++        assert!(error["error"].as_str().is_some_and(|s| !s.is_empty()));
++    }
++}
+diff --git a/crates/locus-cli/tests/fixtures/card/sample.go b/crates/locus-cli/tests/fixtures/card/sample.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..10be82da814c98ebd097fa688d2b61af1b4eef6b
+--- /dev/null
++++ b/crates/locus-cli/tests/fixtures/card/sample.go
+@@ -0,0 +1,4 @@
++package fixture
++func helper(x int) int { return x + 1 }
++func target(x int) int { return helper(x) }
++func Test_target() int { return target(1) }
+diff --git a/crates/locus-cli/tests/fixtures/card/sample.py b/crates/locus-cli/tests/fixtures/card/sample.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d1374e26919db9a8e028cef0cafcb182cbbad48c
+--- /dev/null
++++ b/crates/locus-cli/tests/fixtures/card/sample.py
+@@ -0,0 +1,8 @@
++def helper(x):
++    return x + 1
++
++def target(x):
++    return helper(x)
++
++def test_target():
++    return target(1)
+diff --git a/crates/locus-cli/tests/fixtures/card/sample.rs b/crates/locus-cli/tests/fixtures/card/sample.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c989917a010bf3a646ebd292507e758d11bde470
+--- /dev/null
++++ b/crates/locus-cli/tests/fixtures/card/sample.rs
+@@ -0,0 +1,4 @@
++fn helper(x: i32) -> i32 { x + 1 }
++fn target(x: i32) -> i32 { helper(x) }
++#[test]
++fn test_target() { target(1); }
+diff --git a/crates/locus-cli/tests/fixtures/card/sample.ts b/crates/locus-cli/tests/fixtures/card/sample.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3ccf16e0f8589463622e73d283271d48ed7efc40
+--- /dev/null
++++ b/crates/locus-cli/tests/fixtures/card/sample.ts
+@@ -0,0 +1,3 @@
++export function helper(x: number): number { return x + 1; }
++export function target(x: number): number { return helper(x); }
++export function test_target(): number { return target(1); }
+diff --git a/crates/locus-cli/tests/integration.rs b/crates/locus-cli/tests/integration.rs
+index 10fb072a795a49c8fab255fd964c1fd0fb3c8d85..bf19db1b2cd6bdb4988e6d53d1ab87a7ac843f17 100644
+--- a/crates/locus-cli/tests/integration.rs
++++ b/crates/locus-cli/tests/integration.rs
+@@ -16,6 +16,8 @@ mod autopin_learned_guard;
+ mod autopin_suggest;
+ #[path = "binding_add_idempotent.rs"]
+ mod binding_add_idempotent;
++#[path = "code_card.rs"]
++mod code_card;
+ #[path = "coverage_home_isolation.rs"]
+ mod coverage_home_isolation;
+ #[path = "dead_broker_hint.rs"]
+diff --git a/docs/e2e-graph-lifecycle.md b/docs/e2e-graph-lifecycle.md
+index 4a832fa871b975aa1b826698ddc13e0ea6719153..d3af4067bd74bbcd2ce0c6635b86595425699b0b 100644
+--- a/docs/e2e-graph-lifecycle.md
++++ b/docs/e2e-graph-lifecycle.md
+@@ -32,6 +32,11 @@ script-owned temporary directory, not a setting for choosing a Locus home.
+    `locus-graph-imp.*` directory before removing it, and preserve its parent
+    and unrelated files.
+ 
++The suite also checks creation and exit cleanup unconditionally in section 2j,
++using a separate temporary parent and both successful and failing exits. It
++checks that unrelated files survive, and the focused graph test verifies that
++the lifecycle probe detects a missing cleanup.
++
+ Section 2i rehearses the same create-use-cleanup path earlier in the suite: a
+ subshell selects a temporary root inside the main home whose name contains
+ spaces, runs `create_graph_home` and `init` with `LOCUS_HOME` set to the new
+diff --git a/docs/e2e-security-directories.md b/docs/e2e-security-directories.md
+index 6e70c8632fc3da1adfaeae7bda994697887a8eb1..db08e1c15468bbb857998b9db8dec712a376f20b 100644
+--- a/docs/e2e-security-directories.md
++++ b/docs/e2e-security-directories.md
+@@ -38,7 +38,14 @@ ordinary failure. The security directories are created at the start of section
+ separate security home and workspace inside a custom temporary directory whose
+ name contains spaces. It verifies that they are distinct; its exit trap removes
+ both, and the parent checks their removal and preservation of the supplied
+-temporary directory.
++temporary directory. Sections 2c2 and 2e also exercise the security home and
++workspace separately beneath doubled-space roots while preserving word-split
++decoys. The security-home rehearsal writes and reads a nested binding-store
++path before its exit trap removes the populated fixture.
++
++Run `node --test scripts/e2e-security-home-selection.test.mjs` for the actual
++rehearsal and section-24 selection checks, including either relocated fixture
++and the unset/empty `TMPDIR` fallback.
+ 
+ A termination that prevents the trap from running or a removal error can leave
+ files behind. A failure before trap installation can leave the main home, but
+diff --git a/docs/e2e-temp-resource-types.md b/docs/e2e-temp-resource-types.md
+index 984e9bc3160794832b59b03fcc04c69071d406dc..2ba0bff91213551ee25d2a9db71a7111ff9d6262 100644
+--- a/docs/e2e-temp-resource-types.md
++++ b/docs/e2e-temp-resource-types.md
+@@ -37,9 +37,13 @@ containment beneath the controlled `TMPDIR` and fail-closed selection,
+ `node --test scripts/e2e-home-spaced-tmpdir.test.mjs` for `LOCUS_HOME`
+ allocation beneath a space-containing `TMPDIR`, and
+ `node --test scripts/e2e-graph-home-selection.test.mjs` for the `GRAPH_HOME`
+-equivalent, and
++equivalent,
+ `node --test scripts/e2e-security-workspace-spaced-tmpdir.test.mjs` for the
+-`SECURITY_WS` space-containing `TMPDIR` checks.
++`SECURITY_WS` space-containing `TMPDIR` checks, and
++`node --test scripts/e2e-workspace-spaced-tmpdir.test.mjs` for the `WS_DIR`
++equivalent.
++Run `node --test scripts/e2e-security-home-selection.test.mjs` for the
++security-home rehearsal and both actual section-24 fixture selection checks.
+ Run `scripts/tests/e2e-tmpdir.sh` to exercise the full suite under a custom
+ `TMPDIR`, including an injected failure after workspace creation.
+ See the [security directories](e2e-security-directories.md) for the
+diff --git a/docs/e2e-test-map.md b/docs/e2e-test-map.md
+index 0763690d1d7e5d16734550fae44bc5f9000e8f3c..3908ad7c8e41a154ef1035298ce92d7edeed3611 100644
+--- a/docs/e2e-test-map.md
++++ b/docs/e2e-test-map.md
+@@ -34,10 +34,11 @@ fragment alone is not equivalent to running the suite.
+ | 2g | Suite home creation under a space-containing `TMPDIR` | Check the home fixture respects a path with spaces and is removed on exit. |
+ | 2h | `LOCUS_HOME` allocation and `init` under a space-containing `TMPDIR` | Check the allocated home reaches the binary as one path and is removed on exit, sparing a word-split sibling of the root. |
+ | 2c | Security home creation under a custom `TMPDIR` | Check the security fixture respects a path with spaces and is removed on exit. |
+-| 2d | Workspace creation under a space-containing `TMPDIR` | Check the workspace fixture respects a path with spaces and is removed on exit. |
++| 2d | Workspace creation under a space-containing `TMPDIR` | Check the workspace fixture respects a path with spaces and is removed on exit, sparing a word-split sibling of the root. |
+ | 2e | `SECURITY_WS` creation under a space-containing `TMPDIR` | Check the security workspace fixture respects a path with spaces and is removed on exit, sparing a word-split sibling of the root. |
+ | 2f | `init` inside a home under a space-containing `TMPDIR` | Check the binary receives the spaced home as one path, writes only inside it, and removes it on exit. |
+ | 2i | `GRAPH_HOME` creation under a space-containing `TMPDIR` | Check the graph home fixture respects a path with spaces and is removed on exit. |
++| 2j | Graph home creation under a custom `TMPDIR` | Check creation and exit cleanup on success and failure while preserving unrelated files. |
+ | 2a | `quickstart`, `doctor`, `doctor --json` | Check fresh-install advisories and reject invalid workspace policy. |
+ | 2b | `binding add` twice, then with conflicting content | Verify an identical add preserves the file and timestamp and a conflict is rejected. |
+ | 3 | `init --with-samples`, `pin`, `whoami --json`, `exec` | Check sample pins, exclusive identity, credential presence metadata, binding add idempotence and missing-reference warnings. |
+diff --git a/llms-full.txt b/llms-full.txt
+index 2b30cb37bd69a0620b1fa7c89862f9318890a7c0..1609e5c6db3e2fa3060b6378a9fb9b59a9bcf818 100644
+--- a/llms-full.txt
++++ b/llms-full.txt
+@@ -24,6 +24,7 @@ listed verbatim so an agent can jump straight to the right document.
+   - Development
+   - Part of the Ashlr ecosystem
+   - Contributing
++  - Code cards
+   - License
+ 
+ ## docs/adapter-sdk.md
+diff --git a/scripts/check-e2e-dropin.sh b/scripts/check-e2e-dropin.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..b00cf39ab4cd177106807a30f0a883560a10f77d
+--- /dev/null
++++ b/scripts/check-e2e-dropin.sh
+@@ -0,0 +1,86 @@
++#!/usr/bin/env bash
++# Proves scripts/e2e.sh's drop-in mechanism: a temp step file runs (in sorted
++# order, non-.sh files ignored) and a failing one fails the run. Needs no
++# built binaries.
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++tmp="$(mktemp -d "${TMPDIR:-/tmp}/locus-dropin.XXXXXX")"
++trap 'rm -rf "$tmp"' EXIT
++
++fail() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
++
++# Wiring: e2e.sh sources the runner and calls it after its own steps, before
++# the PASS summary.
++src_line="$(grep -n 'source "\$ROOT/scripts/e2e-dropin.sh"' "$ROOT/scripts/e2e.sh" | cut -d: -f1)"
++run_line="$(grep -n '^e2e_run_dropins$' "$ROOT/scripts/e2e.sh" | cut -d: -f1)"
++pass_line="$(grep -n "e2e PASS" "$ROOT/scripts/e2e.sh" | cut -d: -f1)"
++[[ -n "$src_line" && -n "$run_line" && -n "$pass_line" ]] || fail "e2e.sh does not wire the drop-in runner"
++(( src_line < run_line && run_line < pass_line )) || fail "drop-ins must run before the PASS summary"
++[[ -f "$ROOT/scripts/e2e.d/README.md" ]] || fail "missing scripts/e2e.d/README.md"
++
++# A fresh Bash models e2e.sh's top-level call even when this checker tests the
++# child's status with if/||. Those contexts can suppress errexit inside a
++# function/subshell body on some Bash versions. Steps still share one shell.
++run_dropins() { # dir -> combined output on stdout, status returned
++  bash -euo pipefail -c '
++    ROOT="$1"
++    export ROOT
++    log()  { printf "==> %s\n" "$*"; }
++    ok()   { printf "ok %s\n" "$*"; }
++    skip() { printf "skip %s\n" "$*"; }
++    die()  { printf "FAIL %s\n" "$*" >&2; exit 1; }
++    # shellcheck source=scripts/e2e-dropin.sh
++    source "$ROOT/scripts/e2e-dropin.sh"
++    e2e_run_dropins "$2"
++    echo DROPINS_DONE
++  ' e2e-dropin-check "$ROOT" "$1" 2>&1
++}
++
++# 1. passing steps run, in sorted order; non-.sh files are ignored.
++d1="$tmp/pass"; mkdir "$d1"
++printf '%s\n' '[[ "$dropin_shared" == kept ]] || die "step state lost"' 'ok "step-b"' >"$d1/20-b.sh"
++printf '%s\n' 'dropin_shared=kept' 'ok "step-a"' >"$d1/10-a.sh"
++echo 'ok "step-ignored"' >"$d1/30-notes.txt"
++out="$(run_dropins "$d1")" || fail "passing drop-ins failed: $out"
++grep -q 'ok step-a' <<<"$out" && grep -q 'ok step-b' <<<"$out" || fail "temp step did not run: $out"
++grep -q 'step-ignored' <<<"$out" && fail "non-.sh file ran"
++a_pos="$(grep -n 'ok step-a' <<<"$out" | cut -d: -f1)"
++b_pos="$(grep -n 'ok step-b' <<<"$out" | cut -d: -f1)"
++(( a_pos < b_pos )) || fail "steps ran out of sorted order"
++grep -q DROPINS_DONE <<<"$out" || fail "run did not complete"
++
++# 2. a failing step (die) fails the run and stops later steps.
++d2="$tmp/die"; mkdir "$d2"
++echo 'die "boom"' >"$d2/10-bad.sh"
++echo 'ok "after-bad"' >"$d2/20-after.sh"
++if out="$(run_dropins "$d2")"; then fail "die step did not fail the run"; fi
++grep -q 'after-bad' <<<"$out" && fail "step after a failure still ran"
++
++# 3. a bare failing command (set -e) and an explicit exit also fail the run.
++d3="$tmp/false"; mkdir "$d3"; echo 'false' >"$d3/10-false.sh"
++if run_dropins "$d3" >/dev/null; then fail "failing command did not fail the run"; fi
++d4="$tmp/exit"; mkdir "$d4"; echo 'exit 3' >"$d4/10-exit.sh"
++if run_dropins "$d4" >/dev/null; then fail "exit step did not fail the run"; fi
++
++# 4. empty or missing directory is a no-op.
++d5="$tmp/empty"; mkdir "$d5"
++run_dropins "$d5" | grep -q DROPINS_DONE || fail "empty dir should pass"
++run_dropins "$tmp/missing" | grep -q DROPINS_DONE || fail "missing dir should pass"
++
++# 5. Valid shell filenames stay one argument, including an embedded newline.
++d6="$tmp/spaced dir"; mkdir "$d6"
++printf 'ok "newline-step"\n' >"$d6/10-line"$'\n'"break.sh"
++ln -s "$d1/10-a.sh" "$d6/20-symlink.sh"
++mkdir "$d6/30-directory.sh"
++out="$(run_dropins "$d6")" || fail "newline filename failed: $out"
++grep -q 'ok newline-step' <<<"$out" || fail "newline filename did not run"
++grep -q 'ok step-a' <<<"$out" && fail "symlink step ran"
++grep -q DROPINS_DONE <<<"$out" || fail "newline run did not complete"
++
++# 6. A failed command must stop within the step, before a later success.
++printf 'false\nok "after-false"\n' >"$d3/10-false.sh"
++if out="$(run_dropins "$d3")"; then fail "failure before success did not fail the run"; fi
++grep -q after-false <<<"$out" && fail "commands after failure still ran"
++
++printf 'e2e drop-in check PASS (6 groups)\n'
+diff --git a/scripts/e2e-dropin.sh b/scripts/e2e-dropin.sh
+new file mode 100644
+index 0000000000000000000000000000000000000000..ce58c3f8f5095e1beb9d6723fa66d62c184f2fd9
+--- /dev/null
++++ b/scripts/e2e-dropin.sh
+@@ -0,0 +1,21 @@
++# Sourced by scripts/e2e.sh (and scripts/check-e2e-dropin.sh); not executable.
++# Runs every <dir>/*.sh in sorted order by sourcing it into the caller's shell,
++# so a step can use log/ok/skip/die, locus, and the e2e environment. A step
++# that fails (die, `exit`, or a failing command under set -e) fails the run.
++#
++# Usage: e2e_run_dropins [dir]   (default: E2E_DROPIN_DIR, else scripts/e2e.d)
++e2e_run_dropins() {
++  local dir="${1:-${E2E_DROPIN_DIR:-$ROOT/scripts/e2e.d}}" step
++  local LC_ALL=C
++  [[ -d "$dir" ]] || return 0
++  [[ -r "$dir" && -x "$dir" ]] || { die "cannot enumerate e2e drop-ins"; return 1; }
++  # Bash pathname expansion is sorted and preserves spaces/newlines. Avoid a
++  # find|sort process substitution: its failure cannot reach the caller.
++  for step in "$dir"/*.sh; do
++    # Also handles an unmatched glob; match find -type f by ignoring symlinks.
++    [[ -f "$step" && ! -L "$step" ]] || continue
++    log "drop-in ${step##*/}"
++    # shellcheck disable=SC1090
++    source "$step"
++  done
++}
+diff --git a/scripts/e2e-graph-isolation.test.mjs b/scripts/e2e-graph-isolation.test.mjs
+index 2537246ac1f49012eab902d000e64f63d3c50dfc..b89d18b4e6311099447c49cba981abece70dbc05 100644
+--- a/scripts/e2e-graph-isolation.test.mjs
++++ b/scripts/e2e-graph-isolation.test.mjs
+@@ -15,6 +15,31 @@ const createGraphHome = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[
+ assert.ok(graph.includes('create_graph_home') && cleanup.includes('"${GRAPH_HOME:-}"'));
+ assert.ok(createGraphHome, 'missing create_graph_home function');
+ 
++test('unconditional lifecycle probe detects a missing graph cleanup', (t) => {
++  const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-probe-'));
++  t.after(() => rmSync(fixture, { recursive: true, force: true }));
++  const probe = source.slice(source.indexOf('# Exercise graph home creation'), source.indexOf('# Helper: run locus'));
++  assert.ok(probe.includes('create_graph_home') && probe.includes('e2e_cleanup'));
++
++  for (const broken of [false, true]) {
++    const home = join(fixture, broken ? 'broken' : 'working');
++    mkdirSync(home);
++    const cleanupUnderTest = broken ? cleanup.replace('"${GRAPH_HOME:-}"', '""') : cleanup;
++    const harness = `set -euo pipefail
++LOCUS_HOME="$1"
++log() { :; }
++ok() { :; }
++die() { exit 1; }
++${cleanupUnderTest}
++${createGraphHome}
++${probe}
++`;
++    const result = spawnSync('bash', ['-c', harness, 'graph-probe', home], { encoding: 'utf8' });
++    assert.equal(result.status, broken ? 1 : 0, 'probe must reject a graph home left behind');
++    assert.equal(result.signal, null);
++  }
++});
++
+ for (const scenario of ['same-home', 'success', 'init-failure', 'import-failure', 'cleanup-failure', 'relocated']) {
+   test(`graph ${scenario} uses and cleans the expected home`, (t) => {
+     const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-section-'));
+diff --git a/scripts/e2e-security-home-selection.test.mjs b/scripts/e2e-security-home-selection.test.mjs
+index 635539636079c4ebd8c8881c635787dcea1462ed..17284e8eb8a24b94545e12518b3354d70884de35 100644
+--- a/scripts/e2e-security-home-selection.test.mjs
++++ b/scripts/e2e-security-home-selection.test.mjs
+@@ -327,3 +327,290 @@ ${section24Selection()}
+   assert.deepEqual(readdirSync(wrongRoot), []);
+   assert.deepEqual(readdirSync(scratch), [], 'the correctly placed workspace must be removed too');
+ });
++
++// The script's own section 2c2 rehearsal: a subshell exports a nested,
++// doubled-space TMPDIR, creates only the security home beneath it, exercises
++// the nested store path the probes use, and relies on its EXIT trap.
++function section2c2() {
++  const source = readFileSync(script, 'utf8');
++  const start = source.indexOf('log "2c2.');
++  const endMarker = 'ok "SECURITY_HOME is created and removed beneath a TMPDIR containing spaces"';
++  const end = source.indexOf(endMarker, start);
++  assert.ok(start >= 0 && end > start, 'e2e.sh must contain the section 2c2 rehearsal');
++  return source.slice(start, end + endMarker.length);
++}
++
++// Runs the real section 2c2 (not a copy of its subshell) against a prepared
++// main home. The block owns the subshell trap itself, so the main home and
++// the nested temporary root stay inspectable after the spawn exits.
++function rehearse2c2(home, { shim = '', extraEnv = {} } = {}) {
++  const { cleanup, createHome } = securityParts();
++  return spawnSync('bash', ['-c', `set -euo pipefail
++${cleanup}
++${shim}
++${createHome}
++log() { :; }
++ok() { printf 'ok %s\\n' "$*"; }
++die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
++LOCUS_HOME="$1"
++WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
++${section2c2()}
++`, 'security-home-2c2', home], { env: { ...process.env, ...extraEnv }, encoding: 'utf8' });
++}
++
++test('section 2c2 creates the security home beneath the space-containing TMPDIR', (t) => {
++  const dir = fixture(t);
++  const home = join(dir, 'main home');
++  const outer = join(dir, 'outer tmp');
++  const templates = join(dir, 'mktemp-templates');
++  const argc = join(dir, 'mktemp-argc');
++  mkdirSync(home);
++  mkdirSync(outer);
++  // Record the requested templates and argument count, then let the real
++  // command create the directory it was given. The outer TMPDIR stays visible
++  // to prove the subshell-selected root is what reaches mktemp.
++  const shim = `mktemp() {
++  printf '%s\\n' "$2" >> "$MKTEMP_TEMPLATES"
++  printf '%s' "$#" > "$MKTEMP_ARGC"
++  command mktemp "$@"
++}
++`;
++
++  const result = rehearse2c2(home, {
++    shim,
++    extraEnv: { TMPDIR: outer, MKTEMP_TEMPLATES: templates, MKTEMP_ARGC: argc },
++  });
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 0, `the 2c2 rehearsal must succeed: ${result.stderr}`);
++  assert.match(result.stdout,
++    /ok SECURITY_HOME is created and removed beneath a TMPDIR containing spaces/);
++  const selected = join(home, 'sec tmp  root');
++  assert.equal(readFileSync(argc, 'utf8'), '2',
++    'mktemp must receive exactly -d and one template');
++  assert.deepEqual(readFileSync(templates, 'utf8').trim().split('\n'),
++    [`${selected}/locus-security-e2e.XXXXXX`],
++    'the subshell-selected root must reach mktemp inside one template argument');
++  const recorded = readFileSync(join(selected, 'security-home-path'), 'utf8');
++  assert.equal(dirname(recorded), selected,
++    'the rehearsal home is created directly beneath the exact supplied path');
++  assert.match(recorded, /\/locus-security-e2e\.[^/\s]+$/,
++    'the home name is one unsplit component');
++  assert.throws(() => lstatSync(recorded), { code: 'ENOENT' },
++    'the populated rehearsal home must be removed on subshell exit');
++  assert.deepEqual(readdirSync(selected), ['security-home-path'],
++    'only the recorded home path may remain beneath the supplied root');
++  assert.deepEqual(readdirSync(outer), [],
++    'the outer TMPDIR must not receive the security home');
++  assert.deepEqual(readdirSync(home), ['sec', 'sec tmp  root'],
++    'the subshell trap must leave the main home and the supplied root intact');
++});
++
++// A mktemp regression that relocates the rehearsal security home outside the
++// selected root must stop the suite at the 2h subshell; the subshell trap
++// still removes the misplaced directory before the failure reaches the caller.
++test('a rehearsal security home created outside the supplied TMPDIR stops section 2c2', (t) => {
++  const dir = fixture(t);
++  const home = join(dir, 'main home');
++  const wrongRoot = join(dir, 'wrong root');
++  const created = join(dir, 'security-home-created');
++  mkdirSync(home);
++  mkdirSync(wrongRoot);
++  const shim = `mktemp() {
++  local d
++  if [[ "\${2:-}" == */locus-security-e2e.XXXXXX ]]; then
++    d="$(command mktemp -d "$WRONG_ROOT/locus-security-e2e.XXXXXX")"
++    printf '%s' "$d" > "$HOME_CREATED"
++    printf '%s\\n' "$d"
++    return
++  fi
++  command mktemp "$@"
++}
++`;
++
++  const result = rehearse2c2(home, {
++    shim,
++    extraEnv: { WRONG_ROOT: wrongRoot, HOME_CREATED: created },
++  });
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 1, 'the containment check must fail the suite');
++  assert.match(result.stderr, /FAIL SECURITY_HOME was not created beneath the space-containing TMPDIR/);
++  assert.doesNotMatch(result.stdout, /ok SECURITY_HOME is created and removed beneath a TMPDIR containing spaces/);
++  const misplaced = readFileSync(created, 'utf8');
++  assert.equal(dirname(misplaced), wrongRoot);
++  assert.match(misplaced, /\/locus-security-e2e\.[^/]+$/);
++  assert.throws(() => lstatSync(misplaced), { code: 'ENOENT' },
++    'the misplaced security home must be removed by the subshell exit trap');
++  assert.deepEqual(readdirSync(wrongRoot), []);
++  assert.deepEqual(readdirSync(join(home, 'sec tmp  root')), [],
++    'the rehearsal exits before recording a home path');
++});
++
++// Runs the real section 24 fixture block under the real EXIT trap.
++// tmpdir === undefined leaves TMPDIR unset; extraEnv feeds shim record files.
++// Returns the spawn result and the files the probe writes the created paths
++// to before exit cleanup runs.
++function select24(t, { tmpdir, shim = '', tail = '', extraEnv = {} }) {
++  const dir = fixture(t);
++  const observed = join(dir, 'observed-home');
++  const observedWs = join(dir, 'observed-ws');
++  const mainHome = join(dir, 'main-home');
++  mkdirSync(mainHome);
++  const { cleanup, createHome, createWs } = securityParts();
++  const env = { ...process.env, MAIN_HOME: mainHome, OBSERVED_HOME: observed,
++    OBSERVED_WS: observedWs, ...extraEnv };
++  if (tmpdir === undefined) delete env.TMPDIR;
++  else env.TMPDIR = tmpdir;
++  const result = spawnSync('bash', ['-c', `set -euo pipefail
++${cleanup}
++${createHome}
++${createWs}
++${shim}
++log() { :; }
++ok() { printf 'ok %s\\n' "$*"; }
++die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
++LOCUS_HOME="$MAIN_HOME"
++WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
++trap 'e2e_cleanup' EXIT
++${section24Selection()}
++${tail}
++printf '%s' "$SECURITY_HOME" > "$OBSERVED_HOME"
++printf '%s' "$SECURITY_WS" > "$OBSERVED_WS"
++`], { env, encoding: 'utf8' });
++  return { dir, observed, observedWs, result };
++}
++
++
++// Runs the real section 24 block (not a copy of its mktemp calls) with a
++// recording mktemp: the supplied TMPDIR must reach both security templates,
++// both fixtures must land directly beneath it, and the exit trap removes them.
++test('section 24 creates both security directories beneath the supplied TMPDIR', (t) => {
++  const dir = fixture(t);
++  const scratch = join(dir, 'custom tmp');
++  const templates = join(dir, 'templates');
++  mkdirSync(scratch);
++  writeFileSync(join(scratch, 'keep'), 'unrelated');
++  const shim = `mktemp() { printf '%s\\n' "$2" >> "$TEST_TEMPLATES"; command mktemp "$@"; }
++`;
++
++  const { observed, observedWs, result } = select24(t, {
++    tmpdir: scratch, shim,
++    tail: `
++[[ -d "$SECURITY_HOME" && -w "$SECURITY_HOME" && -d "$SECURITY_WS" && \\
++  ! "$SECURITY_HOME" -ef "$SECURITY_WS" ]] || exit 71
++touch "$SECURITY_HOME/cleanup-sentinel" "$SECURITY_WS/cleanup-sentinel" || exit 72
++`,
++    extraEnv: { TEST_TEMPLATES: templates },
++  });
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 0, result.stderr);
++  assert.match(result.stdout, /ok security directories are created directly beneath TMPDIR/);
++  assert.deepEqual(readFileSync(templates, 'utf8').trim().split('\n'), [
++    `${scratch}/locus-security-e2e.XXXXXX`,
++    `${scratch}/locus-security-ws.XXXXXX`,
++  ], 'both security fixtures must be requested beneath the supplied TMPDIR');
++  const home = readFileSync(observed, 'utf8');
++  const workspace = readFileSync(observedWs, 'utf8');
++  assert.equal(dirname(home), scratch, 'the security home sits directly beneath TMPDIR');
++  assert.equal(dirname(workspace), scratch, 'the security workspace sits directly beneath TMPDIR');
++  assert.match(home, /\/locus-security-e2e\.[A-Za-z0-9]{6}$/, 'the mktemp prefix and suffix shape hold');
++  assert.match(workspace, /\/locus-security-ws\.[A-Za-z0-9]{6}$/);
++  assert.throws(() => lstatSync(home), { code: 'ENOENT' },
++    'the populated security home must be removed on exit');
++  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' },
++    'the populated security workspace must be removed on exit');
++  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
++});
++
++// A mktemp regression that relocates either security fixture must stop the
++// suite at the section 24 containment check, before the probes run; the exit
++// trap still removes the misplaced directory.
++for (const [label, prefix, record] of [
++  ['security home', 'locus-security-e2e', 'security-home-created'],
++  ['security workspace', 'locus-security-ws', 'security-ws-created'],
++]) {
++  test(`a ${label} created outside the supplied TMPDIR stops section 24`, (t) => {
++    const dir = fixture(t);
++    const scratch = join(dir, 'custom tmp');
++    const wrongRoot = join(dir, 'wrong root');
++    const created = join(dir, record);
++    mkdirSync(scratch);
++    mkdirSync(wrongRoot);
++    writeFileSync(join(scratch, 'keep'), 'unrelated');
++    // Answer with the expected name shape but relocate the fixture outside
++    // TMPDIR; the containment check must fail closed.
++    const shim = `mktemp() {
++  local d
++  if [[ "\${2:-}" == */${prefix}.XXXXXX ]]; then
++    d="$(command mktemp -d "$WRONG_ROOT/${prefix}.XXXXXX")"
++    printf '%s' "$d" > "$FIXTURE_CREATED"
++    printf '%s\\n' "$d"
++    return
++  fi
++  command mktemp "$@"
++}
++`;
++
++    const { result } = select24(t, {
++      tmpdir: scratch, shim,
++      extraEnv: { WRONG_ROOT: wrongRoot, FIXTURE_CREATED: created },
++    });
++
++    assert.equal(result.signal, null);
++    assert.equal(result.status, 1, 'the section 24 containment check must fail the suite');
++    assert.match(result.stderr, /FAIL security directories were not created directly beneath TMPDIR/);
++    assert.doesNotMatch(result.stdout, /ok security directories are created directly beneath TMPDIR/);
++    const fixturePath = readFileSync(created, 'utf8');
++    assert.equal(dirname(fixturePath), wrongRoot);
++    assert.match(fixturePath, new RegExp(`/${prefix}\\.[^/]+$`));
++    assert.throws(() => lstatSync(fixturePath), { code: 'ENOENT' },
++      `the misplaced ${label} must be removed by the exit trap`);
++    assert.deepEqual(readdirSync(wrongRoot), []);
++    assert.deepEqual(readdirSync(scratch), ['keep']);
++  });
++}
++
++// With no supplied TMPDIR there is no caller-chosen boundary to check; the
++// block must still create both fixtures under the /tmp fallback and clean them.
++for (const [label, tmpdir] of [['unset', undefined], ['empty', '']]) {
++  test(`section 24 selects the /tmp root and skips the check when TMPDIR is ${label}`, (t) => {
++    const dir = fixture(t);
++    const controlled = join(dir, 'controlled');
++    const templates = join(dir, 'templates');
++    mkdirSync(controlled);
++    // Record the requested templates and redirect creation into the controlled
++    // directory so the probe never writes to the real /tmp.
++    const shim = `mktemp() {
++  printf '%s\\n' "$2" >> "$TEST_TEMPLATES"
++  case "\${2:-}" in
++    /tmp/locus-security-e2e.XXXXXX) command mktemp -d "$CONTROLLED/locus-security-e2e.XXXXXX" ;;
++    /tmp/locus-security-ws.XXXXXX) command mktemp -d "$CONTROLLED/locus-security-ws.XXXXXX" ;;
++    *) command mktemp "$@" ;;
++  esac
++}
++`;
++
++    const { observed, observedWs, result } = select24(t, {
++      tmpdir, shim,
++      extraEnv: { CONTROLLED: controlled, TEST_TEMPLATES: templates },
++    });
++
++    assert.equal(result.signal, null);
++    assert.equal(result.status, 0, result.stderr);
++    assert.deepEqual(readFileSync(templates, 'utf8').trim().split('\n'), [
++      '/tmp/locus-security-e2e.XXXXXX',
++      '/tmp/locus-security-ws.XXXXXX',
++    ], `the script must select the /tmp root when TMPDIR is ${label}`);
++    assert.doesNotMatch(result.stdout, /ok security directories are created directly beneath TMPDIR/,
++      'the supplied-TMPDIR confirmation must not print without a supplied TMPDIR');
++    for (const record of [observed, observedWs]) {
++      const created = readFileSync(record, 'utf8');
++      assert.equal(dirname(created), controlled);
++      assert.throws(() => lstatSync(created), { code: 'ENOENT' },
++        'the redirected fixture must be cleaned up');
++    }
++    assert.deepEqual(readdirSync(controlled), []);
++  });
++}
+diff --git a/scripts/e2e-security-workspace-selection.test.mjs b/scripts/e2e-security-workspace-selection.test.mjs
+index 85ce4b652bed56b06496391225b55fb9ec17a58a..31699d14dbe21c8a4d8728d9c8c9e76e2bcdae18 100644
+--- a/scripts/e2e-security-workspace-selection.test.mjs
++++ b/scripts/e2e-security-workspace-selection.test.mjs
+@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
+ import { spawnSync } from 'node:child_process';
+ import { lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+ import { tmpdir } from 'node:os';
+-import { dirname, join } from 'node:path';
++import { basename, dirname, join } from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ import { test } from 'node:test';
+ 
+@@ -418,3 +418,167 @@ test('a TMPDIR with a trailing slash still holds the security workspace', (t) =>
+   assert.throws(() => lstatSync(workspace), { code: 'ENOENT' });
+   assert.deepEqual(readdirSync(scratch), ['keep']);
+ });
++
++// ── Repeated SECURITY_WS creation ───────────────────────────────────────────
++// The unconditional repeated-creation block at the tail of section 24 is
++// extracted verbatim (not copied) so its own containment, distinctness and
++// removal checks are the ones under test. The probes below run it under the
++// real EXIT trap with SECURITY_WS already naming a live probe workspace —
++// the block must stash and restore it, so the trap removes the live
++// workspace and never the pair the block already removed.
++function repeatedWorkspaceBlock() {
++  const source = readFileSync(script, 'utf8');
++  const start = source.indexOf('security_ws_live="$SECURITY_WS"');
++  const endMarker = 'ok "two security workspaces are distinct and live directly beneath the temp root"';
++  const end = source.indexOf(endMarker, start);
++  assert.ok(start >= 0 && end > start, 'e2e.sh must contain the repeated security-workspace block');
++  const block = source.slice(start, end + endMarker.length);
++  assert.ok(block.includes('security_ws_root="${TMPDIR:-/tmp}"'),
++    'the block must select the temporary root itself');
++  assert.ok(block.includes('SECURITY_WS="$security_ws_live"'),
++    'the block must restore the live workspace it stashed');
++  return block;
++}
++
++// Runs the extracted block verbatim under the real EXIT trap, the same way
++// section 24 reaches it after the security probes. SECURITY_WS names a live
++// populated workspace when the block starts, as it does in the real script.
++function repeatWorkspaceSection(t, { tempRoot, shim = '', extraEnv = {} }) {
++  const dir = mkdtempSync(join(tmpdir(), 'locus-secws-repeat-'));
++  t.after(() => rmSync(dir, { recursive: true, force: true }));
++  const mainHome = join(dir, 'main home');
++  const liveWs = join(dir, 'live workspace');
++  mkdirSync(mainHome);
++  mkdirSync(liveWs);
++  writeFileSync(join(liveWs, 'probe-marker'), 'live');
++  const { cleanup, createWs } = securityLifecycle();
++  const env = { ...process.env, MAIN_HOME: mainHome, LIVE_WS: liveWs, ...extraEnv };
++  if (tempRoot === undefined) delete env.TMPDIR;
++  else env.TMPDIR = tempRoot;
++  const result = spawnSync('bash', ['-c', `set -euo pipefail
++${cleanup}
++${shim}
++${createWs}
++log() { :; }
++ok() { printf 'ok %s\\n' "$*"; }
++die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
++LOCUS_HOME="$MAIN_HOME"
++WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" HTTP_MCP_PID="" MT_MCP_PID=""
++SECURITY_WS="$LIVE_WS"
++trap 'e2e_cleanup' EXIT
++${repeatedWorkspaceBlock()}
++`], { env, encoding: 'utf8' });
++  return { result, dir, liveWs };
++}
++
++test('the verbatim block keeps both repeated workspaces beneath a controlled TMPDIR', (t) => {
++  const dir = mkdtempSync(join(tmpdir(), 'locus-secws-repeat-run-'));
++  t.after(() => rmSync(dir, { recursive: true, force: true }));
++  const scratch = join(dir, 'controlled root');
++  mkdirSync(scratch);
++  writeFileSync(join(scratch, 'keep'), 'unrelated');
++
++  const { result, dir: repeatDir, liveWs } = repeatWorkspaceSection(t, { tempRoot: scratch });
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 0, result.stderr);
++  assert.match(result.stdout,
++    /ok two security workspaces are distinct and live directly beneath the temp root/);
++  assert.deepEqual(readdirSync(scratch), ['keep'],
++    'the block must remove both workspaces it created');
++  assert.throws(() => lstatSync(liveWs), { code: 'ENOENT' },
++    'the restored live workspace must be removed by the exit trap');
++  assert.deepEqual(readdirSync(repeatDir), [],
++    'the exit trap removes the suite home and the restored live workspace only');
++});
++
++// A TMPDIR may end in a slash (macOS hands out such values); the block strips
++// it from both the selected root and each parent before comparing, so a bare
++// equality check would regress here.
++test('the verbatim block honors a controlled TMPDIR with a trailing slash', (t) => {
++  const dir = mkdtempSync(join(tmpdir(), 'locus-secws-repeat-slash-'));
++  t.after(() => rmSync(dir, { recursive: true, force: true }));
++  const scratch = join(dir, 'controlled root');
++  mkdirSync(scratch);
++  writeFileSync(join(scratch, 'keep'), 'unrelated');
++
++  const { result, liveWs } = repeatWorkspaceSection(t, { tempRoot: `${scratch}/` });
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 0, result.stderr);
++  assert.match(result.stdout, /ok two security workspaces are distinct/);
++  assert.deepEqual(readdirSync(scratch), ['keep']);
++  assert.throws(() => lstatSync(liveWs), { code: 'ENOENT' });
++});
++
++// A mktemp regression that relocates the repeated workspaces must stop the
++// suite at the block's own containment check. The misplaced pair is left
++// beneath the wrong root (the script header documents leftover temp dirs on
++// failure) while the supplied root stays untouched and the restored live
++// workspace is still removed by the exit trap.
++test('repeated workspaces created outside the controlled TMPDIR stop the block', (t) => {
++  const dir = mkdtempSync(join(tmpdir(), 'locus-secws-repeat-misplaced-'));
++  t.after(() => rmSync(dir, { recursive: true, force: true }));
++  const scratch = join(dir, 'controlled root');
++  const wrongRoot = join(dir, 'wrong root');
++  mkdirSync(scratch);
++  mkdirSync(wrongRoot);
++  writeFileSync(join(scratch, 'keep'), 'unrelated');
++  const shim = `mktemp() {
++  if [[ "\${2:-}" == */locus-security-ws.XXXXXX ]]; then
++    command mktemp -d "$WRONG_ROOT/locus-security-ws.XXXXXX"
++    return
++  fi
++  command mktemp "$@"
++}
++`;
++
++  const { result, liveWs } = repeatWorkspaceSection(t, {
++    tempRoot: scratch, shim, extraEnv: { WRONG_ROOT: wrongRoot },
++  });
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 1, 'the containment check must fail the suite');
++  assert.match(result.stderr,
++    /FAIL repeated security workspaces were not created directly beneath the temp root/);
++  assert.doesNotMatch(result.stdout, /ok two security workspaces are distinct/);
++  const misplaced = readdirSync(wrongRoot);
++  assert.equal(misplaced.length, 2, 'both misplaced workspaces stay beneath the wrong root');
++  assert.ok(misplaced.every((n) => n.startsWith('locus-security-ws.')));
++  assert.deepEqual(readdirSync(scratch), ['keep']);
++  assert.throws(() => lstatSync(liveWs), { code: 'ENOENT' },
++    'the restored live workspace must still be removed by the exit trap');
++});
++
++// A regression that hands back one directory twice must die at the
++// distinctness check before either workspace is removed.
++test('a repeated creation returning the same directory stops the block', (t) => {
++  const dir = mkdtempSync(join(tmpdir(), 'locus-secws-repeat-dup-'));
++  t.after(() => rmSync(dir, { recursive: true, force: true }));
++  const scratch = join(dir, 'controlled root');
++  const seen = join(dir, 'seen-path');
++  mkdirSync(scratch);
++  const shim = `mktemp() {
++  if [[ "\${2:-}" == */locus-security-ws.XXXXXX ]]; then
++    [[ -s "$SEEN_PATH" ]] || command mktemp -d "$2" > "$SEEN_PATH"
++    cat "$SEEN_PATH"
++    return
++  fi
++  command mktemp "$@"
++}
++`;
++
++  const { result, liveWs } = repeatWorkspaceSection(t, {
++    tempRoot: scratch, shim, extraEnv: { SEEN_PATH: seen },
++  });
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 1, 'the distinctness check must fail the suite');
++  assert.match(result.stderr,
++    /FAIL repeated security workspace creation returned the same directory/);
++  const dup = readFileSync(seen, 'utf8').trim();
++  assert.equal(dirname(dup), scratch);
++  assert.deepEqual(readdirSync(scratch), [basename(dup)],
++    'only the duplicated workspace is left beneath the supplied root');
++  assert.throws(() => lstatSync(liveWs), { code: 'ENOENT' });
++});
+diff --git a/scripts/e2e-temp.test.mjs b/scripts/e2e-temp.test.mjs
+index 8e8599e28867f4cd73dae8e763909e3815e3f15a..83778365e4fe891891408b96f29446fd3c9cd562 100644
+--- a/scripts/e2e-temp.test.mjs
++++ b/scripts/e2e-temp.test.mjs
+@@ -839,8 +839,11 @@ printf '%s' "$WS_DIR" > "$2"
+ });
+ 
+ // Runs the script's real section 2d: a subshell rehearses create_workspace
+-// beneath a nested temporary root whose name contains spaces, verifies the
+-// workspace sits directly beneath that root, and its exit trap removes it.
++// beneath a nested temporary root whose name contains spaces (including a
++// doubled space), verifies the workspace sits directly beneath that root, and
++// its exit trap removes it while sparing a decoy at the root's first
++// word-split fragment. LOCUS_HOME is exported so the rehearsal's `init` stub
++// populates the subshell home the way the real command would.
+ test('section 2d rehearses workspace creation beneath a TMPDIR containing spaces', (t) => {
+   const fixture = setup(t);
+   const home = join(fixture.root, 'main home');
+@@ -859,7 +862,7 @@ ${createWorkspace}
+ log() { :; }
+ ok() { printf 'ok %s\\n' "$*"; }
+ die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+-LOCUS_HOME="$1"
++export LOCUS_HOME="$1"
+ WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+ ${source.slice(start, end + endMarker.length)}
+ `, 'workspace-2d', home], {
+@@ -870,14 +873,17 @@ ${source.slice(start, end + endMarker.length)}
+   assert.equal(result.signal, null);
+   assert.equal(result.status, 0, `the 2d rehearsal must succeed: ${result.stderr}`);
+   assert.match(result.stdout, /ok workspace creation succeeds beneath a TMPDIR containing spaces/);
+-  const root = join(home, 'workspace temp root');
++  const root = join(home, 'workspace  ws temp root');
+   const recorded = readFileSync(join(root, 'workspace-path'), 'utf8');
+   assert.equal(dirname(recorded), root, 'rehearsed beneath the space-containing root');
+   assert.match(recorded, /\/locus-ws\.[^/\s]+$/, 'workspace name is one unsplit component');
++  assert.ok(recorded.includes(' '), 'the recorded workspace path keeps the spaced root');
+   assert.throws(() => lstatSync(recorded), { code: 'ENOENT' },
+     'the rehearsal workspace must be removed on subshell exit');
+   assert.deepEqual(readdirSync(root), ['workspace-path'],
+     'the subshell trap must also remove its own home');
++  assert.ok(existsSync(join(home, 'workspace', 'decoy-sentinel')),
++    'the decoy at the root\'s first word-split fragment must survive cleanup');
+ });
+ 
+ // A mktemp regression that relocates the rehearsal workspace must stop the
+@@ -1348,6 +1354,30 @@ printf '%s' "$SECURITY_WS" > "$2"
+   assert.deepEqual(readdirSync(scratch), ['keep'], 'neither invocation may leave anything behind');
+ });
+ 
++test('repeated security workspace block yields distinct directories beneath TMPDIR', (t) => {
++  const fixture = setup(t);
++  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
++  mkdirSync(scratch);
++  writeFileSync(join(scratch, 'keep'), 'unrelated');
++  const source = readFileSync(script, 'utf8');
++  const create = source.match(/^create_security_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
++  const block = source.match(/^security_ws_live="\$SECURITY_WS"[\s\S]*?^ok "two security workspaces are distinct[^\n]*$/m)?.[0];
++  assert.ok(create && block, 'missing repeated security workspace block');
++
++  for (const tmpdir of [scratch, `${scratch}/`]) {
++    const result = spawnSync('bash', ['-c', `set -euo pipefail
++die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
++ok() { printf 'ok %s\\n' "$*"; }
++${create}
++SECURITY_WS=""
++${block}
++`], { env: { ...process.env, TMPDIR: tmpdir }, encoding: 'utf8' });
++    assert.equal(result.status, 0, result.stderr);
++    assert.match(result.stdout, /two security workspaces are distinct/);
++    assert.deepEqual(readdirSync(scratch), ['keep'], 'block must clean up both workspaces');
++  }
++});
++
+ test('graph home creation selects the custom temporary root or /tmp fallback', (t) => {
+   const fixture = setup(t);
+   const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+diff --git a/scripts/e2e-workspace-spaced-tmpdir.test.mjs b/scripts/e2e-workspace-spaced-tmpdir.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..22555601d5d07ea3c2f004a9a39044cb71ab5f6c
+--- /dev/null
++++ b/scripts/e2e-workspace-spaced-tmpdir.test.mjs
+@@ -0,0 +1,297 @@
++// Run: node --test scripts/e2e-workspace-spaced-tmpdir.test.mjs
++// WS_DIR is the working directory the allowlist probes cd into. With a
++// space-containing TMPDIR the allocation must land directly beneath that root
++// as one unsplit path, stay usable (nested writes, the .locus.toml allowlist,
++// entry), be private to the owner, and be removed by the exit trap — without
++// touching the supplied root or a sibling at the root's first word-split
++// fragment. These tests run the script's own create_workspace and
++// e2e_cleanup verbatim; a doctored cleanup proves the guard distinguishes an
++// unquoted-rm regression.
++import assert from 'node:assert/strict';
++import { spawnSync } from 'node:child_process';
++import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
++import { tmpdir } from 'node:os';
++import { dirname, join } from 'node:path';
++import { fileURLToPath } from 'node:url';
++import { test } from 'node:test';
++
++const script = join(dirname(fileURLToPath(import.meta.url)), 'e2e.sh');
++
++function lifecycle() {
++  const source = readFileSync(script, 'utf8');
++  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
++  const create = source.match(/^create_workspace\(\) \{[\s\S]*?^\}/m)?.[0];
++  assert.ok(cleanup && create, 'e2e.sh must define the workspace lifecycle');
++  return { cleanup, create };
++}
++
++// The temporary root starts with the word "workspace" followed by a doubled
++// space, so a sibling named "workspace" is exactly where an unquoted expansion
++// of the workspace path would strike first.
++function fixture(t) {
++  const root = mkdtempSync(join(tmpdir(), 'locus-ws-space-test-'));
++  t.after(() => rmSync(root, { recursive: true, force: true }));
++  const decoy = join(root, 'workspace');
++  const scratch = join(root, 'workspace  ws tmp root');
++  const observed = join(root, 'workspace-path');
++  const mode = join(root, 'mode');
++  const argc = join(root, 'mktemp-argc');
++  const args = join(root, 'mktemp-args');
++  mkdirSync(decoy);
++  mkdirSync(scratch);
++  writeFileSync(join(decoy, 'decoy-sentinel'), 'decoy');
++  writeFileSync(join(scratch, 'keep'), 'unrelated');
++  return { root, decoy, scratch, observed, mode, argc, args };
++}
++
++// The complete spaced root must reach mktemp inside ONE template argument.
++// The recorder counts and saves each call's arguments before delegating: an
++// unquoted expansion would word-split "workspace  ws tmp root" into four
++// arguments — an outcome check alone cannot tell that apart from a correct
++// call that happened to create the directory.
++const mktempRecorder = `mktemp() {
++  printf '%s\\n' "$#" > "$MKTEMP_ARGC"
++  printf '%s\\n' "$@" > "$MKTEMP_ARGS"
++  command mktemp "$@"
++}
++`;
++
++function probe(f, body, { buggy = false, shim = '' } = {}) {
++  const { cleanup, create } = lifecycle();
++  // With `buggy`, the later definition wins: the quoting regression the guard
++  // must catch. Every other variable stays quoted so only WS_DIR splits.
++  const override = buggy
++    ? 'e2e_cleanup() { rm -rf "$LOCUS_HOME" ${WS_DIR:-} "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"; }'
++    : '';
++  return spawnSync('bash', ['-c', `set -euo pipefail
++${cleanup}
++${create}
++${override}
++${shim}
++TMPDIR="$1"
++LOCUS_HOME="$TMPDIR/main-home"
++mkdir "$LOCUS_HOME"
++WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
++trap 'e2e_cleanup' EXIT
++create_workspace
++${body}
++`, 'workspace-spaced-tmpdir', f.scratch], {
++    cwd: f.root,
++    env: {
++      ...process.env,
++      TMPDIR: f.scratch,
++      OBSERVED: f.observed,
++      MODE_RECORD: f.mode,
++      MKTEMP_ARGC: f.argc,
++      MKTEMP_ARGS: f.args,
++    },
++    encoding: 'utf8',
++  });
++}
++
++test('the allocated workspace is usable and removed on exit beneath a spaced TMPDIR', (t) => {
++  const f = fixture(t);
++  const result = probe(f, `[[ -d "$WS_DIR" && "\${WS_DIR%/*}" == "$TMPDIR" && \\
++  "\${WS_DIR##*/}" == locus-ws.* ]] || exit 71
++{ stat -f %Lp "$WS_DIR" 2>/dev/null || stat -c %a "$WS_DIR"; } > "$MODE_RECORD"
++# Usable, not just present: nested spaced paths round-trip, the allowlist
++# lands inside it (as the real probes require), and entering it resolves to
++# one physical path beneath the spaced root.
++mkdir -p "$WS_DIR/probe dir" || exit 72
++printf 'payload' > "$WS_DIR/probe dir/f.toml" || exit 73
++[[ "$(cat "$WS_DIR/probe dir/f.toml")" == payload ]] || exit 74
++printf 'default = "acme"\\n' > "$WS_DIR/.locus.toml" || exit 75
++[[ -s "$WS_DIR/.locus.toml" ]] || exit 76
++[[ "$(cd "$WS_DIR" && pwd -P)" == "$(cd "$TMPDIR" && pwd -P)/\${WS_DIR##*/}" ]] || exit 77
++touch "$WS_DIR/cleanup-sentinel"
++printf '%s' "$WS_DIR" > "$OBSERVED"
++`);
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 0, `probe failed: ${result.stderr}`);
++  const workspace = readFileSync(f.observed, 'utf8');
++  assert.equal(dirname(workspace), f.scratch, 'allocated directly beneath the spaced TMPDIR');
++  assert.match(workspace, /\/locus-ws\.[^/\s]+$/, 'the workspace name is one unsplit component');
++  assert.ok(workspace.includes(' '), 'the allocated path must contain spaces for this test to mean anything');
++  assert.equal(readFileSync(f.mode, 'utf8').trim(), '700', 'mktemp -d must allocate an owner-only directory');
++  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'the workspace must be removed on exit');
++  assert.deepEqual(readdirSync(f.scratch).sort(), ['keep'], 'the supplied TMPDIR keeps only its own entries');
++  assert.equal(readFileSync(join(f.decoy, 'decoy-sentinel'), 'utf8'), 'decoy',
++    'cleanup must leave the word-split sibling of the spaced TMPDIR untouched');
++});
++
++test('the complete spaced path reaches mktemp as one template argument', (t) => {
++  const f = fixture(t);
++  const result = probe(f, `[[ -d "$WS_DIR" && "\${WS_DIR%/*}" == "$TMPDIR" ]] || exit 71
++printf '%s' "$WS_DIR" > "$OBSERVED"
++touch "$WS_DIR/cleanup-sentinel"
++`, { shim: mktempRecorder });
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 0, `probe failed: ${result.stderr}`);
++  assert.equal(readFileSync(f.argc, 'utf8').trim(), '2',
++    'mktemp must be invoked with exactly -d plus one template argument');
++  assert.deepEqual(readFileSync(f.args, 'utf8').split('\n').filter(Boolean),
++    ['-d', `${f.scratch}/locus-ws.XXXXXX`],
++    'the full spaced path — doubled space included — is the template argument');
++  const workspace = readFileSync(f.observed, 'utf8');
++  assert.equal(dirname(workspace), f.scratch, 'allocated directly beneath the spaced TMPDIR');
++  assert.match(workspace, /\/locus-ws\.[^/\s]+$/, 'the workspace name is one unsplit component');
++  assert.ok(workspace.includes(' '), 'the allocated path must contain spaces for this test to mean anything');
++  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'the workspace must be removed on exit');
++  assert.deepEqual(readdirSync(f.scratch).sort(), ['keep'], 'the supplied TMPDIR keeps only its own entries');
++  assert.equal(readFileSync(join(f.decoy, 'decoy-sentinel'), 'utf8'), 'decoy');
++});
++
++test('cleanup under a failing exit still removes the workspace beneath a spaced TMPDIR', (t) => {
++  const f = fixture(t);
++  const result = probe(f, `[[ -d "$WS_DIR" ]] || exit 71
++touch "$WS_DIR/cleanup-sentinel"
++printf '%s' "$WS_DIR" > "$OBSERVED"
++exit 42
++`);
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 42, `the probe's own failure status must surface: ${result.stderr}`);
++  const workspace = readFileSync(f.observed, 'utf8');
++  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'the workspace must be removed on a failing exit');
++  assert.deepEqual(readdirSync(f.scratch).sort(), ['keep'], 'the supplied TMPDIR keeps only its own entries');
++  assert.equal(readFileSync(join(f.decoy, 'decoy-sentinel'), 'utf8'), 'decoy');
++});
++
++// The quoting regression, reintroduced: the workspace path splits on the
++// spaces in TMPDIR, rm removes the first fragment — the decoy — and leaves
++// the real workspace behind. This is what the decoy and removal assertions
++// above, and the section 2d check inside e2e.sh, exist to detect.
++test('an unquoted cleanup removes the word-split sibling instead of the workspace', (t) => {
++  const f = fixture(t);
++  const result = probe(f, `[[ -d "$WS_DIR" ]] || exit 71
++printf '%s' "$WS_DIR" > "$OBSERVED"
++`, { buggy: true });
++
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 0, `the buggy probe must still run to completion: ${result.stderr}`);
++  const workspace = readFileSync(f.observed, 'utf8');
++  assert.equal(existsSync(join(f.decoy, 'decoy-sentinel')), false,
++    'the word-split sibling is gone — the positive assertion detects this');
++  assert.ok(lstatSync(workspace).isDirectory(),
++    'the real workspace leaks — the removal assertion detects this');
++  rmSync(workspace, { recursive: true, force: true });
++});
++
++// The same quoting regression on the creation side: an unquoted
++// ${TMPDIR:-/tmp} word-splits the doubled-space root into four template
++// arguments — the first fragment is the decoy sibling — instead of one. The
++// recorder shows exactly what the argc and template assertions above detect;
++// the split call also fails outright, so no workspace can leak.
++test('an unquoted creation splits the spaced root into extra mktemp arguments', (t) => {
++  const f = fixture(t);
++  const buggyCreate = `create_workspace() {
++  WS_DIR="$(mktemp -d \${TMPDIR:-/tmp}/locus-ws.XXXXXX)"
++}`;
++  const result = probe(f, ':', { shim: `${mktempRecorder}\n${buggyCreate}` });
++
++  assert.equal(result.signal, null);
++  assert.notEqual(result.status, 0, 'a word-split template cannot allocate the workspace');
++  assert.equal(readFileSync(f.argc, 'utf8').trim(), '5',
++    'the doubled-space root reached mktemp as four template arguments');
++  const args = readFileSync(f.args, 'utf8').split('\n').filter(Boolean);
++  assert.equal(args[0], '-d');
++  assert.deepEqual(args.slice(1),
++    [f.decoy, 'ws', 'tmp', 'root/locus-ws.XXXXXX'],
++    'the doubled space collapsed — the first fragment is the decoy sibling path');
++  assert.equal(readFileSync(join(f.decoy, 'decoy-sentinel'), 'utf8'), 'decoy',
++    'mktemp must fail on the existing decoy, not remove or reuse it');
++  assert.deepEqual(readdirSync(f.scratch).sort(), ['keep'],
++    'no workspace was allocated beneath the spaced TMPDIR');
++});
++
++// The script's own section 2d rehearsal, verbatim. With intact quoting the
++// decoy at the root's first word-split fragment must survive; with the
++// regression reintroduced the rehearsal must stop the suite instead of
++// passing a leaked workspace.
++function section2d() {
++  const source = readFileSync(script, 'utf8');
++  const start = source.indexOf('log "2d.');
++  const endMarker = 'ok "workspace creation succeeds beneath a TMPDIR containing spaces"';
++  const end = source.indexOf(endMarker, start);
++  assert.ok(start >= 0 && end > start, 'e2e.sh must contain the section 2d rehearsal');
++  return source.slice(start, end + endMarker.length);
++}
++
++// The rehearsal calls `locus init` then `locus workspace` inside the
++// workspace; the stub populates the home and writes the allowlist the way the
++// real commands would. Every other subcommand fails.
++function locusStub(root) {
++  const bin = join(root, 'bin');
++  mkdirSync(bin);
++  const locus = join(bin, 'locus');
++  writeFileSync(locus, `#!/bin/sh
++case "$1" in
++  init) printf 'stub init\\n' > "$LOCUS_HOME/init-stamp" && exit 0 ;;
++  workspace) printf '# stub workspace config\\n' > .locus.toml && exit 0 ;;
++esac
++exit 1
++`, { mode: 0o755 });
++  return locus;
++}
++
++function rehearse2d(t, { buggy = false } = {}) {
++  const root = mkdtempSync(join(tmpdir(), 'locus-ws-2d-test-'));
++  t.after(() => rmSync(root, { recursive: true, force: true }));
++  // A space-free suite home: the first space in WS_DIR is then the one in
++  // "workspace  ws temp root", so an unquoted cleanup strikes the decoy first.
++  const home = join(root, 'suite-home');
++  mkdirSync(home);
++  const locus = locusStub(root);
++  const { cleanup, create } = lifecycle();
++  const override = buggy
++    ? 'e2e_cleanup() { rm -rf "$LOCUS_HOME" ${WS_DIR:-} "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"; }'
++    : '';
++  const result = spawnSync('bash', ['-c', `set -euo pipefail
++${cleanup}
++${create}
++${override}
++log() { :; }
++ok() { printf 'ok %s\\n' "$*"; }
++die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
++export LOCUS_HOME="$1"
++WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
++${section2d()}
++`, 'workspace-2d', home], {
++    cwd: root,
++    env: { ...process.env, LOCUS_BIN: locus },
++    encoding: 'utf8',
++  });
++  return { result, home, root };
++}
++
++test('section 2d plants a word-split decoy that survives the rehearsal', (t) => {
++  const { result, home } = rehearse2d(t);
++  assert.equal(result.signal, null);
++  assert.equal(result.status, 0, result.stderr);
++  assert.match(result.stdout, /ok workspace creation succeeds beneath a TMPDIR containing spaces/);
++  const decoy = join(home, 'workspace');
++  const nested = join(home, 'workspace  ws temp root');
++  assert.ok(existsSync(join(decoy, 'decoy-sentinel')),
++    'the decoy at the word-split fragment must survive exit cleanup');
++  assert.ok(lstatSync(nested).isDirectory(), 'the supplied temporary root is preserved');
++  assert.deepEqual(readdirSync(nested).sort(), ['workspace-path'],
++    'the rehearsed workspace is gone; only its path record remains');
++  assert.throws(
++    () => lstatSync(readFileSync(join(nested, 'workspace-path'), 'utf8')),
++    { code: 'ENOENT' });
++});
++
++test('section 2d stops the suite when cleanup splits the spaced workspace path', (t) => {
++  const { result, home } = rehearse2d(t, { buggy: true });
++  assert.equal(result.signal, null);
++  assert.notEqual(result.status, 0, 'the rehearsal must fail once cleanup misbehaves');
++  assert.match(result.stderr, /FAIL rehearsed workspace survived exit cleanup/);
++  const nested = join(home, 'workspace  ws temp root');
++  assert.equal(existsSync(join(home, 'workspace', 'decoy-sentinel')), false,
++    'the unquoted rm struck the word-split sibling');
++  const leaked = readFileSync(join(nested, 'workspace-path'), 'utf8');
++  assert.ok(lstatSync(leaked).isDirectory(), 'the unquoted rm leaked the real workspace');
++  rmSync(leaked, { recursive: true, force: true });
++});
+diff --git a/scripts/e2e.d/README.md b/scripts/e2e.d/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ea15d36bbd8df23ee3c99e5e83d6277b2c932746
+--- /dev/null
++++ b/scripts/e2e.d/README.md
+@@ -0,0 +1,20 @@
++# e2e drop-in steps
++
++`scripts/e2e.sh` sources every `scripts/e2e.d/*.sh` here, in `LC_ALL=C` sorted
++order, after its own steps and before the final PASS summary.
++
++**New end-to-end steps go in a new file here**, not in `scripts/e2e.sh`. Many
++PRs edit that one file at once, so appending to it collides; a new file never
++does.
++
++- Name it `NN-topic.sh` (e.g. `20-widget-pin.sh`) so order is explicit.
++- Steps are sourced into the e2e shell: use `log`, `ok`, `skip`, `die`, `locus`,
++  `$LOCUS_BIN`, `$MCP_BIN`, `$LOCUS_HOME`, `$ROOT`. Fail with `die "msg"`; any
++  `exit`/failing command under `set -e` also fails the whole run.
++- No shebang needed; files are sourced, not executed.
++- Use only the isolated `$LOCUS_HOME`; never touch `~/.locus`, never print secrets.
++- Register temp dirs for cleanup yourself (`trap` is owned by `e2e.sh`; put paths
++  under `$LOCUS_HOME`, which is removed on exit).
++- Other files (like this README) are ignored; only `*.sh` runs.
++
++Prove the mechanism with `bash scripts/check-e2e-dropin.sh`.
+diff --git a/scripts/e2e.sh b/scripts/e2e.sh
+index 5734711cb56bf383d58860ed9a8648c78d60789b..247c06110aa59696f76ddd37e9013f3d7d9ea78a 100755
+--- a/scripts/e2e.sh
++++ b/scripts/e2e.sh
+@@ -231,7 +231,10 @@ touch "$secspace_decoy/decoy-sentinel"
+   [[ "$TMPDIR" == *" "* && -d "$SECURITY_HOME" && \
+     "${SECURITY_HOME%/*}" == "$TMPDIR" && \
+     "${SECURITY_HOME##*/}" == locus-security-e2e.* ]] || exit 1
+-  # Usable, not just present: files must land inside the spaced path.
++  # Use the nested store path too: the doubled-space root must stay one path.
++  mkdir -p "$SECURITY_HOME/bindings/nested dir" || exit 1
++  printf 'payload' >"$SECURITY_HOME/bindings/nested dir/probe.toml" || exit 1
++  [[ "$(cat "$SECURITY_HOME/bindings/nested dir/probe.toml")" == payload ]] || exit 1
+   touch "$SECURITY_HOME/cleanup-sentinel"
+   [[ -f "$SECURITY_HOME/cleanup-sentinel" ]] || exit 1
+   printf '%s' "$SECURITY_HOME" >"$secspace_tmp/security-home-path"
+@@ -246,11 +249,15 @@ secspace_home="$(cat "$secspace_tmp/security-home-path")"
+ ok "SECURITY_HOME is created and removed beneath a TMPDIR containing spaces"
+ 
+ # Exercise the same workspace creation and EXIT cleanup used by the allowlist
+-# probes, beneath a supplied temporary root whose name contains spaces. The
+-# subshell owns its test home so its cleanup cannot remove the main home.
++# probes, beneath a supplied temporary root whose name contains spaces
++# (including a doubled space). The subshell owns its test home so its cleanup
++# cannot remove the main home. A decoy at the first word-split fragment of
++# the root catches an unquoted rm in the exit trap.
+ log "2d. workspace creation honors a space-containing TMPDIR"
+-workspace_tmp="$LOCUS_HOME/workspace temp root"
+-mkdir -p "$workspace_tmp"
++workspace_decoy="$LOCUS_HOME/workspace"
++workspace_tmp="$workspace_decoy  ws temp root"
++mkdir -p "$workspace_decoy" "$workspace_tmp"
++touch "$workspace_decoy/decoy-sentinel"
+ (
+   export TMPDIR="$workspace_tmp"
+   LOCUS_HOME="$workspace_tmp/subshell-home"
+@@ -262,16 +269,19 @@ mkdir -p "$workspace_tmp"
+     "${WS_DIR##*/}" == locus-ws.* ]] || exit 1
+   # The workspace must be usable, not just present: write its allowlist from
+   # inside the spaced path and check the file landed there.
+-  "$LOCUS_BIN" init >/dev/null
++  "$LOCUS_BIN" init >/dev/null || exit 2
+   (cd "$WS_DIR" && "$LOCUS_BIN" workspace --default acme --allow acme >/dev/null) || exit 1
+   [[ -s "$WS_DIR/.locus.toml" ]] || exit 1
+   printf '%s' "$WS_DIR" >"$workspace_tmp/workspace-path"
+   touch "$WS_DIR/cleanup-sentinel"
+ ) || die "workspace was not created beneath the space-containing TMPDIR"
+ workspace_test_dir="$(cat "$workspace_tmp/workspace-path")"
++[[ "$workspace_test_dir" == *" "* ]] || die "WS_DIR path did not contain spaces"
+ [[ ! -e "$workspace_test_dir" && ! -L "$workspace_test_dir" ]] \
+   || die "rehearsed workspace survived exit cleanup"
+ [[ -d "$workspace_tmp" ]] || die "workspace cleanup removed the supplied TMPDIR"
++[[ -f "$workspace_decoy/decoy-sentinel" ]] \
++  || die "workspace cleanup removed a word-split sibling of the spaced TMPDIR"
+ ok "workspace creation succeeds beneath a TMPDIR containing spaces"
+ 
+ # A plain custom TMPDIR (no spaces) must also be honored: WS_DIR is a fresh
+@@ -377,6 +387,36 @@ graph_home_test_dir="$(cat "$graph_home_tmp/graph-home-path")"
+ [[ -d "$graph_home_tmp" ]] || die "GRAPH_HOME cleanup removed the supplied TMPDIR"
+ ok "GRAPH_HOME creation succeeds beneath a TMPDIR containing spaces"
+ 
++# Exercise graph home creation and EXIT cleanup even when graph is unavailable
++# or its same-home import succeeds. All resources belong to this subshell.
++log "2j. graph home lifecycle"
++graph_tmp="$LOCUS_HOME/graph temp"
++mkdir -p "$graph_tmp"
++touch "$graph_tmp/keep"
++for graph_exit in 0 73; do
++  graph_status=0
++  (
++    export TMPDIR="$graph_tmp"
++    LOCUS_HOME="$graph_tmp/subshell-home"
++    mkdir -p "$LOCUS_HOME" || exit 1
++    WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
++    trap 'e2e_cleanup' EXIT
++    create_graph_home || exit 1
++    [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
++      "${GRAPH_HOME##*/}" == locus-graph-imp.* ]] || exit 1
++    printf '%s' "$GRAPH_HOME" >"$graph_tmp/graph-home-path" || exit 1
++    touch "$GRAPH_HOME/cleanup-sentinel" || exit 1
++    exit "$graph_exit"
++  ) || graph_status=$?
++  [[ "$graph_status" -eq "$graph_exit" ]] || die "graph home lifecycle probe failed"
++  graph_test_home="$(cat "$graph_tmp/graph-home-path")"
++  [[ ! -e "$graph_test_home" && ! -L "$graph_test_home" ]] \
++    || die "graph home survived exit cleanup"
++  [[ -f "$graph_tmp/keep" && -d "$graph_tmp" ]] \
++    || die "graph cleanup removed unrelated resources"
++done
++ok "graph home honors nondefault TMPDIR and is cleaned on exit"
++
+ # Helper: run locus with the test home
+ locus() { "$LOCUS_BIN" "$@"; }
+ 
+@@ -637,6 +677,18 @@ if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
+ fi
+ ok "sample exec succeeds without unset-variable warnings"
+ 
++# Exercise the standalone sample's child as documented, including its check
++# that the isolated environment carries the pinned binding.
++sample_exec_stdout="$(locus exec --expect personal -- sh -c \
++  'test "$LOCUS_BINDING" = personal && echo "sample exec succeeded"' \
++  2>"$sample_exec_stderr")" || die "sample walkthrough exec failed"
++[[ "$sample_exec_stdout" == "sample exec succeeded" ]] \
++  || die "sample walkthrough exec produced unexpected output"
++if grep -Eqi 'warn|unset' "$sample_exec_stderr"; then
++  die "sample walkthrough exec emitted an unset-variable warning"
++fi
++ok "sample walkthrough exec succeeds without unset-variable warnings"
++
+ # Missing references must still be visible; do not hide real credential errors
+ # just to make the configured sample path quiet.
+ sample_exec_stdout="$(env -u LOCUS_SUPABASE_PERSONAL -u LOCUS_GH_TOKEN_PERSONAL \
+@@ -1159,6 +1211,56 @@ echo "$pinned_names" | grep -q 'github.scope' || die "pinned missing github.scop
+ echo "$pinned_names" | grep -q 'vercel.scope' || die "pinned missing vercel.scope"
+ ok "pinned tools/list includes provider tools"
+ 
++# Agent-facing whoami surfaces must report the same credential truth as the
++# CLI: locus exec launches locus-mcp with a scrubbed env, so the credential
++# source variables referenced by the pinned binding are unset for the MCP
++# process itself — every env: reference resolves as absent and must surface
++# as credential.present=false without leaking ref names or values.
++mcp_whoami_out="$(
++  mcp_rpc \
++    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"e2e","version":"0"}}}' \
++    '{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}' \
++    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"locus_whoami","arguments":{}}}' \
++    '{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"locus://session"}}'
++)"
++printf '%s' "$mcp_whoami_out" | python3 -c '
++import json, sys
++results = {}
++for line in sys.stdin:
++    line = line.strip()
++    if not line:
++        continue
++    try:
++        msg = json.loads(line)
++    except json.JSONDecodeError:
++        continue
++    if "id" in msg and "result" in msg:
++        results[msg["id"]] = msg["result"]
++call = results.get(2)
++assert call is not None and call.get("isError") is False, call
++who = json.loads(call["content"][0]["text"])
++resource = results.get(3)
++assert resource is not None, "missing locus://session read result"
++contents = resource.get("contents") or []
++assert contents and contents[0].get("uri") == "locus://session", resource
++session = json.loads(contents[0]["text"])
++for body in (who, session):
++    assert body["binding_alias"] == "acme", body
++    assert body["tenant"] == "acme-corp", body
++    assert body["seal_ok"] is True, body
++    providers = {p["provider"]: p for p in body["providers"]}
++    assert set(providers) == {"github", "supabase", "vercel"}, body
++    for name, provider in providers.items():
++        assert "credential_ref" not in provider, provider
++        assert provider["credential"] == {"present": False, "source": "environment"}, \
++            f"unexpected credential metadata for {name}"
++    serialized = json.dumps(body)
++    for canary in ("credential_ref", "GH_TOKEN_ACME", "VERCEL_TOKEN_ACME",
++                   "SUPABASE_ACME", "e2e-sample-", "phm:", "env:"):
++        assert canary not in serialized, (canary, body)
++' || die "MCP whoami surfaces reported incorrect credential presence"
++ok "MCP locus_whoami + locus://session report unset credentials as absent"
++
+ # ── 7. Freeze deny project_ref ───────────────────────────────────────────────
+ log "7. freeze deny project_ref"
+ freeze_out="$(
+@@ -1324,6 +1426,24 @@ else
+   fi
+   ok "touchid mock cancel fails closed"
+ 
++  # --json never prompts: --touchid is interactive-only, so the combination
++  # is refused before confirmation or record mutation — even under the mock.
++  if LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid --json \
++    >"$LOCUS_HOME/touchid-json.out" 2>&1; then
++    die "--touchid --json should refuse (never prompts)"
++  fi
++  grep -q 'requires an interactive invocation' "$LOCUS_HOME/touchid-json.out" \
++    || die "--touchid --json refusal missing contract message"
++  ok "--touchid --json refuses before prompting"
++
++  locus approve status "$dual_id" --json | python3 -c '
++import json, sys
++r = json.load(sys.stdin)
++assert len(r.get("grants") or []) == 0, r
++assert r.get("authoritative_grants") == 0, r
++'
++  ok "JSON mode refuses touchid without recording a grant"
++
+   # A caller-controlled successful mock can only record advisory evidence.
+   LOCUS_TOUCHID_MOCK=ok locus approve grant "$dual_id" --as alice --touchid >/dev/null \
+     || die "mocked confirmation did not record the advisory grant"
+@@ -2020,6 +2140,29 @@ assert d["workspace"]["valid"] is False, d["workspace"]
+ '
+ ok "broken workspace link blocks force/run and makes doctor UNSAFE"
+ 
++# Repeated SECURITY_WS creation (unconditional): two invocations of the
++# security workspace recipe must yield distinct directories directly beneath
++# the selected temporary root. The live probe workspace is stashed and
++# restored so the exit trap still removes exactly it.
++security_ws_live="$SECURITY_WS"
++create_security_workspace; security_ws_a="$SECURITY_WS"
++create_security_workspace; security_ws_b="$SECURITY_WS"
++SECURITY_WS="$security_ws_live"
++security_ws_root="${TMPDIR:-/tmp}"
++security_ws_root="${security_ws_root%/}"
++[[ -d "$security_ws_a" && -d "$security_ws_b" ]] \
++  || die "repeated security workspace creation did not create both directories"
++[[ "$security_ws_a" != "$security_ws_b" ]] \
++  || die "repeated security workspace creation returned the same directory"
++security_ws_parent_a="${security_ws_a%/*}"
++security_ws_parent_b="${security_ws_b%/*}"
++[[ "${security_ws_parent_a%/}" == "$security_ws_root" && "${security_ws_parent_b%/}" == "$security_ws_root" ]] \
++  || die "repeated security workspaces were not created directly beneath the temp root"
++rm -rf "$security_ws_a" "$security_ws_b"
++[[ ! -e "$security_ws_a" && ! -e "$security_ws_b" ]] \
++  || die "repeated security workspaces were not removed"
++ok "two security workspaces are distinct and live directly beneath the temp root"
++
+ # ── 25. verify claim (feature-detected) ──────────────────────────────────────
+ log "25. locus verify claim (optional)"
+ if ! has_cmd verify && ! has_cmd_path verify claim; then
+@@ -2740,6 +2883,11 @@ print("mcp list grants=%d revoked_a_rows=%d live_acme=%d" % (len(rows), len(a_ro
+   fi
+ fi
+ 
++# Drop-in steps (scripts/e2e.d/*.sh): new e2e steps belong there, not above.
++# shellcheck source=scripts/e2e-dropin.sh
++source "$ROOT/scripts/e2e-dropin.sh"
++e2e_run_dropins
++
+ printf '\n========================================\n'
+ printf 'e2e PASS  (%d checks, %d skipped)\n' "$pass" "$skip"
+ printf 'LOCUS_HOME was %s (cleaned)\n' "$LOCUS_HOME"
+diff --git a/scripts/e2e.test.mjs b/scripts/e2e.test.mjs
+index 40fa46c9cd10bd5057994154884d54a086c16810..9848ea236fc014f6788308437e1ee7b259a0b1cc 100644
+--- a/scripts/e2e.test.mjs
++++ b/scripts/e2e.test.mjs
+@@ -341,6 +341,7 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
+     } else {
+       assert.ok(existsSync(cleanedEarly), 'graph home survived until the next section');
+       assert.match(result.stdout, /ok  sample exec succeeds without unset-variable warnings/);
++      assert.match(result.stdout, /ok  sample walkthrough exec succeeds without unset-variable warnings/);
+       assert.match(result.stdout, /ok  sample exec reports missing credentials/);
+       assert.ok(/ok  graph export\/import into fresh LOCUS_HOME/.test(result.stdout), 'fresh import did not pass');
+       assert.ok(/e2e PASS/.test(result.stdout), 'e2e did not pass');
+@@ -672,3 +673,37 @@ exec '${locus.replaceAll("'", "'\\''")}' "$@"
+   assert.equal(existsSync(workspace), false, 'security workspace survived exit cleanup');
+   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup removed or left unexpected files');
+ });
++
++for (const [fault, expected] of [
++  ['exit', 'sample walkthrough exec failed'],
++  ['output', 'sample walkthrough exec produced unexpected output'],
++  ['warning', 'sample walkthrough exec emitted an unset-variable warning'],
++]) {
++  test(`sample walkthrough regression rejects ${fault}`, { timeout: 1_800_000 }, (t) => {
++    const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-sample-test-'));
++    t.after(() => rmSync(fixture, { recursive: true, force: true }));
++    const wrapper = join(fixture, 'locus');
++    writeFileSync(wrapper, `#!/bin/bash
++if [[ "\${1:-}" == exec && "\${2:-}" == --expect && "\${3:-}" == personal && "\${4:-}" == -- && "\${5:-}" == sh ]]; then
++  case "$SAMPLE_FAULT" in
++    exit) exit 1 ;;
++    output) printf '%s\\n' 'unexpected output'; exit 0 ;;
++    warning) printf '%s\\n' 'warning: synthetic unset-variable warning' >&2 ;;
++  esac
++fi
++exec '${locus.replaceAll("'", "'\\''")}' "$@"
++`, { mode: 0o755 });
++
++    const result = spawnSync('bash', [script], {
++      cwd: root,
++      env: { ...process.env, LOCUS_BIN: wrapper, SAMPLE_FAULT: fault },
++      encoding: 'utf8',
++      timeout: 1_800_000,
++      maxBuffer: 10 * 1024 * 1024,
++    });
++    assert.equal(result.signal, null, 'e2e process terminated unexpectedly');
++    assert.equal(result.status, 1, `e2e should reject ${fault}`);
++    assert.ok(result.stderr.includes(`FAIL ${expected}`), 'expected failure was not reported');
++    assert.doesNotMatch(result.stdout, /ok  sample walkthrough exec succeeds without unset-variable warnings/);
++  });
++}
