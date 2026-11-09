@@ -6,6 +6,12 @@ const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.m
 const fullJob = workflow.match(/^  check:\n([\s\S]*?)(?=^  [a-z][\w-]*:|$(?![\s\S]))/m)?.[1];
 const e2eStep = fullJob?.match(/      - name: Release end-to-end gate\n([\s\S]*?)(?=      - name:|$(?![\s\S]))/m)?.[1];
 
+test("offline spaced-workspace regression runs in the regular wrappers job", () => {
+  const wrappers = workflow.match(/^  wrappers:\n([\s\S]*?)(?=^  [a-z][\w-]*:|$(?![\s\S]))/m)?.[1];
+  assert.ok(wrappers);
+  assert.match(wrappers, /node --test scripts\/e2e-workspace-spaced-tmpdir\.test\.mjs/);
+});
+
 test("release e2e runs only in the existing scheduled/manual Linux full job", () => {
   assert.ok(fullJob);
   assert.match(fullJob, /if: github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch'/);
