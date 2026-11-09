@@ -15,6 +15,17 @@ function fixture(files) {
   return root;
 }
 
+test('empty input produces a passing zero-file report', (t) => {
+  const root = fixture({ 'src/empty.ts': '' });
+  t.after(() => rmSync(root, { recursive: true }));
+  const hits = scan(root);
+  assert.deepEqual(hits, []);
+  assert.deepEqual(report(hits), {
+    text: 'classical asymmetric crypto: 0 file(s), 0 not on the allowlist',
+    failed: false,
+  });
+});
+
 test('hashes, HMAC and symmetric AEAD are not flagged', () => {
   const root = fixture({ 'src/a.ts': "createHash('sha256'); createHmac('sha256', k); chacha20poly1305", 'src/b.rs': 'use sha2::Sha256;' });
   assert.deepEqual(scan(root), []);
