@@ -18,6 +18,51 @@ test('first temporary directory allocation failure stops integration commands', 
   assert.equal(result.status, 0, 'shell regression test must pass');
 });
 
+test('project allocation failure removes the earlier home and stops integration commands', (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), 'locus-hub-int-project-failure-'));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const tmp = join(scratch, 'temporary directory');
+  const record = join(scratch, 'home.record');
+  const calls = join(scratch, 'calls');
+  mkdirSync(tmp);
+  const sibling = join(tmp, 'keep');
+  writeFileSync(sibling, 'untouched');
+
+  const stub = `
+mktemp() {
+  case "$2" in
+    */locus-hub-int-proj.XXXXXX) printf 'project\\n' >> "$CALLS"; return 73 ;;
+    */locus-hub-int.XXXXXX)
+      printf 'home\\n' >> "$CALLS"
+      local created
+      created="$(command mktemp "$@")" || return
+      printf '%s\\n' "$created" > "$RECORD"
+      printf '%s\\n' "$created"
+      ;;
+    *) return 74 ;;
+  esac
+}
+node() { printf 'node\\n' >> "$CALLS"; }
+jq() { :; }
+export -f mktemp node jq
+exec bash "$1"
+`;
+  const result = spawnSync('bash', ['-c', stub, 'project-failure', script], {
+    env: { ...process.env, TMPDIR: tmp, RECORD: record, CALLS: calls, LOCUS_CONTROL_CAPABILITY: 'synthetic' },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'project allocation failure must propagate');
+  assert.equal(readFileSync(calls, 'utf8'), 'home\nproject\n', 'integration commands must not run');
+  const home = readFileSync(record, 'utf8').trim();
+  assert.equal(dirname(home), tmp);
+  assert.equal(existsSync(home), false, 'the successfully allocated home must be removed');
+  assert.deepEqual(readdirSync(tmp), ['keep'], 'cleanup must preserve unrelated files');
+  assert.equal(readFileSync(sibling, 'utf8'), 'untouched');
+});
+
 // Exported bash functions shadow the real commands in the child script. The
 // canned answers satisfy every check; `mcp` fails so the multi-tenant slice
 // soft-skips. The final `locus` call lists SMOKE_HOME/SMOKE_PROJ for the test.
