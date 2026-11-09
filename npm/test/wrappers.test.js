@@ -25,6 +25,16 @@ function releaseMatrixTargets() {
 for (const [name, file] of Object.entries(wrappers)) {
   const mod = require(file);
 
+  test(`${name}: supported target names are nonempty and unique`, () => {
+    const targets = Object.values(mod.SUPPORTED_TARGETS);
+    assert.ok(targets.length > 0, "must support at least one target");
+    for (const target of targets) {
+      assert.equal(typeof target, "string");
+      assert.ok(target.trim().length > 0, "target name must not be empty");
+    }
+    assert.equal(new Set(targets).size, targets.length, "target names must be unique");
+  });
+
   test(`${name}: PREBUILT_TARGETS matches the release.yml matrix`, () => {
     assert.deepEqual([...mod.PREBUILT_TARGETS].sort(), releaseMatrixTargets());
   });
