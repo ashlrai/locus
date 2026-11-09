@@ -306,11 +306,19 @@ for (const [name, file] of Object.entries(wrappers)) {
     assert.throws(() => mod.getPlatformTarget({ platform: "darwin", arch: "ia32" }), /Unsupported platform: darwin-ia32/);
   });
 
+  test(`${name}: getPlatformTarget rejects an unknown operating system`, () => {
+    assert.throws(
+      () => mod.getPlatformTarget({ platform: "plan9", arch: "x64" }),
+      /Unsupported platform: plan9-x64\. Install from source: cargo install /,
+    );
+  });
+
   for (const [platform, arch] of [
     ["linux", "riscv64"],
     ["darwin", "ia32"],
     ["freebsd", "x64"],
     ["freebsd", "riscv64"],
+    ["plan9", "x64"],
   ]) {
     test(`${name}: on unsupported ${platform}-${arch} it reports the platform and never attempts a download`, () => {
       const home = mkdtempSync(join(tmpdir(), "locus-unsupported-"));
