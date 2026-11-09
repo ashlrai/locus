@@ -224,7 +224,7 @@ for (const [name, file] of Object.entries(wrappers)) {
   });
 
   test(`${name}: with no installed binary, runs its executable from the release bundle`, () => {
-    const home = mkdtempSync(join(tmpdir(), "locus-bundle-"));
+    const home = mkdtempSync(join(tmpdir(), "locus bundle with spaces-"));
     try {
       const binary = join(home, ".locus", "bin", name);
       const preload = join(home, "release-fixture.js");
@@ -280,6 +280,11 @@ for (const [name, file] of Object.entries(wrappers)) {
       assert.equal(result.signal, null);
       assert.equal(result.stdout, "selected bundle member\n");
       assert.equal(readFileSync(binary, "utf8"), `bundled ${name}`);
+      if (name === "locus") {
+        const companion = join(home, ".locus", "bin", "locus-mcp");
+        assert.equal(readFileSync(companion, "utf8"), "bundled locus-mcp");
+        assert.equal(readFileSync(`${companion}.version`, "utf8").trim(), require(join(root, "npm", "package.json")).version);
+      }
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
