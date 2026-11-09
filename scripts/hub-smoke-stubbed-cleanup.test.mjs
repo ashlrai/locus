@@ -30,6 +30,7 @@ case "$1 $2" in
     [[ -d "$LOCUS_HOME" && -f .mcp.json && \${#errors[@]} -eq 1 && -f "\${errors[0]}" ]] || exit 1
     mkdir -p "$LOCUS_HOME/nested" nested
     touch "$LOCUS_HOME/nested/content" nested/content
+    printf 'synthetic captured error\\n' > "\${errors[0]}"
     printf '%s\\n' "$LOCUS_HOME" "$PWD" "\${errors[0]}" > "$RESOURCE_LOG"
     echo 'personal:t' ;;
   "mcp mint") exit 1 ;;
