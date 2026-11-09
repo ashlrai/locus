@@ -74,6 +74,7 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
 - [Copy-paste examples](https://github.com/ashlrai/locus/blob/main/docs/copy-paste.md)
 - [Signed credential injection audit (opt-in)](https://github.com/ashlrai/locus/blob/main/docs/credential-audit.md)
 - [Credential compatibility](https://github.com/ashlrai/locus/blob/main/docs/credential-compatibility.md)
+- [DeepWiki auto-docs](https://github.com/ashlrai/locus/blob/main/docs/deepwiki.md)
 - [doctor --fix](https://github.com/ashlrai/locus/blob/main/docs/doctor-fix.md)
 - [Multi-account dogfood (personal + client)](https://github.com/ashlrai/locus/blob/main/docs/dogfood-multi-account.md)
 - [Dogfood probe cleanup](https://github.com/ashlrai/locus/blob/main/docs/dogfood-probe-cleanup.md)

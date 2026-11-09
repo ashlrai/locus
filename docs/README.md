@@ -12,6 +12,7 @@ Agents start here. Every command block in [copy-paste.md](copy-paste.md) is mean
 | [../AGENTS.md](../AGENTS.md) | Rules when changing this repo |
 | [architecture.md](architecture.md) | How a pin becomes the only account |
 | [credential-compatibility.md](credential-compatibility.md) | `env:` and `phm:` refs |
+| [deepwiki.md](deepwiki.md) | DeepWiki auto-docs config (`.devin/wiki.json`) |
 
 For autopin implementation changes, use the [autopin review checklist](autopin-review-checklist.md).
 For the suggestion command's output and examples, see [autopin suggest output](autopin-suggest-output.md).

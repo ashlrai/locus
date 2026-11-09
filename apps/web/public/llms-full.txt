@@ -213,6 +213,13 @@ listed verbatim so an agent can jump straight to the right document.
   - Phantom Secrets references
   - Configuration validation
 
+## docs/deepwiki.md
+
+- [DeepWiki auto-docs](https://github.com/ashlrai/locus/blob/main/docs/deepwiki.md)
+  - Contract
+  - How this repo uses it
+  - Maintenance
+
 ## docs/doctor-fix.md
 
 - [doctor --fix](https://github.com/ashlrai/locus/blob/main/docs/doctor-fix.md)

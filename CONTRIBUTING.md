@@ -107,7 +107,12 @@ node --test scripts/check-readme-links.test.mjs
 bash scripts/check-support-links.sh   # every relative link in SUPPORT.md resolves
 node --test scripts/check-support-links.test.mjs
 node scripts/freshness/check.mjs      # generated release blocks are in sync
+node --test scripts/devin-wiki.test.mjs  # .devin/wiki.json stays valid and its paths resolve
 ```
+
+The `.devin/wiki.json` file steers DeepWiki's auto-generated wiki for this
+repository. When adding a crate or a major doc, update it in the same change;
+see [DeepWiki auto-docs](./docs/deepwiki.md).
 
 ## Lint and format
 
