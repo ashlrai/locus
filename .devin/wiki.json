@@ -1,0 +1,164 @@
+{
+  "repo_notes": [
+    {
+      "content": "This is a Rust workspace with three crates: locus-core (bindings, sealed sessions, seal, policy, store, isolation, adapters, workers), locus-cli (the `locus` human control plane), and locus-mcp (a stdio MCP multiplexor). The security-critical logic lives in crates/locus-core/src/.",
+      "author": "Maintainers"
+    },
+    {
+      "content": "Identity is resolved at the gate, not in the prompt: a human pins one binding and every CLI command and MCP tool stays sealed to that tenant until a human re-pins. Documentation must never suggest that an agent can pin or re-pin; agents may only request a pin.",
+      "author": "Maintainers"
+    },
+    {
+      "content": "docs/ holds contributor-facing how-tos (docs/architecture.md, docs/mcp.md, docs/adapters.md, docs/policy.md, docs/onboarding.md). DESIGN.md is the full architecture plus threat model. README.md, AGENTS.md, llms.txt and llms-full.txt are the agent-facing indexes. Cite these instead of restating them.",
+      "author": "Maintainers"
+    },
+    {
+      "content": "Never show real credentials in examples. Bindings store CredentialRefs only (env:VAR, or fail-closed phm:NAME), never raw tokens, and `test:` refs exist only inside compiled unit tests.",
+      "author": "Maintainers"
+    },
+    {
+      "content": "End-to-end test steps live in numbered drop-ins under scripts/e2e.d/ rather than in scripts/e2e.sh, and repository meta checks (README links, release freshness, this .devin/wiki.json file) are dependency-free Node tests listed in CONTRIBUTING.md.",
+      "author": "Maintainers"
+    }
+  ],
+  "pages": [
+    {
+      "title": "Locus Overview",
+      "purpose": "Orient on the product: an identity plane for coding agents where pinning a binding seals every CLI command, MCP tool and child process to one tenant until a human re-pins. Cover the problem (wrong-account action), the 30-second start, and the FAQ from README.md and AGENTS.md.",
+      "parent": null
+    },
+    {
+      "title": "Architecture",
+      "purpose": "Explain the control, policy, credential and worker planes, and how identity is resolved at the gate rather than in the prompt. Use the plane diagram in docs/architecture.md and the full design in DESIGN.md.",
+      "parent": null
+    },
+    {
+      "title": "Sealed Sessions and the Pin Lifecycle",
+      "purpose": "Document the HMAC session seal in crates/locus-core/src/seal.rs, the enter, pin, switch, leave and renew commands, the authority broker's lifetime, and how a user recovers after the broker exits.",
+      "parent": "Architecture"
+    },
+    {
+      "title": "Isolation and Environment Scrubbing",
+      "purpose": "Cover crates/locus-core/src/isolation.rs: scrubbing ambient identity (AWS_PROFILE, GH_TOKEN, SUPABASE_*, VERCEL_*) from children, building the isolated env for locus exec and locus run, and private config dirs so a second account cannot leak in.",
+      "parent": "Architecture"
+    },
+    {
+      "title": "Workspace Allowlist",
+      "purpose": "Explain the .locus.toml walk and allowed_bindings enforcement in crates/locus-core/src/workspace.rs that blocks wrong-tenant pins inside a workspace unless the audited --force path is used.",
+      "parent": "Architecture"
+    },
+    {
+      "title": "locus-core",
+      "purpose": "Tour the core crate: the Binding model, the store under the Locus home, the policy engine, the seal, CredentialRef resolution, adapters and workers. Entry points are crates/locus-core/src/lib.rs and its module list.",
+      "parent": null
+    },
+    {
+      "title": "locus-cli",
+      "purpose": "Document the human control plane binary from crates/locus-cli/: daily commands (enter, switch, pin, leave, renew, whoami, status, exec, run, binding) and setup commands (init, quickstart, onboard, setup, agent, doctor, hook, mcp, workspace), grouped as `locus --help` presents them.",
+      "parent": null
+    },
+    {
+      "title": "locus-mcp",
+      "purpose": "Describe the stdio MCP multiplexor in crates/locus-mcp/: control tools for every session, provider tools only for the live pin, the call gate, and the rule that stdout stays protocol-only JSON-RPC.",
+      "parent": null,
+      "page_notes": [
+        {
+          "content": "stdout is sacred: never document logging or diagnostics on locus-mcp stdout, it breaks the JSON-RPC protocol.",
+          "author": "Maintainers"
+        }
+      ]
+    },
+    {
+      "title": "MCP Client Wiring",
+      "purpose": "Show how Claude Code, Cursor, Codex, Gemini CLI and Grok Build launch Locus, why provider tools need `locus mcp --supervised` plus a live pin and the control capability, and what to restart after a re-pin. Follow docs/mcp.md.",
+      "parent": "locus-mcp"
+    },
+    {
+      "title": "Provider Adapters",
+      "purpose": "Explain the adapter model: all provider-specific knowledge lives in crates/locus-core/src/adapters/, every account selector is frozen via freeze_string_arg, destructive tools are marked and gated by policy. Follow docs/adapters.md.",
+      "parent": null
+    },
+    {
+      "title": "Adapter SDK and Registry Trust",
+      "purpose": "Walk through writing an adapter from the examples/adapters/_template/ skeleton, the adapters/manifest.toml catalog and its schema/adapter-manifest.schema.json contract, adapter verification, and signed-adapter trust keys.",
+      "parent": "Provider Adapters"
+    },
+    {
+      "title": "Workers",
+      "purpose": "Compare worker backends: synthetic in-process adapters versus MCP stdio child workers, and how a worker receives only the pinned binding's credentials. Follow docs/workers.md.",
+      "parent": null
+    },
+    {
+      "title": "Policy and Approvals",
+      "purpose": "Document allow, deny and require_approval rules and their evaluation order, the advisory nature of local approval labels, and the fail-closed external authorization envelope that releases blocked provider execution. Follow docs/policy.md.",
+      "parent": null
+    },
+    {
+      "title": "Credential References",
+      "purpose": "Cover CredentialRefs in bindings: env:VAR values supplied outside agent context, phm:NAME references that fail closed until a supported scoped Phantom bridge exists, and `test:` refs that production binaries reject regardless of environment. Follow docs/credential-compatibility.md.",
+      "parent": null
+    },
+    {
+      "title": "Security Model",
+      "purpose": "State the load-bearing invariants (sealed pin, exclusive tool catalog, no cross-binding credentials, scope freeze, agents cannot pin, fail closed) from AGENTS.md, the threat model in DESIGN.md, and private reporting via SECURITY.md.",
+      "parent": null,
+      "page_notes": [
+        {
+          "content": "The invariants list in AGENTS.md is authoritative; when behavior and prose disagree, prefer a failing test over a soft allow.",
+          "author": "Maintainers"
+        }
+      ]
+    },
+    {
+      "title": "Onboarding and First Run",
+      "purpose": "Walk a new user through `locus quickstart` and the `locus onboard` wizard across clients and tenants, the doctor health check, and first-run expectations from docs/onboarding.md and docs/FIRST-RUN.md.",
+      "parent": null
+    },
+    {
+      "title": "Firm Mode and Agencies",
+      "purpose": "Explain multi-client dual-control operation, engagement workspaces and offboarding, and the agency starter kit in examples/agency-starter/. Follow docs/firm-mode.md and docs/agency-starter.md.",
+      "parent": null
+    },
+    {
+      "title": "Agent Contract",
+      "purpose": "Specify the stable machine surface agents rely on: --json output schema ids, exit codes, --dry-run plan classes per command, and non-interactive rules. Follow docs/agent-contract.md.",
+      "parent": null
+    },
+    {
+      "title": "Installation and Distribution",
+      "purpose": "Cover every install path: the locus-cli and @ashlrai/locus-mcp npm wrappers in npm/ and npm-mcp/, the Homebrew tap in integrations/homebrew/, install from source, the MSRV policy, and the release process in docs/RELEASE.md.",
+      "parent": null
+    },
+    {
+      "title": "Development Guide",
+      "purpose": "Collect the contributor workflow from CONTRIBUTING.md and CLAUDE.md: cargo build, test, clippy and fmt gates, smoke tests that set LOCUS_HOME to a throwaway directory so they never touch a real Locus home, and where the test surface lives.",
+      "parent": null,
+      "page_notes": [
+        {
+          "content": "Any local smoke test must export LOCUS_HOME to a temporary directory; never run examples against a real Locus home.",
+          "author": "Maintainers"
+        }
+      ]
+    },
+    {
+      "title": "End-to-End Test Drop-Ins",
+      "purpose": "Explain adding numbered drop-in scripts under scripts/e2e.d/ instead of editing scripts/e2e.sh, and how scripts/check-e2e-dropin.sh proves the mechanism keeps working.",
+      "parent": "Development Guide"
+    },
+    {
+      "title": "Docs and Repo Checks",
+      "purpose": "List the dependency-free Node repository checks and how to run them: README link and anchor resolution, SUPPORT.md link checks, release-block freshness, and the DeepWiki wiki.json contract test. See the docs checks section of CONTRIBUTING.md.",
+      "parent": "Development Guide"
+    },
+    {
+      "title": "Agent Indexes",
+      "purpose": "Introduce the entry points agents are told to read first: llms.txt, llms-full.txt, docs/copy-paste.md and AGENTS.md, and when to use each.",
+      "parent": null
+    },
+    {
+      "title": "Goals and Roadmap",
+      "purpose": "Summarize the northstar goal loop behind `locus goal status` and the phased delivery plan from GOALS.md and PLAN.md.",
+      "parent": null
+    }
+  ]
+}
