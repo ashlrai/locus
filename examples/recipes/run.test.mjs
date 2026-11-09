@@ -238,6 +238,23 @@ test("a missing binary is incomplete, never complete", () => {
   assert.doesNotMatch(r.stdout, /^COMPLETE/m);
 });
 
+test("a non-executable binary is incomplete, never complete", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-permission-"));
+  try {
+    const bin = join(root, `locus${exe}`);
+    writeFileSync(bin, "not executable\n", { mode: 0o600 });
+    chmodSync(bin, 0o600);
+    const r = run(bin);
+    assert.ifError(r.error);
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stdout, /^SKIP .* is not executable; supply an executable --locus <absolute-path>$/m);
+    assert.match(r.stdout, /^INCOMPLETE: locus recipes$/m);
+    assert.doesNotMatch(r.stdout + r.stderr, /^(PASS|COMPLETE)/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a missing recipe is reported and exits unsuccessfully", () => {
   const recipe = join(here, "does-not-exist.mjs");
   const r = run(process.execPath, recipe);
