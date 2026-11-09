@@ -13,6 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-09
+
+Highlights: policy glob and pin-recovery fixes, plus the `locus status` empty
+state, MCP/CLI regression coverage and installer docs from the 0.7.1 candidate.
+The 0.7.1 version was bumped in source but never tagged or published (the
+latest tag and npm release are 0.7.0), so its changes ship here. No seal,
+provider or credential behavior changed.
+
 ### Fixed
 
 - Policy glob `?` now matches one Unicode scalar value rather than one byte,

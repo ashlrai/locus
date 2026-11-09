@@ -3,7 +3,7 @@
 <!-- fresh:begin versions -->
 | Component | Version |
 |---|---|
-| Rust workspace (source) | 0.7.1 |
+| Rust workspace (source) | 0.7.2 |
 | npm locus-cli (published) | 0.6.2 |
 | npm @ashlrai/locus-mcp (published) | 0.6.2 |
 | Published release date | 2026-11-01 |

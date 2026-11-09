@@ -1,7 +1,7 @@
 # Releasing Locus
 
 Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
-`[workspace.package] version` (currently **0.7.1** in source). This is not
+`[workspace.package] version` (currently **0.7.2** in source). This is not
 proof of publication; see `scripts/freshness/published.json` for the last
 verified published release. Crates inherit via
 `version.workspace = true`. npm packages under `npm/`, `npm-mcp/`, and
