@@ -62,13 +62,21 @@ if [[ "$status" -eq 0 ]] || ! grep -Fxq 'error: hub-smoke could not create tempo
 fi
 echo 'ok: unwritable TMPDIR stops before smoke checks'
 
-# Inspect the real file at its first use, before the EXIT trap removes it.
+# Inspect all three allocations at their first use, before the EXIT trap removes them.
 cat > "$fixture/hook" <<'HOOK'
 jq() { :; }
 cargo() { :; }
 locus() {
   if [[ "${1:-}" == init ]]; then
-    [[ -f "$SMOKE_ERR" && ! -L "$SMOKE_ERR" ]] || exit 74
+    [[ -d "$SMOKE_HOME" && ! -L "$SMOKE_HOME" &&
+       -d "$SMOKE_PROJ" && ! -L "$SMOKE_PROJ" &&
+       -f "$SMOKE_ERR" && ! -L "$SMOKE_ERR" ]] || exit 74
+    for path in "$SMOKE_HOME" "$SMOKE_PROJ" "$SMOKE_ERR"; do
+      [[ "${path%/*}" == "$TMPDIR" ]] || exit 74
+    done
+    [[ "${SMOKE_HOME##*/}" == locus-hub-smoke.* &&
+       "${SMOKE_PROJ##*/}" == locus-hub-proj.* &&
+       "${SMOKE_ERR##*/}" == locus-hub-smoke-err.* ]] || exit 74
     printf '%s\n' "$SMOKE_ERR" > "$RECORD"
     exit 73
   fi
@@ -79,7 +87,7 @@ env BASH_ENV="$fixture/hook" HOME="$fixture" TMPDIR="$fixture/scratch with space
   PATH="$fixture/bin:$PATH" REAL_MKTEMP="$real_mktemp" FAIL_TEMPLATE=none \
   ATTEMPTS="$fixture/attempts" RECORD="$fixture/record" \
   bash "$root/scripts/hub-smoke.sh" > "$fixture/stdout" 2> "$fixture/stderr" || status=$?
-[[ "$status" -eq 73 ]] || { echo 'FAIL: error file was not observed at init' >&2; exit 1; }
+[[ "$status" -eq 73 ]] || { echo 'FAIL: temporary paths were not observed under TMPDIR at init' >&2; exit 1; }
 IFS= read -r error_file < "$fixture/record"
 [[ "${error_file%/*}" == "$fixture/scratch with spaces" && \
    "${error_file##*/}" == locus-hub-smoke-err.* && ! -e "$error_file" ]] || {
@@ -89,7 +97,7 @@ IFS= read -r error_file < "$fixture/record"
    $(cat "$fixture/scratch with spaces/sentinel") == keep ]] || {
   echo 'FAIL: cleanup changed the supplied TMPDIR' >&2; exit 1;
 }
-echo 'ok: error file uses the supplied TMPDIR and is cleaned up'
+echo 'ok: all temporary paths use the supplied TMPDIR and are cleaned up'
 
 # Run the complete smoke against real binaries with the same spaced TMPDIR.
 # Keep output private: the smoke exercises credential-adjacent commands.
