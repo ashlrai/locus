@@ -142,6 +142,35 @@ test("a failing recipe command reports its exit and stops subsequent commands", 
   }
 });
 
+test("an invalid recipe binding fails before subsequent steps run", () => {
+  assert.ok(built, "build locus before running the recipes tests");
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-invalid-"));
+  try {
+    const marker = join(root, "invocations");
+    const diagnostic = join(root, "diagnostic");
+    const wrapper = join(root, "locus");
+    const recipe = join(root, "invalid-recipe.mjs");
+    const source = readFileSync(join(here, "run.mjs"), "utf8");
+    const validBinding = 'binding("acme", "acme-corp", "ACME_GH_TOKEN")';
+    assert.ok(source.includes(validBinding));
+    writeFileSync(recipe, source.replace(validBinding, '"[binding\\ninvalid TOML"'));
+    writeFileSync(wrapper, `#!${process.execPath}\nconst { appendFileSync, writeFileSync } = require("node:fs");\nconst { spawnSync } = require("node:child_process");\nappendFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nconst result = spawnSync(${JSON.stringify(built)}, process.argv.slice(2), { encoding: "utf8" });\nwriteFileSync(${JSON.stringify(diagnostic)}, result.stderr ?? "");\nprocess.stdout.write(result.stdout ?? "");\nprocess.stderr.write(result.stderr ?? "");\nprocess.exit(result.status ?? 1);\n`);
+    chmodSync(wrapper, 0o755);
+
+    const r = run(wrapper, recipe);
+    assert.ifError(r.error);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /^FAIL locus run -b acme exited 1, expected 0$/m);
+    assert.match(readFileSync(diagnostic, "utf8"), /binding 'acme' is malformed/);
+    assert.doesNotMatch(r.stdout, /^(PASS|COMPLETE|SKIP|INCOMPLETE)/m);
+    const calls = readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(calls.length, 1, "subsequent recipe steps must not run");
+    assert.deepEqual(calls[0].slice(0, 3), ["run", "-b", "acme"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a locus executable path containing spaces receives separate arguments", () => {
   const root = mkdtempSync(join(tmpdir(), "locus executable path "));
   try {
