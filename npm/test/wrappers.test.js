@@ -218,15 +218,16 @@ for (const [name, file] of Object.entries(wrappers)) {
     }
   });
 
-  test(`${name}: getPlatformTarget rejects an unsupported architecture by name`, () => {
+  test(`${name}: getPlatformTarget reports the requested unsupported platform and architecture`, () => {
     assert.throws(
       () => mod.getPlatformTarget({ platform: "linux", arch: "riscv64" }),
       (err) => /^Unsupported platform: linux-riscv64\. Install from source: cargo install /.test(err.message),
     );
     assert.throws(() => mod.getPlatformTarget({ platform: "darwin", arch: "ia32" }), /Unsupported platform: darwin-ia32/);
+    assert.throws(() => mod.getPlatformTarget({ platform: "freebsd", arch: "x64" }), /Unsupported platform: freebsd-x64/);
   });
 
-  for (const [platform, arch] of [["linux", "riscv64"], ["darwin", "ia32"]]) {
+  for (const [platform, arch] of [["linux", "riscv64"], ["darwin", "ia32"], ["freebsd", "x64"]]) {
     test(`${name}: on unsupported ${platform}-${arch} it reports the platform and never attempts a download`, () => {
       const home = mkdtempSync(join(tmpdir(), "locus-unsupported-"));
       try {
