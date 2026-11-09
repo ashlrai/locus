@@ -40,6 +40,28 @@ for case_number in 1 2 3; do
   printf 'ok: allocation failure case %s\n' "$case_number"
 done
 
+# Exercise the real mktemp against a directory without write permission.
+# The hook records any attempt to reach the smoke prerequisites or checks.
+mkdir "$fixture/unwritable"
+cat > "$fixture/no-smoke-hook" <<'HOOK'
+jq() { : > "$SMOKE_REACHED"; }
+cargo() { : > "$SMOKE_REACHED"; }
+locus() { : > "$SMOKE_REACHED"; }
+HOOK
+chmod 500 "$fixture/unwritable"
+status=0
+env BASH_ENV="$fixture/no-smoke-hook" HOME="$fixture" TMPDIR="$fixture/unwritable" \
+  SMOKE_REACHED="$fixture/smoke-reached" \
+  bash "$root/scripts/hub-smoke.sh" > "$fixture/stdout" 2> "$fixture/stderr" || status=$?
+chmod 700 "$fixture/unwritable"
+if [[ "$status" -eq 0 ]] || ! grep -Fxq 'error: hub-smoke could not create temporary home' "$fixture/stderr" \
+  || [[ -s "$fixture/stdout" || -e "$fixture/smoke-reached" ]] \
+  || [[ -n $(find "$fixture/unwritable" -mindepth 1 -print -quit) ]]; then
+  echo 'FAIL: unwritable TMPDIR did not stop before smoke checks' >&2
+  exit 1
+fi
+echo 'ok: unwritable TMPDIR stops before smoke checks'
+
 # Inspect the real file at its first use, before the EXIT trap removes it.
 cat > "$fixture/hook" <<'HOOK'
 jq() { :; }
