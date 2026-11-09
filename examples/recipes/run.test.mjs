@@ -86,6 +86,26 @@ test("an unrecognized option returns usage without running a recipe", () => {
   assert.equal(r.stdout, "");
 });
 
+test("a missing --locus input returns usage before running a recipe", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-missing-input-"));
+  try {
+    for (const args of [["--locus"], ["--locus", ""]]) {
+      const r = spawnSync(process.execPath, [join(here, "run.mjs"), ...args], {
+        env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
+        encoding: "utf8",
+        timeout: 120_000,
+      });
+      assert.ifError(r.error);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
+      assert.equal(r.stdout, "");
+      assert.deepEqual(readdirSync(root), [], "a recipe workspace was created for missing input");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("arguments after an absolute --locus path are ignored", () => {
   const r = spawnSync(process.execPath, [join(here, "run.mjs"), "--locus", join(repo, "target", "does-not-exist", `locus${exe}`), "unknown-recipe"], { encoding: "utf8", timeout: 120_000 });
   assert.equal(r.status, 2);
