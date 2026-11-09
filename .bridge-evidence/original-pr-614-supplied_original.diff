@@ -1,0 +1,1575 @@
+diff --git a/.github/workflows/auto-tag.yml b/.github/workflows/auto-tag.yml
+new file mode 100644
+index 0000000000000000000000000000000000000000..b10fb5ea68d6374a2cc5889f94b0ec6658883b0e
+--- /dev/null
++++ b/.github/workflows/auto-tag.yml
+@@ -0,0 +1,197 @@
++# Auto-tag: create v<version> when the version in Cargo.toml changes on main
++# Ported from ashlrai/phantom-secrets auto-tag.yml (RQ-AUTOTAGPORTLOCUSQ8).
++# and every required check plus manual full-suite CI for that exact commit is green.
++# Tags are created only here, with the ashlr-release GitHub App token, so the
++# tag-triggered release workflow runs. release-please (if present) only opens
++# version PRs and never creates tags.
++#
++# Required checks are discovered at run time from the branch rules API
++# (rulesets) unioned with classic branch protection contexts. Fail closed:
++# - no required checks discovered: fail
++# - only GitHub Actions check runs (app id 15368) count; every latest run with
++#   a required name must be completed + success; commit statuses never count
++# - a required check missing, queued or in progress: bounded wait (~9.5 min),
++#   then no tag (notice on the push trigger, which workflow_run re-evaluates;
++#   failure on workflow_run)
++# - any conclusion other than success: fail at once. skipped and neutral are NOT
++#   green: required checks here use the skip-job pattern (phantom #811),
++#   which reports success, so a skipped required check means it did not run.
++name: Auto-tag
++
++on:
++  push:
++    branches: [main]
++    paths: ["Cargo.toml"]
++  workflow_run:
++    workflows: ["CI"]
++    types: [completed]
++    branches: [main]
++  # Manual path (one command): gh workflow run auto-tag.yml -R <owner>/<repo>
++  # Tags the current main manifest version if that tag is absent and every
++  # required check on the main head is green. Same gate as the automatic path.
++  workflow_dispatch:
++
++permissions: {}
++
++concurrency:
++  group: auto-tag-${{ github.repository }}
++  cancel-in-progress: false
++
++jobs:
++  tag:
++    if: github.event_name == 'push' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
++    runs-on: ubuntu-latest
++    timeout-minutes: 15
++    permissions:
++      contents: read
++      checks: read     # read check-runs for the exact commit
++      actions: write   # dispatch release.yml if the tag push did not start it
++    env:
++      GH_TOKEN: ${{ github.token }}
++      REPO: ${{ github.repository }}
++      BRANCH: main
++      VERSION_FILE: Cargo.toml
++      SHA: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
++      TRIGGER: ${{ github.event_name }}
++      ACTIONS_APP_ID: "15368"   # GitHub Actions; other apps' same-named runs never count
++    steps:
++      - name: Detect version change
++        id: version
++        shell: bash
++        run: |
++          set -euo pipefail
++          read_version() {
++            gh api -H 'Accept: application/vnd.github.raw' "repos/$REPO/contents/$VERSION_FILE?ref=$1" | python3 -c 'import sys,tomllib; d=tomllib.loads(sys.stdin.read()); print((d.get("workspace",{}).get("package") or d["package"])["version"])'
++          }
++          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid candidate sha"; exit 1; }
++          main=$(gh api "repos/$REPO/commits/$BRANCH" -q '.sha')
++          [ "$main" = "$SHA" ] || { echo "::error::main moved; qualify its exact current sha"; exit 1; }
++          parent=$(gh api "repos/$REPO/commits/$SHA" -q '.parents[0].sha')
++          new=$(read_version "$SHA")
++          old=$(read_version "$parent")
++          [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::unexpected version '$new'"; exit 1; }
++          if [ "$new" = "$old" ] && [ "$TRIGGER" != workflow_dispatch ]; then
++            echo "Version unchanged ($new); nothing to tag."
++            echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0
++          fi
++          if git ls-remote --exit-code --tags "https://github.com/$REPO.git" "refs/tags/v$new" >/dev/null; then
++            echo "Tag v$new already exists; nothing to do."
++            echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0
++          else
++            status=$?
++            [ "$status" -eq 2 ] || { echo "::error::tag lookup failed; refusing to assume absence"; exit 1; }
++          fi
++          echo "version=$new" >> "$GITHUB_OUTPUT"
++          echo "changed=true" >> "$GITHUB_OUTPUT"
++
++      - name: Require every required check green on this exact commit
++        id: checks
++        if: steps.version.outputs.changed == 'true'
++        shell: bash
++        run: |
++          set -euo pipefail
++          # Separate assignments propagate errors from either API. A successful
++          # second query must never hide a failed ruleset read.
++          rules=$(gh api "repos/$REPO/rules/branches/$BRANCH" -q '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context')
++          classic=$(gh api "repos/$REPO/branches/$BRANCH" -q '.protection.required_status_checks.contexts[]?')
++          required=$(printf '%s\n%s\n' "$rules" "$classic" | sed '/^$/d' | sort -u)
++          if [ -z "$required" ]; then
++            echo "::error::no required checks discovered for $BRANCH; refusing to tag"; exit 1
++          fi
++          # One evaluation pass. Check runs: only GitHub Actions (app id
++          # $ACTIONS_APP_ID) counts, and EVERY latest run with the required name
++          # must be completed + success. Commit statuses are ignored: a required
++          # name with no app-15368 check run is missing.
++          evaluate() {
++            runs=$(gh api --paginate "repos/$REPO/commits/$SHA/check-runs?filter=latest&app_id=$ACTIONS_APP_ID&per_page=100"               -q '.check_runs[] | select(.app.id == '"$ACTIONS_APP_ID"') | [.name, .status, (.conclusion // "")] | @tsv')
++            pending=0; bad=0
++            while IFS= read -r name; do
++              rows=$(awk -F'	' -v n="$name" '$1==n' <<<"$runs")
++              if [ -n "$rows" ]; then
++                while IFS=$'	' read -r _ status conclusion; do
++                  if [ "$status" != completed ]; then echo "pending: $name ($status)"; pending=1
++                  elif [ "$conclusion" = success ]; then echo "green: $name"
++                  else echo "::error::not green: $name ($conclusion)"; bad=1; fi
++                done <<<"$rows"
++                continue
++              fi
++              echo "missing: $name (no GitHub Actions check run; commit statuses never satisfy a required check)"; pending=1
++            done <<<"$required"
++          }
++          # Bounded wait while checks are pending or not yet reported:
++          # about 9.5 minutes total, then decide. Failures stop at once.
++          for delay in 0 20 40 60 90 120 120 120; do
++            sleep "$delay"
++            evaluate
++            if [ "$bad" = 1 ]; then exit 1; fi
++            if [ "$pending" = 0 ]; then echo "green=true" >> "$GITHUB_OUTPUT"; exit 0; fi
++          done
++          if [ "$TRIGGER" = push ]; then
++            echo "::notice::required checks still not finished; the workflow_run trigger re-evaluates after CI"
++            echo "green=false" >> "$GITHUB_OUTPUT"; exit 0
++          fi
++          echo "::error::required checks missing or pending after CI completed and a bounded wait; refusing to tag"; exit 1
++
++      - name: Require a successful workflow_dispatch full suite on this exact commit
++        id: evidence
++        if: steps.checks.outputs.green == 'true'
++        shell: bash
++        run: |
++          set -euo pipefail
++          n=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?event=workflow_dispatch&head_sha=$SHA&status=success&per_page=100" --jq '[.workflow_runs[] | select(.event == "workflow_dispatch" and .status == "completed" and .conclusion == "success" and .head_sha == "'"$SHA"'")] | length')
++          if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ]; then
++            echo "::error::No successful manual full-suite CI on $SHA; host must qualify this exact main commit before tagging."
++            exit 1
++          fi
++          echo "qualified=true" >> "$GITHUB_OUTPUT"
++
++      - name: Mint ashlr-release App token (contents write, this repo only)
++        id: app
++        if: steps.evidence.outputs.qualified == 'true'
++        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
++        with:
++          app-id: ${{ vars.ASHLR_RELEASE_APP_ID }}
++          private-key: ${{ secrets.ASHLR_RELEASE_APP_KEY }}
++          owner: ${{ github.repository_owner }}
++          repositories: ${{ github.event.repository.name }}
++          permission-contents: write
++
++      - name: Create tag v${{ steps.version.outputs.version }}
++        if: steps.evidence.outputs.qualified == 'true'
++        shell: bash
++        env:
++          GH_TOKEN: ${{ steps.app.outputs.token }}
++          VERSION: ${{ steps.version.outputs.version }}
++        run: |
++          set -euo pipefail
++          main=$(gh api "repos/$REPO/commits/$BRANCH" -q '.sha')
++          [ "$main" = "$SHA" ] || { echo "::error::main moved after qualification; refusing to tag"; exit 1; }
++          if refs=$(git ls-remote --exit-code --tags "https://github.com/$REPO.git" "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}"); then
++            tagged=$(printf '%s\n' "$refs" | tail -1 | cut -f1)
++            [ "$tagged" = "$SHA" ] || { echo "::error::tag appeared at another commit; refusing release dispatch"; exit 1; }
++            echo "Tag v$VERSION appeared meanwhile; nothing to do."; exit 0
++          else
++            status=$?
++            [ "$status" -eq 2 ] || { echo "::error::tag lookup failed; refusing to assume absence"; exit 1; }
++          fi
++          gh api -X POST "repos/$REPO/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$SHA" >/dev/null
++          echo "Created v$VERSION at $SHA" >> "$GITHUB_STEP_SUMMARY"
++
++      - name: Make sure release.yml runs for v${{ steps.version.outputs.version }}
++        if: steps.evidence.outputs.qualified == 'true'
++        shell: bash
++        env:
++          VERSION: ${{ steps.version.outputs.version }}
++        run: |
++          set -euo pipefail
++          # An App-token tag push starts release.yml. If no run for the tag
++          # appears within about 2 minutes, dispatch it once with GITHUB_TOKEN
++          # (workflow_dispatch is the documented exception that GITHUB_TOKEN
++          # may trigger). No PAT, no manual step.
++          for delay in 15 15 30 30 30; do
++            sleep "$delay"
++            n=$(gh api "repos/$REPO/actions/workflows/release.yml/runs?branch=v$VERSION&per_page=5" -q '.total_count')
++            if [ "${n:-0}" -ge 1 ]; then echo "release.yml started for v$VERSION" >> "$GITHUB_STEP_SUMMARY"; exit 0; fi
++          done
++          gh workflow run release.yml -R "$REPO" --ref "$BRANCH" -f version="$VERSION"
++          echo "Dispatched release.yml for v$VERSION" >> "$GITHUB_STEP_SUMMARY"
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index ad1a11fb1cf0dc5aeab0d95319f76d3e547c53f0..443f266ea5958f873d7e924b08bb687dbd4b0c10 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -97,6 +97,8 @@ jobs:
+           node --check npm-mcp/install.js
+           node --check npm-mcp/bin/locus-mcp.js
+           node --test npm/test
++          node --test scripts/release-version.test.mjs scripts/ci/release-workflow.test.mjs
++          node scripts/release-version.mjs check
+           # Keep generated agent indexes aligned with the current source docs.
+           node apps/web/discoverability.mjs --check
+           # Exercise the dependency-free public-site contract in the required gate.
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 1d3e8129d968b40cd00b5454f0819ecd8dce0292..6c6dc5ac901c29630023188327937225bca99e62 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -9,6 +9,20 @@ on:
+   pull_request:
+     paths:
+       - ".github/workflows/release.yml"
++      - ".github/workflows/auto-tag.yml"
++      - "scripts/release-version*.mjs"
++      - "scripts/ci/release-workflow.test.mjs"
++  # Manual path (one command):
++  #   gh workflow run release.yml -R ashlrai/locus -f version=X.Y.Z
++  # The tag vX.Y.Z must already exist (auto-tag.yml creates it). The run
++  # checks out that tag, not the dispatch ref, and every tag-push gate
++  # applies unchanged.
++  workflow_dispatch:
++    inputs:
++      version:
++        description: "Release version X.Y.Z; tag vX.Y.Z must already exist"
++        required: true
++        type: string
+ 
+ # A PR dry run cancels its superseded run; tag pushes never cancel.
+ concurrency:
+@@ -20,30 +34,52 @@ permissions:
+ 
+ env:
+   CARGO_TERM_COLOR: always
++  # Effective release tag name: the pushed tag on tag pushes, or v<version>
++  # on manual dispatch (the dispatch ref stays a branch, so the tag name is
++  # derived from the validated input instead of GITHUB_REF_NAME).
++  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref_name }}
+ 
+ jobs:
+   full-suite-evidence:
+-    # Release gate: the full suite (macOS and Windows included) must have
++    # Release gate: the Linux full suite and MSRV checks must have
+     # passed in a manual workflow_dispatch run of CI on this exact sha.
+     name: Full suite green on release sha
+     runs-on: ubuntu-latest
+     timeout-minutes: 3
++    outputs:
++      sha: ${{ steps.tag.outputs.sha || github.sha }}
+     permissions:
+       actions: read
+     steps:
++      - name: Resolve the release tag on manual dispatch
++        id: tag
++        if: github.event_name == 'workflow_dispatch'
++        env:
++          REPO: ${{ github.repository }}
++          VERSION: ${{ inputs.version }}
++        run: |
++          set -euo pipefail
++          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version '$VERSION' must match X.Y.Z"; exit 1; }
++          # ls-remote lists the tag and, for annotated tags, its peeled ^{}
++          # commit line right after it; the last match is always the commit.
++          sha=$(git ls-remote --exit-code "https://github.com/$REPO.git" "refs/tags/v$VERSION" "refs/tags/v$VERSION^{}" | tail -1 | cut -f1)
++          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid release commit"; exit 1; }
++          echo "tag v$VERSION -> $sha"
++          echo "sha=$sha" >> "$GITHUB_OUTPUT"
++
+       - name: Require a successful workflow_dispatch CI run on this sha
+         env:
+           GH_TOKEN: ${{ github.token }}
+           REPO: ${{ github.repository }}
+-          SHA: ${{ github.sha }}
++          SHA: ${{ steps.tag.outputs.sha || github.sha }}
+           CI_WORKFLOW: ci.yml
+           EVENT: ${{ github.event_name }}
+         run: |
+           set -euo pipefail
+           # PR dry runs never publish, so they need no full-suite evidence.
+           if [ "$EVENT" = "pull_request" ]; then echo "PR dry run: evidence not required"; exit 0; fi
+-          n="$(gh api "repos/${REPO}/actions/workflows/${CI_WORKFLOW}/runs?event=workflow_dispatch&head_sha=${SHA}&status=success&per_page=1" --jq '.total_count')"
+-          if [ "${n:-0}" -lt 1 ]; then
++          n="$(gh api "repos/${REPO}/actions/workflows/${CI_WORKFLOW}/runs?event=workflow_dispatch&head_sha=${SHA}&status=success&per_page=100" --jq '[.workflow_runs[] | select(.event == "workflow_dispatch" and .status == "completed" and .conclusion == "success" and .head_sha == "'"$SHA"'")] | length')"
++          if ! [[ "$n" =~ ^[0-9]+$ ]] || [ "$n" -lt 1 ]; then
+             echo "::error::No successful workflow_dispatch run of ${CI_WORKFLOW} on ${SHA}. Run 'gh workflow run ${CI_WORKFLOW} --ref <this ref>', wait for green, then release."
+             exit 1
+           fi
+@@ -80,7 +116,24 @@ jobs:
+     steps:
+       - name: Checkout
+         if: env.SKIP_BUILD != 'true'
+-        uses: actions/checkout@v4
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          # Manual dispatch builds the tag, not the dispatch ref.
++          ref: ${{ needs.full-suite-evidence.outputs.sha }}
++          persist-credentials: false
++
++      - name: Check source version carriers
++        if: env.SKIP_BUILD != 'true'
++        shell: bash
++        env:
++          EVENT: ${{ github.event_name }}
++        run: |
++          set -euo pipefail
++          if [ "$EVENT" = pull_request ]; then
++            node scripts/release-version.mjs check
++          else
++            node scripts/release-version.mjs check --tag "$RELEASE_TAG"
++          fi
+ 
+       - name: Install Rust toolchain
+         if: env.SKIP_BUILD != 'true'
+@@ -149,11 +202,14 @@ jobs:
+ 
+   release:
+     name: Create GitHub Release
+-    needs: build
++    needs: [full-suite-evidence, build]
+     runs-on: ubuntu-latest
+     steps:
+       - name: Checkout
+-        uses: actions/checkout@v4
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          ref: ${{ needs.full-suite-evidence.outputs.sha }}
++          persist-credentials: false
+ 
+       - name: Download all artifacts
+         uses: actions/download-artifact@v4
+@@ -209,9 +265,10 @@ jobs:
+         run: |
+           set -euo pipefail
+           # A tag push names it after the tag; the PR dry run's ref (`79/merge`)
+-          # has a slash, so slashes become dashes.
+-          cargo run --release --locked -p locus-cli -- adapter registry export \
+-            --out "release-assets/locus-adapters-${GITHUB_REF_NAME//\//-}.json"
++          # has a slash, so slashes become dashes. On manual dispatch
++          # RELEASE_TAG carries the v<version> tag, not the dispatch ref.
++          cargo run --release --locked -p locus-cli --bin locus -- adapter registry export \
++            --out "release-assets/locus-adapters-${RELEASE_TAG//\//-}.json"
+ 
+       # TODO(registry-signing): once a LOCUS_REGISTRY_SIGNING_KEY repo secret
+       # exists (base64 or 64-hex ed25519 seed; NOT yet provisioned — do not
+@@ -223,7 +280,7 @@ jobs:
+       #     shell: bash
+       #     run: |
+       #       set -euo pipefail
+-      #       cargo run --release --locked -p locus-cli -- adapter registry export --sign \
++      #       cargo run --release --locked -p locus-cli --bin locus -- adapter registry export --sign \
+       #         --key-id root \
+       #         --out "release-assets/locus-adapters-${GITHUB_REF_NAME}.json"
+       #
+@@ -231,23 +288,26 @@ jobs:
+       # --ed25519-pub <b64>) in the release notes / docs/registry-trust.md.
+ 
+       - name: Create release
+-        if: github.event_name == 'push'
++        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+         with:
++          # Explicit on dispatch: the event ref is the branch, not the tag.
++          tag_name: ${{ env.RELEASE_TAG }}
+           generate_release_notes: true
+           files: release-assets/*
+         env:
+           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+ 
+   # npm publish through trusted publishing (OIDC): no NPM_TOKEN. Runs only on a
+-  # v* tag push, after the GitHub Release exists, because the npm wrappers
+-  # download that release's assets on first run. Never on a PR (the dry run).
++  # v* tag push or a manual dispatch (which builds an existing v<version> tag),
++  # after the GitHub Release exists, because the npm wrappers download that
++  # release's assets on first run. Never on a PR (the dry run).
+   # Register on npmjs.com for each package: owner ashlrai, repo locus,
+   # workflow release.yml, no environment.
+   npm-publish:
+     name: Publish npm packages (${{ matrix.dir }})
+-    needs: release
+-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
++    needs: [full-suite-evidence, release]
++    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || github.event_name == 'workflow_dispatch'
+     runs-on: ubuntu-latest
+     permissions:
+       contents: read
+@@ -259,7 +319,10 @@ jobs:
+         dir: [npm, npm-mcp]
+     steps:
+       - name: Checkout
+-        uses: actions/checkout@v4
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          ref: ${{ needs.full-suite-evidence.outputs.sha }}
++          persist-credentials: false
+ 
+       - name: Set up Node
+         uses: actions/setup-node@v4
+@@ -283,7 +346,7 @@ jobs:
+           set -euo pipefail
+           name="$(node -p "require('./package.json').name")"
+           version="$(node -p "require('./package.json').version")"
+-          [ "v${version}" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} does not match ${name}@${version}" >&2; exit 1; }
++          [ "v${version}" = "${RELEASE_TAG}" ] || { echo "tag ${RELEASE_TAG} does not match ${name}@${version}" >&2; exit 1; }
+           echo "NPM_PKG=${name}@${version}" >> "$GITHUB_ENV"
+ 
+       - name: Publish
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index deb8b3a487ef829e29aec66b3d0a39516e1db794..ab80ba23fef938a060c45637d3cc71c7dcb33f9c 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -13,13 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++## [0.7.0] - 2026-11-06
++
++Highlights: SIEM NDJSON audit export, safer npm wrapper upgrades, idempotent `binding add`, and hardened workspace autopin writes.
++
+ ### Added
+ 
+ - **SIEM event export ([#457](https://github.com/ashlrai/locus/pull/457)).**
+   `locus events export --format ndjson` emits `locus.siem.v1` records with
+   export-time redaction and a fail-closed secret scan. `--since` filters all
+   export formats using an inclusive RFC3339 timestamp or UTC date. See
+-  [observability](docs/observability.md#siem-ndjson).
++  [observability](docs/observability.md#siem-ndjson). Credential-shaped keys
++  and `phm:`, `env:` and `test:` locators are deeply redacted; contract tests
++  pin the exported event schema for downstream parsers.
+ 
+ ### Fixed
+ 
+@@ -33,6 +39,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+   `locus help <command>` now hides `--dry-run` for commands that cannot plan,
+   matching the corresponding command's `--help` output.
+ 
++### Security
++
++- Workspace autopin updates read the existing `.locus.toml` through a single no-follow descriptor and use a private atomic write path, preventing a swapped symlink from being read.
++
++### Internal
++
++- The MCP tool catalog and call gate moved into `lib.rs` so integration tests can exercise them directly. Dry-run, JSON-failure, README-command and registry-manifest documentation coverage was expanded.
++
+ ### Continuous integration
+ 
+ - **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
+@@ -64,7 +78,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+   The issue proposes a one-command shell installer that downloads and verifies
+   a release archive, allowing installation on machines without npm or Rust.
+   The checkout includes `scripts/install.sh` ([#215](https://github.com/ashlrai/locus/pull/215));
+-  installation still depends on release assets for the selected version and platform.
++  installation still depends on release assets for the selected version and platform;
++  this note does not assert release availability.
+ 
+ - **Execution latency report ([#170](https://github.com/ashlrai/locus/issues/170)).**
+   The issue reports `locus exec -- true` as 3–5x slower than
+@@ -172,7 +187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ ### Changed
+ 
+ - **npm wrapper upgrades ([#177](https://github.com/ashlrai/locus/issues/177)).**
+-  In this unreleased checkout, both wrappers compare versions using SemVer
++  In the 0.7.0 candidate, both wrappers compare versions using SemVer
+   precedence, probing the binary with `--version` before falling back to its
+   adjacent `.version` file. By default, an equal cached version is reused; an
+   older one can be upgraded. With a newer or unversioned cache, `locus-cli`
+@@ -1357,7 +1372,8 @@ Synthetic identity/scope tools with hard freeze on account selectors:
+ - Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
+ - Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
+ 
+-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.6.2...HEAD
++[Unreleased]: https://github.com/ashlrai/locus/compare/v0.7.0...HEAD
++[0.7.0]: https://github.com/ashlrai/locus/compare/v0.6.2...v0.7.0
+ [0.6.2]: https://github.com/ashlrai/locus/compare/v0.6.1...v0.6.2
+ [0.6.1]: https://github.com/ashlrai/locus/compare/v0.6.0...v0.6.1
+ [0.6.0]: https://github.com/ashlrai/locus/compare/v0.5.2...v0.6.0
+diff --git a/Cargo.lock b/Cargo.lock
+index 76356b1606e4993e812e1d6c2145993c951cb43b..d35627b1e276ec31ebc84619e038491393354118 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1038,7 +1038,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "locus-cli"
+-version = "0.6.2"
++version = "0.7.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -1064,7 +1064,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "locus-core"
+-version = "0.6.2"
++version = "0.7.0"
+ dependencies = [
+  "argon2",
+  "base64",
+@@ -1093,7 +1093,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "locus-mcp"
+-version = "0.6.2"
++version = "0.7.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+diff --git a/Cargo.toml b/Cargo.toml
+index ecfc9835cd2aabe525decf1d93246bae56da1e56..351c2384b44260d453b02661fbef0a3d53303735 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -7,7 +7,7 @@ members = [
+ resolver = "2"
+ 
+ [workspace.package]
+-version = "0.6.2"
++version = "0.7.0"
+ edition = "2021"
+ # MSRV for the locked workspace; verify it using the commands in CONTRIBUTING.md.
+ rust-version = "1.89"
+@@ -19,7 +19,7 @@ authors = ["Mason Wyatt <mason@ashlr.ai>"]
+ readme = "README.md"
+ 
+ [workspace.dependencies]
+-locus-core = { path = "crates/locus-core", version = "0.6.2" }
++locus-core = { path = "crates/locus-core", version = "0.7.0" }
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+ toml = "0.8"
+diff --git a/INTEGRATION.md b/INTEGRATION.md
+index 05587e93a1f647fd1cfde9994ea9e2055f6a8ded..b26c2953510b8aa26aa6cbe87ff5769e23a73040 100644
+--- a/INTEGRATION.md
++++ b/INTEGRATION.md
+@@ -3,7 +3,7 @@
+ <!-- fresh:begin versions -->
+ | Component | Version |
+ |---|---|
+-| Rust workspace (source) | 0.6.2 |
++| Rust workspace (source) | 0.7.0 |
+ | npm locus-cli (published) | 0.6.2 |
+ | npm @ashlrai/locus-mcp (published) | 0.6.2 |
+ | Published release date | 2026-11-01 |
+diff --git a/apps/web/package.json b/apps/web/package.json
+index a14bf0b72b70894dcdde721ca12c2ef2032ea843..640acfbc337bc40e672fefe4e1c0b3282074047b 100644
+--- a/apps/web/package.json
++++ b/apps/web/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "locus-web",
+-  "version": "0.6.2",
++  "version": "0.7.0",
+   "private": true,
+   "description": "Locus landing page — static, dark, terminal aesthetic",
+   "scripts": {
+diff --git a/apps/web/public/.well-known/security.txt b/apps/web/public/.well-known/security.txt
+index f3018bec748ed2bf2c80b3d6ed2ef23ec876e305..f005a79a3fb6d9b811640d1263700f415f03fbb7 100644
+--- a/apps/web/public/.well-known/security.txt
++++ b/apps/web/public/.well-known/security.txt
+@@ -1,5 +1,5 @@
+ Contact: mailto:security@ashlr.ai
+-Expires: 2027-11-01T00:00:00.000Z
++Expires: 2027-11-06T00:00:00.000Z
+ Preferred-Languages: en
+ Canonical: https://locus.dev/.well-known/security.txt
+ Policy: https://github.com/ashlrai/locus/blob/main/SECURITY.md
+diff --git a/apps/web/public/capabilities.json b/apps/web/public/capabilities.json
+index 944d8db1dae5d00da2c7c1b6af607bc07ea5dd71..885bd6e8c148042a37047edd1e8becf6493967ee 100644
+--- a/apps/web/public/capabilities.json
++++ b/apps/web/public/capabilities.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "Locus",
+-  "version": "0.6.2",
++  "version": "0.7.0",
+   "versionScope": "source checkout; commands/tools may not exist in the published package",
+   "publishedVersion": "0.6.2",
+   "description": "AI-native identity plane for coding agents. Pin a binding; every CLI command, MCP tool and agent session is sealed to that tenant until a human re-pins.",
+diff --git a/apps/web/public/llms-full.txt b/apps/web/public/llms-full.txt
+index 2b30cb37bd69a0620b1fa7c89862f9318890a7c0..0bad5c31957eec3938cd797aeef243bdf0a4e0e5 100644
+--- a/apps/web/public/llms-full.txt
++++ b/apps/web/public/llms-full.txt
+@@ -763,14 +763,15 @@ listed verbatim so an agent can jump straight to the right document.
+ ## docs/RELEASE.md
+ 
+ - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
++  - Qualify and publish through the release workflows
+   - 0.6.0 release candidate - prepared 2026-10-31
+   - Preconditions
+-  - Checklist - v0.5.1 (launch: Oct 20)
+-  - Checklist - v0.5.0
+-  - Checklist - v0.4.0 (shipped)
+-  - Checklist - v0.3.0 (shipped)
+-  - Checklist - v0.2.0 (shipped)
+-  - Tag and push
++  - Historical checklists
++    - Checklist - v0.5.1 (launch: Oct 20)
++    - Checklist - v0.5.0
++    - Checklist - v0.4.0 (shipped)
++    - Checklist - v0.3.0 (shipped)
++    - Checklist - v0.2.0 (shipped)
+     - Prior release (v0.1.0) - reference digests
+   - What release.yml publishes
+   - After the tag (Homebrew / npm)
+@@ -778,7 +779,7 @@ listed verbatim so an agent can jump straight to the right document.
+     - Homebrew (optional prebuilt)
+     - npm wrappers
+   - Verify a release
+-  - Hotfix / re-tag policy
++  - Hotfix policy
+ 
+ ## docs/session-budget.md
+ 
+diff --git a/apps/web/public/sitemap.xml b/apps/web/public/sitemap.xml
+index e8a56f4ffb244cb3a98f3a88023197cab31e59d9..f284dcd781a0076d2ad5756d0e0bfeff92afdc6a 100644
+--- a/apps/web/public/sitemap.xml
++++ b/apps/web/public/sitemap.xml
+@@ -2,6 +2,6 @@
+ <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+   <url>
+     <loc>https://locus.dev/</loc>
+-    <lastmod>2026-11-01</lastmod>
++    <lastmod>2026-11-06</lastmod>
+   </url>
+ </urlset>
+diff --git a/crates/locus-cli/Cargo.toml b/crates/locus-cli/Cargo.toml
+index fdb22fb77ebdacbb86def9177a9fbf1c5ee69937..af08becf91cef704d145dce3a8355be6d456aacc 100644
+--- a/crates/locus-cli/Cargo.toml
++++ b/crates/locus-cli/Cargo.toml
+@@ -20,7 +20,7 @@ path = "src/mcp.rs"
+ [dependencies]
+ locus-core = { workspace = true }
+ libc = { workspace = true }
+-locus-mcp = { path = "../locus-mcp", version = "0.6.2" }
++locus-mcp = { path = "../locus-mcp", version = "0.7.0" }
+ clap = { workspace = true }
+ clap_complete = { workspace = true }
+ anyhow = { workspace = true }
+diff --git a/crates/locus-cli/tests/snapshots/doctor.json b/crates/locus-cli/tests/snapshots/doctor.json
+index f2cc6a9dba0f021663c71524043428c76457bd69..fb6075844c172c9f2fcdff0fd01472de3fce514e 100644
+--- a/crates/locus-cli/tests/snapshots/doctor.json
++++ b/crates/locus-cli/tests/snapshots/doctor.json
+@@ -1 +1 @@
+-{"approvals":{"approval_authority":"local_advisory","approved_valid":0,"authoritative_path_enabled":false,"corrupt":0,"denied":0,"dir":"<HOME>/locus/approvals","exists":true,"expired_grants":0,"ok":true,"pending":0,"total":0,"untrusted_approved":0,"writable":true},"audit":{"deny":0,"last":[],"path":"<HOME>/locus/audit/events.jsonl","scope_freeze":0,"total":0},"autopin":{"note":"config.toml not present (defaults: manual pin)","ok":true,"path":"<HOME>/locus/config.toml","present":false,"remote_autopin_enabled":false,"remote_rules":0},"bindings":0,"checks":[{"id":"no-bindings","status":"warn","summary":"no bindings configured (locus init --with-samples)"},{"id":"phantom-missing","status":"warn","summary":"phantom not on PATH (install Phantom Secrets for Phantom credential references)"},{"id":"control-capability-missing","status":"warn","summary":"LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\""}],"dual_control_waiting":0,"findings":[{"code":"no_bindings","message":"no bindings configured (locus init --with-samples)","severity":"warn"},{"code":"phantom_missing","message":"phantom not on PATH (install Phantom Secrets for Phantom credential references)","severity":"warn"},{"code":"control_capability_missing","message":"LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\"","severity":"warn"}],"home":"<HOME>/locus","issues":["no bindings configured (locus init --with-samples)","phantom not on PATH (install Phantom Secrets for Phantom credential references)","LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\""],"kind":"ashlr.doctor","native_status":"WARN","near_miss":{"count":0,"require_approval":0,"scope_freeze":0,"window_hours":24},"near_miss_count":0,"ok":false,"pending_approvals":0,"phantom_on_path":false,"runtime":{"authority_anchor_ok":false,"backing_ok":false,"binding_id_match":false,"binding_present":false,"expired":false,"frozen":false,"issues":["not_pinned"],"ok":false,"pinned":false,"providers":[],"providers_match":true,"seal_ok":false,"tenant_match":false},"schema":"locus.doctor.v1","schema_version":1,"seal_ok":true,"status":"warn","tool":"locus","unresolved_phm":[],"verdict":"WARN","version":"0.6.2","workspace":{"allowed_bindings":[],"found":false,"require_pin":false,"valid":true}}
++{"approvals":{"approval_authority":"local_advisory","approved_valid":0,"authoritative_path_enabled":false,"corrupt":0,"denied":0,"dir":"<HOME>/locus/approvals","exists":true,"expired_grants":0,"ok":true,"pending":0,"total":0,"untrusted_approved":0,"writable":true},"audit":{"deny":0,"last":[],"path":"<HOME>/locus/audit/events.jsonl","scope_freeze":0,"total":0},"autopin":{"note":"config.toml not present (defaults: manual pin)","ok":true,"path":"<HOME>/locus/config.toml","present":false,"remote_autopin_enabled":false,"remote_rules":0},"bindings":0,"checks":[{"id":"no-bindings","status":"warn","summary":"no bindings configured (locus init --with-samples)"},{"id":"phantom-missing","status":"warn","summary":"phantom not on PATH (install Phantom Secrets for Phantom credential references)"},{"id":"control-capability-missing","status":"warn","summary":"LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\""}],"dual_control_waiting":0,"findings":[{"code":"no_bindings","message":"no bindings configured (locus init --with-samples)","severity":"warn"},{"code":"phantom_missing","message":"phantom not on PATH (install Phantom Secrets for Phantom credential references)","severity":"warn"},{"code":"control_capability_missing","message":"LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\"","severity":"warn"}],"home":"<HOME>/locus","issues":["no bindings configured (locus init --with-samples)","phantom not on PATH (install Phantom Secrets for Phantom credential references)","LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\""],"kind":"ashlr.doctor","native_status":"WARN","near_miss":{"count":0,"require_approval":0,"scope_freeze":0,"window_hours":24},"near_miss_count":0,"ok":false,"pending_approvals":0,"phantom_on_path":false,"runtime":{"authority_anchor_ok":false,"backing_ok":false,"binding_id_match":false,"binding_present":false,"expired":false,"frozen":false,"issues":["not_pinned"],"ok":false,"pinned":false,"providers":[],"providers_match":true,"seal_ok":false,"tenant_match":false},"schema":"locus.doctor.v1","schema_version":1,"seal_ok":true,"status":"warn","tool":"locus","unresolved_phm":[],"verdict":"WARN","version":"0.7.0","workspace":{"allowed_bindings":[],"found":false,"require_pin":false,"valid":true}}
+diff --git a/crates/locus-cli/tests/snapshots/doctor.txt b/crates/locus-cli/tests/snapshots/doctor.txt
+index 698578897b943bfe5456b5f3ec6997f90a0fd64a..edc6ae53dc7719ffa1d688fadfe5592dfaf8bdef 100644
+--- a/crates/locus-cli/tests/snapshots/doctor.txt
++++ b/crates/locus-cli/tests/snapshots/doctor.txt
+@@ -1,4 +1,4 @@
+-doctor locus 0.6.2
++doctor locus 0.7.0
+   verdict   WARN
+   home      <HOME>/locus
+   bindings  0
+diff --git a/crates/locus-cli/tests/stale_pin_recovery.rs b/crates/locus-cli/tests/stale_pin_recovery.rs
+index 2261d0eedde4595e116f15c6122416c86b62475a..98dfde31fb3e893cd6833e562ece3ee05a93562b 100644
+--- a/crates/locus-cli/tests/stale_pin_recovery.rs
++++ b/crates/locus-cli/tests/stale_pin_recovery.rs
+@@ -17,15 +17,15 @@ fn changelog_dead_broker_recipes_match_the_current_hint() {
+     let changelog = include_str!("../../../CHANGELOG.md");
+     let current = locus_core::recovery::dead_broker_recovery_for_shell(None, "bash");
+     let unreleased = changelog
+-        .split_once("## [Unreleased]")
++        .split_once("## [0.7.0]")
+         .unwrap()
+         .1
+-        .split("## [0.5.2]")
++        .split("\n## [")
+         .next()
+         .unwrap();
+     let entry = unreleased
+         .split_once("**Dead-broker recovery (")
+-        .expect("unreleased recovery entry exists")
++        .expect("0.7.0 recovery entry exists")
+         .1
+         .split("\n- ")
+         .next()
+diff --git a/docs/RELEASE.md b/docs/RELEASE.md
+index 5270d66920f03d3563a0280ffe6e2003d6320996..3d86b97dcd672c25c167b5dd8cf7f59060383e5e 100644
+--- a/docs/RELEASE.md
++++ b/docs/RELEASE.md
+@@ -6,6 +6,85 @@ Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
+ `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
+ `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
+ 
++## Qualify and publish through the release workflows
++
++Use the existing release candidate after feature integration lands. Do not open
++another version-only PR. The sanctioned publisher is
++[auto-tag.yml](../.github/workflows/auto-tag.yml), reconciled from PR #611.
++It requires both required GitHub Actions checks and successful manual full-suite
++CI on the exact current main commit before minting its repository-scoped App
++token or creating a tag. Scheduled or merge-queue CI alone cannot authorize a
++tag. Tags are create-only; an existing tag is never moved.
++
++Host/root owns code publication, final CI dispatch and artifact publication.
++The host must verify the existing release App installation/configuration and
++npm trusted publishers. Missing configuration is a blocker, not permission to
++add credentials, change protections or use a raw tag push. The privileged
++auto-tag job never checks out or executes candidate code.
++
++1. Reconcile the existing candidate with current main and its useful feature
++   integration. Run `node scripts/release-version.mjs sync X.Y.Z` to synchronize
++   Cargo versions, local path dependencies, wrapper constants, npm/web package
++   manifests and root `server.json`. This local command writes source files;
++   it does not publish or update `scripts/freshness/published.json`. Keep new
++   Unreleased entries, author the dated changelog and reconcile the doctor
++   snapshot separately. Run freshness/discoverability generators and review
++   their output before publishing the code through the normal host publisher.
++2. After the candidate merges, record its exact main SHA. The authorized host
++   dispatches full CI (this starts Actions work):
++
++   ```bash
++   release_sha=$(gh api repos/ashlrai/locus/commits/main --jq .sha)
++   gh workflow run ci.yml -R ashlrai/locus --ref main
++   gh api "repos/ashlrai/locus/actions/workflows/ci.yml/runs?event=workflow_dispatch&head_sha=${release_sha}&per_page=100" --jq '.workflow_runs[] | {id,head_sha,status,conclusion,html_url}'
++   ```
++
++   Require completed/success on that exact SHA and inspect the full-suite/e2e
++   summaries. If main moved before dispatch, stop and qualify current main.
++   No successful release qualification is implied by a local test run.
++3. The successful same-repository manual CI completion on main re-evaluates
++   auto-tag. For an unchanged manifest or a manual retry, the authorized host
++   invokes the same publisher, after verifying the exact green SHA:
++
++   ```bash
++   gh workflow run auto-tag.yml -R ashlrai/locus --ref main
++   ```
++
++   This creates the absent version tag only after both gates pass. If main
++   moves, the workflow refuses to tag. Requalify rather than bypassing the gate.
++4. Auto-tag confirms the tag-triggered release started and dispatches it once
++   if needed. For a failed release, the host may retry the existing tag:
++
++   ```bash
++   gh workflow run release.yml -R ashlrai/locus --ref main -f version=X.Y.Z
++   ```
++
++   This publishes artifacts and npm packages. It requires the tag to exist,
++   resolves it to a commit, requires the same manual full-suite evidence, and
++   checks out that exact SHA in all build/publish jobs. It cannot mint a tag
++   from the dispatch branch. On failure, inspect the run and repair through
++   normal review; never move a tag to replace already published bytes.
++5. Verify archives, checksums, unsigned manifest, both npm versions/integrities
++   and gitHead, then clean-home installation/runtime. Only after acceptance
++   update the published pin through the normal code publisher. Verify website,
++   Homebrew and MCP registry separately. Missing usage data remains unknown.
++
++Read-only source checks:
++
++```bash
++node scripts/release-version.mjs check
++node scripts/release-version.mjs check --tag vX.Y.Z
++node scripts/freshness/check.mjs
++node apps/web/discoverability.mjs --check
++node --test scripts/release-version.test.mjs scripts/ci/release-workflow.test.mjs
++```
++
++The helper and workflow tests originate in PR #731. Its alternate automatic
++release gate accepting merge-queue evidence is intentionally excluded. The
++release workflow retains tag/manual publication and a PR dry run that builds
++and checks Linux assets without publishing. Registry export explicitly selects
++`--bin locus` because `locus-cli` also supplies `locus-mcp`.
++
+ ## 0.6.0 release candidate — prepared 2026-10-31
+ 
+ This section records the 0.6.0 preparation; a version bump alone is not publication evidence.
+@@ -55,7 +134,12 @@ cargo fmt --all -- --check
+ - [ ] CI green on `main`
+ - [ ] e2e green locally (`scripts/e2e.sh`)
+ 
+-## Checklist — v0.5.1 (launch: Oct 20)
++## Historical checklists
++
++The following checklists record past releases. Their raw tag commands are
++historical; use the qualified workflows above for current releases.
++
++### Checklist - v0.5.1 (launch: Oct 20)
+ 
+ 1. [x] Bump version → **0.5.1** (Cargo workspace + lock, npm, npm-mcp, apps/web, bin wrapper `VERSION`)
+ 2. [x] `CHANGELOG.md` section for 0.5.1 (npm wrapper hang #64, quickstart → enter #66)
+@@ -76,7 +160,7 @@ cargo fmt --all -- --check
+ 5. [ ] Update `integrations/homebrew/Formula/locus.rb` + the live tap with the v0.5.1 source/asset sha256 (commands below)
+ 6. [ ] Smoke: `npm i -g locus-cli@0.5.1` in a clean HOME → `locus quickstart` → `eval "$(locus hook zsh)"` → `locus enter acme`
+ 
+-## Checklist — v0.5.0
++### Checklist - v0.5.0
+ 
+ 1. [x] Bump version → **0.5.0** (Cargo workspace + npm + bin wrappers)
+ 2. [x] `CHANGELOG.md` section for 0.5.0 (signed adapter-registry release manifests + fail-closed `verify-manifest`, hub MT drop-in `withLocusMcpTenant`, MT conformance e2e, Bearer-only HTTP auth, stdio frame cap, catalog deny annotation, watch heartbeat control-capability findings)
+@@ -113,7 +197,7 @@ cargo fmt --all -- --check
+    locus --version   # or extracted binary
+    ```
+ 
+-## Checklist — v0.4.0 (shipped)
++### Checklist - v0.4.0 (shipped)
+ 
+ 1. [x] Bump version → **0.4.0** (Cargo workspace + npm + bin wrappers)
+ 2. [x] `CHANGELOG.md` section for 0.4.0 (multi-tenant MCP multiplexor + grants, Anthropic/OpenAI adapters, `locus switch`, leave --force audit fix, worker-home deletion hardening, …)
+@@ -150,7 +234,7 @@ cargo fmt --all -- --check
+    locus --version   # or extracted binary
+    ```
+ 
+-## Checklist — v0.3.0 (shipped)
++### Checklist - v0.3.0 (shipped)
+ 
+ 1. [x] Bump version → **0.3.0** (Cargo workspace + npm + bin wrappers)
+ 2. [x] `CHANGELOG.md` section for 0.3.0 (TTL auto-leave, client add, MCP session pin-anchoring, Grok/Claude wiring, verify_session, control capability, …)
+@@ -187,7 +271,7 @@ cargo fmt --all -- --check
+    locus --version   # or extracted binary
+    ```
+ 
+-## Checklist — v0.2.0 (shipped)
++### Checklist - v0.2.0 (shipped)
+ 
+ 1. [x] Bump version → **0.2.0** (Cargo workspace + npm + bin wrappers)
+ 2. [x] `CHANGELOG.md` section for 0.2.0 (dashboard, forensics, HTTP MCP, agent, goal, verify, …)
+@@ -224,20 +308,6 @@ cargo fmt --all -- --check
+    locus --version   # or extracted binary
+    ```
+ 
+-## Tag and push
+-
+-Tags must match `v*` so [`.github/workflows/release.yml`](../.github/workflows/release.yml) runs.
+-
+-```bash
+-# From a clean main at the release commit:
+-git tag -a v0.2.0 -m "Locus v0.2.0"
+-git push origin v0.2.0
+-```
+-
+-Annotated tags are preferred (`-a`). Lightweight tags also trigger the workflow.
+-
+-**Do not move or force-push an existing published tag.** Hotfix → bump patch and re-tag.
+-
+ ### Prior release (v0.1.0) — reference digests
+ 
+ Published 2026-08-07. Useful when validating the formula or comparing assets:
+@@ -301,8 +371,11 @@ block in `locus.rb` and fill per-target sha256 digests.
+ 
+ ### npm wrappers
+ 
+-Bump `VERSION` / `package.json` version in `npm/` and `npm-mcp/` if needed, then
+-publish from those packages (they download the matching release binary).
++The qualified `release.yml` workflow publishes both packages through npm
++trusted OIDC after the GitHub Release exists. Keep versions synchronized in
++the candidate before qualification. For a failed publish, inspect the workflow
++and use the existing-tag retry above; do not publish packages separately from
++the sanctioned flow. Verify both registry versions, integrity and gitHead.
+ 
+ ## Verify a release
+ 
+@@ -316,7 +389,8 @@ tar -xzf /tmp/locus-rel/locus-aarch64-apple-darwin.tar.gz -C /tmp
+ /tmp/locus-aarch64-apple-darwin/locus --version
+ ```
+ 
+-## Hotfix / re-tag policy
++## Hotfix policy
+ 
+-Do **not** move an existing published tag. Bump patch (`v0.1.2`), document in
+-CHANGELOG, tag, and push. Never `--force` a tag that already has release assets.
++Do **not** move an existing published tag. Prepare a fresh patch candidate with
++a changelog through normal review, then qualify and publish it through the
++workflows above. Never force a tag that already has release assets.
+diff --git a/llms-full.txt b/llms-full.txt
+index 2b30cb37bd69a0620b1fa7c89862f9318890a7c0..0bad5c31957eec3938cd797aeef243bdf0a4e0e5 100644
+--- a/llms-full.txt
++++ b/llms-full.txt
+@@ -763,14 +763,15 @@ listed verbatim so an agent can jump straight to the right document.
+ ## docs/RELEASE.md
+ 
+ - [Releasing Locus](https://github.com/ashlrai/locus/blob/main/docs/RELEASE.md)
++  - Qualify and publish through the release workflows
+   - 0.6.0 release candidate - prepared 2026-10-31
+   - Preconditions
+-  - Checklist - v0.5.1 (launch: Oct 20)
+-  - Checklist - v0.5.0
+-  - Checklist - v0.4.0 (shipped)
+-  - Checklist - v0.3.0 (shipped)
+-  - Checklist - v0.2.0 (shipped)
+-  - Tag and push
++  - Historical checklists
++    - Checklist - v0.5.1 (launch: Oct 20)
++    - Checklist - v0.5.0
++    - Checklist - v0.4.0 (shipped)
++    - Checklist - v0.3.0 (shipped)
++    - Checklist - v0.2.0 (shipped)
+     - Prior release (v0.1.0) - reference digests
+   - What release.yml publishes
+   - After the tag (Homebrew / npm)
+@@ -778,7 +779,7 @@ listed verbatim so an agent can jump straight to the right document.
+     - Homebrew (optional prebuilt)
+     - npm wrappers
+   - Verify a release
+-  - Hotfix / re-tag policy
++  - Hotfix policy
+ 
+ ## docs/session-budget.md
+ 
+diff --git a/npm-mcp/bin/locus-mcp.js b/npm-mcp/bin/locus-mcp.js
+index 7469381eaa6c95d6bfb060d2cda7e8159f403673..26f9432e4f9cba51485662693538b98c5a9dc938 100644
+--- a/npm-mcp/bin/locus-mcp.js
++++ b/npm-mcp/bin/locus-mcp.js
+@@ -30,7 +30,7 @@ const { join } = require("path");
+ const https = require("https");
+ const crypto = require("crypto");
+ 
+-const VERSION = "0.6.2";
++const VERSION = "0.7.0";
+ const REPO = "ashlrai/locus";
+ const BINARY_NAME = "locus-mcp";
+ const CARGO_PACKAGE = "locus-mcp";
+diff --git a/npm-mcp/package.json b/npm-mcp/package.json
+index 51239a817741d989624b9862cc209cf4b717371a..d0ef50931e13e25d95e1270de7cac78f8cb5ac97 100644
+--- a/npm-mcp/package.json
++++ b/npm-mcp/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@ashlrai/locus-mcp",
+-  "version": "0.6.2",
++  "version": "0.7.0",
+   "publishConfig": {
+     "access": "public"
+   },
+diff --git a/npm/bin/locus.js b/npm/bin/locus.js
+index cdf7cb322eed3c0220c4f07037aac1a017553cd3..aa5a0fddaeb0ebed6a82474f7f4de4d93d4bd725 100644
+--- a/npm/bin/locus.js
++++ b/npm/bin/locus.js
+@@ -26,7 +26,7 @@ const { dirname, join } = require("path");
+ const https = require("https");
+ const crypto = require("crypto");
+ 
+-const VERSION = "0.6.2";
++const VERSION = "0.7.0";
+ const REPO = "ashlrai/locus";
+ const BINARY_NAME = "locus";
+ const CARGO_PACKAGE = "locus-cli";
+diff --git a/npm/package.json b/npm/package.json
+index b1e16e423b82a2c00c181f8f521bb48cb5d27bc0..5b895cd50c022ce0888737f241fa119b008339a4 100644
+--- a/npm/package.json
++++ b/npm/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "locus-cli",
+-  "version": "0.6.2",
++  "version": "0.7.0",
+   "description": "Locus CLI — identity plane for coding agents. Pin multi-account bindings so agents never act in the wrong tenant.",
+   "bin": {
+     "locus": "bin/locus.js",
+diff --git a/npm/test/upgrade-changelog.test.js b/npm/test/upgrade-changelog.test.js
+index 53c3f0150345bf266400573830cdecba96e7cd6c..da27945354b0c60921a86ee4870c97f7fe8a9d69 100644
+--- a/npm/test/upgrade-changelog.test.js
++++ b/npm/test/upgrade-changelog.test.js
+@@ -5,9 +5,9 @@ const { readFileSync } = require("node:fs");
+ const { join } = require("node:path");
+ const test = require("node:test");
+ 
+-test("unreleased changelog distinguishes npm wrapper upgrade behavior", () => {
++test("0.7.0 changelog distinguishes npm wrapper upgrade behavior", () => {
+   const changelog = readFileSync(join(__dirname, "../..", "CHANGELOG.md"), "utf8");
+-  const unreleased = changelog.split("## [Unreleased]")[1].split("\n## [")[0];
++  const unreleased = changelog.split("## [0.7.0]")[1].split("\n## [")[0];
+   const note = unreleased.split("**npm wrapper upgrades")[1].split("\n- **")[0]
+     .replace(/\s+/g, " ");
+ 
+diff --git a/scripts/ci/release-workflow.test.mjs b/scripts/ci/release-workflow.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ae46453aa5b2eb97c8d26e25444c31ec07a97535
+--- /dev/null
++++ b/scripts/ci/release-workflow.test.mjs
+@@ -0,0 +1,237 @@
++import assert from "node:assert/strict";
++import { spawnSync } from "node:child_process";
++import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import test from "node:test";
++
++// Reconciled from #731: automatic tags use #611's publisher, while every
++// publishing path keeps manual full-suite evidence on the exact commit.
++const workflows = new URL("../../.github/workflows/", import.meta.url);
++const release = readFileSync(new URL("release.yml", workflows), "utf8");
++const auto = readFileSync(new URL("auto-tag.yml", workflows), "utf8");
++const job = (text, name) => text.match(new RegExp(`^  ${name}:\\n([\\s\\S]*?)(?=^  [a-z][\\w-]*:|$(?![\\s\\S]))`, "m"))?.[1];
++const step = (text, name) => {
++  const block = text.split("      - name: ").find((s) => s.startsWith(name + "\n"));
++  assert.ok(block, `missing workflow step: ${name}`);
++  const script = block.split("        run: |\n")[1];
++  assert.ok(script, `missing shell body: ${name}`);
++  const lines = [];
++  for (const line of script.split("\n")) {
++    if (line.trim() && !line.startsWith("          ")) break;
++    lines.push(line.slice(10));
++  }
++  return lines.join("\n");
++};
++const sha = "a".repeat(40);
++const other = "b".repeat(40);
++const evidence = "Require a successful workflow_dispatch full suite on this exact commit";
++const required = "Require every required check green on this exact commit";
++
++// Execute the real workflow shell against local API responses. gh's jq filter
++// is evaluated by jq itself, so wrong-SHA/event/status fixtures exercise the
++// actual evidence selection. No network or publisher credentials are used.
++function fixture(t, data = {}, runtimeWithSpaces = false) {
++  const root = mkdtempSync(join(tmpdir(), "locus-release-gate-"));
++  t.after(() => rmSync(root, { recursive: true, force: true }));
++  const config = {
++    main: sha, parent: other, version: "0.7.0", oldVersion: "0.6.2",
++    rules: [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "CI Gate" }] } }],
++    classic: {}, checks: [{ name: "CI Gate", status: "completed", conclusion: "success", app: { id: 15368 } }],
++    runs: [{ event: "workflow_dispatch", status: "completed", conclusion: "success", head_sha: sha }],
++    ...data,
++  };
++  writeFileSync(join(root, "config.json"), JSON.stringify(config));
++  // A shebang cannot quote an executable path. Preserve the commissioned
++  // runtime as one argv value through a fixed shell and a separate JS file.
++  const runtime = runtimeWithSpaces ? join(root, "node runtime's fixture") : process.execPath;
++  if (runtimeWithSpaces) {
++    writeFileSync(runtime, '#!/bin/sh\nexec "$FIXTURE_PARENT_NODE" "$@"\n');
++    chmodSync(runtime, 0o755);
++  }
++  writeFileSync(join(root, "gh"), '#!/bin/sh\nexec "$FIXTURE_NODE" "$FIXTURE_SCRIPT" "$@"\n');
++  writeFileSync(join(root, "gh.cjs"), `const fs = require('node:fs');
++const { spawnSync } = require('node:child_process');
++const c = JSON.parse(fs.readFileSync(process.env.FIXTURE_CONFIG));
++const args = process.argv.slice(2);
++fs.appendFileSync(process.env.FIXTURE_LOG, JSON.stringify(args) + '\\n');
++const url = args.find(a => a.startsWith('repos/')) ?? '';
++if (c.fail && url.includes(c.fail)) process.exit(1);
++let value;
++if (url.includes('/rules/')) value = c.rules;
++else if (url.includes('/branches/')) value = c.classic;
++else if (url.includes('/check-runs?')) value = { check_runs: c.checks };
++else if (url.includes('/actions/workflows/ci.yml/runs?')) value = { total_count: 100, workflow_runs: c.runs };
++else if (url.endsWith('/commits/main')) value = { sha: c.main };
++else if (url.includes('/commits/')) value = { parents: [{ sha: c.parent }] };
++else if (url.includes('/contents/')) {
++  console.log('[workspace.package]\\nversion = "' + (url.endsWith(c.parent) ? c.oldVersion : c.version) + '"');
++  process.exit(0);
++} else if (url.endsWith('/git/refs')) process.exit(0);
++else process.exit(2);
++const i = args.findIndex(a => a === '-q' || a === '--jq');
++const out = spawnSync('jq', ['-r', args[i + 1]], { input: JSON.stringify(value), encoding: 'utf8' });
++process.stdout.write(out.stdout); process.stderr.write(out.stderr); process.exit(out.status ?? 1);
++`);
++  writeFileSync(join(root, "git"), `#!/bin/sh\n${config.tag ? `printf '%s\\trefs/tags/v0.7.0\\n' '${config.tag}'` : `exit ${config.gitError ?? 2}`}\n`);
++  writeFileSync(join(root, "sleep"), "#!/bin/sh\nexit 0\n");
++  for (const name of ["gh", "git", "sleep"]) chmodSync(join(root, name), 0o755);
++  const output = join(root, "output");
++  const log = join(root, "calls");
++  writeFileSync(output, ""); writeFileSync(log, "");
++  return {
++    run(text, name, env = {}) {
++      return spawnSync("bash", ["-c", step(text, name)], {
++        encoding: "utf8", timeout: 15000,
++        env: { ...process.env, PATH: `${root}:${process.env.PATH}`, HOME: root,
++          FIXTURE_CONFIG: join(root, "config.json"), FIXTURE_LOG: log,
++          FIXTURE_NODE: runtime, FIXTURE_PARENT_NODE: process.execPath, FIXTURE_SCRIPT: join(root, "gh.cjs"),
++          REPO: "ashlrai/locus", BRANCH: "main", SHA: sha, VERSION: "0.7.0",
++          VERSION_FILE: "Cargo.toml", ACTIONS_APP_ID: "15368", TRIGGER: "workflow_dispatch",
++          EVENT: "push", CI_WORKFLOW: "ci.yml", GITHUB_OUTPUT: output,
++          GITHUB_STEP_SUMMARY: join(root, "summary"), ...env },
++      });
++    },
++    output: () => readFileSync(output, "utf8"),
++    calls: () => readFileSync(log, "utf8"),
++  };
++}
++
++test("release triggers preserve tag, manual retry and PR dry run; no direct-main bypass", () => {
++  assert.match(release, /tags:\n\s+- "v\*"/);
++  assert.match(release, /^  workflow_dispatch:$/m);
++  assert.match(release, /pull_request:\n\s+paths:/);
++  assert.doesNotMatch(release, /branches: \[main\]|^  (workflow_run|pull_request_target):/m);
++  assert.match(job(release, "build"), /needs: \[full-suite-evidence\]/);
++  for (const name of ["release", "npm-publish"]) assert.match(job(release, name), /needs: \[full-suite-evidence,/);
++  assert.equal(release.match(/ref: \$\{\{ needs.full-suite-evidence.outputs.sha \}\}/g)?.length, 3);
++  assert.match(release, /node scripts\/release-version.mjs check --tag "\$RELEASE_TAG"/);
++  assert.match(release, /cargo run --release --locked -p locus-cli --bin locus -- adapter registry export/);
++});
++
++test("PR never publishes; existing OIDC stays confined to npm", () => {
++  assert.match(job(release, "release"), /name: Create release\n\s+if: github.event_name == 'push' \|\| github.event_name == 'workflow_dispatch'/);
++  assert.match(job(release, "npm-publish"), /if: \(github.event_name == 'push' && startsWith\(github.ref, 'refs\/tags\/v'\)\) \|\| github.event_name == 'workflow_dispatch'/);
++  assert.equal(release.match(/id-token: write/g)?.length, 1);
++  assert.match(job(release, "npm-publish"), /id-token: write/);
++  assert.match(release, /token-based npm auth must not be configured/);
++  const live = release.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
++  assert.doesNotMatch(live, /NPM_TOKEN: |NODE_AUTH_TOKEN|secrets\.(?!GITHUB_TOKEN)/);
++});
++
++test("privileged auto-tag trusts only main manual CI and mints only after full evidence", () => {
++  assert.match(auto, /workflow_run.event == 'workflow_dispatch'/);
++  assert.match(auto, /workflow_run.head_branch == 'main'/);
++  assert.match(auto, /workflow_run.head_repository.full_name == github.repository/);
++  assert.doesNotMatch(auto, /uses: actions\/checkout|download-artifact|pull_request_target|git push|git tag|secrets\.(?!ASHLR_RELEASE_APP_KEY)/);
++  assert.match(auto, /repositories: \$\{\{ github.event.repository.name \}\}\n\s+permission-contents: write/);
++  assert.match(auto, /uses: actions\/create-github-app-token@[0-9a-f]{40}/);
++  const privileged = auto.slice(auto.indexOf("      - name: Mint ashlr-release"));
++  assert.equal(privileged.match(/if: steps.evidence.outputs.qualified == 'true'/g)?.length, 3);
++  assert.match(privileged, /gh api -X POST .*\/git\/refs/);
++  assert.doesNotMatch(privileged, /-X (PATCH|DELETE)|force/);
++});
++
++for (const [name, overrides] of [
++  ["missing", { runs: [] }], ["wrong SHA", { runs: [{ event: "workflow_dispatch", status: "completed", conclusion: "success", head_sha: other }] }],
++  ...["merge_group", "schedule", "pull_request"].map((event) => [event, { runs: [{ event, status: "completed", conclusion: "success", head_sha: sha }] }]),
++  ...["failure", "skipped", "neutral"].map((conclusion) => [conclusion, { runs: [{ event: "workflow_dispatch", status: "completed", conclusion, head_sha: sha }] }]),
++  ["pending", { runs: [{ event: "workflow_dispatch", status: "in_progress", conclusion: "success", head_sha: sha }] }],
++  ["API failure", { fail: "/actions/" }],
++]) {
++  test(`both release gates reject ${name} evidence`, (t) => {
++    const f = fixture(t, overrides);
++    assert.notEqual(f.run(auto, evidence).status, 0);
++    assert.notEqual(f.run(release, "Require a successful workflow_dispatch CI run on this sha").status, 0);
++    assert.doesNotMatch(f.output(), /qualified=true/);
++  });
++}
++
++test("exact successful manual evidence qualifies both gates; PR dry run needs none", (t) => {
++  const f = fixture(t);
++  assert.equal(f.run(auto, evidence).status, 0);
++  assert.match(f.output(), /qualified=true/);
++  assert.equal(f.run(release, "Require a successful workflow_dispatch CI run on this sha").status, 0);
++  const pr = fixture(t, { fail: "/actions/" });
++  assert.equal(pr.run(release, "Require a successful workflow_dispatch CI run on this sha", { EVENT: "pull_request" }).status, 0);
++  assert.equal(pr.calls(), "");
++});
++
++for (const [name, data] of [
++  ["rules API failure", { fail: "/rules/" }], ["classic API failure", { fail: "/branches/" }],
++  ["missing required checks", { rules: [] }], ["missing check run", { checks: [] }],
++  ["foreign app", { checks: [{ name: "CI Gate", status: "completed", conclusion: "success", app: { id: 1 } }] }],
++  ...["skipped", "neutral", "failure"].map((conclusion) => [conclusion, { checks: [{ name: "CI Gate", status: "completed", conclusion, app: { id: 15368 } }] }]),
++]) {
++  test(`required-check gate rejects ${name}`, (t) => {
++    const f = fixture(t, data);
++    assert.notEqual(f.run(auto, required).status, 0);
++    assert.doesNotMatch(f.output(), /green=true/);
++  });
++}
++
++test("required GitHub Actions checks succeed; any duplicate failure rejects", (t) => {
++  const f = fixture(t);
++  assert.equal(f.run(auto, required).status, 0);
++  assert.match(f.output(), /green=true/);
++  const duplicate = fixture(t, { checks: [
++    { name: "CI Gate", status: "completed", conclusion: "success", app: { id: 15368 } },
++    { name: "CI Gate", status: "completed", conclusion: "failure", app: { id: 15368 } },
++  ] });
++  assert.notEqual(duplicate.run(auto, required).status, 0);
++});
++
++test("main drift rejects detection and creation before tag POST", (t) => {
++  const f = fixture(t, { main: other });
++  assert.notEqual(f.run(auto, "Detect version change").status, 0);
++  assert.notEqual(f.run(auto, "Create tag v${{ steps.version.outputs.version }}").status, 0);
++  assert.doesNotMatch(f.calls(), /POST/);
++});
++
++test("version detection fails closed on parent read failure and detects a real bump", (t) => {
++  const broken = fixture(t, { fail: `/contents/Cargo.toml?ref=${other}` });
++  assert.notEqual(broken.run(auto, "Detect version change").status, 0);
++  assert.doesNotMatch(broken.output(), /changed=true/);
++  const bump = fixture(t);
++  const result = bump.run(auto, "Detect version change");
++  assert.equal(result.status, 0, result.stderr);
++  assert.match(bump.output(), /version=0.7.0\nchanged=true/);
++  const unchanged = fixture(t, { oldVersion: "0.7.0" });
++  assert.equal(unchanged.run(auto, "Detect version change", { TRIGGER: "workflow_run" }).status, 0);
++  assert.match(unchanged.output(), /changed=false/);
++});
++
++test("qualified current-main tag creation uses only immutable POST; existing tag is untouched", (t) => {
++  const f = fixture(t);
++  assert.equal(f.run(auto, "Create tag v${{ steps.version.outputs.version }}").status, 0);
++  assert.match(f.calls(), /POST.*git\/refs.*refs\/tags\/v0.7.0/);
++  const existing = fixture(t, { tag: sha });
++  assert.equal(existing.run(auto, "Create tag v${{ steps.version.outputs.version }}").status, 0);
++  assert.doesNotMatch(existing.calls(), /POST/);
++});
++
++test("tag lookup errors and a tag raced onto another commit block publication", (t) => {
++  const broken = fixture(t, { gitError: 128 });
++  assert.notEqual(broken.run(auto, "Detect version change").status, 0);
++  assert.notEqual(broken.run(auto, "Create tag v${{ steps.version.outputs.version }}").status, 0);
++  assert.doesNotMatch(broken.calls(), /POST/);
++  const conflict = fixture(t, { tag: other });
++  assert.notEqual(conflict.run(auto, "Create tag v${{ steps.version.outputs.version }}").status, 0);
++  assert.doesNotMatch(conflict.calls(), /POST/);
++});
++
++test("manual release resolves and freezes tag commit; invalid/missing tag fails", (t) => {
++  const f = fixture(t, { tag: sha });
++  assert.equal(f.run(release, "Resolve the release tag on manual dispatch").status, 0);
++  assert.match(f.output(), new RegExp(`sha=${sha}`));
++  assert.notEqual(f.run(release, "Resolve the release tag on manual dispatch", { VERSION: "0.7.0;exit 0" }).status, 0);
++  assert.notEqual(fixture(t).run(release, "Resolve the release tag on manual dispatch").status, 0);
++});
++
++test("workflow evidence fixture executes the qualified runtime even with spaces and apostrophes", (t) => {
++  const f = fixture(t, {}, true);
++  const result = f.run(auto, evidence);
++  assert.equal(result.status, 0, result.stderr);
++  assert.match(f.output(), /qualified=true/);
++  assert.match(f.calls(), /actions\/workflows\/ci\.yml/);
++});
+diff --git a/scripts/release-version.mjs b/scripts/release-version.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..708ca18d0f5dcf86c516dae9056b88b43c965026
+--- /dev/null
++++ b/scripts/release-version.mjs
+@@ -0,0 +1,167 @@
++#!/usr/bin/env node
++// One version for everything Locus ships. The Cargo workspace version is the
++// source of truth; the carriers below must equal it, or npm and the GitHub
++// release drift apart and `cargo build --locked` fails on a stale Cargo.lock.
++//
++//   check [--tag vX.Y.Z]   every carrier equals the Cargo version (and the tag)
++//   version                print the Cargo version
++//   sync [X.Y.Z]           write X.Y.Z (default: the Cargo version) to every carrier
++//   next                   read commit subjects on stdin, print the next version
++//
++// Bump rule for `next` (the repo's merge subjects are `bridge(...)`, not
++// conventional, so release-please would never find a release-worthy commit):
++// breaking (`type!:` or BREAKING CHANGE) and `feat` raise the minor while the
++// major is 0 (the major otherwise for breaking); everything else is a patch.
++//
++// No dependencies: text edits keep each file's formatting. Exits 1 on any
++// mismatch; output never includes file contents beyond version strings.
++import { readFileSync, writeFileSync } from "node:fs";
++import { join } from "node:path";
++import { fileURLToPath } from "node:url";
++
++const SEMVER = /^(\d+)\.(\d+)\.(\d+)$/;
++const CARGO_VERSION = /(\[workspace\.package\][^[]*?\nversion\s*=\s*")([^"]+)(")/;
++const PACKAGE_MANIFESTS = ["npm/package.json", "npm-mcp/package.json", "apps/web/package.json"];
++const WRAPPERS = ["npm/bin/locus.js", "npm-mcp/bin/locus-mcp.js"];
++const PATH_DEPENDENCIES = [
++  ["Cargo.toml", "locus-core", "crates/locus-core"],
++  ["crates/locus-cli/Cargo.toml", "locus-mcp", "../locus-mcp"],
++];
++const SERVER_JSON = "server.json";
++
++const read = (root, rel) => readFileSync(join(root, rel), "utf8");
++
++export function cargoVersion(root) {
++  const m = read(root, "Cargo.toml").match(CARGO_VERSION);
++  if (!m) throw new Error("Cargo.toml: no [workspace.package] version");
++  return m[2];
++}
++
++function pathDependencyVersion(text, name, path) {
++  const line = text.split("\n").find((line) => line.startsWith(`${name} = `) && line.includes(`path = "${path}"`));
++  const version = line?.match(/\bversion\s*=\s*"([^"]+)"/)?.[1];
++  if (!version) throw new Error(`missing version for path dependency ${name} (${path})`);
++  return version;
++}
++
++// Workspace crates are the Cargo.lock packages with no `source` line.
++function lockBlocks(lock) {
++  return lock.split(/(?=^\[\[package\]\]\n)/m).map((text) => ({
++    text,
++    name: text.match(/^name = "([^"]+)"/m)?.[1],
++    version: text.match(/^version = "([^"]+)"/m)?.[1],
++    local: /^\[\[package\]\]\n/.test(text) && !/^source = /m.test(text),
++  }));
++}
++
++// [carrier label, current version] for every place a version is written.
++export function carriers(root) {
++  const out = [["Cargo.toml [workspace.package]", cargoVersion(root)]];
++  for (const b of lockBlocks(read(root, "Cargo.lock"))) {
++    if (b.local) out.push([`Cargo.lock ${b.name}`, b.version]);
++  }
++  for (const [rel, name, path] of PATH_DEPENDENCIES) {
++    out.push([`${rel} path dependency ${name}`, pathDependencyVersion(read(root, rel), name, path)]);
++  }
++  for (const rel of PACKAGE_MANIFESTS) out.push([rel, JSON.parse(read(root, rel)).version]);
++  for (const rel of WRAPPERS) {
++    const version = read(root, rel).match(/^const VERSION = "([^"]+)";/m)?.[1];
++    if (!version) throw new Error(`${rel}: missing VERSION constant`);
++    out.push([`${rel} VERSION`, version]);
++  }
++  const server = JSON.parse(read(root, SERVER_JSON));
++  out.push([`${SERVER_JSON} version`, server.version]);
++  (server.packages ?? []).forEach((p, i) => out.push([`${SERVER_JSON} packages[${i}] ${p.identifier}`, p.version]));
++  return out;
++}
++
++export function check(root, tag) {
++  const want = cargoVersion(root);
++  const problems = [];
++  if (!SEMVER.test(want)) problems.push(`Cargo version "${want}" is not X.Y.Z`);
++  for (const [label, got] of carriers(root)) {
++    if (got !== want) problems.push(`${label} is ${got}, Cargo is ${want}`);
++  }
++  if (tag !== undefined && tag !== `v${want}`) problems.push(`tag ${tag} is not v${want}`);
++  return problems;
++}
++
++export function sync(root, version) {
++  if (!SEMVER.test(version)) throw new Error(`"${version}" is not X.Y.Z`);
++  // Read and validate the known carrier formats before making any edits.
++  carriers(root);
++  const edit = (rel, fn) => {
++    const before = read(root, rel);
++    const after = fn(before);
++    if (after !== before) writeFileSync(join(root, rel), after);
++  };
++  edit("Cargo.toml", (t) => t.replace(CARGO_VERSION, `$1${version}$3`));
++  edit("Cargo.lock", (t) =>
++    lockBlocks(t)
++      .map((b) => (b.local ? b.text.replace(/^(version = ")[^"]+(")/m, `$1${version}$2`) : b.text))
++      .join(""),
++  );
++  for (const [rel, name, path] of PATH_DEPENDENCIES) {
++    edit(rel, (text) => text.split("\n").map((line) =>
++      line.startsWith(`${name} = `) && line.includes(`path = "${path}"`)
++        ? line.replace(/(\bversion\s*=\s*")[^"]+("|$)/, `$1${version}$2`)
++        : line,
++    ).join("\n"));
++  }
++  for (const rel of [...PACKAGE_MANIFESTS, SERVER_JSON]) {
++    // Top-level and server.json packages[] versions: every `"version": "X"` at
++    // the 2- or 6-space indent these files use, never a dependency range.
++    edit(rel, (t) => t.replace(/^( {2}| {6})("version": ")\d+\.\d+\.\d+(")/gm, `$1$2${version}$3`));
++  }
++  for (const rel of WRAPPERS) {
++    edit(rel, (text) => text.replace(/^(const VERSION = ")[^"]+(";)/m, `$1${version}$2`));
++  }
++  return check(root);
++}
++
++export function nextVersion(current, subjects) {
++  const m = current.match(SEMVER);
++  if (!m) throw new Error(`"${current}" is not X.Y.Z`);
++  const [major, minor, patch] = m.slice(1).map(Number);
++  const lines = subjects.filter((s) => s.trim());
++  if (lines.length === 0) return null;
++  const breaking = lines.some((s) => /^\w+(\([^)]*\))?!:/.test(s) || /BREAKING[ -]CHANGE/.test(s));
++  const feature = lines.some((s) => /^feat(\([^)]*\))?:/.test(s));
++  if (breaking && major > 0) return `${major + 1}.0.0`;
++  if (breaking || feature) return `${major}.${minor + 1}.0`;
++  return `${major}.${minor}.${patch + 1}`;
++}
++
++function main(argv) {
++  const root = process.env.RELEASE_VERSION_ROOT ?? fileURLToPath(new URL("..", import.meta.url));
++  const [cmd, ...rest] = argv;
++  const fail = (msg) => {
++    console.error(msg);
++    process.exit(1);
++  };
++  try {
++    if (cmd === "version") return console.log(cargoVersion(root));
++    if (cmd === "check") {
++      if (rest.length && (rest.length !== 2 || rest[0] !== "--tag")) fail("usage: release-version.mjs check [--tag vX.Y.Z]");
++      const i = rest.indexOf("--tag");
++      const problems = check(root, i >= 0 ? rest[i + 1] : undefined);
++      if (problems.length) fail(problems.map((p) => `::error::version drift: ${p}`).join("\n"));
++      return console.log(`all version carriers at ${cargoVersion(root)}`);
++    }
++    if (cmd === "sync") {
++      const problems = sync(root, rest[0] ?? cargoVersion(root));
++      if (problems.length) fail(problems.join("\n"));
++      return console.log(`synced to ${cargoVersion(root)}`);
++    }
++    if (cmd === "next") {
++      const subjects = readFileSync(0, "utf8").split("\n");
++      const v = nextVersion(cargoVersion(root), subjects);
++      return console.log(v ?? cargoVersion(root));
++    }
++    fail("usage: release-version.mjs check [--tag vX.Y.Z] | version | sync [X.Y.Z] | next < subjects");
++  } catch (e) {
++    fail(e.message);
++  }
++}
++
++if (process.argv[1] === fileURLToPath(import.meta.url)) main(process.argv.slice(2));
+diff --git a/scripts/release-version.test.mjs b/scripts/release-version.test.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..909beb7a9f91da12cc2eb689e0d4ff10e77400c0
+--- /dev/null
++++ b/scripts/release-version.test.mjs
+@@ -0,0 +1,130 @@
++import assert from "node:assert/strict";
++import { spawnSync } from "node:child_process";
++import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import test from "node:test";
++import { fileURLToPath } from "node:url";
++import { carriers, check, cargoVersion, nextVersion, sync } from "./release-version.mjs";
++
++const repo = fileURLToPath(new URL("..", import.meta.url));
++const script = fileURLToPath(new URL("./release-version.mjs", import.meta.url));
++const fixtureFiles = [
++  "Cargo.toml", "Cargo.lock", "server.json", "npm/package.json", "npm-mcp/package.json",
++  "apps/web/package.json", "npm/bin/locus.js", "npm-mcp/bin/locus-mcp.js",
++  "crates/locus-cli/Cargo.toml", "scripts/freshness/published.json",
++];
++
++// A copy of the real carriers, so the tests track the repo's actual formats.
++function fixture(t) {
++  const root = mkdtempSync(join(tmpdir(), "release-version-"));
++  t.after(() => rmSync(root, { recursive: true, force: true }));
++  for (const rel of fixtureFiles) {
++    mkdirSync(join(root, rel, ".."), { recursive: true });
++    cpSync(join(repo, rel), join(root, rel));
++  }
++  return root;
++}
++
++test("the repository's carriers are consistent", () => {
++  assert.deepEqual(check(repo), []);
++});
++
++test("every source carrier kind is covered including path dependencies and wrapper constants", () => {
++  const labels = carriers(repo).map(([l]) => l);
++  for (const want of ["Cargo.toml [workspace.package]", "Cargo.lock locus-cli", "Cargo.lock locus-core", "Cargo.lock locus-mcp", "npm/package.json", "npm-mcp/package.json", "apps/web/package.json", "npm/bin/locus.js VERSION", "npm-mcp/bin/locus-mcp.js VERSION", "Cargo.toml path dependency locus-core", "crates/locus-cli/Cargo.toml path dependency locus-mcp", "server.json version", "server.json packages[0] @ashlrai/locus-mcp"]) {
++    assert.ok(labels.includes(want), `missing carrier: ${want}`);
++  }
++  assert.ok(!labels.some((l) => l.startsWith("Cargo.lock") && !/locus-(cli|core|mcp)$/.test(l)), "registry crates must not be treated as carriers");
++});
++
++test("sync moves every carrier and leaves registry crates and dependency ranges alone", (t) => {
++  const root = fixture(t);
++  const lockBefore = readFileSync(join(root, "Cargo.lock"), "utf8");
++  const publishedBefore = readFileSync(join(root, "scripts/freshness/published.json"), "utf8");
++  assert.deepEqual(sync(root, "9.8.7"), []);
++  assert.equal(cargoVersion(root), "9.8.7");
++  for (const [label, v] of carriers(root)) assert.equal(v, "9.8.7", label);
++  const lockAfter = readFileSync(join(root, "Cargo.lock"), "utf8");
++  const changed = lockAfter.split("\n").filter((l, i) => l !== lockBefore.split("\n")[i]);
++  assert.equal(changed.length, 3, "only the three workspace crate versions change");
++  assert.equal(readFileSync(join(root, "scripts/freshness/published.json"), "utf8"), publishedBefore,
++    "a source version change must not claim publication");
++  assert.deepEqual(check(root), []);
++  const synced = fixtureFiles.map((rel) => readFileSync(join(root, rel), "utf8"));
++  assert.deepEqual(sync(root, "9.8.7"), []);
++  assert.deepEqual(fixtureFiles.map((rel) => readFileSync(join(root, rel), "utf8")), synced,
++    "sync is byte-for-byte idempotent");
++});
++
++test("check detects drift in web, wrapper and local dependency versions", (t) => {
++  const root = fixture(t);
++  for (const [rel, from, to, label] of [
++    ["apps/web/package.json", /("version": ")[^"]+/, '$10.0.1', "apps/web/package.json"],
++    ["npm/bin/locus.js", /const VERSION = "[^"]+/, 'const VERSION = "0.0.1', "npm/bin/locus.js VERSION"],
++    ["npm-mcp/bin/locus-mcp.js", /const VERSION = "[^"]+/, 'const VERSION = "0.0.1', "npm-mcp/bin/locus-mcp.js VERSION"],
++    ["Cargo.toml", /(locus-core = \{[^\n]*version = ")[^"]+/, '$10.0.1', "Cargo.toml path dependency locus-core"],
++    ["crates/locus-cli/Cargo.toml", /(locus-mcp = \{[^\n]*version = ")[^"]+/, '$10.0.1', "crates/locus-cli/Cargo.toml path dependency locus-mcp"],
++  ]) {
++    const file = join(root, rel);
++    const before = readFileSync(file, "utf8");
++    writeFileSync(file, before.replace(from, to));
++    assert.deepEqual(check(root), [`${label} is 0.0.1, Cargo is ${cargoVersion(root)}`]);
++    writeFileSync(file, before);
++  }
++});
++
++test("sync changes local path versions while preserving registry dependency versions", (t) => {
++  const root = fixture(t);
++  const manifest = join(root, "crates/locus-cli/Cargo.toml");
++  const dependency = '\nrelease-test-registry = { version = "4.5.6" }\n';
++  writeFileSync(manifest, readFileSync(manifest, "utf8") + dependency);
++  assert.deepEqual(sync(root, "9.8.7"), []);
++  assert.ok(readFileSync(manifest, "utf8").endsWith(dependency));
++});
++
++test("check names every drifted carrier and a wrong tag", (t) => {
++  const root = fixture(t);
++  const pkg = join(root, "npm/package.json");
++  writeFileSync(pkg, readFileSync(pkg, "utf8").replace(/"version": "[^"]+"/, '"version": "0.0.1"'));
++  const server = join(root, "server.json");
++  writeFileSync(server, readFileSync(server, "utf8").replace(/^( {6}"version": ")[^"]+/m, "$10.0.2"));
++  const want = cargoVersion(root);
++  assert.deepEqual(check(root, `v${want}`), [
++    `npm/package.json is 0.0.1, Cargo is ${want}`,
++    `server.json packages[0] @ashlrai/locus-mcp is 0.0.2, Cargo is ${want}`,
++  ]);
++  assert.deepEqual(sync(root, want), [], "sync repairs drift");
++  assert.deepEqual(check(root, "v0.0.0"), [`tag v0.0.0 is not v${want}`]);
++});
++
++test("next: patch for bridge/docs/fix, minor for feat, breaking per major", () => {
++  assert.equal(nextVersion("0.6.2", ["bridge(RQ-X): notes (#1)", "docs: x"]), "0.6.3");
++  assert.equal(nextVersion("0.6.2", ["fix: y", "feat(cli): z"]), "0.7.0");
++  assert.equal(nextVersion("0.6.2", ["refactor!: drop flag"]), "0.7.0");
++  assert.equal(nextVersion("1.4.9", ["feat!: new contract"]), "2.0.0");
++  assert.equal(nextVersion("1.4.9", ["chore: BREAKING CHANGE in body"]), "2.0.0");
++  assert.equal(nextVersion("1.4.9", ["feat: a"]), "1.5.0");
++  assert.equal(nextVersion("1.4.9", ["", "  "]), null, "no commits, no release");
++  assert.throws(() => nextVersion("1.4", ["fix: a"]));
++});
++
++test("sync rejects a non-semver version before touching files", (t) => {
++  const root = fixture(t);
++  assert.throws(() => sync(root, "1.2"));
++  assert.throws(() => sync(root, "1.2.3-rc.1"));
++  assert.deepEqual(check(root), []);
++});
++
++test("CLI: check passes on the repo, fails closed on a wrong tag, next reads stdin", () => {
++  const env = { ...process.env, RELEASE_VERSION_ROOT: repo };
++  const v = cargoVersion(repo);
++  assert.equal(spawnSync("node", [script, "check", "--tag", `v${v}`], { env }).status, 0);
++  const bad = spawnSync("node", [script, "check", "--tag", "v0.0.0"], { env, encoding: "utf8" });
++  assert.equal(bad.status, 1);
++  assert.match(bad.stderr, /tag v0\.0\.0 is not v/);
++  const next = spawnSync("node", [script, "next"], { env, input: "bridge(RQ-A): x\n", encoding: "utf8" });
++  assert.equal(next.stdout.trim(), nextVersion(v, ["bridge(RQ-A): x"]));
++  assert.equal(spawnSync("node", [script, "nope"], { env }).status, 1);
++  assert.equal(spawnSync("node", [script, "check", "--tag"], { env }).status, 1);
++});
+diff --git a/scripts/tests/test_cargo_install_changelog.py b/scripts/tests/test_cargo_install_changelog.py
+index 99839484d6a75f9cd0b57938fb2677e61e9e0ff9..1887a50c0a61d4cff59242d79c13335f399c3559 100644
+--- a/scripts/tests/test_cargo_install_changelog.py
++++ b/scripts/tests/test_cargo_install_changelog.py
+@@ -21,7 +21,7 @@ def recipe():
+ class CargoInstallRecipeTest(unittest.TestCase):
+     def test_note_records_reported_observation_without_claiming_a_fix(self):
+         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+-        unreleased = changelog.split("## [Unreleased]", 1)[1].split("## [0.5.2]", 1)[0]
++        unreleased = changelog.split("## [0.7.0]", 1)[1].split("\n## [", 1)[0]
+         entry = unreleased.split("**Reproduce cargo-install timings", 1)[1]
+         note = entry.split("```bash", 1)[0]
+         self.assertIn("issues/168", note)
+diff --git a/scripts/tests/test_shell_installer_changelog.py b/scripts/tests/test_shell_installer_changelog.py
+index 9a0ef6941880e3a33b04370470c6b06343b413aa..2d9c986881999cb965ed50ca8ccb3f3a5a8d7280 100644
+--- a/scripts/tests/test_shell_installer_changelog.py
++++ b/scripts/tests/test_shell_installer_changelog.py
+@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
+ class ShellInstallerChangelogTest(unittest.TestCase):
+     def test_unreleased_documentation_describes_the_proposal(self):
+         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+-        unreleased = changelog.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
++        unreleased = changelog.split("## [0.7.0]", 1)[1].split("\n## [", 1)[0]
+         documentation = unreleased.split("### Documentation", 1)[1].split("\n### ", 1)[0]
+         note = documentation.split("**Shell installer proposal", 1)[1].split("\n\n", 1)[0]
+ 
+diff --git a/server.json b/server.json
+index a12900366117d6d8adc8ccffcb89992a0b9a3e30..9bb88184064d3472b9481e473b75172d1076da82 100644
+--- a/server.json
++++ b/server.json
+@@ -3,7 +3,7 @@
+   "name": "io.github.ashlrai/locus-mcp",
+   "title": "Locus",
+   "description": "Identity control tools for coding agents. Pinned provider tools require a supervised Locus launch.",
+-  "version": "0.6.2",
++  "version": "0.7.0",
+   "websiteUrl": "https://github.com/ashlrai/locus",
+   "repository": {
+     "url": "https://github.com/ashlrai/locus",
+@@ -14,7 +14,7 @@
+       "registryType": "npm",
+       "registryBaseUrl": "https://registry.npmjs.org",
+       "identifier": "@ashlrai/locus-mcp",
+-      "version": "0.6.2",
++      "version": "0.7.0",
+       "runtimeHint": "npx",
+       "transport": {
+         "type": "stdio"
