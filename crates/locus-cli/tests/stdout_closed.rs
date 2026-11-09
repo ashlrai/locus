@@ -2,6 +2,7 @@
 //! "failed printing to stdout". The CLI exits 141 (128 + SIGPIPE) quietly.
 
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Run `locus <args>` with a stdout pipe whose read end is already closed, so
 /// the first write deterministically fails with EPIPE.
@@ -48,4 +49,44 @@ fn completion_path_exits_quietly_on_closed_stdout() {
 #[test]
 fn json_error_path_exits_quietly_on_closed_stdout() {
     assert_quiet_sigpipe_exit(&["whoami", "--json"]);
+}
+
+#[test]
+fn immediate_consumer_close_terminates_without_panic() {
+    let home = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .args(["hook", "bash"])
+        .env("LOCUS_HOME", home.path())
+        .env_remove("LOCUS_CONTROL_CAPABILITY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("locus binary runs");
+    drop(child.stdout.take().expect("piped stdout"));
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if child.try_wait().expect("check locus status").is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("kill hung locus");
+            child.wait().expect("reap hung locus");
+            panic!("locus hung after its stdout consumer closed");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let out = child.wait_with_output().expect("collect locus output");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("panicked") && !stderr.contains("failed printing"),
+        "locus panicked on closed stdout: {stderr}"
+    );
+    // The CLI can finish writing before the parent closes its pipe.
+    assert!(
+        matches!(out.status.code(), Some(0 | 141)),
+        "unexpected exit status {}; stderr: {stderr}",
+        out.status
+    );
 }
