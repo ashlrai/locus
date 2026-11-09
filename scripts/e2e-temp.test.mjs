@@ -394,17 +394,19 @@ test('exit cleanup removes the populated graph home after success', (t) => {
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   const source = readFileSync(script, 'utf8');
   const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
-  const createGraphHome = source.match(/^\s*GRAPH_HOME="\$\(mktemp -d .*\)"$/m)?.[0];
+  const createGraphHome = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[0];
   assert.ok(cleanup, 'missing e2e cleanup function');
   assert.ok(createGraphHome, 'missing graph home creation');
 
   const result = spawnSync('bash', ['-c', `set -euo pipefail
 ${cleanup}
+die() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
+${createGraphHome}
 LOCUS_HOME="$1/main-home"
 mkdir "$LOCUS_HOME"
 WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
 trap 'e2e_cleanup' EXIT
-${createGraphHome}
+create_graph_home
 [[ -d "$GRAPH_HOME" && "\${GRAPH_HOME%/*}" == "$TMPDIR" && "\${GRAPH_HOME##*/}" == locus-graph-imp.* ]]
 touch "$GRAPH_HOME/import-sentinel"
 [[ -f "$GRAPH_HOME/import-sentinel" ]]
@@ -1454,6 +1456,43 @@ ${block}
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /two security workspaces are distinct/);
     assert.deepEqual(readdirSync(scratch), ['keep'], 'block must clean up both workspaces');
+  }
+});
+
+test('graph import stops clearly when its temporary home cannot be created', (t) => {
+  const fixture = setup(t);
+  const home = join(fixture.root, 'main-home');
+  const calls = join(fixture.root, 'calls');
+  mkdirSync(home);
+  const source = readFileSync(script, 'utf8');
+  const create = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  const graph = source.slice(source.indexOf('# ── 16. graph'), source.indexOf('# ── 17. ci'));
+  assert.ok(create && graph.includes('create_graph_home'), 'missing graph import code');
+
+  for (const failure of ['error', 'empty']) {
+    rmSync(calls, { force: true });
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+GRAPH_HOME=""
+log() { :; }
+ok() { :; }
+skip() { exit 90; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+has_cmd() { return 0; }
+mktemp() { [[ "$TEST_FAILURE" == empty ]]; }
+locus() {
+  printf '%s:%s\\n' "$1" "\${2:-}" >> "$TEST_CALLS"
+  case "$1:\${2:-}" in
+    graph:export) printf 'LOCUSGRAPH00' > "$4" ;;
+    *) return 1 ;;
+  esac
+}
+${create}
+${graph}
+`], { env: { ...process.env, LOCUS_HOME: home, TEST_CALLS: calls, TEST_FAILURE: failure }, encoding: 'utf8' });
+    assert.equal(result.status, 1, failure);
+    assert.match(result.stderr, /could not create GRAPH_HOME for graph import/);
+    assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'),
+      ['graph:export', 'graph:import', 'graph:import'], 'no init or fresh-home import may run');
   }
 });
 
