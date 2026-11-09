@@ -307,6 +307,7 @@ for (const [name, file] of Object.entries(wrappers)) {
   });
 
   for (const [platform, arch] of [
+    ["linux", "unknown-arch"],
     ["linux", "riscv64"],
     ["darwin", "ia32"],
     ["freebsd", "x64"],
