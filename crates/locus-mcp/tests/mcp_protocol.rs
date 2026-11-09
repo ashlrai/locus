@@ -3151,6 +3151,32 @@ fn bad_tool_params_return_rpc_errors_and_allow_recovery() {
 }
 
 #[test]
+fn unknown_method_returns_rpc_error_and_preserves_request_id() {
+    for framing in [Framing::ContentLength, Framing::Ndjson] {
+        let dir = tempdir().unwrap();
+        let mut client = McpClient::spawn(dir.path(), framing);
+        handshake(&mut client);
+
+        let id = json!("unknown-method-request");
+        client.write_msg(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "locus/nonexistent",
+            "params": {},
+        }));
+        let response = client.read_msg();
+        assert_eq!(response["jsonrpc"], "2.0", "{response}");
+        assert_eq!(response["id"], id, "{response}");
+        assert_eq!(response["error"]["code"], -32601, "{response}");
+        assert!(response["error"]["message"].is_string(), "{response}");
+        assert!(response.get("result").is_none(), "{response}");
+
+        let ping = client.request("ping", json!({}));
+        assert_eq!(ping["result"], json!({}), "{ping}");
+    }
+}
+
+#[test]
 fn unknown_tools_return_rpc_errors_without_a_pin() {
     for framing in [Framing::ContentLength, Framing::Ndjson] {
         let dir = tempdir().unwrap();
