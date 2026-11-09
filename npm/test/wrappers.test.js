@@ -226,7 +226,12 @@ for (const [name, file] of Object.entries(wrappers)) {
     assert.throws(() => mod.getPlatformTarget({ platform: "darwin", arch: "ia32" }), /Unsupported platform: darwin-ia32/);
   });
 
-  for (const [platform, arch] of [["linux", "riscv64"], ["darwin", "ia32"]]) {
+  for (const [platform, arch] of [
+    ["linux", "riscv64"],
+    ["darwin", "ia32"],
+    ["freebsd", "x64"],
+    ["freebsd", "riscv64"],
+  ]) {
     test(`${name}: on unsupported ${platform}-${arch} it reports the platform and never attempts a download`, () => {
       const home = mkdtempSync(join(tmpdir(), "locus-unsupported-"));
       try {
