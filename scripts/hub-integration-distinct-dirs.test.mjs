@@ -48,7 +48,7 @@ test('SMOKE_HOME and SMOKE_PROJ are two distinct, non-nested directories under T
 });
 
 
-test('two invocations create distinct SMOKE_HOME directories and each cleans up its own', (t) => {
+test('two invocations create distinct SMOKE_PROJ directories under the selected root and clean up', (t) => {
   const scratch = mkdtempSync('/tmp/locus-distinct-test-');
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
   const tmp = join(scratch, 'tmp');
@@ -63,12 +63,16 @@ test('two invocations create distinct SMOKE_HOME directories and each cleans up 
     assert.equal(result.error, undefined);
     assert.equal(result.status, 73, `run ${n}: both directories must exist when init runs`);
     const [home, proj] = readFileSync(record, 'utf8').trim().split('\n');
+    assert.equal(dirname(proj), tmp, `run ${n}: project must be directly under TMPDIR`);
+    assert.match(proj.slice(tmp.length + 1), /^locus-hub-int-proj\.[^/]+$/);
+    assert.equal(existsSync(proj), false, `run ${n}: project must be removed on exit`);
     return { home, proj };
   });
 
   const all = runs.flatMap(({ home, proj }) => [home, proj]);
   assert.equal(new Set(all).size, 4, 'no directory name may repeat across invocations');
   assert.notEqual(runs[0].home, runs[1].home, 'SMOKE_HOME must differ between invocations');
+  assert.notEqual(runs[0].proj, runs[1].proj, 'SMOKE_PROJ must differ between invocations');
   for (const p of all) assert.equal(existsSync(p), false, `removed on exit: ${p}`);
   assert.deepEqual(readdirSync(tmp), [], 'neither invocation may leave anything behind');
 });
