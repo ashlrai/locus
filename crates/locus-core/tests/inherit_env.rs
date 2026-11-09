@@ -110,15 +110,15 @@ fn inherit_env_end_to_end() {
 
     // An optional allowlisted variable that is absent in the parent stays absent.
     // A present neighbor confirms the allowlist is still applied.
-    std::env::remove_var("LOCUS_INHERIT_TEST_OPTIONAL");
+    std::env::remove_var("INHERIT_TEST_OPTIONAL_ABSENT");
     store
         .save_config(&cfg(
-            &["LOCUS_INHERIT_TEST_OPTIONAL", "PHANTOM_PROXY_PORT"],
+            &["INHERIT_TEST_OPTIONAL_ABSENT", "PHANTOM_PROXY_PORT"],
             GatewayConfig::default(),
         ))
         .unwrap();
     let iso = build_isolated_env_opts(&s, &b, true);
-    assert!(!iso.vars.contains_key("LOCUS_INHERIT_TEST_OPTIONAL"));
+    assert!(!iso.vars.contains_key("INHERIT_TEST_OPTIONAL_ABSENT"));
     assert_eq!(
         iso.vars.get("PHANTOM_PROXY_PORT").map(String::as_str),
         Some("41000")
