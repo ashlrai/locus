@@ -630,6 +630,9 @@ for (const exitStatus of [0, 73]) {
     const record = join(fixture.root, 'workspace-path');
     mkdirSync(scratch);
     writeFileSync(join(scratch, 'keep'), 'unrelated');
+    const sibling = join(scratch, 'locus-ws.preexisting');
+    mkdirSync(join(sibling, 'nested'), { recursive: true });
+    writeFileSync(join(sibling, 'nested', 'keep'), 'sibling contents\n');
     const source = readFileSync(script, 'utf8');
     const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
     const createWorkspace = source.match(/^\s*WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
@@ -654,7 +657,10 @@ exit "$3"
     const workspace = readFileSync(record, 'utf8');
     assert.equal(dirname(workspace), scratch);
     assert.match(workspace, /\/locus-ws\.[^/]+$/);
-    assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must remove workspace and preserve unrelated files');
+    assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'workspace must be removed');
+    assert.ok(lstatSync(sibling).isDirectory(), 'preexisting sibling must survive cleanup');
+    assert.equal(readFileSync(join(sibling, 'nested', 'keep'), 'utf8'), 'sibling contents\n');
+    assert.deepEqual(readdirSync(scratch).sort(), ['keep', 'locus-ws.preexisting']);
   });
 }
 
