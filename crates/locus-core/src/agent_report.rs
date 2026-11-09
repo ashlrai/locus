@@ -1132,6 +1132,58 @@ mod tests {
     }
 
     #[test]
+    fn empty_store_report_is_protected_and_serializes_consistently() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let report = agent_report_from_doctor(
+            doctor_for(&store, dir.path()),
+            AgentReportOptions::default(),
+        );
+
+        assert_eq!(report.doctor.bindings, 0);
+        assert!(report.pin.is_none());
+        assert_eq!(report.status, AgentStatus::Protected);
+        assert!(!report.ready);
+        assert_eq!(report.exit_code, 1);
+        assert_eq!(report.status_oneline, "unpinned");
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.starts_with("no bindings")));
+        assert!(!report.mcp_registered.any());
+
+        let json = serde_json::to_value(&report).unwrap();
+        agent_report_json_has_stable_keys(&json).expect("stable keys");
+        assert!(json.get("pin").is_none());
+        let decoded: AgentReport = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn empty_optional_lists_are_omitted_and_default_on_deserialization() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut report = agent_report_from_doctor(
+            doctor_for(&store, dir.path()),
+            AgentReportOptions::default(),
+        );
+        report.findings.clear();
+        report.next_steps.clear();
+        report.required_servers.clear();
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("findings").is_none());
+        assert!(json.get("next_steps").is_none());
+        assert_eq!(json["required_servers"], serde_json::json!([]));
+        agent_report_json_has_stable_keys(&json).expect("stable keys");
+        let decoded: AgentReport = serde_json::from_value(json.clone()).unwrap();
+        assert!(decoded.findings.is_empty());
+        assert!(decoded.next_steps.is_empty());
+        assert!(decoded.required_servers.is_empty());
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
     fn agent_ready_when_pinned_and_mcp() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
