@@ -39,7 +39,9 @@ skip() { printf '  skip %s\n' "$*"; skip=$((skip + 1)); }
 die()  { printf '  FAIL %s\n' "$*" >&2; fail=$((fail + 1)); exit 1; }
 # Sets GRAPH_HOME to a fresh directory directly beneath the temp root.
 create_graph_home() {
-  GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
+  GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")" \
+    || die "could not create GRAPH_HOME for graph import"
+  [[ -n "$GRAPH_HOME" ]] || die "could not create GRAPH_HOME for graph import"
 }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
