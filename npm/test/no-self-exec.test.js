@@ -60,4 +60,41 @@ test("locus: a `locus` on PATH that is this wrapper is never executed (no self-e
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+  // Exercise the same installed wrapper from a directory with spaces and
+  // verify that it finds and invokes the native cargo installation.
+  const spacesHome = mkdtempSync(join(tmpdir(), "locus-spaces-"));
+  try {
+    const cwd = join(spacesHome, "directory with spaces");
+    const bin = join(cwd, "bin with spaces");
+    const cargoBin = join(spacesHome, ".cargo", "bin");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(cargoBin, { recursive: true });
+    const installedWrapper = join(cwd, "locus wrapper.js");
+    copyFileSync(wrapper, installedWrapper);
+    chmodSync(installedWrapper, 0o755);
+    symlinkSync(installedWrapper, join(bin, "locus"));
+    // `which` sees the wrapper first; the native cargo installation is the fallback.
+    writeFileSync(join(cargoBin, "locus"), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "locus 0.7.1"; else printf "target: <%s>\\n" "$1"; fi\n', { mode: 0o755 });
+    const marker = join(spacesHome, "starts.log");
+    const counter = join(spacesHome, "count.js");
+    writeFileSync(counter, `require("fs").appendFileSync(${JSON.stringify(marker)}, "x");\n`);
+    const result = spawnSync(process.execPath, ["--require", counter, join(bin, "locus"), "argument with spaces"], {
+      cwd,
+      env: {
+        HOME: spacesHome,
+        USERPROFILE: spacesHome,
+        PATH: [bin, join(process.execPath, ".."), "/usr/bin", "/bin"].join(delimiter),
+        NODE_OPTIONS: `--require ${JSON.stringify(counter)}`,
+        LOCUS_NPM_NO_LINK: "1",
+      },
+      encoding: "utf8",
+      timeout: 20_000,
+      killSignal: "SIGKILL",
+    });
+    assert.equal(result.status, 0, `wrapper failed: ${result.stderr}; signal: ${result.signal}`);
+    assert.equal(require("node:fs").readFileSync(marker, "utf8"), "x", "wrapper recursively executed itself");
+    assert.equal(result.stdout, "target: <argument with spaces>\n");
+  } finally {
+    rmSync(spacesHome, { recursive: true, force: true });
+  }
 });
