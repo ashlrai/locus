@@ -98,7 +98,7 @@ case "$1 $2" in
   'verify session') [[ "\${3:-}" == --help ]] || cat "$FIXTURE_ROOT/verify.json" ;;
   'forensics export') printf '{}\\n' > "$4" ;;
   'goal status') exit 1 ;;
-  'mcp mint') printf '%s\\n' '{"grant_id":"grant_fixture","token":"lmt_fixture"}' ;;
+  'mcp mint') [[ "\${3:-}" != --help ]] || exit 0; [[ -f "$LOCUS_HOME/bindings/mt-probe.toml" ]] || exit 76; touch "$MT_STATE_DIR/mint-attempted"; [[ "\${MT_FAIL_MINT:-0}" != 1 ]] || exit 75; printf '%s\\n' '{"grant_id":"grant_fixture","token":"lmt_fixture"}' ;;
   'mcp list')
     if [[ -f "$MT_STATE_DIR/revoked" ]]; then printf '[]\\n'
     else printf '%s\\n' '[{"grant_id":"grant_fixture","revoked":false,"expired":false}]'; fi ;;
@@ -166,6 +166,37 @@ test('a controlled TMPDIR contains the multi-tenant probe root during a dogfood 
   assert.ok(Number.isInteger(pid) && pid > 0);
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' },
     'the exit trap must reap the probe server');
+});
+
+test('a failed multi-tenant mint removes the populated probe root', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-failure-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'controlled tmp root');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const mtProbe = join(root, 'mt-probe');
+  const result = spawnSync('bash', [fixture(root)], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, DOGFOOD_MT: '1',
+      PROBE_FILE: join(root, 'probe'), MT_PROBE_FILE: mtProbe,
+      MT_LISTING: join(root, 'mt-listing'), MT_STATE_DIR: root,
+      MT_PID_FILE: join(root, 'mt-server-pid'), FIXTURE_ROOT: root, MT_FAIL_MINT: '1' },
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0, 'a failed mint must fail dogfood');
+  assert.match(result.stderr, /mt probe: mint failed/);
+  assert.match(result.stderr, /multi-tenant probe failed/);
+  assert.doesNotMatch(result.stdout, /DOGFOOD READY/);
+  assert.equal(existsSync(join(root, 'mint-attempted')), true, 'the injected failure must be reached');
+  const probeRoot = readFileSync(mtProbe, 'utf8').trim();
+  assert.equal(dirname(probeRoot), scratch);
+  assert.match(basename(probeRoot), /^locus-mt-dogfood\.[^/]+$/);
+  assert.equal(existsSync(probeRoot), false, 'the failed probe must remove its root');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup preserves unrelated files');
 });
 
 // TMP, TEMP and the working directory are all plausible but wrong roots: the
