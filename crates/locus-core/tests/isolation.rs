@@ -4,10 +4,57 @@
 //! credential refs in agent-facing output, project refs, or ambient provider env.
 
 use locus_core::{
-    build_isolated_env, build_isolated_env_for_provider_opts, build_isolated_env_opts, Binding,
-    BindingBody, Policy, ProviderBinding, Scope, Store,
+    build_isolated_env, build_isolated_env_for_provider_opts, build_isolated_env_opts,
+    find_workspace, stage_file_replace, Binding, BindingBody, Policy, ProviderBinding, Scope,
+    Store,
 };
 use tempfile::tempdir;
+
+#[test]
+fn independently_created_workspace_policy_changes_are_isolated() {
+    let root = tempdir().unwrap();
+    let first = root.path().join("first");
+    let second = root.path().join("second");
+    std::fs::create_dir_all(first.join("nested")).unwrap();
+    std::fs::create_dir_all(second.join("nested")).unwrap();
+
+    let first_policy = first.join(".locus.toml");
+    let second_policy = second.join(".locus.toml");
+    std::fs::write(
+        &first_policy,
+        "default_binding = \"acme\"\nallowed_bindings = [\"acme\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &second_policy,
+        "default_binding = \"personal\"\nallowed_bindings = [\"personal\"]\n",
+    )
+    .unwrap();
+
+    let (second_path, before) = find_workspace(&second.join("nested")).unwrap().unwrap();
+    assert_eq!(second_path, second_policy);
+    assert_eq!(before.default_binding.as_deref(), Some("personal"));
+    assert!(before.allows("personal"));
+    assert!(!before.allows("acme"));
+
+    stage_file_replace(
+        &first_policy,
+        b"default_binding = \"acme-ro\"\nallowed_bindings = [\"acme-ro\"]\n",
+    )
+    .unwrap()
+    .commit()
+    .unwrap();
+
+    let (first_path, changed) = find_workspace(&first.join("nested")).unwrap().unwrap();
+    assert_eq!(first_path, first_policy);
+    assert_eq!(changed.default_binding.as_deref(), Some("acme-ro"));
+    assert!(changed.allows("acme-ro"));
+    assert!(!changed.allows("acme"));
+    let (second_path_after, after) = find_workspace(&second.join("nested")).unwrap().unwrap();
+    assert_eq!(second_path_after, second_policy);
+    assert_eq!(after, before);
+    assert!(!after.allows("acme-ro"));
+}
 
 fn binding(
     alias: &str,
