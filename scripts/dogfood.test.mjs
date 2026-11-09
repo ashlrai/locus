@@ -503,7 +503,12 @@ case "$1 $2" in
     fi ;;
   'binding add') mkdir -p "$LOCUS_HOME/bindings"; touch "$LOCUS_HOME/bindings/$3.toml" ;;
   'exec --no-resolve') printf '%s\\n' '{"id":2,"result":{"tools":[]}}' '{"id":3,"result":{"isError":false,"content":[{"text":"{\\"isError\\":false,\\"content\\":[{\\"text\\":\\"sandboxed=1 backend=sandbox-exec\\"}]}"}]}}' ;;
-  'agent report') cat "$FIXTURE_ROOT/report.json" ;;
+  'agent report')
+    if [[ "\${CHECK_READY_HOME:-0}" == 1 ]]; then
+      [[ -f "$LOCUS_HOME/sentinel" ]] || exit 88
+      printf 'present\n' > "$PROBE_FILE.ready"
+    fi
+    cat "$FIXTURE_ROOT/report.json" ;;
   'verify session') [[ "\${3:-}" == --help ]] || cat "$FIXTURE_ROOT/verify.json" ;;
   'forensics export') printf '{}\\n' > "$4" ;;
   'goal status') exit 1 ;;
@@ -525,12 +530,15 @@ test('successful dogfood run removes its isolated home and preserves neighboring
   const probe = join(root, 'probe');
   const result = spawnSync('bash', [join(fixtureRoot, 'scripts', 'dogfood.sh')], {
     cwd: root,
-    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, PROBE_FILE: probe, FIXTURE_ROOT: root },
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, PROBE_FILE: probe, FIXTURE_ROOT: root,
+      CHECK_READY_HOME: '1' },
     encoding: 'utf8',
   });
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, 'the fixture must reach a normal successful exit');
   assert.match(result.stdout, /DOGFOOD READY/);
+  assert.equal(readFileSync(`${probe}.ready`, 'utf8').trim(), 'present',
+    'the populated home must still exist when readiness is checked');
   const home = readFileSync(probe, 'utf8').trim();
   assert.match(home, /\/locus-dogfood\.[^/]+$/);
   assert.equal(dirname(home), scratch);
