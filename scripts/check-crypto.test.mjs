@@ -48,6 +48,24 @@ test('multiple crypto kinds retain default code-unit ordering', (t) => {
   assert.deepEqual(scan(root)[0].kinds, ['DH', 'ECDSA/ECDH', 'Ed25519/X25519', 'RSA']);
 });
 
+test('report includes every finding across multiple files', (t) => {
+  const root = fixture({
+    'src/a.ts': 'createSign(); ECDSA;',
+    'src/b.rs': 'use ed25519_dalek::SigningKey;',
+    'src/c.ts': 'generateKeyPairSync();',
+  });
+  t.after(() => rmSync(root, { recursive: true }));
+
+  const result = report(scan(root, { allow: { 'src/b.rs': 'legacy signatures' } }));
+  assert.equal(result.failed, true);
+  assert.equal(result.text, [
+    'classical asymmetric crypto: 3 file(s), 2 not on the allowlist',
+    '  FLAG src/a.ts [ECDSA/ECDH, RSA]',
+    '  ok   src/b.rs [Ed25519/X25519] - legacy signatures',
+    '  FLAG src/c.ts [DH]',
+  ].join('\n'));
+});
+
 test('tests, docs and vendored dirs are skipped, and id_rsa paths are not RSA use', () => {
   const root = fixture({
     'src/__tests__/x.test.ts': "ed25519",
