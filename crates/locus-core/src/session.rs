@@ -726,4 +726,186 @@ mod tests {
         assert_eq!(s.all_aliases(), vec!["acme", "personal"]);
         assert!(s.is_namespaced());
     }
+
+    #[test]
+    fn set_backing_rejects_relative_and_parent_components() {
+        let key = SealKey::generate();
+        let mut s = Session::new(
+            "bnd_a",
+            "acme",
+            "acme-corp",
+            None,
+            PinSource::Explicit,
+            None,
+            Duration::hours(1),
+            "/tmp/w".into(),
+            &key,
+        );
+        for bad in [
+            Path::new("relative/session.json"),
+            Path::new("/tmp/../etc/passwd"),
+            Path::new("/tmp/locus/../session.json"),
+            Path::new("foo/bar"),
+        ] {
+            assert!(
+                matches!(
+                    s.set_backing(SessionBackingType::Active, bad),
+                    Err(LocusError::InvalidSeal)
+                ),
+                "{bad:?}"
+            );
+        }
+        assert!(s.backing.is_none());
+
+        s.set_backing(
+            SessionBackingType::Active,
+            Path::new("/tmp/locus/session.json"),
+        )
+        .unwrap();
+        let backing = s.backing.as_ref().unwrap();
+        assert_eq!(backing.version, SESSION_BACKING_VERSION);
+        assert_eq!(backing.backing_type, SessionBackingType::Active);
+        assert_eq!(backing.canonical_path, "/tmp/locus/session.json");
+        assert_eq!(backing.file_name, "session.json");
+    }
+
+    #[test]
+    fn verify_backing_rejects_path_type_or_name_mismatch() {
+        let key = SealKey::generate();
+        let mut s = Session::new(
+            "bnd_a",
+            "acme",
+            "acme-corp",
+            None,
+            PinSource::Explicit,
+            None,
+            Duration::hours(1),
+            "/tmp/w".into(),
+            &key,
+        );
+        assert!(matches!(
+            s.verify_backing(
+                SessionBackingType::Active,
+                Path::new("/tmp/locus/session.json")
+            ),
+            Err(LocusError::InvalidSeal)
+        ));
+
+        s.set_backing(
+            SessionBackingType::Active,
+            Path::new("/tmp/locus/session.json"),
+        )
+        .unwrap();
+        s.verify_backing(
+            SessionBackingType::Active,
+            Path::new("/tmp/locus/session.json"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            s.verify_backing(
+                SessionBackingType::Run,
+                Path::new("/tmp/locus/session.json")
+            ),
+            Err(LocusError::InvalidSeal)
+        ));
+        assert!(matches!(
+            s.verify_backing(
+                SessionBackingType::Active,
+                Path::new("/tmp/locus/other.json")
+            ),
+            Err(LocusError::InvalidSeal)
+        ));
+
+        // Path string matches but file_name was tampered after set.
+        s.backing.as_mut().unwrap().file_name = "tampered.json".into();
+        assert!(matches!(
+            s.verify_backing(
+                SessionBackingType::Active,
+                Path::new("/tmp/locus/session.json")
+            ),
+            Err(LocusError::InvalidSeal)
+        ));
+    }
+
+    #[test]
+    fn seal_authentic_ignores_expiry_and_frozen() {
+        let key = SealKey::generate();
+        let mut s = Session::new(
+            "bnd_a",
+            "acme",
+            "acme-corp",
+            None,
+            PinSource::Explicit,
+            None,
+            Duration::hours(1),
+            "/tmp/w".into(),
+            &key,
+        );
+        assert!(s.seal_authentic(&key));
+        s.verify(&key).unwrap();
+
+        s.freeze("providers_drift");
+        s.reseal(&key);
+        assert!(s.seal_authentic(&key));
+        assert!(matches!(s.verify(&key), Err(LocusError::SessionFrozen(_))));
+
+        // Expiry is checked before frozen; authentic still holds for an expired pin.
+        s.frozen = false;
+        s.frozen_reason = None;
+        s.expires_at = Utc::now() - Duration::hours(1);
+        s.reseal(&key);
+        assert!(s.seal_authentic(&key));
+        assert!(matches!(s.verify(&key), Err(LocusError::SessionExpired(_))));
+
+        let wrong = SealKey::generate();
+        assert!(!s.seal_authentic(&wrong));
+    }
+
+    #[test]
+    fn verify_authority_shape_fail_closed() {
+        let key = SealKey::generate();
+        let mut s = Session::new(
+            "bnd_a",
+            "acme",
+            "acme-corp",
+            None,
+            PinSource::Explicit,
+            None,
+            Duration::hours(1),
+            "/tmp/w".into(),
+            &key,
+        );
+        assert!(matches!(
+            s.verify_authority_shape(),
+            Err(LocusError::LegacySessionSeal)
+        ));
+
+        s.authority_anchor = Some(SessionAuthorityAnchor {
+            version: AUTHORITY_ANCHOR_VERSION,
+            epoch: "epoch-1".into(),
+            generation: 1,
+        });
+        s.verify_authority_shape().unwrap();
+
+        s.authority_anchor.as_mut().unwrap().generation = 0;
+        assert!(matches!(
+            s.verify_authority_shape(),
+            Err(LocusError::InvalidSeal)
+        ));
+
+        s.authority_anchor.as_mut().unwrap().generation = 2;
+        s.authority_anchor.as_mut().unwrap().epoch.clear();
+        assert!(matches!(
+            s.verify_authority_shape(),
+            Err(LocusError::InvalidSeal)
+        ));
+
+        s.authority_anchor.as_mut().unwrap().epoch = "epoch-1".into();
+        s.authority_anchor.as_mut().unwrap().version = AUTHORITY_ANCHOR_VERSION + 1;
+        assert!(matches!(
+            s.verify_authority_shape(),
+            Err(LocusError::InvalidSeal)
+        ));
+    }
 }
