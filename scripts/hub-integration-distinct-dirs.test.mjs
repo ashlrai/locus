@@ -1,7 +1,7 @@
 // Run: node --test scripts/hub-integration-distinct-dirs.test.mjs
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -72,6 +72,41 @@ test('both directories are created beneath a TMPDIR containing spaces', (t) => {
   assert.deepEqual(readdirSync(tmp), []);
 });
 
+
+test('spaced temporary paths reach allocation and cleanup as single arguments', (t) => {
+  const scratch = mkdtempSync('/tmp/locus-arguments-test-');
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const tmp = join(scratch, 'requested location with spaces');
+  const record = join(scratch, 'observed');
+  const allocations = join(scratch, 'allocations');
+  const removals = join(scratch, 'removals');
+  mkdirSync(tmp);
+  writeFileSync(join(tmp, 'keep'), 'untouched');
+  const recordingHarness = `
+mktemp() { printf '%s\\0' "$#" "$@" >> "$ALLOCATIONS"; command mktemp "$@"; }
+rm() { printf '%s\\0' "$#" "$@" >> "$REMOVALS"; command rm "$@"; }
+export -f mktemp rm
+${harness}`;
+  const result = spawnSync('bash', ['-c', recordingHarness, 'spaced-arguments', script], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: tmp, RECORD: record,
+      ALLOCATIONS: allocations, REMOVALS: removals },
+    encoding: 'utf8',
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 73);
+  const args = (file) => readFileSync(file, 'utf8').split('\0').slice(0, -1);
+  assert.deepEqual(args(allocations), [
+    '2', '-d', `${tmp}/locus-hub-int.XXXXXX`,
+    '2', '-d', `${tmp}/locus-hub-int-proj.XXXXXX`,
+  ]);
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.deepEqual(args(removals), [
+    '3', '-f', '--', `${tmp}/.locus-hub-int-scan.${result.pid}.*`,
+    '4', '-rf', '--', ...paths,
+  ]);
+  assert.deepEqual(readdirSync(tmp), ['keep']);
+  assert.equal(readFileSync(join(tmp, 'keep'), 'utf8'), 'untouched');
+});
 
 test('two invocations create distinct SMOKE_HOME directories and each cleans up its own', (t) => {
   const scratch = mkdtempSync('/tmp/locus-distinct-test-');
