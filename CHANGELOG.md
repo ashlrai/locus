@@ -22,8 +22,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   appropriate human recovery steps. MCP reports stale pins as broken rather
   than absent ([#819](https://github.com/ashlrai/locus/pull/819)).
 
+### Changed
+
+- Removed the unused `executable` field from the sandbox spawn plan
+  ([#832](https://github.com/ashlrai/locus/pull/832)).
+
 ### Documentation and tests
 
+- Added `.devin/wiki.json` to steer DeepWiki generation, with
+  [docs/deepwiki.md](docs/deepwiki.md), a contract test in
+  `scripts/devin-wiki.test.mjs`, and matching `llms.txt` and CONTRIBUTING
+  notes ([#833](https://github.com/ashlrai/locus/pull/833)).
+- Added seal tests pinning a known HMAC vector, identity-change rejection and
+  key-hex length validation, plus loopback tests for parsed URL hosts
+  ([#831](https://github.com/ashlrai/locus/pull/831)).
 - Documented archive installer design questions and expanded workspace
   selection and installer coverage
   ([#823](https://github.com/ashlrai/locus/pull/823),
