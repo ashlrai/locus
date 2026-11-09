@@ -102,7 +102,7 @@ locus whoami
 Docs checks (Node 18+, no dependencies):
 
 ```bash
-node scripts/check-readme-links.mjs   # every README link / anchor / image resolves
+node scripts/check-readme-links.mjs README.md docs/*.md  # README and docs links and anchors resolve
 node --test scripts/check-readme-links.test.mjs
 bash scripts/check-support-links.sh   # every relative link in SUPPORT.md resolves
 node --test scripts/check-support-links.test.mjs
