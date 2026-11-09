@@ -74,6 +74,7 @@ class Skip extends Error {}
 function locusRun(argv, { cwd = root, expectStatus = 0 } = {}) {
   const r = spawnSync(locus, argv, { cwd, env, encoding: "utf8", timeout: 30_000, windowsHide: true });
   if (r.error?.code === "ENOENT") throw new Skip(`${locus} is not installed; supply --locus <absolute-path>`);
+  if (r.error?.code === "EACCES") throw new Skip(`${locus} is not executable; supply an executable --locus <absolute-path>`);
   const out = `${r.stdout}${r.stderr}`;
   if (r.status !== expectStatus) throw new Error(`locus ${argv.slice(0, 3).join(" ")} exited ${r.status}, expected ${expectStatus}`);
   return out;
