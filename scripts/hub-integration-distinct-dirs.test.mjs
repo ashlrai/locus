@@ -47,6 +47,31 @@ test('SMOKE_HOME and SMOKE_PROJ are two distinct, non-nested directories under T
   for (const p of [home, proj]) assert.equal(existsSync(p), false, 'removed on exit');
 });
 
+test('both directories are created beneath a TMPDIR containing spaces', (t) => {
+  const scratch = mkdtempSync('/tmp/locus-distinct-test-');
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const tmp = join(scratch, 'requested location with spaces');
+  const record = join(scratch, 'observed');
+  mkdirSync(tmp);
+
+  const result = spawnSync('bash', ['-c', harness, 'spaced-test', script], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: tmp, RECORD: record },
+    encoding: 'utf8',
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.status, 73, 'both directories must exist when init runs');
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2);
+  assert.notEqual(paths[0], paths[1]);
+  assert.match(paths[0], /\/locus-hub-int\.[^/]+$/);
+  assert.match(paths[1], /\/locus-hub-int-proj\.[^/]+$/);
+  for (const path of paths) {
+    assert.equal(dirname(path), tmp, 'created directly beneath the requested location');
+    assert.equal(existsSync(path), false, 'removed on exit');
+  }
+  assert.deepEqual(readdirSync(tmp), []);
+});
+
 
 test('two invocations create distinct SMOKE_HOME directories and each cleans up its own', (t) => {
   const scratch = mkdtempSync('/tmp/locus-distinct-test-');
