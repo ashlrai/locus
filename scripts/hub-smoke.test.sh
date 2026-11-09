@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run: bash scripts/hub-smoke.test.sh
-# Exercise each allocation failure without starting Locus or touching real state.
+# Exercise allocation failures and a complete smoke without touching real state.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 real_mktemp="$(command -v mktemp)"
@@ -90,3 +90,20 @@ IFS= read -r error_file < "$fixture/record"
   echo 'FAIL: cleanup changed the supplied TMPDIR' >&2; exit 1;
 }
 echo 'ok: error file uses the supplied TMPDIR and is cleaned up'
+
+# Run the complete smoke against real binaries with the same spaced TMPDIR.
+# Keep output private: the smoke exercises credential-adjacent commands.
+: > "$fixture/attempts"
+status=0
+env BASH_ENV= HOME="$fixture" TMPDIR="$fixture/scratch with spaces" \
+  PATH="$fixture/bin:$PATH" REAL_MKTEMP="$real_mktemp" FAIL_TEMPLATE=none \
+  ATTEMPTS="$fixture/attempts" \
+  bash "$root/scripts/hub-smoke.sh" > "$fixture/stdout" 2> "$fixture/stderr" || status=$?
+if [[ "$status" -ne 0 ]] || ! grep -Fxq '== hub-smoke OK ==' "$fixture/stdout" \
+  || [[ $(wc -l < "$fixture/attempts") -ne 3 ]] \
+  || [[ $(find "$fixture/scratch with spaces" -mindepth 1 -maxdepth 1 | wc -l) -ne 1 ]] \
+  || [[ $(cat "$fixture/scratch with spaces/sentinel") != keep ]]; then
+  echo 'FAIL: complete smoke with spaced TMPDIR or cleanup' >&2
+  exit 1
+fi
+echo 'ok: complete smoke with spaced TMPDIR and cleanup'
