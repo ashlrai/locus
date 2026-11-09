@@ -169,6 +169,53 @@ test('sandbox probe root is created under a dedicated TMPDIR and removed', (t) =
   assert.deepEqual(left, []);
 });
 
+test('successful sandbox probe uses the complete spaced TMPDIR path', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-sandbox-spaces-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'temporary  directory with spaces');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'preserve');
+  const args = join(root, 'args');
+  const observed = join(root, 'observed');
+  const harness = String.raw`
+source "$1"
+mktemp() {
+  printf '%s\n' "$#" "$@" > "$ARGS_FILE"
+  command mktemp "$@"
+}
+uname() { printf 'Darwin\n'; }
+locus() {
+  case "$1" in
+    init)
+      [[ "$LOCUS_HOME" == "$TMPDIR"/locus-sandbox-dogfood.*/home &&
+         "$PWD" == "${'$'}{LOCUS_HOME%/home}/project" && -d "$PWD" ]] || return 41
+      printf '%s\n' "${'$'}{LOCUS_HOME%/home}" > "$OBSERVED_FILE" ;;
+    binding) mkdir -p "$LOCUS_HOME/bindings"; touch "$LOCUS_HOME/bindings/sandbox-probe.toml" ;;
+    pin) ;;
+    exec) printf '%s\n' '{"id":2,"result":{"tools":[]}}' '{"id":3,"result":{"isError":false,"content":[{"text":"{\"isError\":false,\"content\":[{\"text\":\"sandboxed=1 backend=sandbox-exec\"}]}"}]}}' ;;
+    *) return 42 ;;
+  esac
+}
+MCP_BIN=fixture
+sandbox_attestation
+`;
+  const result = spawnSync('bash', ['-c', harness, 'dogfood-test', script], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, ARGS_FILE: args, OBSERVED_FILE: observed },
+    encoding: 'utf8',
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(readFileSync(args, 'utf8').trim().split('\n'),
+    ['2', '-d', `${scratch}/locus-sandbox-dogfood.XXXXXX`]);
+  const probeRoot = readFileSync(observed, 'utf8').trim();
+  assert.equal(dirname(probeRoot), scratch);
+  assert.match(basename(probeRoot), /^locus-sandbox-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.equal(existsSync(probeRoot), false);
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+});
+
 test('sandbox probe root stays directly beneath an explicit TMPDIR written with a trailing slash', (t) => {
   const { controlled, template, created, left } = sandboxRootSelection(t, (dir) => ({ TMPDIR: `${dir}/` }));
   assert.equal(template, `${controlled}//locus-sandbox-dogfood.XXXXXX`);
