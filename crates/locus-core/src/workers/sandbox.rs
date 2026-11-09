@@ -551,9 +551,6 @@ pub struct SandboxSpawn {
     pub backend: SandboxBackend,
     /// Restricted PATH value, with the protected executable directory first.
     pub path: String,
-    /// Canonical executable selected before the child environment is rebuilt.
-    #[allow(dead_code)]
-    pub executable: PathBuf,
     /// Whether network isolation was applied (bwrap unshare-net / Seatbelt deny).
     pub no_network: bool,
 }
@@ -772,7 +769,7 @@ fn resolve_sandbox_spawn_for(
     let runtime = resolve_runtime_access(&requested_executable, search_path)?;
     let paths = validate_sandbox_paths(work_dir, worker_home, &runtime)?;
     let path = restricted_path_for_runtime(&runtime);
-    let executable = runtime.executable.clone();
+    let executable = &runtime.executable;
 
     match selection.backend {
         SandboxBackend::SandboxExec => {
@@ -797,7 +794,6 @@ fn resolve_sandbox_spawn_for(
                 args: wrapped,
                 backend: SandboxBackend::SandboxExec,
                 path,
-                executable,
                 no_network,
             })
         }
@@ -823,7 +819,6 @@ fn resolve_sandbox_spawn_for(
                 args: wrapped,
                 backend: SandboxBackend::Bwrap,
                 path,
-                executable,
                 no_network,
             })
         }
@@ -840,7 +835,6 @@ fn resolve_sandbox_spawn_for(
                 args: args.to_vec(),
                 backend: SandboxBackend::Path,
                 path,
-                executable,
                 no_network: false,
             })
         }
@@ -1023,7 +1017,6 @@ mod tests {
         assert!(!spawn.no_network);
         assert_eq!(spawn.program, canonical.display().to_string());
         assert_eq!(spawn.args, custom_args);
-        assert_eq!(spawn.executable, canonical);
         assert!(spawn.path.ends_with(&restricted_worker_path()));
         assert!(spawn
             .path
@@ -1249,7 +1242,10 @@ mod tests {
         )
         .unwrap();
         let canonical = executable.canonicalize().unwrap();
-        assert_eq!(spawn.executable, canonical);
+        assert_eq!(
+            spawn.program,
+            backend.canonicalize().unwrap().display().to_string()
+        );
         assert_eq!(spawn.args[2], canonical.display().to_string());
         assert_eq!(&spawn.args[3..], custom_args.as_slice());
         assert!(spawn
