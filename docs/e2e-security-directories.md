@@ -54,6 +54,8 @@ the security directories have not yet been created. Inspect any leftover
 `locus-security-e2e.*` and `locus-security-ws.*` directories before removing
 them; do not remove the parent `TMPDIR` or unrelated files. Run
 `node --test scripts/e2e-security-home-selection.test.mjs` for the focused
-`SECURITY_HOME` temporary-root selection and containment checks. See the
+`SECURITY_HOME` temporary-root selection and containment checks, and
+`node --test scripts/e2e-security-cleanup.test.mjs` to confirm both security
+directories are removed on exit, including when a section 24 probe fails. See the
 [temporary resource reference](e2e-temp-resource-types.md) for all directory
 types and the [test map](e2e-test-map.md) for the full suite and prerequisites.
