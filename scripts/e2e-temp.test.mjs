@@ -538,6 +538,44 @@ exit 73
   assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited');
 });
 
+test('workspace allocation failure stops before workspace initialization', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const marker = join(fixture.root, 'workspace-initialized');
+  const attempts = join(fixture.root, 'workspace-attempts');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+case "$2" in
+  */locus-ws.XXXXXX)
+    printf 'attempt\\n' >> "$WORKSPACE_ATTEMPTS"
+    printf 'injected workspace allocation failure\\n' >&2
+    exit 73 ;;
+esac
+exec "$REAL_MKTEMP" "$@"
+`, { mode: 0o755 });
+  writeFileSync(fixture.locus, `#!/bin/sh
+case "$1" in
+  init) printf 'stub init\\n' > "$LOCUS_HOME/init-stamp"; exit 0 ;;
+  workspace) printf 'started\\n' > "$WORKSPACE_MARKER"; exit 0 ;;
+esac
+exit 1
+`, { mode: 0o755 });
+
+  const result = run(fixture, scratch, {
+    REAL_MKTEMP: realMktemp, WORKSPACE_ATTEMPTS: attempts, WORKSPACE_MARKER: marker,
+  });
+
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0, 'allocation failure must stop the script');
+  assert.match(result.stderr, /injected workspace allocation failure/);
+  assert.match(result.stderr, /workspace was not created beneath the space-containing TMPDIR/);
+  assert.equal(readFileSync(attempts, 'utf8'), 'attempt\n');
+  assert.equal(existsSync(marker), false, 'workspace initialization must not run');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
+
 test('workspace cleanup survives a command failure after leaving the workspace', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp $literal; [test]');
