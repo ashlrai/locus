@@ -62,6 +62,18 @@ if [[ "$status" -eq 0 ]] || ! grep -Fxq 'error: hub-smoke could not create tempo
 fi
 echo 'ok: unwritable TMPDIR stops before smoke checks'
 
+# A missing directory must fail at allocation without starting smoke checks.
+status=0
+env BASH_ENV="$fixture/no-smoke-hook" HOME="$fixture" TMPDIR="$fixture/does not exist" \
+  SMOKE_REACHED="$fixture/smoke-reached" \
+  bash "$root/scripts/hub-smoke.sh" > "$fixture/stdout" 2> "$fixture/stderr" || status=$?
+if [[ "$status" -eq 0 ]] || ! grep -Fxq 'error: hub-smoke could not create temporary home' "$fixture/stderr" \
+  || [[ -s "$fixture/stdout" || -e "$fixture/smoke-reached" || -e "$fixture/does not exist" ]]; then
+  echo 'FAIL: nonexistent TMPDIR did not stop before smoke checks' >&2
+  exit 1
+fi
+echo 'ok: nonexistent TMPDIR stops before smoke checks'
+
 # Inspect the real file at its first use, before the EXIT trap removes it.
 cat > "$fixture/hook" <<'HOOK'
 jq() { :; }
