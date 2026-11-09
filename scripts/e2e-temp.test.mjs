@@ -1632,6 +1632,7 @@ ${source.slice(start, end)}
   assert.ok(rm, 'exit cleanup must remove the workspace');
   assert.ok(rm.slice(2).includes(cd[2]), 'cleanup must pass the same WS_DIR as one argument');
   assert.throws(() => lstatSync(cd[2]), { code: 'ENOENT' }, 'workspace must be removed');
+  assert.deepEqual(readdirSync(scratch), [], 'successful cleanup must leave no temporary artifacts');
 });
 
 // Whitespace at the edges of a path component is the easiest thing for an
