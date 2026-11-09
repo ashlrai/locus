@@ -90,6 +90,25 @@ fn matching_alias_runs_the_child() {
 }
 
 #[test]
+fn matching_alias_preserves_an_argument_containing_spaces() {
+    let f = fixture();
+    let alias = f.pinned().split(':').next().unwrap().to_string();
+    let out = f.locus(&[
+        "exec",
+        "--expect",
+        &alias,
+        "--",
+        "sh",
+        "-c",
+        "printf '%s\\n%s' \"$#\" \"$1\"",
+        "child",
+        "one argument with spaces",
+    ]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(out.stdout, b"1\none argument with spaces");
+}
+
+#[test]
 fn mismatch_refuses_with_exit_1_and_never_runs_the_child() {
     let f = fixture();
     let alias = f.pinned().split(':').next().unwrap().to_string();
