@@ -1,0 +1,67 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 443f266..65d6ab5 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -110,6 +110,25 @@ jobs:
+           node scripts/check-crypto.mjs
+           ruby -c integrations/homebrew/Formula/locus.rb
+ 
++      # Hermetic shell-suite tests (locus, cargo and jq are mocked, so no Rust
++      # toolchain or broker is needed): the hub scripts must create and clean
++      # their mktemp paths under TMPDIR — including a TMPDIR containing spaces
++      # and shell glob characters — without splitting them or touching
++      # unrelated neighbors.
++      - name: Hub scripts temporary-path discipline
++        run: |
++          node --test \
++            scripts/hub-smoke-spaced-tmpdir.test.mjs \
++            scripts/hub-smoke-temp-failures.test.mjs \
++            scripts/hub-smoke-temp-lifecycle.test.mjs \
++            scripts/hub-smoke-error-cleanup.test.mjs \
++            scripts/hub-smoke-error-failure.test.mjs \
++            scripts/hub-smoke-interruption.test.mjs \
++            scripts/hub-integration-tmpdir.test.mjs \
++            scripts/hub-integration-temp-lifecycle.test.mjs \
++            scripts/hub-test-temp-comparison.test.mjs \
++            scripts/temp-parent-reference.test.mjs
++
+   # Tier-1 worker sandbox tests: pre-merge whenever the PR touches the sandbox,
+   # locus-core, the lockfile or CI, and on every daily and dispatch run. The
+   # job always runs and reports success, so the gate keeps exact keys.
+diff --git a/.github/workflows/conformance.yml b/.github/workflows/conformance.yml
+index ba6ad3d..2946077 100644
+--- a/.github/workflows/conformance.yml
++++ b/.github/workflows/conformance.yml
+@@ -89,6 +89,18 @@ jobs:
+         if: steps.scope.outputs.code == 'true'
+         run: ./scripts/hub-smoke.sh
+ 
++      # Real end-to-end proof for the temp-path contract: a TMPDIR containing
++      # spaces and shell glob characters must not split the script's mktemp
++      # paths; the script still removes everything it created.
++      - name: Hub contract smoke (TMPDIR with spaces)
++        if: steps.scope.outputs.code == 'true'
++        run: |
++          set -euo pipefail
++          scratch="$(mktemp -d)/hub smoke [*]"
++          mkdir "$scratch"
++          TMPDIR="$scratch" ./scripts/hub-smoke.sh
++          [ -z "$(ls -A "$scratch")" ] || { echo "leftover paths under spaced TMPDIR" >&2; ls -la "$scratch" >&2; exit 1; }
++
+       - name: End-to-end shell pack
+         if: steps.scope.outputs.code == 'true'
+         run: ./scripts/e2e.sh
+diff --git a/docs/temp-parent-reference.md b/docs/temp-parent-reference.md
+index a0c2919..57e6d5a 100644
+--- a/docs/temp-parent-reference.md
++++ b/docs/temp-parent-reference.md
+@@ -26,7 +26,8 @@ passed to `mktemp` as a single quoted argument, so the path is never word-split
+ or glob-expanded, and the exit trap removes exactly the paths that were
+ created — unrelated files under the same parent are left untouched.
+ [`hub-smoke-spaced-tmpdir.test.mjs`](../scripts/hub-smoke-spaced-tmpdir.test.mjs)
+-keeps this contract under test.
++keeps this contract under test, and the conformance workflow runs the smoke
++with a spaced `TMPDIR` end to end.
+ 
+ Each script installs an `EXIT` trap that attempts to remove its assigned paths;
+ the integration trap also removes matching scan listings for its shell PID.
