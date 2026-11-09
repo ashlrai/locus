@@ -197,6 +197,31 @@ test("recipes resolve paths containing spaces", () => {
   }
 });
 
+test("a recipe path containing spaces selects the intended script intact", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus recipe path "));
+  try {
+    const recipe = join(root, "requested recipe.mjs");
+    const marker = "requested recipe path:";
+    const source = readFileSync(join(here, "run.mjs"), "utf8");
+    writeFileSync(recipe, source.replace("const args = process.argv.slice(2);", `console.log(${JSON.stringify(marker)}, JSON.stringify(process.argv[1]));\nconst args = process.argv.slice(2);`));
+
+    const opened = spawnSync(process.execPath, [recipe, "--help"], { encoding: "utf8", timeout: 120_000 });
+    assert.ifError(opened.error);
+    assert.equal(opened.status, 0, opened.stderr);
+    assert.ok(opened.stdout.split(/\r?\n/).includes(`${marker} ${JSON.stringify(recipe)}`));
+    assert.match(opened.stdout, /Usage: node examples\/recipes\/run\.mjs/);
+
+    rmSync(recipe);
+    const missing = run(process.execPath, recipe);
+    assert.ifError(missing.error);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /Cannot find module/);
+    assert.ok(missing.stderr.includes(recipe), "diagnostic must preserve the recipe path including spaces");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a Unicode recipe filename is opened and preserved in diagnostics", () => {
   const root = mkdtempSync(join(tmpdir(), "locus-recipes-unicode-"));
   try {
