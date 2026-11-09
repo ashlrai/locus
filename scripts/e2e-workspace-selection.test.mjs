@@ -353,3 +353,20 @@ test('WS_DIR is only ever assigned through create_workspace', () => {
   assert.equal(assigns.length, 1, `unexpected WS_DIR creations: ${assigns.join(' | ')}`);
   assert.match(assigns[0], /mktemp -d "\$\{TMPDIR:-\/tmp\}\/locus-ws\.XXXXXX"/);
 });
+
+// The header documents that a nonempty TMPDIR must name an existing writable
+// directory. A missing one must stop the suite rather than fall back to /tmp.
+test('a nonexistent TMPDIR fails closed without creating a workspace', (t) => {
+  const dir = fixture(t);
+  const missing = join(dir, 'does not exist');
+
+  const { observed, result } = select(t, { tmpdir: missing });
+
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0, 'workspace creation must fail under a missing TMPDIR');
+  assert.doesNotMatch(result.stdout, /ok workspace is created directly beneath TMPDIR/);
+  assert.throws(() => lstatSync(missing), { code: 'ENOENT' },
+    'the missing TMPDIR must not be created on the caller\'s behalf');
+  assert.throws(() => lstatSync(observed), { code: 'ENOENT' },
+    'no workspace path may be recorded');
+});
