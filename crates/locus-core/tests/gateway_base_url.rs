@@ -218,3 +218,63 @@ fn gateway_base_url_end_to_end() {
         std::env::remove_var(k);
     }
 }
+
+/// Join a request path onto a base URL the way a child client does: the
+/// separator is supplied once, whether or not the base already ends in `/`.
+fn join(base: &str, path: &str) -> String {
+    format!(
+        "{}/{}",
+        base.trim_end_matches('/'),
+        path.trim_start_matches('/')
+    )
+}
+
+/// Count `//` runs after the scheme's own `://`.
+fn doubled_separators(url: &str) -> usize {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    after_scheme.matches("//").count()
+}
+
+/// Pure (no env, no store), so it can share the binary with the end-to-end
+/// test above.
+#[test]
+fn trailing_slash_base_url_joins_with_exactly_one_separator() {
+    use locus_core::gateway::{resolve, GatewayChild};
+
+    for (with_slash, without_slash) in [
+        ("http://127.0.0.1:4000/v1/", "http://127.0.0.1:4000/v1"),
+        ("http://127.0.0.1:4000/", "http://127.0.0.1:4000"),
+    ] {
+        // A trailing slash is accepted and handed to the child verbatim.
+        let GatewayChild::Set { target, vars } = resolve(&GatewayConfig {
+            enabled: true,
+            base_url: Some(with_slash.into()),
+            child_env: vec!["OPENAI_BASE_URL".into()],
+            allowed_hosts: vec![],
+        }) else {
+            panic!("trailing-slash base URL {with_slash} was refused");
+        };
+        assert_eq!(target.base_url, with_slash);
+        assert_eq!(vars, vec!["OPENAI_BASE_URL".to_string()]);
+
+        for path in ["chat/completions", "/chat/completions"] {
+            let slashed = join(&target.base_url, path);
+            let plain = join(without_slash, path);
+            assert_eq!(slashed, plain, "{with_slash} + {path}");
+            assert!(slashed.ends_with("/chat/completions"), "{slashed}");
+            assert_eq!(doubled_separators(&slashed), 0, "{slashed}");
+            // The join is exactly one `/` between base and path.
+            let base = target.base_url.trim_end_matches('/');
+            assert_eq!(&slashed[base.len()..], "/chat/completions");
+        }
+    }
+
+    // A doubled trailing slash is refused, not silently collapsed.
+    let refused = resolve(&GatewayConfig {
+        enabled: true,
+        base_url: Some("http://127.0.0.1:4000/v1//".into()),
+        child_env: vec!["OPENAI_BASE_URL".into()],
+        allowed_hosts: vec![],
+    });
+    assert!(matches!(refused, GatewayChild::Refused("path-not-allowed")));
+}
