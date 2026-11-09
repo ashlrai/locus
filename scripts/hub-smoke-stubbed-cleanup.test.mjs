@@ -37,12 +37,12 @@ esac
 exit 0
 `;
 
-test('stubbed successful run removes its populated temporary resources only', (t) => {
+test('successful run uses and cleans populated resources under a spaced TMPDIR', (t) => {
   // Short path: keeps any socket path small and the listing below easy to read.
   const tmp = mkdtempSync('/tmp/locus-stub-test-');
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const fakeRoot = join(tmp, 'repo');
-  const scratch = join(tmp, 'scratch');
+  const scratch = join(tmp, 'scratch with spaces');
   mkdirSync(join(fakeRoot, 'scripts'), { recursive: true });
   mkdirSync(join(fakeRoot, 'target', 'debug'), { recursive: true });
   mkdirSync(join(fakeRoot, 'schema'));
