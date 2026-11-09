@@ -265,3 +265,136 @@ fn concurrent_calls_share_one_persisted_action_cap() {
         "budget.exhausted"
     );
 }
+
+fn caps(max_actions: Option<u64>, max_minutes: Option<u64>) -> BudgetConfig {
+    BudgetConfig {
+        max_actions,
+        max_minutes,
+    }
+}
+
+#[test]
+fn session_at_its_exact_action_limit_is_allowed_then_stopped_on_the_next_call() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    enable_action_cap(&store, 3);
+    let b = binding();
+    for n in 1..=3 {
+        assert!(call(&store, &b, "ses_edge").is_none(), "call {n} of 3 runs");
+    }
+    // Exactly at the limit: all calls ran, nothing is stopped or audited yet.
+    let at_limit = peek(&store, "ses_edge").unwrap();
+    assert_eq!(at_limit.actions, 3);
+    assert!(at_limit.stopped.is_none());
+    assert!(!store.audit_path().exists());
+
+    // The first call past the limit trips the stop; the count stays at the cap.
+    let blocked = call(&store, &b, "ses_edge").expect("call 4 refused");
+    assert_eq!(blocked["error"], "session_budget_exhausted");
+    let stopped = peek(&store, "ses_edge").unwrap();
+    assert_eq!(stopped.actions, 3);
+    assert_eq!(
+        stopped.stopped.as_deref(),
+        Some("action budget of 3 tool calls used")
+    );
+
+    // Sticky: more refusals neither count nor re-audit.
+    for _ in 0..2 {
+        assert_eq!(
+            call(&store, &b, "ses_edge").unwrap()["error"],
+            "session_budget_exhausted"
+        );
+    }
+    assert_eq!(peek(&store, "ses_edge").unwrap(), stopped);
+    let audit = fs::read_to_string(store.audit_path()).unwrap();
+    assert_eq!(audit.lines().count(), 1);
+    let entry: serde_json::Value = serde_json::from_str(&audit).unwrap();
+    assert_eq!(entry["op"], "budget.exhausted");
+}
+
+#[test]
+fn raising_the_cap_does_not_revive_a_stopped_session_but_does_help_one_at_the_limit() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let b = binding();
+
+    // Session A sits exactly at the limit (not yet stopped): a higher cap lets it continue.
+    enable_action_cap(&store, 2);
+    assert!(call(&store, &b, "ses_at_limit").is_none());
+    assert!(call(&store, &b, "ses_at_limit").is_none());
+    // Session B has been refused once, so its stop is sticky.
+    assert!(call(&store, &b, "ses_stopped").is_none());
+    assert!(call(&store, &b, "ses_stopped").is_none());
+    assert!(call(&store, &b, "ses_stopped").is_some());
+
+    enable_action_cap(&store, 10);
+    assert!(call(&store, &b, "ses_at_limit").is_none());
+    assert_eq!(peek(&store, "ses_at_limit").unwrap().actions, 3);
+    assert_eq!(
+        call(&store, &b, "ses_stopped").unwrap()["error"],
+        "session_budget_exhausted"
+    );
+    assert_eq!(peek(&store, "ses_stopped").unwrap().actions, 2);
+}
+
+#[test]
+fn session_at_its_exact_minute_limit_is_stopped_but_one_instant_earlier_is_allowed() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let cfg = caps(None, Some(5));
+    let start = chrono::Utc::now();
+    let window = chrono::Duration::minutes(5);
+
+    assert_eq!(
+        charge(&store, &cfg, "ses_clock", start).unwrap(),
+        BudgetVerdict::Allowed
+    );
+    // One nanosecond inside the window still runs.
+    let just_inside = start + window - chrono::Duration::nanoseconds(1);
+    assert_eq!(
+        charge(&store, &cfg, "ses_clock", just_inside).unwrap(),
+        BudgetVerdict::Allowed
+    );
+    assert!(peek(&store, "ses_clock").unwrap().stopped.is_none());
+
+    // Elapsed time equal to the cap is already over budget.
+    assert_eq!(
+        charge(&store, &cfg, "ses_clock", start + window).unwrap(),
+        BudgetVerdict::Exhausted {
+            reason: "time budget of 5 minutes used".into()
+        }
+    );
+    let stopped = peek(&store, "ses_clock").unwrap();
+    assert_eq!(stopped.actions, 2);
+    // Sticky even if the clock is later read as being back inside the window.
+    assert!(matches!(
+        charge(&store, &cfg, "ses_clock", start).unwrap(),
+        BudgetVerdict::Exhausted { .. }
+    ));
+    assert_eq!(peek(&store, "ses_clock").unwrap(), stopped);
+}
+
+#[test]
+fn both_caps_at_their_limit_report_the_action_cap_first() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let cfg = caps(Some(1), Some(5));
+    let start = chrono::Utc::now();
+    assert_eq!(
+        charge(&store, &cfg, "ses_both", start).unwrap(),
+        BudgetVerdict::Allowed
+    );
+    let verdict = charge(
+        &store,
+        &cfg,
+        "ses_both",
+        start + chrono::Duration::minutes(5),
+    )
+    .unwrap();
+    assert_eq!(
+        verdict,
+        BudgetVerdict::Exhausted {
+            reason: "action budget of 1 tool calls used".into()
+        }
+    );
+}
