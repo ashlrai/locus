@@ -133,6 +133,52 @@ for (const [name, file] of Object.entries(wrappers)) {
     }
   });
 
+  // Regression: the wrapper must hand arguments to the native binary as an
+  // argv array, never through a shell, so metacharacters arrive literally.
+  test(`${name}: passes shell metacharacters to the wrapped command literally`, () => {
+    if (process.platform === "win32") return;
+    const home = mkdtempSync(join(tmpdir(), "locus-metachar-"));
+    try {
+      const packageDir = join(root, name === "locus" ? "npm" : "npm-mcp");
+      const version = require(join(packageDir, "package.json")).version;
+      const binary = join(home, ".locus", "bin", name);
+      const received = join(home, "received");
+      const sentinel = join(home, "injected");
+      mkdirSync(join(home, ".locus", "bin"), { recursive: true });
+      writeFileSync(`${binary}.version`, `${version}\n`);
+      // Real executable fixture: prints its version, else records each argument
+      // NUL-terminated so embedded newlines survive.
+      writeFileSync(binary, [
+        "#!/bin/sh",
+        `if [ "$1" = "--version" ]; then echo "${name} ${version}"; exit 0; fi`,
+        `for a in "$@"; do printf '%s\\0' "$a" >> "${received}"; done`,
+        "",
+      ].join("\n"), { mode: 0o755 });
+      const args = [
+        "$(touch " + sentinel + ")",
+        "`touch " + sentinel + "`",
+        "; touch " + sentinel,
+        "a && b || c | d",
+        "> " + sentinel,
+        "$HOME ${PATH} ~ *",
+        "'single' \"double\" \\back",
+        "line1\nline2",
+        "a b  c",
+        "#comment & bg",
+      ];
+      const result = spawnSync(process.execPath, [file, ...args], {
+        env: { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", LOCUS_NPM_NO_LINK: "1" },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(readFileSync(received, "utf8").split("\0").slice(0, -1), args);
+      assert.equal(existsSync(sentinel), false, "no argument may be executed or redirected by a shell");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test(`${name}: with no installed binary, runs its executable from the release bundle`, () => {
     const home = mkdtempSync(join(tmpdir(), "locus-bundle-"));
     try {
