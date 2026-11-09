@@ -51,7 +51,26 @@ impl HttpServer {
         Self::spawn_with_home(token, &home_owned, &[])
     }
 
+    /// `free_port` releases the port before the child binds, so a parallel test
+    /// can take it first. Retry on a bind collision with a fresh port.
     fn spawn_with_home(token: &str, home: &std::path::Path, extra_env: &[(&str, &str)]) -> Self {
+        let mut attempts = 0;
+        loop {
+            match Self::try_spawn(token, home, extra_env) {
+                Ok(server) => return server,
+                Err(err) if err.contains("Address already in use") && attempts < 5 => {
+                    attempts += 1;
+                }
+                Err(err) => panic!("{err}"),
+            }
+        }
+    }
+
+    fn try_spawn(
+        token: &str,
+        home: &std::path::Path,
+        extra_env: &[(&str, &str)],
+    ) -> Result<Self, String> {
         let port = free_port();
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
         let mut command = Command::new(mcp_bin());
@@ -110,15 +129,15 @@ impl HttpServer {
                 if let Some(mut e) = child.stderr.take() {
                     let _ = e.read_to_string(&mut err);
                 }
-                panic!("locus-mcp exited early {status}: {err}");
+                return Err(format!("locus-mcp exited early {status}: {err}"));
             }
         }
 
-        Self {
+        Ok(Self {
             child,
             addr,
             token: token.to_string(),
-        }
+        })
     }
 
     fn request(
