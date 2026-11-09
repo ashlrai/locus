@@ -99,6 +99,40 @@ for (const [name, file] of Object.entries(wrappers)) {
     }
   });
 
+  test(`${name}: propagates a nonzero exit status from the child process`, () => {
+    const home = mkdtempSync(join(tmpdir(), "locus-child-exit-"));
+    try {
+      const packageDir = join(root, name === "locus" ? "npm" : "npm-mcp");
+      const version = require(join(packageDir, "package.json")).version;
+      const binary = join(home, ".locus", "bin", name);
+      mkdirSync(join(home, ".locus", "bin"), { recursive: true });
+      writeFileSync(binary, "cached binary fixture\n");
+      const preload = join(home, "child-exit.js");
+      writeFileSync(preload, `
+        const assert = require("node:assert/strict");
+        const cp = require("node:child_process");
+        const execFileSync = cp.execFileSync;
+        cp.execFileSync = (command, args, options) => {
+          assert.equal(command, ${JSON.stringify(binary)});
+          if (args.length === 1 && args[0] === "--version") {
+            return Buffer.from(${JSON.stringify(`${name} ${version}\n`)});
+          }
+          assert.deepEqual(args, ["fixture-argument"]);
+          return execFileSync(process.execPath, ["-e", "process.exit(37)"], options);
+        };
+      `);
+      const result = spawnSync(process.execPath, ["--require", preload, file, "fixture-argument"], {
+        env: { HOME: home, USERPROFILE: home, PATH: "", LOCUS_NPM_NO_LINK: "1" },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 37, result.stderr);
+      assert.equal(result.signal, null);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test(`${name}: with no installed binary, runs its executable from the release bundle`, () => {
     const home = mkdtempSync(join(tmpdir(), "locus-bundle-"));
     try {
