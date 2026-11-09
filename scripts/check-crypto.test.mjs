@@ -32,6 +32,22 @@ test('hashes, HMAC and symmetric AEAD are not flagged', () => {
   rmSync(root, { recursive: true });
 });
 
+test('comments alone do not produce findings', (t) => {
+  const root = fixture({
+    'src/comments.ts': '// ECDSA\n/* RSA-PSS\n Ed25519 */\n',
+    'src/comments.rs': '/// x25519\n/* createSign */\n',
+    'config.toml': '# rsa = "example"\n',
+  });
+  t.after(() => rmSync(root, { recursive: true }));
+  assert.deepEqual(scan(root), []);
+});
+
+test('code following a block comment is still scanned', (t) => {
+  const root = fixture({ 'src/key.ts': '/* note */ ECDSA;\n' });
+  t.after(() => rmSync(root, { recursive: true }));
+  assert.deepEqual(scan(root).map((hit) => hit.kinds), [['ECDSA/ECDH']]);
+});
+
 test('classical asymmetric use is flagged and fails the report', () => {
   const root = fixture({
     'src/sign.ts': "crypto.subtle.generateKey({ name: 'ECDSA' })",
