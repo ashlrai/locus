@@ -48,6 +48,17 @@ test('multiple crypto kinds retain default code-unit ordering', (t) => {
   assert.deepEqual(scan(root)[0].kinds, ['DH', 'ECDSA/ECDH', 'Ed25519/X25519', 'RSA']);
 });
 
+test('crypto tokens match at word boundaries, not inside identifiers', (t) => {
+  const root = fixture({
+    'src/embedded.ts': 'const myECDSAKey = 1; const ed25519_key = 2;',
+    'src/bounded.ts': 'const algorithm = "ECDSA";',
+  });
+  t.after(() => rmSync(root, { recursive: true }));
+  assert.deepEqual(scan(root).map(({ file, kinds }) => ({ file, kinds })), [
+    { file: 'src/bounded.ts', kinds: ['ECDSA/ECDH'] },
+  ]);
+});
+
 test('tests, docs and vendored dirs are skipped, and id_rsa paths are not RSA use', () => {
   const root = fixture({
     'src/__tests__/x.test.ts': "ed25519",
