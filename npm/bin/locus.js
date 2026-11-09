@@ -547,7 +547,7 @@ function linkNativeBin(
   if (process.platform === "win32" || process.env.LOCUS_NPM_NO_LINK) return false;
   const fs = require("fs");
   try {
-    if (fs.lstatSync(target).isSymbolicLink()) return false;
+    if (fs.lstatSync(target).isSymbolicLink() && fs.readlinkSync(target) === binary) return false;
     // A root install into a shared prefix (e.g. `sudo npm install -g` into
     // /usr/lib/node_modules) must not point its bin into root's private HOME
     // (/root is 0700): other users would get "Permission denied". Keep the

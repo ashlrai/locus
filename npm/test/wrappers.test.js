@@ -458,6 +458,29 @@ test("locus: linkNativeBin replaces the wrapper with a symlink to the binary", (
   }
 });
 
+test("locus: linkNativeBin replaces a stale binary symlink", () => {
+  if (process.platform === "win32") return;
+  const { linkNativeBin } = require(wrappers.locus);
+  const { lstatSync, readlinkSync, symlinkSync } = require("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "locus-stale-link-"));
+  try {
+    const oldBin = join(dir, "old-native");
+    const newBin = join(dir, "new-native");
+    const target = join(dir, "locus.js");
+    writeFileSync(oldBin, "old binary\n");
+    writeFileSync(newBin, "new binary\n");
+    symlinkSync(oldBin, target);
+    assert.equal(linkNativeBin(newBin, target, 1000), true);
+    assert.ok(lstatSync(target).isSymbolicLink());
+    assert.equal(readlinkSync(target), newBin);
+    assert.equal(readFileSync(target, "utf8"), "new binary\n");
+    assert.equal(readFileSync(oldBin, "utf8"), "old binary\n");
+    assert.equal(linkNativeBin(newBin, target, 1000), false, "idempotent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Regression: a root `npm install -g` linked the shared bin to
 // /root/.locus/bin/locus (under a 0700 HOME), so every other user got
 // "Permission denied". A world-reachable wrapper must not be linked to a
