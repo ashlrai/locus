@@ -28,13 +28,20 @@ export function scan(root, { allow = {}, dirs = ['.'], selfNames = ['check-crypt
       const rel = relative(root, p).split(sep).join('/');
       if (/(^|\/)(__tests__|tests?)\//.test(rel) || /\.test\.[a-z]+$/.test(rel)) continue;
       const kinds = new Set();
-      for (const [kind, re] of PATTERNS) if (re.test(readFileSync(p, 'utf8'))) kinds.add(kind);
+      const lines = new Set();
+      const source = readFileSync(p, 'utf8');
+      for (const [kind, re] of PATTERNS) {
+        for (const match of source.matchAll(new RegExp(re.source, `${re.flags}g`))) {
+          kinds.add(kind);
+          lines.add(source.slice(0, match.index).split('\n').length);
+        }
+      }
       if (kinds.size) hits.push({ file: rel, kinds: [...kinds].sort((a, b) => {
         // Preserve Array.sort's default UTF-16 ordering, independent of locale.
         if (a < b) return -1;
         if (a > b) return 1;
         return 0;
-      }), allowed: rel in allow, reason: allow[rel] });
+      }), lines: [...lines].sort((a, b) => a - b), allowed: rel in allow, reason: allow[rel] });
     }
   };
   for (const d of dirs) walk(resolve(root, d));
@@ -44,7 +51,7 @@ export function scan(root, { allow = {}, dirs = ['.'], selfNames = ['check-crypt
 export function report(hits) {
   const bad = hits.filter((h) => !h.allowed);
   const lines = [`classical asymmetric crypto: ${hits.length} file(s), ${bad.length} not on the allowlist`];
-  for (const h of hits) lines.push(`  ${h.allowed ? 'ok  ' : 'FLAG'} ${h.file} [${h.kinds.join(', ')}]${h.reason ? ` - ${h.reason}` : ''}`);
+  for (const h of hits) lines.push(`  ${h.allowed ? 'ok  ' : 'FLAG'} ${h.file} [${h.kinds.join(', ')}] lines ${h.lines.join(', ')}${h.reason ? ` - ${h.reason}` : ''}`);
   return { text: lines.join('\n'), failed: bad.length > 0 };
 }
 

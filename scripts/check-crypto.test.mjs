@@ -48,6 +48,15 @@ test('multiple crypto kinds retain default code-unit ordering', (t) => {
   assert.deepEqual(scan(root)[0].kinds, ['DH', 'ECDSA/ECDH', 'Ed25519/X25519', 'RSA']);
 });
 
+test('reports a finding on the final line without a newline', (t) => {
+  const root = fixture({ 'src/final.ts': '// first line\n\nconst algorithm = "ECDSA";' });
+  t.after(() => rmSync(root, { recursive: true }));
+  const hits = scan(root);
+  assert.deepEqual(hits[0].lines, [3]);
+  assert.match(report(hits).text, /FLAG src\/final\.ts \[ECDSA\/ECDH\] lines 3/);
+  assert.equal(report(hits).failed, true);
+});
+
 test('tests, docs and vendored dirs are skipped, and id_rsa paths are not RSA use', () => {
   const root = fixture({
     'src/__tests__/x.test.ts': "ed25519",
