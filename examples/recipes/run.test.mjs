@@ -1,7 +1,7 @@
 // node --test examples/recipes
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,6 +119,27 @@ test("a failed check stops the run without reporting completion", () => {
   assert.equal(r.status, 1);
   assert.match(r.stdout, /^FAIL /m);
   assert.doesNotMatch(r.stdout, /^(PASS|COMPLETE)/m);
+});
+
+test("a failing recipe command reports its exit and stops subsequent commands", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-failure-"));
+  try {
+    const marker = join(root, "invocations");
+    const fake = join(root, "locus");
+    writeFileSync(fake, `#!${process.execPath}\nconst { appendFileSync } = require("node:fs");\nappendFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nif (process.argv[4] === "acme") { console.log('PROBE {"gh":"fake-acme-token","aws":null,"tenant":"acme-corp","acme":null,"personal":null}'); } else { process.exit(7); }\n`);
+    chmodSync(fake, 0o755);
+    const r = run(fake);
+    assert.ifError(r.error);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /^PASS locus run -b acme:/m);
+    assert.match(r.stdout, /^FAIL locus run -b personal exited 7, expected 0$/m);
+    assert.doesNotMatch(r.stdout, /^(COMPLETE|SKIP|INCOMPLETE)/m);
+    const calls = readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(calls.length, 2, "subsequent recipe commands must not run");
+    assert.deepEqual(calls.map((call) => call.slice(0, 3)), [["run", "-b", "acme"], ["run", "-b", "personal"]]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("recipes pass against the workspace build", { skip: !built && "no target/{release,debug}/locus" }, () => {
