@@ -142,6 +142,27 @@ test("a failing recipe command reports its exit and stops subsequent commands", 
   }
 });
 
+test("a locus executable path containing spaces receives separate arguments", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus executable path "));
+  try {
+    const marker = join(root, "received arguments.json");
+    const fake = join(root, "locus executable");
+    writeFileSync(fake, `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2)));\nprocess.exit(7);\n`);
+    chmodSync(fake, 0o755);
+
+    const r = run(fake);
+    assert.ifError(r.error);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /^FAIL locus run -b acme exited 7, expected 0$/m);
+    const args = JSON.parse(readFileSync(marker, "utf8"));
+    assert.equal(args.length, 7);
+    assert.deepEqual(args.slice(0, 6), ["run", "-b", "acme", "--", process.execPath, "-e"]);
+    assert.match(args[6], /^const e=process\.env;console\.log\('PROBE '/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("recipes pass against the workspace build", { skip: !built && "no target/{release,debug}/locus" }, () => {
   const r = run(built);
   assert.equal(r.status, 0, r.stdout + r.stderr);
