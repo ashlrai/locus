@@ -135,7 +135,10 @@ test("recipes resolve paths containing spaces", () => {
     mkdirSync(dir);
     const script = join(dir, "run recipes.mjs");
     const bin = join(dir, `locus binary${exe}`);
-    copyFileSync(join(here, "run.mjs"), script);
+    const marker = "requested recipe with spaces ran";
+    const source = readFileSync(join(here, "run.mjs"), "utf8");
+    assert.ok(source.includes("const args = process.argv.slice(2);"));
+    writeFileSync(script, source.replace("const args = process.argv.slice(2);", `console.log(${JSON.stringify(marker)});\nconst args = process.argv.slice(2);`));
     copyFileSync(built, bin);
     const r = spawnSync(process.execPath, [script, "--locus", bin], {
       cwd: dir,
@@ -145,6 +148,7 @@ test("recipes resolve paths containing spaces", () => {
     });
     assert.ifError(r.error);
     assert.equal(r.status, 0, "recipe runner failed in a directory containing spaces");
+    assert.ok(r.stdout.split(/\r?\n/).includes(marker), "the requested recipe was not executed");
     assert.ok(/^COMPLETE: locus recipes \(4 checks\)$/m.test(r.stdout), "recipe runner did not complete all four checks");
   } finally {
     rmSync(root, { recursive: true, force: true });
