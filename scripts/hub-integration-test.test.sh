@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline regression for cleanup when the second smoke directory cannot be made.
+# Offline regressions for cleanup on allocation failure and interruption.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -44,3 +44,51 @@ if [[ -e "$first_dir" ]]; then
   exit 1
 fi
 echo 'ok: second directory allocation failure cleans up the first directory'
+
+# Interrupt the real script after both allocations, without starting any
+# external services. The node shim runs in the script's shell, so $$ is the
+# process receiving the signal (background shells can inherit ignored SIGINT).
+cat > "$test_root/interrupt-shim.sh" <<'SHIM'
+jq() { return 0; }
+mktemp() {
+  local dir
+  dir="$(command mktemp "$@")" || return
+  case "$2" in
+    */locus-hub-int.XXXXXX) printf '%s\n' "$dir" > "$TEST_ROOT/interrupt-home" ;;
+    */locus-hub-int-proj.XXXXXX) printf '%s\n' "$dir" > "$TEST_ROOT/interrupt-project" ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$dir"
+}
+node() {
+  # Model a scan listing left behind when interruption occurs.
+  [[ -d "$(cat "$TEST_ROOT/interrupt-home")" && -d "$(cat "$TEST_ROOT/interrupt-project")" ]] || return 1
+  : > "$TMPDIR/.locus-hub-int-scan.$$.fixture"
+  : > "$TEST_ROOT/interrupt-ready"
+  kill -s "$TEST_SIGNAL" "$$"
+  return 1
+}
+SHIM
+
+for signal in INT TERM; do
+  rm -f -- "$test_root/interrupt-home" "$test_root/interrupt-project" "$test_root/interrupt-ready"
+  status=0
+  HOME="$test_root/home" TMPDIR="$test_root/tmp with spaces" TEST_ROOT="$test_root" \
+    TEST_SIGNAL="$signal" BASH_ENV="$test_root/interrupt-shim.sh" \
+    bash "$ROOT/scripts/hub-integration-test.sh" \
+    >"$test_root/stdout" 2>"$test_root/stderr" || status=$?
+  expected_status=130
+  [[ $signal == TERM ]] && expected_status=143
+  if [[ $status -ne $expected_status || ! -s "$test_root/interrupt-home" || ! -s "$test_root/interrupt-project" || ! -f "$test_root/interrupt-ready" ]]; then
+    echo "FAIL: $signal did not interrupt after both allocations" >&2
+    exit 1
+  fi
+  IFS= read -r smoke_home < "$test_root/interrupt-home"
+  IFS= read -r smoke_project < "$test_root/interrupt-project"
+  if [[ -e "$smoke_home" || -e "$smoke_project" ]] || \
+    compgen -G "$test_root/tmp with spaces/.locus-hub-int-scan.*" >/dev/null; then
+    echo "FAIL: $signal left temporary paths behind" >&2
+    exit 1
+  fi
+  echo "ok: $signal removes both smoke directories and scan listings"
+done
