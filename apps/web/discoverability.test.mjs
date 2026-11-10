@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { deflateSync, inflateSync } from 'node:zlib';
 import {
   PUBLIC,
   REPO_ROOT,
@@ -19,6 +20,8 @@ import {
   buildOutputs,
   applyDisc,
   repoVersion,
+  encodePng,
+  equivalentPng,
 } from './discoverability.mjs';
 
 const read = (rel) => readFileSync(join(PUBLIC, rel), 'utf8');
@@ -297,13 +300,36 @@ test('og.png is a real 1200x630 PNG', () => {
   assert.ok(png.subarray(-8).includes('IEND'), 'missing IEND chunk');
 });
 
+test('PNG freshness accepts recompression but rejects changed pixels and corruption', () => {
+  const original = encodePng(2, 1, Buffer.from([1, 2, 3, 4, 5, 6]));
+  const raw = inflateSync(original.subarray(41, 41 + original.readUInt32BE(33)));
+  const compressed = deflateSync(raw, { level: 0 });
+  const chunk = Buffer.alloc(compressed.length + 12);
+  chunk.writeUInt32BE(compressed.length);
+  chunk.write('IDAT', 4);
+  compressed.copy(chunk, 8);
+  let crc = 0xffffffff;
+  for (const byte of chunk.subarray(4, -4)) {
+    crc ^= byte;
+    for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  chunk.writeUInt32BE((crc ^ 0xffffffff) >>> 0, chunk.length - 4);
+  const recompressed = Buffer.concat([original.subarray(0, 33), chunk, original.subarray(-12)]);
+  assert.ok(!original.equals(recompressed));
+  assert.ok(equivalentPng(recompressed, original));
+  assert.ok(!equivalentPng(encodePng(2, 1, Buffer.from([1, 2, 3, 4, 5, 7])), original));
+  recompressed[recompressed.length - 13] ^= 1;
+  assert.ok(!equivalentPng(recompressed, original));
+  assert.ok(!equivalentPng(original.subarray(0, -1), original));
+});
+
 test('generated assets are in sync with repo sources (run generator)', () => {
   const { files, binaries, regions } = buildOutputs(REPO_ROOT, inputs);
   for (const [rel, text] of Object.entries(files)) {
     assert.equal(read(rel), text, `public/${rel} is stale; run node apps/web/discoverability.mjs`);
   }
   for (const [rel, buf] of Object.entries(binaries)) {
-    assert.ok(readFileSync(join(PUBLIC, rel)).equals(buf), `public/${rel} is stale`);
+    assert.ok(equivalentPng(readFileSync(join(PUBLIC, rel)), buf), `public/${rel} is stale`);
   }
   assert.equal(
     readFileSync(join(REPO_ROOT, 'apps/web/public/index.html'), 'utf8'),
