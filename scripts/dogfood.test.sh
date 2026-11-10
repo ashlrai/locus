@@ -34,3 +34,29 @@ grep -q 'injected allocation failure' "$test_root/stderr" || {
   printf 'FAIL: probe ran commands after allocation failed\n' >&2; exit 1;
 }
 printf 'PASS: multi-tenant probe stops when directory creation fails\n'
+
+# Interrupt each isolated probe after it has allocated its home, without running
+# a real Locus command or contacting a provider.
+for probe in sandbox_attestation mt_grant_probe; do
+  marker="$test_root/$probe.home"
+  status=0
+  (
+    export TMPDIR="$test_root"
+    source "$ROOT/scripts/dogfood.sh"
+    locus() {
+      printf '%s\n' "$LOCUS_HOME" > "$marker"
+      sh -c 'kill -TERM "$PPID"'
+    }
+    "$probe"
+  ) >"$test_root/$probe.out" 2>&1 || status=$?
+
+  [[ "$status" -eq 143 && -s "$marker" ]] || {
+    cat "$test_root/$probe.out" >&2
+    printf 'FAIL: %s did not reach the interrupted command\n' "$probe" >&2; exit 1;
+  }
+  probe_home="$(cat "$marker")"
+  [[ "$probe_home" == "$test_root"/*/home && ! -e "${probe_home%/home}" ]] || {
+    printf 'FAIL: %s left its temporary directory after interruption\n' "$probe" >&2; exit 1;
+  }
+  printf 'PASS: %s removes its temporary directory after interruption\n' "$probe"
+done
