@@ -10,6 +10,12 @@ mkdir -p "$fixture/bin" "$fixture/scratch with spaces"
 printf 'keep' > "$fixture/scratch with spaces/sentinel"
 cat > "$fixture/bin/mktemp" <<'STUB'
 #!/usr/bin/env bash
+if [[ -n "${CHECK_ARGUMENTS:-}" ]]; then
+  if ! [[ ( "$#" -eq 2 && "$1" == -d ) || "$#" -eq 1 ]]; then
+    exit 75
+  fi
+  [[ "${!#}" == "$TMPDIR"/* ]] || exit 75
+fi
 printf '%s\n' "${!#}" >> "$ATTEMPTS"
 if [[ "${!#}" == */"$FAIL_TEMPLATE" ]]; then
   exit 1
@@ -17,6 +23,21 @@ fi
 exec "$REAL_MKTEMP" "$@"
 STUB
 chmod +x "$fixture/bin/mktemp"
+real_rm="$(command -v rm)"
+cat > "$fixture/bin/rm" <<'STUB'
+#!/usr/bin/env bash
+if [[ -n "${CHECK_ARGUMENTS:-}" ]]; then
+  [[ "$#" -eq 5 && "$1" == -rf && "$2" == -- ]] || exit 76
+  shift 2
+  for path in "$@"; do
+    [[ "${path%/*}" == "$TMPDIR" && -e "$path" ]] || exit 76
+  done
+  printf 'checked\n' > "$CLEANUP_RECORD"
+  exec "$REAL_RM" -rf -- "$@"
+fi
+exec /bin/rm "$@"
+STUB
+chmod +x "$fixture/bin/rm"
 
 for case_number in 1 2 3; do
   case "$case_number" in
@@ -85,9 +106,11 @@ HOOK
 status=0
 env BASH_ENV="$fixture/hook" HOME="$fixture" TMPDIR="$fixture/scratch with spaces" \
   PATH="$fixture/bin:$PATH" REAL_MKTEMP="$real_mktemp" FAIL_TEMPLATE=none \
-  ATTEMPTS="$fixture/attempts" RECORD="$fixture/record" \
+  ATTEMPTS="$fixture/attempts" RECORD="$fixture/record" CHECK_ARGUMENTS=1 \
+  REAL_RM="$real_rm" CLEANUP_RECORD="$fixture/cleanup-record" \
   bash "$root/scripts/hub-smoke.sh" > "$fixture/stdout" 2> "$fixture/stderr" || status=$?
 [[ "$status" -eq 73 ]] || { echo 'FAIL: temporary paths were not observed under TMPDIR at init' >&2; exit 1; }
+[[ -f "$fixture/cleanup-record" ]] || { echo 'FAIL: cleanup did not receive three separate paths' >&2; exit 1; }
 IFS= read -r error_file < "$fixture/record"
 [[ "${error_file%/*}" == "$fixture/scratch with spaces" && \
    "${error_file##*/}" == locus-hub-smoke-err.* && ! -e "$error_file" ]] || {
