@@ -39,8 +39,8 @@ if [[ $status -eq 0 || ! -s "$test_root/first-dir" || ! -f "$test_root/second-at
   exit 1
 fi
 IFS= read -r first_dir < "$test_root/first-dir"
-if [[ -e "$first_dir" ]]; then
-  echo 'FAIL: first smoke directory was not removed' >&2
+if [[ "$first_dir" != "$test_root/tmp with spaces"/locus-hub-int.* || -e "$first_dir" ]]; then
+  echo 'FAIL: first smoke directory was outside TMPDIR or not removed' >&2
   exit 1
 fi
 echo 'ok: second directory allocation failure cleans up the first directory'
@@ -85,9 +85,11 @@ for signal in INT TERM; do
   fi
   IFS= read -r smoke_home < "$test_root/interrupt-home"
   IFS= read -r smoke_project < "$test_root/interrupt-project"
-  if [[ -e "$smoke_home" || -e "$smoke_project" ]] || \
+  if [[ "$smoke_home" != "$test_root/tmp with spaces"/locus-hub-int.* || \
+        "$smoke_project" != "$test_root/tmp with spaces"/locus-hub-int-proj.* || \
+        -e "$smoke_home" || -e "$smoke_project" ]] || \
     compgen -G "$test_root/tmp with spaces/.locus-hub-int-scan.*" >/dev/null; then
-    echo "FAIL: $signal left temporary paths behind" >&2
+    echo "FAIL: $signal used the wrong TMPDIR or left temporary paths behind" >&2
     exit 1
   fi
   echo "ok: $signal removes both smoke directories and scan listings"
