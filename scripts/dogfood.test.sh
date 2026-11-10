@@ -60,3 +60,33 @@ for probe in sandbox_attestation mt_grant_probe; do
   }
   printf 'PASS: %s removes its temporary directory after interruption\n' "$probe"
 done
+
+# Exercise real allocation and cleanup with spaces in the caller's TMPDIR.
+# The stub stops each probe at its first Locus command, before any network I/O.
+spaced_tmp="$test_root/temp directory with spaces"
+mkdir -p "$spaced_tmp"
+printf 'keep\n' > "$spaced_tmp/unrelated"
+for probe in sandbox_attestation mt_grant_probe; do
+  marker="$test_root/$probe.spaced-home"
+  status=0
+  (
+    export TMPDIR="$spaced_tmp"
+    source "$ROOT/scripts/dogfood.sh"
+    locus() {
+      [[ -d "${LOCUS_HOME%/home}" && "${LOCUS_HOME%/home}" == "$TMPDIR"/* ]] || exit 42
+      printf '%s\n' "$LOCUS_HOME" > "$marker"
+      sh -c 'kill -TERM "$PPID"'
+    }
+    "$probe"
+  ) >"$test_root/$probe.spaced.out" 2>&1 || status=$?
+
+  [[ "$status" -eq 143 && -s "$marker" ]] || {
+    cat "$test_root/$probe.spaced.out" >&2
+    printf 'FAIL: %s did not allocate under the spaced TMPDIR\n' "$probe" >&2; exit 1;
+  }
+  probe_home="$(cat "$marker")"
+  [[ "${probe_home%/home}" == "$spaced_tmp"/* && ! -e "${probe_home%/home}" && -f "$spaced_tmp/unrelated" ]] || {
+    printf 'FAIL: %s did not clean up its spaced temporary directory\n' "$probe" >&2; exit 1;
+  }
+  printf 'PASS: %s allocates and cleans up under a spaced TMPDIR\n' "$probe"
+done
