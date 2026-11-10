@@ -7,6 +7,32 @@ test_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-hub-test.XXXXXX")"
 trap 'rm -rf -- "$test_root"' EXIT
 mkdir -p "$test_root/tmp with spaces" "$test_root/home"
 
+# Fail the first allocation before any integration workload can run.
+cat > "$test_root/first-failure-shim.sh" <<'SHIM'
+jq() { return 0; }
+node() { : > "$TEST_ROOT/workload-started"; return 1; }
+mktemp() {
+  case "$2" in
+    */locus-hub-int.XXXXXX) : > "$TEST_ROOT/first-attempt"; return 1 ;;
+    *) : > "$TEST_ROOT/unexpected-allocation"; return 1 ;;
+  esac
+}
+SHIM
+
+status=0
+HOME="$test_root/home" TMPDIR="$test_root/tmp with spaces" TEST_ROOT="$test_root" \
+  BASH_ENV="$test_root/first-failure-shim.sh" bash "$ROOT/scripts/hub-integration-test.sh" \
+  >"$test_root/stdout" 2>"$test_root/stderr" || status=$?
+if [[ $status -eq 0 || ! -f "$test_root/first-attempt" || -e "$test_root/unexpected-allocation" || -e "$test_root/workload-started" ]]; then
+  echo 'FAIL: first allocation failure did not stop before the integration workload' >&2
+  exit 1
+fi
+if [[ -n "$(find "$test_root/tmp with spaces" -mindepth 1 -print -quit)" ]]; then
+  echo 'FAIL: first allocation failure left temporary paths behind' >&2
+  exit 1
+fi
+echo 'ok: first directory allocation failure stops without leaving temporary paths'
+
 # BASH_ENV supplies the shim to the real script, including its command
 # substitutions. Record the first allocation outside the cleanup target.
 cat > "$test_root/shim.sh" <<'SHIM'
