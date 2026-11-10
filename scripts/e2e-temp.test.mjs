@@ -1502,6 +1502,68 @@ ${graph}
   }
 });
 
+test('graph home allocation failure removes earlier temporary directories', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const create = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  const graph = source.slice(source.indexOf('# ── 16. graph'), source.indexOf('# ── 17. ci'));
+  assert.ok(cleanup && create && graph.includes('create_graph_home'), 'missing graph import code');
+
+  // Earlier suite directories exist and are populated when the graph import
+  // home allocation fails; the EXIT trap must remove every one of them.
+  const earlier = {
+    LOCUS_HOME: 'locus-e2e.earlier',
+    WS_DIR: 'locus-ws.earlier',
+    SECURITY_HOME: 'locus-security-e2e.earlier',
+    SECURITY_WS: 'locus-security-ws.earlier',
+  };
+  for (const name of Object.values(earlier)) {
+    mkdirSync(join(scratch, name));
+    writeFileSync(join(scratch, name, 'sentinel'), name);
+  }
+
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+GRAPH_HOME=""
+HTTP_MCP_PID="" MT_MCP_PID=""
+LOCUS_HOME="$TMPDIR/${earlier.LOCUS_HOME}"
+WS_DIR="$TMPDIR/${earlier.WS_DIR}"
+SECURITY_HOME="$TMPDIR/${earlier.SECURITY_HOME}"
+SECURITY_WS="$TMPDIR/${earlier.SECURITY_WS}"
+log() { :; }
+ok() { :; }
+skip() { exit 90; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+has_cmd() { return 0; }
+mktemp() {
+  case "$2" in
+    */locus-graph-imp.XXXXXX) printf 'injected graph home failure\\n' >&2; return 73 ;;
+  esac
+  command mktemp "$@"
+}
+locus() {
+  case "$1:\${2:-}" in
+    graph:export) printf 'LOCUSGRAPH00' > "$4" ;;
+    *) return 1 ;;
+  esac
+}
+trap 'e2e_cleanup' EXIT
+${create}
+${graph}
+`], { env: { ...process.env, TMPDIR: scratch }, encoding: 'utf8' });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the allocation failure must stop the suite');
+  assert.match(result.stderr, /injected graph home failure/);
+  assert.match(result.stderr, /could not create GRAPH_HOME for graph import/);
+  assert.deepEqual(readdirSync(scratch), ['keep'],
+    'every earlier temporary directory must be removed on failure');
+});
+
 test('graph home creation selects the custom temporary root or /tmp fallback', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp $literal; [test]');
