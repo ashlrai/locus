@@ -35,7 +35,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { deflateSync } from 'node:zlib';
+import { deflateSync, inflateSync } from 'node:zlib';
 
 export const WEB_DIR = dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = join(WEB_DIR, '..', '..');
@@ -491,6 +491,28 @@ export function encodePng(width, height, rgb) {
   ]);
 }
 
+// zlib versions can encode identical pixels into different valid streams.
+// Accept only the exact PNG structure we generate, with a valid IDAT CRC.
+export function equivalentPng(actual, expected) {
+  if (!Buffer.isBuffer(actual) || !Buffer.isBuffer(expected)) return false;
+  try {
+    const pixels = (png) => {
+      if (png.length < 57 || !png.subarray(0, 33).equals(expected.subarray(0, 33))) return null;
+      const length = png.readUInt32BE(33);
+      const end = 41 + length;
+      if (end + 16 !== png.length || png.toString('ascii', 37, 41) !== 'IDAT' ||
+          png.readUInt32BE(end) !== crc32(png.subarray(37, end)) ||
+          !png.subarray(end + 4).equals(expected.subarray(-12))) return null;
+      const width = png.readUInt32BE(16), height = png.readUInt32BE(20);
+      return inflateSync(png.subarray(41, end), { maxOutputLength: (width * 3 + 1) * height });
+    };
+    const a = pixels(actual), b = pixels(expected);
+    return a !== null && b !== null && a.equals(b);
+  } catch {
+    return false;
+  }
+}
+
 // Draw a text run; scale is the integer pixel factor for the 5x7 glyphs.
 function drawText(px, width, x, y, text, scale, [r, g, b]) {
   for (const ch of text) {
@@ -634,7 +656,9 @@ export function run(root = REPO_ROOT, { check = false, out = console.log } = {})
   const write = (rel, contents) => {
     const path = join(PUBLIC, rel);
     const current = existsSync(path) ? readFileSync(path, contents instanceof Buffer ? undefined : 'utf8') : undefined;
-    const same = contents instanceof Buffer ? current?.equals(contents) : current === contents;
+    const same = contents instanceof Buffer
+      ? (rel === 'og.png' ? equivalentPng(current, contents) : current?.equals(contents))
+      : current === contents;
     if (!same) {
       if (check) { stale.push(rel); return; }
       mkdirSync(dirname(path), { recursive: true });
