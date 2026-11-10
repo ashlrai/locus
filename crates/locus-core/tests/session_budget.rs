@@ -111,6 +111,33 @@ fn config_round_trips_and_defaults_to_off() {
     assert_eq!(again, cfg);
 }
 
+#[test]
+fn zero_caps_are_unset_and_do_not_disable_a_nonzero_cap() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let b = binding();
+    let cfg = LocusConfig::parse("[budget]\nmax_actions = 0\nmax_minutes = 0\n").unwrap();
+    assert!(!cfg.budget.is_enabled());
+    assert_eq!(cfg.budget.actions_cap(), None);
+    assert_eq!(cfg.budget.minutes_cap(), None);
+    store.save_config(&cfg).unwrap();
+    for _ in 0..10 {
+        assert!(call(&store, &b, "ses_zero").is_none());
+    }
+    assert!(!dir.path().join("budgets").exists());
+    assert!(!store.audit_path().exists());
+
+    let cfg = LocusConfig::parse("[budget]\nmax_actions = 1\nmax_minutes = 0\n").unwrap();
+    assert!(cfg.budget.is_enabled());
+    assert_eq!(cfg.budget.minutes_cap(), None);
+    store.save_config(&cfg).unwrap();
+    assert!(call(&store, &b, "ses_mixed").is_none());
+    assert_eq!(
+        call(&store, &b, "ses_mixed").unwrap()["error"],
+        "session_budget_exhausted"
+    );
+}
+
 fn enable_action_cap(store: &Store, cap: u64) {
     store
         .save_config(&LocusConfig {
