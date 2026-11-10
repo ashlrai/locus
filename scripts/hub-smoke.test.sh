@@ -39,6 +39,14 @@ exec /bin/rm "$@"
 STUB
 chmod +x "$fixture/bin/rm"
 
+# Record any attempt to enter the smoke setup or workload after allocation.
+cat > "$fixture/allocation-hook" <<'HOOK'
+od() { : > "$SMOKE_REACHED"; }
+jq() { : > "$SMOKE_REACHED"; }
+cargo() { : > "$SMOKE_REACHED"; }
+locus() { : > "$SMOKE_REACHED"; }
+HOOK
+
 for case_number in 1 2 3; do
   case "$case_number" in
     1) template='locus-hub-smoke.XXXXXX'; diagnostic='temporary home' ;;
@@ -46,13 +54,16 @@ for case_number in 1 2 3; do
     3) template='locus-hub-smoke-err.XXXXXX'; diagnostic='temporary error file' ;;
   esac
   : > "$fixture/attempts"
+  rm -f "$fixture/smoke-reached"
   status=0
-  env BASH_ENV= HOME="$fixture" TMPDIR="$fixture/scratch with spaces" \
+  env BASH_ENV="$fixture/allocation-hook" SMOKE_REACHED="$fixture/smoke-reached" \
+    HOME="$fixture" TMPDIR="$fixture/scratch with spaces" \
     PATH="$fixture/bin:$PATH" REAL_MKTEMP="$real_mktemp" \
     FAIL_TEMPLATE="$template" ATTEMPTS="$fixture/attempts" \
     bash "$root/scripts/hub-smoke.sh" > "$fixture/stdout" 2> "$fixture/stderr" || status=$?
   if [[ "$status" -eq 0 ]] || ! grep -Fxq "error: hub-smoke could not create $diagnostic" "$fixture/stderr" \
-    || [[ -s "$fixture/stdout" ]] || [[ $(wc -l < "$fixture/attempts") -ne "$case_number" ]] \
+    || [[ -s "$fixture/stdout" || -e "$fixture/smoke-reached" ]] \
+    || [[ $(wc -l < "$fixture/attempts") -ne "$case_number" ]] \
     || [[ $(find "$fixture/scratch with spaces" -mindepth 1 -maxdepth 1 | wc -l) -ne 1 ]] \
     || [[ $(cat "$fixture/scratch with spaces/sentinel") != keep ]]; then
     printf 'FAIL: allocation failure case %s\n' "$case_number" >&2
