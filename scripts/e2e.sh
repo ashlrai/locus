@@ -12,9 +12,11 @@
 # directory; otherwise mktemp uses /tmp. The script creates isolated home and
 # workspace directories there, verifies the home and workspace are created
 # directly beneath the supplied TMPDIR, and removes them on shell exit after
-# installing its cleanup trap. An optional graph-import home is also removed immediately
-# after a successful import. Abrupt termination or removal errors can leave
-# temporary directories; inspect and remove any
+# installing its cleanup trap. The trap also tracks every graph home the run
+# created, so a failing command after a graph home is created is reported and
+# the trap removes that home; an optional graph-import home is additionally
+# removed immediately after a successful import. Abrupt termination or removal
+# errors can leave temporary directories; inspect and remove any
 # leftover locus-e2e.*, locus-ws.*, locus-security-e2e.*, locus-security-ws.*,
 # or locus-graph-imp.* directories when needed.
 set -euo pipefail
@@ -37,9 +39,18 @@ log()  { printf '\n==> %s\n' "$*"; }
 ok()   { printf '  ok  %s\n' "$*"; pass=$((pass + 1)); }
 skip() { printf '  skip %s\n' "$*"; skip=$((skip + 1)); }
 die()  { printf '  FAIL %s\n' "$*" >&2; fail=$((fail + 1)); exit 1; }
-# Sets GRAPH_HOME to a fresh directory directly beneath the temp root.
+# Sets GRAPH_HOME to a fresh directory directly beneath the temp root and
+# records it in the newline-separated GRAPH_HOMES registry, so the exit trap
+# removes every graph home the run created even if the variable no longer
+# names it: a failed creation clears the variable, and a later reset does too.
 create_graph_home() {
   GRAPH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-graph-imp.XXXXXX")"
+  local status=$?
+  if [[ "$status" -ne 0 ]]; then
+    return "$status"
+  fi
+  GRAPH_HOMES="${GRAPH_HOMES:-}
+$GRAPH_HOME"
 }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
 
@@ -94,6 +105,13 @@ e2e_cleanup() {
     MT_MCP_PID=""
   fi
   rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"
+  # Every graph home this run created is removed, not only the one GRAPH_HOME
+  # still names: a failed creation or a later reset clears the variable, and a
+  # failure after creation must not leave the earlier directory behind.
+  while IFS= read -r registered_graph_home; do
+    [[ -n "$registered_graph_home" ]] || continue
+    rm -rf -- "$registered_graph_home"
+  done <<< "${GRAPH_HOMES:-}"
 }
 trap 'e2e_cleanup' EXIT
 ok "isolated home ready"
@@ -117,7 +135,7 @@ home_tmp="$LOCUS_HOME/home temp root"
 mkdir -p "$home_tmp"
 (
   export TMPDIR="$home_tmp"
-  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  WS_DIR="" GRAPH_HOME="" GRAPH_HOMES="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
   create_locus_home
   trap 'e2e_cleanup' EXIT
   [[ -d "$LOCUS_HOME" && "${LOCUS_HOME%/*}" == "$TMPDIR" && \
@@ -148,7 +166,7 @@ mkdir -p "$alloc_decoy" "$alloc_tmp"
 touch "$alloc_decoy/decoy-sentinel"
 (
   export TMPDIR="$alloc_tmp"
-  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  WS_DIR="" GRAPH_HOME="" GRAPH_HOMES="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
   create_locus_home
   trap 'e2e_cleanup' EXIT
   [[ "$TMPDIR" == *" "* && -d "$LOCUS_HOME" && \
@@ -225,7 +243,7 @@ touch "$secspace_decoy/decoy-sentinel"
   export TMPDIR="$secspace_tmp"
   LOCUS_HOME="$secspace_tmp/subshell-home"
   mkdir -p "$LOCUS_HOME"
-  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  WS_DIR="" GRAPH_HOME="" GRAPH_HOMES="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
   trap 'e2e_cleanup' EXIT
   create_security_home
   [[ "$TMPDIR" == *" "* && -d "$SECURITY_HOME" && \
@@ -264,7 +282,7 @@ touch "$workspace_decoy/decoy-sentinel"
   export TMPDIR="$workspace_tmp"
   LOCUS_HOME="$workspace_tmp/subshell-home"
   mkdir -p "$LOCUS_HOME"
-  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  WS_DIR="" GRAPH_HOME="" GRAPH_HOMES="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
   trap 'e2e_cleanup' EXIT
   create_workspace
   [[ -d "$WS_DIR" && "${WS_DIR%/*}" == "$TMPDIR" && \
@@ -295,7 +313,7 @@ mkdir -p "$ws_root_tmp"
   export TMPDIR="$ws_root_tmp"
   LOCUS_HOME="$ws_root_tmp/subshell-home"
   mkdir -p "$LOCUS_HOME"
-  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  WS_DIR="" GRAPH_HOME="" GRAPH_HOMES="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
   trap 'e2e_cleanup' EXIT
   create_workspace
   [[ -d "$WS_DIR" && "$WS_DIR" == "$TMPDIR"/locus-ws.* && \
@@ -320,7 +338,7 @@ touch "$security_ws_decoy/decoy-sentinel"
   export TMPDIR="$security_ws_tmp"
   LOCUS_HOME="$security_ws_tmp/subshell-home"
   mkdir -p "$LOCUS_HOME"
-  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  WS_DIR="" GRAPH_HOME="" GRAPH_HOMES="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
   trap 'e2e_cleanup' EXIT
   create_security_workspace
   [[ -d "$SECURITY_WS" && "${SECURITY_WS%/*}" == "$TMPDIR" && \
@@ -348,7 +366,7 @@ onearg_tmp="$LOCUS_HOME/one arg root"
 mkdir -p "$onearg_tmp"
 (
   export TMPDIR="$onearg_tmp"
-  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+  WS_DIR="" GRAPH_HOME="" GRAPH_HOMES="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
   create_locus_home
   trap 'e2e_cleanup' EXIT
   "$LOCUS_BIN" init >/dev/null || exit 1
@@ -378,7 +396,7 @@ for graph_exit in 0 73; do
     export TMPDIR="$graph_home_tmp"
     LOCUS_HOME="$graph_home_tmp/subshell-home"
     mkdir -p "$LOCUS_HOME"
-    WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+    WS_DIR="" GRAPH_HOME="" GRAPH_HOMES="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
     trap 'e2e_cleanup' EXIT
     create_graph_home
     [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
@@ -1616,7 +1634,7 @@ else
       ok "graph import --force roundtrip"
     else
       # Fresh home for a true write path
-      create_graph_home
+      create_graph_home || die "could not create the temporary graph home"
       # Same containment rule as LOCUS_HOME: a supplied TMPDIR owns the graph home.
       if [[ -n "${TMPDIR:-}" ]]; then
         [[ -d "$GRAPH_HOME" && "${GRAPH_HOME%/*}" == "$TMPDIR" && \
@@ -1642,8 +1660,13 @@ fi
 
 # Repeated graph-home creation (unconditional): two creations with the graph
 # import recipe must yield distinct directories under the selected temp root.
-create_graph_home; graph_home_a="$GRAPH_HOME"
-create_graph_home; graph_home_b="$GRAPH_HOME"
+# Every created directory is registered, so the exit trap removes them all if
+# any later command fails; a failed creation is reported instead of exiting
+# silently.
+create_graph_home || die "could not create the temporary graph home"
+graph_home_a="$GRAPH_HOME"
+create_graph_home || die "could not create the temporary graph home"
+graph_home_b="$GRAPH_HOME"
 GRAPH_HOME=""
 graph_root="${TMPDIR:-/tmp}"
 graph_root="${graph_root%/}"
