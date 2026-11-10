@@ -68,3 +68,7 @@ path = "tests/cli_help_exit.rs"
 [[test]]
 name = "workspace_version_sync"
 path = "tests/workspace_version_sync.rs"
+
+[[test]]
+name = "exec_exit_codes"
+path = "tests/exec_exit_codes.rs"
