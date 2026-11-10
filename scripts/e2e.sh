@@ -71,7 +71,8 @@ ok "locus + locus-mcp release binaries"
 
 # ── 2. Isolated LOCUS_HOME ───────────────────────────────────────────────────
 create_locus_home() {
-  LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")"
+  LOCUS_HOME="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e.XXXXXX")" \
+    || { local status=$?; printf '  FAIL could not create LOCUS_HOME\n' >&2; return "$status"; }
 }
 export LOCUS_HOME
 create_locus_home

@@ -240,6 +240,7 @@ jobs:
           done
           node --test scripts/ci/e2e-release-gate.test.mjs
           node --test scripts/e2e-workspace-success-cleanup.test.mjs
+          bash scripts/e2e.test.sh
           bash scripts/e2e.sh
 
       # npm wrappers at the Cargo version and packable; release locus-mcp keeps
