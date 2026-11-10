@@ -122,6 +122,47 @@ IFS= read -r error_file < "$fixture/record"
 }
 echo 'ok: all temporary paths use the supplied TMPDIR and are cleaned up'
 
+# Complete the smoke offline while inspecting the actual allocations at init.
+cat > "$fixture/offline-hook" <<'HOOK'
+jq() { cat >/dev/null; }
+cargo() { :; }
+locus() {
+  if [[ "${1:-}" == init ]]; then
+    [[ -d "$SMOKE_HOME" && -d "$SMOKE_PROJ" && -f "$SMOKE_ERR" ]] || return 74
+    for path in "$SMOKE_HOME" "$SMOKE_PROJ" "$SMOKE_ERR"; do
+      [[ "${path%/*}" == "$TMPDIR" ]] || return 74
+      printf '%s\n' "$path" >> "$RECORD"
+    done
+  elif [[ "${1:-} ${2:-}" == 'status --oneline' ]]; then
+    printf 'personal:tenant\n'
+  else
+    printf '{}\n'
+  fi
+}
+HOOK
+: > "$fixture/attempts"
+: > "$fixture/record"
+rm -f "$fixture/cleanup-record"
+status=0
+env BASH_ENV="$fixture/offline-hook" HOME="$fixture" TMPDIR="$fixture/scratch with spaces" \
+  PATH="$fixture/bin:$PATH" REAL_MKTEMP="$real_mktemp" FAIL_TEMPLATE=none \
+  ATTEMPTS="$fixture/attempts" RECORD="$fixture/record" CHECK_ARGUMENTS=1 \
+  REAL_RM="$real_rm" CLEANUP_RECORD="$fixture/cleanup-record" \
+  bash "$root/scripts/hub-smoke.sh" > "$fixture/stdout" 2> "$fixture/stderr" || status=$?
+if [[ "$status" -ne 0 ]] || ! grep -Fxq '== hub-smoke OK ==' "$fixture/stdout" \
+  || grep -q '^skip ' "$fixture/stdout" \
+  || [[ $(wc -l < "$fixture/record") -ne 3 || $(wc -l < "$fixture/attempts") -ne 3 \
+        || ! -f "$fixture/cleanup-record" ]] \
+  || [[ $(find "$fixture/scratch with spaces" -mindepth 1 -maxdepth 1 | wc -l) -ne 1 ]] \
+  || [[ $(cat "$fixture/scratch with spaces/sentinel") != keep ]]; then
+  echo 'FAIL: offline smoke with spaced TMPDIR or cleanup' >&2
+  exit 1
+fi
+while IFS= read -r path; do
+  [[ ! -e "$path" ]] || { echo 'FAIL: offline smoke left a temporary path' >&2; exit 1; }
+done < "$fixture/record"
+echo 'ok: offline smoke with spaced TMPDIR and cleanup'
+
 # Run the complete smoke against real binaries with the same spaced TMPDIR.
 # Keep output private: the smoke exercises credential-adjacent commands.
 : > "$fixture/attempts"
