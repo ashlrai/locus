@@ -75,6 +75,36 @@ test('multiple crypto kinds retain default code-unit ordering', (t) => {
   assert.deepEqual(scan(root)[0].kinds, ['DH', 'ECDSA/ECDH', 'Ed25519/X25519', 'RSA']);
 });
 
+test('CRLF and LF fixtures produce the same findings and report lines', (t) => {
+  const source = [
+    '// first line',
+    'createSign();',
+    '// unrelated line',
+    'ECDSA; Ed25519;',
+    '',
+  ].join('\n');
+  const lf = fixture({ 'src/crypto.ts': source });
+  const crlf = fixture({ 'src/crypto.ts': source.replaceAll('\n', '\r\n') });
+  t.after(() => {
+    rmSync(lf, { recursive: true });
+    rmSync(crlf, { recursive: true });
+  });
+
+  const lfHits = scan(lf);
+  const crlfHits = scan(crlf);
+  assert.deepEqual(lfHits, [{
+    file: 'src/crypto.ts',
+    kinds: ['ECDSA/ECDH', 'Ed25519/X25519', 'RSA'],
+    allowed: false,
+    reason: undefined,
+  }]);
+  assert.deepEqual(crlfHits, lfHits);
+  const lfReport = report(lfHits);
+  const crlfReport = report(crlfHits);
+  assert.deepEqual(crlfReport, lfReport);
+  assert.match(crlfReport.text.split('\n')[1], /FLAG src\/crypto\.ts/);
+});
+
 test('crypto tokens match at word boundaries, not inside identifiers', (t) => {
   const root = fixture({
     'src/embedded.ts': 'const myECDSAKey = 1; const ed25519_key = 2;',
