@@ -21,13 +21,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Recovery guidance for expired, invalid and frozen pins now names the
   appropriate human recovery steps. MCP reports stale pins as broken rather
   than absent ([#819](https://github.com/ashlrai/locus/pull/819)).
+- The npm `locus-cli` wrapper now replaces a `locus` bin symlink that points
+  somewhere other than the resolved native binary, instead of skipping every
+  existing symlink and leaving a stale link in place
+  ([#915](https://github.com/ashlrai/locus/pull/915)).
+- `scripts/e2e.sh` and `scripts/dogfood.sh` now trap `INT` and `TERM` (and
+  `HUP` in dogfood) so an interrupted run exits with the conventional signal
+  status and still runs its temp-home cleanup; graph import fails fast when
+  `mktemp` cannot create `GRAPH_HOME`
+  ([#891](https://github.com/ashlrai/locus/pull/891),
+  [#933](https://github.com/ashlrai/locus/pull/933),
+  [#934](https://github.com/ashlrai/locus/pull/934)).
+- `scripts/check-crypto.mjs` ignores standalone `//`, `/* */` and TOML `#`
+  comments, so prose that names a primitive no longer counts as crypto usage
+  ([#908](https://github.com/ashlrai/locus/pull/908)).
+- The web discoverability generator treats `og.png` as unchanged when the
+  decoded pixels match, so a different zlib build no longer reports a
+  spurious diff ([#943](https://github.com/ashlrai/locus/pull/943)).
+- `examples/recipes/run.mjs` skips with a clear `--locus <absolute-path>`
+  hint when the supplied binary is not executable
+  ([#900](https://github.com/ashlrai/locus/pull/900)).
+
+### Added
+
+- `scripts/queue-recut-plan.mjs BASE BRANCH...`: read-only planner that
+  classifies branches as `clean`, `stale` or `conflicting` against a base
+  using `git merge-tree`, printing stable JSON. See
+  [scripts/queue-recut-plan.md](scripts/queue-recut-plan.md)
+  ([#859](https://github.com/ashlrai/locus/pull/859)).
 
 ### Changed
 
 - Removed the unused `executable` field from the sandbox spawn plan
   ([#832](https://github.com/ashlrai/locus/pull/832)).
+- The release workflow installs npm 11.19.0 (was 11.6.2) before publishing
+  ([#842](https://github.com/ashlrai/locus/pull/842)).
 
 ### Documentation and tests
+
+- Contributor link checking now covers `docs/*.md` as well as the README
+  (`node scripts/check-readme-links.mjs README.md docs/*.md`)
+  ([#843](https://github.com/ashlrai/locus/pull/843)).
+- Rust regression tests: routed CLI env scrubs unselected provider
+  credentials and `inherit_env` ([#834](https://github.com/ashlrai/locus/pull/834),
+  [#879](https://github.com/ashlrai/locus/pull/879),
+  [#889](https://github.com/ashlrai/locus/pull/889)); `locus exec` exit-code
+  propagation and `--expect` ([#927](https://github.com/ashlrai/locus/pull/927),
+  [#848](https://github.com/ashlrai/locus/pull/848)); session budget exact
+  limits ([#883](https://github.com/ashlrai/locus/pull/883),
+  [#921](https://github.com/ashlrai/locus/pull/921)); stale pin recovery
+  ([#920](https://github.com/ashlrai/locus/pull/920)); closed stdout and
+  `--json` error envelopes ([#876](https://github.com/ashlrai/locus/pull/876),
+  [#877](https://github.com/ashlrai/locus/pull/877),
+  [#888](https://github.com/ashlrai/locus/pull/888)); MCP protocol, stdio
+  lifecycle and HTTP transport ([#878](https://github.com/ashlrai/locus/pull/878),
+  [#882](https://github.com/ashlrai/locus/pull/882),
+  [#902](https://github.com/ashlrai/locus/pull/902)); gateway base URLs
+  ([#880](https://github.com/ashlrai/locus/pull/880),
+  [#919](https://github.com/ashlrai/locus/pull/919)); `doctor --fix`
+  ([#881](https://github.com/ashlrai/locus/pull/881)); agent report and pin
+  history empty states ([#909](https://github.com/ashlrai/locus/pull/909),
+  [#910](https://github.com/ashlrai/locus/pull/910)); and doc facts
+  ([#924](https://github.com/ashlrai/locus/pull/924)).
+- npm wrapper tests for relinking, self-exec guards and install paths
+  ([#845](https://github.com/ashlrai/locus/pull/845),
+  [#857](https://github.com/ashlrai/locus/pull/857),
+  [#863](https://github.com/ashlrai/locus/pull/863),
+  [#864](https://github.com/ashlrai/locus/pull/864),
+  [#867](https://github.com/ashlrai/locus/pull/867),
+  [#884](https://github.com/ashlrai/locus/pull/884)
+  to [#887](https://github.com/ashlrai/locus/pull/887),
+  [#914](https://github.com/ashlrai/locus/pull/914),
+  [#918](https://github.com/ashlrai/locus/pull/918)).
+- Script harness coverage for temp-home creation, containment, interruption
+  and cleanup across `e2e`, `dogfood`, `hub-smoke`, `hub-integration-test`,
+  the archive installer and the recipe runner (#838 to #941, including
+  [#852](https://github.com/ashlrai/locus/pull/852),
+  [#853](https://github.com/ashlrai/locus/pull/853),
+  [#871](https://github.com/ashlrai/locus/pull/871),
+  [#923](https://github.com/ashlrai/locus/pull/923),
+  [#931](https://github.com/ashlrai/locus/pull/931),
+  [#941](https://github.com/ashlrai/locus/pull/941)).
 
 - Added `.devin/wiki.json` to steer DeepWiki generation, with
   [docs/deepwiki.md](docs/deepwiki.md), a contract test in
@@ -438,7 +512,7 @@ Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run
 
 - **Audit webhook errors no longer carry the webhook URL.** A failed `locus events export --sink webhook` post (URL from `--url` or `LOCUS_AUDIT_WEBHOOK_URL`) (a non-2xx status or a connection error) put ureq's error text in the message, and that text starts with the full URL: user name, password, path token and query token included. The error now names only `scheme://host` and the status or transport kind. A new test posts to a 401, a 500 and a closed port with canary tokens in the path, query and password and fails on any 8-character run of them.
 
-- **`locus dashboard` / `locus serve --open` no longer put `LOCUS_DASHBOARD_TOKEN` in the opened URL.** The browser opener (`open`, `xdg-open`, `gio`, `cmd /C start`) received `http://127.0.0.1:<port>/?token=<token>` as an argument, visible to other local users in `ps`, and the browser kept it in history. The plain URL is opened; with a token set the page's token gate asks for it once. `?token=` is still accepted by the API.
+- **`locus dashboard` / `locus serve --open` no longer put `LOCUS_DASHBOARD_TOKEN` in the opened URL.** The browser opener (`open`, `xdg-open`, `gio`, `cmd /C start`) received http://127.0.0.1:<port>/?token=<token> as an argument, visible to other local users in `ps`, and the browser kept it in history. The plain URL is opened; with a token set the page's token gate asks for it once. `?token=` is still accepted by the API.
 
 ### Added
 
