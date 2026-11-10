@@ -97,7 +97,12 @@ e2e_cleanup() {
   fi
   rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"
 }
-trap 'e2e_cleanup' EXIT
+e2e_install_traps() {
+  trap 'e2e_cleanup' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+}
+e2e_install_traps
 ok "isolated home ready"
 
 # A supplied TMPDIR is the containment boundary the caller chose; the suite
