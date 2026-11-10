@@ -171,7 +171,8 @@ Short checklist:
 3. Ensure `fmt`, `clippy -D warnings`, and `cargo test` pass.
 4. Describe **what isolation property** changes (or does not).
 5. Link related `DESIGN.md` sections when changing security-sensitive code.
-6. Conflict in a high-churn path? `CHANGELOG.md` unions itself via `.gitattributes`; `node scripts/resolve-merge-conflicts.mjs --continue` deterministically resolves `CLAUDE.md`/`README.md` and regenerates `Cargo.lock`/`bun.lock`/`package-lock.json` — never hand-merge lockfiles. See [docs/conflict-drivers.md](./docs/conflict-drivers.md).
+6. Conflict in a high-churn path? `CHANGELOG.md` unions itself via `.gitattributes`; `node scripts/resolve-merge-conflicts.mjs --continue` deterministically resolves `CLAUDE.md`/`README.md` and regenerates `Cargo.lock`/`bun.lock`/`package-lock.json`. Never hand-merge lockfiles. See [docs/conflict-drivers.md](./docs/conflict-drivers.md).
+7. Several branches queued against a moving `main`? `node scripts/queue-recut-plan.mjs origin/main BRANCH...` prints read-only JSON marking each branch `clean`, `stale` (recut) or `conflicting` (resolve first). Fetch first; it never edits branches or bypasses required checks. See [scripts/queue-recut-plan.md](./scripts/queue-recut-plan.md).
 
 ## Reporting security issues
 
