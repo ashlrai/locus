@@ -122,6 +122,61 @@ IFS= read -r error_file < "$fixture/record"
 }
 echo 'ok: all temporary paths use the supplied TMPDIR and are cleaned up'
 
+# Interrupt a running smoke after all allocations, without invoking real services.
+cat > "$fixture/interrupt-hook" <<'HOOK'
+jq() { :; }
+cargo() { :; }
+locus() {
+  if [[ "${1:-}" == init ]]; then
+    [[ -d "$SMOKE_HOME" && -d "$SMOKE_PROJ" && -f "$SMOKE_ERR" ]] || exit 74
+    printf '%s\n' "$SMOKE_HOME" "$SMOKE_PROJ" "$SMOKE_ERR" > "$INTERRUPT_RECORD"
+    while :; do :; done
+  fi
+}
+HOOK
+# Python launches a foreground-like child so SIGINT is not inherited as ignored
+# from a shell background job. The timeout also prevents a broken trap hanging CI.
+env BASH_ENV="$fixture/interrupt-hook" HOME="$fixture" TMPDIR="$fixture/scratch with spaces" \
+  PATH="$fixture/bin:$PATH" REAL_MKTEMP="$real_mktemp" FAIL_TEMPLATE=none \
+  ATTEMPTS="$fixture/attempts" INTERRUPT_RECORD="$fixture/interrupt-record" \
+  python3 - "$root/scripts/hub-smoke.sh" "$fixture/interrupt-record" <<'PYTHON'
+import os
+import signal
+import subprocess
+import sys
+import time
+
+child = subprocess.Popen(['bash', sys.argv[1]], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+try:
+    deadline = time.monotonic() + 10
+    while not os.path.exists(sys.argv[2]):
+        if child.poll() is not None or time.monotonic() >= deadline:
+            raise RuntimeError('smoke did not reach the interrupt point')
+        time.sleep(0.01)
+    child.send_signal(signal.SIGINT)
+    status = child.wait(timeout=10)
+    if status not in (128 + signal.SIGINT, -signal.SIGINT):
+        raise RuntimeError(f'unexpected interrupted exit status: {status}')
+finally:
+    if child.poll() is None:
+        child.kill()
+        child.wait()
+PYTHON
+[[ $(wc -l < "$fixture/interrupt-record") -eq 3 ]] || {
+  echo 'FAIL: interrupt test did not record all temporary paths' >&2; exit 1;
+}
+while IFS= read -r path; do
+  [[ "${path%/*}" == "$fixture/scratch with spaces" && ! -e "$path" ]] || {
+    echo 'FAIL: interrupted smoke left a temporary path behind' >&2; exit 1;
+  }
+done < "$fixture/interrupt-record"
+[[ $(find "$fixture/scratch with spaces" -mindepth 1 -maxdepth 1 | wc -l) -eq 1 && \
+   $(cat "$fixture/scratch with spaces/sentinel") == keep ]] || {
+  echo 'FAIL: interrupt cleanup changed the supplied TMPDIR' >&2; exit 1;
+}
+echo 'ok: interrupt cleans all temporary paths'
+
 # Run the complete smoke against real binaries with the same spaced TMPDIR.
 # Keep output private: the smoke exercises credential-adjacent commands.
 : > "$fixture/attempts"
