@@ -67,7 +67,7 @@ for the side effects it keeps).
 | `agent setup`, `adapter install`, `adapter uninstall`, `adapter trust add`, `adapter registry export`, `adapter registry index add`, `adapter registry index remove` | plan |
 | `doctor` | plan only with `--fix`; accepted, ignored without |
 | `approve grant`, `approve deny`, `notify on`, `notify off`, `events export`, `forensics export` | plan |
-| `whoami`, `status`, `watch`, `hook`, `completion`, `topic`, `version`, `fleet-preflight`, `fleet-feed`, `fleet-denials`, `events` | accepted, ignored |
+| `whoami`, `status`, `watch`, `hook`, `completion`, `topic`, `version`, `fleet-preflight`, `fleet-feed`, `fleet-denials`, `fleet-outcomes`, `events` | accepted, ignored |
 | `agent doctor`, `agent report`, `binding list`, `binding show`, `graph list`, `capability status`, `notify status`, `approve list`, `approve status`, `approve wait`, `mcp list`, `goal status`, `verify session`, `verify claim`, `upstream list`, `upstream suggest` | accepted, ignored |
 | `adapter search`, `adapter list`, `adapter verify`, `adapter verify-manifest`, `adapter trust list`, `adapter registry index list` | accepted, ignored |
 

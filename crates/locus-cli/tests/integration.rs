@@ -52,6 +52,8 @@ mod fail_closed_unreadable;
 mod fleet_denials_q8;
 #[path = "fleet_feed_q8.rs"]
 mod fleet_feed_q8;
+#[path = "fleet_outcomes_q8.rs"]
+mod fleet_outcomes_q8;
 #[path = "fleet_preflight_q8.rs"]
 mod fleet_preflight_q8;
 #[path = "handshake_conformance.rs"]
