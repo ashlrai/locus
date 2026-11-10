@@ -9,7 +9,7 @@ touch "$interrupt_root/keep"
   LOCUS_HOME="$interrupt_root/child-home"
   mkdir -p "$LOCUS_HOME"
   WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
-  trap 'e2e_cleanup' EXIT
+  e2e_install_traps
   create_workspace
   [[ -d "$WS_DIR" && "${WS_DIR%/*}" == "$TMPDIR" && "${WS_DIR##*/}" == locus-ws.* ]] || exit 1
   touch "$WS_DIR/sentinel"
