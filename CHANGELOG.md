@@ -59,6 +59,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation and tests
 
+- Clarified quickstart workspace selection, human pin authority, supervised
+  MCP provider tools and advisory doctor exit codes in onboarding guidance.
+
 - Contributor link checking now covers `docs/*.md` as well as the README
   (`node scripts/check-readme-links.mjs README.md docs/*.md`)
   ([#843](https://github.com/ashlrai/locus/pull/843)).
