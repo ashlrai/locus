@@ -366,7 +366,9 @@ other over HTTP.
    `reason: grant_expired` + a re-mint `safe_next`; its sessions are swept and
    audited (`mcp.grant_expired_swept`). Re-mint rather than extend.
 5. **Reconcile** — `locus mcp list` joins live per-grant HTTP-session counts;
-   diff it against the hub's job table to catch leaked grants. Per-grant
+   diff it against the hub's job table to catch leaked grants. If session
+   records cannot be read or parsed, the command fails instead of reporting
+   incomplete counts as zero. Per-grant
    session cap: `LOCUS_MCP_SESSIONS_PER_GRANT` (default 8).
 
 Mint output contract: [`schema/mcp-grant.schema.json`](../schema/mcp-grant.schema.json).
