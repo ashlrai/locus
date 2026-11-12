@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `locus mcp list` now fails with `cannot determine live HTTP session counts`
+  when session records cannot be read or parsed, instead of reporting
+  incomplete per-grant counts as zero
+  ([#948](https://github.com/ashlrai/locus/pull/948)).
 - Policy glob `?` now matches one Unicode scalar value rather than one byte,
   so deny and approval rules also match non-ASCII tool names
   ([#824](https://github.com/ashlrai/locus/pull/824)).
@@ -58,6 +62,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#842](https://github.com/ashlrai/locus/pull/842)).
 
 ### Documentation and tests
+
+- Removed two committed Python bytecode files from `scripts/tests/` and
+  ignored `__pycache__/` and `*.pyc`.
+- Expanded script and wrapper regression coverage: hub-smoke,
+  hub-integration, e2e and dogfood cleanup and temp-home cases,
+  `check-crypto`, recipe runner and npm wrapper tests
+  ([#885](https://github.com/ashlrai/locus/pull/885),
+  [#886](https://github.com/ashlrai/locus/pull/886),
+  [#893](https://github.com/ashlrai/locus/pull/893),
+  [#895](https://github.com/ashlrai/locus/pull/895),
+  [#901](https://github.com/ashlrai/locus/pull/901),
+  [#903](https://github.com/ashlrai/locus/pull/903),
+  [#917](https://github.com/ashlrai/locus/pull/917),
+  [#927](https://github.com/ashlrai/locus/pull/927),
+  [#928](https://github.com/ashlrai/locus/pull/928),
+  [#930](https://github.com/ashlrai/locus/pull/930),
+  [#936](https://github.com/ashlrai/locus/pull/936),
+  [#944](https://github.com/ashlrai/locus/pull/944),
+  [#945](https://github.com/ashlrai/locus/pull/945)).
 
 - Clarified quickstart workspace selection, human pin authority, supervised
   MCP provider tools and advisory doctor exit codes in onboarding guidance.
