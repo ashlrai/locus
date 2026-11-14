@@ -2104,8 +2104,44 @@ fn is_test_harness() -> bool {
     }
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.ends_with("deps")))
+        .map(|path| is_cargo_test_exe_path(&path))
         .unwrap_or(false)
+}
+
+/// Cargo places test executables in `<target>/<profile>/deps/` (classic
+/// layout) or `<target>/<profile>/build/<pkg>/<hash>/out/` (newer build-dir
+/// layout). Installed binaries are never in either location.
+fn is_cargo_test_exe_path(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if parent.ends_with("deps") {
+        return true;
+    }
+    parent.file_name().is_some_and(|n| n == "out")
+        && parent
+            .ancestors()
+            .skip(1)
+            .any(|a| a.file_name().is_some_and(|n| n == "build"))
+}
+
+#[cfg(test)]
+mod test_exe_path_tests {
+    use super::is_cargo_test_exe_path;
+    use std::path::Path;
+
+    #[test]
+    fn recognizes_both_cargo_layouts_only() {
+        assert!(is_cargo_test_exe_path(Path::new(
+            "/w/target/debug/deps/invariants-abc"
+        )));
+        assert!(is_cargo_test_exe_path(Path::new(
+            "/w/target/debug/build/locus-core/9a81/out/invariants-9a81"
+        )));
+        assert!(!is_cargo_test_exe_path(Path::new("/w/target/debug/locus")));
+        assert!(!is_cargo_test_exe_path(Path::new("/usr/local/bin/locus")));
+        assert!(!is_cargo_test_exe_path(Path::new("/opt/out/locus")));
+    }
 }
 
 fn executable_identity(path: &Path) -> Result<ExecutableIdentity> {
