@@ -228,8 +228,13 @@ function locusStub(root) {
   const locus = join(bin, 'locus');
   writeFileSync(locus, `#!/bin/sh
 case "$1" in
-  init) printf 'stub init\\n' > "$LOCUS_HOME/init-stamp" && exit 0 ;;
-  workspace) printf '# stub workspace config\\n' > .locus.toml && exit 0 ;;
+  init)
+    test "$LOCUS_HOME" = "$TMPDIR/subshell-home" || exit 1
+    printf 'stub init\\n' > "$LOCUS_HOME/init-stamp" && exit 0 ;;
+  workspace)
+    case "$PWD" in "$TMPDIR"/locus-ws.*) ;; *) exit 1 ;; esac
+    test -f "$LOCUS_HOME/init-stamp" || exit 1
+    printf '# stub workspace config\\n' > .locus.toml && exit 0 ;;
 esac
 exit 1
 `, { mode: 0o755 });
