@@ -131,7 +131,7 @@ independently even when the manifest is signed.
 
 ## What it is
 
-`locus adapter registry export` emits a canonical JSON manifest of the
+`locus adapter registry export` emits a deterministic JSON manifest of the
 **built-in** adapter catalog compiled into the binary:
 
 ```json
@@ -162,6 +162,17 @@ also includes `signature` and `signed_by` fields.
 - Adapters and tool lists are sorted; exporting twice from the same binary is
   byte-identical. `signature`/`signed_by` are excluded from the signed
   material, so signing does not perturb it.
+
+### Canonicalization and signature verification
+
+The JSON bytes are not the signature input. Locus constructs canonical material
+from a versioned header and sorted adapter records; formatting and list ordering
+do not change that material. Constructing it does not authenticate the manifest.
+Signature verification separately checks the Ed25519 signature against the key
+selected by `signed_by` in the local trust store. The key ID is not itself part
+of the signed material, so the consumer must independently trust that key.
+An unsigned export or a drift-free comparison with `--allow-unsigned` does not
+verify a signature.
 
 ## Trust model
 
