@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The authority anchor's test-harness detection now recognises cargo's
+  `build/<package>/<hash>/out/<exe>` test layout (newer cargo with a separate
+  build-dir) as well as `.../deps/<exe>`, so coverage runs no longer misread a
+  test binary as an installed one. Installed binaries still match neither
+  layout and keep the strict path
+  ([#951](https://github.com/ashlrai/locus/pull/951)).
 - `locus mcp list` now fails with `cannot determine live HTTP session counts`
   when session records cannot be read or parsed, instead of reporting
   incomplete per-grant counts as zero
@@ -48,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Drop-in end-to-end steps: new steps go in `scripts/e2e.d/NN-topic.sh`
+  (see [scripts/e2e.d/README.md](scripts/e2e.d/README.md)) instead of
+  growing `scripts/e2e.sh`, and `bash scripts/check-e2e-dropin.sh` proves the
+  mechanism ([#620](https://github.com/ashlrai/locus/pull/620)).
 - `scripts/queue-recut-plan.mjs BASE BRANCH...`: read-only planner that
   classifies branches as `clean`, `stale` or `conflicting` against a base
   using `git merge-tree`, printing stable JSON. See
@@ -128,6 +138,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   [#923](https://github.com/ashlrai/locus/pull/923),
   [#931](https://github.com/ashlrai/locus/pull/931),
   [#941](https://github.com/ashlrai/locus/pull/941)).
+- Individual script and recipe-runner regression PRs in that range, by area:
+  hub-smoke ([#844](https://github.com/ashlrai/locus/pull/844),
+  [#854](https://github.com/ashlrai/locus/pull/854),
+  [#869](https://github.com/ashlrai/locus/pull/869),
+  [#874](https://github.com/ashlrai/locus/pull/874),
+  [#897](https://github.com/ashlrai/locus/pull/897),
+  [#898](https://github.com/ashlrai/locus/pull/898),
+  [#922](https://github.com/ashlrai/locus/pull/922),
+  [#940](https://github.com/ashlrai/locus/pull/940)); hub-integration
+  ([#840](https://github.com/ashlrai/locus/pull/840),
+  [#849](https://github.com/ashlrai/locus/pull/849),
+  [#870](https://github.com/ashlrai/locus/pull/870),
+  [#873](https://github.com/ashlrai/locus/pull/873),
+  [#925](https://github.com/ashlrai/locus/pull/925),
+  [#929](https://github.com/ashlrai/locus/pull/929),
+  [#938](https://github.com/ashlrai/locus/pull/938)); dogfood
+  ([#850](https://github.com/ashlrai/locus/pull/850),
+  [#855](https://github.com/ashlrai/locus/pull/855),
+  [#858](https://github.com/ashlrai/locus/pull/858),
+  [#868](https://github.com/ashlrai/locus/pull/868),
+  [#872](https://github.com/ashlrai/locus/pull/872),
+  [#892](https://github.com/ashlrai/locus/pull/892),
+  [#937](https://github.com/ashlrai/locus/pull/937)); e2e
+  ([#841](https://github.com/ashlrai/locus/pull/841),
+  [#860](https://github.com/ashlrai/locus/pull/860),
+  [#861](https://github.com/ashlrai/locus/pull/861),
+  [#894](https://github.com/ashlrai/locus/pull/894),
+  [#896](https://github.com/ashlrai/locus/pull/896),
+  [#939](https://github.com/ashlrai/locus/pull/939)); recipe runner
+  ([#846](https://github.com/ashlrai/locus/pull/846),
+  [#847](https://github.com/ashlrai/locus/pull/847),
+  [#875](https://github.com/ashlrai/locus/pull/875),
+  [#890](https://github.com/ashlrai/locus/pull/890),
+  [#911](https://github.com/ashlrai/locus/pull/911),
+  [#912](https://github.com/ashlrai/locus/pull/912)); and `check-crypto`
+  ([#904](https://github.com/ashlrai/locus/pull/904)).
+- `scripts/fast-check.sh` creates its scratch file under `${TMPDIR:-/tmp}`
+  with a `locus-fast-check` prefix, and
+  [docs/temp-parent-reference.md](docs/temp-parent-reference.md) documents the
+  temp-parent rules ([#827](https://github.com/ashlrai/locus/pull/827)).
 
 - Added `.devin/wiki.json` to steer DeepWiki generation, with
   [docs/deepwiki.md](docs/deepwiki.md), a contract test in
