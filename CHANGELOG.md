@@ -73,6 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation and tests
 
+- `docs/adapters.md` now lists all nine built-in adapters (supabase, github,
+  vercel, cloudflare, aws, resend, stripe, anthropic, openai) and the full
+  `adapter_for()` match, instead of the original three. Every `locus`
+  command and `--flag` in the README and docs was re-checked against the
+  built binary; no other drift was found.
 - Removed two committed Python bytecode files from `scripts/tests/` and
   ignored `__pycache__/` and `*.pyc`.
 - Expanded script and wrapper regression coverage: hub-smoke,
