@@ -356,7 +356,7 @@ test('no em dashes or en dashes anywhere in public/', () => {
 
 test('security.txt is served under .well-known with required fields', () => {
   const text = read('.well-known/security.txt');
-  assert.match(text, /^Contact: mailto:security@ashlr\.ai/m);
+  assert.match(text, /^Contact: mailto:support@ashlr\.ai/m);
   assert.match(text, /^Expires: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z/m);
   assert.ok(existsSync(join(PUBLIC, '.well-known', 'security.txt')));
 });
