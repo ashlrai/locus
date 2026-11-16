@@ -1,12 +1,23 @@
 # macOS smoke test for the npm wrappers: pack, install the tarball globally,
 # run `locus --version`, and fail on a wrapper self-exec loop (the 0.5.0 hang).
-# Not a required check. Runs only when the wrappers or this file change, or
-# by hand.
+# Not a required check. A push to main runs only when the wrapper, the release
+# CLI build inputs, or this workflow change. The schedule still runs unfiltered.
 name: npm wrapper macOS smoke
 
-# Runs with the scheduled full suite (6 AM and 6 PM ET) and on dispatch, off
-# PRs, the merge queue and main pushes, so they only wait on CI Gate.
+# Runs after a filtered main push, with the scheduled full suite (6 AM and
+# 6 PM ET), and on dispatch. PRs and the merge queue still wait on CI Gate only.
 on:
+  push:
+    branches: [main]
+    paths:
+      - "npm/**"
+      - "crates/**"
+      - "adapters/**"
+      - "apps/dashboard/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - ".github/workflows/npm-wrapper-macos.yml"
   schedule:
     - cron: "59 10 * * *"
     - cron: "59 22 * * *"
@@ -15,9 +26,12 @@ on:
 permissions:
   contents: read
 
+# A burst of pushes to one ref shares a group and the newer run cancels the
+# older. Schedule and dispatch keep a per-run group so a main push cannot
+# cancel them.
 concurrency:
-  group: npm-wrapper-macos-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: npm-wrapper-macos-${{ github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 jobs:
   smoke:

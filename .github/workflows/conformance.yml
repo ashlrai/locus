@@ -2,9 +2,11 @@
 # INV suite, MCP protocol, hub-smoke, and full e2e shell pack.
 name: Conformance
 
-# Runs with the scheduled full suite (6 AM and 6 PM ET) and on dispatch, off
-# PRs, the merge queue and main pushes, so they only wait on CI Gate.
+# Runs after merge on main, with the scheduled full suite (6 AM and 6 PM ET),
+# and on dispatch. PRs and the merge queue still wait on CI Gate only.
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "57 10 * * *"
     - cron: "57 22 * * *"
@@ -14,10 +16,12 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded PR runs; never cancel main/master.
+# A burst of pushes to one ref shares a group and the newer run cancels the
+# older. Schedule and dispatch keep a per-run group so a main push cannot
+# cancel them.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: conformance-${{ github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 env:
   CARGO_TERM_COLOR: always
