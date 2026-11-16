@@ -15,10 +15,37 @@ function fixture(files) {
   return root;
 }
 
+test('empty input produces a passing zero-file report', (t) => {
+  const root = fixture({ 'src/empty.ts': '' });
+  t.after(() => rmSync(root, { recursive: true }));
+  const hits = scan(root);
+  assert.deepEqual(hits, []);
+  assert.deepEqual(report(hits), {
+    text: 'classical asymmetric crypto: 0 file(s), 0 not on the allowlist',
+    failed: false,
+  });
+});
+
 test('hashes, HMAC and symmetric AEAD are not flagged', () => {
   const root = fixture({ 'src/a.ts': "createHash('sha256'); createHmac('sha256', k); chacha20poly1305", 'src/b.rs': 'use sha2::Sha256;' });
   assert.deepEqual(scan(root), []);
   rmSync(root, { recursive: true });
+});
+
+test('comments alone do not produce findings', (t) => {
+  const root = fixture({
+    'src/comments.ts': '// ECDSA\n/* RSA-PSS\n Ed25519 */\n',
+    'src/comments.rs': '/// x25519\n/* createSign */\n',
+    'config.toml': '# rsa = "example"\n',
+  });
+  t.after(() => rmSync(root, { recursive: true }));
+  assert.deepEqual(scan(root), []);
+});
+
+test('code following a block comment is still scanned', (t) => {
+  const root = fixture({ 'src/key.ts': '/* note */ ECDSA;\n' });
+  t.after(() => rmSync(root, { recursive: true }));
+  assert.deepEqual(scan(root).map((hit) => hit.kinds), [['ECDSA/ECDH']]);
 });
 
 test('classical asymmetric use is flagged and fails the report', () => {
@@ -46,6 +73,47 @@ test('multiple crypto kinds retain default code-unit ordering', (t) => {
   const root = fixture({ 'src/mixed.ts': 'createSign(); ECDSA; Ed25519; generateKeyPairSync();' });
   t.after(() => rmSync(root, { recursive: true }));
   assert.deepEqual(scan(root)[0].kinds, ['DH', 'ECDSA/ECDH', 'Ed25519/X25519', 'RSA']);
+});
+
+test('CRLF and LF fixtures produce the same findings and report lines', (t) => {
+  const source = [
+    '// first line',
+    'createSign();',
+    '// unrelated line',
+    'ECDSA; Ed25519;',
+    '',
+  ].join('\n');
+  const lf = fixture({ 'src/crypto.ts': source });
+  const crlf = fixture({ 'src/crypto.ts': source.replaceAll('\n', '\r\n') });
+  t.after(() => {
+    rmSync(lf, { recursive: true });
+    rmSync(crlf, { recursive: true });
+  });
+
+  const lfHits = scan(lf);
+  const crlfHits = scan(crlf);
+  assert.deepEqual(lfHits, [{
+    file: 'src/crypto.ts',
+    kinds: ['ECDSA/ECDH', 'Ed25519/X25519', 'RSA'],
+    allowed: false,
+    reason: undefined,
+  }]);
+  assert.deepEqual(crlfHits, lfHits);
+  const lfReport = report(lfHits);
+  const crlfReport = report(crlfHits);
+  assert.deepEqual(crlfReport, lfReport);
+  assert.match(crlfReport.text.split('\n')[1], /FLAG src\/crypto\.ts/);
+});
+
+test('crypto tokens match at word boundaries, not inside identifiers', (t) => {
+  const root = fixture({
+    'src/embedded.ts': 'const myECDSAKey = 1; const ed25519_key = 2;',
+    'src/bounded.ts': 'const algorithm = "ECDSA";',
+  });
+  t.after(() => rmSync(root, { recursive: true }));
+  assert.deepEqual(scan(root).map(({ file, kinds }) => ({ file, kinds })), [
+    { file: 'src/bounded.ts', kinds: ['ECDSA/ECDH'] },
+  ]);
 });
 
 test('tests, docs and vendored dirs are skipped, and id_rsa paths are not RSA use', () => {

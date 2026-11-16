@@ -77,7 +77,20 @@ printf '%s\n' '{"reason":"compiler-artifact","package_id":"locus-core fixture","
 printf 'Compiling locus-core\nFinished \`release\`\n' >&2
 `);
     await chmod(cargo, 0o755);
-    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir, CALL_LOG: join(dir, 'args') };
+    // macOS mktemp resolves a bare `mktemp -d` under the per-user Darwin temp
+    // directory and ignores TMPDIR, so pin the recipe's investigation dir under
+    // `dir` with a shim instead of relying on TMPDIR alone.
+    const bashEnv = join(dir, 'env.sh');
+    await writeFile(bashEnv, `mktemp() {
+  if [[ "$*" == -d ]]; then
+    command mktemp -d "$RECIPE_WATCH/mktemp.XXXXXX"
+  else
+    command mktemp "$@"
+  fi
+}
+`);
+    const env = { ...process.env, PATH: `${dir}:${process.env.PATH}`, TMPDIR: dir,
+      BASH_ENV: bashEnv, RECIPE_WATCH: dir, CALL_LOG: join(dir, 'args') };
     const run = (extra = {}) => spawnSync('bash', ['-c', recipe], {
       cwd: repository, env: { ...env, ...extra }, encoding: 'utf8',
     });

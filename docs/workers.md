@@ -16,7 +16,7 @@ When spawning:
 
 1. Ambient identity env is scrubbed (`AWS_PROFILE`, `GH_TOKEN`, …).
 2. Only the pinned binding’s `LOCUS_*` surface is injected.
-3. Optional `resolve_secrets` pulls `phm:` / `env:` into the child only.
+3. Optional `resolve_secrets` injects supported `env:` credentials into the child only. `phm:` resolution fails closed; see [credential compatibility](credential-compatibility.md).
 4. Private `GH_CONFIG_DIR` / AWS config paths under the session worker home.
 5. Optional **sandbox** (below) when `LOCUS_WORKER_SANDBOX=1` or `upstream.sandbox = true`.
 
@@ -112,7 +112,7 @@ the addressed provider's scoped credential.
 [[binding.providers]]
 provider = "github"
 account = "acme"
-credential_ref = "phm:GH_TOKEN_ACME"
+credential_ref = "env:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"] }
 # Sandbox-compatible npx recipe — expands to command/args + hardened defaults:
 upstream = { recipe = "github-mcp", resolve_secrets = true, sandbox = true }
@@ -148,7 +148,7 @@ locus upstream suggest vercel
 
 Recipe table source: [`adapters/recipes.toml`](../adapters/recipes.toml). Explicit `command` / `args` replace the recipe's command or arguments, but do not disable its sandbox policy. Compatible recipes adopt `default_sandbox`, including command-only and args-only overrides; explicit `sandbox = false` remains the opt-out. Recipes whose machine-readable `readiness` is `explicit_unsandboxed_required` are unavailable when `sandbox` is omitted or true, and run only after an explicit `sandbox = false` acknowledgement. `LOCUS_WORKER_SANDBOX=1` makes those recipes fail closed instead of producing a false sandbox claim.
 
-The macOS Seatbelt profile permits outbound TCP/UDP provider connections, but denies application-created inbound listeners and non-system Unix-domain sockets. It imports Apple's `system.sb` and `system-network` baseline and allows `system-socket`, so OS-defined system-service IPC such as logging is intentionally outside the blanket denial claim. Native tests prove denial for an arbitrary external Unix socket, `/var/run/docker.sock` when present, Docker Desktop-style sockets, and TCP OAuth listeners. Locus never grants a Docker socket or blanket inbound networking. Docker therefore remains a host-level, high-authority execution path outside the filesystem boundary. The Vercel bridge remains unsandboxed until Locus can separate and attest OAuth bootstrap from a cached-auth steady state; host-native remote MCP is preferred meanwhile.
+The macOS Seatbelt profile permits outbound TCP/UDP provider connections, but denies application-created inbound listeners and non-system Unix-domain sockets. It imports Apple's `system.sb` and `system-network` baseline and allows `system-socket`, so OS-defined system-service IPC such as logging is intentionally outside the blanket denial claim. When Seatbelt can apply on the test host, native tests cover denial for an arbitrary external Unix socket, `/var/run/docker.sock` when present, Docker Desktop-style sockets, and TCP OAuth listeners. Those real-sandbox tests return early when the host refuses to apply Seatbelt; a passing test run on such a host does not verify those boundaries. Locus never grants a Docker socket or blanket inbound networking. Docker therefore remains a host-level, high-authority execution path outside the filesystem boundary. The Vercel bridge remains unsandboxed until Locus can separate and attest OAuth bootstrap from a cached-auth steady state; host-native remote MCP is preferred meanwhile.
 
 **Remote URLs (host MCP, not Locus workers):** Supabase `https://mcp.supabase.com/mcp` (optional `?project_ref=…`); Vercel `https://mcp.vercel.com` (OAuth). Locus upstream workers are **stdio** only today. Use host-native remote MCP when the client supports it; the `vercel-mcp` bridge is an explicit unsandboxed fallback.
 

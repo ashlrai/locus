@@ -13,6 +13,284 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The authority anchor's test-harness detection now recognises cargo's
+  `build/<package>/<hash>/out/<exe>` test layout (newer cargo with a separate
+  build-dir) as well as `.../deps/<exe>`, so coverage runs no longer misread a
+  test binary as an installed one. Installed binaries still match neither
+  layout and keep the strict path
+  ([#951](https://github.com/ashlrai/locus/pull/951)).
+- `locus mcp list` now fails with `cannot determine live HTTP session counts`
+  when session records cannot be read or parsed, instead of reporting
+  incomplete per-grant counts as zero
+  ([#948](https://github.com/ashlrai/locus/pull/948)).
+- Policy glob `?` now matches one Unicode scalar value rather than one byte,
+  so deny and approval rules also match non-ASCII tool names
+  ([#824](https://github.com/ashlrai/locus/pull/824)).
+- Recovery guidance for expired, invalid and frozen pins now names the
+  appropriate human recovery steps. MCP reports stale pins as broken rather
+  than absent ([#819](https://github.com/ashlrai/locus/pull/819)).
+- The npm `locus-cli` wrapper now replaces a `locus` bin symlink that points
+  somewhere other than the resolved native binary, instead of skipping every
+  existing symlink and leaving a stale link in place
+  ([#915](https://github.com/ashlrai/locus/pull/915)).
+- `scripts/e2e.sh` and `scripts/dogfood.sh` now trap `INT` and `TERM` (and
+  `HUP` in dogfood) so an interrupted run exits with the conventional signal
+  status and still runs its temp-home cleanup; graph import fails fast when
+  `mktemp` cannot create `GRAPH_HOME`
+  ([#891](https://github.com/ashlrai/locus/pull/891),
+  [#933](https://github.com/ashlrai/locus/pull/933),
+  [#934](https://github.com/ashlrai/locus/pull/934)).
+- `scripts/check-crypto.mjs` ignores standalone `//`, `/* */` and TOML `#`
+  comments, so prose that names a primitive no longer counts as crypto usage
+  ([#908](https://github.com/ashlrai/locus/pull/908)).
+- The web discoverability generator treats `og.png` as unchanged when the
+  decoded pixels match, so a different zlib build no longer reports a
+  spurious diff ([#943](https://github.com/ashlrai/locus/pull/943)).
+- `examples/recipes/run.mjs` skips with a clear `--locus <absolute-path>`
+  hint when the supplied binary is not executable
+  ([#900](https://github.com/ashlrai/locus/pull/900)).
+
+### Added
+
+- Drop-in end-to-end steps: new steps go in `scripts/e2e.d/NN-topic.sh`
+  (see [scripts/e2e.d/README.md](scripts/e2e.d/README.md)) instead of
+  growing `scripts/e2e.sh`, and `bash scripts/check-e2e-dropin.sh` proves the
+  mechanism ([#620](https://github.com/ashlrai/locus/pull/620)).
+- `scripts/queue-recut-plan.mjs BASE BRANCH...`: read-only planner that
+  classifies branches as `clean`, `stale` or `conflicting` against a base
+  using `git merge-tree`, printing stable JSON. See
+  [scripts/queue-recut-plan.md](scripts/queue-recut-plan.md)
+  ([#859](https://github.com/ashlrai/locus/pull/859)).
+
+### Changed
+
+- Removed the unused `executable` field from the sandbox spawn plan
+  ([#832](https://github.com/ashlrai/locus/pull/832)).
+- The release workflow installs npm 11.19.0 (was 11.6.2) before publishing
+  ([#842](https://github.com/ashlrai/locus/pull/842)).
+
+### Documentation and tests
+
+- `docs/adapters.md` now lists all nine built-in adapters (supabase, github,
+  vercel, cloudflare, aws, resend, stripe, anthropic, openai) and the full
+  `adapter_for()` match, instead of the original three. Every `locus`
+  command and `--flag` in the README and docs was re-checked against the
+  built binary; no other drift was found.
+- Removed two committed Python bytecode files from `scripts/tests/` and
+  ignored `__pycache__/` and `*.pyc`.
+- Expanded script and wrapper regression coverage: hub-smoke,
+  hub-integration, e2e and dogfood cleanup and temp-home cases,
+  `check-crypto`, recipe runner and npm wrapper tests
+  ([#885](https://github.com/ashlrai/locus/pull/885),
+  [#886](https://github.com/ashlrai/locus/pull/886),
+  [#893](https://github.com/ashlrai/locus/pull/893),
+  [#895](https://github.com/ashlrai/locus/pull/895),
+  [#901](https://github.com/ashlrai/locus/pull/901),
+  [#903](https://github.com/ashlrai/locus/pull/903),
+  [#917](https://github.com/ashlrai/locus/pull/917),
+  [#927](https://github.com/ashlrai/locus/pull/927),
+  [#928](https://github.com/ashlrai/locus/pull/928),
+  [#930](https://github.com/ashlrai/locus/pull/930),
+  [#936](https://github.com/ashlrai/locus/pull/936),
+  [#944](https://github.com/ashlrai/locus/pull/944),
+  [#945](https://github.com/ashlrai/locus/pull/945)).
+
+- Clarified quickstart workspace selection, human pin authority, supervised
+  MCP provider tools and advisory doctor exit codes in onboarding guidance.
+
+- Contributor link checking now covers `docs/*.md` as well as the README
+  (`node scripts/check-readme-links.mjs README.md docs/*.md`)
+  ([#843](https://github.com/ashlrai/locus/pull/843)).
+- Rust regression tests: routed CLI env scrubs unselected provider
+  credentials and `inherit_env` ([#834](https://github.com/ashlrai/locus/pull/834),
+  [#879](https://github.com/ashlrai/locus/pull/879),
+  [#889](https://github.com/ashlrai/locus/pull/889)); `locus exec` exit-code
+  propagation and `--expect` ([#927](https://github.com/ashlrai/locus/pull/927),
+  [#848](https://github.com/ashlrai/locus/pull/848)); session budget exact
+  limits ([#883](https://github.com/ashlrai/locus/pull/883),
+  [#921](https://github.com/ashlrai/locus/pull/921)); stale pin recovery
+  ([#920](https://github.com/ashlrai/locus/pull/920)); closed stdout and
+  `--json` error envelopes ([#876](https://github.com/ashlrai/locus/pull/876),
+  [#877](https://github.com/ashlrai/locus/pull/877),
+  [#888](https://github.com/ashlrai/locus/pull/888)); MCP protocol, stdio
+  lifecycle and HTTP transport ([#878](https://github.com/ashlrai/locus/pull/878),
+  [#882](https://github.com/ashlrai/locus/pull/882),
+  [#902](https://github.com/ashlrai/locus/pull/902)); gateway base URLs
+  ([#880](https://github.com/ashlrai/locus/pull/880),
+  [#919](https://github.com/ashlrai/locus/pull/919)); `doctor --fix`
+  ([#881](https://github.com/ashlrai/locus/pull/881)); agent report and pin
+  history empty states ([#909](https://github.com/ashlrai/locus/pull/909),
+  [#910](https://github.com/ashlrai/locus/pull/910)); and doc facts
+  ([#924](https://github.com/ashlrai/locus/pull/924)).
+- npm wrapper tests for relinking, self-exec guards and install paths
+  ([#845](https://github.com/ashlrai/locus/pull/845),
+  [#857](https://github.com/ashlrai/locus/pull/857),
+  [#863](https://github.com/ashlrai/locus/pull/863),
+  [#864](https://github.com/ashlrai/locus/pull/864),
+  [#867](https://github.com/ashlrai/locus/pull/867),
+  [#884](https://github.com/ashlrai/locus/pull/884)
+  to [#887](https://github.com/ashlrai/locus/pull/887),
+  [#914](https://github.com/ashlrai/locus/pull/914),
+  [#918](https://github.com/ashlrai/locus/pull/918)).
+- Script harness coverage for temp-home creation, containment, interruption
+  and cleanup across `e2e`, `dogfood`, `hub-smoke`, `hub-integration-test`,
+  the archive installer and the recipe runner (#838 to #941, including
+  [#852](https://github.com/ashlrai/locus/pull/852),
+  [#853](https://github.com/ashlrai/locus/pull/853),
+  [#871](https://github.com/ashlrai/locus/pull/871),
+  [#923](https://github.com/ashlrai/locus/pull/923),
+  [#931](https://github.com/ashlrai/locus/pull/931),
+  [#941](https://github.com/ashlrai/locus/pull/941)).
+- Individual script and recipe-runner regression PRs in that range, by area:
+  hub-smoke ([#844](https://github.com/ashlrai/locus/pull/844),
+  [#854](https://github.com/ashlrai/locus/pull/854),
+  [#869](https://github.com/ashlrai/locus/pull/869),
+  [#874](https://github.com/ashlrai/locus/pull/874),
+  [#897](https://github.com/ashlrai/locus/pull/897),
+  [#898](https://github.com/ashlrai/locus/pull/898),
+  [#922](https://github.com/ashlrai/locus/pull/922),
+  [#940](https://github.com/ashlrai/locus/pull/940)); hub-integration
+  ([#840](https://github.com/ashlrai/locus/pull/840),
+  [#849](https://github.com/ashlrai/locus/pull/849),
+  [#870](https://github.com/ashlrai/locus/pull/870),
+  [#873](https://github.com/ashlrai/locus/pull/873),
+  [#925](https://github.com/ashlrai/locus/pull/925),
+  [#929](https://github.com/ashlrai/locus/pull/929),
+  [#938](https://github.com/ashlrai/locus/pull/938)); dogfood
+  ([#850](https://github.com/ashlrai/locus/pull/850),
+  [#855](https://github.com/ashlrai/locus/pull/855),
+  [#858](https://github.com/ashlrai/locus/pull/858),
+  [#868](https://github.com/ashlrai/locus/pull/868),
+  [#872](https://github.com/ashlrai/locus/pull/872),
+  [#892](https://github.com/ashlrai/locus/pull/892),
+  [#937](https://github.com/ashlrai/locus/pull/937)); e2e
+  ([#841](https://github.com/ashlrai/locus/pull/841),
+  [#860](https://github.com/ashlrai/locus/pull/860),
+  [#861](https://github.com/ashlrai/locus/pull/861),
+  [#894](https://github.com/ashlrai/locus/pull/894),
+  [#896](https://github.com/ashlrai/locus/pull/896),
+  [#939](https://github.com/ashlrai/locus/pull/939)); recipe runner
+  ([#846](https://github.com/ashlrai/locus/pull/846),
+  [#847](https://github.com/ashlrai/locus/pull/847),
+  [#875](https://github.com/ashlrai/locus/pull/875),
+  [#890](https://github.com/ashlrai/locus/pull/890),
+  [#911](https://github.com/ashlrai/locus/pull/911),
+  [#912](https://github.com/ashlrai/locus/pull/912)); and `check-crypto`
+  ([#904](https://github.com/ashlrai/locus/pull/904)).
+- `scripts/fast-check.sh` creates its scratch file under `${TMPDIR:-/tmp}`
+  with a `locus-fast-check` prefix, and
+  [docs/temp-parent-reference.md](docs/temp-parent-reference.md) documents the
+  temp-parent rules ([#827](https://github.com/ashlrai/locus/pull/827)).
+
+- Added `.devin/wiki.json` to steer DeepWiki generation, with
+  [docs/deepwiki.md](docs/deepwiki.md), a contract test in
+  `scripts/devin-wiki.test.mjs`, and matching `llms.txt` and CONTRIBUTING
+  notes ([#833](https://github.com/ashlrai/locus/pull/833)).
+- Added seal tests pinning a known HMAC vector, identity-change rejection and
+  key-hex length validation, plus loopback tests for parsed URL hosts
+  ([#831](https://github.com/ashlrai/locus/pull/831)).
+- Documented archive installer design questions and expanded workspace
+  selection and installer coverage
+  ([#823](https://github.com/ashlrai/locus/pull/823),
+  [#825](https://github.com/ashlrai/locus/pull/825)).
+- Improved macOS sandbox test preflight and expanded doctor and MCP regression
+  coverage ([#828](https://github.com/ashlrai/locus/pull/828)).
+- Fixed auto-tag workflow handling and added release workflow coverage
+  ([#821](https://github.com/ashlrai/locus/pull/821)).
+
+## [0.7.1] - 2026-11-07
+
+Highlights: clearer `locus status` empty state, deeper MCP and CLI regression
+coverage, and expanded e2e, dogfood and hub-smoke suites plus installer and
+probe documentation. No provider, seal, policy or credential behavior changed.
+
+### Fixed
+
+- **`locus status` empty state ([#814](https://github.com/ashlrai/locus/pull/814)).**
+  With no pin, `status` now says `no pin` and names the one next step
+  (`locus enter <alias>`, workspace-required variant under `require_pin`)
+  instead of a bare `!` glyph, so the hint reads plainly in every renderer.
+
+### Tests
+
+- **MCP credential-ref hygiene ([#418](https://github.com/ashlrai/locus/pull/418)).**
+  New scrubbed-environment `locus-mcp` tests assert that whoami and session
+  surfaces never echo `env:` credential references, and the sample-walkthrough
+  e2e gained coverage. `json_tty` output coverage was extended.
+- **CLI regression tests.** `cli_help_exit` pins help/usage exit behavior
+  ([#643](https://github.com/ashlrai/locus/pull/643)), `fleet_denials_q8`
+  covers fleet denial output ([#380](https://github.com/ashlrai/locus/pull/380)),
+  `binding_add_idempotent` grew cases ([#427](https://github.com/ashlrai/locus/pull/427)),
+  and `status_doctor_output` pins the readable empty state
+  ([#814](https://github.com/ashlrai/locus/pull/814)).
+- **e2e coverage.** Security home and workspace selection suites grew distinct-
+  home and spaced-tmpdir cases ([#719](https://github.com/ashlrai/locus/pull/719),
+  [#597](https://github.com/ashlrai/locus/pull/597)); graph home selection and
+  `e2e.sh` were reworked ([#537](https://github.com/ashlrai/locus/pull/537));
+  temp-home rehearsal and temp resource cleanup assertions were added
+  ([#674](https://github.com/ashlrai/locus/pull/674),
+  [#595](https://github.com/ashlrai/locus/pull/595)).
+- **hub-smoke error paths.** Distinct-directory and allocation failure cases
+  were expanded ([#804](https://github.com/ashlrai/locus/pull/804),
+  [#722](https://github.com/ashlrai/locus/pull/722)), and a cleanup-review
+  pass documents and tests interruption cleanup
+  ([#619](https://github.com/ashlrai/locus/pull/619)).
+
+### Documentation
+
+- **Installer runbook set ([#482](https://github.com/ashlrai/locus/pull/482)).**
+  New pages cover archive acceptance, platform questions and prerequisites for
+  `scripts/install.sh`, with matching test fixtures, plus a dogfood temporary-
+  resources page.
+- **Dogfood probe isolation ([#617](https://github.com/ashlrai/locus/pull/617)).**
+  `docs/dogfood-probe-isolation.md` records how probe homes stay isolated, with
+  new `dogfood.test.mjs` assertions.
+- **Release automation proposal ([#731](https://github.com/ashlrai/locus/pull/731)).**
+  `docs/release-automation.md` preserves the historical release-PR design as an
+  inactive template; the sanctioned publisher remains the qualified
+  auto-tag/release chain in [RELEASE.md](docs/RELEASE.md).
+- **e2e directory docs.** Security-directory and temp-resource pages and the
+  e2e test map now describe the current suite layout
+  ([#657](https://github.com/ashlrai/locus/pull/657),
+  [#719](https://github.com/ashlrai/locus/pull/719)).
+
+## [0.7.0] - 2026-11-06
+
+Highlights: SIEM NDJSON audit export, safer npm wrapper upgrades, idempotent `binding add`, and hardened workspace autopin writes.
+
+### Added
+
+- **SIEM event export ([#457](https://github.com/ashlrai/locus/pull/457)).**
+  `locus events export --format ndjson` emits `locus.siem.v1` records with
+  export-time redaction and a fail-closed secret scan. `--since` filters all
+  export formats using an inclusive RFC3339 timestamp or UTC date. See
+  [observability](docs/observability.md#siem-ndjson). Credential-shaped keys
+  and `phm:`, `env:` and `test:` locators are deeply redacted; contract tests
+  pin the exported event schema for downstream parsers.
+
+### Fixed
+
+- **Broker audit records ([#637](https://github.com/ashlrai/locus/pull/637)).**
+  The broker builds and sanitizes audit records from structured fields instead
+  of accepting caller-supplied raw audit lines. Executor-authenticated requests
+  are limited to child-launch operations and marked `source: executor`; they
+  cannot record control-plane operations through the broker.
+- **JSON usage errors ([#473](https://github.com/ashlrai/locus/pull/473)).**
+  Usage errors under `--json` emit a `locus.error.v1` envelope on stdout and
+  stderr, including the named usage exit code. See [exit codes](docs/exit-codes.md).
+- **Dry-run help ([#475](https://github.com/ashlrai/locus/pull/475)).**
+  `locus help <command>` now hides `--dry-run` for commands that cannot plan,
+  matching the corresponding command's `--help` output.
+
+### Security
+
+- Workspace autopin updates read the existing `.locus.toml` through a single no-follow descriptor and use a private atomic write path, preventing a swapped symlink from being read.
+
+### Internal
+
+- The MCP tool catalog and call gate moved into `lib.rs` so integration tests can exercise them directly. Dry-run, JSON-failure, README-command and registry-manifest documentation coverage was expanded.
 ### Continuous integration
 
 - **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
@@ -21,6 +299,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cannot drift from the source docs.
 
 ### Tests
+
+- **Adapter model API coverage ([#660](https://github.com/ashlrai/locus/pull/660)).**
+  Added coverage for model API adapter behavior and scope handling.
+- **Temporary root and repeated creation coverage ([#666](https://github.com/ashlrai/locus/pull/666), [#667](https://github.com/ashlrai/locus/pull/667)).**
+  Added checks for repeated dogfood home creation and hub-smoke temporary
+  directory selection with spaces in the path.
 
 - **Temporary-directory cleanup coverage ([#587](https://github.com/ashlrai/locus/pull/587), [#600](https://github.com/ashlrai/locus/pull/600)).**
   The e2e, dogfood and hub-smoke scripts now assert that their temporary homes
@@ -43,7 +327,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Shell installer proposal ([#169](https://github.com/ashlrai/locus/issues/169)).**
   The issue proposes a one-command shell installer that downloads and verifies
   a release archive, allowing installation on machines without npm or Rust.
-  This note records the proposal; it does not assert release availability.
+  The checkout includes `scripts/install.sh` ([#215](https://github.com/ashlrai/locus/pull/215));
+  installation still depends on release assets for the selected version and platform;
+  this note does not assert release availability.
 
 - **Execution latency report ([#170](https://github.com/ashlrai/locus/issues/170)).**
   The issue reports `locus exec -- true` as 3–5x slower than
@@ -151,7 +437,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **npm wrapper upgrades ([#177](https://github.com/ashlrai/locus/issues/177)).**
-  In this unreleased checkout, both wrappers compare versions using SemVer
+  In the 0.7.0 candidate, both wrappers compare versions using SemVer
   precedence, probing the binary with `--version` before falling back to its
   adjacent `.version` file. By default, an equal cached version is reused; an
   older one can be upgraded. With a newer or unversioned cache, `locus-cli`
@@ -307,7 +593,7 @@ Highlights: `locus renew` and expired-pin recovery (#193), the global `--dry-run
 
 - **Audit webhook errors no longer carry the webhook URL.** A failed `locus events export --sink webhook` post (URL from `--url` or `LOCUS_AUDIT_WEBHOOK_URL`) (a non-2xx status or a connection error) put ureq's error text in the message, and that text starts with the full URL: user name, password, path token and query token included. The error now names only `scheme://host` and the status or transport kind. A new test posts to a 401, a 500 and a closed port with canary tokens in the path, query and password and fails on any 8-character run of them.
 
-- **`locus dashboard` / `locus serve --open` no longer put `LOCUS_DASHBOARD_TOKEN` in the opened URL.** The browser opener (`open`, `xdg-open`, `gio`, `cmd /C start`) received `http://127.0.0.1:<port>/?token=<token>` as an argument, visible to other local users in `ps`, and the browser kept it in history. The plain URL is opened; with a token set the page's token gate asks for it once. `?token=` is still accepted by the API.
+- **`locus dashboard` / `locus serve --open` no longer put `LOCUS_DASHBOARD_TOKEN` in the opened URL.** The browser opener (`open`, `xdg-open`, `gio`, `cmd /C start`) received http://127.0.0.1:<port>/?token=<token> as an argument, visible to other local users in `ps`, and the browser kept it in history. The plain URL is opened; with a token set the page's token gate asks for it once. `?token=` is still accepted by the API.
 
 ### Added
 
@@ -1336,7 +1622,12 @@ Synthetic identity/scope tools with hard freeze on account selectors:
 - Team binding graph / multi-namespace sessions — later (see [PLAN.md](./PLAN.md)); experimental `--ns` is local-only
 - Homebrew source `sha256` must be refreshed after each tag (see [docs/RELEASE.md](./docs/RELEASE.md))
 
-[Unreleased]: https://github.com/ashlrai/locus/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/ashlrai/locus/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/ashlrai/locus/compare/v0.6.2...v0.7.0
+[0.6.2]: https://github.com/ashlrai/locus/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/ashlrai/locus/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/ashlrai/locus/compare/v0.5.2...v0.6.0
+[0.5.2]: https://github.com/ashlrai/locus/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/ashlrai/locus/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/ashlrai/locus/releases/tag/v0.5.0
 [0.4.0]: https://github.com/ashlrai/locus/releases/tag/v0.4.0

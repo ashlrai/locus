@@ -12,6 +12,30 @@ const { delimiter, join, resolve } = require("node:path");
 
 const wrapper = process.env.LOCUS_WRAPPER_UNDER_TEST || resolve(__dirname, "..", "bin", "locus.js");
 
+test("requiring each npm wrapper does not start a child process", async () => {
+  const childProcess = require("node:child_process");
+  const methods = ["spawn", "spawnSync", "exec", "execSync", "execFile", "execFileSync", "fork"];
+  const originals = Object.fromEntries(methods.map((method) => [method, childProcess[method]]));
+  const calls = [];
+  try {
+    for (const method of methods) {
+      childProcess[method] = () => {
+        calls.push(method);
+        throw new Error(`unexpected child_process.${method} during import`);
+      };
+    }
+    for (const path of [wrapper, resolve(__dirname, "..", "..", "npm-mcp", "bin", "locus-mcp.js")]) {
+      delete require.cache[require.resolve(path)];
+      assert.doesNotThrow(() => require(path), `import failed: ${path}`);
+    }
+    // Allow promise callbacks scheduled during module initialization to run.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(calls, [], "imports must not start child processes");
+  } finally {
+    Object.assign(childProcess, originals);
+  }
+});
+
 test("locus: a `locus` on PATH that is this wrapper is never executed (no self-exec loop)", { skip: process.platform === "win32" && "npm -g uses .cmd shims on Windows" }, () => {
   const home = mkdtempSync(join(tmpdir(), "locus-noloop-"));
   try {
@@ -59,5 +83,42 @@ test("locus: a `locus` on PATH that is this wrapper is never executed (no self-e
     assert.match(result.stderr, /No prebuilt locus binary for linux-arm64/);
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+  // Exercise the same installed wrapper from a directory with spaces and
+  // verify that it finds and invokes the native cargo installation.
+  const spacesHome = mkdtempSync(join(tmpdir(), "locus-spaces-"));
+  try {
+    const cwd = join(spacesHome, "directory with spaces");
+    const bin = join(cwd, "bin with spaces");
+    const cargoBin = join(spacesHome, ".cargo", "bin");
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(cargoBin, { recursive: true });
+    const installedWrapper = join(cwd, "locus wrapper.js");
+    copyFileSync(wrapper, installedWrapper);
+    chmodSync(installedWrapper, 0o755);
+    symlinkSync(installedWrapper, join(bin, "locus"));
+    // `which` sees the wrapper first; the native cargo installation is the fallback.
+    writeFileSync(join(cargoBin, "locus"), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "locus 0.7.1"; else printf "target: <%s>\\n" "$1"; fi\n', { mode: 0o755 });
+    const marker = join(spacesHome, "starts.log");
+    const counter = join(spacesHome, "count.js");
+    writeFileSync(counter, `require("fs").appendFileSync(${JSON.stringify(marker)}, "x");\n`);
+    const result = spawnSync(process.execPath, ["--require", counter, join(bin, "locus"), "argument with spaces"], {
+      cwd,
+      env: {
+        HOME: spacesHome,
+        USERPROFILE: spacesHome,
+        PATH: [bin, join(process.execPath, ".."), "/usr/bin", "/bin"].join(delimiter),
+        NODE_OPTIONS: `--require ${JSON.stringify(counter)}`,
+        LOCUS_NPM_NO_LINK: "1",
+      },
+      encoding: "utf8",
+      timeout: 20_000,
+      killSignal: "SIGKILL",
+    });
+    assert.equal(result.status, 0, `wrapper failed: ${result.stderr}; signal: ${result.signal}`);
+    assert.equal(require("node:fs").readFileSync(marker, "utf8"), "x", "wrapper recursively executed itself");
+    assert.equal(result.stdout, "target: <argument with spaces>\n");
+  } finally {
+    rmSync(spacesHome, { recursive: true, force: true });
   }
 });

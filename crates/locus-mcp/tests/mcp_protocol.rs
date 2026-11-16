@@ -61,7 +61,21 @@ impl McpClient {
         extra_env: &[(&str, &str)],
         args: &[&str],
     ) -> Self {
+        Self::spawn_args_with_scrub(locus_home, framing, cwd, extra_env, args, false)
+    }
+
+    fn spawn_args_with_scrub(
+        locus_home: &std::path::Path,
+        framing: Framing,
+        cwd: Option<&std::path::Path>,
+        extra_env: &[(&str, &str)],
+        args: &[&str],
+        scrub: bool,
+    ) -> Self {
         let mut cmd = Command::new(mcp_bin());
+        if scrub {
+            cmd.env_clear().env("HOME", locus_home);
+        }
         cmd.args(args)
             .env("LOCUS_HOME", locus_home)
             // Default off so tests without workspace defaults stay unpinned.
@@ -1035,6 +1049,10 @@ fn broker_session_gates_sandbox_start_and_scopes_each_provider_environment() {
         std::path::Path::new("/usr/bin/sandbox-exec").is_file(),
         "native Seatbelt backend is required for this integration regression"
     );
+    if !seatbelt_apply_permitted() {
+        eprintln!("skip: host refuses sandbox_apply; Seatbelt sandbox cannot run here");
+        return;
+    }
 
     let dir = tempdir().unwrap();
     let home = dir.path().join("locus-home");
@@ -1225,6 +1243,83 @@ fn locus_heartbeat_and_enter_hint() {
     assert_eq!(body["seal_ok"], true);
     assert_eq!(body["frozen"], false);
     assert_eq!(body["binding"], "acme");
+}
+
+/// Expired pin: every agent-facing surface must name the working recovery —
+/// `locus leave --force` then `locus enter` — never a bare `locus pin`, which
+/// the store refuses for an expired pin (SessionExpired).
+#[test]
+fn expired_pin_surfaces_name_force_leave_recovery() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    store.pin("acme", dir.path(), None, false).unwrap();
+    // Authentic but expired: reseal keeps the HMAC valid while TTL has passed.
+    let path = store.active_session_path();
+    let mut s: locus_core::Session =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    s.pinned_at = chrono::Utc::now() - chrono::Duration::hours(2);
+    s.expires_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+    s.reseal(&store.seal_key().unwrap());
+    std::fs::write(&path, serde_json::to_vec(&s).unwrap()).unwrap();
+
+    let mut client = McpClient::spawn(dir.path(), Framing::Ndjson);
+    handshake(&mut client);
+
+    // locus_safe_next: the command field is what agents relay to the human —
+    // it must be the teardown recipe, and the executor-authority override
+    // must not mask a re_pin verdict with `locus mcp --supervised`.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_safe_next", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&resp);
+    assert!(is_err, "safe_next should flag not-ready: {text}");
+    let body: Value = serde_json::from_str(&text).expect("safe_next json");
+    assert_eq!(body["action"], "re_pin", "{body}");
+    let command = body["command"].as_str().unwrap_or("");
+    assert!(command.contains("locus leave --force"), "{command}");
+    assert!(command.contains("locus enter acme"), "{command}");
+    assert!(!command.contains("locus pin acme"), "{command}");
+
+    // locus_heartbeat hint names the same teardown.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_heartbeat", "arguments": {} }),
+    );
+    let (text, _) = McpClient::tool_text(&resp);
+    let body: Value = serde_json::from_str(&text).expect("heartbeat json");
+    assert_eq!(body["expired"], true, "{body}");
+    let hint = body["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("locus leave --force"), "{hint}");
+    assert!(hint.contains("locus enter"), "{hint}");
+
+    // locus_whoami reports the pin as present-but-expired — not `pinned:
+    // false`, which reads as "no pin, just pin again".
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "locus_whoami", "arguments": {} }),
+    );
+    let (text, _) = McpClient::tool_text(&resp);
+    let body: Value = serde_json::from_str(&text).expect("whoami json");
+    assert_eq!(body["pinned"], true, "{body}");
+    assert_eq!(body["expired"], true, "{body}");
+    let hint = body["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("locus leave --force"), "{hint}");
+    assert!(hint.contains("locus enter acme"), "{hint}");
+
+    // Provider gate: session_expired hint names the working recovery.
+    let resp = client.request(
+        "tools/call",
+        json!({ "name": "github.scope", "arguments": {} }),
+    );
+    let (text, is_err) = McpClient::tool_text(&resp);
+    assert!(is_err, "provider call should fail: {text}");
+    let body: Value = serde_json::from_str(&text).expect("provider error json");
+    assert_eq!(body["error"], "session_expired", "{body}");
+    let hint = body["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("locus leave --force"), "{hint}");
+    assert!(hint.contains("locus enter acme"), "{hint}");
 }
 
 #[test]
@@ -1479,6 +1574,78 @@ fn resource_doctor_reports_malformed_binding_instead_of_erroring() {
         findings.iter().any(|f| f["code"] == "binding_invalid"),
         "{body}"
     );
+}
+
+#[test]
+fn scrubbed_environment_whoami_and_session_hide_credential_refs() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    sample_bindings(&store);
+    let mut binding = store.load_binding("acme").unwrap();
+    for provider in &mut binding.providers {
+        provider.credential_ref = match provider.provider.as_str() {
+            "github" => "env:GH_TOKEN_ACME",
+            "vercel" => "env:VERCEL_TOKEN_ACME",
+            "supabase" => "env:SUPABASE_ACME",
+            other => panic!("unexpected provider: {other}"),
+        }
+        .into();
+    }
+    store.save_binding(&binding).unwrap();
+    store
+        .pin("acme", dir.path(), Some("scrubbed-mcp".into()), false)
+        .unwrap();
+
+    // A fresh child receives only the explicitly supplied control environment.
+    let mut client =
+        McpClient::spawn_args_with_scrub(dir.path(), Framing::Ndjson, None, &[], &[], true);
+    handshake(&mut client);
+    let who = client.request(
+        "tools/call",
+        json!({"name": "locus_whoami", "arguments": {}}),
+    );
+    assert_eq!(who["result"]["isError"], false, "{who}");
+    let (who_text, _) = McpClient::tool_text(&who);
+    let session = client.request("resources/read", json!({"uri": "locus://session"}));
+    assert_eq!(
+        session["result"]["contents"][0]["uri"], "locus://session",
+        "{session}"
+    );
+    let session_text = parse_resource_text(&session);
+    for text in [&who_text, &session_text] {
+        let body: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(body["binding_alias"], "acme");
+        assert_eq!(body["tenant"], "acme-corp");
+        assert_eq!(body["seal_ok"], true);
+        let providers = body["providers"].as_array().unwrap();
+        let mut names: Vec<_> = providers
+            .iter()
+            .map(|p| p["provider"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["github", "supabase", "vercel"]);
+        for provider in providers {
+            assert!(provider.get("credential_ref").is_none());
+            assert_eq!(
+                provider["credential"],
+                json!({"present": false, "source": "environment"})
+            );
+        }
+        for canary in [
+            "credential_ref",
+            "GH_TOKEN_ACME",
+            "VERCEL_TOKEN_ACME",
+            "SUPABASE_ACME",
+            "e2e-sample-",
+            "phm:",
+            "env:",
+        ] {
+            assert!(
+                !text.contains(canary),
+                "identity surface leaked {canary}: {text}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -2096,9 +2263,27 @@ require_pin = true
     assert!(store.active_session().unwrap().is_none());
 }
 
+/// `/usr/bin/sandbox-exec` can exist while `sandbox_apply` is refused by
+/// host policy (MDM, an outer Seatbelt, a VM without Seatbelt support).
+/// Sandboxed-worker assertions are then unreachable; skip instead.
+#[cfg(target_os = "macos")]
+fn seatbelt_apply_permitted() -> bool {
+    std::process::Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", "(version 1)(allow default)", "/usr/bin/true"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 /// A metadata-only Phantom probe; any credential operation leaves a marker.
+/// The third tuple element is whether the `phantom`-named shim actually
+/// executed — some hosts refuse that filename by policy, making every
+/// `phantom_on_path` assertion unreachable.
 #[cfg(unix)]
-fn phantom_version_fixture(dir: &std::path::Path) -> (String, PathBuf) {
+fn phantom_version_fixture(dir: &std::path::Path) -> (String, PathBuf, bool) {
     use std::os::unix::fs::PermissionsExt;
     let shim_dir = dir.join("shim-bin");
     std::fs::create_dir_all(&shim_dir).unwrap();
@@ -2109,9 +2294,18 @@ fn phantom_version_fixture(dir: &std::path::Path) -> (String, PathBuf) {
     )
     .unwrap();
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let shim_runs = std::process::Command::new(&shim)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
     (
         format!("{}:/usr/bin:/bin", shim_dir.display()),
         dir.join("phantom-credential-operation"),
+        shim_runs,
     )
 }
 
@@ -2137,7 +2331,11 @@ fn locus_verify_session_session_ok_true_on_healthy_pin() {
     store
         .pin("acme", dir.path(), Some("mcp-verify".into()), false)
         .unwrap();
-    let (path_env, marker) = phantom_version_fixture(dir.path());
+    let (path_env, marker, shim_runs) = phantom_version_fixture(dir.path());
+    if !shim_runs {
+        eprintln!("skip: host refuses to exec a file named `phantom`");
+        return;
+    }
     let mut client = McpClient::spawn_opts(
         dir.path(),
         Framing::Ndjson,
@@ -2201,7 +2399,11 @@ fn locus_verify_session_session_ok_false_for_unsupported_phantom_even_installed(
             false,
         )
         .unwrap();
-    let (path_env, marker) = phantom_version_fixture(dir.path());
+    let (path_env, marker, shim_runs) = phantom_version_fixture(dir.path());
+    if !shim_runs {
+        eprintln!("skip: host refuses to exec a file named `phantom`");
+        return;
+    }
     let mut client = McpClient::spawn_opts(
         dir.path(),
         Framing::Ndjson,
@@ -2945,6 +3147,32 @@ fn bad_tool_params_return_rpc_errors_and_allow_recovery() {
             let ping = client.request("ping", json!({}));
             assert_eq!(ping["result"], json!({}), "{ping}");
         }
+    }
+}
+
+#[test]
+fn unknown_method_returns_rpc_error_and_preserves_request_id() {
+    for framing in [Framing::ContentLength, Framing::Ndjson] {
+        let dir = tempdir().unwrap();
+        let mut client = McpClient::spawn(dir.path(), framing);
+        handshake(&mut client);
+
+        let id = json!("unknown-method-request");
+        client.write_msg(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "locus/nonexistent",
+            "params": {},
+        }));
+        let response = client.read_msg();
+        assert_eq!(response["jsonrpc"], "2.0", "{response}");
+        assert_eq!(response["id"], id, "{response}");
+        assert_eq!(response["error"]["code"], -32601, "{response}");
+        assert!(response["error"]["message"].is_string(), "{response}");
+        assert!(response.get("result").is_none(), "{response}");
+
+        let ping = client.request("ping", json!({}));
+        assert_eq!(ping["result"], json!({}), "{ping}");
     }
 }
 

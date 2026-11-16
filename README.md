@@ -33,7 +33,7 @@ npm package READMEs use version-neutral installation commands to avoid stale pin
 
 ## For agents
 
-One command installs both binaries:
+Install the CLI and MCP packages:
 
 ```bash
 npm install -g locus-cli @ashlrai/locus-mcp
@@ -41,7 +41,7 @@ npm install -g locus-cli @ashlrai/locus-mcp
 
 Homebrew and Cargo are in [Install options](#install-options). At the v0.6.2 release, the live Homebrew tap installs v0.6.1, so use npm for v0.6.2.
 
-Read state as JSON. The first key is `schema`. Failures on stderr use `locus.error.v1`. No command prints a secret.
+Read state as JSON. The first key is `schema`. Failures on stderr use `locus.error.v1`. These status commands do not print secret values. Some operator commands, such as `locus mcp mint`, print a credential once; handle that output privately.
 
 ```bash
 locus whoami --json
@@ -88,12 +88,12 @@ More copy-paste blocks: [docs/copy-paste.md](./docs/copy-paste.md). Rules for ag
 
 ## 30-second start
 
-Run this in one shell. It creates sample bindings, pins `personal`, and checks that `acme` is refused. `LOCUS_HOME` keeps the trial off your real `~/.locus`.
+Run this in one shell. On a fresh home it creates sample bindings; the explicit `enter` pins `personal`, and the last command checks that `acme` is refused. `LOCUS_HOME` keeps the trial off your real `~/.locus`.
 
 ```bash
 export LOCUS_HOME="$(mktemp -d)"        # omit this line to use ~/.locus
 npm install -g locus-cli @ashlrai/locus-mcp   # or brew or cargo; see Install options
-locus quickstart                        # sample bindings, pin, whoami, doctor
+locus quickstart                        # initialize, try to enter, whoami, doctor
 eval "$(locus hook zsh)"                # or bash; exports the control capability
 locus enter personal                    # pin from this shell (it supervises the pin)
 locus whoami                            # who your agents are acting as, right now
@@ -117,7 +117,7 @@ What the extra steps are for:
 - **Broker.** The shell that pins supervises an authority broker. `locus enter personal` works after `quickstart`, including when quickstart ran in a shell that has already exited.
 - **Recovery.** If the next command says `human re-pin required` or `no current broker endpoint`, use [Recovering after the broker exits](#recovering-after-the-broker-exits).
 
-![locus quickstart pins a sample binding; locus whoami shows the sealed session and its scoped providers](docs/assets/locus-demo.gif)
+The sample commands above include `enter` after the hook so the current shell supervises the pin. A broker started by `quickstart` does not survive the process that started it.
 
 ## How it works
 
@@ -159,9 +159,9 @@ Credential refs in a binding are pointers, never raw tokens.
 
 ### One pin is the only account
 
-<img src="docs/assets/feature-pin.svg" alt="personal is pinned and its tools are on. acme is not this pin. An agent can ask to pin and cannot pin." width="720" />
+<img src="docs/assets/feature-pin.svg" alt="personal is pinned and its provider tools require supervision. acme is not this pin. An agent can ask to pin and cannot pin." width="720" />
 
-Unpinned sessions get control tools only. There is no fallthrough to a personal account. `locus_request_pin` asks a person to pin. It does not pin.
+Unpinned sessions get control tools only. Provider tools also require a supervised launch bound to the pin. There is no fallthrough to a personal account. `locus_request_pin` asks a person to pin. It does not pin.
 
 ### The child does not inherit the other client
 
@@ -306,12 +306,13 @@ Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
 locus init [--with-samples] · quickstart
 locus onboard [--detect-only] [--yes] [--reset]  # guided refs-only tenant setup
 locus client add                      # guided client binding (flags for every prompt)
-locus pin [alias] [--force] [--client claude] [--ns a,b] [--ttl 2h]
-locus enter <alias>                   # firm workflow pin
+locus pin [alias] [--force] [--client claude] [--ns a,b] [--ttl 2h] [--rewrite-configs]
+locus enter [alias]                   # explicit alias, workspace default, or configured autopin
 locus switch <alias>                  # one-shot leave + enter
 locus leave · renew                   # clear pin; extend expiry (opt-in per binding)
 locus whoami [--json]
 locus status [--oneline] [--json]
+locus fleet-feed · fleet-denials · fleet-preflight  # value-free JSON for hub/workbench polls
 locus exec -- <command> [args...]
 locus exec --expect <alias> -- <cmd>  # refuse (exit 1, child never starts) unless <alias> is pinned
 locus exec --for gh -- gh pr list    # inject only the pinned GitHub credential
@@ -319,26 +320,28 @@ locus run -b <alias> -- <command>     # one-shot; global pin unchanged
 locus binding list|show|add|rm|migrate-credential-refs
 locus capability status|persist|unpersist  # where control authority lives
 locus autopin suggest [--json] [--apply]  # learned per-repo binding from pin history
-locus workspace --default <alias> [--allow a,b] [--require-pin]
+locus workspace --default <alias> [--allow a,b] [--require-pin] [--force]
 locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2; advisory-only WARN exits 0)
 locus doctor --fix [--apply]          # preview safe repairs; --apply makes them, backing up first
-locus watch [--once] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
+locus watch [--once] [--interval 5s] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
 locus dashboard · serve               # local identity UI + API (127.0.0.1)
 locus forensics export                # shareable pack (no secrets)
-locus verify session · claim --text "…"  # verification plane: session pack · claim score
+locus verify session                  # verification plane: session pack
+locus verify claim --text "…"         # claim score
 locus approve list|grant|status|wait|deny  # require_approval / dual-control
 locus notify status|on|off            # desktop banners OFF by default
-locus events --last N · events export # audit tail / fleet pulse / OTLP
+locus events --last N · events export # audit tail / fleet pulse / SIEM / OTLP
 locus graph list|export|import        # encrypted binding graph share (no secrets)
 locus ci mint|env|run                 # short-lived sealed sessions for pipelines
 locus engagement init|close           # client engagement lifecycle (binding + workspace)
 locus offboard <alias> [--apply]      # plan first; --apply removes the client's local records
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
-locus adapter search|install|uninstall|verify-manifest · registry export  # community + release adapters
+locus adapter search|install|uninstall|verify-manifest  # community + release adapters
+locus adapter registry export|index    # release manifest and community indexes
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex|grok|gemini|generic
-locus mcp [--supervised]              # run the stdio MCP server; --supervised serves pinned provider tools
+locus mcp [--supervised] [--route <provider>]  # supervised provider tools; --route can repeat
 locus mcp mint|list|revoke            # multi-tenant grant tokens
 locus agent report|setup|doctor       # AI-native readiness (hub JSON)
 locus goal status                     # northstar progress from GOALS.md
@@ -475,7 +478,8 @@ Roadmap and goals: [GOALS.md](./GOALS.md), [PLAN.md](./PLAN.md), [DESIGN.md](./D
 | 1 `locus-mcp`, credential resolve, adapters, scope freeze | done |
 | 2 Firm UX, doctor, run, graph, ci | done (0.1.1) |
 | 0.2 to 0.6 Dashboard, forensics, HTTP MCP, agent report, switch, registry | 0.6.2 released |
-| 3 Remote binding graph sync, dual-control packs, SIEM export | next |
+| 3 SIEM NDJSON export | available in source since 0.7.0 |
+| 3 Remote binding graph sync, dual-control packs | planned |
 
 Agency kit: [examples/agency-starter](./examples/agency-starter/) and [docs/agency-starter.md](./docs/agency-starter.md). Recipes: [examples/recipes](./examples/recipes/).
 

@@ -1,1 +1,1 @@
-! unpinned — run `locus enter <alias>`
+no pin — run `locus enter <alias>`

@@ -20,7 +20,7 @@ path = "src/mcp.rs"
 [dependencies]
 locus-core = { workspace = true }
 libc = { workspace = true }
-locus-mcp = { path = "../locus-mcp", version = "0.6.2" }
+locus-mcp = { path = "../locus-mcp", version = "0.7.1" }
 clap = { workspace = true }
 clap_complete = { workspace = true }
 anyhow = { workspace = true }
@@ -66,3 +66,15 @@ path = "tests/packaged_binaries.rs"
 [[test]]
 name = "cli-unknown-command"
 path = "tests/cli-unknown-command.rs"
+
+[[test]]
+name = "cli_help_exit"
+path = "tests/cli_help_exit.rs"
+
+[[test]]
+name = "workspace_version_sync"
+path = "tests/workspace_version_sync.rs"
+
+[[test]]
+name = "exec_exit_codes"
+path = "tests/exec_exit_codes.rs"

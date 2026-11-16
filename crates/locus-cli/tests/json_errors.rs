@@ -55,6 +55,26 @@ fn json_flag_turns_command_errors_into_json() {
 }
 
 #[test]
+fn malformed_commands_return_json_usage_errors() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    for args in [
+        &["--json", "not-a-command"][..],
+        &["binding", "show", "--json"][..],
+    ] {
+        let out = locus(home.path(), cwd.path(), None, args);
+        assert_eq!(out.status.code(), Some(2), "args: {args:?}");
+        let error: Value = serde_json::from_slice(&out.stderr).expect("JSON error on stderr");
+        let stdout: Value = serde_json::from_slice(&out.stdout).expect("JSON error on stdout");
+        assert_eq!(stdout, error);
+        assert_eq!(error["schema"], "locus.error.v1");
+        assert_eq!(error["ok"], false);
+        assert_eq!(error["exit_code"], 2);
+        assert!(error["error"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+}
+
+#[test]
 fn without_json_flag_errors_stay_human() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();

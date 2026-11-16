@@ -28,7 +28,7 @@ secrets, use [`scripts/dogfood-dual-ide.sh`](../scripts/dogfood-dual-ide.sh).
 | `locus` + `locus-mcp` on `PATH` | `cargo install --locked --path crates/locus-cli` from this checkout, or release bins |
 | `jq` | Report / session JSON gates |
 | Two bindings | Distinct tenants + CredentialRefs (never reuse personal PAT on client) |
-| Resolved credentials | Phantom (`phm:…`) preferred; doctor should not list unresolved PHM |
+| Resolved credentials | Use `env:` refs with values supplied outside agent context; `phm:` refs fail closed |
 | MCP registered once | `locus agent setup --apply --client claude` **or** `cursor` (one is enough) |
 | Control capability | Scripts set `LOCUS_CONTROL_CAPABILITY` if unset (enter/pin/leave need it) |
 
@@ -53,9 +53,9 @@ or `examples/agency-starter/bindings/personal.toml`):
 locus init   # once
 # Edit scopes; CredentialRefs only — never raw tokens in TOML.
 cp examples/agency-starter/bindings/personal.toml ~/.locus/bindings/personal.toml
-# → set orgs / team_id / project_ref; keep phm:SUPABASE_PERSONAL, phm:GH_TOKEN_PERSONAL, …
+# Set scopes and replace phm: refs with tenant-specific env: refs for execution.
 
-# Phantom: create secrets named like the refs (values never in git/chat).
+# Supply referenced values outside agent context, never in git or chat.
 locus binding list
 ```
 
@@ -73,7 +73,7 @@ One binding (or full + `-ro` pair) per engagement:
 
 ```bash
 cp examples/agency-starter/bindings/client-a.toml ~/.locus/bindings/client-a.toml
-# edit tenant, project_ref, team_id, orgs; phm:…_CLIENT_A only
+# Edit scopes and use tenant-specific env: refs for execution.
 
 # Optional workspace fence in the client monorepo:
 cp examples/agency-starter/workspaces/client-a.locus.toml ~/clients/client-a/.locus.toml
@@ -298,7 +298,7 @@ M3: multi-account playbook + dual-IDE **matrix script** (no secrets) landed;
 | Dual matrix `locus_reg=no` | `locus agent setup --apply --client claude` (or `cursor`); re-run dual-ide script |
 | Dual matrix soft-skip / no clients | Install Claude Code or Cursor, or unset `LOCUS_DOGFOOD_REQUIRE_DUAL` |
 | `agent report` `protected` | Pin first; run `locus agent setup --apply --client claude` (or cursor) once |
-| `session_ok=false` / doctor WARN | Resolve PHM secrets; `locus doctor --json \| jq .unresolved_phm` (no values) |
+| `session_ok=false` / doctor WARN | Inspect `locus doctor --json \| jq .unresolved_phm`; replace unsupported `phm:` refs with supported `env:` refs where execution is needed |
 | `unsafe` / seal invalid | `locus leave` then `locus enter <alias>`; re-run `locus init` if home corrupt |
 | Wrong tenant in report | You entered the wrong alias — leave and enter the intended one |
 | Control capability errors | Export a non-empty `LOCUS_CONTROL_CAPABILITY` (script generates one if unset) |
@@ -309,7 +309,7 @@ M3: multi-account playbook + dual-IDE **matrix script** (no secrets) landed;
 ## Operator checklist
 
 - [ ] `personal` + client bindings on disk (CredentialRefs only)  
-- [ ] Phantom (or env) secrets resolve — doctor SAFE under each pin  
+- [ ] Environment-backed credentials are supplied; doctor SAFE under each pin
 - [ ] One IDE wired (`locus agent setup --apply --client claude|cursor`)  
 - [ ] Manual or `scripts/dogfood-multi-account.sh` walk: personal ready → leave → client ready → leave  
 - [ ] Optional matrix: `scripts/dogfood-dual-ide.sh` (found / locus_reg / multi_account)  

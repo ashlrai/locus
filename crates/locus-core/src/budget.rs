@@ -210,6 +210,38 @@ mod tests {
             charge(&store, &c, "ses_a", Utc::now()).unwrap(),
             BudgetVerdict::Allowed
         );
+        assert!(!dir.path().join("budgets").exists());
+    }
+
+    #[test]
+    fn zero_cap_does_not_disable_the_other_cap() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let t = Utc::now();
+
+        let actions = cfg(Some(1), Some(0));
+        assert_eq!(
+            charge(&store, &actions, "actions", t).unwrap(),
+            BudgetVerdict::Allowed
+        );
+        assert!(matches!(
+            charge(&store, &actions, "actions", t).unwrap(),
+            BudgetVerdict::Exhausted { ref reason } if reason.contains("action budget")
+        ));
+
+        let minutes = cfg(Some(0), Some(1));
+        assert_eq!(
+            charge(&store, &minutes, "minutes", t).unwrap(),
+            BudgetVerdict::Allowed
+        );
+        assert_eq!(
+            charge(&store, &minutes, "minutes", t).unwrap(),
+            BudgetVerdict::Allowed
+        );
+        assert!(matches!(
+            charge(&store, &minutes, "minutes", t + Duration::minutes(1)).unwrap(),
+            BudgetVerdict::Exhausted { ref reason } if reason.contains("time budget")
+        ));
     }
 
     #[test]

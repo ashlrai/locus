@@ -11,7 +11,7 @@ Principal (you / contractor-ro)
     acts_as → Binding (acme | acme-ro | personal | …)
                  for → Tenant (acme-corp)
                  includes → Provider accounts (Supabase project, Vercel team, GH org)
-                 uses → CredentialRefs only (phm:…)
+                 uses → CredentialRefs only (env:…)
                  constrained_by → Policy + Scope
 Workspace (.locus.toml) defaults_to → Binding allowlist
 Session sealed_to → exactly one Binding
@@ -61,19 +61,19 @@ action = "dual_control"
 [[binding.providers]]
 provider = "supabase"
 account = "acme-prod"
-credential_ref = "phm:SUPABASE_ACME"
+credential_ref = "env:SUPABASE_ACME"
 scope = { project_ref = "abcdefghij", read_only = false }
 
 [[binding.providers]]
 provider = "github"
 account = "acme-corp"
-credential_ref = "phm:GH_TOKEN_ACME"
+credential_ref = "env:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 
 [[binding.providers]]
 provider = "vercel"
 account = "acme-team"
-credential_ref = "phm:VERCEL_TOKEN_ACME"
+credential_ref = "env:VERCEL_TOKEN_ACME"
 scope = { team_id = "team_xxx", projects = ["acme-web"], env = ["preview"] }
 ```
 
@@ -82,7 +82,7 @@ Rules:
 1. **Separate CredentialRefs per tenant** — never reuse personal PAT on an Acme binding.
 2. **Freeze hard scopes** — `project_ref`, `team_id`, org/repo allowlists are the fence; adapters reject smuggled overrides.
 3. **Prod-capable tools stay on `require_approval`** (or on a dedicated elevation binding later).
-4. **Phantom names** should encode tenant: `phm:SUPABASE_ACME`, not `phm:SUPABASE`.
+4. **Credential variable names** should encode tenant: `env:SUPABASE_ACME`, not `env:SUPABASE`.
 
 Create:
 
@@ -192,7 +192,7 @@ binding = "acme"
 ```bash
 # New client unit (binding + optional .locus.toml + .locus/README.md)
 locus engagement init acme --tenant acme-corp --workspace
-# edit ~/.locus/bindings/acme.toml scopes; create phm: refs in Phantom
+# edit scopes and use env: refs; supply values outside agent context
 locus enter acme
 
 # Engagement ends
@@ -314,12 +314,14 @@ operable state, not history.
 
 Then finish the human checklist:
 
-1. Rotate/revoke provider tokens that backed `phm:…_ACME` (Phantom + provider consoles). Locus never deletes vault secrets.
+1. Rotate/revoke provider tokens for the client in their secret store and provider consoles. Locus never deletes vault secrets.
 2. Remove client repo access (GH org, Vercel team, Supabase project invites).
 3. Strip or rewrite `.locus.toml` if the repo leaves your custody — offboard lists workspace templates still naming the alias but never edits them.
 4. Retain the archive under `~/.locus/archives/` for the engagement window if required.
 
 ## Compose with Phantom
+
+Stored `phm:` references cannot currently resolve. Use supported `env:` references for provider execution; see [credential compatibility](credential-compatibility.md).
 
 | Concern | Tool |
 |---------|------|
@@ -327,7 +329,7 @@ Then finish the human checklist:
 | Which Supabase / Vercel / GH account acts | Locus |
 
 ```toml
-credential_ref = "phm:SUPABASE_ACME"
+credential_ref = "env:SUPABASE_ACME"
 ```
 
 Never put service role keys in binding files. Never commit `.locus` seal keys or approval stores.
@@ -335,7 +337,7 @@ Never put service role keys in binding files. Never commit `.locus` seal keys or
 ## Operator checklist
 
 - [ ] One binding (or ro pair) per client tenant  
-- [ ] CredentialRefs only; Phantom namespaced by tenant  
+- [ ] CredentialRefs only; namespaced by tenant
 - [ ] Client repos have `.locus.toml` with tight `allowed_bindings` + `require_pin`  
 - [ ] Prod/destructive globs on `require_approval` (+ `dual_control` for firm mode)  
 - [ ] Shell hook so pin is visible  

@@ -4,7 +4,7 @@
   <rect x="24" y="28" width="200" height="164" rx="12" fill="#052e16" stroke="#86efac"/>
   <text x="44" y="68" fill="#86efac" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="14">PINNED</text>
   <text x="44" y="108" fill="#f4f4f5" font-family="ui-sans-serif, system-ui, sans-serif" font-size="28" font-weight="650">personal</text>
-  <text x="44" y="146" fill="#a1a1aa" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">tools on</text>
+  <text x="44" y="146" fill="#a1a1aa" font-family="ui-sans-serif, system-ui, sans-serif" font-size="16">tools if supervised</text>
   <rect x="248" y="28" width="200" height="164" rx="12" fill="#18181b" stroke="#3f3f46"/>
   <text x="268" y="68" fill="#71717a" font-family="ui-monospace, Menlo, Consolas, monospace" font-size="14">NOT THIS PIN</text>
   <text x="268" y="108" fill="#71717a" font-family="ui-sans-serif, system-ui, sans-serif" font-size="28">acme</text>

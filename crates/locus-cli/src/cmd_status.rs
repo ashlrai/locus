@@ -38,15 +38,9 @@ pub(super) fn run(oneline: bool, json: bool) -> Result<()> {
                 }
             } else {
                 if require_pin {
-                    println!(
-                        "{} unpinned — workspace require_pin: run `locus enter <alias>`",
-                        "!".red().bold()
-                    );
+                    println!("no pin — workspace requires one: `locus enter <alias>`");
                 } else {
-                    println!(
-                        "{} unpinned — run `locus enter <alias>`",
-                        "!".yellow().bold()
-                    );
+                    println!("no pin — run `locus enter <alias>`");
                 }
             }
         }

@@ -1,7 +1,7 @@
 // Run: node --test scripts/hub-smoke-proj-spaced-tmpdir.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -89,4 +89,40 @@ locus() {
   const rmParts = projRm.split(' ');
   assert.equal(rmParts[1], '5', 'rm -rf -- home proj err: five arguments total');
   assert.ok(rmParts.slice(2).join(' ').startsWith(`${scratch}/locus-hub-proj.`));
+});
+
+test('SMOKE_PROJ is private (0700) when created under a space-containing TMPDIR', (t) => {
+  const root = mkdtempSync('/tmp/lhs-proj-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'project workspace dir');
+  const record = join(root, 'mode');
+  const projectRecord = join(root, 'project');
+  const hook = join(root, 'hook.sh');
+  mkdirSync(scratch);
+  // init runs after all three resources are allocated; stat SMOKE_PROJ there so
+  // the mktemp -d mode is recorded verbatim before anything could alter it.
+  writeFileSync(hook, `cargo() { return 0; }
+jq() { cat >/dev/null; printf '%s\\n' grant; }
+locus() {
+  if [[ "\${1:-}" == init ]]; then
+    [[ -d "$SMOKE_PROJ" ]] || return 73
+    printf '%s' "$SMOKE_PROJ" > "$PROJECT_RECORD"
+    stat -f %Lp "$SMOKE_PROJ" 2>/dev/null > "$MODE_RECORD" || stat -c %a "$SMOKE_PROJ" > "$MODE_RECORD"
+  fi
+  if [[ "\${1:-}" == status && "\${2:-}" == --oneline ]]; then printf '%s\\n' personal:tenant; else printf '%s\\n' '{}'; fi
+}
+`);
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, BASH_ENV: hook, TMPDIR: scratch,
+      MODE_RECORD: record, PROJECT_RECORD: projectRecord },
+    encoding: 'utf8',
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 0, result.stderr);
+  const project = readFileSync(projectRecord, 'utf8');
+  assert.equal(dirname(project), scratch, 'project must be created directly beneath the exact TMPDIR');
+  assert.match(project.slice(scratch.length + 1), /^locus-hub-proj\.[A-Za-z0-9]{6}$/);
+  assert.equal(readFileSync(record, 'utf8').trim(), '700');
+  assert.equal(existsSync(project), false, 'project must be removed on exit');
 });

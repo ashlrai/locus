@@ -42,7 +42,7 @@ The [first-run investigation](./docs/BENCHMARKS.md) for [issue #168](https://git
 To inspect a current checkout, run this from its root. The current `locus-cli` package installs both binaries; this single-package command measures that path, not the historical two-package install. It uses a fresh build directory and install root, so it neither relies on an existing target cache nor installs binaries into your usual Cargo bin directory:
 
 ```bash
-investigation_dir=$(mktemp -d)
+investigation_dir=$(mktemp -d "${TMPDIR:-/tmp}/locus-install.XXXXXX")
 cargo install --git "file://$(pwd)" locus-cli --locked \
   --root "$investigation_dir/install" --target-dir "$investigation_dir/target" \
   --message-format=json > "$investigation_dir/artifacts.jsonl" 2> "$investigation_dir/cargo.log"
@@ -102,12 +102,17 @@ locus whoami
 Docs checks (Node 18+, no dependencies):
 
 ```bash
-node scripts/check-readme-links.mjs   # every README link / anchor / image resolves
+node scripts/check-readme-links.mjs README.md docs/*.md  # README and docs links and anchors resolve
 node --test scripts/check-readme-links.test.mjs
 bash scripts/check-support-links.sh   # every relative link in SUPPORT.md resolves
 node --test scripts/check-support-links.test.mjs
 node scripts/freshness/check.mjs      # generated release blocks are in sync
+node --test scripts/devin-wiki.test.mjs  # .devin/wiki.json stays valid and its paths resolve
 ```
+
+The `.devin/wiki.json` file steers DeepWiki's auto-generated wiki for this
+repository. When adding a crate or a major doc, update it in the same change;
+see [DeepWiki auto-docs](./docs/deepwiki.md).
 
 ## Lint and format
 
@@ -166,7 +171,8 @@ Short checklist:
 3. Ensure `fmt`, `clippy -D warnings`, and `cargo test` pass.
 4. Describe **what isolation property** changes (or does not).
 5. Link related `DESIGN.md` sections when changing security-sensitive code.
-6. Conflict in a high-churn path? `CHANGELOG.md` unions itself via `.gitattributes`; `node scripts/resolve-merge-conflicts.mjs --continue` deterministically resolves `CLAUDE.md`/`README.md` and regenerates `Cargo.lock`/`bun.lock`/`package-lock.json` — never hand-merge lockfiles. See [docs/conflict-drivers.md](./docs/conflict-drivers.md).
+6. Conflict in a high-churn path? `CHANGELOG.md` unions itself via `.gitattributes`; `node scripts/resolve-merge-conflicts.mjs --continue` deterministically resolves `CLAUDE.md`/`README.md` and regenerates `Cargo.lock`/`bun.lock`/`package-lock.json`. Never hand-merge lockfiles. See [docs/conflict-drivers.md](./docs/conflict-drivers.md).
+7. Several branches queued against a moving `main`? `node scripts/queue-recut-plan.mjs origin/main BRANCH...` prints read-only JSON marking each branch `clean`, `stale` (recut) or `conflicting` (resolve first). Fetch first; it never edits branches or bypasses required checks. See [scripts/queue-recut-plan.md](./scripts/queue-recut-plan.md).
 
 ## Reporting security issues
 

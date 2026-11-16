@@ -37,5 +37,6 @@ removing specific leftovers; other concurrent runs may use the same parent.
 The startup banner identifies the home only after setup reaches it, so it may
 not be available after an early interruption. Do not remove the temporary parent
 or unrelated paths. See [allocation failures](hub-smoke-temp-failures.md) for
-partial setup and [temporary path lifecycle](hub-smoke-temp-lifecycle.md) for
-normal cleanup.
+partial setup, the [temporary path lifecycle](hub-smoke-temp-lifecycle.md) for
+normal cleanup, and the [cleanup review](hub-smoke-cleanup-review.md) for the
+full exit and residue inventory.

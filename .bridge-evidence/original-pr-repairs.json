@@ -1,0 +1,1200 @@
+{
+  "schema_version": 1,
+  "scope": "Five supplied original PRs; not an all-open inventory",
+  "current_main": "627aae3fb696d0cc99d930513953ee86f38597e2",
+  "owner_map": "E/all-open-owner-map.json unavailable in this worktree",
+  "catalog_note": "No pre-existing original-pr-repairs.json found in this worktree; this file does not assert other reviews or replace external evidence.",
+  "originals": [
+    {
+      "pr": 813,
+      "current_main": "627aae3fb696d0cc99d930513953ee86f38597e2",
+      "status": "semantic_review_incomplete",
+      "publication_ready": false,
+      "findings": "Release candidate 0.7.0 version and metadata changes conflict with main workspace 0.7.1; release owner must reconcile. Added locus_mcp_version_matches_workspace_package test blob is identical in main. Other hunks require semantic review.",
+      "variants": [
+        {
+          "identity": "supplied_original",
+          "head": "5ece089913516d8e3937496ab8f2161a557dd7a1",
+          "merge_base_with_main": "4b54f5099ffcd76214c307e7e6607146c8ac2ac9",
+          "full_changed_hunks": "original-pr-813-supplied_original.diff",
+          "paths": [
+            {
+              "path": "CHANGELOG.md",
+              "base_blob": "6968b52247945bb2d18f01f86ce45ec17bbfbb37",
+              "head_blob": "2ba7af843dd1355a89a4bf5d45eea64d825ddd12",
+              "main_blob": "ce1b917e90d06f8ec27d92a7d546d2e7f05397f9"
+            },
+            {
+              "path": "Cargo.lock",
+              "base_blob": "76356b1606e4993e812e1d6c2145993c951cb43b",
+              "head_blob": "d35627b1e276ec31ebc84619e038491393354118",
+              "main_blob": "f53eb2bdd3f07cb862360f3f7072fd1fe4e5184e"
+            },
+            {
+              "path": "Cargo.toml",
+              "base_blob": "ecfc9835cd2aabe525decf1d93246bae56da1e56",
+              "head_blob": "351c2384b44260d453b02661fbef0a3d53303735",
+              "main_blob": "bfff76c2adfb7fb6546932d115fc71b157da380d"
+            },
+            {
+              "path": "INTEGRATION.md",
+              "base_blob": "05587e93a1f647fd1cfde9994ea9e2055f6a8ded",
+              "head_blob": "b26c2953510b8aa26aa6cbe87ff5769e23a73040",
+              "main_blob": "5d21496de2dba8e39c32f69b50fa9771640cc035"
+            },
+            {
+              "path": "apps/web/package.json",
+              "base_blob": "a14bf0b72b70894dcdde721ca12c2ef2032ea843",
+              "head_blob": "640acfbc337bc40e672fefe4e1c0b3282074047b",
+              "main_blob": "0368744cfcdea2e5e5e5ccf11b2d0e394e4f1a4c"
+            },
+            {
+              "path": "apps/web/public/.well-known/security.txt",
+              "base_blob": "f3018bec748ed2bf2c80b3d6ed2ef23ec876e305",
+              "head_blob": "f005a79a3fb6d9b811640d1263700f415f03fbb7",
+              "main_blob": "f76ea91f702af69b984dd16cad732cda36466ec7"
+            },
+            {
+              "path": "apps/web/public/capabilities.json",
+              "base_blob": "944d8db1dae5d00da2c7c1b6af607bc07ea5dd71",
+              "head_blob": "885bd6e8c148042a37047edd1e8becf6493967ee",
+              "main_blob": "f1e24a7c072ea6447000a6c68628e1280674077e"
+            },
+            {
+              "path": "apps/web/public/sitemap.xml",
+              "base_blob": "e8a56f4ffb244cb3a98f3a88023197cab31e59d9",
+              "head_blob": "f284dcd781a0076d2ad5756d0e0bfeff92afdc6a",
+              "main_blob": "1bdba59b0c1df675cf12720eeb172c3d398afedd"
+            },
+            {
+              "path": "crates/locus-cli/Cargo.toml",
+              "base_blob": "fdb22fb77ebdacbb86def9177a9fbf1c5ee69937",
+              "head_blob": "af08becf91cef704d145dce3a8355be6d456aacc",
+              "main_blob": "5d30165dbbcccb3ed475b52f6c0fe9b2d6277b01"
+            },
+            {
+              "path": "crates/locus-cli/tests/snapshots/doctor.json",
+              "base_blob": "f2cc6a9dba0f021663c71524043428c76457bd69",
+              "head_blob": "fb6075844c172c9f2fcdff0fd01472de3fce514e",
+              "main_blob": "888037ef7c1d6894efbfbf30df83048b9ac166bf"
+            },
+            {
+              "path": "crates/locus-cli/tests/snapshots/doctor.txt",
+              "base_blob": "698578897b943bfe5456b5f3ec6997f90a0fd64a",
+              "head_blob": "edc6ae53dc7719ffa1d688fadfe5592dfaf8bdef",
+              "main_blob": "b972ea2bfbe5bab4e99bd204463f4e907a84bf46"
+            },
+            {
+              "path": "crates/locus-cli/tests/workspace_version_sync.rs",
+              "base_blob": "773c2d82aa6ed9266ce4b007d944a65ecbb585a9",
+              "head_blob": "1b1baf6ecf2fa399dc3512d81baf8868c425b99f",
+              "main_blob": "1b1baf6ecf2fa399dc3512d81baf8868c425b99f"
+            },
+            {
+              "path": "docs/RELEASE.md",
+              "base_blob": "5270d66920f03d3563a0280ffe6e2003d6320996",
+              "head_blob": "0d00dc2e5cb1cbc386fbf69925f6c631f7b73dc8",
+              "main_blob": "bf9c9dfedb975af64fc9be81fb8e1d7ab89b325a"
+            },
+            {
+              "path": "npm-mcp/bin/locus-mcp.js",
+              "base_blob": "7469381eaa6c95d6bfb060d2cda7e8159f403673",
+              "head_blob": "26f9432e4f9cba51485662693538b98c5a9dc938",
+              "main_blob": "0cd984f14872cb58939f8fd7c0eb9a65e9db1aa6"
+            },
+            {
+              "path": "npm-mcp/package.json",
+              "base_blob": "51239a817741d989624b9862cc209cf4b717371a",
+              "head_blob": "d0ef50931e13e25d95e1270de7cac78f8cb5ac97",
+              "main_blob": "10349450d78b1933f38b521b4062a11885b67e45"
+            },
+            {
+              "path": "npm/bin/locus.js",
+              "base_blob": "cdf7cb322eed3c0220c4f07037aac1a017553cd3",
+              "head_blob": "aa5a0fddaeb0ebed6a82474f7f4de4d93d4bd725",
+              "main_blob": "534a350636f664b536d4dae3b9efccdd240a0529"
+            },
+            {
+              "path": "npm/package.json",
+              "base_blob": "b1e16e423b82a2c00c181f8f521bb48cb5d27bc0",
+              "head_blob": "5b895cd50c022ce0888737f241fa119b008339a4",
+              "main_blob": "e0fd5b49b34cfa5527d80c460d2bdd3cabbe9951"
+            },
+            {
+              "path": "server.json",
+              "base_blob": "a12900366117d6d8adc8ccffcb89992a0b9a3e30",
+              "head_blob": "9bb88184064d3472b9481e473b75172d1076da82",
+              "main_blob": "fad1f8ff69c0f5f5bc06ebd4142736affa2cdbfa"
+            }
+          ]
+        },
+        {
+          "identity": "refreshed_head",
+          "head": "5ece089913516d8e3937496ab8f2161a557dd7a1",
+          "merge_base_with_main": "4b54f5099ffcd76214c307e7e6607146c8ac2ac9",
+          "full_changed_hunks": "original-pr-813-refreshed_head.diff",
+          "paths": [
+            {
+              "path": "CHANGELOG.md",
+              "base_blob": "6968b52247945bb2d18f01f86ce45ec17bbfbb37",
+              "head_blob": "2ba7af843dd1355a89a4bf5d45eea64d825ddd12",
+              "main_blob": "ce1b917e90d06f8ec27d92a7d546d2e7f05397f9"
+            },
+            {
+              "path": "Cargo.lock",
+              "base_blob": "76356b1606e4993e812e1d6c2145993c951cb43b",
+              "head_blob": "d35627b1e276ec31ebc84619e038491393354118",
+              "main_blob": "f53eb2bdd3f07cb862360f3f7072fd1fe4e5184e"
+            },
+            {
+              "path": "Cargo.toml",
+              "base_blob": "ecfc9835cd2aabe525decf1d93246bae56da1e56",
+              "head_blob": "351c2384b44260d453b02661fbef0a3d53303735",
+              "main_blob": "bfff76c2adfb7fb6546932d115fc71b157da380d"
+            },
+            {
+              "path": "INTEGRATION.md",
+              "base_blob": "05587e93a1f647fd1cfde9994ea9e2055f6a8ded",
+              "head_blob": "b26c2953510b8aa26aa6cbe87ff5769e23a73040",
+              "main_blob": "5d21496de2dba8e39c32f69b50fa9771640cc035"
+            },
+            {
+              "path": "apps/web/package.json",
+              "base_blob": "a14bf0b72b70894dcdde721ca12c2ef2032ea843",
+              "head_blob": "640acfbc337bc40e672fefe4e1c0b3282074047b",
+              "main_blob": "0368744cfcdea2e5e5e5ccf11b2d0e394e4f1a4c"
+            },
+            {
+              "path": "apps/web/public/.well-known/security.txt",
+              "base_blob": "f3018bec748ed2bf2c80b3d6ed2ef23ec876e305",
+              "head_blob": "f005a79a3fb6d9b811640d1263700f415f03fbb7",
+              "main_blob": "f76ea91f702af69b984dd16cad732cda36466ec7"
+            },
+            {
+              "path": "apps/web/public/capabilities.json",
+              "base_blob": "944d8db1dae5d00da2c7c1b6af607bc07ea5dd71",
+              "head_blob": "885bd6e8c148042a37047edd1e8becf6493967ee",
+              "main_blob": "f1e24a7c072ea6447000a6c68628e1280674077e"
+            },
+            {
+              "path": "apps/web/public/sitemap.xml",
+              "base_blob": "e8a56f4ffb244cb3a98f3a88023197cab31e59d9",
+              "head_blob": "f284dcd781a0076d2ad5756d0e0bfeff92afdc6a",
+              "main_blob": "1bdba59b0c1df675cf12720eeb172c3d398afedd"
+            },
+            {
+              "path": "crates/locus-cli/Cargo.toml",
+              "base_blob": "fdb22fb77ebdacbb86def9177a9fbf1c5ee69937",
+              "head_blob": "af08becf91cef704d145dce3a8355be6d456aacc",
+              "main_blob": "5d30165dbbcccb3ed475b52f6c0fe9b2d6277b01"
+            },
+            {
+              "path": "crates/locus-cli/tests/snapshots/doctor.json",
+              "base_blob": "f2cc6a9dba0f021663c71524043428c76457bd69",
+              "head_blob": "fb6075844c172c9f2fcdff0fd01472de3fce514e",
+              "main_blob": "888037ef7c1d6894efbfbf30df83048b9ac166bf"
+            },
+            {
+              "path": "crates/locus-cli/tests/snapshots/doctor.txt",
+              "base_blob": "698578897b943bfe5456b5f3ec6997f90a0fd64a",
+              "head_blob": "edc6ae53dc7719ffa1d688fadfe5592dfaf8bdef",
+              "main_blob": "b972ea2bfbe5bab4e99bd204463f4e907a84bf46"
+            },
+            {
+              "path": "crates/locus-cli/tests/workspace_version_sync.rs",
+              "base_blob": "773c2d82aa6ed9266ce4b007d944a65ecbb585a9",
+              "head_blob": "1b1baf6ecf2fa399dc3512d81baf8868c425b99f",
+              "main_blob": "1b1baf6ecf2fa399dc3512d81baf8868c425b99f"
+            },
+            {
+              "path": "docs/RELEASE.md",
+              "base_blob": "5270d66920f03d3563a0280ffe6e2003d6320996",
+              "head_blob": "0d00dc2e5cb1cbc386fbf69925f6c631f7b73dc8",
+              "main_blob": "bf9c9dfedb975af64fc9be81fb8e1d7ab89b325a"
+            },
+            {
+              "path": "npm-mcp/bin/locus-mcp.js",
+              "base_blob": "7469381eaa6c95d6bfb060d2cda7e8159f403673",
+              "head_blob": "26f9432e4f9cba51485662693538b98c5a9dc938",
+              "main_blob": "0cd984f14872cb58939f8fd7c0eb9a65e9db1aa6"
+            },
+            {
+              "path": "npm-mcp/package.json",
+              "base_blob": "51239a817741d989624b9862cc209cf4b717371a",
+              "head_blob": "d0ef50931e13e25d95e1270de7cac78f8cb5ac97",
+              "main_blob": "10349450d78b1933f38b521b4062a11885b67e45"
+            },
+            {
+              "path": "npm/bin/locus.js",
+              "base_blob": "cdf7cb322eed3c0220c4f07037aac1a017553cd3",
+              "head_blob": "aa5a0fddaeb0ebed6a82474f7f4de4d93d4bd725",
+              "main_blob": "534a350636f664b536d4dae3b9efccdd240a0529"
+            },
+            {
+              "path": "npm/package.json",
+              "base_blob": "b1e16e423b82a2c00c181f8f521bb48cb5d27bc0",
+              "head_blob": "5b895cd50c022ce0888737f241fa119b008339a4",
+              "main_blob": "e0fd5b49b34cfa5527d80c460d2bdd3cabbe9951"
+            },
+            {
+              "path": "server.json",
+              "base_blob": "a12900366117d6d8adc8ccffcb89992a0b9a3e30",
+              "head_blob": "9bb88184064d3472b9481e473b75172d1076da82",
+              "main_blob": "fad1f8ff69c0f5f5bc06ebd4142736affa2cdbfa"
+            }
+          ]
+        }
+      ],
+      "validation": [
+        {
+          "input": "627aae3fb696d0cc99d930513953ee86f38597e2",
+          "command": "cargo +1.97.1 test -p locus-cli --test workspace_version_sync (temporary HOME; real CARGO_HOME and RUSTUP_HOME)",
+          "result": "interrupted during dependency compilation; no test results"
+        }
+      ]
+    },
+    {
+      "pr": 811,
+      "current_main": "627aae3fb696d0cc99d930513953ee86f38597e2",
+      "status": "semantic_review_incomplete",
+      "publication_ready": false,
+      "findings": "Code-card implementation and code_card test/fixtures absent from main. E2E/drop-in changes overlap later main and require complete hunk and assertion review; no source patch prepared. Original CLI dispatch calls card::run(target, budget, body, json, dry_run); original tests assert nested/newline targets, calls and callers, body/hash, dry-run cache avoidance, budget trimming and machine-readable errors. Their corresponding card.rs and code_card.rs are absent in main. Port requires privacy/security and newer CLI integration review before a candidate can be safe.",
+      "variants": [
+        {
+          "identity": "supplied_original",
+          "head": "1151c04bdc955c098c8b0b1d0d90cfba4f073b53",
+          "merge_base_with_main": "7a402e321c7f5bc82beb6b187ed852f5deeb0de8",
+          "full_changed_hunks": "original-pr-811-supplied_original.diff",
+          "paths": [
+            {
+              "path": "AGENTS.md",
+              "base_blob": "9bc59e6a19e3f216f022db4eea3f84384a6de8bf",
+              "head_blob": "095801e0288ccbf320c56d1d830aab7a12862ade",
+              "main_blob": "095801e0288ccbf320c56d1d830aab7a12862ade"
+            },
+            {
+              "path": "Cargo.lock",
+              "base_blob": "76356b1606e4993e812e1d6c2145993c951cb43b",
+              "head_blob": "0aaf59b0cb505b17190761e2914dd1d2fb883787",
+              "main_blob": "f53eb2bdd3f07cb862360f3f7072fd1fe4e5184e"
+            },
+            {
+              "path": "README.md",
+              "base_blob": "865cb5a7cfe6c91c30361a0865bc303b06d77135",
+              "head_blob": "b56f51dad460e0f5badec5296503c9372314f963",
+              "main_blob": "4ccfa06d3cf3e1cad1647599ae622535ccefad47"
+            },
+            {
+              "path": "apps/web/public/AGENTS.md",
+              "base_blob": "a49f038ac90993bcf6ab69e6c661e05d245d21e3",
+              "head_blob": "1d3a84f6aff32268913bfc85cb9efe83ba27abd0",
+              "main_blob": "1d3a84f6aff32268913bfc85cb9efe83ba27abd0"
+            },
+            {
+              "path": "apps/web/public/capabilities.json",
+              "base_blob": "944d8db1dae5d00da2c7c1b6af607bc07ea5dd71",
+              "head_blob": "38e63dcaf6f7cfac5327d81f4a081f85a28c228c",
+              "main_blob": "f1e24a7c072ea6447000a6c68628e1280674077e"
+            },
+            {
+              "path": "apps/web/public/llms-full.txt",
+              "base_blob": "2b30cb37bd69a0620b1fa7c89862f9318890a7c0",
+              "head_blob": "1609e5c6db3e2fa3060b6378a9fb9b59a9bcf818",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "crates/locus-cli/Cargo.toml",
+              "base_blob": "fdb22fb77ebdacbb86def9177a9fbf1c5ee69937",
+              "head_blob": "13b5298a575cdc4f7496910e5d0b2fae31212eed",
+              "main_blob": "5d30165dbbcccb3ed475b52f6c0fe9b2d6277b01"
+            },
+            {
+              "path": "crates/locus-cli/src/card.rs",
+              "base_blob": null,
+              "head_blob": "9b2d19015fb45272bb463db39cffaf79111755c9",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/src/main.rs",
+              "base_blob": "53b21d6d2becffed1a8d9d7590464a7508fdf3ee",
+              "head_blob": "3f7e00f8ea83f80d2d78c8ed570a27a3b492f9e0",
+              "main_blob": "23a58c45d5b1fd0984cd4792b9157d2a05c1bc6f"
+            },
+            {
+              "path": "crates/locus-cli/tests/code_card.rs",
+              "base_blob": null,
+              "head_blob": "ecf9217835dd6336a4b05bc7c8fd7283cc2da1bd",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/tests/fixtures/card/sample.go",
+              "base_blob": null,
+              "head_blob": "10be82da814c98ebd097fa688d2b61af1b4eef6b",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/tests/fixtures/card/sample.py",
+              "base_blob": null,
+              "head_blob": "d1374e26919db9a8e028cef0cafcb182cbbad48c",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/tests/fixtures/card/sample.rs",
+              "base_blob": null,
+              "head_blob": "c989917a010bf3a646ebd292507e758d11bde470",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/tests/fixtures/card/sample.ts",
+              "base_blob": null,
+              "head_blob": "3ccf16e0f8589463622e73d283271d48ed7efc40",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/tests/integration.rs",
+              "base_blob": "10fb072a795a49c8fab255fd964c1fd0fb3c8d85",
+              "head_blob": "bf19db1b2cd6bdb4988e6d53d1ab87a7ac843f17",
+              "main_blob": "10fb072a795a49c8fab255fd964c1fd0fb3c8d85"
+            },
+            {
+              "path": "docs/e2e-graph-lifecycle.md",
+              "base_blob": "4a832fa871b975aa1b826698ddc13e0ea6719153",
+              "head_blob": "d3af4067bd74bbcd2ce0c6635b86595425699b0b",
+              "main_blob": "5f651a725ca70d35e6cb2aa18fd74a715de5b9bf"
+            },
+            {
+              "path": "docs/e2e-security-directories.md",
+              "base_blob": "6e70c8632fc3da1adfaeae7bda994697887a8eb1",
+              "head_blob": "db08e1c15468bbb857998b9db8dec712a376f20b",
+              "main_blob": "506d28ad0eb8853d4480b46b39472f5f6f737652"
+            },
+            {
+              "path": "docs/e2e-temp-resource-types.md",
+              "base_blob": "984e9bc3160794832b59b03fcc04c69071d406dc",
+              "head_blob": "2ba0bff91213551ee25d2a9db71a7111ff9d6262",
+              "main_blob": "249f15ec06ecc1795c1f4ba9e9a93c6ccd13fa96"
+            },
+            {
+              "path": "docs/e2e-test-map.md",
+              "base_blob": "0763690d1d7e5d16734550fae44bc5f9000e8f3c",
+              "head_blob": "3908ad7c8e41a154ef1035298ce92d7edeed3611",
+              "main_blob": "5226ea56251457f17c3b3c0e71d2d9a2e0a94695"
+            },
+            {
+              "path": "llms-full.txt",
+              "base_blob": "2b30cb37bd69a0620b1fa7c89862f9318890a7c0",
+              "head_blob": "1609e5c6db3e2fa3060b6378a9fb9b59a9bcf818",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "scripts/check-e2e-dropin.sh",
+              "base_blob": null,
+              "head_blob": "b00cf39ab4cd177106807a30f0a883560a10f77d",
+              "main_blob": "4947dc9c42db303787a739009a63a7795b38e56e"
+            },
+            {
+              "path": "scripts/e2e-dropin.sh",
+              "base_blob": null,
+              "head_blob": "ce58c3f8f5095e1beb9d6723fa66d62c184f2fd9",
+              "main_blob": "ab967a3372c9e6e00230aa287f36a990ac3ad714"
+            },
+            {
+              "path": "scripts/e2e-graph-isolation.test.mjs",
+              "base_blob": "2537246ac1f49012eab902d000e64f63d3c50dfc",
+              "head_blob": "b89d18b4e6311099447c49cba981abece70dbc05",
+              "main_blob": "2537246ac1f49012eab902d000e64f63d3c50dfc"
+            },
+            {
+              "path": "scripts/e2e-security-home-selection.test.mjs",
+              "base_blob": "635539636079c4ebd8c8881c635787dcea1462ed",
+              "head_blob": "17284e8eb8a24b94545e12518b3354d70884de35",
+              "main_blob": "d2b42881753861bc54de1a91343776d48f945cd1"
+            },
+            {
+              "path": "scripts/e2e-security-workspace-selection.test.mjs",
+              "base_blob": "85ce4b652bed56b06496391225b55fb9ec17a58a",
+              "head_blob": "31699d14dbe21c8a4d8728d9c8c9e76e2bcdae18",
+              "main_blob": "f5c6bed92c81a036e543850a840e29b1aed0ea46"
+            },
+            {
+              "path": "scripts/e2e-temp.test.mjs",
+              "base_blob": "8e8599e28867f4cd73dae8e763909e3815e3f15a",
+              "head_blob": "83778365e4fe891891408b96f29446fd3c9cd562",
+              "main_blob": "b9c4305876ad9a79885fd25c3d8d7fc82dae1e99"
+            },
+            {
+              "path": "scripts/e2e-workspace-spaced-tmpdir.test.mjs",
+              "base_blob": null,
+              "head_blob": "22555601d5d07ea3c2f004a9a39044cb71ab5f6c",
+              "main_blob": "22555601d5d07ea3c2f004a9a39044cb71ab5f6c"
+            },
+            {
+              "path": "scripts/e2e.d/README.md",
+              "base_blob": null,
+              "head_blob": "ea15d36bbd8df23ee3c99e5e83d6277b2c932746",
+              "main_blob": "ea15d36bbd8df23ee3c99e5e83d6277b2c932746"
+            },
+            {
+              "path": "scripts/e2e.sh",
+              "base_blob": "5734711cb56bf383d58860ed9a8648c78d60789b",
+              "head_blob": "247c06110aa59696f76ddd37e9013f3d7d9ea78a",
+              "main_blob": "78b81ed010cde41fc975f3399f3b48f0defbf829"
+            },
+            {
+              "path": "scripts/e2e.test.mjs",
+              "base_blob": "40fa46c9cd10bd5057994154884d54a086c16810",
+              "head_blob": "9848ea236fc014f6788308437e1ee7b259a0b1cc",
+              "main_blob": "974a97727a520e89aac548a6c41f9e8aca3fca50"
+            }
+          ]
+        },
+        {
+          "identity": "refreshed_head",
+          "head": "1151c04bdc955c098c8b0b1d0d90cfba4f073b53",
+          "merge_base_with_main": "7a402e321c7f5bc82beb6b187ed852f5deeb0de8",
+          "full_changed_hunks": "original-pr-811-refreshed_head.diff",
+          "paths": [
+            {
+              "path": "AGENTS.md",
+              "base_blob": "9bc59e6a19e3f216f022db4eea3f84384a6de8bf",
+              "head_blob": "095801e0288ccbf320c56d1d830aab7a12862ade",
+              "main_blob": "095801e0288ccbf320c56d1d830aab7a12862ade"
+            },
+            {
+              "path": "Cargo.lock",
+              "base_blob": "76356b1606e4993e812e1d6c2145993c951cb43b",
+              "head_blob": "0aaf59b0cb505b17190761e2914dd1d2fb883787",
+              "main_blob": "f53eb2bdd3f07cb862360f3f7072fd1fe4e5184e"
+            },
+            {
+              "path": "README.md",
+              "base_blob": "865cb5a7cfe6c91c30361a0865bc303b06d77135",
+              "head_blob": "b56f51dad460e0f5badec5296503c9372314f963",
+              "main_blob": "4ccfa06d3cf3e1cad1647599ae622535ccefad47"
+            },
+            {
+              "path": "apps/web/public/AGENTS.md",
+              "base_blob": "a49f038ac90993bcf6ab69e6c661e05d245d21e3",
+              "head_blob": "1d3a84f6aff32268913bfc85cb9efe83ba27abd0",
+              "main_blob": "1d3a84f6aff32268913bfc85cb9efe83ba27abd0"
+            },
+            {
+              "path": "apps/web/public/capabilities.json",
+              "base_blob": "944d8db1dae5d00da2c7c1b6af607bc07ea5dd71",
+              "head_blob": "38e63dcaf6f7cfac5327d81f4a081f85a28c228c",
+              "main_blob": "f1e24a7c072ea6447000a6c68628e1280674077e"
+            },
+            {
+              "path": "apps/web/public/llms-full.txt",
+              "base_blob": "2b30cb37bd69a0620b1fa7c89862f9318890a7c0",
+              "head_blob": "1609e5c6db3e2fa3060b6378a9fb9b59a9bcf818",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "crates/locus-cli/Cargo.toml",
+              "base_blob": "fdb22fb77ebdacbb86def9177a9fbf1c5ee69937",
+              "head_blob": "13b5298a575cdc4f7496910e5d0b2fae31212eed",
+              "main_blob": "5d30165dbbcccb3ed475b52f6c0fe9b2d6277b01"
+            },
+            {
+              "path": "crates/locus-cli/src/card.rs",
+              "base_blob": null,
+              "head_blob": "9b2d19015fb45272bb463db39cffaf79111755c9",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/src/main.rs",
+              "base_blob": "53b21d6d2becffed1a8d9d7590464a7508fdf3ee",
+              "head_blob": "3f7e00f8ea83f80d2d78c8ed570a27a3b492f9e0",
+              "main_blob": "23a58c45d5b1fd0984cd4792b9157d2a05c1bc6f"
+            },
+            {
+              "path": "crates/locus-cli/tests/code_card.rs",
+              "base_blob": null,
+              "head_blob": "ecf9217835dd6336a4b05bc7c8fd7283cc2da1bd",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/tests/fixtures/card/sample.go",
+              "base_blob": null,
+              "head_blob": "10be82da814c98ebd097fa688d2b61af1b4eef6b",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/tests/fixtures/card/sample.py",
+              "base_blob": null,
+              "head_blob": "d1374e26919db9a8e028cef0cafcb182cbbad48c",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/tests/fixtures/card/sample.rs",
+              "base_blob": null,
+              "head_blob": "c989917a010bf3a646ebd292507e758d11bde470",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/tests/fixtures/card/sample.ts",
+              "base_blob": null,
+              "head_blob": "3ccf16e0f8589463622e73d283271d48ed7efc40",
+              "main_blob": null
+            },
+            {
+              "path": "crates/locus-cli/tests/integration.rs",
+              "base_blob": "10fb072a795a49c8fab255fd964c1fd0fb3c8d85",
+              "head_blob": "bf19db1b2cd6bdb4988e6d53d1ab87a7ac843f17",
+              "main_blob": "10fb072a795a49c8fab255fd964c1fd0fb3c8d85"
+            },
+            {
+              "path": "docs/e2e-graph-lifecycle.md",
+              "base_blob": "4a832fa871b975aa1b826698ddc13e0ea6719153",
+              "head_blob": "d3af4067bd74bbcd2ce0c6635b86595425699b0b",
+              "main_blob": "5f651a725ca70d35e6cb2aa18fd74a715de5b9bf"
+            },
+            {
+              "path": "docs/e2e-security-directories.md",
+              "base_blob": "6e70c8632fc3da1adfaeae7bda994697887a8eb1",
+              "head_blob": "db08e1c15468bbb857998b9db8dec712a376f20b",
+              "main_blob": "506d28ad0eb8853d4480b46b39472f5f6f737652"
+            },
+            {
+              "path": "docs/e2e-temp-resource-types.md",
+              "base_blob": "984e9bc3160794832b59b03fcc04c69071d406dc",
+              "head_blob": "2ba0bff91213551ee25d2a9db71a7111ff9d6262",
+              "main_blob": "249f15ec06ecc1795c1f4ba9e9a93c6ccd13fa96"
+            },
+            {
+              "path": "docs/e2e-test-map.md",
+              "base_blob": "0763690d1d7e5d16734550fae44bc5f9000e8f3c",
+              "head_blob": "3908ad7c8e41a154ef1035298ce92d7edeed3611",
+              "main_blob": "5226ea56251457f17c3b3c0e71d2d9a2e0a94695"
+            },
+            {
+              "path": "llms-full.txt",
+              "base_blob": "2b30cb37bd69a0620b1fa7c89862f9318890a7c0",
+              "head_blob": "1609e5c6db3e2fa3060b6378a9fb9b59a9bcf818",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "scripts/check-e2e-dropin.sh",
+              "base_blob": null,
+              "head_blob": "b00cf39ab4cd177106807a30f0a883560a10f77d",
+              "main_blob": "4947dc9c42db303787a739009a63a7795b38e56e"
+            },
+            {
+              "path": "scripts/e2e-dropin.sh",
+              "base_blob": null,
+              "head_blob": "ce58c3f8f5095e1beb9d6723fa66d62c184f2fd9",
+              "main_blob": "ab967a3372c9e6e00230aa287f36a990ac3ad714"
+            },
+            {
+              "path": "scripts/e2e-graph-isolation.test.mjs",
+              "base_blob": "2537246ac1f49012eab902d000e64f63d3c50dfc",
+              "head_blob": "b89d18b4e6311099447c49cba981abece70dbc05",
+              "main_blob": "2537246ac1f49012eab902d000e64f63d3c50dfc"
+            },
+            {
+              "path": "scripts/e2e-security-home-selection.test.mjs",
+              "base_blob": "635539636079c4ebd8c8881c635787dcea1462ed",
+              "head_blob": "17284e8eb8a24b94545e12518b3354d70884de35",
+              "main_blob": "d2b42881753861bc54de1a91343776d48f945cd1"
+            },
+            {
+              "path": "scripts/e2e-security-workspace-selection.test.mjs",
+              "base_blob": "85ce4b652bed56b06496391225b55fb9ec17a58a",
+              "head_blob": "31699d14dbe21c8a4d8728d9c8c9e76e2bcdae18",
+              "main_blob": "f5c6bed92c81a036e543850a840e29b1aed0ea46"
+            },
+            {
+              "path": "scripts/e2e-temp.test.mjs",
+              "base_blob": "8e8599e28867f4cd73dae8e763909e3815e3f15a",
+              "head_blob": "83778365e4fe891891408b96f29446fd3c9cd562",
+              "main_blob": "b9c4305876ad9a79885fd25c3d8d7fc82dae1e99"
+            },
+            {
+              "path": "scripts/e2e-workspace-spaced-tmpdir.test.mjs",
+              "base_blob": null,
+              "head_blob": "22555601d5d07ea3c2f004a9a39044cb71ab5f6c",
+              "main_blob": "22555601d5d07ea3c2f004a9a39044cb71ab5f6c"
+            },
+            {
+              "path": "scripts/e2e.d/README.md",
+              "base_blob": null,
+              "head_blob": "ea15d36bbd8df23ee3c99e5e83d6277b2c932746",
+              "main_blob": "ea15d36bbd8df23ee3c99e5e83d6277b2c932746"
+            },
+            {
+              "path": "scripts/e2e.sh",
+              "base_blob": "5734711cb56bf383d58860ed9a8648c78d60789b",
+              "head_blob": "247c06110aa59696f76ddd37e9013f3d7d9ea78a",
+              "main_blob": "78b81ed010cde41fc975f3399f3b48f0defbf829"
+            },
+            {
+              "path": "scripts/e2e.test.mjs",
+              "base_blob": "40fa46c9cd10bd5057994154884d54a086c16810",
+              "head_blob": "9848ea236fc014f6788308437e1ee7b259a0b1cc",
+              "main_blob": "974a97727a520e89aac548a6c41f9e8aca3fca50"
+            }
+          ]
+        }
+      ],
+      "validation": []
+    },
+    {
+      "pr": 731,
+      "current_main": "627aae3fb696d0cc99d930513953ee86f38597e2",
+      "status": "semantic_review_incomplete",
+      "publication_ready": false,
+      "findings": "Original release workflow, release version script and assertions plus release documentation require semantic comparison. Refreshed head is a forward reconciliation and differs from supplied original.",
+      "variants": [
+        {
+          "identity": "supplied_original",
+          "head": "ac7cb85e2877fc2803c3c868a3ea58f67badadef",
+          "merge_base_with_main": "30d340dc211c403d6a699274dfcb7d0756ea587b",
+          "full_changed_hunks": "original-pr-731-supplied_original.diff",
+          "paths": [
+            {
+              "path": ".github/workflows/ci.yml",
+              "base_blob": "eee0d098b32ee2af93cabf92cd8262744938492e",
+              "head_blob": "c869b3835889c907f73ba2c06ea3efbdf1021ab2",
+              "main_blob": "539d125c1faa6fb12e4bf7f3efa575bb254c0d9d"
+            },
+            {
+              "path": ".github/workflows/release.yml",
+              "base_blob": "1d3e8129d968b40cd00b5454f0819ecd8dce0292",
+              "head_blob": "643559cc2222832fe5d6a2de05f8e81d12a60ea6",
+              "main_blob": "d7e6c2cf95bbd488d8e0725c5a230ebaf4e65cda"
+            },
+            {
+              "path": "apps/web/public/llms-full.txt",
+              "base_blob": "2b30cb37bd69a0620b1fa7c89862f9318890a7c0",
+              "head_blob": "1ac4970f692fc257e2db90e224551cb2096860d8",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "apps/web/public/llms.txt",
+              "base_blob": "a9046ba5c9690df732ac18d163438969b58d8eeb",
+              "head_blob": "de4cbaacc8a24fba952d9593366673cb80adf604",
+              "main_blob": "4be9f76c97df5317f94bb592eb887655c36cbb41"
+            },
+            {
+              "path": "apps/web/public/og.png",
+              "base_blob": "81ce8b913d91b4325f4c6e06013f2b10856bb170",
+              "head_blob": "53ee1045a33483953c3769cd09d934c9a9a090ee",
+              "main_blob": "81ce8b913d91b4325f4c6e06013f2b10856bb170"
+            },
+            {
+              "path": "docs/RELEASE.md",
+              "base_blob": "5270d66920f03d3563a0280ffe6e2003d6320996",
+              "head_blob": "9b472e3586e9c481427c58b4929d56e05008b981",
+              "main_blob": "bf9c9dfedb975af64fc9be81fb8e1d7ab89b325a"
+            },
+            {
+              "path": "docs/release-automation.md",
+              "base_blob": null,
+              "head_blob": "29e99c96f04fd16fa48e38aa8706f4b319d7d710",
+              "main_blob": "597a87c7efd8dfbc3cb23068dc5e06545819c0fe"
+            },
+            {
+              "path": "docs/release-automation/release-pr.yml.template",
+              "base_blob": null,
+              "head_blob": "11072a9a2074208b16698b59f785b7bc6ba97f73",
+              "main_blob": "603bdf168215c150b059e78bf9af4fb3d3d3293e"
+            },
+            {
+              "path": "llms-full.txt",
+              "base_blob": "2b30cb37bd69a0620b1fa7c89862f9318890a7c0",
+              "head_blob": "1ac4970f692fc257e2db90e224551cb2096860d8",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "llms.txt",
+              "base_blob": "a9046ba5c9690df732ac18d163438969b58d8eeb",
+              "head_blob": "de4cbaacc8a24fba952d9593366673cb80adf604",
+              "main_blob": "4be9f76c97df5317f94bb592eb887655c36cbb41"
+            },
+            {
+              "path": "scripts/ci/release-workflow.test.mjs",
+              "base_blob": null,
+              "head_blob": "9e15abacd793b7efba4a89938ff01bd2e5191bf2",
+              "main_blob": "639f9460f4dc6856ba99b86f7c79312568e91bfb"
+            },
+            {
+              "path": "scripts/release-version.mjs",
+              "base_blob": null,
+              "head_blob": "6500354ce406b01e6049df5fa192982f4c6ff02a",
+              "main_blob": "708ca18d0f5dcf86c516dae9056b88b43c965026"
+            },
+            {
+              "path": "scripts/release-version.test.mjs",
+              "base_blob": null,
+              "head_blob": "49b712464b32bcc25d3443ab9fe0d3aaf5f9b85f",
+              "main_blob": "909beb7a9f91da12cc2eb689e0d4ff10e77400c0"
+            }
+          ]
+        },
+        {
+          "identity": "refreshed_head",
+          "head": "00405651e0d3e48b11d8d991f4421cf26f3b2e0b",
+          "merge_base_with_main": "86da09bbd50455e63939e6998e0fc47d8e26162d",
+          "full_changed_hunks": "original-pr-731-refreshed_head.diff",
+          "paths": [
+            {
+              "path": "apps/web/public/llms-full.txt",
+              "base_blob": "0bad5c31957eec3938cd797aeef243bdf0a4e0e5",
+              "head_blob": "b9398969649cc36ca2d6e1d85dba68f2ffc05931",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "apps/web/public/llms.txt",
+              "base_blob": "a9046ba5c9690df732ac18d163438969b58d8eeb",
+              "head_blob": "de4cbaacc8a24fba952d9593366673cb80adf604",
+              "main_blob": "4be9f76c97df5317f94bb592eb887655c36cbb41"
+            },
+            {
+              "path": "docs/release-automation.md",
+              "base_blob": null,
+              "head_blob": "597a87c7efd8dfbc3cb23068dc5e06545819c0fe",
+              "main_blob": "597a87c7efd8dfbc3cb23068dc5e06545819c0fe"
+            },
+            {
+              "path": "docs/release-automation/release-pr.yml.template",
+              "base_blob": null,
+              "head_blob": "603bdf168215c150b059e78bf9af4fb3d3d3293e",
+              "main_blob": "603bdf168215c150b059e78bf9af4fb3d3d3293e"
+            },
+            {
+              "path": "llms-full.txt",
+              "base_blob": "0bad5c31957eec3938cd797aeef243bdf0a4e0e5",
+              "head_blob": "b9398969649cc36ca2d6e1d85dba68f2ffc05931",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "llms.txt",
+              "base_blob": "a9046ba5c9690df732ac18d163438969b58d8eeb",
+              "head_blob": "de4cbaacc8a24fba952d9593366673cb80adf604",
+              "main_blob": "4be9f76c97df5317f94bb592eb887655c36cbb41"
+            }
+          ]
+        }
+      ],
+      "validation": []
+    },
+    {
+      "pr": 614,
+      "current_main": "627aae3fb696d0cc99d930513953ee86f38597e2",
+      "status": "semantic_review_incomplete",
+      "publication_ready": false,
+      "findings": "Release automation, release version synchronization and tests plus version metadata require release-owner semantic review; active release source is out of scope. Refreshed head differs from supplied original.",
+      "variants": [
+        {
+          "identity": "supplied_original",
+          "head": "107755c95adddea7250225eee9a3ea477ac8a53e",
+          "merge_base_with_main": "5f81c569fa3845073d754d976b990e517ba4eebe",
+          "full_changed_hunks": "original-pr-614-supplied_original.diff",
+          "paths": [
+            {
+              "path": ".github/workflows/auto-tag.yml",
+              "base_blob": null,
+              "head_blob": "b10fb5ea68d6374a2cc5889f94b0ec6658883b0e",
+              "main_blob": "07bd8f4612207e012c4cec1e7659a4a120438a49"
+            },
+            {
+              "path": ".github/workflows/ci.yml",
+              "base_blob": "ad1a11fb1cf0dc5aeab0d95319f76d3e547c53f0",
+              "head_blob": "443f266ea5958f873d7e924b08bb687dbd4b0c10",
+              "main_blob": "539d125c1faa6fb12e4bf7f3efa575bb254c0d9d"
+            },
+            {
+              "path": ".github/workflows/release.yml",
+              "base_blob": "1d3e8129d968b40cd00b5454f0819ecd8dce0292",
+              "head_blob": "6c6dc5ac901c29630023188327937225bca99e62",
+              "main_blob": "d7e6c2cf95bbd488d8e0725c5a230ebaf4e65cda"
+            },
+            {
+              "path": "CHANGELOG.md",
+              "base_blob": "deb8b3a487ef829e29aec66b3d0a39516e1db794",
+              "head_blob": "ab80ba23fef938a060c45637d3cc71c7dcb33f9c",
+              "main_blob": "ce1b917e90d06f8ec27d92a7d546d2e7f05397f9"
+            },
+            {
+              "path": "Cargo.lock",
+              "base_blob": "76356b1606e4993e812e1d6c2145993c951cb43b",
+              "head_blob": "d35627b1e276ec31ebc84619e038491393354118",
+              "main_blob": "f53eb2bdd3f07cb862360f3f7072fd1fe4e5184e"
+            },
+            {
+              "path": "Cargo.toml",
+              "base_blob": "ecfc9835cd2aabe525decf1d93246bae56da1e56",
+              "head_blob": "351c2384b44260d453b02661fbef0a3d53303735",
+              "main_blob": "bfff76c2adfb7fb6546932d115fc71b157da380d"
+            },
+            {
+              "path": "INTEGRATION.md",
+              "base_blob": "05587e93a1f647fd1cfde9994ea9e2055f6a8ded",
+              "head_blob": "b26c2953510b8aa26aa6cbe87ff5769e23a73040",
+              "main_blob": "5d21496de2dba8e39c32f69b50fa9771640cc035"
+            },
+            {
+              "path": "apps/web/package.json",
+              "base_blob": "a14bf0b72b70894dcdde721ca12c2ef2032ea843",
+              "head_blob": "640acfbc337bc40e672fefe4e1c0b3282074047b",
+              "main_blob": "0368744cfcdea2e5e5e5ccf11b2d0e394e4f1a4c"
+            },
+            {
+              "path": "apps/web/public/.well-known/security.txt",
+              "base_blob": "f3018bec748ed2bf2c80b3d6ed2ef23ec876e305",
+              "head_blob": "f005a79a3fb6d9b811640d1263700f415f03fbb7",
+              "main_blob": "f76ea91f702af69b984dd16cad732cda36466ec7"
+            },
+            {
+              "path": "apps/web/public/capabilities.json",
+              "base_blob": "944d8db1dae5d00da2c7c1b6af607bc07ea5dd71",
+              "head_blob": "885bd6e8c148042a37047edd1e8becf6493967ee",
+              "main_blob": "f1e24a7c072ea6447000a6c68628e1280674077e"
+            },
+            {
+              "path": "apps/web/public/llms-full.txt",
+              "base_blob": "2b30cb37bd69a0620b1fa7c89862f9318890a7c0",
+              "head_blob": "0bad5c31957eec3938cd797aeef243bdf0a4e0e5",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "apps/web/public/sitemap.xml",
+              "base_blob": "e8a56f4ffb244cb3a98f3a88023197cab31e59d9",
+              "head_blob": "f284dcd781a0076d2ad5756d0e0bfeff92afdc6a",
+              "main_blob": "1bdba59b0c1df675cf12720eeb172c3d398afedd"
+            },
+            {
+              "path": "crates/locus-cli/Cargo.toml",
+              "base_blob": "fdb22fb77ebdacbb86def9177a9fbf1c5ee69937",
+              "head_blob": "af08becf91cef704d145dce3a8355be6d456aacc",
+              "main_blob": "5d30165dbbcccb3ed475b52f6c0fe9b2d6277b01"
+            },
+            {
+              "path": "crates/locus-cli/tests/snapshots/doctor.json",
+              "base_blob": "f2cc6a9dba0f021663c71524043428c76457bd69",
+              "head_blob": "fb6075844c172c9f2fcdff0fd01472de3fce514e",
+              "main_blob": "888037ef7c1d6894efbfbf30df83048b9ac166bf"
+            },
+            {
+              "path": "crates/locus-cli/tests/snapshots/doctor.txt",
+              "base_blob": "698578897b943bfe5456b5f3ec6997f90a0fd64a",
+              "head_blob": "edc6ae53dc7719ffa1d688fadfe5592dfaf8bdef",
+              "main_blob": "b972ea2bfbe5bab4e99bd204463f4e907a84bf46"
+            },
+            {
+              "path": "crates/locus-cli/tests/stale_pin_recovery.rs",
+              "base_blob": "2261d0eedde4595e116f15c6122416c86b62475a",
+              "head_blob": "98dfde31fb3e893cd6833e562ece3ee05a93562b",
+              "main_blob": "98dfde31fb3e893cd6833e562ece3ee05a93562b"
+            },
+            {
+              "path": "docs/RELEASE.md",
+              "base_blob": "5270d66920f03d3563a0280ffe6e2003d6320996",
+              "head_blob": "3d86b97dcd672c25c167b5dd8cf7f59060383e5e",
+              "main_blob": "bf9c9dfedb975af64fc9be81fb8e1d7ab89b325a"
+            },
+            {
+              "path": "llms-full.txt",
+              "base_blob": "2b30cb37bd69a0620b1fa7c89862f9318890a7c0",
+              "head_blob": "0bad5c31957eec3938cd797aeef243bdf0a4e0e5",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "npm-mcp/bin/locus-mcp.js",
+              "base_blob": "7469381eaa6c95d6bfb060d2cda7e8159f403673",
+              "head_blob": "26f9432e4f9cba51485662693538b98c5a9dc938",
+              "main_blob": "0cd984f14872cb58939f8fd7c0eb9a65e9db1aa6"
+            },
+            {
+              "path": "npm-mcp/package.json",
+              "base_blob": "51239a817741d989624b9862cc209cf4b717371a",
+              "head_blob": "d0ef50931e13e25d95e1270de7cac78f8cb5ac97",
+              "main_blob": "10349450d78b1933f38b521b4062a11885b67e45"
+            },
+            {
+              "path": "npm/bin/locus.js",
+              "base_blob": "cdf7cb322eed3c0220c4f07037aac1a017553cd3",
+              "head_blob": "aa5a0fddaeb0ebed6a82474f7f4de4d93d4bd725",
+              "main_blob": "534a350636f664b536d4dae3b9efccdd240a0529"
+            },
+            {
+              "path": "npm/package.json",
+              "base_blob": "b1e16e423b82a2c00c181f8f521bb48cb5d27bc0",
+              "head_blob": "5b895cd50c022ce0888737f241fa119b008339a4",
+              "main_blob": "e0fd5b49b34cfa5527d80c460d2bdd3cabbe9951"
+            },
+            {
+              "path": "npm/test/upgrade-changelog.test.js",
+              "base_blob": "53c3f0150345bf266400573830cdecba96e7cd6c",
+              "head_blob": "da27945354b0c60921a86ee4870c97f7fe8a9d69",
+              "main_blob": "da27945354b0c60921a86ee4870c97f7fe8a9d69"
+            },
+            {
+              "path": "scripts/ci/release-workflow.test.mjs",
+              "base_blob": null,
+              "head_blob": "ae46453aa5b2eb97c8d26e25444c31ec07a97535",
+              "main_blob": "639f9460f4dc6856ba99b86f7c79312568e91bfb"
+            },
+            {
+              "path": "scripts/release-version.mjs",
+              "base_blob": null,
+              "head_blob": "708ca18d0f5dcf86c516dae9056b88b43c965026",
+              "main_blob": "708ca18d0f5dcf86c516dae9056b88b43c965026"
+            },
+            {
+              "path": "scripts/release-version.test.mjs",
+              "base_blob": null,
+              "head_blob": "909beb7a9f91da12cc2eb689e0d4ff10e77400c0",
+              "main_blob": "909beb7a9f91da12cc2eb689e0d4ff10e77400c0"
+            },
+            {
+              "path": "scripts/tests/test_cargo_install_changelog.py",
+              "base_blob": "99839484d6a75f9cd0b57938fb2677e61e9e0ff9",
+              "head_blob": "1887a50c0a61d4cff59242d79c13335f399c3559",
+              "main_blob": "1887a50c0a61d4cff59242d79c13335f399c3559"
+            },
+            {
+              "path": "scripts/tests/test_shell_installer_changelog.py",
+              "base_blob": "9a0ef6941880e3a33b04370470c6b06343b413aa",
+              "head_blob": "2d9c986881999cb965ed50ca8ccb3f3a5a8d7280",
+              "main_blob": "2d9c986881999cb965ed50ca8ccb3f3a5a8d7280"
+            },
+            {
+              "path": "server.json",
+              "base_blob": "a12900366117d6d8adc8ccffcb89992a0b9a3e30",
+              "head_blob": "9bb88184064d3472b9481e473b75172d1076da82",
+              "main_blob": "fad1f8ff69c0f5f5bc06ebd4142736affa2cdbfa"
+            }
+          ]
+        },
+        {
+          "identity": "refreshed_head",
+          "head": "e403fbc04daec67bd02f4b7d641d94c347fbdde8",
+          "merge_base_with_main": "5f81c569fa3845073d754d976b990e517ba4eebe",
+          "full_changed_hunks": "original-pr-614-refreshed_head.diff",
+          "paths": [
+            {
+              "path": ".github/workflows/auto-tag.yml",
+              "base_blob": null,
+              "head_blob": "b10fb5ea68d6374a2cc5889f94b0ec6658883b0e",
+              "main_blob": "07bd8f4612207e012c4cec1e7659a4a120438a49"
+            },
+            {
+              "path": ".github/workflows/ci.yml",
+              "base_blob": "ad1a11fb1cf0dc5aeab0d95319f76d3e547c53f0",
+              "head_blob": "443f266ea5958f873d7e924b08bb687dbd4b0c10",
+              "main_blob": "539d125c1faa6fb12e4bf7f3efa575bb254c0d9d"
+            },
+            {
+              "path": ".github/workflows/release.yml",
+              "base_blob": "1d3e8129d968b40cd00b5454f0819ecd8dce0292",
+              "head_blob": "6c6dc5ac901c29630023188327937225bca99e62",
+              "main_blob": "d7e6c2cf95bbd488d8e0725c5a230ebaf4e65cda"
+            },
+            {
+              "path": "CHANGELOG.md",
+              "base_blob": "deb8b3a487ef829e29aec66b3d0a39516e1db794",
+              "head_blob": "ab80ba23fef938a060c45637d3cc71c7dcb33f9c",
+              "main_blob": "ce1b917e90d06f8ec27d92a7d546d2e7f05397f9"
+            },
+            {
+              "path": "Cargo.lock",
+              "base_blob": "76356b1606e4993e812e1d6c2145993c951cb43b",
+              "head_blob": "d35627b1e276ec31ebc84619e038491393354118",
+              "main_blob": "f53eb2bdd3f07cb862360f3f7072fd1fe4e5184e"
+            },
+            {
+              "path": "Cargo.toml",
+              "base_blob": "ecfc9835cd2aabe525decf1d93246bae56da1e56",
+              "head_blob": "351c2384b44260d453b02661fbef0a3d53303735",
+              "main_blob": "bfff76c2adfb7fb6546932d115fc71b157da380d"
+            },
+            {
+              "path": "INTEGRATION.md",
+              "base_blob": "05587e93a1f647fd1cfde9994ea9e2055f6a8ded",
+              "head_blob": "b26c2953510b8aa26aa6cbe87ff5769e23a73040",
+              "main_blob": "5d21496de2dba8e39c32f69b50fa9771640cc035"
+            },
+            {
+              "path": "apps/web/package.json",
+              "base_blob": "a14bf0b72b70894dcdde721ca12c2ef2032ea843",
+              "head_blob": "640acfbc337bc40e672fefe4e1c0b3282074047b",
+              "main_blob": "0368744cfcdea2e5e5e5ccf11b2d0e394e4f1a4c"
+            },
+            {
+              "path": "apps/web/public/.well-known/security.txt",
+              "base_blob": "f3018bec748ed2bf2c80b3d6ed2ef23ec876e305",
+              "head_blob": "f005a79a3fb6d9b811640d1263700f415f03fbb7",
+              "main_blob": "f76ea91f702af69b984dd16cad732cda36466ec7"
+            },
+            {
+              "path": "apps/web/public/capabilities.json",
+              "base_blob": "944d8db1dae5d00da2c7c1b6af607bc07ea5dd71",
+              "head_blob": "885bd6e8c148042a37047edd1e8becf6493967ee",
+              "main_blob": "f1e24a7c072ea6447000a6c68628e1280674077e"
+            },
+            {
+              "path": "apps/web/public/llms-full.txt",
+              "base_blob": "2b30cb37bd69a0620b1fa7c89862f9318890a7c0",
+              "head_blob": "0bad5c31957eec3938cd797aeef243bdf0a4e0e5",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "apps/web/public/sitemap.xml",
+              "base_blob": "e8a56f4ffb244cb3a98f3a88023197cab31e59d9",
+              "head_blob": "f284dcd781a0076d2ad5756d0e0bfeff92afdc6a",
+              "main_blob": "1bdba59b0c1df675cf12720eeb172c3d398afedd"
+            },
+            {
+              "path": "crates/locus-cli/Cargo.toml",
+              "base_blob": "fdb22fb77ebdacbb86def9177a9fbf1c5ee69937",
+              "head_blob": "af08becf91cef704d145dce3a8355be6d456aacc",
+              "main_blob": "5d30165dbbcccb3ed475b52f6c0fe9b2d6277b01"
+            },
+            {
+              "path": "crates/locus-cli/tests/snapshots/doctor.json",
+              "base_blob": "f2cc6a9dba0f021663c71524043428c76457bd69",
+              "head_blob": "fb6075844c172c9f2fcdff0fd01472de3fce514e",
+              "main_blob": "888037ef7c1d6894efbfbf30df83048b9ac166bf"
+            },
+            {
+              "path": "crates/locus-cli/tests/snapshots/doctor.txt",
+              "base_blob": "698578897b943bfe5456b5f3ec6997f90a0fd64a",
+              "head_blob": "edc6ae53dc7719ffa1d688fadfe5592dfaf8bdef",
+              "main_blob": "b972ea2bfbe5bab4e99bd204463f4e907a84bf46"
+            },
+            {
+              "path": "crates/locus-cli/tests/stale_pin_recovery.rs",
+              "base_blob": "2261d0eedde4595e116f15c6122416c86b62475a",
+              "head_blob": "98dfde31fb3e893cd6833e562ece3ee05a93562b",
+              "main_blob": "98dfde31fb3e893cd6833e562ece3ee05a93562b"
+            },
+            {
+              "path": "docs/RELEASE.md",
+              "base_blob": "5270d66920f03d3563a0280ffe6e2003d6320996",
+              "head_blob": "3d86b97dcd672c25c167b5dd8cf7f59060383e5e",
+              "main_blob": "bf9c9dfedb975af64fc9be81fb8e1d7ab89b325a"
+            },
+            {
+              "path": "llms-full.txt",
+              "base_blob": "2b30cb37bd69a0620b1fa7c89862f9318890a7c0",
+              "head_blob": "0bad5c31957eec3938cd797aeef243bdf0a4e0e5",
+              "main_blob": "e5997dd01ea2f926fba32d830fa998fbe149f011"
+            },
+            {
+              "path": "npm-mcp/bin/locus-mcp.js",
+              "base_blob": "7469381eaa6c95d6bfb060d2cda7e8159f403673",
+              "head_blob": "26f9432e4f9cba51485662693538b98c5a9dc938",
+              "main_blob": "0cd984f14872cb58939f8fd7c0eb9a65e9db1aa6"
+            },
+            {
+              "path": "npm-mcp/package.json",
+              "base_blob": "51239a817741d989624b9862cc209cf4b717371a",
+              "head_blob": "d0ef50931e13e25d95e1270de7cac78f8cb5ac97",
+              "main_blob": "10349450d78b1933f38b521b4062a11885b67e45"
+            },
+            {
+              "path": "npm/bin/locus.js",
+              "base_blob": "cdf7cb322eed3c0220c4f07037aac1a017553cd3",
+              "head_blob": "aa5a0fddaeb0ebed6a82474f7f4de4d93d4bd725",
+              "main_blob": "534a350636f664b536d4dae3b9efccdd240a0529"
+            },
+            {
+              "path": "npm/package.json",
+              "base_blob": "b1e16e423b82a2c00c181f8f521bb48cb5d27bc0",
+              "head_blob": "5b895cd50c022ce0888737f241fa119b008339a4",
+              "main_blob": "e0fd5b49b34cfa5527d80c460d2bdd3cabbe9951"
+            },
+            {
+              "path": "npm/test/upgrade-changelog.test.js",
+              "base_blob": "53c3f0150345bf266400573830cdecba96e7cd6c",
+              "head_blob": "da27945354b0c60921a86ee4870c97f7fe8a9d69",
+              "main_blob": "da27945354b0c60921a86ee4870c97f7fe8a9d69"
+            },
+            {
+              "path": "scripts/ci/release-workflow.test.mjs",
+              "base_blob": null,
+              "head_blob": "6254f2ab9ad7a68a14da5b0949f6b137e649dd69",
+              "main_blob": "639f9460f4dc6856ba99b86f7c79312568e91bfb"
+            },
+            {
+              "path": "scripts/release-version.mjs",
+              "base_blob": null,
+              "head_blob": "708ca18d0f5dcf86c516dae9056b88b43c965026",
+              "main_blob": "708ca18d0f5dcf86c516dae9056b88b43c965026"
+            },
+            {
+              "path": "scripts/release-version.test.mjs",
+              "base_blob": null,
+              "head_blob": "909beb7a9f91da12cc2eb689e0d4ff10e77400c0",
+              "main_blob": "909beb7a9f91da12cc2eb689e0d4ff10e77400c0"
+            },
+            {
+              "path": "scripts/tests/test_cargo_install_changelog.py",
+              "base_blob": "99839484d6a75f9cd0b57938fb2677e61e9e0ff9",
+              "head_blob": "1887a50c0a61d4cff59242d79c13335f399c3559",
+              "main_blob": "1887a50c0a61d4cff59242d79c13335f399c3559"
+            },
+            {
+              "path": "scripts/tests/test_shell_installer_changelog.py",
+              "base_blob": "9a0ef6941880e3a33b04370470c6b06343b413aa",
+              "head_blob": "2d9c986881999cb965ed50ca8ccb3f3a5a8d7280",
+              "main_blob": "2d9c986881999cb965ed50ca8ccb3f3a5a8d7280"
+            },
+            {
+              "path": "server.json",
+              "base_blob": "a12900366117d6d8adc8ccffcb89992a0b9a3e30",
+              "head_blob": "9bb88184064d3472b9481e473b75172d1076da82",
+              "main_blob": "fad1f8ff69c0f5f5bc06ebd4142736affa2cdbfa"
+            }
+          ]
+        }
+      ],
+      "validation": []
+    },
+    {
+      "pr": 611,
+      "current_main": "627aae3fb696d0cc99d930513953ee86f38597e2",
+      "status": "semantic_review_incomplete",
+      "publication_ready": false,
+      "findings": "Original auto-tag and release workflows and release documentation differ from main; security/release-owner semantic review is required. Refreshed head has empty diff against its merge base, which does not prove preservation of original behavior.",
+      "variants": [
+        {
+          "identity": "supplied_original",
+          "head": "746ff726722eb58cab6bd8c6bb3aadfcd15ecb44",
+          "merge_base_with_main": "862922b26944109279d5575d852c4f3b3c2fd0a2",
+          "full_changed_hunks": "original-pr-611-supplied_original.diff",
+          "paths": [
+            {
+              "path": ".github/workflows/auto-tag.yml",
+              "base_blob": null,
+              "head_blob": "fabdaec9d0da233c44e99671be064f7d9bd7b040",
+              "main_blob": "07bd8f4612207e012c4cec1e7659a4a120438a49"
+            },
+            {
+              "path": ".github/workflows/release.yml",
+              "base_blob": "1d3e8129d968b40cd00b5454f0819ecd8dce0292",
+              "head_blob": "ee192b68d1ae8c3470d115c47fc6eb5af14e681d",
+              "main_blob": "d7e6c2cf95bbd488d8e0725c5a230ebaf4e65cda"
+            },
+            {
+              "path": "docs/RELEASE.md",
+              "base_blob": "5270d66920f03d3563a0280ffe6e2003d6320996",
+              "head_blob": "702db59a579cf47a65c38bec10310c3eee7da74a",
+              "main_blob": "bf9c9dfedb975af64fc9be81fb8e1d7ab89b325a"
+            }
+          ]
+        },
+        {
+          "identity": "refreshed_head",
+          "head": "fc2623c8cdc5078716033cef5041d0dc23d0c6fc",
+          "merge_base_with_main": "2480321dbf82ae6ed81c5b20940cb08706fc2dd2",
+          "full_changed_hunks": "original-pr-611-refreshed_head.diff",
+          "paths": []
+        }
+      ],
+      "validation": []
+    }
+  ]
+}

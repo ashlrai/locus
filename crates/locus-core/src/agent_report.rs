@@ -298,8 +298,11 @@ pub fn agent_report_from_doctor(doctor: DoctorReport, opts: AgentReportOptions) 
     if pin.is_none() {
         findings
             .push("not pinned — run `locus enter` or `locus pin <alias>` before agent work".into());
-    } else if pin.as_ref().is_some_and(|p| p.seal_ok && p.expired) {
-        findings.push("pin expired — re-pin with `locus pin <alias>`".into());
+    } else if let Some(p) = pin.as_ref().filter(|p| p.seal_ok && p.expired) {
+        findings.push(format!(
+            "pin expired — human recovery: `{}`",
+            crate::recovery::stale_pin_recovery(Some(p.alias.as_str()))
+        ));
     } else if let Some(recovery) = &recovery {
         findings.push(format!(
             "pin cannot be verified (authority broker gone, stale session or bad seal) — \
@@ -876,19 +879,19 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
 
     let binding = runtime.binding_alias.clone();
     let tenant = runtime.tenant_session.clone();
-    let re_pin_cmd = binding
-        .as_ref()
-        .map(|a| format!("locus leave && locus pin {a}"))
-        .unwrap_or_else(|| "locus leave && locus pin <alias>".into());
+    // Every broken-pin state needs the same human recipe: `locus pin`/`enter`
+    // refuse an expired, bad-seal or unreadable pin until it is cleared, and a
+    // plain `leave` still fails when the authority broker is gone — so the
+    // command is the canonical stale-pin recovery every other surface prints.
 
     if !runtime.seal_ok {
         return Ok(SafeNext {
             action: "re_pin".into(),
-            command: Some(re_pin_cmd),
+            command: Some(crate::recovery::stale_pin_recovery(binding.as_deref())),
             agent_tool: Some("locus_request_pin".into()),
-            message:
-                "Session seal invalid. Human must re-pin (`locus leave` then `locus pin <alias>`)."
-                    .into(),
+            message: "Session seal invalid — `locus pin`/`enter` refuse it until \
+                      cleared. Human: `locus leave --force` then `locus enter <alias>`."
+                .into(),
             ready: false,
             approval_id: None,
             binding,
@@ -898,14 +901,12 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
     if runtime.expired {
         return Ok(SafeNext {
             action: "re_pin".into(),
-            command: Some(
-                binding
-                    .as_ref()
-                    .map(|a| format!("locus pin {a}"))
-                    .unwrap_or_else(|| "locus pin <alias>".into()),
-            ),
+            command: Some(crate::recovery::stale_pin_recovery(binding.as_deref())),
             agent_tool: Some("locus_request_pin".into()),
-            message: "Pin TTL expired. Human must re-pin.".into(),
+            message: "Pin TTL expired — `locus pin`/`enter` refuse an expired pin \
+                      until it is cleared. Human: `locus leave --force` then \
+                      `locus enter <alias>`."
+                .into(),
             ready: false,
             approval_id: None,
             binding,
@@ -913,13 +914,16 @@ pub fn compute_safe_next(store: &Store, cwd: &Path) -> crate::Result<SafeNext> {
         });
     }
     if runtime.frozen {
+        // A frozen pin still has a valid seal, so `locus enter` replaces it
+        // directly (dead or live broker alike); forced teardown is only the
+        // fallback for a pin enter still refuses.
         return Ok(SafeNext {
             action: "re_pin".into(),
-            command: Some(re_pin_cmd),
+            command: Some(crate::recovery::dead_broker_recovery(binding.as_deref())),
             agent_tool: Some("locus_heartbeat".into()),
-            message:
-                "Session frozen after binding drift. Human: `locus leave` then `locus pin <alias>`."
-                    .into(),
+            message: "Session frozen after binding drift. Human: `locus enter <alias>` \
+                      re-pins (if enter refuses, `locus leave --force` first)."
+                .into(),
             ready: false,
             approval_id: None,
             binding,
@@ -1125,6 +1129,58 @@ mod tests {
         let s = serde_json::to_string(&report).unwrap();
         assert!(!s.contains("sk-"));
         assert!(!s.contains("ghp_"));
+    }
+
+    #[test]
+    fn empty_store_report_is_protected_and_serializes_consistently() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let report = agent_report_from_doctor(
+            doctor_for(&store, dir.path()),
+            AgentReportOptions::default(),
+        );
+
+        assert_eq!(report.doctor.bindings, 0);
+        assert!(report.pin.is_none());
+        assert_eq!(report.status, AgentStatus::Protected);
+        assert!(!report.ready);
+        assert_eq!(report.exit_code, 1);
+        assert_eq!(report.status_oneline, "unpinned");
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.starts_with("no bindings")));
+        assert!(!report.mcp_registered.any());
+
+        let json = serde_json::to_value(&report).unwrap();
+        agent_report_json_has_stable_keys(&json).expect("stable keys");
+        assert!(json.get("pin").is_none());
+        let decoded: AgentReport = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
+    }
+
+    #[test]
+    fn empty_optional_lists_are_omitted_and_default_on_deserialization() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut report = agent_report_from_doctor(
+            doctor_for(&store, dir.path()),
+            AgentReportOptions::default(),
+        );
+        report.findings.clear();
+        report.next_steps.clear();
+        report.required_servers.clear();
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("findings").is_none());
+        assert!(json.get("next_steps").is_none());
+        assert_eq!(json["required_servers"], serde_json::json!([]));
+        agent_report_json_has_stable_keys(&json).expect("stable keys");
+        let decoded: AgentReport = serde_json::from_value(json.clone()).unwrap();
+        assert!(decoded.findings.is_empty());
+        assert!(decoded.next_steps.is_empty());
+        assert!(decoded.required_servers.is_empty());
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
     }
 
     #[test]
@@ -1718,6 +1774,93 @@ require_pin = true
         assert_eq!(next.binding.as_deref(), Some("acme"));
         assert_eq!(next.tenant.as_deref(), Some("acme-corp"));
         assert!(next.command.is_none());
+    }
+
+    /// Rewrite the active pin file in place. `reseal` keeps the HMAC valid
+    /// (expiry/frozen are sealed fields); pass `false` to leave a tampered
+    /// seal behind.
+    fn rewrite_active_pin(store: &Store, edit: impl FnOnce(&mut crate::Session), reseal: bool) {
+        let path = store.active_session_path();
+        let mut s: crate::Session =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        edit(&mut s);
+        if reseal {
+            s.reseal(&store.seal_key().unwrap());
+        }
+        fs::write(&path, serde_json::to_vec(&s).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn safe_next_expired_pin_names_working_recovery() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        // Authentic but expired: `locus pin`/`enter` refuse it (SessionExpired)
+        // until the operator runs `locus leave --force`.
+        rewrite_active_pin(
+            &store,
+            |s| {
+                s.pinned_at = chrono::Utc::now() - chrono::Duration::hours(2);
+                s.expires_at = chrono::Utc::now() - chrono::Duration::minutes(5);
+            },
+            true,
+        );
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "re_pin");
+        assert!(!next.ready);
+        assert_eq!(next.binding.as_deref(), Some("acme"));
+        let command = next.command.as_deref().unwrap_or("");
+        assert!(command.contains("locus leave --force"), "{command}");
+        assert!(command.contains("locus enter acme"), "{command}");
+        assert!(!command.contains("locus pin acme"), "{command}");
+        assert!(next.message.contains("expired"), "{}", next.message);
+    }
+
+    #[test]
+    fn safe_next_bad_seal_names_working_recovery() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        // Tampered seal: `locus pin`/`enter` refuse it until `leave --force`.
+        rewrite_active_pin(&store, |s| s.seal = "deadbeef".into(), false);
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "re_pin");
+        assert!(!next.ready);
+        let command = next.command.as_deref().unwrap_or("");
+        assert!(command.contains("locus leave --force"), "{command}");
+        assert!(command.contains("locus enter acme"), "{command}");
+        assert!(!command.contains("locus pin acme"), "{command}");
+    }
+
+    #[test]
+    fn safe_next_frozen_pin_names_enter_first_recovery() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        // Frozen keeps a valid seal, so `locus enter` replaces the pin
+        // directly; forced teardown stays the documented fallback.
+        rewrite_active_pin(&store, |s| s.freeze("providers_drift"), true);
+
+        let next = compute_safe_next(&store, dir.path()).unwrap();
+        assert_eq!(next.action, "re_pin");
+        assert!(!next.ready);
+        let command = next.command.as_deref().unwrap_or("");
+        assert!(command.contains("locus enter acme"), "{command}");
+        assert!(
+            command.contains("locus leave --force && locus enter acme"),
+            "{command}"
+        );
     }
 
     #[test]

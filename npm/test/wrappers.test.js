@@ -25,6 +25,16 @@ function releaseMatrixTargets() {
 for (const [name, file] of Object.entries(wrappers)) {
   const mod = require(file);
 
+  test(`${name}: supported target names are nonempty and unique`, () => {
+    const targets = Object.values(mod.SUPPORTED_TARGETS);
+    assert.ok(targets.length > 0, "must support at least one target");
+    for (const target of targets) {
+      assert.equal(typeof target, "string");
+      assert.ok(target.trim().length > 0, "target name must not be empty");
+    }
+    assert.equal(new Set(targets).size, targets.length, "target names must be unique");
+  });
+
   test(`${name}: PREBUILT_TARGETS matches the release.yml matrix`, () => {
     assert.deepEqual([...mod.PREBUILT_TARGETS].sort(), releaseMatrixTargets());
   });
@@ -99,8 +109,122 @@ for (const [name, file] of Object.entries(wrappers)) {
     }
   });
 
+  test(`${name}: forwards an argument containing spaces as one value`, () => {
+    const home = mkdtempSync(join(tmpdir(), "locus-child-args-"));
+    try {
+      const packageDir = join(root, name === "locus" ? "npm" : "npm-mcp");
+      const version = require(join(packageDir, "package.json")).version;
+      const binary = join(home, ".locus", "bin", name);
+      mkdirSync(join(home, ".locus", "bin"), { recursive: true });
+      writeFileSync(binary, "cached binary fixture\n");
+      const preload = join(home, "child-args.js");
+      writeFileSync(preload, `
+        const assert = require("node:assert/strict");
+        const cp = require("node:child_process");
+        const execFileSync = cp.execFileSync;
+        cp.execFileSync = (command, args, options) => {
+          assert.equal(command, ${JSON.stringify(binary)});
+          if (args.length === 1 && args[0] === "--version") {
+            return Buffer.from(${JSON.stringify(`${name} ${version}\n`)});
+          }
+          return execFileSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify(process.argv.slice(1)))", ...args], options);
+        };
+      `);
+      const args = ["before", "argument with spaces", "after"];
+      const result = spawnSync(process.execPath, ["--require", preload, file, ...args], {
+        env: { HOME: home, USERPROFILE: home, PATH: "", LOCUS_NPM_NO_LINK: "1" },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), args);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test(`${name}: propagates a nonzero exit status from the child process`, () => {
+    const home = mkdtempSync(join(tmpdir(), "locus-child-exit-"));
+    try {
+      const packageDir = join(root, name === "locus" ? "npm" : "npm-mcp");
+      const version = require(join(packageDir, "package.json")).version;
+      const binary = join(home, ".locus", "bin", name);
+      mkdirSync(join(home, ".locus", "bin"), { recursive: true });
+      writeFileSync(binary, "cached binary fixture\n");
+      const preload = join(home, "child-exit.js");
+      writeFileSync(preload, `
+        const assert = require("node:assert/strict");
+        const cp = require("node:child_process");
+        const execFileSync = cp.execFileSync;
+        cp.execFileSync = (command, args, options) => {
+          assert.equal(command, ${JSON.stringify(binary)});
+          if (args.length === 1 && args[0] === "--version") {
+            return Buffer.from(${JSON.stringify(`${name} ${version}\n`)});
+          }
+          assert.deepEqual(args, ["fixture-argument"]);
+          return execFileSync(process.execPath, ["-e", "process.exit(37)"], options);
+        };
+      `);
+      const result = spawnSync(process.execPath, ["--require", preload, file, "fixture-argument"], {
+        env: { HOME: home, USERPROFILE: home, PATH: "", LOCUS_NPM_NO_LINK: "1" },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 37, result.stderr);
+      assert.equal(result.signal, null);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  // Regression: the wrapper must hand arguments to the native binary as an
+  // argv array, never through a shell, so metacharacters arrive literally.
+  test(`${name}: passes shell metacharacters to the wrapped command literally`, () => {
+    if (process.platform === "win32") return;
+    const home = mkdtempSync(join(tmpdir(), "locus-metachar-"));
+    try {
+      const packageDir = join(root, name === "locus" ? "npm" : "npm-mcp");
+      const version = require(join(packageDir, "package.json")).version;
+      const binary = join(home, ".locus", "bin", name);
+      const received = join(home, "received");
+      const sentinel = join(home, "injected");
+      mkdirSync(join(home, ".locus", "bin"), { recursive: true });
+      writeFileSync(`${binary}.version`, `${version}\n`);
+      // Real executable fixture: prints its version, else records each argument
+      // NUL-terminated so embedded newlines survive.
+      writeFileSync(binary, [
+        "#!/bin/sh",
+        `if [ "$1" = "--version" ]; then echo "${name} ${version}"; exit 0; fi`,
+        `for a in "$@"; do printf '%s\\0' "$a" >> "${received}"; done`,
+        "",
+      ].join("\n"), { mode: 0o755 });
+      const args = [
+        "$(touch " + sentinel + ")",
+        "`touch " + sentinel + "`",
+        "; touch " + sentinel,
+        "a && b || c | d",
+        "> " + sentinel,
+        "$HOME ${PATH} ~ *",
+        "'single' \"double\" \\back",
+        "line1\nline2",
+        "a b  c",
+        "#comment & bg",
+      ];
+      const result = spawnSync(process.execPath, [file, ...args], {
+        env: { HOME: home, USERPROFILE: home, PATH: "/usr/bin:/bin", LOCUS_NPM_NO_LINK: "1" },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(readFileSync(received, "utf8").split("\0").slice(0, -1), args);
+      assert.equal(existsSync(sentinel), false, "no argument may be executed or redirected by a shell");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test(`${name}: with no installed binary, runs its executable from the release bundle`, () => {
-    const home = mkdtempSync(join(tmpdir(), "locus-bundle-"));
+    const home = mkdtempSync(join(tmpdir(), "locus bundle with spaces-"));
     try {
       const binary = join(home, ".locus", "bin", name);
       const preload = join(home, "release-fixture.js");
@@ -156,6 +280,11 @@ for (const [name, file] of Object.entries(wrappers)) {
       assert.equal(result.signal, null);
       assert.equal(result.stdout, "selected bundle member\n");
       assert.equal(readFileSync(binary, "utf8"), `bundled ${name}`);
+      if (name === "locus") {
+        const companion = join(home, ".locus", "bin", "locus-mcp");
+        assert.equal(readFileSync(companion, "utf8"), "bundled locus-mcp");
+        assert.equal(readFileSync(`${companion}.version`, "utf8").trim(), require(join(root, "npm", "package.json")).version);
+      }
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -183,6 +312,61 @@ for (const [name, file] of Object.entries(wrappers)) {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  test(`${name}: getPlatformTarget rejects an unsupported architecture by name`, () => {
+    assert.throws(
+      () => mod.getPlatformTarget({ platform: "linux", arch: "riscv64" }),
+      (err) => /^Unsupported platform: linux-riscv64\. Install from source: cargo install /.test(err.message),
+    );
+    assert.throws(() => mod.getPlatformTarget({ platform: "darwin", arch: "ia32" }), /Unsupported platform: darwin-ia32/);
+  });
+
+  test(`${name}: getPlatformTarget rejects an unknown operating system`, () => {
+    assert.throws(
+      () => mod.getPlatformTarget({ platform: "plan9", arch: "x64" }),
+      /Unsupported platform: plan9-x64\. Install from source: cargo install /,
+    );
+  });
+
+  for (const [platform, arch] of [
+    ["linux", "unknown-arch"],
+    ["linux", "riscv64"],
+    ["darwin", "ia32"],
+    ["freebsd", "x64"],
+    ["freebsd", "riscv64"],
+    ["plan9", "x64"],
+  ]) {
+    test(`${name}: on unsupported ${platform}-${arch} it reports the platform and never attempts a download`, () => {
+      const home = mkdtempSync(join(tmpdir(), "locus-unsupported-"));
+      try {
+        const attempts = join(home, "network-attempt");
+        const preload = join(home, "unsupported.js");
+        writeFileSync(preload, `
+          const fs = require("node:fs");
+          Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });
+          Object.defineProperty(process, "arch", { value: ${JSON.stringify(arch)} });
+          const record = (what) => () => { fs.appendFileSync(${JSON.stringify(attempts)}, what + "\\n"); throw new Error("unexpected " + what); };
+          for (const mod of ["node:https", "node:http"]) {
+            const m = require(mod);
+            m.get = record(mod + ".get");
+            m.request = record(mod + ".request");
+          }
+        `);
+        const result = spawnSync(process.execPath, ["--require", preload, file, "--help"], {
+          env: { HOME: home, USERPROFILE: home, PATH: join(home, "empty-bin") },
+          encoding: "utf8",
+          timeout: 20_000,
+        });
+        assert.equal(result.status, 1, result.stderr);
+        assert.match(result.stderr, new RegExp(`Failed to download ${name}: Unsupported platform: ${platform}-${arch}\\. Install from source: cargo install `));
+        assert.doesNotMatch(result.stderr, /Downloading/, "must not announce a download");
+        assert.equal(existsSync(attempts), false, "must not open a network connection");
+        assert.equal(existsSync(join(home, ".locus", "bin", name)), false, "must not install a binary");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  }
 }
 
 test("source-install commands use a positional crate (cargo install has no --package flag)", () => {
@@ -258,22 +442,47 @@ test("locus rejects a release archive whose checksum does not match", () => {
 
 // Regression: quickstart then `enter` failed with a stale session authority
 // because the Node wrapper, not the shell, was locus's parent process.
-test("locus: linkNativeBin replaces the wrapper with a symlink to the binary", () => {
+test("locus: linkNativeBin resolves a native binary path containing spaces", () => {
   if (process.platform === "win32") return;
   const { linkNativeBin } = require(wrappers.locus);
-  const { lstatSync, readlinkSync } = require("node:fs");
+  const { lstatSync, readlinkSync, realpathSync } = require("node:fs");
   const dir = mkdtempSync(join(tmpdir(), "locus-link-"));
   try {
-    const bin = join(dir, "locus-native");
+    const bin = join(dir, "native binaries", "locus native");
     const target = join(dir, "locus.js");
+    mkdirSync(join(dir, "native binaries"));
     writeFileSync(bin, "#!/bin/sh\necho native\n", { mode: 0o755 });
     writeFileSync(target, "// wrapper\n");
     assert.equal(linkNativeBin(bin, target), true);
     assert.ok(lstatSync(target).isSymbolicLink());
     assert.equal(readlinkSync(target), bin);
+    assert.equal(realpathSync(target), realpathSync(bin));
     const out = spawnSync(target, [], { encoding: "utf8" });
     assert.equal(out.stdout.trim(), "native");
     assert.equal(linkNativeBin(bin, target), false, "idempotent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("locus: linkNativeBin replaces a stale binary symlink", () => {
+  if (process.platform === "win32") return;
+  const { linkNativeBin } = require(wrappers.locus);
+  const { lstatSync, readlinkSync, symlinkSync } = require("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "locus-stale-link-"));
+  try {
+    const oldBin = join(dir, "old-native");
+    const newBin = join(dir, "new-native");
+    const target = join(dir, "locus.js");
+    writeFileSync(oldBin, "old binary\n");
+    writeFileSync(newBin, "new binary\n");
+    symlinkSync(oldBin, target);
+    assert.equal(linkNativeBin(newBin, target, 1000), true);
+    assert.ok(lstatSync(target).isSymbolicLink());
+    assert.equal(readlinkSync(target), newBin);
+    assert.equal(readFileSync(target, "utf8"), "new binary\n");
+    assert.equal(readFileSync(oldBin, "utf8"), "old binary\n");
+    assert.equal(linkNativeBin(newBin, target, 1000), false, "idempotent");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

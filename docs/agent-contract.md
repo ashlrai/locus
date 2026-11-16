@@ -35,6 +35,7 @@ whose first key is `schema`. Key on it:
 | `locus whoami` | `locus.whoami.v1` |
 | `locus fleet-feed` (always JSON) | `locus.fleet_feed.v1` |
 | `locus fleet-denials` (always JSON) | `locus.fleet_denials.v1` |
+| `locus fleet-preflight` (always JSON) | `locus.fleet_preflight.v1` |
 | `locus status` | `locus.status.v1` |
 | `locus verify session` | `locus.verify.session.v1` |
 | `locus verify claim` | `locus.verify.claim.v1` |
@@ -220,6 +221,12 @@ Destructive commands keep their explicit flags (`binding rm --yes`,
 `fleet-denials` projects only fixed denial kinds and numeric audit positions. It
 scans the latest 100 parsed records by default; `--cursor N` scans up to 100
 records after N. Persist `next_cursor`, and continue while `has_more` is true.
+
+An explicit cursor validates only the scanned page and the parsed lookahead needed
+to set `has_more`. A successful partial page does not certify unread later bytes.
+Continue with its `next_cursor`: a later unreadable or invalid-UTF-8 page fails
+with a sanitized error, without advancing the cursor or returning an empty-complete
+result. Without a cursor, the command scans the log to find the recent window.
 Corrupt lines are skipped. Cursors assume an append-only log; restart without a
 cursor after replacing or truncating the log. This local observation grants no
 execution authority and includes no audit strings or credential values.

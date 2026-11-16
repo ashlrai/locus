@@ -239,6 +239,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn empty_recipe_collection_parses_to_no_recipes() {
+        // `recipes` is `#[serde(default)]`: an empty file or `recipes = []`
+        // is a valid, empty collection (offline; no I/O).
+        for src in ["", "recipes = []\n"] {
+            let file: RecipesFile = toml::from_str(src).expect("empty collection parses");
+            assert!(file.recipes.is_empty(), "{src:?} should yield no recipes");
+        }
+    }
+
+    #[test]
     fn builtin_recipes_parse_and_have_core_ids() {
         let all = all_recipes().unwrap();
         assert!(

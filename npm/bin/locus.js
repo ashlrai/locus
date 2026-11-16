@@ -26,7 +26,7 @@ const { dirname, join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
 
-const VERSION = "0.6.2";
+const VERSION = "0.7.1";
 const REPO = "ashlrai/locus";
 const BINARY_NAME = "locus";
 const CARGO_PACKAGE = "locus-cli";
@@ -547,7 +547,7 @@ function linkNativeBin(
   if (process.platform === "win32" || process.env.LOCUS_NPM_NO_LINK) return false;
   const fs = require("fs");
   try {
-    if (fs.lstatSync(target).isSymbolicLink()) return false;
+    if (fs.lstatSync(target).isSymbolicLink() && fs.readlinkSync(target) === binary) return false;
     // A root install into a shared prefix (e.g. `sudo npm install -g` into
     // /usr/lib/node_modules) must not point its bin into root's private HOME
     // (/root is 0700): other users would get "Permission denied". Keep the

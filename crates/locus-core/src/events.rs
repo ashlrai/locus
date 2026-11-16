@@ -527,6 +527,52 @@ mod tests {
     }
 
     #[test]
+    fn fleet_pulse_event_serialization_round_trip() {
+        let event = FleetPulseEvent {
+            schema: FleetPulseEvent::SCHEMA.into(),
+            locus_version: "1.2.3".into(),
+            exported_at: "2026-08-09T12:03:00Z".into(),
+            ts: "2026-08-09T12:01:00Z".into(),
+            op: "mcp.scope_freeze".into(),
+            binding: "acme".into(),
+            detail: Some(json!({"tool": "example", "scope": ["read", "write"]})),
+            kind: "audit".into(),
+        };
+        let serialized = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&serialized).unwrap(),
+            json!({
+                "schema": "locus.audit.v1",
+                "locus_version": "1.2.3",
+                "exported_at": "2026-08-09T12:03:00Z",
+                "ts": "2026-08-09T12:01:00Z",
+                "op": "mcp.scope_freeze",
+                "binding": "acme",
+                "detail": {"tool": "example", "scope": ["read", "write"]},
+                "kind": "audit"
+            })
+        );
+        assert_eq!(
+            serde_json::from_str::<FleetPulseEvent>(&serialized).unwrap(),
+            event
+        );
+
+        let without_detail = FleetPulseEvent {
+            detail: None,
+            ..event
+        };
+        let serialized = serde_json::to_string(&without_detail).unwrap();
+        assert!(serde_json::from_str::<Value>(&serialized)
+            .unwrap()
+            .get("detail")
+            .is_none());
+        assert_eq!(
+            serde_json::from_str::<FleetPulseEvent>(&serialized).unwrap(),
+            without_detail
+        );
+    }
+
+    #[test]
     fn json_lines_fleet_pulse() {
         let out = export_events(
             &sample_events(),

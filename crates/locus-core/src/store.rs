@@ -570,8 +570,8 @@ impl Store {
         let key = self.seal_key()?;
         if self.is_expired_authentic(&session)? {
             return Err(LocusError::msg(format!(
-                "pin expired at {}; renew only extends a live pin. Re-pin with \
-                 `locus enter {}` (human re-pin required)",
+                "pin expired at {}; renew only extends a live pin. Clear it with \
+                 `locus leave --force`, then `locus enter {}` (human re-pin required)",
                 session.expires_at.to_rfc3339(),
                 session.binding_alias
             )));

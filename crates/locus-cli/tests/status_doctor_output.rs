@@ -85,3 +85,25 @@ fn doctor_json_and_text_snapshots() {
         include_str!("snapshots/doctor.txt")
     );
 }
+
+/// Regression: empty-state message is human-readable and actionable.
+/// The text must mention the next step (no sub-command, no cryptic code).
+#[test]
+fn status_empty_state_is_readable() {
+    let sandbox = Sandbox::new();
+    let out = sandbox.run(&["status"]);
+    assert!(out.status.success());
+    let text = sandbox.normalized(&out.stdout);
+    assert!(
+        text.contains("no pin"),
+        "empty-state must say 'no pin' clearly: {text}"
+    );
+    assert!(
+        text.contains("locus enter <alias>"),
+        "must include the one next step: {text}"
+    );
+    assert!(
+        !text.contains("!"),
+        "no punctuation noise in the empty-state message: {text}"
+    );
+}

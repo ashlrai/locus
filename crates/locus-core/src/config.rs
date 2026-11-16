@@ -371,6 +371,26 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn parses_empty_config_with_documented_defaults() {
+        let cfg = LocusConfig::parse("").unwrap();
+
+        assert_eq!(cfg, LocusConfig::default());
+        assert!(cfg.clients.auto_pin.is_none());
+        assert!(!cfg.autopin.enabled);
+        assert!(cfg.autopin.remotes.is_empty());
+        assert!(!cfg.notify.enabled);
+        assert!(!cfg.budget.is_enabled());
+        assert!(!cfg.credential_audit.enabled);
+        assert!(!cfg.gateway.enabled);
+        assert!(cfg.exec.inherit_env.is_empty());
+        assert!(cfg.history.enabled);
+        assert_eq!(
+            cfg.history.max_entries,
+            crate::pin_history::DEFAULT_MAX_ENTRIES
+        );
+    }
+
+    #[test]
     fn parses_autopin() {
         let raw = r#"
 [clients]

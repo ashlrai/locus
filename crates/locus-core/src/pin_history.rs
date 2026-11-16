@@ -438,6 +438,28 @@ mod tests {
         assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
     }
 
+    #[test]
+    fn read_missing_history_in_existing_home_returns_empty_list_without_writes() {
+        let home = tempfile::tempdir().unwrap();
+
+        let entries = read(home.path());
+        assert_eq!(entries, Vec::<HistoryEntry>::new());
+        assert_eq!(existing_history_key(home.path()).unwrap(), None);
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn read_empty_history_file_returns_empty_list_without_changes() {
+        let home = tempfile::tempdir().unwrap();
+        let log = path(home.path());
+        fs::write(&log, "").unwrap();
+
+        let entries = read(home.path());
+        assert_eq!(entries, Vec::<HistoryEntry>::new());
+        assert_eq!(fs::read(&log).unwrap(), b"");
+        assert_eq!(fs::read_dir(home.path()).unwrap().count(), 1);
+    }
+
     #[cfg(unix)]
     #[test]
     fn read_refuses_symlinked_log_without_creating_a_lock() {

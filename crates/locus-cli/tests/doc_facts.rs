@@ -35,7 +35,39 @@ fn repo_root() -> PathBuf {
 }
 
 fn read_doc(rel: &str) -> String {
-    std::fs::read_to_string(repo_root().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+    read_doc_from(&repo_root(), rel)
+}
+
+fn read_doc_from(root: &Path, rel: &str) -> String {
+    std::fs::read_to_string(root.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+}
+
+#[test]
+fn missing_document_reports_failure_and_exits_nonzero() {
+    const CHILD_ROOT: &str = "LOCUS_DOC_FACTS_MISSING_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        read_doc_from(Path::new(&root), "missing-document.md");
+        return;
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "doc_facts::missing_document_reports_failure_and_exits_nonzero",
+            "--nocapture",
+        ])
+        .env(CHILD_ROOT, root.path())
+        .output()
+        .expect("doc facts test binary runs");
+    assert_eq!(output.status.code(), Some(101));
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(report.contains("read missing-document.md:"), "{report}");
+    assert!(report.contains("FAILED"), "{report}");
 }
 
 pub(super) fn locus_output(args: &[&str]) -> String {

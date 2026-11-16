@@ -1,9 +1,9 @@
 // node --test examples/recipes
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -56,12 +56,54 @@ test("a recipe name is not a selector and returns usage", () => {
   }
 });
 
+test("an unknown recipe name exits nonzero before any recipe runs", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-name-"));
+  try {
+    // `acme` names a binding inside the recipes, but the runner has no recipe
+    // selector: the name is rejected with the usage error and TMPDIR is left
+    // untouched (no recipe workspace was created).
+    const r = spawnSync(process.execPath, [join(here, "run.mjs"), "acme"], {
+      env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    assert.ifError(r.error);
+    assert.notEqual(r.status, 0);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
+    assert.equal(r.stdout, "");
+    assert.equal(readdirSync(root).length, 0, "a recipe workspace was created for an unknown recipe name");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("an unrecognized option returns usage without running a recipe", () => {
   const r = spawnSync(process.execPath, [join(here, "run.mjs"), "--unknown-option"], { encoding: "utf8", timeout: 120_000 });
   assert.ifError(r.error);
   assert.equal(r.status, 1);
   assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]/m);
   assert.equal(r.stdout, "");
+});
+
+test("a missing --locus input returns usage before running a recipe", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-missing-input-"));
+  try {
+    for (const args of [["--locus"], ["--locus", ""]]) {
+      const r = spawnSync(process.execPath, [join(here, "run.mjs"), ...args], {
+        env: { ...process.env, TMPDIR: root, TMP: root, TEMP: root },
+        encoding: "utf8",
+        timeout: 120_000,
+      });
+      assert.ifError(r.error);
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
+      assert.equal(r.stdout, "");
+      assert.deepEqual(readdirSync(root), [], "a recipe workspace was created for missing input");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("arguments after an absolute --locus path are ignored", () => {
@@ -79,6 +121,77 @@ test("a failed check stops the run without reporting completion", () => {
   assert.doesNotMatch(r.stdout, /^(PASS|COMPLETE)/m);
 });
 
+test("a failing recipe command reports its exit and stops subsequent commands", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-failure-"));
+  try {
+    const marker = join(root, "invocations");
+    const fake = join(root, "locus");
+    writeFileSync(fake, `#!${process.execPath}\nconst { appendFileSync } = require("node:fs");\nappendFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nif (process.argv[4] === "acme") { console.log('PROBE {"gh":"fake-acme-token","aws":null,"tenant":"acme-corp","acme":null,"personal":null}'); } else { process.exit(7); }\n`);
+    chmodSync(fake, 0o755);
+    const r = run(fake);
+    assert.ifError(r.error);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /^PASS locus run -b acme:/m);
+    assert.match(r.stdout, /^FAIL locus run -b personal exited 7, expected 0$/m);
+    assert.doesNotMatch(r.stdout, /^(COMPLETE|SKIP|INCOMPLETE)/m);
+    const calls = readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(calls.length, 2, "subsequent recipe commands must not run");
+    assert.deepEqual(calls.map((call) => call.slice(0, 3)), [["run", "-b", "acme"], ["run", "-b", "personal"]]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an invalid recipe binding fails before subsequent steps run", () => {
+  assert.ok(built, "build locus before running the recipes tests");
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-invalid-"));
+  try {
+    const marker = join(root, "invocations");
+    const diagnostic = join(root, "diagnostic");
+    const wrapper = join(root, "locus");
+    const recipe = join(root, "invalid-recipe.mjs");
+    const source = readFileSync(join(here, "run.mjs"), "utf8");
+    const validBinding = 'binding("acme", "acme-corp", "ACME_GH_TOKEN")';
+    assert.ok(source.includes(validBinding));
+    writeFileSync(recipe, source.replace(validBinding, '"[binding\\ninvalid TOML"'));
+    writeFileSync(wrapper, `#!${process.execPath}\nconst { appendFileSync, writeFileSync } = require("node:fs");\nconst { spawnSync } = require("node:child_process");\nappendFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2)) + "\\n");\nconst result = spawnSync(${JSON.stringify(built)}, process.argv.slice(2), { encoding: "utf8" });\nwriteFileSync(${JSON.stringify(diagnostic)}, result.stderr ?? "");\nprocess.stdout.write(result.stdout ?? "");\nprocess.stderr.write(result.stderr ?? "");\nprocess.exit(result.status ?? 1);\n`);
+    chmodSync(wrapper, 0o755);
+
+    const r = run(wrapper, recipe);
+    assert.ifError(r.error);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /^FAIL locus run -b acme exited 1, expected 0$/m);
+    assert.match(readFileSync(diagnostic, "utf8"), /binding 'acme' is malformed/);
+    assert.doesNotMatch(r.stdout, /^(PASS|COMPLETE|SKIP|INCOMPLETE)/m);
+    const calls = readFileSync(marker, "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(calls.length, 1, "subsequent recipe steps must not run");
+    assert.deepEqual(calls[0].slice(0, 3), ["run", "-b", "acme"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a locus executable path containing spaces receives separate arguments", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus executable path "));
+  try {
+    const marker = join(root, "received arguments.json");
+    const fake = join(root, "locus executable");
+    writeFileSync(fake, `#!${process.execPath}\nrequire("node:fs").writeFileSync(${JSON.stringify(marker)}, JSON.stringify(process.argv.slice(2)));\nprocess.exit(7);\n`);
+    chmodSync(fake, 0o755);
+
+    const r = run(fake);
+    assert.ifError(r.error);
+    assert.equal(r.status, 1);
+    assert.match(r.stdout, /^FAIL locus run -b acme exited 7, expected 0$/m);
+    const args = JSON.parse(readFileSync(marker, "utf8"));
+    assert.equal(args.length, 7);
+    assert.deepEqual(args.slice(0, 6), ["run", "-b", "acme", "--", process.execPath, "-e"]);
+    assert.match(args[6], /^const e=process\.env;console\.log\('PROBE '/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("recipes pass against the workspace build", { skip: !built && "no target/{release,debug}/locus" }, () => {
   const r = run(built);
   assert.equal(r.status, 0, r.stdout + r.stderr);
@@ -93,7 +206,10 @@ test("recipes resolve paths containing spaces", () => {
     mkdirSync(dir);
     const script = join(dir, "run recipes.mjs");
     const bin = join(dir, `locus binary${exe}`);
-    copyFileSync(join(here, "run.mjs"), script);
+    const marker = "requested recipe with spaces ran";
+    const source = readFileSync(join(here, "run.mjs"), "utf8");
+    assert.ok(source.includes("const args = process.argv.slice(2);"));
+    writeFileSync(script, source.replace("const args = process.argv.slice(2);", `console.log(${JSON.stringify(marker)});\nconst args = process.argv.slice(2);`));
     copyFileSync(built, bin);
     const r = spawnSync(process.execPath, [script, "--locus", bin], {
       cwd: dir,
@@ -103,7 +219,89 @@ test("recipes resolve paths containing spaces", () => {
     });
     assert.ifError(r.error);
     assert.equal(r.status, 0, "recipe runner failed in a directory containing spaces");
+    assert.ok(r.stdout.split(/\r?\n/).includes(marker), "the requested recipe was not executed");
     assert.ok(/^COMPLETE: locus recipes \(4 checks\)$/m.test(r.stdout), "recipe runner did not complete all four checks");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a recipe path containing spaces selects the intended script intact", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus recipe path "));
+  try {
+    const recipe = join(root, "requested recipe.mjs");
+    const marker = "requested recipe path:";
+    const source = readFileSync(join(here, "run.mjs"), "utf8");
+    writeFileSync(recipe, source.replace("const args = process.argv.slice(2);", `console.log(${JSON.stringify(marker)}, JSON.stringify(process.argv[1]));\nconst args = process.argv.slice(2);`));
+
+    const opened = spawnSync(process.execPath, [recipe, "--help"], { encoding: "utf8", timeout: 120_000 });
+    assert.ifError(opened.error);
+    assert.equal(opened.status, 0, opened.stderr);
+    assert.ok(opened.stdout.split(/\r?\n/).includes(`${marker} ${JSON.stringify(recipe)}`));
+    assert.match(opened.stdout, /Usage: node examples\/recipes\/run\.mjs/);
+
+    rmSync(recipe);
+    const missing = run(process.execPath, recipe);
+    assert.ifError(missing.error);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /Cannot find module/);
+    assert.ok(missing.stderr.includes(recipe), "diagnostic must preserve the recipe path including spaces");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a Unicode recipe filename is opened and preserved in diagnostics", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-unicode-"));
+  try {
+    const recipe = join(root, "レシピ-☕.mjs");
+    const marker = "Unicode recipe opened";
+    const source = readFileSync(join(here, "run.mjs"), "utf8");
+    writeFileSync(recipe, source.replace("#!/usr/bin/env node\n", `#!/usr/bin/env node\nconsole.log(${JSON.stringify(marker)});\n`));
+
+    const opened = spawnSync(process.execPath, [recipe, "--help"], { encoding: "utf8", timeout: 120_000 });
+    assert.ifError(opened.error);
+    assert.equal(opened.status, 0, opened.stderr);
+    assert.ok(opened.stdout.split(/\r?\n/).includes(marker));
+    assert.match(opened.stdout, /Usage: node examples\/recipes\/run\.mjs/);
+
+    rmSync(recipe);
+    const missing = run(process.execPath, recipe);
+    assert.ifError(missing.error);
+    assert.equal(missing.status, 1);
+    assert.match(missing.stderr, /Cannot find module/);
+    assert.ok(missing.stderr.includes(recipe), "diagnostic must preserve the Unicode path");
+    assert.doesNotMatch(missing.stdout, /^COMPLETE/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("recipes run from a working directory outside the repository", { skip: !built && "no target/{release,debug}/locus" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-cwd-"));
+  try {
+    // Recipe resolution must not consult the caller's cwd: run the repo's
+    // runner from a directory that carries a workspace policy refusing every
+    // recipe binding, with the recipe workspace in a separate sibling tmp.
+    const outside = join(root, "outside-the-repo");
+    const work = join(root, "recipe-tmp");
+    mkdirSync(outside);
+    mkdirSync(work);
+    const rel = relative(repo, outside);
+    assert.ok(rel.startsWith("..") || isAbsolute(rel), "the outside directory must not be inside the repository");
+    const decoy = 'version = 1\ndefault_binding = "decoy"\nallowed_bindings = ["decoy"]\nrequire_pin = true\n';
+    writeFileSync(join(outside, ".locus.toml"), decoy);
+    const r = spawnSync(process.execPath, [join(here, "run.mjs"), "--locus", built], {
+      cwd: outside,
+      env: { ...process.env, TMPDIR: work, TMP: work, TEMP: work },
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    assert.ifError(r.error);
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    assert.match(r.stdout, /^COMPLETE: locus recipes \(4 checks\)$/m);
+    assert.deepEqual(readdirSync(outside), [".locus.toml"], "the caller's working directory was written to");
+    assert.equal(readFileSync(join(outside, ".locus.toml"), "utf8"), decoy, "the caller's workspace policy was modified");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -113,6 +311,23 @@ test("a missing binary is incomplete, never complete", () => {
   const r = run(join(repo, "target", "does-not-exist", `locus${exe}`));
   assert.equal(r.status, 2, r.stdout + r.stderr);
   assert.doesNotMatch(r.stdout, /^COMPLETE/m);
+});
+
+test("a non-executable binary is incomplete, never complete", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-permission-"));
+  try {
+    const bin = join(root, `locus${exe}`);
+    writeFileSync(bin, "not executable\n", { mode: 0o600 });
+    chmodSync(bin, 0o600);
+    const r = run(bin);
+    assert.ifError(r.error);
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stdout, /^SKIP .* is not executable; supply an executable --locus <absolute-path>$/m);
+    assert.match(r.stdout, /^INCOMPLETE: locus recipes$/m);
+    assert.doesNotMatch(r.stdout + r.stderr, /^(PASS|COMPLETE)/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a missing recipe is reported and exits unsuccessfully", () => {

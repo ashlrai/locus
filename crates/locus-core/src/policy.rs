@@ -9,7 +9,7 @@
 //! # Glob syntax (simplified)
 //!
 //! - `*` matches any run of characters (greedy across the whole name)
-//! - `?` matches a single character
+//! - `?` matches a single Unicode scalar value (not a byte or grapheme cluster)
 //! - matching is case-sensitive on the tool name string
 //!
 //! See [docs/policy.md](../../../docs/policy.md).
@@ -148,21 +148,23 @@ pub fn evaluate(policy: &Policy, tool: &str) -> PolicyVerdict {
     }
 }
 
-/// Simple glob: `*` = any chars (greedy), `?` = single char, no character classes.
+/// Simple glob: `*` = any chars (greedy), `?` = one Unicode scalar value, no character classes.
 pub fn glob_match(pattern: &str, text: &str) -> bool {
-    glob_match_inner(pattern.as_bytes(), text.as_bytes())
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    glob_match_inner(&pattern, &text)
 }
 
-fn glob_match_inner(pat: &[u8], text: &[u8]) -> bool {
+fn glob_match_inner(pat: &[char], text: &[char]) -> bool {
     let (mut pi, mut ti) = (0usize, 0usize);
     let mut star_pi = None;
     let mut star_ti = 0usize;
 
     while ti < text.len() {
-        if pi < pat.len() && (pat[pi] == text[ti] || pat[pi] == b'?') {
+        if pi < pat.len() && (pat[pi] == text[ti] || pat[pi] == '?') {
             pi += 1;
             ti += 1;
-        } else if pi < pat.len() && pat[pi] == b'*' {
+        } else if pi < pat.len() && pat[pi] == '*' {
             star_pi = Some(pi);
             star_ti = ti;
             pi += 1;
@@ -174,7 +176,7 @@ fn glob_match_inner(pat: &[u8], text: &[u8]) -> bool {
             return false;
         }
     }
-    while pi < pat.len() && pat[pi] == b'*' {
+    while pi < pat.len() && pat[pi] == '*' {
         pi += 1;
     }
     pi == pat.len()
@@ -207,6 +209,32 @@ mod tests {
         assert!(glob_match("*", "anything"));
         assert!(glob_match("supabase.*", "supabase.execute_sql"));
         assert!(!glob_match("supabase.*", "github.list_prs"));
+    }
+
+    #[test]
+    fn glob_question_mark_matches_one_unicode_character() {
+        assert!(glob_match("provider.?", "provider.é"));
+        assert!(glob_match("*.?x", "provider.🦀x"));
+        assert!(!glob_match("provider.?", "provider."));
+        assert!(!glob_match("provider.?", "provider.éx"));
+        assert!(glob_match("provider.??", "provider.e\u{301}"));
+    }
+
+    #[test]
+    fn unicode_tool_names_cannot_bypass_question_mark_policy() {
+        for action in ["deny", "require_approval"] {
+            let p = Policy {
+                rules: vec![PolicyRule::new("provider.?", action)],
+                ..empty_policy()
+            };
+            let expected = if action == "deny" {
+                Decision::Deny
+            } else {
+                Decision::RequireApproval
+            };
+            assert_eq!(evaluate(&p, "provider.é").decision, expected);
+            assert_eq!(evaluate(&p, "provider.🦀").decision, expected);
+        }
     }
 
     #[test]

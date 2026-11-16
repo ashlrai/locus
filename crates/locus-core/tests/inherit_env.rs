@@ -108,6 +108,23 @@ fn inherit_env_end_to_end() {
     assert_eq!(iso.vars.keys().cloned().collect::<Vec<_>>(), baseline);
     assert!(iso.secrets_failed.is_empty());
 
+    // An optional allowlisted variable that is absent in the parent stays absent.
+    // A present neighbor confirms the allowlist is still applied.
+    std::env::remove_var("INHERIT_TEST_OPTIONAL_ABSENT");
+    store
+        .save_config(&cfg(
+            &["INHERIT_TEST_OPTIONAL_ABSENT", "PHANTOM_PROXY_PORT"],
+            GatewayConfig::default(),
+        ))
+        .unwrap();
+    let iso = build_isolated_env_opts(&s, &b, true);
+    assert!(!iso.vars.contains_key("INHERIT_TEST_OPTIONAL_ABSENT"));
+    assert_eq!(
+        iso.vars.get("PHANTOM_PROXY_PORT").map(String::as_str),
+        Some("41000")
+    );
+    assert!(iso.secrets_failed.is_empty());
+
     // 3. The phantom exec route: placeholder, proxy URL and port cross. The real
     //    OPENAI_API_KEY does not, and the refusal carries no name or value.
     //    The bound credential still wins over the parent's placeholder.

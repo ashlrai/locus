@@ -180,5 +180,11 @@ fn json_touchid_is_refused_before_confirmation_or_mutation() {
             .unwrap()
             .contains("--touchid requires an interactive invocation"));
         assert_eq!(std::fs::read(&path).unwrap(), original);
+        let status = run(home.path(), &["approve", "status", &record.id, "--json"], 0);
+        assert!(
+            status["grants"].is_null() || status["grants"].as_array().is_some_and(Vec::is_empty)
+        );
+        assert_eq!(status["advisory_assertions"], 0);
+        assert_eq!(status["authoritative_grants"], 0);
     }
 }

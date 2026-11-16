@@ -31,7 +31,7 @@ These are orthogonal. Mixing them into one “be careful” prompt loses mechani
                              │ credentials never in model
 ┌────────────────────────────▼─────────────────────────────┐
 │  Phantom — secret plane                                    │
-│  phm: refs; reveal only into worker/proxy env              │
+│  proxy / placeholders; phm: resolution unavailable         │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -52,6 +52,6 @@ Locus answers *who may act*. It does **not** assert the model’s plan is correc
 
 ## Firm-mode implication
 
-Agencies need identity certainty first (wrong tenant = contractual incident), then secret hygiene, then epistemic gates on prod-shaped mutations. Install order: Phantom refs in bindings → Locus pin/workspace → verification checks on the critical path.
+Agencies need identity certainty first (wrong tenant = contractual incident), then secret hygiene, then epistemic gates on prod-shaped mutations. Use supported `env:` references for provider execution, then set the Locus pin and workspace and add verification checks on the critical path. Stored `phm:` references cannot currently resolve; see [credential compatibility](credential-compatibility.md).
 
 See also: [architecture.md](./architecture.md), [firm-mode.md](./firm-mode.md), [DESIGN.md](../DESIGN.md).

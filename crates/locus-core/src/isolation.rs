@@ -672,4 +672,226 @@ mod tests {
         std::env::remove_var("LOCUS_CI_ALLOW_SECRETS");
         std::env::remove_var("LOCUS_CI_SECRET_TOKEN");
     }
+
+    fn multi_provider_binding() -> Binding {
+        Binding::from_body(BindingBody {
+            id: "bnd_route".into(),
+            alias: "route".into(),
+            tenant: "route-corp".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![
+                ProviderBinding {
+                    provider: "github".into(),
+                    account: "route-gh".into(),
+                    credential_ref: "env:LOCUS_ROUTE_GH".into(),
+                    scope: Scope {
+                        orgs: vec!["route-corp".into()],
+                        ..Scope::default()
+                    },
+                    upstream: None,
+                },
+                ProviderBinding {
+                    provider: "supabase".into(),
+                    account: "route-db".into(),
+                    credential_ref: "env:LOCUS_ROUTE_SB".into(),
+                    scope: Scope {
+                        project_ref: Some("proj_route".into()),
+                        ..Scope::default()
+                    },
+                    upstream: None,
+                },
+            ],
+        })
+    }
+
+    fn session_for(binding: &Binding, worker_home: &str) -> Session {
+        let key = SealKey::generate();
+        Session::new(
+            &binding.id,
+            &binding.alias,
+            &binding.tenant,
+            None,
+            PinSource::Explicit,
+            None,
+            Duration::hours(1),
+            worker_home.into(),
+            &key,
+        )
+    }
+
+    #[test]
+    fn routed_cli_env_scrubs_unselected_provider_credential_sources() {
+        if !crate::test_support::run_in_isolated_process(
+            module_path!(),
+            "routed_cli_env_scrubs_unselected_provider_credential_sources",
+        ) {
+            return;
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("LOCUS_HOME", home.path());
+        crate::config::save_config(
+            home.path(),
+            &crate::config::LocusConfig {
+                exec: crate::config::ExecConfig {
+                    inherit_env: vec!["ANTHROPIC_API_KEY".into()],
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        std::env::set_var("LOCUS_ROUTE_GH", "github-route-secret");
+        std::env::set_var("LOCUS_ROUTE_SB", "supabase-route-secret");
+        std::env::set_var("ANTHROPIC_API_KEY", "must-not-inherit-on-route");
+
+        let binding = multi_provider_binding();
+        let session = session_for(&binding, "/tmp/locus-route-worker");
+        let github = &binding.providers[0];
+        let iso = build_routed_cli_env(&session, &binding, github);
+
+        assert_eq!(
+            iso.vars.get("LOCUS_PROVIDERS").map(String::as_str),
+            Some("github")
+        );
+        assert_eq!(
+            iso.vars.get("GH_TOKEN").map(String::as_str),
+            Some("github-route-secret")
+        );
+        assert!(!iso.vars.contains_key("SUPABASE_ACCESS_TOKEN"));
+        assert!(!iso.vars.contains_key("SUPABASE_PROJECT_REF"));
+        assert!(!iso.vars.contains_key("LOCUS_ROUTE_GH"));
+        assert!(!iso.vars.contains_key("LOCUS_ROUTE_SB"));
+        assert!(!iso.vars.contains_key("ANTHROPIC_API_KEY"));
+        assert!(iso.scrubbed.iter().any(|k| k == "LOCUS_ROUTE_GH"));
+        assert!(iso.scrubbed.iter().any(|k| k == "LOCUS_ROUTE_SB"));
+        assert!(iso.scrubbed.iter().any(|k| k == "ANTHROPIC_API_KEY"));
+        assert_eq!(
+            iso.vars.get("HOME").map(String::as_str),
+            Some("/tmp/locus-route-worker")
+        );
+        assert!(iso
+            .vars
+            .get("GH_CONFIG_DIR")
+            .is_some_and(|v| v.contains("locus-route-worker")));
+        assert_eq!(iso.secrets_resolved, 3); // GH_TOKEN + GITHUB_TOKEN + GITHUB_PERSONAL_ACCESS_TOKEN
+        assert!(iso.secrets_failed.is_empty());
+    }
+
+    #[test]
+    fn isolated_env_strict_errors_when_resolution_fails() {
+        if !crate::test_support::run_in_isolated_process(
+            module_path!(),
+            "isolated_env_strict_errors_when_resolution_fails",
+        ) {
+            return;
+        }
+
+        std::env::remove_var("LOCUS_STRICT_MISSING");
+        let binding = Binding::from_body(BindingBody {
+            id: "bnd_strict".into(),
+            alias: "strict".into(),
+            tenant: "strict".into(),
+            principal: None,
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "supabase".into(),
+                account: "strict".into(),
+                credential_ref: "env:LOCUS_STRICT_MISSING".into(),
+                scope: Scope::default(),
+                upstream: None,
+            }],
+        });
+        let session = session_for(&binding, "/tmp/locus-strict-worker");
+
+        let soft = build_isolated_env_opts(&session, &binding, true);
+        assert!(!soft.secrets_failed.is_empty());
+        assert!(!soft.vars.contains_key("SUPABASE_ACCESS_TOKEN"));
+        let soft_serialized = serde_json::to_string(&soft.secrets_failed).unwrap();
+        assert!(!soft_serialized.contains("LOCUS_STRICT_MISSING"));
+
+        let err = build_isolated_env_strict(&session, &binding).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("credential resolve failed"));
+        assert!(msg.contains("unavailable") || msg.contains("provider=supabase"));
+        assert!(!msg.contains("LOCUS_STRICT_MISSING"));
+    }
+
+    #[test]
+    fn ci_env_map_secrets_require_exact_allow_flag() {
+        if !crate::test_support::run_in_isolated_process(
+            module_path!(),
+            "ci_env_map_secrets_require_exact_allow_flag",
+        ) {
+            return;
+        }
+
+        std::env::set_var("LOCUS_CI_EXACT_TOKEN", "ci-exact-secret");
+        let binding = Binding::from_body(BindingBody {
+            id: "bnd_ci_exact".into(),
+            alias: "ci-exact".into(),
+            tenant: "ci-exact".into(),
+            principal: Some("ci".into()),
+            description: None,
+            policy: Policy::default(),
+            providers: vec![ProviderBinding {
+                provider: "supabase".into(),
+                account: "ci".into(),
+                credential_ref: "env:LOCUS_CI_EXACT_TOKEN".into(),
+                scope: Scope {
+                    project_ref: Some("proj_ci".into()),
+                    ..Scope::default()
+                },
+                upstream: None,
+            }],
+        });
+        let session = Session::new(
+            &binding.id,
+            &binding.alias,
+            &binding.tenant,
+            Some("ci".into()),
+            PinSource::Ci,
+            Some("ci".into()),
+            Duration::minutes(15),
+            "/tmp/locus-ci-exact-worker".into(),
+            &SealKey::generate(),
+        );
+
+        for flag in [
+            None,
+            Some(""),
+            Some("true"),
+            Some("yes"),
+            Some("TRUE"),
+            Some("1 "),
+        ] {
+            match flag {
+                None => std::env::remove_var("LOCUS_CI_ALLOW_SECRETS"),
+                Some(v) => std::env::set_var("LOCUS_CI_ALLOW_SECRETS", v),
+            }
+            assert!(!ci_secrets_allowed(), "flag={flag:?}");
+            let map = build_ci_env_map(&session, &binding, true);
+            assert!(!map.contains_key("SUPABASE_ACCESS_TOKEN"), "flag={flag:?}");
+            assert!(
+                !map.values().any(|v| v == "ci-exact-secret"),
+                "flag={flag:?}"
+            );
+        }
+
+        std::env::set_var("LOCUS_CI_ALLOW_SECRETS", "1");
+        assert!(ci_secrets_allowed());
+        let allowed = build_ci_env_map(&session, &binding, true);
+        assert_eq!(
+            allowed.get("SUPABASE_ACCESS_TOKEN").map(String::as_str),
+            Some("ci-exact-secret")
+        );
+
+        // Exact allow flag is still gated by resolve_secrets=false.
+        let denied = build_ci_env_map(&session, &binding, false);
+        assert!(!denied.contains_key("SUPABASE_ACCESS_TOKEN"));
+        assert!(!denied.values().any(|v| v == "ci-exact-secret"));
+    }
 }

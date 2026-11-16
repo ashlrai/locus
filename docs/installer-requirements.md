@@ -34,6 +34,25 @@ evaluate a candidate release, including native execution and failure cases.
 Offline tests use fixtures and cannot establish hosted availability or native
 binary compatibility.
 
+## Evidence needed for the proposed path
+
+The repository script is an implementation, not by itself a published
+one-command installation path. Before describing the issue's goal as delivered,
+record the following for a specific release and installer revision:
+
+1. A documented, publicly reachable command and the prerequisites needed to run
+   it on machines without npm or Rust.
+2. The supported native platforms and matching release archives and verification
+   material, with the trust model stated for the published assets.
+3. Successful installation and execution on the supported native hosts, plus
+   failure checks showing that missing or invalid verification material stops
+   installation. Record the release, host and results in the
+   [acceptance checklist](installer-acceptance.md).
+
+These are proposed release-readiness checks, not claims that the hosted command,
+assets or native-host results already exist. Offline fixture tests help exercise
+the script but do not replace the release and host checks.
+
 ## Open questions
 
 - Where will the one-command entry point be hosted, and which releases will
