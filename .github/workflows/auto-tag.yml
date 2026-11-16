@@ -1,4 +1,4 @@
-# Auto-tag: create v<version> when the version in Cargo.toml changes on main
+# Auto-tag: reconcile the Cargo.toml version on the current main tip
 # Ported from ashlrai/phantom-secrets auto-tag.yml (RQ-AUTOTAGPORTLOCUSQ8).
 # and every required check plus manual full-suite CI for that exact commit is green.
 # Tags are created only here, with the ashlr-release GitHub App token, so the
@@ -55,7 +55,7 @@ jobs:
       TRIGGER: ${{ github.event_name }}
       ACTIONS_APP_ID: "15368"   # GitHub Actions; other apps' same-named runs never count
     steps:
-      - name: Detect version change
+      - name: Detect missing version tag
         id: version
         shell: bash
         run: |
@@ -66,16 +66,16 @@ jobs:
           [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid candidate sha"; exit 1; }
           main=$(gh api "repos/$REPO/commits/$BRANCH" -q '.sha')
           [ "$main" = "$SHA" ] || { echo "::error::main moved; qualify its exact current sha"; exit 1; }
-          parent=$(gh api "repos/$REPO/commits/$SHA" -q '.parents[0].sha')
           new=$(read_version "$SHA")
-          old=$(read_version "$parent")
           [[ "$new" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::unexpected version '$new'"; exit 1; }
-          if [ "$new" = "$old" ] && [ "$TRIGGER" != workflow_dispatch ]; then
-            echo "Version unchanged ($new); nothing to tag."
-            echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          if git ls-remote --exit-code --tags "https://github.com/$REPO.git" "refs/tags/v$new" >/dev/null; then
-            echo "Tag v$new already exists; nothing to do."
+          if refs=$(git ls-remote --exit-code --tags "https://github.com/$REPO.git" "refs/tags/v$new" "refs/tags/v$new^{}"); then
+            tagged=$(printf '%s\n' "$refs" | tail -1 | cut -f1)
+            [[ "$tagged" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::invalid tag target"; exit 1; }
+            relation=$(gh api "repos/$REPO/compare/$tagged...$SHA" -q '.status')
+            case "$relation" in
+              ahead|identical) echo "Tag v$new is already on main history; nothing to do." ;;
+              *) echo "::error::tag v$new conflicts with main (comparison: $relation); refusing to tag"; exit 1 ;;
+            esac
             echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0
           else
             status=$?

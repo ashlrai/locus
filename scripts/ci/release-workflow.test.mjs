@@ -63,6 +63,7 @@ else if (url.includes('/branches/')) value = c.classic;
 else if (url.includes('/check-runs?')) value = { check_runs: c.checks };
 else if (url.includes('/actions/workflows/ci.yml/runs?')) value = { total_count: 100, workflow_runs: c.runs };
 else if (url.endsWith('/commits/main')) value = { sha: c.main };
+else if (url.includes('/compare/')) value = { status: c.relation ?? 'ahead' };
 else if (url.includes('/commits/')) value = { parents: [{ sha: c.parent }] };
 else if (url.includes('/contents/')) {
   console.log('[workspace.package]\\nversion = "' + (url.endsWith(c.parent) ? c.oldVersion : c.version) + '"');
@@ -198,22 +199,30 @@ test("required GitHub Actions checks succeed; any duplicate failure rejects", (t
 
 test("main drift rejects detection and creation before tag POST", (t) => {
   const f = fixture(t, { main: other });
-  assert.notEqual(f.run(auto, "Detect version change").status, 0);
+  assert.notEqual(f.run(auto, "Detect missing version tag").status, 0);
   assert.notEqual(f.run(auto, "Create tag v${{ steps.version.outputs.version }}").status, 0);
   assert.doesNotMatch(f.calls(), /POST/);
 });
 
-test("version detection fails closed on parent read failure and detects a real bump", (t) => {
-  const broken = fixture(t, { fail: `/contents/Cargo.toml?ref=${other}` });
-  assert.notEqual(broken.run(auto, "Detect version change").status, 0);
-  assert.doesNotMatch(broken.output(), /changed=true/);
-  const bump = fixture(t);
-  const result = bump.run(auto, "Detect version change");
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(bump.output(), /version=0.7.0\nchanged=true/);
-  const unchanged = fixture(t, { oldVersion: "0.7.0" });
-  assert.equal(unchanged.run(auto, "Detect version change", { TRIGGER: "workflow_run" }).status, 0);
-  assert.match(unchanged.output(), /changed=false/);
+test("version tag detection handles batched bumps, existing history and conflicts", (t) => {
+  const batch = fixture(t, { oldVersion: "0.7.0" });
+  assert.equal(batch.run(auto, "Detect missing version tag", { TRIGGER: "workflow_run" }).status, 0);
+  assert.match(batch.output(), /version=0.7.0\nchanged=true/);
+  for (const relation of ["ahead", "identical"]) {
+    const existing = fixture(t, { tag: other, relation });
+    assert.equal(existing.run(auto, "Detect missing version tag").status, 0);
+    assert.match(existing.output(), /changed=false/);
+  }
+  const conflict = fixture(t, { tag: other, relation: "diverged" });
+  const result = conflict.run(auto, "Detect missing version tag");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stdout, /conflicts with main/);
+  assert.doesNotMatch(conflict.output(), /changed=true/);
+  const plain = fixture(t, { oldVersion: "0.7.0", tag: other, relation: "ahead" });
+  assert.equal(plain.run(auto, "Detect missing version tag", { TRIGGER: "push" }).status, 0);
+  assert.match(plain.output(), /changed=false/);
+  const failed = fixture(t, { tag: other, fail: "/compare/" });
+  assert.notEqual(failed.run(auto, "Detect missing version tag").status, 0);
 });
 
 test("qualified current-main tag creation uses only immutable POST; existing tag is untouched", (t) => {
@@ -227,7 +236,7 @@ test("qualified current-main tag creation uses only immutable POST; existing tag
 
 test("tag lookup errors and a tag raced onto another commit block publication", (t) => {
   const broken = fixture(t, { gitError: 128 });
-  assert.notEqual(broken.run(auto, "Detect version change").status, 0);
+  assert.notEqual(broken.run(auto, "Detect missing version tag").status, 0);
   assert.notEqual(broken.run(auto, "Create tag v${{ steps.version.outputs.version }}").status, 0);
   assert.doesNotMatch(broken.calls(), /POST/);
   const conflict = fixture(t, { tag: other });
