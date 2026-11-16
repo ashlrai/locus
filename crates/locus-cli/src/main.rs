@@ -21,6 +21,7 @@ mod exec_perf;
 mod exit;
 mod fleet_denials;
 mod fleet_feed;
+mod fleet_outcomes;
 mod fleet_preflight;
 mod handshake;
 mod json_out;
@@ -69,7 +70,7 @@ Sibling to Phantom Secrets: Phantom protects secrets in context;\n\
 Locus protects which identity acts.\n\n\
 Commands are grouped (in display order):\n  \
   Setup         init · quickstart · setup · agent · capability · autopin · client · doctor · watch · workspace · hook · mcp · engagement · graph · goal · verify · upstream · adapter · onboard · offboard\n  \
-  Daily use     enter · switch · pin · leave · renew · whoami · fleet-feed · fleet-denials · fleet-preflight · status · exec · run · binding\n  \
+  Daily use     enter · switch · pin · leave · renew · whoami · fleet-feed · fleet-denials · fleet-outcomes · fleet-preflight · status · exec · run · binding\n  \
   CI            ci mint · ci env · ci run\n  \
   Approvals     approve · notify\n  \
   Audit         events · forensics\n  \
@@ -360,6 +361,9 @@ enum Commands {
         #[arg(long)]
         cursor: Option<usize>,
     },
+
+    /// Value-free JSON outcomes of recent `exec` / `ci run` calls, plus pending approvals
+    FleetOutcomes,
 
     /// Read-only JSON launch readiness for unattended `locus exec -- gh`
     FleetPreflight,
@@ -1563,6 +1567,7 @@ fn run() -> Result<()> {
         Commands::Whoami => cmd_whoami(json),
         Commands::FleetFeed => fleet_feed::run(),
         Commands::FleetDenials { cursor } => fleet_denials::run(cursor),
+        Commands::FleetOutcomes => fleet_outcomes::run(),
         Commands::FleetPreflight => fleet_preflight::run(),
         Commands::Autopin(AutopinCmd::Suggest { apply }) => {
             cmd_autopin_suggest(apply, json, dry_run)
@@ -1771,6 +1776,7 @@ fn dry_run_support(cmd: &Commands) -> DryRunSupport {
         Commands::FleetPreflight
         | Commands::FleetFeed
         | Commands::FleetDenials { .. }
+        | Commands::FleetOutcomes
         | Commands::Whoami
         | Commands::Autopin(AutopinCmd::Suggest { apply: false })
         | Commands::Status { .. }

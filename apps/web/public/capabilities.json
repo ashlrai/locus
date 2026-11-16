@@ -46,6 +46,7 @@
     "locus whoami",
     "locus fleet-feed",
     "locus fleet-denials",
+    "locus fleet-outcomes",
     "locus fleet-preflight",
     "locus status",
     "locus agent",
