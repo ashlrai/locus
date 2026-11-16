@@ -15,6 +15,7 @@ use serde::Serialize;
 pub(crate) const DOCTOR: &str = "locus.doctor.v1";
 pub(crate) const DOCTOR_FIX: &str = "locus.doctor.fix.v1";
 pub(crate) const FLEET_DENIALS: &str = "locus.fleet_denials.v1";
+pub(crate) const FLEET_OUTCOMES: &str = "locus.fleet_outcomes.v1";
 pub(crate) const FLEET_FEED: &str = "locus.fleet_feed.v1";
 pub(crate) const WHOAMI: &str = "locus.whoami.v1";
 pub(crate) const STATUS: &str = "locus.status.v1";
@@ -44,6 +45,7 @@ pub(crate) const CATALOGUE: &[(&str, &str)] = &[
     ("locus whoami", WHOAMI),
     ("locus fleet-feed (always JSON)", FLEET_FEED),
     ("locus fleet-denials (always JSON)", FLEET_DENIALS),
+    ("locus fleet-outcomes (always JSON)", FLEET_OUTCOMES),
     ("locus status", STATUS),
     ("locus verify session", VERIFY_SESSION),
     ("locus verify claim", VERIFY_CLAIM),
