@@ -166,6 +166,23 @@ fn apply_removes_stale_entries_with_a_backup_and_keeps_unknown_keys() {
 }
 
 #[test]
+fn applying_fixes_twice_leaves_repaired_configuration_unchanged() {
+    let f = fixture("allowed_bindings = [\"acme\", \"gone\"]\ndefault_binding = \"old\"\n");
+    write_raw_binding(&f.store, "legacy", "LEGACY_NAME");
+
+    let first = plan_fixes(&f.store, &f.project, None).unwrap();
+    assert_eq!(first.fixes.len(), 3);
+    assert!(apply_fixes(&f.store, &first).unwrap().all_applied());
+    let repaired = snapshot(&[f.store.home(), &f.project]);
+
+    let second = plan_fixes(&f.store, &f.project, None).unwrap();
+    assert!(second.fixes.is_empty());
+    let outcome = apply_fixes(&f.store, &second).unwrap();
+    assert!(outcome.results.is_empty());
+    assert_eq!(snapshot(&[f.store.home(), &f.project]), repaired);
+}
+
+#[test]
 fn the_last_allowlist_entry_is_never_removed() {
     let f = fixture("allowed_bindings = [\"gone1\", \"gone2\"]\n");
     let ws = f.project.join(".locus.toml");

@@ -47,6 +47,7 @@ equivalent,
 `SECURITY_WS` space-containing `TMPDIR` checks, and
 `node --test scripts/e2e-workspace-spaced-tmpdir.test.mjs` for the `WS_DIR`
 equivalent.
+Run `node --test scripts/e2e-workspace-selection.test.mjs` for focused `WS_DIR` selection checks.
 Run `scripts/tests/e2e-tmpdir.sh` to exercise the full suite under a custom
 `TMPDIR`, including an injected failure after workspace creation.
 See the [security directories](e2e-security-directories.md) for the

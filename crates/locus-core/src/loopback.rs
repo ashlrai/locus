@@ -42,4 +42,23 @@ mod tests {
         }
         assert!(!is_exact_loopback_host(&url::Host::Domain("localhost")));
     }
+
+    #[test]
+    fn parsed_url_hosts_obey_exact_loopback_rule() {
+        for (url, expected) in [
+            ("http://127.0.0.1:8080/", true),
+            ("http://[::1]:8080/", true),
+            ("http://127.0.0.2/", false),
+            ("http://[::ffff:127.0.0.1]/", false),
+            ("http://localhost/", false),
+            ("http://service.localhost/", false),
+        ] {
+            let parsed = url::Url::parse(url).unwrap();
+            assert_eq!(
+                is_exact_loopback_host(&parsed.host().unwrap()),
+                expected,
+                "{url}"
+            );
+        }
+    }
 }

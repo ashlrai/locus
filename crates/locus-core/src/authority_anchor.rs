@@ -2104,8 +2104,26 @@ fn is_test_harness() -> bool {
     }
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(|parent| parent.ends_with("deps")))
+        .map(|path| is_cargo_test_exe(&path))
         .unwrap_or(false)
+}
+
+/// Whether `exe` sits where cargo places test executables: `.../deps/<exe>`
+/// (classic layout) or `.../build/<package>/<hash>/out/<exe>` (the layout of
+/// newer cargo with a separate build-dir). Installed binaries match neither.
+fn is_cargo_test_exe(exe: &Path) -> bool {
+    let Some(parent) = exe.parent() else {
+        return false;
+    };
+    if parent.ends_with("deps") {
+        return true;
+    }
+    parent.file_name().is_some_and(|name| name == "out")
+        && parent
+            .ancestors()
+            .nth(3)
+            .and_then(Path::file_name)
+            .is_some_and(|name| name == "build")
 }
 
 fn executable_identity(path: &Path) -> Result<ExecutableIdentity> {
@@ -2325,6 +2343,28 @@ fn random_u64() -> u64 {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn cargo_test_exe_layouts_are_recognised_and_installs_are_not() {
+        for yes in [
+            "/w/target/debug/deps/mcp_protocol-1a2b",
+            "/w/target/llvm-cov-target/debug/deps/mcp_protocol-1a2b",
+            "/w/target/debug/build/locus-mcp/4725dfbb03d13f0c/out/mcp_protocol-4725",
+        ] {
+            assert!(is_cargo_test_exe(Path::new(yes)), "{yes}");
+        }
+        for no in [
+            "/usr/local/bin/locus",
+            "/home/u/.cargo/bin/locus-mcp",
+            "/w/target/debug/locus-mcp",
+            "/opt/out/locus",
+            "/opt/build/out/locus",
+            "/opt/build/pkg/out/locus",
+            "/locus",
+        ] {
+            assert!(!is_cargo_test_exe(Path::new(no)), "{no}");
+        }
+    }
+
     use super::*;
     use std::os::unix::net::UnixStream;
     use std::process::Command;

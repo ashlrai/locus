@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Run: bash scripts/dogfood.test.sh
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+test_root="$(mktemp -d "${TMPDIR:-/tmp}/locus-dogfood-test.XXXXXX")"
+trap 'rm -rf "$test_root"' EXIT
+
+(
+  source "$ROOT/scripts/dogfood.sh"
+  mktemp() {
+    printf '%s\n' "$*" > "$test_root/mktemp-called"
+    printf 'injected allocation failure\n' >&2
+    return 1
+  }
+  locus() { printf 'locus\n' >> "$test_root/unexpected"; return 1; }
+  cd() { printf 'cd\n' >> "$test_root/unexpected"; return 1; }
+  rm() { printf 'rm\n' >> "$test_root/unexpected"; return 1; }
+
+  # Match the production caller: an OR-list suppresses Bash errexit in the probe.
+  if mt_grant_probe; then
+    printf 'FAIL: multi-tenant probe accepted an allocation failure\n' >&2
+    exit 1
+  fi
+) 2>"$test_root/stderr"
+
+[[ "$(cat "$test_root/mktemp-called")" == "-d ${TMPDIR:-/tmp}/locus-mt-dogfood.XXXXXX" ]] || {
+  printf 'FAIL: unexpected multi-tenant allocation request\n' >&2; exit 1;
+}
+grep -q 'injected allocation failure' "$test_root/stderr" || {
+  printf 'FAIL: allocation failure was not reported\n' >&2; exit 1;
+}
+[[ ! -e "$test_root/unexpected" ]] || {
+  printf 'FAIL: probe ran commands after allocation failed\n' >&2; exit 1;
+}
+printf 'PASS: multi-tenant probe stops when directory creation fails\n'
+
+# Interrupt each isolated probe after it has allocated its home, without running
+# a real Locus command or contacting a provider.
+for probe in sandbox_attestation mt_grant_probe; do
+  marker="$test_root/$probe.home"
+  status=0
+  (
+    export TMPDIR="$test_root"
+    source "$ROOT/scripts/dogfood.sh"
+    locus() {
+      printf '%s\n' "$LOCUS_HOME" > "$marker"
+      sh -c 'kill -TERM "$PPID"'
+    }
+    "$probe"
+  ) >"$test_root/$probe.out" 2>&1 || status=$?
+
+  [[ "$status" -eq 143 && -s "$marker" ]] || {
+    cat "$test_root/$probe.out" >&2
+    printf 'FAIL: %s did not reach the interrupted command\n' "$probe" >&2; exit 1;
+  }
+  probe_home="$(cat "$marker")"
+  [[ "$probe_home" == "$test_root"/*/home && ! -e "${probe_home%/home}" ]] || {
+    printf 'FAIL: %s left its temporary directory after interruption\n' "$probe" >&2; exit 1;
+  }
+  printf 'PASS: %s removes its temporary directory after interruption\n' "$probe"
+done
+
+# Exercise real allocation and cleanup with spaces in the caller's TMPDIR.
+# The stub stops each probe at its first Locus command, before any network I/O.
+spaced_tmp="$test_root/temp directory with spaces"
+mkdir -p "$spaced_tmp"
+printf 'keep\n' > "$spaced_tmp/unrelated"
+for probe in sandbox_attestation mt_grant_probe; do
+  marker="$test_root/$probe.spaced-home"
+  status=0
+  (
+    export TMPDIR="$spaced_tmp"
+    source "$ROOT/scripts/dogfood.sh"
+    locus() {
+      [[ -d "${LOCUS_HOME%/home}" && "${LOCUS_HOME%/home}" == "$TMPDIR"/* ]] || exit 42
+      printf '%s\n' "$LOCUS_HOME" > "$marker"
+      sh -c 'kill -TERM "$PPID"'
+    }
+    "$probe"
+  ) >"$test_root/$probe.spaced.out" 2>&1 || status=$?
+
+  [[ "$status" -eq 143 && -s "$marker" ]] || {
+    cat "$test_root/$probe.spaced.out" >&2
+    printf 'FAIL: %s did not allocate under the spaced TMPDIR\n' "$probe" >&2; exit 1;
+  }
+  probe_home="$(cat "$marker")"
+  [[ "${probe_home%/home}" == "$spaced_tmp"/* && ! -e "${probe_home%/home}" && -f "$spaced_tmp/unrelated" ]] || {
+    printf 'FAIL: %s did not clean up its spaced temporary directory\n' "$probe" >&2; exit 1;
+  }
+  printf 'PASS: %s allocates and cleans up under a spaced TMPDIR\n' "$probe"
+done

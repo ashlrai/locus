@@ -8,7 +8,7 @@ Locus itself makes no model-provider calls, so it has no API key or base URL of 
 
 `phantom exec -- <cmd>` does three things:
 - It starts `<cmd>` with fresh `phm_` session placeholders instead of real provider keys.
-- It points the provider base URLs (for example `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL`) at a local Phantom proxy: `http://127.0.0.1:<port>/<route>/_phantom/<token>/`.
+- It points the provider base URLs (for example `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL`) at a local Phantom proxy on `127.0.0.1`, with a session-specific port, route and token.
 - On the way out, the proxy swaps each placeholder for the real key, so the real key never enters the process.
 
 What changes with Locus:

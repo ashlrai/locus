@@ -90,4 +90,45 @@ mod tests {
         let m = "hello";
         assert_eq!(key.seal(m), key2.seal(m));
     }
+
+    #[test]
+    fn seal_matches_known_hmac_and_rejects_changed_identity() {
+        let key = SealKey::from_bytes([0x0b; 32]);
+        assert_eq!(
+            key.seal("Hi There"),
+            "hmac-sha256:198a607eb44bfbc69903a0f1cf2bbdc5ba0aa3f3d9ae3c1c7a3b1696a0b68cf7"
+        );
+        let material = seal_material("session", "binding", "start", "end");
+        let seal = key.seal(&material);
+        for changed in [
+            seal_material("other", "binding", "start", "end"),
+            seal_material("session", "other", "start", "end"),
+            seal_material("session", "binding", "other", "end"),
+            seal_material("session", "binding", "start", "other"),
+        ] {
+            assert!(!key.verify(&changed, &seal));
+        }
+        assert!(!SealKey::from_bytes([0x0c; 32]).verify(&material, &seal));
+        let mut altered = seal.into_bytes();
+        *altered.last_mut().unwrap() ^= 1;
+        assert!(!key.verify(&material, std::str::from_utf8(&altered).unwrap()));
+    }
+
+    #[test]
+    fn key_hex_validation_rejects_malformed_and_wrong_lengths() {
+        for input in [
+            "",
+            "00",
+            &"00".repeat(31),
+            &"00".repeat(33),
+            &"zz".repeat(32),
+        ] {
+            assert!(SealKey::from_hex(input).is_err());
+        }
+        let hex = "ab".repeat(32);
+        assert_eq!(
+            SealKey::from_hex(&format!("  {hex}\n")).unwrap().to_hex(),
+            hex
+        );
+    }
 }

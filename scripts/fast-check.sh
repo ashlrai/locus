@@ -15,7 +15,7 @@ step() {
     fi
 }
 step fmt cargo fmt --all -- --check
-changes=$(mktemp)
+changes=$(mktemp "${TMPDIR:-/tmp}/locus-fast-check.XXXXXX")
 trap 'rm -f "$changes"; printf "Total: %ss\n" "$SECONDS"' EXIT
 # Disable rename detection so both old and new crate paths are considered.
 if ! git diff --no-renames --name-only -z origin/main -- > "$changes" ||

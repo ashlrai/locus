@@ -15,7 +15,7 @@ Full design detail lives in **[DESIGN.md §9](./DESIGN.md)** (assets, adversarie
 
 **Please do not open a public GitHub issue for security bugs.**
 
-1. Email **security@ashlr.ai** (preferred), or open a **private** security advisory on the [ashlrai/locus](https://github.com/ashlrai/locus) repository if you have access.
+1. Email **support@ashlr.ai** (preferred), or open a **private** security advisory on the [ashlrai/locus](https://github.com/ashlrai/locus) repository if you have access.
 2. Include:
    - Affected commit / version / platform
    - Reproduction steps (minimal, if possible)

@@ -1,4 +1,4 @@
-Contact: mailto:security@ashlr.ai
+Contact: mailto:support@ashlr.ai
 Expires: 2027-11-07T00:00:00.000Z
 Preferred-Languages: en
 Canonical: https://locus.dev/.well-known/security.txt

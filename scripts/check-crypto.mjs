@@ -15,6 +15,28 @@ export const PATTERNS = [
 const SKIP_DIRS = new Set(['node_modules', 'target', '.git', 'dist', 'build', 'coverage', '.next', 'docs']);
 const EXTS = new Set(['.ts', '.tsx', '.js', '.mjs', '.cjs', '.rs', '.toml']);
 
+// Ignore standalone comments without trying to parse strings or inline comments.
+function withoutStandaloneComments(source, ext) {
+  let inBlock = false;
+  return source.split('\n').map((line) => {
+    let rest = line;
+    while (true) {
+      if (inBlock) {
+        const end = rest.indexOf('*/');
+        if (end === -1) return '';
+        rest = rest.slice(end + 2);
+        inBlock = false;
+      }
+      const trimmed = rest.trimStart();
+      if (ext === '.toml') return trimmed.startsWith('#') ? '' : rest;
+      if (trimmed.startsWith('//')) return '';
+      if (!trimmed.startsWith('/*')) return rest;
+      inBlock = true;
+      rest = trimmed.slice(2);
+    }
+  }).join('\n');
+}
+
 export function scan(root, { allow = {}, dirs = ['.'], selfNames = ['check-crypto.mjs', 'check-crypto.test.mjs'] } = {}) {
   const hits = [];
   const walk = (dir) => {
@@ -28,7 +50,8 @@ export function scan(root, { allow = {}, dirs = ['.'], selfNames = ['check-crypt
       const rel = relative(root, p).split(sep).join('/');
       if (/(^|\/)(__tests__|tests?)\//.test(rel) || /\.test\.[a-z]+$/.test(rel)) continue;
       const kinds = new Set();
-      for (const [kind, re] of PATTERNS) if (re.test(readFileSync(p, 'utf8'))) kinds.add(kind);
+      const source = withoutStandaloneComments(readFileSync(p, 'utf8'), ext);
+      for (const [kind, re] of PATTERNS) if (re.test(source)) kinds.add(kind);
       if (kinds.size) hits.push({ file: rel, kinds: [...kinds].sort((a, b) => {
         // Preserve Array.sort's default UTF-16 ordering, independent of locale.
         if (a < b) return -1;

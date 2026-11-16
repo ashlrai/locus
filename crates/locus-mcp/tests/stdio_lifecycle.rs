@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 fn mcp_bin() -> PathBuf {
@@ -26,7 +27,7 @@ fn mcp_bin() -> PathBuf {
 /// plain entry `locus setup` writes into client configs.
 struct Client {
     child: Child,
-    stdin: ChildStdin,
+    stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
 }
 
@@ -45,15 +46,19 @@ impl Client {
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Self {
             child,
-            stdin,
+            stdin: Some(stdin),
             stdout,
         }
     }
 
     fn send_raw(&mut self, line: &str) {
-        self.stdin.write_all(line.as_bytes()).unwrap();
-        self.stdin.write_all(b"\n").unwrap();
-        self.stdin.flush().unwrap();
+        self.stdin
+            .as_mut()
+            .unwrap()
+            .write_all(line.as_bytes())
+            .unwrap();
+        self.stdin.as_mut().unwrap().write_all(b"\n").unwrap();
+        self.stdin.as_mut().unwrap().flush().unwrap();
     }
 
     fn read(&mut self) -> Value {
@@ -130,6 +135,28 @@ fn pinned_home() -> tempfile::TempDir {
         .pin("acme", dir.path(), Some("cli".into()), false)
         .unwrap();
     dir
+}
+
+#[test]
+fn server_exits_promptly_when_stdin_closes() {
+    let dir = tempdir().unwrap();
+    let mut client = Client::spawn(dir.path());
+    client.initialize(Some("2025-06-18"));
+    assert_eq!(client.request(2, "ping", json!({}))["result"], json!({}));
+
+    // Close the sole writer while retaining the child so we can observe exit.
+    drop(client.stdin.take());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(status) = client.child.try_wait().expect("wait for server") {
+            assert!(status.success(), "server exited unsuccessfully: {status}");
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("server did not exit within 5 seconds of stdin EOF");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]

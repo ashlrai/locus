@@ -38,8 +38,8 @@ Use `--dry-run` first to print the binding TOML without writing it.
 
 ## 2. Pin the repo to its scope
 
-In each enrolled repo, write a workspace policy so agents can only pin the
-scope that owns it:
+In each enrolled repo, write a workspace policy limiting pins to the
+scope that owns it. A human performs pin changes:
 
 ```bash
 cd ~/code/phantom            && locus workspace --default ashlr --allow ashlr --require-pin
@@ -54,9 +54,10 @@ A malformed or unreadable `.locus.toml` fails closed.
 - One-shot commands: `locus run -b ashlr -- gh pr list` (global pin unchanged).
 - Interactive agent sessions: `locus pin` in the repo, then start the agent.
 - MCP clients: `locus setup --client claude|cursor|codex|grok|gemini` wires
-  `locus-mcp`; it exposes only the pinned binding's tools and never returns
-  credential refs or secret values. Agents can request a pin
-  (`locus_request_pin`) but cannot pin themselves.
+  `locus-mcp` with control tools only. Register `locus mcp --supervised`
+  to expose provider tools, and launch the client from the shell that entered
+  the pin. Restart the client after re-pinning. MCP results never return secret
+  values. Agents can request a pin (`locus_request_pin`) but cannot pin.
 - CI / fleet workers: `locus ci mint|env|run` for short-lived sealed sessions
   that never touch `active.json`.
 
@@ -65,7 +66,7 @@ A malformed or unreadable `.locus.toml` fails closed.
 | Check | Command | Meaning |
 |---|---|---|
 | Readiness | `locus agent report --json` | `ready` / `protected` / `unsafe` |
-| Doctor | `locus doctor --json` | SAFE / WARN / UNSAFE (exit 0/1/2); reports unresolved `phm:` refs |
+| Doctor | `locus doctor --json` | SAFE / WARN / UNSAFE; advisory-only WARN can exit 0, other WARN exits 1, UNSAFE exits 2; reports unresolved `phm:` refs |
 | Who am I | `locus whoami --json` | the current pin, no secrets |
 
 Phantom should treat `unsafe` or exit 2 as "do not dispatch provider work in

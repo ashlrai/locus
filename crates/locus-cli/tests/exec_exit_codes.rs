@@ -206,3 +206,56 @@ fn run_with_unknown_binding_names_the_known_aliases() {
         assert!(err.contains("did you mean `acme`?"), "{err}");
     }
 }
+
+#[test]
+fn nonzero_child_codes_propagate_unchanged_through_every_entry_point() {
+    let f = fixture();
+    // 1 and 2 collide with Locus' own failure/usage codes and 255 is the
+    // ceiling: all must come back as the child's code, not remapped.
+    for code in [1, 2, 7, 42, 255] {
+        let script = format!("exit {code}");
+        let argv: [&[&str]; 4] = [
+            &["exec", "--", "sh", "-c", &script],
+            &["--json", "exec", "--", "sh", "-c", &script],
+            &["run", "--binding", "personal", "--", "sh", "-c", &script],
+            &[
+                "ci",
+                "run",
+                "--binding",
+                "personal",
+                "--",
+                "sh",
+                "-c",
+                &script,
+            ],
+        ];
+        for args in argv {
+            let out = f.locus(args);
+            assert_eq!(
+                out.status.code(),
+                Some(code),
+                "{args:?} must exit with the child's code: {}",
+                stderr(&out)
+            );
+        }
+    }
+}
+
+#[test]
+fn nonzero_child_output_is_passed_through_and_not_wrapped() {
+    let f = fixture();
+    let out = f.locus(&[
+        "exec",
+        "--",
+        "sh",
+        "-c",
+        "echo child-out; echo child-err >&2; exit 5",
+    ]);
+    assert_eq!(out.status.code(), Some(5), "{}", stderr(&out));
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "child-out");
+    // Locus' banner/warnings precede the child; after it, the child's own
+    // stderr is last: a child that ran and failed adds no Locus error line.
+    let err = stderr(&out);
+    assert_eq!(err.trim_end().lines().last(), Some("child-err"), "{err}");
+    assert!(!err.contains("\"ok\":false"), "{err}");
+}

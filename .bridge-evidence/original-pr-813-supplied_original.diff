@@ -1,0 +1,270 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 6968b52247945bb2d18f01f86ce45ec17bbfbb37..2ba7af843dd1355a89a4bf5d45eea64d825ddd12 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++## [0.7.0] - 2026-11-06
++
++### Added
++
++- Export events as SIEM NDJSON with the `locus.siem.v1` schema and redacted fields.
++- Expanded coverage for dry runs, isolated temporary homes, installer failures, and registry manifest guidance.
++
+ ### Continuous integration
+ 
+ - **Generated discovery indexes in the required gate ([#572](https://github.com/ashlrai/locus/pull/572)).**
+diff --git a/Cargo.lock b/Cargo.lock
+index 76356b1606e4993e812e1d6c2145993c951cb43b..d35627b1e276ec31ebc84619e038491393354118 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1038,7 +1038,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "locus-cli"
+-version = "0.6.2"
++version = "0.7.0"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -1064,7 +1064,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "locus-core"
+-version = "0.6.2"
++version = "0.7.0"
+ dependencies = [
+  "argon2",
+  "base64",
+@@ -1093,7 +1093,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "locus-mcp"
+-version = "0.6.2"
++version = "0.7.0"
+ dependencies = [
+  "anyhow",
+  "chrono",
+diff --git a/Cargo.toml b/Cargo.toml
+index ecfc9835cd2aabe525decf1d93246bae56da1e56..351c2384b44260d453b02661fbef0a3d53303735 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -7,7 +7,7 @@ members = [
+ resolver = "2"
+ 
+ [workspace.package]
+-version = "0.6.2"
++version = "0.7.0"
+ edition = "2021"
+ # MSRV for the locked workspace; verify it using the commands in CONTRIBUTING.md.
+ rust-version = "1.89"
+@@ -19,7 +19,7 @@ authors = ["Mason Wyatt <mason@ashlr.ai>"]
+ readme = "README.md"
+ 
+ [workspace.dependencies]
+-locus-core = { path = "crates/locus-core", version = "0.6.2" }
++locus-core = { path = "crates/locus-core", version = "0.7.0" }
+ serde = { version = "1", features = ["derive"] }
+ serde_json = "1"
+ toml = "0.8"
+diff --git a/INTEGRATION.md b/INTEGRATION.md
+index 05587e93a1f647fd1cfde9994ea9e2055f6a8ded..b26c2953510b8aa26aa6cbe87ff5769e23a73040 100644
+--- a/INTEGRATION.md
++++ b/INTEGRATION.md
+@@ -3,7 +3,7 @@
+ <!-- fresh:begin versions -->
+ | Component | Version |
+ |---|---|
+-| Rust workspace (source) | 0.6.2 |
++| Rust workspace (source) | 0.7.0 |
+ | npm locus-cli (published) | 0.6.2 |
+ | npm @ashlrai/locus-mcp (published) | 0.6.2 |
+ | Published release date | 2026-11-01 |
+diff --git a/apps/web/package.json b/apps/web/package.json
+index a14bf0b72b70894dcdde721ca12c2ef2032ea843..640acfbc337bc40e672fefe4e1c0b3282074047b 100644
+--- a/apps/web/package.json
++++ b/apps/web/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "locus-web",
+-  "version": "0.6.2",
++  "version": "0.7.0",
+   "private": true,
+   "description": "Locus landing page — static, dark, terminal aesthetic",
+   "scripts": {
+diff --git a/apps/web/public/.well-known/security.txt b/apps/web/public/.well-known/security.txt
+index f3018bec748ed2bf2c80b3d6ed2ef23ec876e305..f005a79a3fb6d9b811640d1263700f415f03fbb7 100644
+--- a/apps/web/public/.well-known/security.txt
++++ b/apps/web/public/.well-known/security.txt
+@@ -1,5 +1,5 @@
+ Contact: mailto:security@ashlr.ai
+-Expires: 2027-11-01T00:00:00.000Z
++Expires: 2027-11-06T00:00:00.000Z
+ Preferred-Languages: en
+ Canonical: https://locus.dev/.well-known/security.txt
+ Policy: https://github.com/ashlrai/locus/blob/main/SECURITY.md
+diff --git a/apps/web/public/capabilities.json b/apps/web/public/capabilities.json
+index 944d8db1dae5d00da2c7c1b6af607bc07ea5dd71..885bd6e8c148042a37047edd1e8becf6493967ee 100644
+--- a/apps/web/public/capabilities.json
++++ b/apps/web/public/capabilities.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "Locus",
+-  "version": "0.6.2",
++  "version": "0.7.0",
+   "versionScope": "source checkout; commands/tools may not exist in the published package",
+   "publishedVersion": "0.6.2",
+   "description": "AI-native identity plane for coding agents. Pin a binding; every CLI command, MCP tool and agent session is sealed to that tenant until a human re-pins.",
+diff --git a/apps/web/public/sitemap.xml b/apps/web/public/sitemap.xml
+index e8a56f4ffb244cb3a98f3a88023197cab31e59d9..f284dcd781a0076d2ad5756d0e0bfeff92afdc6a 100644
+--- a/apps/web/public/sitemap.xml
++++ b/apps/web/public/sitemap.xml
+@@ -2,6 +2,6 @@
+ <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+   <url>
+     <loc>https://locus.dev/</loc>
+-    <lastmod>2026-11-01</lastmod>
++    <lastmod>2026-11-06</lastmod>
+   </url>
+ </urlset>
+diff --git a/crates/locus-cli/Cargo.toml b/crates/locus-cli/Cargo.toml
+index fdb22fb77ebdacbb86def9177a9fbf1c5ee69937..af08becf91cef704d145dce3a8355be6d456aacc 100644
+--- a/crates/locus-cli/Cargo.toml
++++ b/crates/locus-cli/Cargo.toml
+@@ -20,7 +20,7 @@ path = "src/mcp.rs"
+ [dependencies]
+ locus-core = { workspace = true }
+ libc = { workspace = true }
+-locus-mcp = { path = "../locus-mcp", version = "0.6.2" }
++locus-mcp = { path = "../locus-mcp", version = "0.7.0" }
+ clap = { workspace = true }
+ clap_complete = { workspace = true }
+ anyhow = { workspace = true }
+diff --git a/crates/locus-cli/tests/snapshots/doctor.json b/crates/locus-cli/tests/snapshots/doctor.json
+index f2cc6a9dba0f021663c71524043428c76457bd69..fb6075844c172c9f2fcdff0fd01472de3fce514e 100644
+--- a/crates/locus-cli/tests/snapshots/doctor.json
++++ b/crates/locus-cli/tests/snapshots/doctor.json
+@@ -1 +1 @@
+-{"approvals":{"approval_authority":"local_advisory","approved_valid":0,"authoritative_path_enabled":false,"corrupt":0,"denied":0,"dir":"<HOME>/locus/approvals","exists":true,"expired_grants":0,"ok":true,"pending":0,"total":0,"untrusted_approved":0,"writable":true},"audit":{"deny":0,"last":[],"path":"<HOME>/locus/audit/events.jsonl","scope_freeze":0,"total":0},"autopin":{"note":"config.toml not present (defaults: manual pin)","ok":true,"path":"<HOME>/locus/config.toml","present":false,"remote_autopin_enabled":false,"remote_rules":0},"bindings":0,"checks":[{"id":"no-bindings","status":"warn","summary":"no bindings configured (locus init --with-samples)"},{"id":"phantom-missing","status":"warn","summary":"phantom not on PATH (install Phantom Secrets for Phantom credential references)"},{"id":"control-capability-missing","status":"warn","summary":"LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\""}],"dual_control_waiting":0,"findings":[{"code":"no_bindings","message":"no bindings configured (locus init --with-samples)","severity":"warn"},{"code":"phantom_missing","message":"phantom not on PATH (install Phantom Secrets for Phantom credential references)","severity":"warn"},{"code":"control_capability_missing","message":"LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\"","severity":"warn"}],"home":"<HOME>/locus","issues":["no bindings configured (locus init --with-samples)","phantom not on PATH (install Phantom Secrets for Phantom credential references)","LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\""],"kind":"ashlr.doctor","native_status":"WARN","near_miss":{"count":0,"require_approval":0,"scope_freeze":0,"window_hours":24},"near_miss_count":0,"ok":false,"pending_approvals":0,"phantom_on_path":false,"runtime":{"authority_anchor_ok":false,"backing_ok":false,"binding_id_match":false,"binding_present":false,"expired":false,"frozen":false,"issues":["not_pinned"],"ok":false,"pinned":false,"providers":[],"providers_match":true,"seal_ok":false,"tenant_match":false},"schema":"locus.doctor.v1","schema_version":1,"seal_ok":true,"status":"warn","tool":"locus","unresolved_phm":[],"verdict":"WARN","version":"0.6.2","workspace":{"allowed_bindings":[],"found":false,"require_pin":false,"valid":true}}
++{"approvals":{"approval_authority":"local_advisory","approved_valid":0,"authoritative_path_enabled":false,"corrupt":0,"denied":0,"dir":"<HOME>/locus/approvals","exists":true,"expired_grants":0,"ok":true,"pending":0,"total":0,"untrusted_approved":0,"writable":true},"audit":{"deny":0,"last":[],"path":"<HOME>/locus/audit/events.jsonl","scope_freeze":0,"total":0},"autopin":{"note":"config.toml not present (defaults: manual pin)","ok":true,"path":"<HOME>/locus/config.toml","present":false,"remote_autopin_enabled":false,"remote_rules":0},"bindings":0,"checks":[{"id":"no-bindings","status":"warn","summary":"no bindings configured (locus init --with-samples)"},{"id":"phantom-missing","status":"warn","summary":"phantom not on PATH (install Phantom Secrets for Phantom credential references)"},{"id":"control-capability-missing","status":"warn","summary":"LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\""}],"dual_control_waiting":0,"findings":[{"code":"no_bindings","message":"no bindings configured (locus init --with-samples)","severity":"warn"},{"code":"phantom_missing","message":"phantom not on PATH (install Phantom Secrets for Phantom credential references)","severity":"warn"},{"code":"control_capability_missing","message":"LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\"","severity":"warn"}],"home":"<HOME>/locus","issues":["no bindings configured (locus init --with-samples)","phantom not on PATH (install Phantom Secrets for Phantom credential references)","LOCUS_CONTROL_CAPABILITY is not set — control commands (init/enter/pin/leave) will fail. Fix: locus quickstart (mints + persists one), or: export LOCUS_CONTROL_CAPABILITY=\"$(openssl rand -hex 32)\"; then persist for new shells with eval \"$(locus hook bash)\""],"kind":"ashlr.doctor","native_status":"WARN","near_miss":{"count":0,"require_approval":0,"scope_freeze":0,"window_hours":24},"near_miss_count":0,"ok":false,"pending_approvals":0,"phantom_on_path":false,"runtime":{"authority_anchor_ok":false,"backing_ok":false,"binding_id_match":false,"binding_present":false,"expired":false,"frozen":false,"issues":["not_pinned"],"ok":false,"pinned":false,"providers":[],"providers_match":true,"seal_ok":false,"tenant_match":false},"schema":"locus.doctor.v1","schema_version":1,"seal_ok":true,"status":"warn","tool":"locus","unresolved_phm":[],"verdict":"WARN","version":"0.7.0","workspace":{"allowed_bindings":[],"found":false,"require_pin":false,"valid":true}}
+diff --git a/crates/locus-cli/tests/snapshots/doctor.txt b/crates/locus-cli/tests/snapshots/doctor.txt
+index 698578897b943bfe5456b5f3ec6997f90a0fd64a..edc6ae53dc7719ffa1d688fadfe5592dfaf8bdef 100644
+--- a/crates/locus-cli/tests/snapshots/doctor.txt
++++ b/crates/locus-cli/tests/snapshots/doctor.txt
+@@ -1,4 +1,4 @@
+-doctor locus 0.6.2
++doctor locus 0.7.0
+   verdict   WARN
+   home      <HOME>/locus
+   bindings  0
+diff --git a/crates/locus-cli/tests/workspace_version_sync.rs b/crates/locus-cli/tests/workspace_version_sync.rs
+index 773c2d82aa6ed9266ce4b007d944a65ecbb585a9..1b1baf6ecf2fa399dc3512d81baf8868c425b99f 100644
+--- a/crates/locus-cli/tests/workspace_version_sync.rs
++++ b/crates/locus-cli/tests/workspace_version_sync.rs
+@@ -31,3 +31,19 @@ fn locus_core_version_matches_workspace_package() {
+         "locus-core dependency version must match workspace package version"
+     );
+ }
++
++#[test]
++fn locus_mcp_version_matches_workspace_package() {
++    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
++    let workspace = std::fs::read_to_string(root).expect("read root Cargo.toml");
++    let cli = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
++        .expect("read CLI Cargo.toml");
++    let package_version = section_line(&workspace, "workspace.package", "version =");
++    let mcp_dependency = section_line(&cli, "dependencies", "locus-mcp =");
++
++    assert_eq!(
++        quoted_version(package_version),
++        quoted_version(mcp_dependency),
++        "locus-mcp dependency version must match workspace package version"
++    );
++}
+diff --git a/docs/RELEASE.md b/docs/RELEASE.md
+index 5270d66920f03d3563a0280ffe6e2003d6320996..0d00dc2e5cb1cbc386fbf69925f6c631f7b73dc8 100644
+--- a/docs/RELEASE.md
++++ b/docs/RELEASE.md
+@@ -1,7 +1,7 @@
+ # Releasing Locus
+ 
+ Version lives in the workspace root [`Cargo.toml`](../Cargo.toml) under
+-`[workspace.package] version` (currently **0.6.2**). Crates inherit via
++`[workspace.package] version` (currently **0.7.0**). Crates inherit via
+ `version.workspace = true`. npm packages under `npm/`, `npm-mcp/`, and
+ `apps/web/` keep a matching `"version"` (wrappers also set `VERSION` in
+ `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js`).
+diff --git a/npm-mcp/bin/locus-mcp.js b/npm-mcp/bin/locus-mcp.js
+index 7469381eaa6c95d6bfb060d2cda7e8159f403673..26f9432e4f9cba51485662693538b98c5a9dc938 100644
+--- a/npm-mcp/bin/locus-mcp.js
++++ b/npm-mcp/bin/locus-mcp.js
+@@ -30,7 +30,7 @@ const { join } = require("path");
+ const https = require("https");
+ const crypto = require("crypto");
+ 
+-const VERSION = "0.6.2";
++const VERSION = "0.7.0";
+ const REPO = "ashlrai/locus";
+ const BINARY_NAME = "locus-mcp";
+ const CARGO_PACKAGE = "locus-mcp";
+diff --git a/npm-mcp/package.json b/npm-mcp/package.json
+index 51239a817741d989624b9862cc209cf4b717371a..d0ef50931e13e25d95e1270de7cac78f8cb5ac97 100644
+--- a/npm-mcp/package.json
++++ b/npm-mcp/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@ashlrai/locus-mcp",
+-  "version": "0.6.2",
++  "version": "0.7.0",
+   "publishConfig": {
+     "access": "public"
+   },
+diff --git a/npm/bin/locus.js b/npm/bin/locus.js
+index cdf7cb322eed3c0220c4f07037aac1a017553cd3..aa5a0fddaeb0ebed6a82474f7f4de4d93d4bd725 100644
+--- a/npm/bin/locus.js
++++ b/npm/bin/locus.js
+@@ -26,7 +26,7 @@ const { dirname, join } = require("path");
+ const https = require("https");
+ const crypto = require("crypto");
+ 
+-const VERSION = "0.6.2";
++const VERSION = "0.7.0";
+ const REPO = "ashlrai/locus";
+ const BINARY_NAME = "locus";
+ const CARGO_PACKAGE = "locus-cli";
+diff --git a/npm/package.json b/npm/package.json
+index b1e16e423b82a2c00c181f8f521bb48cb5d27bc0..5b895cd50c022ce0888737f241fa119b008339a4 100644
+--- a/npm/package.json
++++ b/npm/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "locus-cli",
+-  "version": "0.6.2",
++  "version": "0.7.0",
+   "description": "Locus CLI — identity plane for coding agents. Pin multi-account bindings so agents never act in the wrong tenant.",
+   "bin": {
+     "locus": "bin/locus.js",
+diff --git a/server.json b/server.json
+index a12900366117d6d8adc8ccffcb89992a0b9a3e30..9bb88184064d3472b9481e473b75172d1076da82 100644
+--- a/server.json
++++ b/server.json
+@@ -3,7 +3,7 @@
+   "name": "io.github.ashlrai/locus-mcp",
+   "title": "Locus",
+   "description": "Identity control tools for coding agents. Pinned provider tools require a supervised Locus launch.",
+-  "version": "0.6.2",
++  "version": "0.7.0",
+   "websiteUrl": "https://github.com/ashlrai/locus",
+   "repository": {
+     "url": "https://github.com/ashlrai/locus",
+@@ -14,7 +14,7 @@
+       "registryType": "npm",
+       "registryBaseUrl": "https://registry.npmjs.org",
+       "identifier": "@ashlrai/locus-mcp",
+-      "version": "0.6.2",
++      "version": "0.7.0",
+       "runtimeHint": "npx",
+       "transport": {
+         "type": "stdio"

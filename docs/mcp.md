@@ -548,7 +548,7 @@ Each tick is a JSON-RPC `notifications/message` with values-free `data`:
   "safe_next": "ready",
   "pinned": true,
   "frozen": false,
-  "version": "0.5.2"
+  "version": "0.7.1"
 }
 ```
 

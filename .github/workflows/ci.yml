@@ -239,6 +239,7 @@ jobs:
             command -v "$tool" >/dev/null || { echo "missing e2e prerequisite: $tool" >&2; exit 1; }
           done
           node --test scripts/ci/e2e-release-gate.test.mjs
+          node --test scripts/e2e-workspace-success-cleanup.test.mjs
           bash scripts/e2e.sh
 
       # npm wrappers at the Cargo version and packable; release locus-mcp keeps

@@ -213,6 +213,13 @@ listed verbatim so an agent can jump straight to the right document.
   - Phantom Secrets references
   - Configuration validation
 
+## docs/deepwiki.md
+
+- [DeepWiki auto-docs](https://github.com/ashlrai/locus/blob/main/docs/deepwiki.md)
+  - Contract
+  - How this repo uses it
+  - Maintenance
+
 ## docs/doctor-fix.md
 
 - [doctor --fix](https://github.com/ashlrai/locus/blob/main/docs/doctor-fix.md)
@@ -489,6 +496,13 @@ listed verbatim so an agent can jump straight to the right document.
 - [Archive installer acceptance evidence](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-acceptance.md)
   - Outcomes that need explicit evidence
   - Evidence and scope
+
+## docs/installer-archive-questions.md
+
+- [Installer archive questions](https://github.com/ashlrai/locus/blob/main/docs/installer-archive-questions.md)
+  - Archive selection
+  - Installation
+  - Evidence boundary
 
 ## docs/installer-archive-requirements.md
 

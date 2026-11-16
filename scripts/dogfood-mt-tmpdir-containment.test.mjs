@@ -39,6 +39,7 @@ if (process.argv[2] === '--help') {
   process.stdout.write('usage: locus-mcp [--http <addr> --multi-tenant]\n');
   process.exit(0);
 }
+if (process.env.MT_FAIL_MARKER && fs.existsSync(process.env.MT_FAIL_MARKER)) fs.writeFileSync(process.env.MT_AFTER_FAILURE, 'server');
 if (process.argv[2] !== '--http' || process.argv[4] !== '--multi-tenant') process.exit(2);
 const [host, port] = process.argv[3].split(':');
 const server = http.createServer((req, res) => {
@@ -77,6 +78,7 @@ server.listen(Number(port), host, () => fs.writeFileSync(process.env.MT_PID_FILE
   writeFileSync(join(root, 'verify.json'), JSON.stringify(verify));
 
   writeFileSync(join(bin, 'locus'), `#!/usr/bin/env bash
+if [[ -n "\${MT_FAIL_MARKER:-}" && -f "$MT_FAIL_MARKER" ]]; then touch "$MT_AFTER_FAILURE"; fi
 case "$1 $2" in
   'init ')
     if [[ "$LOCUS_HOME" == */locus-mt-dogfood.*/home && "$PWD" == "\${LOCUS_HOME%/home}" ]]; then
@@ -98,7 +100,7 @@ case "$1 $2" in
   'verify session') [[ "\${3:-}" == --help ]] || cat "$FIXTURE_ROOT/verify.json" ;;
   'forensics export') printf '{}\\n' > "$4" ;;
   'goal status') exit 1 ;;
-  'mcp mint') printf '%s\\n' '{"grant_id":"grant_fixture","token":"lmt_fixture"}' ;;
+  'mcp mint') [[ "\${3:-}" != --help ]] || exit 0; [[ -f "$LOCUS_HOME/bindings/mt-probe.toml" ]] || exit 76; touch "$MT_STATE_DIR/mint-attempted"; [[ "\${MT_FAIL_MINT:-0}" != 1 ]] || exit 75; printf '%s\\n' '{"grant_id":"grant_fixture","token":"lmt_fixture"}' ;;
   'mcp list')
     if [[ -f "$MT_STATE_DIR/revoked" ]]; then printf '[]\\n'
     else printf '%s\\n' '[{"grant_id":"grant_fixture","revoked":false,"expired":false}]'; fi ;;
@@ -166,6 +168,37 @@ test('a controlled TMPDIR contains the multi-tenant probe root during a dogfood 
   assert.ok(Number.isInteger(pid) && pid > 0);
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' },
     'the exit trap must reap the probe server');
+});
+
+test('a failed multi-tenant mint removes the populated probe root', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-failure-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'controlled tmp root');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const mtProbe = join(root, 'mt-probe');
+  const result = spawnSync('bash', [fixture(root)], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, DOGFOOD_MT: '1',
+      PROBE_FILE: join(root, 'probe'), MT_PROBE_FILE: mtProbe,
+      MT_LISTING: join(root, 'mt-listing'), MT_STATE_DIR: root,
+      MT_PID_FILE: join(root, 'mt-server-pid'), FIXTURE_ROOT: root, MT_FAIL_MINT: '1' },
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0, 'a failed mint must fail dogfood');
+  assert.match(result.stderr, /mt probe: mint failed/);
+  assert.match(result.stderr, /multi-tenant probe failed/);
+  assert.doesNotMatch(result.stdout, /DOGFOOD READY/);
+  assert.equal(existsSync(join(root, 'mint-attempted')), true, 'the injected failure must be reached');
+  const probeRoot = readFileSync(mtProbe, 'utf8').trim();
+  assert.equal(dirname(probeRoot), scratch);
+  assert.match(basename(probeRoot), /^locus-mt-dogfood\.[^/]+$/);
+  assert.equal(existsSync(probeRoot), false, 'the failed probe must remove its root');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup preserves unrelated files');
 });
 
 // TMP, TEMP and the working directory are all plausible but wrong roots: the
@@ -255,4 +288,45 @@ exit "$?"
   assert.equal(existsSync(missing), false, 'the missing root must not be created for it');
   assert.deepEqual(readdirSync(controlled), [],
     'no fallback directory may be allocated beneath another root');
+});
+
+// Exercise the mainline's hard failure when only the step 8b allocation fails.
+test('dogfood stops before multi-tenant execution when probe allocation fails', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-mt-allocation-failure-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'scratch');
+  mkdirSync(scratch);
+  const dogfood = fixture(root);
+  const failure = join(root, 'allocation-failed');
+  const afterFailure = join(root, 'after-failure');
+  const attempts = join(root, 'allocation-attempts');
+  writeFileSync(join(root, 'fixture', 'target', 'debug', 'mktemp'), `#!/bin/bash
+if [[ "\${!#}" == */locus-mt-dogfood.XXXXXX ]]; then
+  printf '%s\\n' "\${!#}" >> "$MT_ATTEMPTS"
+  touch "$MT_FAIL_MARKER"
+  exit 1
+fi
+exec /usr/bin/mktemp "$@"
+`, { mode: 0o755 });
+  const result = spawnSync('bash', [dogfood], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, DOGFOOD_MT: '1',
+      PROBE_FILE: join(root, 'probe'), MT_PROBE_FILE: join(root, 'mt-probe'),
+      MT_LISTING: join(root, 'mt-listing'), MT_STATE_DIR: root,
+      MT_PID_FILE: join(root, 'mt-server-pid'), FIXTURE_ROOT: root,
+      MT_FAIL_MARKER: failure, MT_AFTER_FAILURE: afterFailure, MT_ATTEMPTS: attempts },
+    encoding: 'utf8', timeout: 60_000,
+  });
+
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /multi-tenant probe failed/);
+  assert.doesNotMatch(result.stdout, /DOGFOOD READY/);
+  assert.equal(readFileSync(attempts, 'utf8').trim(), `${scratch}/locus-mt-dogfood.XXXXXX`);
+  assert.equal(existsSync(afterFailure), false, 'no locus command or multi-tenant server may run after allocation fails');
+  assert.equal(existsSync(join(root, 'mt-probe')), false);
+  assert.equal(existsSync(join(root, 'mint-attempted')), false);
+  assert.equal(existsSync(join(root, 'mt-server-pid')), false);
+  assert.deepEqual(readdirSync(scratch), []);
 });

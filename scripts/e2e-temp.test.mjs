@@ -394,17 +394,19 @@ test('exit cleanup removes the populated graph home after success', (t) => {
   writeFileSync(join(scratch, 'keep'), 'unrelated');
   const source = readFileSync(script, 'utf8');
   const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
-  const createGraphHome = source.match(/^\s*GRAPH_HOME="\$\(mktemp -d .*\)"$/m)?.[0];
+  const createGraphHome = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[0];
   assert.ok(cleanup, 'missing e2e cleanup function');
   assert.ok(createGraphHome, 'missing graph home creation');
 
   const result = spawnSync('bash', ['-c', `set -euo pipefail
 ${cleanup}
+die() { printf 'FAIL %s\n' "$*" >&2; exit 1; }
+${createGraphHome}
 LOCUS_HOME="$1/main-home"
 mkdir "$LOCUS_HOME"
 WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
 trap 'e2e_cleanup' EXIT
-${createGraphHome}
+create_graph_home
 [[ -d "$GRAPH_HOME" && "\${GRAPH_HOME%/*}" == "$TMPDIR" && "\${GRAPH_HOME##*/}" == locus-graph-imp.* ]]
 touch "$GRAPH_HOME/import-sentinel"
 [[ -f "$GRAPH_HOME/import-sentinel" ]]
@@ -538,6 +540,44 @@ exit 73
   assert.equal(readFileSync(join(inherited, 'keep'), 'utf8'), 'inherited');
 });
 
+test('workspace allocation failure stops before workspace initialization', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp');
+  const marker = join(fixture.root, 'workspace-initialized');
+  const attempts = join(fixture.root, 'workspace-attempts');
+  const realMktemp = execFileSync('which', ['mktemp'], { encoding: 'utf8' }).trim();
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(join(fixture.bin, 'mktemp'), `#!/bin/sh
+case "$2" in
+  */locus-ws.XXXXXX)
+    printf 'attempt\\n' >> "$WORKSPACE_ATTEMPTS"
+    printf 'injected workspace allocation failure\\n' >&2
+    exit 73 ;;
+esac
+exec "$REAL_MKTEMP" "$@"
+`, { mode: 0o755 });
+  writeFileSync(fixture.locus, `#!/bin/sh
+case "$1" in
+  init) printf 'stub init\\n' > "$LOCUS_HOME/init-stamp"; exit 0 ;;
+  workspace) printf 'started\\n' > "$WORKSPACE_MARKER"; exit 0 ;;
+esac
+exit 1
+`, { mode: 0o755 });
+
+  const result = run(fixture, scratch, {
+    REAL_MKTEMP: realMktemp, WORKSPACE_ATTEMPTS: attempts, WORKSPACE_MARKER: marker,
+  });
+
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0, 'allocation failure must stop the script');
+  assert.match(result.stderr, /injected workspace allocation failure/);
+  assert.match(result.stderr, /workspace was not created beneath the space-containing TMPDIR/);
+  assert.equal(readFileSync(attempts, 'utf8'), 'attempt\n');
+  assert.equal(existsSync(marker), false, 'workspace initialization must not run');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
+
 test('workspace cleanup survives a command failure after leaving the workspace', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp $literal; [test]');
@@ -590,6 +630,9 @@ for (const exitStatus of [0, 73]) {
     const record = join(fixture.root, 'workspace-path');
     mkdirSync(scratch);
     writeFileSync(join(scratch, 'keep'), 'unrelated');
+    const sibling = join(scratch, 'locus-ws.preexisting');
+    mkdirSync(join(sibling, 'nested'), { recursive: true });
+    writeFileSync(join(sibling, 'nested', 'keep'), 'sibling contents\n');
     const source = readFileSync(script, 'utf8');
     const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
     const createWorkspace = source.match(/^\s*WS_DIR="\$\(mktemp -d .*\)"$/m)?.[0];
@@ -614,7 +657,10 @@ exit "$3"
     const workspace = readFileSync(record, 'utf8');
     assert.equal(dirname(workspace), scratch);
     assert.match(workspace, /\/locus-ws\.[^/]+$/);
-    assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must remove workspace and preserve unrelated files');
+    assert.throws(() => lstatSync(workspace), { code: 'ENOENT' }, 'workspace must be removed');
+    assert.ok(lstatSync(sibling).isDirectory(), 'preexisting sibling must survive cleanup');
+    assert.equal(readFileSync(join(sibling, 'nested', 'keep'), 'utf8'), 'sibling contents\n');
+    assert.deepEqual(readdirSync(scratch).sort(), ['keep', 'locus-ws.preexisting']);
   });
 }
 
@@ -1419,6 +1465,105 @@ ${block}
   }
 });
 
+test('graph import stops clearly when its temporary home cannot be created', (t) => {
+  const fixture = setup(t);
+  const home = join(fixture.root, 'main-home');
+  const calls = join(fixture.root, 'calls');
+  mkdirSync(home);
+  const source = readFileSync(script, 'utf8');
+  const create = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  const graph = source.slice(source.indexOf('# ── 16. graph'), source.indexOf('# ── 17. ci'));
+  assert.ok(create && graph.includes('create_graph_home'), 'missing graph import code');
+
+  for (const failure of ['error', 'empty']) {
+    rmSync(calls, { force: true });
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+GRAPH_HOME=""
+log() { :; }
+ok() { :; }
+skip() { exit 90; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+has_cmd() { return 0; }
+mktemp() { [[ "$TEST_FAILURE" == empty ]]; }
+locus() {
+  printf '%s:%s\\n' "$1" "\${2:-}" >> "$TEST_CALLS"
+  case "$1:\${2:-}" in
+    graph:export) printf 'LOCUSGRAPH00' > "$4" ;;
+    *) return 1 ;;
+  esac
+}
+${create}
+${graph}
+`], { env: { ...process.env, LOCUS_HOME: home, TEST_CALLS: calls, TEST_FAILURE: failure }, encoding: 'utf8' });
+    assert.equal(result.status, 1, failure);
+    assert.match(result.stderr, /could not create GRAPH_HOME for graph import/);
+    assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'),
+      ['graph:export', 'graph:import', 'graph:import'], 'no init or fresh-home import may run');
+  }
+});
+
+test('graph home allocation failure removes earlier temporary directories', (t) => {
+  const fixture = setup(t);
+  const scratch = join(fixture.root, 'custom tmp $literal; [test]');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+  const create = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  const graph = source.slice(source.indexOf('# ── 16. graph'), source.indexOf('# ── 17. ci'));
+  assert.ok(cleanup && create && graph.includes('create_graph_home'), 'missing graph import code');
+
+  // Earlier suite directories exist and are populated when the graph import
+  // home allocation fails; the EXIT trap must remove every one of them.
+  const earlier = {
+    LOCUS_HOME: 'locus-e2e.earlier',
+    WS_DIR: 'locus-ws.earlier',
+    SECURITY_HOME: 'locus-security-e2e.earlier',
+    SECURITY_WS: 'locus-security-ws.earlier',
+  };
+  for (const name of Object.values(earlier)) {
+    mkdirSync(join(scratch, name));
+    writeFileSync(join(scratch, name, 'sentinel'), name);
+  }
+
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+GRAPH_HOME=""
+HTTP_MCP_PID="" MT_MCP_PID=""
+LOCUS_HOME="$TMPDIR/${earlier.LOCUS_HOME}"
+WS_DIR="$TMPDIR/${earlier.WS_DIR}"
+SECURITY_HOME="$TMPDIR/${earlier.SECURITY_HOME}"
+SECURITY_WS="$TMPDIR/${earlier.SECURITY_WS}"
+log() { :; }
+ok() { :; }
+skip() { exit 90; }
+die() { printf 'FAIL %s\\n' "$*" >&2; exit 1; }
+has_cmd() { return 0; }
+mktemp() {
+  case "$2" in
+    */locus-graph-imp.XXXXXX) printf 'injected graph home failure\\n' >&2; return 73 ;;
+  esac
+  command mktemp "$@"
+}
+locus() {
+  case "$1:\${2:-}" in
+    graph:export) printf 'LOCUSGRAPH00' > "$4" ;;
+    *) return 1 ;;
+  esac
+}
+trap 'e2e_cleanup' EXIT
+${create}
+${graph}
+`], { env: { ...process.env, TMPDIR: scratch }, encoding: 'utf8' });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1, 'the allocation failure must stop the suite');
+  assert.match(result.stderr, /injected graph home failure/);
+  assert.match(result.stderr, /could not create GRAPH_HOME for graph import/);
+  assert.deepEqual(readdirSync(scratch), ['keep'],
+    'every earlier temporary directory must be removed on failure');
+});
+
 test('graph home creation selects the custom temporary root or /tmp fallback', (t) => {
   const fixture = setup(t);
   const scratch = join(fixture.root, 'custom tmp $literal; [test]');
@@ -1549,6 +1694,7 @@ ${source.slice(start, end)}
   assert.ok(rm, 'exit cleanup must remove the workspace');
   assert.ok(rm.slice(2).includes(cd[2]), 'cleanup must pass the same WS_DIR as one argument');
   assert.throws(() => lstatSync(cd[2]), { code: 'ENOENT' }, 'workspace must be removed');
+  assert.deepEqual(readdirSync(scratch), [], 'successful cleanup must leave no temporary artifacts');
 });
 
 // Whitespace at the edges of a path component is the easiest thing for an

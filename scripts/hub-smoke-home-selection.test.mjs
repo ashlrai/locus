@@ -1,7 +1,7 @@
 // Run: node --test scripts/hub-smoke-home-selection.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
@@ -65,6 +65,21 @@ test('SMOKE_HOME is created under the controlled TMPDIR and removed on exit', (t
   assert.equal(dirname(created), controlled);
   assert.match(created.slice(controlled.length + 1), /^locus-hub-smoke\.[A-Za-z0-9]{6}$/);
   assert.deepEqual(readdirSync(controlled), []);
+});
+
+test('SMOKE_HOME uses a symlinked custom TMPDIR and cleans the target', (t) => {
+  const { controlled, template, created } = run(t, (dir) => {
+    mkdirSync(join(dir, 'target'));
+    symlinkSync(join(dir, 'target'), join(dir, 'alias'));
+    writeFileSync(join(dir, 'target', 'unrelated'), 'keep');
+    return { TMPDIR: join(dir, 'alias') };
+  });
+  assert.equal(template, `${controlled}/alias/locus-hub-smoke.XXXXXX`);
+  assert.equal(dirname(created), join(controlled, 'alias'));
+  assert.match(created.slice(created.lastIndexOf('/') + 1), /^locus-hub-smoke\.[A-Za-z0-9]{6}$/);
+  assert.equal(existsSync(created), false, 'the allocated home must be removed on exit');
+  assert.deepEqual(readdirSync(join(controlled, 'target')), ['unrelated']);
+  assert.equal(readFileSync(join(controlled, 'target', 'unrelated'), 'utf8'), 'keep');
 });
 
 test('SMOKE_HOME stays directly under a TMPDIR with a trailing slash', (t) => {

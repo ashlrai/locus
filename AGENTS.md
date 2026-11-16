@@ -211,4 +211,4 @@ Firm / multi-client workflow: [docs/firm-mode.md](./docs/firm-mode.md).
 
 ## Security reports
 
-Do **not** open a public issue for vulnerabilities. See [SECURITY.md](./SECURITY.md) → `security@ashlr.ai`.
+Do **not** open a public issue for vulnerabilities. See [SECURITY.md](./SECURITY.md) → `support@ashlr.ai`.
