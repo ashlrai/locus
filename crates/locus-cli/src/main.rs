@@ -5317,33 +5317,28 @@ fn cmd_mcp_mint(
 /// `LOCUS_MCP_SESSION_DIR` with its `-mt` suffix).
 fn mt_live_sessions_by_grant(
     dir: Option<&std::path::Path>,
-) -> std::collections::HashMap<String, usize> {
+) -> Option<std::collections::HashMap<String, usize>> {
     let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    let Some(dir) = dir else {
-        return counts;
-    };
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return counts;
+    let dir = dir?;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(counts),
+        Err(_) => return None,
     };
     let now_unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
+        .ok()?
         .as_secs();
-    for ent in entries.flatten() {
+    for ent in entries {
+        let ent = ent.ok()?;
         let path = ent.path();
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
-        };
+        let raw = std::fs::read_to_string(&path).ok()?;
+        let v = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
         // Expired records are dead sessions awaiting sweep — never "live".
-        let Some(last_seen) = v.get("last_seen_unix").and_then(|x| x.as_u64()) else {
-            continue;
-        };
+        let last_seen = v.get("last_seen_unix").and_then(|x| x.as_u64())?;
         if locus_core::http_sessions::http_session_record_expired(
             last_seen,
             now_unix,
@@ -5351,15 +5346,13 @@ fn mt_live_sessions_by_grant(
         ) {
             continue;
         }
-        if let Some(gid) = v
+        let gid = v
             .get("tenant")
             .and_then(|t| t.get("grant_id"))
-            .and_then(|g| g.as_str())
-        {
-            *counts.entry(gid.to_string()).or_insert(0) += 1;
-        }
+            .and_then(|g| g.as_str())?;
+        *counts.entry(gid.to_string()).or_insert(0) += 1;
     }
-    counts
+    Some(counts)
 }
 
 /// Operator-only grant roster (grant_id / alias / tenant / expiry / sessions).
@@ -5369,7 +5362,8 @@ fn cmd_mcp_list(json: bool) -> Result<()> {
     let s = store()?;
     let grants = s.list_mcp_grants()?;
     let live =
-        mt_live_sessions_by_grant(locus_core::http_sessions::http_session_dir_mt().as_deref());
+        mt_live_sessions_by_grant(locus_core::http_sessions::http_session_dir_mt().as_deref())
+            .context("cannot determine live HTTP session counts")?;
     if json {
         let rows: Vec<serde_json::Value> = grants
             .iter()
@@ -5510,11 +5504,17 @@ mod mt_session_reconcile_tests {
         // Non-record noise is ignored.
         std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
 
-        let counts = mt_live_sessions_by_grant(Some(dir.path()));
+        let counts = mt_live_sessions_by_grant(Some(dir.path())).unwrap();
         assert_eq!(counts.get("g1"), Some(&1), "expired record must not count");
         assert_eq!(counts.get("g2"), Some(&1));
 
-        assert!(mt_live_sessions_by_grant(None).is_empty());
+        assert!(mt_live_sessions_by_grant(None).is_none());
+        assert!(mt_live_sessions_by_grant(Some(&dir.path().join("absent")))
+            .unwrap()
+            .is_empty());
+        std::fs::write(dir.path().join("broken.json"), "{").unwrap();
+        assert!(mt_live_sessions_by_grant(Some(dir.path())).is_none());
+        assert!(mt_live_sessions_by_grant(Some(&dir.path().join("notes.txt"))).is_none());
     }
 }
 

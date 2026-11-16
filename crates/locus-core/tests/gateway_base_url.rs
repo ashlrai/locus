@@ -219,6 +219,31 @@ fn gateway_base_url_end_to_end() {
     }
 }
 
+#[test]
+fn explicit_port_is_preserved_and_checked_against_allowlist() {
+    use locus_core::gateway::{resolve, GatewayChild};
+
+    let url = "https://gw.example.com:8443/v1";
+    let mut config = GatewayConfig {
+        enabled: true,
+        base_url: Some(url.into()),
+        child_env: vec!["OPENAI_BASE_URL".into()],
+        allowed_hosts: vec!["gw.example.com:8443".into()],
+    };
+    let GatewayChild::Set { target, vars } = resolve(&config) else {
+        panic!("explicit-port gateway URL was refused");
+    };
+    assert_eq!(target.base_url, url);
+    assert_eq!(target.port, 8443);
+    assert_eq!(vars, vec!["OPENAI_BASE_URL".to_string()]);
+
+    config.allowed_hosts = vec!["gw.example.com:443".into()];
+    assert!(matches!(
+        resolve(&config),
+        GatewayChild::Refused("host-not-allowlisted")
+    ));
+}
+
 /// Join a request path onto a base URL the way a child client does: the
 /// separator is supplied once, whether or not the base already ends in `/`.
 fn join(base: &str, path: &str) -> String {

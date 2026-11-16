@@ -88,12 +88,12 @@ More copy-paste blocks: [docs/copy-paste.md](./docs/copy-paste.md). Rules for ag
 
 ## 30-second start
 
-Run this in one shell. It creates sample bindings, pins `personal`, and checks that `acme` is refused. `LOCUS_HOME` keeps the trial off your real `~/.locus`.
+Run this in one shell. On a fresh home it creates sample bindings; the explicit `enter` pins `personal`, and the last command checks that `acme` is refused. `LOCUS_HOME` keeps the trial off your real `~/.locus`.
 
 ```bash
 export LOCUS_HOME="$(mktemp -d)"        # omit this line to use ~/.locus
 npm install -g locus-cli @ashlrai/locus-mcp   # or brew or cargo; see Install options
-locus quickstart                        # sample bindings, pin, whoami, doctor
+locus quickstart                        # initialize, try to enter, whoami, doctor
 eval "$(locus hook zsh)"                # or bash; exports the control capability
 locus enter personal                    # pin from this shell (it supervises the pin)
 locus whoami                            # who your agents are acting as, right now

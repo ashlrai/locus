@@ -18,3 +18,7 @@ approvals/
 # Coverage report
 lcov.info
 *.profraw
+
+# Python bytecode
+__pycache__/
+*.pyc

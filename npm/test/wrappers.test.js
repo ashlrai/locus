@@ -224,7 +224,7 @@ for (const [name, file] of Object.entries(wrappers)) {
   });
 
   test(`${name}: with no installed binary, runs its executable from the release bundle`, () => {
-    const home = mkdtempSync(join(tmpdir(), "locus-bundle-"));
+    const home = mkdtempSync(join(tmpdir(), "locus bundle with spaces-"));
     try {
       const binary = join(home, ".locus", "bin", name);
       const preload = join(home, "release-fixture.js");
@@ -280,6 +280,11 @@ for (const [name, file] of Object.entries(wrappers)) {
       assert.equal(result.signal, null);
       assert.equal(result.stdout, "selected bundle member\n");
       assert.equal(readFileSync(binary, "utf8"), `bundled ${name}`);
+      if (name === "locus") {
+        const companion = join(home, ".locus", "bin", "locus-mcp");
+        assert.equal(readFileSync(companion, "utf8"), "bundled locus-mcp");
+        assert.equal(readFileSync(`${companion}.version`, "utf8").trim(), require(join(root, "npm", "package.json")).version);
+      }
     } finally {
       rmSync(home, { recursive: true, force: true });
     }
@@ -437,22 +442,47 @@ test("locus rejects a release archive whose checksum does not match", () => {
 
 // Regression: quickstart then `enter` failed with a stale session authority
 // because the Node wrapper, not the shell, was locus's parent process.
-test("locus: linkNativeBin replaces the wrapper with a symlink to the binary", () => {
+test("locus: linkNativeBin resolves a native binary path containing spaces", () => {
   if (process.platform === "win32") return;
   const { linkNativeBin } = require(wrappers.locus);
-  const { lstatSync, readlinkSync } = require("node:fs");
+  const { lstatSync, readlinkSync, realpathSync } = require("node:fs");
   const dir = mkdtempSync(join(tmpdir(), "locus-link-"));
   try {
-    const bin = join(dir, "locus-native");
+    const bin = join(dir, "native binaries", "locus native");
     const target = join(dir, "locus.js");
+    mkdirSync(join(dir, "native binaries"));
     writeFileSync(bin, "#!/bin/sh\necho native\n", { mode: 0o755 });
     writeFileSync(target, "// wrapper\n");
     assert.equal(linkNativeBin(bin, target), true);
     assert.ok(lstatSync(target).isSymbolicLink());
     assert.equal(readlinkSync(target), bin);
+    assert.equal(realpathSync(target), realpathSync(bin));
     const out = spawnSync(target, [], { encoding: "utf8" });
     assert.equal(out.stdout.trim(), "native");
     assert.equal(linkNativeBin(bin, target), false, "idempotent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("locus: linkNativeBin replaces a stale binary symlink", () => {
+  if (process.platform === "win32") return;
+  const { linkNativeBin } = require(wrappers.locus);
+  const { lstatSync, readlinkSync, symlinkSync } = require("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "locus-stale-link-"));
+  try {
+    const oldBin = join(dir, "old-native");
+    const newBin = join(dir, "new-native");
+    const target = join(dir, "locus.js");
+    writeFileSync(oldBin, "old binary\n");
+    writeFileSync(newBin, "new binary\n");
+    symlinkSync(oldBin, target);
+    assert.equal(linkNativeBin(newBin, target, 1000), true);
+    assert.ok(lstatSync(target).isSymbolicLink());
+    assert.equal(readlinkSync(target), newBin);
+    assert.equal(readFileSync(target, "utf8"), "new binary\n");
+    assert.equal(readFileSync(oldBin, "utf8"), "old binary\n");
+    assert.equal(linkNativeBin(newBin, target, 1000), false, "idempotent");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

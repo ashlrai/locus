@@ -258,6 +258,55 @@ fn stderr(out: &Output) -> String {
 }
 
 #[test]
+fn force_recovery_without_an_active_pin_preserves_state() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let qs = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .arg("quickstart")
+        .env("LOCUS_HOME", home.path())
+        .env_remove("LOCUS_CONTROL_CAPABILITY")
+        .env_remove("LOCUS_SESSION_ID")
+        .current_dir(cwd.path())
+        .output()
+        .unwrap();
+    assert!(qs.status.success(), "quickstart: {}", stderr(&qs));
+    let cap = std::fs::read_to_string(home.path().join("control_capability")).unwrap();
+    let leave = locus_cmd(home.path(), cwd.path(), cap.trim(), &["leave"])
+        .env_remove("LOCUS_SESSION_ID")
+        .output()
+        .unwrap();
+    assert!(leave.status.success(), "leave: {}", stderr(&leave));
+
+    let active = home.path().join("sessions/active.json");
+    assert!(!active.exists());
+    let binding = home.path().join("bindings/personal.toml");
+    let audit = home.path().join("audit/events.jsonl");
+    let worker = home.path().join("workers/unrelated/sentinel");
+    std::fs::create_dir_all(worker.parent().unwrap()).unwrap();
+    std::fs::write(&worker, b"preserve unrelated state").unwrap();
+    let binding_before = std::fs::read(&binding).unwrap();
+    let audit_before = std::fs::read(&audit).unwrap();
+
+    let out = locus_cmd(
+        home.path(),
+        cwd.path(),
+        cap.trim(),
+        &["--json", "leave", "--force"],
+    )
+    .env_remove("LOCUS_SESSION_ID")
+    .output()
+    .unwrap();
+    assert!(out.status.success(), "force leave: {}", stderr(&out));
+    let result: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(result["left"], false);
+    assert_eq!(result["forced"], true);
+    assert!(!active.exists());
+    assert_eq!(std::fs::read(binding).unwrap(), binding_before);
+    assert_eq!(std::fs::read(audit).unwrap(), audit_before);
+    assert_eq!(std::fs::read(worker).unwrap(), b"preserve unrelated state");
+}
+
+#[test]
 fn stale_pin_surfaces_name_the_recovery() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();

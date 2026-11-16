@@ -12,7 +12,7 @@ Canonical design: [DESIGN.md §8](../DESIGN.md) (adapter model) and §9 (threat 
 
 ## Where adapters live (today)
 
-Phase 1 adapters are in-tree Rust modules:
+Built-in adapters are in-tree Rust modules:
 
 ```
 crates/locus-core/src/adapters/
@@ -20,6 +20,13 @@ crates/locus-core/src/adapters/
   supabase.rs
   github.rs
   vercel.rs
+  cloudflare.rs
+  aws.rs
+  resend.rs
+  stripe.rs
+  anthropic.rs
+  openai.rs
+  cli.rs          # native CLI routing helpers (not a provider adapter)
 ```
 
 Registration is a match arm in `adapter_for()`:
@@ -30,13 +37,18 @@ pub fn adapter_for(provider: &str) -> Option<Box<dyn ProviderAdapter>> {
         "supabase" => Some(Box::new(SupabaseAdapter)),
         "github" => Some(Box::new(GithubAdapter)),
         "vercel" => Some(Box::new(VercelAdapter)),
-        // "cloudflare" => Some(Box::new(CloudflareAdapter)),
+        "cloudflare" => Some(Box::new(CloudflareAdapter)),
+        "aws" => Some(Box::new(AwsAdapter)),
+        "resend" => Some(Box::new(ResendAdapter)),
+        "stripe" => Some(Box::new(StripeAdapter)),
+        "anthropic" => Some(Box::new(AnthropicAdapter)),
+        "openai" => Some(Box::new(OpenaiAdapter)),
         _ => None,
     }
 }
 ```
 
-Unknown providers still get a generic `{provider}.scope` identity tool via `tools_for_binding` — useful for experimentation, but a real adapter should own freeze rules.
+`known_providers()` lists the same names and a test keeps it in sync with `adapter_for()`. Unknown providers still get a generic `{provider}.scope` identity tool via `tools_for_binding`, which is useful for experimentation, but a real adapter should own freeze rules.
 
 ## The trait
 

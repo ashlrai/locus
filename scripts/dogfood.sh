@@ -152,6 +152,9 @@ sandbox_attestation() {
     # Function locals may be out of scope when an EXIT trap runs after exit.
     sandbox_cleanup_root="$probe_root"
     trap 'rm -rf "$sandbox_cleanup_root"' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     export LOCUS_HOME="$probe_root/home"
     unset LOCUS_SESSION_ID LOCUS_DOGFOOD_SANDBOX_UNUSED || true
 
@@ -267,6 +270,9 @@ mt_grant_probe() {
       rm -rf "$probe_root"
     }
     trap 'mt_cleanup' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
     export LOCUS_HOME="$probe_root/home"
     unset LOCUS_SESSION_ID || true
     # Full isolation includes cwd: the caller may sit inside a workspace whose
@@ -423,6 +429,9 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ "${USE_REAL}" == "1" ]]; then
   APPLY="${APPLY:-0}"

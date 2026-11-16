@@ -35,6 +35,7 @@ whose first key is `schema`. Key on it:
 | `locus whoami` | `locus.whoami.v1` |
 | `locus fleet-feed` (always JSON) | `locus.fleet_feed.v1` |
 | `locus fleet-denials` (always JSON) | `locus.fleet_denials.v1` |
+| `locus fleet-preflight` (always JSON) | `locus.fleet_preflight.v1` |
 | `locus status` | `locus.status.v1` |
 | `locus verify session` | `locus.verify.session.v1` |
 | `locus verify claim` | `locus.verify.claim.v1` |
