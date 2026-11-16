@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-16
+
 ### Fixed
 
 - The authority anchor's test-harness detection now recognises cargo's
