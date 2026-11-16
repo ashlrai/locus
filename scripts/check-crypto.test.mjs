@@ -95,6 +95,7 @@ test('CRLF and LF fixtures produce the same findings and report lines', (t) => {
   assert.deepEqual(lfHits, [{
     file: 'src/crypto.ts',
     kinds: ['ECDSA/ECDH', 'Ed25519/X25519', 'RSA'],
+    lines: [2, 4],
     allowed: false,
     reason: undefined,
   }]);
@@ -114,6 +115,15 @@ test('crypto tokens match at word boundaries, not inside identifiers', (t) => {
   assert.deepEqual(scan(root).map(({ file, kinds }) => ({ file, kinds })), [
     { file: 'src/bounded.ts', kinds: ['ECDSA/ECDH'] },
   ]);
+});
+
+test('reports a finding on the final line without a newline', (t) => {
+  const root = fixture({ 'src/final.ts': '// first line\n\nconst algorithm = "ECDSA";' });
+  t.after(() => rmSync(root, { recursive: true }));
+  const hits = scan(root);
+  assert.deepEqual(hits[0].lines, [3]);
+  assert.match(report(hits).text, /FLAG src\/final\.ts \[ECDSA\/ECDH\] lines 3/);
+  assert.equal(report(hits).failed, true);
 });
 
 test('tests, docs and vendored dirs are skipped, and id_rsa paths are not RSA use', () => {

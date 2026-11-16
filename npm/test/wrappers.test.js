@@ -143,6 +143,41 @@ for (const [name, file] of Object.entries(wrappers)) {
     }
   });
 
+  test(`${name}: forwards an empty argument in its original position`, () => {
+    const home = mkdtempSync(join(tmpdir(), "locus-empty-arg-"));
+    try {
+      const packageDir = join(root, name === "locus" ? "npm" : "npm-mcp");
+      const version = require(join(packageDir, "package.json")).version;
+      const binary = join(home, ".locus", "bin", name);
+      mkdirSync(join(home, ".locus", "bin"), { recursive: true });
+      writeFileSync(binary, "cached binary fixture\n");
+      const preload = join(home, "child-args.js");
+      writeFileSync(preload, `
+        const assert = require("node:assert/strict");
+        const cp = require("node:child_process");
+        const execFileSync = cp.execFileSync;
+        cp.execFileSync = (command, args, options) => {
+          assert.equal(command, ${JSON.stringify(binary)});
+          if (args.length === 1 && args[0] === "--version") {
+            return Buffer.from(${JSON.stringify(`${name} ${version}\n`)});
+          }
+          return execFileSync(process.execPath, ["-e", "process.stdout.write(JSON.stringify(process.argv.slice(1)))", "--", ...args], options);
+        };
+      `);
+      const args = ["before", "", "after"];
+      const result = spawnSync(process.execPath, ["--require", preload, file, ...args], {
+        env: { HOME: home, USERPROFILE: home, PATH: "", LOCUS_NPM_NO_LINK: "1" },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.signal, null);
+      assert.deepEqual(JSON.parse(result.stdout), args);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   test(`${name}: propagates a nonzero exit status from the child process`, () => {
     const home = mkdtempSync(join(tmpdir(), "locus-child-exit-"));
     try {
