@@ -11,17 +11,22 @@ name: Integration
 #   workflow-level paths: (merge_group does not support on.paths).
 # Not a required check until the locus ruleset flip plus ~5 green merge_group
 # runs. Never part of release.yml or tag workflows. Dummy canary only, no secrets.
-# Runs with the scheduled full suite (6 AM and 6 PM ET) and on dispatch, off
-# PRs, the merge queue and main pushes, so they only wait on CI Gate.
+# Runs after merge on main, with the scheduled full suite (6 AM and 6 PM ET),
+# and on dispatch. PRs and the merge queue still wait on CI Gate only.
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "57 10 * * *"
     - cron: "57 22 * * *"
   workflow_dispatch:
 
+# A burst of pushes to one ref shares a group and the newer run cancels the
+# older. Schedule and dispatch keep a per-run group so a main push cannot
+# cancel them.
 concurrency:
-  group: integration-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: integration-${{ github.event_name == 'push' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
 
 permissions:
   contents: read
