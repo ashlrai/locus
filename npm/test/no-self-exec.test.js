@@ -11,6 +11,7 @@ const { tmpdir } = require("node:os");
 const { delimiter, join, resolve } = require("node:path");
 
 const wrapper = process.env.LOCUS_WRAPPER_UNDER_TEST || resolve(__dirname, "..", "bin", "locus.js");
+const { version } = require("../package.json");
 
 test("requiring each npm wrapper does not start a child process", async () => {
   const childProcess = require("node:child_process");
@@ -98,7 +99,7 @@ test("locus: a `locus` on PATH that is this wrapper is never executed (no self-e
     chmodSync(installedWrapper, 0o755);
     symlinkSync(installedWrapper, join(bin, "locus"));
     // `which` sees the wrapper first; the native cargo installation is the fallback.
-    writeFileSync(join(cargoBin, "locus"), '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "locus 0.7.1"; else printf "target: <%s>\\n" "$1"; fi\n', { mode: 0o755 });
+    writeFileSync(join(cargoBin, "locus"), `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "locus ${version}"; else printf "target: <%s>\\n" "$1"; fi\n`, { mode: 0o755 });
     const marker = join(spacesHome, "starts.log");
     const counter = join(spacesHome, "count.js");
     writeFileSync(counter, `require("fs").appendFileSync(${JSON.stringify(marker)}, "x");\n`);
