@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# check-readme-quickstart.sh -- dry rehearsal of the README "30-second start".
+# check-readme-quickstart.sh -- dry rehearsal of the README "Get started".
 #
 # Extracts the locus commands from the README quickstart block and replays
 # them verbatim inside a throwaway HOME (mktemp -d), in one shell, the way a
@@ -60,14 +60,14 @@ pass=0
 ok()   { printf '  ok  %s\n' "$*"; pass=$((pass + 1)); }
 die()  { printf '  FAIL %s\n' "$*" >&2; exit 1; }
 
-# Extract the fenced bash block under "## 30-second start": lines between the
+# Extract the fenced bash block under "## Get started": lines between the
 # first ```bash fence after the heading and its closing ```. Keep only lines
 # that invoke locus, including an env-prefixed smoke command, or eval the shell
 # hook (install lines are skipped), with the trailing comment kept for
 # expectation parsing.
 extract_steps() {
   awk '
-    /^## 30-second start/ { in_sec = 1; next }
+    /^## Get started/ { in_sec = 1; next }
     in_sec && /^```bash/   { in_blk = 1; next }
     in_blk && /^```/       { exit }
     in_blk                 { print }
@@ -100,7 +100,7 @@ expect_for() {
 STEPS=()
 while IFS= read -r line; do STEPS+=("$line"); done < <(extract_steps)
 if [[ ${#STEPS[@]} -lt 4 ]]; then
-  die "extracted ${#STEPS[@]} locus step(s) from '## 30-second start' in $README; section missing or reshaped?"
+  die "extracted ${#STEPS[@]} locus step(s) from '## Get started' in $README; section missing or reshaped?"
 fi
 # The check shell is bash; the README's "or bash" alternative is what we run.
 for i in "${!STEPS[@]}"; do STEPS[$i]="${STEPS[$i]//hook zsh/hook bash}"; done

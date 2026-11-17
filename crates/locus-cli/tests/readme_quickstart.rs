@@ -1,4 +1,4 @@
-//! The README "30-second start" must keep working: the check script extracts
+//! The README "Get started" section must keep working: the check script extracts
 //! the documented commands and replays them verbatim in a throwaway HOME, so
 //! a stale quickstart step fails here before a new user hits it. These tests
 //! run the script and prove it refuses a stale or reshaped README.
@@ -86,11 +86,7 @@ fn readme_quickstart_fails_when_section_is_gone() {
     let dir = tempfile::tempdir().unwrap();
     let mangled = dir.path().join("README.md");
     let body = std::fs::read_to_string(repo_root().join("README.md")).unwrap();
-    std::fs::write(
-        &mangled,
-        body.replace("## 30-second start", "## Quickstart"),
-    )
-    .unwrap();
+    std::fs::write(&mangled, body.replace("## Get started", "## Quickstart")).unwrap();
 
     let out = run(&[], Some(&mangled));
     assert!(
@@ -113,14 +109,13 @@ fn readme_quickstart_fails_on_a_stale_step() {
     let mangled = dir.path().join("README.md");
     let body = std::fs::read_to_string(repo_root().join("README.md")).unwrap();
     assert!(
-        body.contains("\nlocus quickstart "),
+        body.contains("\nlocus quickstart\n") || body.contains("\nlocus quickstart "),
         "README quickstart line shape changed; update this test"
     );
-    std::fs::write(
-        &mangled,
-        body.replacen("\nlocus quickstart ", "\nlocus bogus-start ", 1),
-    )
-    .unwrap();
+    let stale = body
+        .replacen("\nlocus quickstart\n", "\nlocus bogus-start\n", 1)
+        .replacen("\nlocus quickstart ", "\nlocus bogus-start ", 1);
+    std::fs::write(&mangled, stale).unwrap();
 
     let out = run(&[], Some(&mangled));
     assert!(

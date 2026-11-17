@@ -4,7 +4,7 @@ Locus pins each coding-agent session to one Binding, so wrong-account action is 
 
 ## Start here
 
-- **Install and first run:** [README.md](./README.md#30-second-start) and [docs/copy-paste.md](./docs/copy-paste.md) (runnable command blocks).
+- **Install and first run:** [README.md](./README.md#get-started) and [docs/copy-paste.md](./docs/copy-paste.md) (runnable command blocks).
 - **Wiring an MCP client** (Claude Code, Cursor, Codex, Gemini CLI, Grok Build): [docs/mcp.md](./docs/mcp.md).
 - **`--json` output, exit codes, dry-run:** [docs/agent-contract.md](./docs/agent-contract.md).
 - **Policy rules and approvals:** [docs/policy.md](./docs/policy.md).
