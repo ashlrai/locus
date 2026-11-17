@@ -347,7 +347,7 @@ locus agent report|setup|doctor       # AI-native readiness (hub JSON)
 locus goal status                     # northstar progress from GOALS.md
 locus completion zsh|bash|fish|elvish|powershell  # shell completions
 locus version                         # build version (also: locus --version)
-locus topic <name>                    # dashboard · forensics · serve · goal · verify · …
+locus topic <name>                    # dashboard · forensics · serve · goal · verify · … (alias: help-topic)
 ```
 
 `locus --help` is the grouped list. Shell prompt: `eval "$(locus hook zsh)"` shows `[locus:acme:acme-corp]` or `[locus:unpinned]`.
