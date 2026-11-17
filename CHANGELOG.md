@@ -13,17 +13,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Documentation and tests
+Changes since 0.7.2 touch docs, tests and release plumbing only. The `locus`
+and `locus-mcp` binaries behave the same as 0.7.2.
 
-- README CLI block lists `locus fleet-outcomes` next to the other
-  `fleet-*` commands. Release freshness blocks (README badge and summary,
-  `docs/mcp.md`, `INTEGRATION.md`, `examples/recipes/README.md`, web
-  discoverability assets) now track the published 0.7.0 packages instead of
-  0.6.2.
-- Regression tests: repeated closed-stdout `locus hook bash` invocations exit
-  without panic or hang, and `locus-mcp` HTTP keeps serving a valid request
-  after a malformed JSON body
-  ([#967](https://github.com/ashlrai/locus/pull/967)).
+### Added
+
+- Tests: repeated `locus hook bash` calls with a closed stdout exit cleanly,
+  and `locus-mcp` HTTP keeps serving after a malformed JSON body
+  ([#967](https://github.com/ashlrai/locus/pull/967)). A doc-facts test now
+  keeps the README command list in step with `locus --help`
+  ([#970](https://github.com/ashlrai/locus/pull/970)).
+
+### Changed
+
+- The README command list now shows `locus fleet-outcomes` and the
+  `help-topic` alias for `locus topic`. Install and 30-second start commands
+  were re-checked against `--help` and still match.
+- Release freshness text (README, `docs/mcp.md`, `INTEGRATION.md`, recipes,
+  web pages) points at the published 0.7.0 packages instead of 0.6.2.
+- Release automation: the version tag is created from the current `main`
+  version when it is missing, and slower test suites now run after merge to
+  `main` ([#966](https://github.com/ashlrai/locus/pull/966),
+  [#964](https://github.com/ashlrai/locus/pull/964)).
+
+### Fixed
+
+- The security contact address in the docs is corrected
+  ([#954](https://github.com/ashlrai/locus/pull/954)).
 
 ## [0.7.2] - 2026-11-16
 
