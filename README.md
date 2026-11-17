@@ -18,7 +18,7 @@ Agents are first-class users. Start with the commands below. Machine indexes: [l
 [Star](#star-locus)
 
 <!-- fresh:begin badge -->
-[![Release 0.6.2](https://img.shields.io/badge/release-v0.6.2-blue?style=for-the-badge&labelColor=0b0b14)](https://github.com/ashlrai/locus/releases/tag/v0.6.2)
+[![Release 0.7.0](https://img.shields.io/badge/release-v0.7.0-blue?style=for-the-badge&labelColor=0b0b14)](https://github.com/ashlrai/locus/releases/tag/v0.7.0)
 <!-- fresh:end -->
 [![CI](https://img.shields.io/github/actions/workflow/status/ashlrai/locus/ci.yml?style=for-the-badge&label=CI&logo=github&labelColor=0b0b14)](https://github.com/ashlrai/locus/actions/workflows/ci.yml)
 [![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?style=for-the-badge&logo=npm&label=locus-cli&labelColor=0b0b14)](https://www.npmjs.com/package/locus-cli)
@@ -26,9 +26,9 @@ Agents are first-class users. Start with the commands below. Machine indexes: [l
 [![Rust ≥1.89](https://img.shields.io/badge/rust-%E2%89%A51.89-CE412B?style=for-the-badge&logo=rust&labelColor=0b0b14)](./rust-toolchain.toml)
 
 <!-- fresh:begin release -->
-Latest release: [v0.6.2](https://github.com/ashlrai/locus/releases/tag/v0.6.2) (2026-11-01).
+Latest release: [v0.7.0](https://github.com/ashlrai/locus/releases/tag/v0.7.0) (2026-11-06).
 
-npm package READMEs use version-neutral installation commands to avoid stale pinned releases.
+SIEM NDJSON audit export, safer npm wrapper upgrades, idempotent `binding add`, and hardened workspace autopin writes.
 <!-- fresh:end -->
 
 ## For agents
@@ -312,7 +312,7 @@ locus switch <alias>                  # one-shot leave + enter
 locus leave · renew                   # clear pin; extend expiry (opt-in per binding)
 locus whoami [--json]
 locus status [--oneline] [--json]
-locus fleet-feed · fleet-denials · fleet-preflight  # value-free JSON for hub/workbench polls
+locus fleet-feed · fleet-denials · fleet-outcomes · fleet-preflight  # value-free JSON for hub/workbench polls
 locus exec -- <command> [args...]
 locus exec --expect <alias> -- <cmd>  # refuse (exit 1, child never starts) unless <alias> is pinned
 locus exec --for gh -- gh pr list    # inject only the pinned GitHub credential
