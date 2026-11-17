@@ -466,3 +466,29 @@ fn docs_mcp_setup_clients_match_the_cli() {
         }
     }
 }
+
+/// Reverse direction of the check above: every top-level `locus` command must
+/// be named in a README code span (as `locus <cmd>` or in a `a · b` / `a|b`
+/// list), so a new command cannot ship undocumented.
+#[test]
+fn every_top_level_command_is_documented_in_readme() {
+    let top = help_commands(&locus_output(&["--help"]));
+    assert!(top.contains("enter"), "could not parse `locus --help`");
+    let named: BTreeSet<String> = code_spans(&read_doc("README.md"))
+        .into_iter()
+        .flat_map(|(_, span)| {
+            span.split(|c: char| c.is_whitespace() || "·|,`\"'()".contains(c))
+                .filter(|t| is_word(t))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let missing: Vec<_> = top
+        .iter()
+        .filter(|c| c.as_str() != "help" && !named.contains(*c))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "README.md does not mention these top-level commands in a code span: {missing:?}"
+    );
+}
