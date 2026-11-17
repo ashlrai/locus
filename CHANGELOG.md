@@ -26,6 +26,11 @@ and `locus-mcp` binaries behave the same as 0.7.2.
 
 ### Changed
 
+- README: a five-step **Get started** section now leads the README, with what
+  you should see at each step. The MCP tool list (`locus_*`) is documented in
+  the README, and the CLI block names the `adapter trust`, `adapter registry
+  index` and `approve pending` commands that were missing. A drift test
+  (`readme_drift.rs`) fails when the README and the `--help` tree or MCP catalog differ.
 - The README command list now shows `locus fleet-outcomes` and the
   `help-topic` alias for `locus topic`. Install and 30-second start commands
   were re-checked against `--help` and still match.

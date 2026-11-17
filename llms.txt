@@ -47,7 +47,7 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
 
 ## Start
 
-- [README](https://github.com/ashlrai/locus/blob/main/README.md): install options, 30-second start, MCP wiring
+- [README](https://github.com/ashlrai/locus/blob/main/README.md): install options, get started, MCP wiring
 - [AGENTS.md](https://github.com/ashlrai/locus/blob/main/AGENTS.md): agent operating rules and invariants
 - [capabilities.json](https://locus.dev/capabilities.json): machine-readable capabilities, install and commands
 - [server.json](https://locus.dev/server.json): MCP registry manifest for io.github.ashlrai/locus-mcp

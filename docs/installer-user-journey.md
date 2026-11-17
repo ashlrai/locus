@@ -62,7 +62,7 @@ locus-mcp --version
 If another installation appears first on `PATH`, invoke the chosen binaries by
 their full paths or adjust `PATH`. A version check confirms the binaries start,
 not that provider access is configured or that a release is authentic. For a
-sample first run, see the [30-second start](../README.md#30-second-start) and
+sample first run, see the [Get started](../README.md#get-started) and
 [onboarding guide](onboarding.md). Quickstart creates local state; use a
 disposable Locus home if you are only evaluating it.
 

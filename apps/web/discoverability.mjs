@@ -242,7 +242,7 @@ function llmsTxt({ info, docs }) {
     '',
     '## Start',
     '',
-    `- [README](${REPO_BLOB}/README.md): install options, 30-second start, MCP wiring`,
+    `- [README](${REPO_BLOB}/README.md): install options, get started, MCP wiring`,
     `- [AGENTS.md](${REPO_BLOB}/AGENTS.md): agent operating rules and invariants`,
     `- [capabilities.json](${SITE}/capabilities.json): machine-readable capabilities, install and commands`,
     `- [server.json](${SITE}/server.json): MCP registry manifest for ${MCP_NAME}`,

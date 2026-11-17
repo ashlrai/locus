@@ -84,6 +84,8 @@ mod quickstart_then_doctor;
 mod quickstart_then_enter;
 #[path = "readme_commands.rs"]
 mod readme_commands;
+#[path = "readme_drift.rs"]
+mod readme_drift;
 #[path = "readme_quickstart.rs"]
 mod readme_quickstart;
 #[path = "registry_manifest_ci_role.rs"]

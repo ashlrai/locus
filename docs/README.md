@@ -4,7 +4,7 @@ Agents start here. Every command block in [copy-paste.md](copy-paste.md) is mean
 
 | Read this | For |
 | --- | --- |
-| [copy-paste.md](copy-paste.md) | Install, JSON, MCP, the 30-second pin |
+| [copy-paste.md](copy-paste.md) | Install, JSON, MCP, the first pin |
 | [agent-contract.md](agent-contract.md) | `--json` schemas, exit codes, dry-run |
 | [mcp.md](mcp.md) | Claude Code, Cursor, Codex, supervised launch |
 | [../llms.txt](../llms.txt) | Short index for agents |

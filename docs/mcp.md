@@ -8,7 +8,7 @@ npm install -g locus-cli@0.7.0 @ashlrai/locus-mcp@0.7.0
 
 ## Agent setup
 
-An agent cannot pin. A person runs the [30-second start](../README.md#30-second-start), then the client launches the supervised server from that shell.
+An agent cannot pin. A person runs the [Get started](../README.md#get-started), then the client launches the supervised server from that shell.
 
 Print the control-tools entry (`locus-mcp`) without writing a config:
 

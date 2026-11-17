@@ -8,10 +8,10 @@ Locus is the identity plane for coding agents. You pin one client. After that, t
 
 That matters on a machine with more than one client. Ambient `gh auth`, a shared Supabase token, or the last Vercel team can send an agent to the wrong account. A pin makes the other account unavailable.
 
-Agents are first-class users. Start with the commands below. Machine indexes: [llms.txt](./llms.txt), [llms-full.txt](./llms-full.txt), and the [agent contract](./docs/agent-contract.md).
+Agents are first-class users. Start with [Get started](#get-started). Machine indexes: [llms.txt](./llms.txt), [llms-full.txt](./llms-full.txt), and the [agent contract](./docs/agent-contract.md).
 
+[Get started](#get-started) ·
 [For agents](#for-agents) ·
-[30-second start](#30-second-start) ·
 [How it works](#how-it-works) ·
 [Install](#install-options) ·
 [FAQ](#faq) ·
@@ -30,6 +30,57 @@ Latest release: [v0.7.0](https://github.com/ashlrai/locus/releases/tag/v0.7.0) (
 
 SIEM NDJSON audit export, safer npm wrapper upgrades, idempotent `binding add`, and hardened workspace autopin writes.
 <!-- fresh:end -->
+
+## Get started
+
+Five steps, about a minute. Use zsh or bash. Step 2 uses a temporary `LOCUS_HOME`, so your real `~/.locus` stays untouched. Other install routes: [Install options](#install-options).
+
+```bash
+# 1. Install the CLI and the MCP server.
+npm install -g locus-cli @ashlrai/locus-mcp
+
+# 2. Set up a trial home and run the first-run check.
+export LOCUS_HOME="$(mktemp -d)"        # omit this line to use ~/.locus
+locus quickstart
+
+# 3. Load the hook, then pin personal from this shell.
+eval "$(locus hook zsh)"                # or: eval "$(locus hook bash)"
+locus enter personal
+
+# 4. Confirm the pin, and that an allowed command runs.
+locus whoami
+locus exec --expect personal --no-resolve -- echo ok
+
+# 5. Confirm a different account is refused.
+locus exec --expect acme -- echo ok     # refused: exit 1, the child never starts
+```
+
+What you should see:
+
+- **Step 2:** `pinned personal`, a `whoami personal` line, and a `doctor` verdict. A `phantom_missing` WARN is expected unless you use Phantom Secrets.
+- **Step 3:** a session ID and an expiry time.
+- **Step 4:** a line that starts with the pinned alias and `tenant=personal`, then the providers, then `ok`.
+- **Step 5:** `pin_mismatch: expected binding 'acme' but 'personal' is pinned; nothing was run.` and exit code 1.
+
+### Details
+
+Same shell, machine output:
+
+```bash
+locus whoami --json
+locus status --json
+locus doctor --json
+```
+
+Step 4 uses `--no-resolve` because the `echo` check needs no credentials. `--no-resolve` refuses bindings whose upstreams would resolve credentials. `quickstart` does not replace bindings you already have. For real provider work, supply credentials outside the agent and replace the sample scopes. See the [sample exec walkthrough](examples/sample-exec-q8.md).
+
+What the extra steps are for:
+
+- **Control capability.** `enter`, `pin`, `leave`, and `exec` need `LOCUS_CONTROL_CAPABILITY`. `locus quickstart` mints it and saves it at `~/.locus/control_capability` (mode 0600, respects `LOCUS_HOME`). `eval "$(locus hook zsh)"` exports it and does not print it. Without it, `locus exec` stops with `LOCUS_CONTROL_CAPABILITY is required for control-plane authority`. `locus capability status` shows the posture and not the value.
+- **Broker.** The shell that pins supervises an authority broker. `locus enter personal` works after `quickstart`, including when quickstart ran in a shell that has already exited.
+- **Recovery.** If the next command says `human re-pin required` or `no current broker endpoint`, use [Recovering after the broker exits](#recovering-after-the-broker-exits).
+
+Step 3 runs `enter` after the hook so the current shell supervises the pin. A broker started by `quickstart` does not survive the process that started it.
 
 ## For agents
 
@@ -84,40 +135,26 @@ claude mcp add locus -- locus mcp --supervised
 codex mcp add locus -- locus mcp --supervised
 ```
 
+### MCP tools
+
+The MCP server (`locus-mcp`, or `locus mcp`) serves these tools. Tools marked *pinned* appear only while a binding is pinned. None returns a secret value.
+
+| Tool | Pinned | What it does |
+|---|---|---|
+| `locus_whoami` | no | Active pin: tenant, binding, providers, frozen scopes. |
+| `locus_safe_next` | no | The one best next step for identity safety: enter, re-pin, approve, fix, or ready. |
+| `locus_status` | no | Short status: pinned or unpinned, alias, seal, frozen. |
+| `locus_heartbeat` | no | Pin health: seal, freeze, and binding match. |
+| `locus_enter_hint` | no | The shell command a person runs to pin a binding. |
+| `locus_list_bindings` | no | Binding aliases and tenants. |
+| `locus_request_pin` | no | Asks a person to pin. Agents cannot pin. |
+| `locus_verify_claim` | no | Scores a claim before acting: confidence and suggested next steps. |
+| `locus_verify_session` | no | Session pack for the hub: whoami, doctor, safe next, and `session_ok`. |
+| `locus_providers` | yes | Providers and frozen scopes for the active pin. |
+
+`locus_context` is an MCP prompt, not a tool. It gives the active tenant and frozen scopes as a system prompt fragment. Provider tools for the pinned binding come from the supervised server (`locus mcp --supervised`) and are not in this list.
+
 More copy-paste blocks: [docs/copy-paste.md](./docs/copy-paste.md). Rules for agents in this repo: [AGENTS.md](./AGENTS.md).
-
-## 30-second start
-
-Run this in one shell. On a fresh home it creates sample bindings; the explicit `enter` pins `personal`, and the last command checks that `acme` is refused. `LOCUS_HOME` keeps the trial off your real `~/.locus`.
-
-```bash
-export LOCUS_HOME="$(mktemp -d)"        # omit this line to use ~/.locus
-npm install -g locus-cli @ashlrai/locus-mcp   # or brew or cargo; see Install options
-locus quickstart                        # initialize, try to enter, whoami, doctor
-eval "$(locus hook zsh)"                # or bash; exports the control capability
-locus enter personal                    # pin from this shell (it supervises the pin)
-locus whoami                            # who your agents are acting as, right now
-locus exec --expect personal --no-resolve -- echo ok # runs: personal is pinned
-locus exec --expect acme -- echo ok     # refused, exit 1, child never starts (pin_mismatch)
-```
-
-The `echo` check uses `--no-resolve` because it needs no credentials. `quickstart` does not replace bindings you already have. `--no-resolve` refuses bindings whose upstreams resolve credentials. For real provider work, supply credentials outside the agent and replace the sample scopes. See the [sample exec walkthrough](examples/sample-exec-q8.md).
-
-Same shell, machine output:
-
-```bash
-locus whoami --json
-locus status --json
-locus doctor --json
-```
-
-What the extra steps are for:
-
-- **Control capability.** `enter`, `pin`, `leave`, and `exec` need `LOCUS_CONTROL_CAPABILITY`. `locus quickstart` mints it and saves it at `~/.locus/control_capability` (mode 0600, respects `LOCUS_HOME`). `eval "$(locus hook zsh)"` exports it and does not print it. Without it, `locus exec` stops with `LOCUS_CONTROL_CAPABILITY is required for control-plane authority`. `locus capability status` shows the posture and not the value.
-- **Broker.** The shell that pins supervises an authority broker. `locus enter personal` works after `quickstart`, including when quickstart ran in a shell that has already exited.
-- **Recovery.** If the next command says `human re-pin required` or `no current broker endpoint`, use [Recovering after the broker exits](#recovering-after-the-broker-exits).
-
-The sample commands above include `enter` after the hook so the current shell supervises the pin. A broker started by `quickstart` does not survive the process that started it.
 
 ## How it works
 
@@ -328,7 +365,7 @@ locus dashboard · serve               # local identity UI + API (127.0.0.1)
 locus forensics export                # shareable pack (no secrets)
 locus verify session                  # verification plane: session pack
 locus verify claim --text "…"         # claim score
-locus approve list|grant|status|wait|deny  # require_approval / dual-control
+locus approve list|pending|grant|status|wait|deny  # require_approval / dual-control
 locus notify status|on|off            # desktop banners OFF by default
 locus events --last N · events export # audit tail / fleet pulse / SIEM / OTLP
 locus graph list|export|import        # encrypted binding graph share (no secrets)
@@ -337,8 +374,10 @@ locus engagement init|close           # client engagement lifecycle (binding + w
 locus offboard <alias> [--apply]      # plan first; --apply removes the client's local records
 locus upstream list|suggest           # built-in upstream MCP recipes
 locus adapter list|verify|trust       # provider adapter catalog + signature trust
+locus adapter trust list|add          # trusted registry keys
 locus adapter search|install|uninstall|verify-manifest  # community + release adapters
-locus adapter registry export|index    # release manifest and community indexes
+locus adapter registry export         # canonical release manifest JSON
+locus adapter registry index add|list|remove  # community index sources
 locus hook zsh|bash|fish
 locus setup --client claude|cursor|codex|grok|gemini|generic
 locus mcp [--supervised] [--route <provider>]  # supervised provider tools; --route can repeat

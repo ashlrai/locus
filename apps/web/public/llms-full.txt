@@ -9,8 +9,8 @@ listed verbatim so an agent can jump straight to the right document.
 ## README
 
 - [README](https://github.com/ashlrai/locus/blob/main/README.md)
+  - Get started
   - For agents
-  - 30-second start
   - How it works
   - Features
   - Measured reach of the wrong client's credentials
