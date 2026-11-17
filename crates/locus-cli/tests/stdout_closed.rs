@@ -58,6 +58,13 @@ fn println_path_exits_quietly_on_closed_stdout() {
 }
 
 #[test]
+fn repeated_closed_stdout_invocations_exit_without_panic_or_hang() {
+    for _ in 0..2 {
+        assert_quiet_sigpipe_exit(&["hook", "bash"]);
+    }
+}
+
+#[test]
 fn doctor_exits_quietly_on_closed_stdout() {
     assert_quiet_sigpipe_exit(&["doctor"]);
 }
