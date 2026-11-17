@@ -146,6 +146,112 @@ fn audit(doc: &str) -> Vec<String> {
     assert!(count > 0, "no documented invocations found");
     failures
 }
+/// The README's "For agents" block must run as written on a host with no pin,
+/// and its promises must hold: the JSON `schema` key leads stdout, errors go
+/// to stderr as `locus.error.v1`, `--print` writes no client config, and
+/// `init --dry-run` creates no home. Pinned behaviour is in readme_quickstart.rs.
+#[test]
+fn readme_for_agents_read_only_commands_run_as_written() {
+    use std::process::{Command, Output};
+
+    // Each run gets a fresh HOME and LOCUS_HOME so the no-write checks below
+    // are not defeated by a sibling command that creates the store.
+    let run = |args: &[&str]| -> (Output, tempfile::TempDir) {
+        let home = tempfile::tempdir().unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_locus"))
+            .args(args)
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("LOCUS_HOME", home.path().join(".locus"))
+            .env("NO_COLOR", "1")
+            .env_remove("LOCUS_CONTROL_CAPABILITY")
+            .env_remove("LOCUS_SESSION_ID")
+            .env_remove("LOCUS_SEAL")
+            .output()
+            .expect("locus runs");
+        (out, home)
+    };
+    let text = |out: &Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+
+    // `--json` output leads with the `schema` key, as docs/agent-contract.md
+    // and the README promise. Parse the whole object so the stamp is real JSON.
+    for (args, schema) in [
+        (&["version", "--json"][..], "locus.version.v1"),
+        (
+            &["topic", "agent-contract", "--json"][..],
+            "locus.contract.v1",
+        ),
+        (&["status", "--json"][..], "locus.status.v1"),
+        (&["init", "--dry-run", "--json"][..], "locus.plan.v1"),
+    ] {
+        let (out, home) = run(args);
+        assert!(out.status.success(), "{args:?} failed:\n{}", text(&out));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let value: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("{args:?} stdout is not JSON ({e}):\n{stdout}"));
+        assert_eq!(value["schema"], schema, "{args:?}");
+        assert_eq!(
+            stdout.split('"').nth(1),
+            Some("schema"),
+            "{args:?}: schema must be the first key"
+        );
+        if args.contains(&"--dry-run") {
+            assert!(
+                !home.path().join(".locus").exists(),
+                "init --dry-run must not create the Locus home"
+            );
+        }
+    }
+
+    let (oneline, _) = run(&["status", "--oneline"]);
+    assert!(oneline.status.success(), "{}", text(&oneline));
+    assert_eq!(String::from_utf8_lossy(&oneline.stdout).trim(), "unpinned");
+
+    // With no pin, whoami exits 1 and the error on stderr is machine-readable.
+    let (whoami, _) = run(&["whoami", "--json"]);
+    assert_eq!(whoami.status.code(), Some(1), "{}", text(&whoami));
+    let error: serde_json::Value = serde_json::from_slice(&whoami.stderr)
+        .unwrap_or_else(|e| panic!("whoami stderr is not JSON ({e}): {}", text(&whoami)));
+    assert_eq!(error["schema"], "locus.error.v1");
+
+    // `setup --print` prints the entry and writes no client config.
+    for client in ["claude", "cursor", "codex"] {
+        let (out, home) = run(&["setup", "--client", client, "--print"]);
+        assert!(
+            out.status.success(),
+            "setup {client} --print:\n{}",
+            text(&out)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("locus-mcp"),
+            "{client}: no MCP entry:\n{stdout}"
+        );
+        assert!(
+            !home.path().join(".mcp.json").exists(),
+            "{client}: wrote .mcp.json"
+        );
+        assert!(
+            !home.path().join(".cursor").exists(),
+            "{client}: wrote ~/.cursor"
+        );
+        assert!(
+            !home.path().join(".codex").exists(),
+            "{client}: wrote ~/.codex"
+        );
+        assert!(
+            !home.path().join(".locus").exists(),
+            "{client}: setup --print created the Locus home"
+        );
+    }
+}
+
 #[test]
 fn readme_commands_and_flags_exist() {
     let failures = audit(include_str!("../../../README.md"));

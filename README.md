@@ -177,7 +177,7 @@ The model cannot override a frozen `project_ref`, `team_id`, org, or repo. Destr
 
 ## Measured reach of the wrong client's credentials
 
-The shell still holds another client's ambient credentials, and a child process starts. Reproduce with `python3 eval/env-reachability/redteam.py` (needs `locus` 0.5.0 on `PATH`, fake canary credentials, throwaway `HOME` and `LOCUS_HOME`). This table is that run. It is not a new measurement.
+The shell still holds another client's ambient credentials, and a child process starts. Reproduce with `python3 eval/env-reachability/redteam.py`. It uses whichever `locus` is first on `PATH` and prints that version. It uses fake canary credentials and throwaway `HOME` and `LOCUS_HOME`. This table was recorded with locus 0.5.0. It is not a new measurement.
 
 | launch | env credentials reachable (16 variables, 3 trials) |
 | --- | --- |
