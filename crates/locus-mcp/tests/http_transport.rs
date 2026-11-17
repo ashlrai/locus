@@ -1126,6 +1126,32 @@ fn http_bad_json_body_400_and_no_session_mint() {
     );
 }
 
+#[test]
+fn http_malformed_json_allows_a_following_valid_request() {
+    let home = tempdir().unwrap();
+    let srv = HttpServer::spawn_with_home("malformed-json-recovery", home.path(), &[]);
+    let (status, _, body) = srv.request("POST", "/mcp", Some(b"{\"jsonrpc\":"), Some(&srv.token));
+    assert_eq!(status, 400, "{body}");
+    let error: Value = serde_json::from_str(&body).expect("JSON-RPC parse error");
+    assert_eq!(error["jsonrpc"], "2.0", "{error}");
+    assert_eq!(error.get("id"), Some(&Value::Null), "{error}");
+    assert_eq!(error["error"]["code"], -32700, "{error}");
+    assert!(error.get("result").is_none(), "{error}");
+
+    // Reuse the server so a correct error response cannot hide a process crash.
+    let ping = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "id": 42, "method": "ping", "params": {}
+    }))
+    .unwrap();
+    let (status, _, body) = srv.request("POST", "/mcp", Some(&ping), Some(&srv.token));
+    assert_eq!(status, 200, "{body}");
+    let response: Value = serde_json::from_str(&body).expect("JSON-RPC ping response");
+    assert_eq!(response["jsonrpc"], "2.0", "{response}");
+    assert_eq!(response["id"], 42, "{response}");
+    assert_eq!(response["result"], json!({}), "{response}");
+    assert!(response.get("error").is_none(), "{response}");
+}
+
 // ─── MCP session pin-anchoring over HTTP (per Mcp-Session-Id, file-backed) ──
 
 /// Two sample bindings (different tenants + binding ids) for pin-swap tests.
