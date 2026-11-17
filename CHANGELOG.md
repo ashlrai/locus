@@ -1,9 +1,9 @@
 # Changelog
 
 <!-- fresh:begin release -->
-Latest release: [v0.6.2](https://github.com/ashlrai/locus/releases/tag/v0.6.2) (2026-11-01).
+Latest release: [v0.7.0](https://github.com/ashlrai/locus/releases/tag/v0.7.0) (2026-11-06).
 
-npm package READMEs use version-neutral installation commands to avoid stale pinned releases.
+SIEM NDJSON audit export, safer npm wrapper upgrades, idempotent `binding add`, and hardened workspace autopin writes.
 <!-- fresh:end -->
 
 All notable changes to this project will be documented in this file.
@@ -12,6 +12,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### Documentation and tests
+
+- README CLI block lists `locus fleet-outcomes` next to the other
+  `fleet-*` commands. Release freshness blocks (README badge and summary,
+  `docs/mcp.md`, `INTEGRATION.md`, `examples/recipes/README.md`, web
+  discoverability assets) now track the published 0.7.0 packages instead of
+  0.6.2.
+- Regression tests: repeated closed-stdout `locus hook bash` invocations exit
+  without panic or hang, and `locus-mcp` HTTP keeps serving a valid request
+  after a malformed JSON body
+  ([#967](https://github.com/ashlrai/locus/pull/967)).
 
 ## [0.7.2] - 2026-11-16
 

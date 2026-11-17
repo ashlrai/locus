@@ -2,7 +2,7 @@
 
 <!-- fresh:begin install -->
 ```bash
-npm install -g locus-cli@0.6.2 @ashlrai/locus-mcp@0.6.2
+npm install -g locus-cli@0.7.0 @ashlrai/locus-mcp@0.7.0
 ```
 <!-- fresh:end -->
 
