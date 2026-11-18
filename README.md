@@ -90,7 +90,7 @@ Install the CLI and MCP packages:
 npm install -g locus-cli @ashlrai/locus-mcp
 ```
 
-Homebrew and Cargo are in [Install options](#install-options). At the v0.6.2 release, the live Homebrew tap installs v0.6.1, so use npm for v0.6.2.
+Homebrew and Cargo are in [Install options](#install-options). npm tracks the latest release. The Homebrew tap can lag behind it, so check `locus --version` after `brew install`.
 
 Read state as JSON. The first key is `schema`. Failures on stderr use `locus.error.v1`. These status commands do not print secret values. Some operator commands, such as `locus mcp mint`, print a credential once; handle that output privately.
 
@@ -259,8 +259,9 @@ If a pin kept an agent on the right account, star the repo so the next person ca
 
 ## Install options
 
-Homebrew, npm, and Cargo are the current installation options. At the v0.6.2
-release, the live Homebrew tap installs v0.6.1; use npm for v0.6.2.
+Homebrew, npm, and Cargo are the current installation options. npm tracks the
+latest release; the Homebrew tap can lag behind it, so check `locus --version`
+after `brew install`.
 The v0.6.2 npm wrappers fail closed if a release checksum sidecar is missing,
 unparseable, unreachable or mismatched; a checksum failure does not fall back
 to Cargo. Earlier v0.6.0 wrappers could install without verification on a
@@ -517,7 +518,7 @@ Roadmap and goals: [GOALS.md](./GOALS.md), [PLAN.md](./PLAN.md), [DESIGN.md](./D
 | 1 `locus-mcp`, credential resolve, adapters, scope freeze | done |
 | 2 Firm UX, doctor, run, graph, ci | done (0.1.1) |
 | 0.2 to 0.6 Dashboard, forensics, HTTP MCP, agent report, switch, registry | 0.6.2 released |
-| 3 SIEM NDJSON export | available in source since 0.7.0 |
+| 3 SIEM NDJSON export | released in 0.7.0 |
 | 3 Remote binding graph sync, dual-control packs | planned |
 
 Agency kit: [examples/agency-starter](./examples/agency-starter/) and [docs/agency-starter.md](./docs/agency-starter.md). Recipes: [examples/recipes](./examples/recipes/).
