@@ -22,6 +22,8 @@ mod coverage_home_isolation;
 mod dead_broker_hint;
 #[path = "doc_facts.rs"]
 mod doc_facts;
+#[path = "docs_index.rs"]
+mod docs_index;
 #[path = "doctor_after_quickstart.rs"]
 mod doctor_after_quickstart;
 #[path = "doctor_fix_cli.rs"]
