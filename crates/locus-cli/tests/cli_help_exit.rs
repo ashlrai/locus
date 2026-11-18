@@ -58,3 +58,39 @@ fn locus_help_exits_zero_and_names_subcommands() {
         "locus --help output did not name any subcommand.\nstdout:\n{text}"
     );
 }
+
+#[test]
+fn failure_codes_are_stable_across_commands() {
+    let home = tempfile::tempdir().unwrap();
+    for args in [
+        &["whoami", "--bad"][..],
+        &["status", "--bad"][..],
+        &["doctor", "--bad"][..],
+        &["binding", "--bad"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_locus"))
+            .args(args)
+            .env("HOME", home.path())
+            .env("LOCUS_HOME", home.path().join("locus"))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+}
+
+#[test]
+fn readme_exit_table_matches_cli_catalog() {
+    let output = Command::new(env!("CARGO_BIN_EXE_locus"))
+        .args(["topic", "agent-contract"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    let start = text.find("| Code | Name | Meaning |").unwrap();
+    let table = text[start..].split("\n\n").next().unwrap();
+    let readme = include_str!("../../../README.md");
+    assert!(
+        readme.contains(table),
+        "README exit table differs from CLI catalog"
+    );
+}
