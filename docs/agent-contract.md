@@ -16,8 +16,8 @@ output, so the tables below cannot drift from the code.
 
 ## JSON schemas
 
-With `--json`, every check, status and plan command prints one JSON object
-whose first key is `schema`. Key on it:
+With `--json`, the commands below print one JSON object whose first key is
+`schema`. Key on it:
 
 - The id is `locus.<surface>.v<N>`. `N` changes only when the shape breaks
   (a field is removed, renamed or retyped). New fields are additive and keep
@@ -33,6 +33,9 @@ whose first key is `schema`. Key on it:
 | `locus doctor` | `locus.doctor.v1` |
 | `locus doctor --fix [--apply]` | `locus.doctor.fix.v1` |
 | `locus whoami` | `locus.whoami.v1` |
+| `locus adapter trust list` | `locus.adapter.trust.list.v1` |
+| `locus binding show` | `locus.binding.show.v1` |
+| `locus setup` | `locus.setup.v1` |
 | `locus fleet-feed` (always JSON) | `locus.fleet_feed.v1` |
 | `locus fleet-denials` (always JSON) | `locus.fleet_denials.v1` |
 | `locus fleet-preflight` (always JSON) | `locus.fleet_preflight.v1` |
@@ -60,6 +63,10 @@ whose first key is `schema`. Key on it:
 List commands (`binding list`, `events`, `approve list`, `mcp list`,
 `graph list`, `upstream list`) print a bare JSON array, unchanged, and are not
 stamped: wrapping them would break existing readers.
+
+Use the same commands with `--json` for scripts. `setup --print --json` and
+`setup --client generic --json` use the setup schema too; the nested client
+configuration stays unchanged. Without `--json`, output stays unchanged.
 
 `locus fleet-feed` emits one read-only workbench resource observation with
 `kind: "locus_session"`, `state: "pinned" | "unpinned" | "unhealthy"`, and

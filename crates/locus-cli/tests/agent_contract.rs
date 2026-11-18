@@ -263,6 +263,136 @@ fn contract_exit_codes_are_the_documented_values() {
 // ── Check / status JSON shapes and exit codes ────────────────────────────
 
 #[test]
+fn binding_show_json_is_versioned_and_keeps_redaction_and_human_toml() {
+    let env = Env::new();
+    let store = locus_core::Store::open(env.home()).unwrap();
+    let fixture = locus_core::Binding::parse_toml(
+        r#"id = "bnd_fixture"
+alias = "personal"
+tenant = "fixture"
+[[providers]]
+provider = "github"
+account = "fixture"
+credential_ref = "env:LOCUS_JSON_FIXTURE"
+"#,
+    )
+    .unwrap();
+    // Write fixture data directly; this test only exercises binding reads.
+    std::fs::write(
+        store.bindings_dir().join("personal.toml"),
+        fixture.to_toml().unwrap(),
+    )
+    .unwrap();
+    let human = env.run(&["binding", "show", "personal"]);
+    assert!(human.status.success());
+    let binding = locus_core::Binding::parse_toml(&stdout(&human)).unwrap();
+    assert_eq!(binding.alias, "personal");
+    assert_eq!(
+        binding.providers[0].credential_ref,
+        "<redacted:environment>"
+    );
+    for args in [
+        vec!["--json", "binding", "show", "personal"],
+        vec!["binding", "show", "personal", "--json"],
+    ] {
+        let out = env.run(&args);
+        assert!(out.status.success(), "{}", stderr(&out));
+        assert!(out.stderr.is_empty());
+        let value = doc(&out, "locus.binding.show.v1");
+        let decoded: locus_core::Binding = serde_json::from_value(value).unwrap();
+        assert_eq!(format!("{}\n", decoded.to_toml().unwrap()), stdout(&human));
+        assert!(!stdout(&out).contains("LOCUS_JSON_FIXTURE"));
+    }
+}
+
+#[test]
+fn adapter_trust_list_json_is_versioned_and_keeps_human_output() {
+    let env = Env::new();
+    let signing = locus_core::parse_ed25519_signing_key(&"01".repeat(32)).unwrap();
+    let public = locus_core::ed25519_public_key_b64(&signing.verifying_key());
+    for populated in [false, true] {
+        if populated {
+            locus_core::add_ed25519_trust_key(&env.home(), "fixture", &public).unwrap();
+        }
+        for args in [
+            vec!["--json", "adapter", "trust", "list"],
+            vec!["adapter", "trust", "list", "--json"],
+        ] {
+            let out = env.run_with(&args, None, &[("LOCUS_ADAPTER_TRUST_KEYS", "")]);
+            assert!(out.status.success(), "{}", stderr(&out));
+            assert!(out.stderr.is_empty());
+            let value = doc(&out, "locus.adapter.trust.list.v1");
+            assert_eq!(
+                value["trust_file"],
+                locus_core::adapter_trust_keys_path(&env.home().canonicalize().unwrap())
+                    .to_str()
+                    .unwrap()
+            );
+            let keys: Vec<locus_core::TrustKeyListing> =
+                serde_json::from_value(value["keys"].clone()).unwrap();
+            assert_eq!(keys.len(), usize::from(populated));
+            if populated {
+                assert_eq!(keys[0].id, "fixture");
+                assert_eq!(keys[0].material, public);
+                assert_eq!(keys[0].origin, locus_core::TrustKeyOrigin::File);
+            }
+        }
+        let human = env.run_with(
+            &["adapter", "trust", "list"],
+            None,
+            &[("LOCUS_ADAPTER_TRUST_KEYS", "")],
+        );
+        assert!(human.status.success());
+        assert!(stdout(&human).starts_with("locus adapter trust adapter registry trust store\n"));
+        assert!(!stdout(&human).contains("locus.adapter.trust.list.v1"));
+        if populated {
+            assert!(stdout(&human).contains(&format!("  fixture  ed25519  ·  file  ·  {public}")));
+        } else {
+            assert!(stdout(&human).contains("-> no trust keys pinned"));
+        }
+    }
+}
+
+#[test]
+fn setup_json_is_versioned_for_previews_without_stamping_client_config() {
+    let env = Env::new();
+    for client in ["generic", "claude", "codex"] {
+        for leading_json in [true, false] {
+            let mut args = vec!["setup", "--client", client, "--print"];
+            if leading_json {
+                args.insert(0, "--json");
+            } else {
+                args.push("--json");
+            }
+            let out = env.run(&args);
+            assert!(out.status.success(), "{}", stderr(&out));
+            assert!(out.stderr.is_empty());
+            let value = doc(&out, "locus.setup.v1");
+            assert_eq!(value["ok"], true);
+            assert_eq!(value["client"], client);
+            assert_eq!(value["written"], serde_json::json!([]));
+            assert!(value["entry"].get("schema").is_none());
+            assert!(!env.project().join(".mcp.json").exists());
+            if client == "generic" {
+                assert!(value["entry"].is_object() && value["entry_toml"].is_string());
+                continue;
+            }
+            let human = env.run(&["setup", "--client", client, "--print"]);
+            assert!(human.status.success());
+            let expected = if client == "codex" {
+                value["entry_toml"].as_str().unwrap().to_string()
+            } else {
+                format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&value["entry"]).unwrap()
+                )
+            };
+            assert_eq!(stdout(&human), expected);
+        }
+    }
+}
+
+#[test]
 fn status_and_identity_checks_unpinned() {
     let env = Env::new();
     let init = env.run(&["init", "--with-samples"]);

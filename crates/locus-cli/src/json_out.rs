@@ -1,4 +1,4 @@
-//! Versioned `--json` envelopes for check / status / plan output.
+//! Versioned `--json` envelopes for CLI command output.
 //!
 //! Every object these commands print starts with `"schema": "locus.<name>.vN"`.
 //! The `.vN` suffix changes only when the shape breaks (a field removed,
@@ -18,6 +18,9 @@ pub(crate) const FLEET_DENIALS: &str = "locus.fleet_denials.v1";
 pub(crate) const FLEET_OUTCOMES: &str = "locus.fleet_outcomes.v1";
 pub(crate) const FLEET_FEED: &str = "locus.fleet_feed.v1";
 pub(crate) const WHOAMI: &str = "locus.whoami.v1";
+pub(crate) const ADAPTER_TRUST_LIST: &str = "locus.adapter.trust.list.v1";
+pub(crate) const BINDING_SHOW: &str = "locus.binding.show.v1";
+pub(crate) const SETUP: &str = "locus.setup.v1";
 pub(crate) const STATUS: &str = "locus.status.v1";
 pub(crate) const VERIFY_SESSION: &str = "locus.verify.session.v1";
 pub(crate) const VERIFY_CLAIM: &str = "locus.verify.claim.v1";
@@ -43,6 +46,9 @@ pub(crate) const CATALOGUE: &[(&str, &str)] = &[
     ("locus doctor", DOCTOR),
     ("locus doctor --fix [--apply]", DOCTOR_FIX),
     ("locus whoami", WHOAMI),
+    ("locus adapter trust list", ADAPTER_TRUST_LIST),
+    ("locus binding show", BINDING_SHOW),
+    ("locus setup", SETUP),
     ("locus fleet-feed (always JSON)", FLEET_FEED),
     ("locus fleet-denials (always JSON)", FLEET_DENIALS),
     ("locus fleet-outcomes (always JSON)", FLEET_OUTCOMES),
