@@ -10,7 +10,7 @@ Agents cannot pin. These commands are the human control plane. After a pin, an a
 npm install -g locus-cli @ashlrai/locus-mcp
 ```
 
-Homebrew and Cargo are in the [README install options](../README.md#install-options). At the v0.6.2 release, the live Homebrew tap installs v0.6.1, so use npm for v0.6.2.
+Homebrew and Cargo are in the [README install options](../README.md#install-options). npm tracks the latest release. The Homebrew tap can lag behind it, so check `locus --version` after `brew install`.
 
 ## Pin a sample and read JSON
 

@@ -431,7 +431,7 @@
       <section id="agents">
         <h2 class="sec">For agents</h2>
         <h3>Install</h3>
-        <p class="note">One command installs <code>locus</code> and <code>locus-mcp</code>. At the v0.6.2 release the Homebrew tap installs v0.6.1, so use npm for v0.6.2. The v0.6.2 npm wrappers fail closed if a release checksum sidecar is missing, unparseable, unreachable, or mismatched, and a checksum failure does not fall back to Cargo. Checksums detect corruption, not publisher authenticity. Source installs need Rust 1.89 or newer.</p>
+        <p class="note">One command installs <code>locus</code> and <code>locus-mcp</code>. npm tracks the latest release; the Homebrew tap can lag behind it, so check <code>locus --version</code> after <code>brew install</code>. The v0.6.2 npm wrappers fail closed if a release checksum sidecar is missing, unparseable, unreachable, or mismatched, and a checksum failure does not fall back to Cargo. Checksums detect corruption, not publisher authenticity. Source installs need Rust 1.89 or newer.</p>
         <div class="term">
           <div class="tabs" role="tablist" aria-label="Install method">
             <button type="button" role="tab" id="tab-npm" aria-selected="true" aria-controls="panel-npm" data-group="install" data-panel="panel-npm">npm</button>
@@ -443,7 +443,7 @@
             <pre id="src-npm">npm install -g locus-cli @ashlrai/locus-mcp</pre>
           </div>
           <div class="term-block" id="panel-brew" role="tabpanel" aria-labelledby="tab-brew">
-            <div class="term-head"><span class="cmt">tap is v0.6.1 at the v0.6.2 release</span><button type="button" class="copy" data-target="src-brew">Copy</button></div>
+            <div class="term-head"><span class="cmt">tap can lag npm</span><button type="button" class="copy" data-target="src-brew">Copy</button></div>
             <pre id="src-brew">brew install ashlrai/tap/locus</pre>
           </div>
           <div class="term-block" id="panel-cargo" role="tabpanel" aria-labelledby="tab-cargo">
