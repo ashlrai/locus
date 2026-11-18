@@ -165,6 +165,7 @@ fn setup_honors_json() {
     };
 
     let v = json_of(&run(&["--json", "setup", "--client", "cursor"]));
+    assert_eq!(v["schema"], "locus.setup.v1");
     assert_eq!(v["ok"], true);
     assert_eq!(v["client"], "cursor");
     let written = v["written"].as_array().unwrap();

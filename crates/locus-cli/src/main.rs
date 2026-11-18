@@ -6223,13 +6223,13 @@ fn cmd_adapter_trust(sub: AdapterTrustCmd, json: bool) -> Result<()> {
         AdapterTrustCmd::List => {
             let listings = list_trust_keys_with_origin(home).context("list adapter trust keys")?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
+                json_out::print(
+                    json_out::ADAPTER_TRUST_LIST,
+                    &json!({
                         "trust_file": path.display().to_string(),
                         "keys": listings,
-                    }))?
-                );
+                    }),
+                )?;
                 return Ok(());
             }
             println!(
@@ -6495,7 +6495,7 @@ fn cmd_binding(sub: BindingCmd, json: bool, dry_run: bool) -> Result<()> {
                 provider.credential_ref = format!("<redacted:{source}>");
             }
             if json {
-                println!("{}", serde_json::to_string_pretty(&b)?);
+                json_out::print(json_out::BINDING_SHOW, &b)?;
             } else {
                 println!("{}", b.to_toml()?);
             }
@@ -9781,7 +9781,7 @@ fn cmd_setup(
             if client == "generic" || toml_client {
                 out["entry_toml"] = serde_json::json!(toml_entry);
             }
-            println!("{out}");
+            json_out::print(json_out::SETUP, &out)?;
             return Ok(());
         }
         if client != "generic" {
@@ -9887,16 +9887,16 @@ fn cmd_setup(
 
     let locus_bin = locus_self_bin();
     if json {
-        println!(
-            "{}",
-            serde_json::json!({
+        json_out::print(
+            json_out::SETUP,
+            &serde_json::json!({
                 "ok": true,
                 "client": client,
                 "written": written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                 "serves": "control_tools",
                 "supervised_command": format!("{locus_bin} mcp --supervised"),
-            })
-        );
+            }),
+        )?;
         return Ok(());
     }
 
