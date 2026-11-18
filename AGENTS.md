@@ -6,6 +6,8 @@
 
 Sibling: [Phantom](https://phm.dev) answers *can this secret enter the model?* Locus answers *as whom, against which tenant, right now?*
 
+Ecosystem: Locus is one of the [Ashlr](https://ashlr.ai) tools (Phantom, phantom-secrets, ashlr-plugin, Locus, Lexicon, ashlr-md, ashlr-stack). Together they aim to be a fully autonomous, code-first, agent-native software factory: agents do the work, and the human acts as a passive board member, chasing open-source RSI (recursive self-improvement). Agents working on this repo are part of that loop: follow the rules below and land each change as a pull request that passes CI. See [README: Part of the Ashlr ecosystem](./README.md#part-of-the-ashlr-ecosystem).
+
 ## Using Locus from an agent
 
 You cannot pin. Ask a person to pin, then use the tools. Indexes: [llms.txt](./llms.txt), [llms-full.txt](./llms-full.txt), [docs/copy-paste.md](./docs/copy-paste.md), [docs/agent-contract.md](./docs/agent-contract.md).

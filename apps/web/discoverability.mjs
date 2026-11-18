@@ -199,6 +199,8 @@ function llmsTxt({ info, docs }) {
     '',
     'Identity is resolved at the gate, not in the prompt. Bindings hold principal, tenant, CredentialRefs and policy; sessions are HMAC-sealed to exactly one binding, and agents cannot pin. Sibling product: Phantom (phm.dev) keeps real secret values out of model context.',
     '',
+    'Ecosystem: Locus is one of the Ashlr (ashlr.ai) open-source tools: Phantom, phantom-secrets, ashlr-plugin, Locus, Lexicon, ashlr-md and ashlr-stack. Together they aim to be a fully autonomous, code-first, agent-native software factory run by agents, with the human as a passive board member, chasing open-source RSI (recursive self-improvement). In that factory Locus is the identity gate: a person pins, and agents act only inside the pin.',
+    '',
     '## Agent start',
     '',
     'One command:',

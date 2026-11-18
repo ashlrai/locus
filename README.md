@@ -524,7 +524,7 @@ Agency kit: [examples/agency-starter](./examples/agency-starter/) and [docs/agen
 
 ## Part of the Ashlr ecosystem
 
-Locus is one of the open-source tools from [Ashlr](https://ashlr.ai). Each one installs and runs on its own.
+Locus is one of the open-source tools from [Ashlr](https://ashlr.ai). Together they aim to be a fully autonomous, code-first, agent-native software factory: agents do the work, and the human acts as a passive board member. The stated goal is chasing open-source RSI (recursive self-improvement): agents improving the tools they run on. That is a direction, not a finished capability. Each tool installs and runs on its own.
 
 - **[Phantom](https://phm.dev)** (`phm`): the agent workbench. Source: [ashlrai/phantom](https://github.com/ashlrai/phantom).
 - **[Phantom Secrets](https://phm.dev/secrets)** (`phantom`): keeps real API keys out of agent context with `phm_` placeholders. Source: [ashlrai/phantom-secrets](https://github.com/ashlrai/phantom-secrets).
@@ -534,6 +534,12 @@ Locus is one of the open-source tools from [Ashlr](https://ashlr.ai). Each one i
 - **[ashlr-plugin](https://plugin.ashlr.ai/)** (`ashlr-plugin`): token-efficiency tools for Claude Code and Codex.
 
 Phantom answers "can this secret enter the model?" Locus answers "as whom, against which tenant, right now?" Wire both. Do not put raw Supabase, Vercel, or GitHub MCP servers with ambient tokens next to Locus. They bypass the pin. Contract: [docs/hub-integration.md](./docs/hub-integration.md).
+
+In that factory, Locus is the identity gate. Agents act without a person approving each command, so the account they act as is fixed by a person ahead of time, not chosen in the prompt. A person pins once. Agents work inside that pin and can only ask for a different one.
+
+### How agents work on this repo
+
+Agents also change Locus itself. They follow [AGENTS.md](./AGENTS.md) and [CLAUDE.md](./CLAUDE.md), and each change lands as a pull request that passes the same CI as any other: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the workspace tests, and a release build ([ci.yml](./.github/workflows/ci.yml)). The product rules apply to them too: they cannot pin, and they never commit secrets.
 
 ## Contributing
 
