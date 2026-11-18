@@ -20,6 +20,7 @@ if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
 let locus = "locus";
 if (args.length) {
   if (args[0] !== "--locus" || !args[1] || !isAbsolute(args[1])) {
+    if (!args[0].startsWith("-")) console.error(`Unknown recipe: ${JSON.stringify(args[0])}`);
     console.error(usage);
     process.exit(1);
   }

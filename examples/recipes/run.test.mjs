@@ -49,7 +49,7 @@ test("a recipe name is not a selector and returns usage", () => {
     });
     assert.ifError(r.error);
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
+    assert.equal(r.stderr, 'Unknown recipe: "unknown-recipe"\nUsage: node examples/recipes/run.mjs [--locus <absolute-path>]\n');
     assert.equal(r.stdout, "");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -70,9 +70,29 @@ test("an unknown recipe name exits nonzero before any recipe runs", () => {
     assert.ifError(r.error);
     assert.notEqual(r.status, 0);
     assert.equal(r.status, 1);
-    assert.match(r.stderr, /^Usage: node examples\/recipes\/run\.mjs \[--locus <absolute-path>\]\s*$/);
+    assert.equal(r.stderr, 'Unknown recipe: "acme"\nUsage: node examples/recipes/run.mjs [--locus <absolute-path>]\n');
     assert.equal(r.stdout, "");
     assert.equal(readdirSync(root).length, 0, "a recipe workspace was created for an unknown recipe name");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unknown recipe name is identified offline without creating a workspace", () => {
+  const root = mkdtempSync(join(tmpdir(), "locus-recipes-offline-"));
+  try {
+    const name = "unknown recipe-☕";
+    const r = spawnSync(process.execPath, [join(here, "run.mjs"), name], {
+      env: { HOME: root, USERPROFILE: root, PATH: "", TMPDIR: root, TMP: root, TEMP: root },
+      encoding: "utf8",
+      timeout: 120_000,
+    });
+    assert.ifError(r.error);
+    assert.equal(r.signal, null);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr, `Unknown recipe: ${JSON.stringify(name)}\nUsage: node examples/recipes/run.mjs [--locus <absolute-path>]\n`);
+    assert.equal(r.stdout, "");
+    assert.deepEqual(readdirSync(root), [], "an unknown name must not create a recipe workspace");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
