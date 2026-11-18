@@ -26,6 +26,12 @@ and `locus-mcp` binaries behave the same as 0.7.2.
 
 ### Changed
 
+- `docs/README.md` now carries a **Reference by topic** table that links all
+  110 pages in `docs/`; about 80 of them (policy, firm mode, workers, registry
+  signing, release, probes) were not reachable from the index. A new test
+  (`docs_index.rs`) fails when a page is unlinked or an index link dangles.
+  Command and flag references in the README and docs were re-checked against
+  `--help`: no stale ones were found.
 - README: a five-step **Get started** section now leads the README, with what
   you should see at each step. The MCP tool list (`locus_*`) is documented in
   the README, and the CLI block names the `adapter trust`, `adapter registry

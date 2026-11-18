@@ -14,6 +14,26 @@ Agents start here. Every command block in [copy-paste.md](copy-paste.md) is mean
 | [credential-compatibility.md](credential-compatibility.md) | `env:` and `phm:` refs |
 | [deepwiki.md](deepwiki.md) | DeepWiki auto-docs config (`.devin/wiki.json`) |
 
+## Reference by topic
+
+Every page in this directory is linked from this index; a test
+(`docs_index.rs`) fails when one is not.
+
+| Topic | Pages |
+| --- | --- |
+| Setup and first run | [FIRST-RUN.md](FIRST-RUN.md), [onboarding.md](onboarding.md), [build-q8.md](build-q8.md), [MSRV.md](MSRV.md), [shell-completions.md](shell-completions.md), [broker-recovery-q8.md](broker-recovery-q8.md) |
+| Policy, firm mode, budgets | [policy.md](policy.md), [firm-mode.md](firm-mode.md), [agency-starter.md](agency-starter.md), [agency-certainty.md](agency-certainty.md), [session-budget.md](session-budget.md), [exit-codes.md](exit-codes.md) |
+| Workers, routing, peers | [workers.md](workers.md), [cli-routing.md](cli-routing.md), [peers.md](peers.md), [swarm-broker.md](swarm-broker.md), [swarm-child-jobs.md](swarm-child-jobs.md), [conflict-drivers.md](conflict-drivers.md), [verification-plane.md](verification-plane.md) |
+| Credentials and gateways | [credential-audit.md](credential-audit.md), [gateway-base-url.md](gateway-base-url.md), [gateway-base-urls.md](gateway-base-urls.md), [PQ-READINESS.md](PQ-READINESS.md) |
+| Phantom and Ashlr | [PHANTOM-USAGE.md](PHANTOM-USAGE.md), [phantom-enrolled-repos.md](phantom-enrolled-repos.md), [phantom-preflight.md](phantom-preflight.md), [hub-integration.md](hub-integration.md), [ashlr-handshake.md](ashlr-handshake.md) |
+| Adapters | [adapters.md](adapters.md), [adapter-sdk.md](adapter-sdk.md) |
+| Adapter registry and signing | [registry-trust.md](registry-trust.md), [registry-trust-actors.md](registry-trust-actors.md), [registry-trust-ci-status.md](registry-trust-ci-status.md), [registry-trust-faq.md](registry-trust-faq.md), [registry-signing-status.md](registry-signing-status.md), [registry-signing-open-questions.md](registry-signing-open-questions.md), [registry-manifest-current-state.md](registry-manifest-current-state.md), [registry-manifest-ci-role.md](registry-manifest-ci-role.md), [registry-manifest-provenance.md](registry-manifest-provenance.md), [registry-manifest-verification.md](registry-manifest-verification.md), [registry-manifest-verification-questions.md](registry-manifest-verification-questions.md), [registry-manifest-consumer.md](registry-manifest-consumer.md), [registry-manifest-consumer-checklist.md](registry-manifest-consumer-checklist.md), [registry-unsigned-consumer-guidance.md](registry-unsigned-consumer-guidance.md), [registry-unsigned-manifest-faq.md](registry-unsigned-manifest-faq.md) |
+| Releasing and operations | [RELEASE.md](RELEASE.md), [release-automation.md](release-automation.md), [observability.md](observability.md), [BENCHMARKS.md](BENCHMARKS.md), [exec-latency.md](exec-latency.md) |
+| Dogfood probes | [dogfood-multi-account.md](dogfood-multi-account.md), [dogfood-probe-cleanup.md](dogfood-probe-cleanup.md), [dogfood-probe-isolation.md](dogfood-probe-isolation.md), [dogfood-probe-roles.md](dogfood-probe-roles.md), [dogfood-temp-failures.md](dogfood-temp-failures.md), [dogfood-temp-prefix-reference.md](dogfood-temp-prefix-reference.md) |
+| End-to-end test notes | [e2e-test-map.md](e2e-test-map.md), [e2e-graph-isolation.md](e2e-graph-isolation.md), [e2e-graph-lifecycle.md](e2e-graph-lifecycle.md), [e2e-security-directories.md](e2e-security-directories.md), [e2e-security-isolation.md](e2e-security-isolation.md), [e2e-temp-resource-types.md](e2e-temp-resource-types.md) |
+| Hub smoke notes | [hub-integration-isolation.md](hub-integration-isolation.md), [hub-integration-temp-lifecycle.md](hub-integration-temp-lifecycle.md), [hub-integration-tmpdir.md](hub-integration-tmpdir.md), [hub-smoke-cleanup-review.md](hub-smoke-cleanup-review.md), [hub-smoke-interruption.md](hub-smoke-interruption.md), [hub-smoke-output.md](hub-smoke-output.md), [hub-smoke-prerequisites.md](hub-smoke-prerequisites.md), [hub-smoke-resource-map.md](hub-smoke-resource-map.md), [hub-smoke-resource-roles.md](hub-smoke-resource-roles.md), [hub-smoke-resources.md](hub-smoke-resources.md), [hub-smoke-temp-failures.md](hub-smoke-temp-failures.md), [hub-smoke-temp-lifecycle.md](hub-smoke-temp-lifecycle.md), [hub-smoke-temp-resources.md](hub-smoke-temp-resources.md), [hub-test-temp-comparison.md](hub-test-temp-comparison.md), [temp-parent-reference.md](temp-parent-reference.md) |
+| Shell installer | [installer-acceptance.md](installer-acceptance.md), [installer-failure-matrix.md](installer-failure-matrix.md), [installer-platform-matrix.md](installer-platform-matrix.md), [shell-installer-archive-selection.md](shell-installer-archive-selection.md) |
+
 For autopin implementation changes, use the [autopin review checklist](autopin-review-checklist.md).
 For the suggestion command's output and examples, see [autopin suggest output](autopin-suggest-output.md).
 For the proposed one-command archive installer, see the [user journey](installer-user-journey.md), [requirements](installer-requirements.md), and [issue checklist](shell-installer-issue-checklist.md).
