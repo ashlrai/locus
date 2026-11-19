@@ -485,7 +485,7 @@ Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md](./DESIGN.md).
 | [docs/mcp.md](./docs/mcp.md) | Claude Code, Cursor, Codex, supervised launch |
 | [docs/architecture.md](./docs/architecture.md) | System diagram |
 | [docs/README.md](./docs/README.md) | Doc index and dry-run limits |
-| [CONTRIBUTING.md](./CONTRIBUTING.md) | Build, test, adapters |
+| [CONTRIBUTING.md](./CONTRIBUTING.md) | [Contribute with an agent](./CONTRIBUTING.md#contribute-with-an-agent), build, test, adapters |
 | [SECURITY.md](./SECURITY.md) | Reporting |
 | [SUPPORT.md](./SUPPORT.md) | Where to get help |
 
