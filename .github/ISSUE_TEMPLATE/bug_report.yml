@@ -34,12 +34,21 @@ body:
     id: repro
     attributes:
       label: Steps to reproduce
+      description: If you can, reproduce with a throwaway `LOCUS_HOME` in one shell, so the steps never touch your real `~/.locus`.
       placeholder: |
-        1. locus init --with-samples
-        2. locus enter ...
-        3. ...
+        1. export LOCUS_HOME=/tmp/locus-repro
+        2. locus quickstart
+        3. eval "$(locus hook bash)"
+        4. locus enter personal
+        5. ...
     validations:
       required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: locus doctor output (optional)
+      description: Output of `locus doctor --json`. Redact binding aliases, account names, and paths you do not want public.
+      render: json
   - type: textarea
     id: expected
     attributes:
