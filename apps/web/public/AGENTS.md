@@ -53,7 +53,7 @@ Rust workspace (`locus-core`, `locus-cli`, `locus-mcp`) implementing:
 - **Scope freeze** - model cannot override frozen `project_ref` / `team_id` / org allowlists
 - **Policy** - allow/deny + `require_approval` globs; local CLI labels are advisory and external authorization is fail-closed
 
-Codename directory may still be `mmcp`; product name is **Locus**.
+Early design docs ([DESIGN.md](./DESIGN.md), [PLAN.md](./PLAN.md)) use the codename `mmcp`; the product, crates, and binaries are **Locus**.
 
 ## Build / test / lint
 

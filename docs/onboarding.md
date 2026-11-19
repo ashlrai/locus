@@ -13,7 +13,7 @@
 
 The end-to-end walkthrough for an agency operator wiring **Codex CLI, Claude
 Code, and Grok Build** across three tenants: **personal**, **company
-(ashlr.ai)**, and a **client (cash-margin-partners)**. Every command below is
+(ashlr.ai)**, and a **client (globex-corp)**. Every command below is
 real; run them in order. Identity is resolved at the gate (`locus enter`), not
 in the prompt — agents never pin and never see secrets.
 
@@ -64,28 +64,28 @@ One binding per tenant. Alias is positional; everything else is flags:
 locus binding add personal \
   --tenant personal \
   --provider github \
-  --account masonwyatt \
+  --account your-github-user \
   --credential-ref env:GH_PERSONAL
 
 # Company — ashlr.ai on Vercel
 locus binding add ashlr \
   --tenant ashlr.ai \
   --provider vercel \
-  --account mason@ashlr.ai \
+  --account you@example.com \
   --team-id team_ashlr \
   --credential-ref env:VERCEL_ASHLR
 
-# Client — Cash Margin Partners on Supabase (frozen to their project, read-only)
-locus binding add cmp \
-  --tenant cash-margin-partners \
+# Client — Globex Corp on Supabase (frozen to their project, read-only)
+locus binding add globex \
+  --tenant globex-corp \
   --provider supabase \
-  --account cmp-ops \
-  --project-ref "$CMP_PROJECT_REF" \
-  --credential-ref env:SUPABASE_CMP \
+  --account globex-ops \
+  --project-ref "$GLOBEX_PROJECT_REF" \
+  --credential-ref env:SUPABASE_GLOBEX \
   --read-only
 ```
 
-Set `CMP_PROJECT_REF` to the intended project ref before running the example.
+Set `GLOBEX_PROJECT_REF` to the intended project ref before running the example.
 `--project-ref` / `--team-id` / `--org` become **frozen scopes**: agent calls
 that try a different selector are denied, not redirected.
 
@@ -93,11 +93,11 @@ Confirm (the active pin, once you have one, is marked in the list):
 
 ```bash
 locus binding list
-locus binding show cmp
+locus binding show globex
 ```
 
-Alternative for client tenants: `locus engagement init cmp --tenant
-cash-margin-partners --workspace` creates the binding (phm: stub only) plus a
+Alternative for client tenants: `locus engagement init globex --tenant
+globex-corp --workspace` creates the binding (phm: stub only) plus a
 workspace file and `.locus/README.md` in one step.
 
 ## 2. Pin project directories to tenants
@@ -106,8 +106,8 @@ In each project directory, write a `.locus.toml` so the right tenant is the
 only one reachable there:
 
 ```bash
-cd ~/work/cmp-project
-locus workspace --default cmp --allow cmp --require-pin
+cd ~/work/globex-project
+locus workspace --default globex --allow globex --require-pin
 ```
 
 Repeat with `--default ashlr --allow ashlr` and `--default personal --allow
@@ -172,8 +172,8 @@ locus agent report --json    # hub contract: ready / pin / mcp_registered / doct
 ## 4. Daily rhythm
 
 ```bash
-cd ~/work/cmp-project
-locus enter            # resolves the workspace default (cmp); or: locus enter ashlr
+cd ~/work/globex-project
+locus enter            # resolves the workspace default (globex); or: locus enter ashlr
 locus whoami           # confirm tenant + providers + frozen scopes before any work
 # ... agents work through locus-mcp ...
 locus leave            # clear identity when done
@@ -203,7 +203,7 @@ client presents a per-tenant bearer token instead of relying on the shell pin:
 ```bash
 # Mint one grant per binding (token printed exactly once; only its HMAC is stored)
 locus mcp mint --binding ashlr --ttl 1h --label "hub — ashlr agent"
-locus mcp mint --binding cmp --ttl 15m --label "hub — cmp agent"
+locus mcp mint --binding globex --ttl 15m --label "hub — globex agent"
 
 # Serve with per-request tenant routing (needs LOCUS_CONTROL_CAPABILITY in the
 # server env — e.g. eval "$(locus hook zsh)" — or tenant validation fails closed)
@@ -216,7 +216,7 @@ locus-mcp --http 127.0.0.1:8742 --multi-tenant
 
 # Operate the grant roster (operator-only; deliberately no HTTP enumeration)
 locus mcp list
-locus mcp revoke <grant_id>     # or: --binding cmp, or --all
+locus mcp revoke <grant_id>     # or: --binding globex, or --all
 ```
 
 Every request routes to its grant's sealed session: tools are hard-scoped to

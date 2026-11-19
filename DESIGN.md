@@ -142,7 +142,7 @@ JSON Schema (control-plane API / validation):
 ### 3.3 Workspace schema
 
 ```toml
-# /Users/mason/clients/acme/.locus.toml
+# ~/clients/acme/.locus.toml
 version = 1
 default_binding = "acme"          # alias or id
 # Optional: allowlist of bindings this directory may pin to
@@ -162,7 +162,7 @@ require_pin = true
   "binding_alias": "acme",
   "principal": "mason",
   "tenant": "acme-corp",
-  "source": "dir:/Users/mason/clients/acme",
+  "source": "dir:/Users/me/clients/acme",
   "client": "claude-code",
   "pinned_at": "2026-08-06T18:00:00Z",
   "expires_at": "2026-08-07T02:00:00Z",
@@ -296,7 +296,7 @@ Daemon protocol (length-prefixed JSON over UDS), illustrative:
 
 ```json
 // Request
-{ "v": 1, "op": "session.pin", "alias": "acme", "client": "claude-code", "cwd": "/Users/mason/clients/acme" }
+{ "v": 1, "op": "session.pin", "alias": "acme", "client": "claude-code", "cwd": "/Users/me/clients/acme" }
 
 // Response
 {
@@ -1036,7 +1036,7 @@ principal = "mason"
 
 [[binding.providers]]
 provider = "github"
-account = "masonwyatt"
+account = "your-github-user"
 credential_ref = "phm:GH_TOKEN_PERSONAL"
 scope = { orgs = ["*"], repos = ["*"] }  # still isolated from acme workers
 
