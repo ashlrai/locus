@@ -114,6 +114,7 @@ require_pin = true
 ```bash
 cd ~/clients/acme
 locus workspace --default acme --allow acme,acme-ro --require-pin
+eval "$(locus hook zsh)"  # pin needs the control capability the hook exports
 locus pin                 # → acme
 locus whoami
 ```
@@ -131,15 +132,17 @@ Walk behavior: nearest `.locus.toml` walking toward filesystem root wins (child 
 
 ```bash
 # Enter client (<30s)
+eval "$(locus hook zsh)"  # once per shell: exports LOCUS_CONTROL_CAPABILITY; prompt [locus:enter]
 cd ~/clients/acme
 locus enter               # pin + friendly status (or: locus enter acme)
 #   → ok entered acme (acme-corp)
-#   → prompt   [locus:acme:acme-corp]
-eval "$(locus hook zsh)"  # prompt: [locus:enter] | [locus:acme:acme-corp]
+#      prompt   [locus:acme:acme-corp]
 locus whoami
 
-# Agent / IDE — after locus setup --client claude|cursor
-# tools are only Acme; agent cannot re-pin
+# Agent / IDE — after locus setup --client claude|cursor|codex|grok|gemini
+# A client-launched locus-mcp serves control tools only. Launch it as
+# `locus mcp --supervised` from this pinned shell to get the Acme provider
+# tools (see mcp.md#provider-tools-need-a-supervised-launch). The agent cannot re-pin.
 
 # Multi-client install probe (optional dogfood): detect Claude Code / Cursor /
 # Continue config paths and dry-run setup for each found client. Soft-skips
@@ -192,7 +195,9 @@ binding = "acme"
 ```bash
 # New client unit (binding + optional .locus.toml + .locus/README.md)
 locus engagement init acme --tenant acme-corp --workspace
-# edit scopes and use env: refs; supply values outside agent context
+# The template's credential_refs are phm: stubs, which cannot resolve today:
+# replace them with env: refs and the *_replace_me scopes with real IDs;
+# supply values outside agent context. --workspace allowlists only `acme`.
 locus enter acme
 
 # Engagement ends
@@ -266,7 +271,7 @@ After each local label, the CLI prints advisory progress separately from authori
 - Authoritative envelopes require a peer-authenticated OS broker, a non-agent-accessible issue capability, nonce/replay and idempotency state, exact scope/proposal binding, expiry, and requester/approver separation.
 - That adapter is absent, so authoritative approval and dual control remain disabled.
 
-**Roadmap (Phase 3):** shared binding graph, policy packs, engagement offboard as a unit, and authenticated remote dual-control with an independent trust root.
+**Roadmap (Phase 3):** shared binding graph, policy packs, and authenticated remote dual-control with an independent trust root. Offboarding an engagement as a unit already ships as `locus offboard` (see [Offboard a client](#offboard-a-client-checklist)).
 
 Recommended firm defaults:
 
