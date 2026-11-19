@@ -138,9 +138,12 @@ Isolation and adapter behavior live primarily in `locus-core` unit tests. Prefer
 ```bash
 export LOCUS_HOME=/tmp/locus-dev
 locus init --with-samples
+eval "$(locus hook bash)"   # exports LOCUS_CONTROL_CAPABILITY, which pin needs
 locus pin personal
 locus whoami
 ```
+
+Run it in one shell. In a later shell, repeat the `export` and `eval` lines, then `locus enter personal`.
 
 Docs checks (Node 18+, no dependencies):
 
@@ -211,7 +214,7 @@ Short checklist:
 
 1. Branch from `main`.
 2. Keep PRs focused (one adapter, one CLI surface, one isolation fix).
-3. Ensure `fmt`, `clippy -D warnings`, and `cargo test` pass.
+3. Ensure `fmt`, `clippy -D warnings`, and `cargo test` pass; `scripts/fast-check.sh` runs the cheap gates (see [Contribute with an agent](#contribute-with-an-agent)).
 4. Describe **what isolation property** changes (or does not).
 5. Link related `DESIGN.md` sections when changing security-sensitive code.
 6. Conflict in a high-churn path? `CHANGELOG.md` unions itself via `.gitattributes`; `node scripts/resolve-merge-conflicts.mjs --continue` deterministically resolves `CLAUDE.md`/`README.md` and regenerates `Cargo.lock`/`bun.lock`/`package-lock.json`. Never hand-merge lockfiles. See [docs/conflict-drivers.md](./docs/conflict-drivers.md).

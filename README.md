@@ -262,7 +262,7 @@ If a pin kept an agent on the right account, star the repo so the next person ca
 Homebrew, npm, and Cargo are the current installation options. npm tracks the
 latest release; the Homebrew tap can lag behind it, so check `locus --version`
 after `brew install`.
-The v0.6.2 npm wrappers fail closed if a release checksum sidecar is missing,
+Since v0.6.1 the npm wrappers fail closed if a release checksum sidecar is missing,
 unparseable, unreachable or mismatched; a checksum failure does not fall back
 to Cargo. Earlier v0.6.0 wrappers could install without verification on a
 missing or unparseable sidecar and could fall back to Cargo on a mismatch.
