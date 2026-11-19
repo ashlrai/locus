@@ -393,6 +393,7 @@
         <a href="#agents">agents</a>
         <a href="#demo">pin</a>
         <a href="#how">how</a>
+        <a href="#ecosystem">ecosystem</a>
         <a href="#faq">faq</a>
         <a href="https://github.com/ashlrai/locus">github</a>
         <a href="/llms.txt">llms.txt</a>
@@ -532,6 +533,22 @@ args = ["mcp", "--supervised"]</pre>
             <p>The MCP catalog is this pin only. <code>locus exec</code> scrubs ambient <code>GH_TOKEN</code>, <code>AWS_*</code>, <code>SUPABASE_*</code>, and <code>VERCEL_*</code>.</p>
           </article>
         </div>
+      </section>
+
+      <section id="ecosystem">
+        <h2 class="sec">Part of the Ashlr ecosystem</h2>
+        <p class="note">Locus is one of the open-source tools from <a href="https://ashlr.ai">Ashlr</a>. Together they aim to be a fully autonomous, code-first, agent-native software factory: agents do the work, and the human acts as a passive board member. The stated goal is chasing open-source RSI (recursive self-improvement): agents improving the tools they run on. That is a direction, not a finished capability. Each tool installs and runs on its own.</p>
+        <p class="note">
+          <a href="https://phm.dev">Phantom</a> (<code>phm</code>): the agent workbench.
+          · <a href="https://phm.dev/secrets">Phantom Secrets</a> (<code>phantom</code>): keeps real API keys out of agent context.
+          · <a href="https://plugin.ashlr.ai/">ashlr-plugin</a>: token-efficiency tools for Claude Code and Codex.
+          · <a href="https://lexicon.ashlr.ai">Lexicon</a>: fixes the words dictation gets wrong.
+          · <a href="https://md.ashlr.ai">Ashlr MD</a>: a Markdown app with an MCP server.
+          · <a href="https://stack.ashlr.ai">Ashlr Stack</a> (<code>stack</code>): provisions services and stores their keys in Phantom Secrets.
+        </p>
+        <p class="note">In that factory, Locus is the identity gate. Agents act without a person approving each command, so the account they act as is fixed by a person ahead of time, not chosen in the prompt. A person pins once. Agents work inside that pin and can only ask for a different one.</p>
+        <h3>How agents work on Locus</h3>
+        <p class="note">Agents also change Locus itself. They follow <a href="https://github.com/ashlrai/locus/blob/main/AGENTS.md">AGENTS.md</a> and <a href="https://github.com/ashlrai/locus/blob/main/CLAUDE.md">CLAUDE.md</a>, and each change lands as a pull request that passes the same CI as any other: <code>cargo fmt</code>, <code>cargo clippy -D warnings</code>, the workspace tests, and a release build. The product rules apply to them too: they cannot pin, and they never commit secrets.</p>
       </section>
 
       <section id="faq" class="faq" itemscope itemtype="https://schema.org/FAQPage">
