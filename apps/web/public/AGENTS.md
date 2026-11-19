@@ -77,7 +77,12 @@ Local install from this checkout (`locus-cli` installs both binaries):
 cargo install --locked --path crates/locus-cli
 ```
 
-CI enforces fmt + clippy `-D warnings` + test + release build (see `.github/workflows/ci.yml`).
+Before pushing, run the local merge gate: `git fetch origin && bash scripts/fast-check.sh`
+(fmt, then clippy `-D warnings` and tests for the crates changed relative to `origin/main`).
+The required PR check, CI Gate (`.github/workflows/ci.yml`), runs fmt, clippy, wrapper,
+discoverability and crypto checks, path-selected sandbox tests and diff secret scans;
+the full test suite, release build and MSRV run on the daily schedule and on dispatch.
+See [CONTRIBUTING.md](./CONTRIBUTING.md#contribute-with-an-agent).
 
 ### Safe local smoke (never touch real `~/.locus` in tests)
 
