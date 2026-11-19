@@ -3,3 +3,9 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/ashlrai/locus/security/policy
     about: Please report security issues privately. Do not open a public issue.
+  - name: Contribute a fix (with or without a coding agent)
+    url: https://github.com/ashlrai/locus/blob/main/CONTRIBUTING.md#contribute-with-an-agent
+    about: Fork, one worktree per agent, a throwaway LOCUS_HOME, scripts/fast-check.sh, and what the required CI Gate check runs.
+  - name: Install, setup, and usage help
+    url: https://github.com/ashlrai/locus/blob/main/SUPPORT.md
+    about: Where to start for install, MCP client wiring, policy, and the docs index before opening an issue.
