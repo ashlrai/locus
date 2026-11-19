@@ -26,4 +26,4 @@ Do not open a public issue for a security problem. Report it privately as descri
 
 ## Contributing
 
-To build, test, or send a change, read [CONTRIBUTING.md](./CONTRIBUTING.md). Participation in any project space follows the [Code of Conduct](./CODE_OF_CONDUCT.md).
+To build, test, or send a change, read [CONTRIBUTING.md](./CONTRIBUTING.md). Its [Contribute with an agent](./CONTRIBUTING.md#contribute-with-an-agent) section is the shortest path for humans and coding agents alike: fork, one worktree per agent, a throwaway `LOCUS_HOME`, `bash scripts/fast-check.sh` before pushing, and what the required **CI Gate** check runs. Participation in any project space follows the [Code of Conduct](./CODE_OF_CONDUCT.md).
