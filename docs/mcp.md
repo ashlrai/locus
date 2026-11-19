@@ -772,7 +772,18 @@ Every tool description is prefixed with **`[locus:<alias|unpinned>]`** so the mo
 | Tool | Behavior |
 |------|----------|
 | `locus_providers` | Providers + frozen scopes for this pin |
-| `supabase.*` / `github.*` / `vercel.*` | Adapter tools for providers on the binding |
+| `<provider>.*` | Adapter tools for each provider on the binding — **supervised launch only** (see below) |
+
+Built-in adapters: `supabase`, `github`, `vercel`, `cloudflare`, `aws`,
+`resend`, `stripe`, `anthropic`, `openai` (`adapter_for` in
+`crates/locus-core/src/adapters/mod.rs`). Providers backed by an MCP stdio
+worker add the upstream server's tools as `provider.toolname`; see
+[workers](./workers.md).
+
+A client-launched `locus-mcp` has no executor capability, so a pin adds only
+`locus_providers`. Provider tools appear when the server runs under
+`locus mcp --supervised` or `locus exec` (see
+[Provider tools need a supervised launch](#provider-tools-need-a-supervised-launch)).
 
 Tool names are **not** multi-tenant namespaced under exclusive pin — the catalog itself is the isolation boundary. Wrong-tenant tools simply do not appear.
 
