@@ -96,7 +96,10 @@ human `error:` line and never contains a secret.
 One table for every command, defined once in
 `crates/locus-cli/src/exit.rs` (`ExitCode`). Check commands map their verdict
 onto it: doctor SAFE/WARN/UNSAFE and agent `ready`/`protected`/`unsafe` give
-0/1/2.
+0/1/2. One exception: `doctor` exits 0 on WARN when every finding is a
+setup advisory (`approvals_missing`, `phantom_missing`,
+`control_capability_not_exported`, `executor_authority_unavailable`). The
+report still says `WARN` and `ok: false`.
 
 <!-- exit-codes:begin -->
 | Code | Name | Meaning |
@@ -126,7 +129,7 @@ Per command:
 
 | Command | 0 | 1 | 2 |
 | --- | --- | --- | --- |
-| `doctor` | SAFE | WARN, or a refused Phantom preflight | UNSAFE |
+| `doctor` | SAFE, or WARN with setup advisories only | any other WARN, or a refused Phantom preflight | UNSAFE |
 | `agent doctor`, `agent report` | `ready` | `protected` | `unsafe` |
 | `status` | unpinned, or pin ok | error | pin invalid, frozen or expired |
 | `verify session` | `session_ok` | not ok | usage |

@@ -19,7 +19,7 @@ The current 30-second commands, on the npm binary, a fresh home, and stdin that 
 | `locus exec --expect personal -- echo ok` | 0 | 0.047 s, stdout `ok` |
 | `locus exec --expect acme -- echo ok` | 1 | 0.014 s, `pin_mismatch` |
 
-A second quickstart printed `already pinned` and exited 0. `locus doctor` after quickstart exited 1 with verdict `WARN` (`phantom_missing`); quickstart itself exited 0.
+A second quickstart printed `already pinned` and exited 0. `locus doctor` after quickstart exited 1 with verdict `WARN` (`phantom_missing`); quickstart itself exited 0. The current CLI still reports that `WARN` but exits 0 when every finding is setup advice ([issue #172](https://github.com/ashlrai/locus/issues/172)).
 
 ### Dead broker
 
