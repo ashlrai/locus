@@ -8,9 +8,9 @@
 
 ## How I tested it
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo test --workspace`
+- [ ] `git fetch origin && bash scripts/fast-check.sh` passes (fmt, plus clippy `-D warnings` and tests for the crates this PR touches)
+- [ ] Docs changes: the docs checks in CONTRIBUTING.md ("Test") pass, and `node apps/web/discoverability.mjs --check` passes (run it without `--check` to regenerate)
+- [ ] Any local smoke used a throwaway `LOCUS_HOME`, never a real `~/.locus`
 
 ## Checklist
 
