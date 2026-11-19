@@ -540,11 +540,11 @@ In that factory, Locus is the identity gate. Agents act without a person approvi
 
 ### How agents work on this repo
 
-Agents also change Locus itself. They follow [AGENTS.md](./AGENTS.md) and [CLAUDE.md](./CLAUDE.md), and each change lands as a pull request that passes the same CI as any other: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the workspace tests, and a release build ([ci.yml](./.github/workflows/ci.yml)). The product rules apply to them too: they cannot pin, and they never commit secrets.
+Agents also change Locus itself. They follow [AGENTS.md](./AGENTS.md) and [CLAUDE.md](./CLAUDE.md), and each change lands as a pull request that passes the same required check as any other, CI Gate ([ci.yml](./.github/workflows/ci.yml)): `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the wrapper, site and crypto-policy checks, path-selected sandbox tests and diff secret scans. The full test suite and release build run on the daily schedule, so contributors run `bash scripts/fast-check.sh` and `cargo test` for the crates they touch before pushing. The product rules apply to them too: they cannot pin, and they never commit secrets.
 
 ## Contributing
 
-Issues and pull requests are welcome. Look for [`good first issue`](https://github.com/ashlrai/locus/labels/good%20first%20issue), and read [CONTRIBUTING.md](CONTRIBUTING.md). Report security problems privately per [SECURITY.md](SECURITY.md).
+Issues and pull requests are welcome. Look for [`good first issue`](https://github.com/ashlrai/locus/labels/good%20first%20issue), and read [CONTRIBUTING.md](CONTRIBUTING.md). If you work with a coding agent, start at [Contribute with an agent](CONTRIBUTING.md#contribute-with-an-agent). Report security problems privately per [SECURITY.md](SECURITY.md).
 
 ## License
 

@@ -548,7 +548,7 @@ args = ["mcp", "--supervised"]</pre>
         </p>
         <p class="note">In that factory, Locus is the identity gate. Agents act without a person approving each command, so the account they act as is fixed by a person ahead of time, not chosen in the prompt. A person pins once. Agents work inside that pin and can only ask for a different one.</p>
         <h3>How agents work on Locus</h3>
-        <p class="note">Agents also change Locus itself. They follow <a href="https://github.com/ashlrai/locus/blob/main/AGENTS.md">AGENTS.md</a> and <a href="https://github.com/ashlrai/locus/blob/main/CLAUDE.md">CLAUDE.md</a>, and each change lands as a pull request that passes the same CI as any other: <code>cargo fmt</code>, <code>cargo clippy -D warnings</code>, the workspace tests, and a release build. The product rules apply to them too: they cannot pin, and they never commit secrets.</p>
+        <p class="note">Agents also change Locus itself. They follow <a href="https://github.com/ashlrai/locus/blob/main/AGENTS.md">AGENTS.md</a> and <a href="https://github.com/ashlrai/locus/blob/main/CLAUDE.md">CLAUDE.md</a>, and each change lands as a pull request that passes the same required check as any other, CI Gate: <code>cargo fmt</code>, <code>cargo clippy -D warnings</code>, the wrapper, site and crypto-policy checks, path-selected sandbox tests and diff secret scans. The full test suite and release build run on the daily schedule, so contributors run <code>bash scripts/fast-check.sh</code> and <code>cargo test</code> for the crates they touch before pushing. The product rules apply to them too: they cannot pin, and they never commit secrets.</p>
       </section>
 
       <section id="faq" class="faq" itemscope itemtype="https://schema.org/FAQPage">
