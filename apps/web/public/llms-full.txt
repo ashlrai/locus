@@ -694,6 +694,18 @@ listed verbatim so an agent can jump straight to the right document.
 ## docs/README.md
 
 - [Locus documentation](https://github.com/ashlrai/locus/blob/main/docs/README.md)
+  - Where Locus fits
+  - All docs by task
+    - Start and daily use
+    - Architecture, policy, and security
+    - Agencies and multi-client work
+    - MCP, swarms, and workers
+    - Phantom and the Ashlr ecosystem
+    - Adapters and the adapter registry
+    - Dry-run (--dry-run)
+    - Contributing and releases
+    - Proposed one-command installer (design notes)
+    - Test harness internals
   - Previewing changes with --dry-run
     - Limits and unsupported operations
 
