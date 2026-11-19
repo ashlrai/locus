@@ -54,11 +54,17 @@ npm install -g locus-cli @ashlrai/locus-mcp
 # cargo install --git https://github.com/ashlrai/locus locus-cli --locked
 # Other revisions may package the binaries separately; check that revision.
 
+locus quickstart               # sample personal + acme bindings, control capability
 eval "$(locus hook bash)"      # exports LOCUS_CONTROL_CAPABILITY
-locus pin acme
+locus enter personal           # pin; agents cannot do this step
 locus setup --client claude   # writes/merges .mcp.json
 # restart Claude Code from that shell
 ```
+
+Run these in one shell: the pin's authority broker lives with the shell that
+pinned. In a later shell, repeat the `eval` line and `locus enter personal`.
+On a machine that already has bindings, skip `quickstart` and enter your own
+alias.
 
 `locus setup --client claude` writes this entry (`command` is the absolute
 `locus-mcp` path when it sits next to `locus`):
@@ -83,5 +89,6 @@ and launch the client from the shell that pinned. See the repo `docs/mcp.md`.
 ## Related
 
 - CLI: [`locus-cli`](https://www.npmjs.com/package/locus-cli)
-- Pairs with `phantom` (Phantom Secrets) as `required_servers`: https://github.com/ashlrai/locus#how-locus-plugs-into-phantom
+- Pairs with `phantom` (Phantom Secrets) as `required_servers`: https://github.com/ashlrai/locus/blob/main/docs/hub-integration.md
+- Part of the Ashlr ecosystem (Phantom, Phantom Secrets, Lexicon, Ashlr MD, Ashlr Stack, ashlr-plugin): https://github.com/ashlrai/locus#part-of-the-ashlr-ecosystem
 - Docs: https://github.com/ashlrai/locus/blob/main/docs/mcp.md

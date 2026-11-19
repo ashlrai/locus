@@ -106,8 +106,9 @@ binaries intact. A checksum detects corruption; it is not a publisher signature.
 ## Quick start
 
 ```bash
-locus quickstart                 # sample bindings, pin, whoami, doctor
+locus quickstart                 # sample bindings, control capability, whoami, doctor
 eval "$(locus hook bash)"        # or zsh; exports the control capability
+locus enter personal             # pin the sample binding (human-only step)
 locus whoami
 locus exec -- env | grep LOCUS_
 ```
@@ -119,5 +120,6 @@ Step by step instead of `quickstart`: `locus init --with-samples`, then
 ## Related
 
 - MCP server: [`@ashlrai/locus-mcp`](https://www.npmjs.com/package/@ashlrai/locus-mcp)
-- Pairs with Phantom Secrets — the secret plane to Locus's identity plane: https://github.com/ashlrai/locus#how-locus-plugs-into-phantom
+- Pairs with Phantom Secrets — the secret plane to Locus's identity plane: https://github.com/ashlrai/locus/blob/main/docs/hub-integration.md
+- Part of the Ashlr ecosystem (Phantom, Phantom Secrets, Lexicon, Ashlr MD, Ashlr Stack, ashlr-plugin): https://github.com/ashlrai/locus#part-of-the-ashlr-ecosystem
 - Source / Homebrew: https://github.com/ashlrai/locus
