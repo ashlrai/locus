@@ -13,11 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Changes since 0.7.2 touch docs, tests and release plumbing only. The `locus`
-and `locus-mcp` binaries behave the same as 0.7.2.
+Changes since 0.7.2 are mostly docs, tests and release plumbing. The one
+binary change: three more `--json` commands now carry a `schema` id.
 
 ### Added
 
+- `locus adapter trust list`, `locus binding show` and `locus setup` now print a
+  `schema` id with `--json`, and `setup --print --json` uses it too
+  ([#974](https://github.com/ashlrai/locus/pull/974)).
+- The recipe runner names the unknown recipe before it prints usage
+  ([#975](https://github.com/ashlrai/locus/pull/975)).
 - Tests: repeated `locus hook bash` calls with a closed stdout exit cleanly,
   and `locus-mcp` HTTP keeps serving after a malformed JSON body
   ([#967](https://github.com/ashlrai/locus/pull/967)). A doc-facts test now
@@ -47,6 +52,21 @@ and `locus-mcp` binaries behave the same as 0.7.2.
   were re-checked against `--help` and still match.
 - Release freshness text (README, `docs/mcp.md`, `INTEGRATION.md`, recipes,
   web pages) points at the published 0.7.0 packages instead of 0.6.2.
+- Docs: the docs index (`docs/README.md`), `llms.txt`/`llms-full.txt` and the
+  landing page gain agent-facing entry points and quick-start text
+  ([#977](https://github.com/ashlrai/locus/pull/977),
+  [#979](https://github.com/ashlrai/locus/pull/979),
+  [#981](https://github.com/ashlrai/locus/pull/981)).
+- Docs: onboarding, adapters, first-run, agent-contract and exit-code pages are
+  re-checked against the CLI, and the npm and npm-mcp READMEs are refreshed
+  ([#980](https://github.com/ashlrai/locus/pull/980),
+  [#990](https://github.com/ashlrai/locus/pull/990),
+  [#991](https://github.com/ashlrai/locus/pull/991),
+  [#992](https://github.com/ashlrai/locus/pull/992)).
+- The bug report form and issue chooser now point to the right place for
+  setup help, and the PR template lists the checks to run
+  ([#987](https://github.com/ashlrai/locus/pull/987),
+  [#983](https://github.com/ashlrai/locus/pull/983)).
 - Release automation: the version tag is created from the current `main`
   version when it is missing, and slower test suites now run after merge to
   `main` ([#966](https://github.com/ashlrai/locus/pull/966),
