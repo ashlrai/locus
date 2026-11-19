@@ -85,7 +85,9 @@ locus pin acme
  Session sealed to binding "acme"
       │
       ├─► locus-mcp
-      │     tools/list = binding providers (under locus exec/run) + locus_whoami / status / request_pin
+      │     tools/list = locus_* controls; binding provider tools only when the
+      │       server holds the pin's executor grant (locus mcp --supervised,
+      │       locus exec / run); client-launched locus-mcp = controls only
       │     agents cannot pin
       │     scope freeze: wrong project_ref / team_id → deny
       │
@@ -103,8 +105,10 @@ locus pin acme
 1. Valid session seal?           else DENY
 2. Tool provider ∈ binding?      else DENY
 3. Scope allowlist / freeze?     else DENY
-4. require_approval match?       else block; local labels are advisory only
-5. policy.default                ALLOW or DENY
+4. Policy rules, then legacy     first matching rule, then require_approval /
+   globs                         dual_control globs → ALLOW, DENY, or block for
+                                 approval (local labels are advisory only)
+5. policy.default                ALLOW or DENY (unrecognized → DENY)
 6. Audit meta (no secret values)
 ```
 
@@ -142,7 +146,7 @@ Adapters are the **only** place provider knowledge lives. Guide: [adapters.md](.
 | **3** | Team binding graph, dual-control packs, offboard, remote audit |
 | **4** | Adapter SDK, CI ephemeral pins, sandbox |
 
-Already shipped from phases 2–4: upstream MCP stdio workers, `locus run`, CI ephemeral pins (`locus ci mint|env|run`), the worker sandbox, and the adapter catalog with optional manifest signing ([registry trust](./registry-trust.md)). Current release attachments are unsigned. Roadmap detail: [PLAN.md](../PLAN.md). Threat model: [DESIGN.md §9](../DESIGN.md), [SECURITY.md](../SECURITY.md).
+Already shipped from phases 2–4: upstream MCP stdio workers, `locus run`, continuous drift checks (`locus watch` freezes the pin on binding drift), the team binding graph (`locus graph`), `dual_control` policy ([policy.md](./policy.md)), `locus offboard`, audit export to a file or webhook ([observability.md](./observability.md); continuous chain-verified remote append is still later), CI ephemeral pins (`locus ci mint|env|run`), the worker sandbox, and the adapter catalog with optional manifest signing ([registry trust](./registry-trust.md)). Current release attachments are unsigned. Roadmap detail: [PLAN.md](../PLAN.md). Threat model: [DESIGN.md §9](../DESIGN.md), [SECURITY.md](../SECURITY.md).
 
 ## Composition
 
