@@ -158,6 +158,8 @@ Because rules are ordered, a more-specific `allow` listed **above** a broader `r
    review activity and says external broker authority is still required
    (separate rate limit per approval id).
    Disable anytime: `locus notify off` or `LOCUS_NOTIFY=0` / `LOCUS_QUIET=1`.
+   Banners never fire when `CI=true` (or `CI=1`), even if enabled. Check the
+   current setting with `locus notify status`.
 3. A local operator may record advisory evidence:
    ```bash
    locus approve list
@@ -177,10 +179,10 @@ locus approve deny appr_…
 
 | Command | Purpose |
 |---------|---------|
-| `locus approve list` | Pending rows; shows authoritative `0/N` and advisory assertion count |
-| `locus approve grant <id> [--as P] [--touchid]` | Records an untrusted local advisory label only; confirmation is not identity authority |
+| `locus approve list [--limit N]` | Pending rows (default 50; alias `approve pending`); shows authoritative `0/N` and advisory assertion count |
+| `locus approve grant <id> [--as P] [--touchid] [--ttl DUR]` | Records an untrusted local advisory label only; confirmation is not identity authority. `--touchid` is a macOS confirm dialog (not biometric identity) and is refused with `--json`. `--ttl` (1s..24h) is reserved for external authority; local advisory records ignore it |
 | `locus approve status <id>` | Full record with explicit trust and disabled authority state |
-| `locus approve wait <id> [--timeout 120\|2m]` | Poll until approved / denied / timeout (exit non-zero on deny/timeout); `--timeout` takes bare seconds or 90s / 2m / 1h |
+| `locus approve wait <id> [--timeout 120\|2m] [--interval-ms 500]` | Poll until approved / denied / timeout (exit non-zero on deny/timeout); `--timeout` takes bare seconds or 90s / 2m / 1h (default 120); `--interval-ms` sets the poll interval (default 500) |
 | `locus approve deny <id>` | Terminal deny |
 
 Label default: `--as` → `LOCUS_PRINCIPAL` → `$USER`. These are caller-controlled strings, not authenticated identities.
