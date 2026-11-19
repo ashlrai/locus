@@ -142,7 +142,7 @@ Reports (mission-control JSON):
 6. `autopin` (`config.toml` / remote rules / `clients.auto_pin`)
 7. `workspace` (found path, allowlist, `require_pin`)
 8. `audit` (last 5 ops, recent `scope_freeze` / deny counts)
-9. `verdict`: **SAFE** (exit 0) · **WARN** (1) · **UNSAFE** (2)
+9. `verdict`: **SAFE** (exit 0) · **WARN** (1, or 0 when every finding is setup advice such as missing phantom) · **UNSAFE** (2)
 
 | Verdict | When |
 |---------|------|

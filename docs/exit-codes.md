@@ -28,6 +28,10 @@ conditions specifically. Existing generic command errors continue to return
 under `--json`, usage errors print a `locus.error.v1` envelope on stdout and
 stderr with `exit_code_name: "usage"`.
 
+`doctor` exits 0 on a `WARN` whose findings are all setup advisories, such as
+`phantom_missing`; any other `WARN` exits 1. The report still says `WARN`. See
+the [agent contract](./agent-contract.md#exit-codes) for the full list.
+
 `exec`, `run`, `ci run`, and `mcp --supervised` pass through the child status
 when it starts (`128 + signal` when killed by a signal). Codes 126 and 127
 indicate that the child could not be started.

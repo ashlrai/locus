@@ -165,7 +165,7 @@ same shape when `--json` appears before any `--`, and keep exit code 2.
 | Command | Exit 0 | Exit 1 | Exit 2 |
 |---------|--------|--------|--------|
 | `locus agent report` / `locus agent doctor` | `status=ready` | `status=protected` | `status=unsafe` |
-| `locus doctor` | `verdict=SAFE` | `verdict=WARN` | `verdict=UNSAFE` |
+| `locus doctor` | `verdict=SAFE`, or `WARN` with setup advisories only | other `verdict=WARN` | `verdict=UNSAFE` |
 
 ---
 
@@ -230,7 +230,7 @@ Schema: [`schema/doctor.schema.json`](../schema/doctor.schema.json).
 
 ```bash
 locus doctor --json
-# exit: 0 SAFE | 1 WARN | 2 UNSAFE
+# exit: 0 SAFE (or setup-advisory-only WARN) | 1 WARN | 2 UNSAFE
 ```
 
 Stable keys:  
