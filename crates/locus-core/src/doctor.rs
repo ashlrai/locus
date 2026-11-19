@@ -3,7 +3,7 @@
 //! Pure assembly over [`Store`] + external facts (Phantom PATH, cwd). Never
 //! includes secret values — only aliases, digests, counts, and issue codes.
 
-use crate::config::{self, AutopinStatus, LocusConfig};
+use crate::config::{AutopinStatus, LocusConfig};
 use crate::credential::CredentialResolutionIssue;
 use crate::store::{ApprovalsHealth, AuditEvent, RuntimeDrift, Store};
 use crate::verify::{
@@ -513,10 +513,16 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
     }
 
     let config_path = store.config_path();
-    let cfg_opt = LocusConfig::load(&config_path).ok().flatten();
+    // A config.toml that exists but cannot be read or parsed must be a
+    // finding, not a silent fallback to defaults: the operator's autopin and
+    // client settings would vanish without a signal.
+    let (cfg_opt, config_error) = match LocusConfig::load(&config_path) {
+        Ok(cfg) => (cfg, None),
+        // Collapse to one line: TOML parse errors render as multi-line source
+        // snippets, and a finding must stay one line in the human pane.
+        Err(err) => (None, Some(one_line(&err.to_string()))),
+    };
     let autopin = AutopinStatus::from_config(&config_path, cfg_opt.as_ref());
-    // Keep load_config warm for side-effect-free default parse (corrupt → defaults).
-    let _ = config::load_config(store.home());
 
     let cwd = external.cwd.clone().unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| Path::new(".").to_path_buf())
@@ -761,6 +767,18 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
             ),
         ));
     }
+    if let Some(ref err) = config_error {
+        findings.push(issue(
+            IssueSeverity::Warn,
+            "config_unreadable",
+            format!(
+                "config.toml cannot be read ({err}) — autopin and client settings in it are \
+                 ignored and defaults are in effect. Fix: repair or delete {}, then re-run \
+                 `locus doctor`",
+                config_path.display()
+            ),
+        ));
+    }
     if !autopin.ok {
         findings.push(issue(
             IssueSeverity::Warn,
@@ -956,6 +974,15 @@ pub fn build_doctor_report(store: &Store, external: DoctorExternal) -> crate::Re
         verdict,
         ok: verdict == DoctorVerdict::Safe,
     })
+}
+
+/// Collapse a message to a single line (parser errors carry source snippets).
+fn one_line(s: &str) -> String {
+    s.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// "4m59s" / "45s" — short remaining-time label for findings.
@@ -1955,6 +1982,155 @@ require_pin = true
         assert_eq!(report.autopin.remote_rules, 0);
         assert!(!report.autopin.ok);
         assert!(report.findings.iter().any(|f| f.code == "autopin_invalid"));
+    }
+
+    #[test]
+    fn doctor_warns_when_config_toml_is_unreadable() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        // A config.toml that exists but is not valid TOML used to fall back to
+        // defaults silently — the operator's autopin/client settings vanished
+        // with no finding.
+        std::fs::write(store.config_path(), "autopin.enabled = ").unwrap();
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.code == "config_unreadable")
+            .expect("config_unreadable finding");
+        assert_eq!(finding.severity, IssueSeverity::Warn);
+        // One line per finding even though the TOML error is multi-line.
+        assert_eq!(finding.message.lines().count(), 1, "{}", finding.message);
+        // Plain-words fix line: names the file, the effect, and the one command.
+        assert!(
+            finding.message.contains("defaults are in effect"),
+            "{}",
+            finding.message
+        );
+        assert!(
+            finding
+                .message
+                .contains(&store.config_path().display().to_string()),
+            "{}",
+            finding.message
+        );
+        assert!(
+            finding.message.contains("locus doctor"),
+            "fix line must name the one command: {}",
+            finding.message
+        );
+        assert_eq!(report.verdict, DoctorVerdict::Warn);
+        let v = serde_json::to_value(&report).unwrap();
+        doctor_json_has_stable_keys(&v).expect("stable keys");
+    }
+
+    /// Read-denied config (permissions) takes the same finding as a parse
+    /// error. Skipped when raw reads succeed anyway (e.g. running as root).
+    #[cfg(unix)]
+    #[test]
+    fn doctor_warns_when_config_toml_is_read_denied() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        let path = store.config_path();
+        std::fs::write(&path, "clients.auto_pin = \"cwd\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&path).is_ok() {
+            return; // environment ignores the mode (root); parse branch is covered above
+        }
+
+        let report = build_doctor_report(
+            &store,
+            DoctorExternal {
+                phantom_on_path: true,
+                unresolved_phm: Vec::new(),
+                cwd: Some(dir.path().to_path_buf()),
+            },
+        )
+        .unwrap();
+        let finding = report
+            .findings
+            .iter()
+            .find(|f| f.code == "config_unreadable")
+            .expect("config_unreadable finding");
+        assert_eq!(finding.severity, IssueSeverity::Warn);
+        assert!(
+            finding
+                .message
+                .contains(&store.config_path().display().to_string()),
+            "{}",
+            finding.message
+        );
+        // The healthy slice is not fabricated from a file we could not read.
+        assert_eq!(report.autopin.auto_pin, None);
+    }
+
+    #[test]
+    fn doctor_stays_clean_when_config_toml_is_valid_or_absent() {
+        let dir = tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .save_binding(&sample_binding("acme", "acme-corp"))
+            .unwrap();
+        store.pin("acme", dir.path(), None, false).unwrap();
+        let external = || DoctorExternal {
+            phantom_on_path: true,
+            unresolved_phm: Vec::new(),
+            cwd: Some(dir.path().to_path_buf()),
+        };
+
+        // Absent config: no finding (defaults are a valid state).
+        let report = build_doctor_report(&store, external()).unwrap();
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.code == "config_unreadable"),
+            "{:?}",
+            report.findings
+        );
+
+        // Valid config with autopin rules: parsed and reported, no finding.
+        store
+            .save_config(&LocusConfig {
+                autopin: crate::config::AutopinConfig {
+                    enabled: true,
+                    remotes: vec![crate::config::AutopinRemote {
+                        match_pattern: "github.com/acme-corp".into(),
+                        binding: "acme".into(),
+                    }],
+                },
+                ..Default::default()
+            })
+            .unwrap();
+        let report = build_doctor_report(&store, external()).unwrap();
+        assert!(
+            !report
+                .findings
+                .iter()
+                .any(|f| f.code == "config_unreadable"),
+            "{:?}",
+            report.findings
+        );
+        assert!(report.autopin.present);
+        assert!(report.autopin.remote_autopin_enabled);
+        assert_eq!(report.autopin.remote_rules, 1);
     }
 
     #[test]

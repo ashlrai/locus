@@ -1,6 +1,7 @@
 //! Optional `$LOCUS_HOME/config.toml` — defaults, autopin remotes, credential preference.
 //!
-//! Absent or unreadable config is treated as empty (doctor reports "not present").
+//! Absent config is treated as empty; an unreadable or invalid file falls back
+//! to defaults here and is reported by doctor as `config_unreadable`.
 //! Never stores secrets.
 //!
 //! ```toml

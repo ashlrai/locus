@@ -102,7 +102,7 @@ locus version --json
 locus topic agent-contract --json
 ```
 
-`locus doctor --json` can exit 0 while `verdict` is `WARN` and `ok` is false. Exit 0 means the findings are setup advice, not that setup is finished.
+`locus doctor --json` can exit 0 while `verdict` is `WARN` and `ok` is false. Exit 0 means the findings are setup advice, not that setup is finished. A `config_unreadable` WARN means `$LOCUS_HOME/config.toml` exists but cannot be read or parsed: locus runs on defaults until the file is repaired or deleted, and the finding's fix line names that one step.
 
 Print the MCP entries without writing a client config:
 

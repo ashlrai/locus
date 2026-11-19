@@ -13,11 +13,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Changes since 0.7.2 touch docs, tests and release plumbing only. The `locus`
-and `locus-mcp` binaries behave the same as 0.7.2.
+Changes since 0.7.2 touch docs, tests, release plumbing, and one doctor check.
+Beyond the items below, the `locus` and `locus-mcp` binaries behave the same as
+0.7.2.
 
 ### Added
 
+- `locus doctor` now reports `config_unreadable` (WARN) when
+  `$LOCUS_HOME/config.toml` exists but cannot be read or parsed. Previously the
+  error was swallowed and locus silently ran on defaults, ignoring the
+  operator's autopin and client settings. The finding's fix line names the file
+  and the one command to re-check: `locus doctor`. Doctor also no longer
+  performs a redundant extra `config.toml` read per run.
 - Tests: repeated `locus hook bash` calls with a closed stdout exit cleanly,
   and `locus-mcp` HTTP keeps serving after a malformed JSON body
   ([#967](https://github.com/ashlrai/locus/pull/967)). A doc-facts test now
