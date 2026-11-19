@@ -502,7 +502,7 @@ Each JSON file stores only: schema version, session `id`, `created_at_unix`, `la
 
 `GET /mcp` does **not** require a session (capabilities probe). If a client sends `Mcp-Session-Id` on GET, unknown ids still fail closed with **404**. Capabilities JSON lists `streamable.session` (`header`, `ttl_seconds`, `max_sessions`, `storage`, mint rule).
 
-Multi-message SSE (progress/chunks + final) is available on POST when Accept allows event-stream. Multi-tenant remote multiplexor remains open.
+Multi-message SSE (progress/chunks + final) is available on POST when Accept allows event-stream. Serving several tenants from one process is a separate opt-in mode; see [Multi-tenant HTTP](#multi-tenant-http---multi-tenant).
 
 ### Streamable Accept / Content-Type
 
@@ -556,7 +556,7 @@ Each tick is a JSON-RPC `notifications/message` with values-free `data`:
 
 Wire contract: `params.data` validates against [`schema/locus-events.v1.schema.json`](../schema/locus-events.v1.schema.json) `$defs.sessionTick` (tenant ticks add `scope`/`grant_id`/`issues`). This closed schema describes the current emitted shape: it requires the emitting binary `version` and rejects unknown fields, so older or future tick shapes may not validate. The binary version is not schema negotiation.
 
-Cross-process `Mcp-Session-Id` resume is **on** when workers share the same `LOCUS_HOME` (or `LOCUS_MCP_SESSION_DIR`). Multi-tenant remote multiplexor remains open.
+Cross-process `Mcp-Session-Id` resume is **on** when workers share the same `LOCUS_HOME` (or `LOCUS_MCP_SESSION_DIR`). Multi-tenant mode keeps its records in a separate directory (see [Semantics](#semantics)).
 
 **Hard rules:**
 
@@ -564,7 +564,7 @@ Cross-process `Mcp-Session-Id` resume is **on** when workers share the same `LOC
 2. **Token required** — HTTP mode will not start without a non-empty `LOCUS_MCP_HTTP_TOKEN`.
 3. Missing/wrong token → **401**; never soft-allow. Applies to `GET /mcp`, `GET /mcp/sse`, `POST /mcp`, and `DELETE /mcp`.
 4. Unknown / expired `Mcp-Session-Id` → **404**; never soft-allow.
-5. Same pin/policy/seal gate as stdio — HTTP is only a transport.
+5. Same pin/policy/seal gate as stdio — HTTP is only a transport. That includes the executor capability: a single-tenant `locus-mcp --http` started directly serves control tools only (see [Provider tools need a supervised launch](#provider-tools-need-a-supervised-launch)).
 6. `GET /mcp` / session ticks never return secret values or credential refs — tool **names** and pin alias/tenant only.
 
 Example (CI):
@@ -600,11 +600,19 @@ HTTP mode is safe for **remote** agents only when you treat the process like any
 1. **Pin before serving** — identity is resolved at the gate. On the host that runs `locus-mcp`:
    ```bash
    export LOCUS_HOME=/var/lib/locus          # dedicated store (not a shared laptop home)
-   locus init --with-samples                # once
-   locus pin <alias>                        # or: locus ci mint / enter workflow
+   locus init --with-samples                # once; mints the control capability
+   eval "$(locus hook bash)"                # export LOCUS_CONTROL_CAPABILITY
+   locus pin <alias>                        # or: locus enter <alias>
    locus whoami                             # confirm tenant
    ```
    Agents still **cannot** pin. Wrong pin ⇒ wrong catalog. Unpinned ⇒ control tools only.
+   The pin's authority broker lives as long as the shell that pinned, so pin
+   and serve from the same long-lived operator session.
+   A single-tenant HTTP server only accepts executor authority, so started
+   directly as below it lists control tools plus `locus_providers`, as on
+   stdio. To serve provider tools to remote tenants, use
+   [multi-tenant mode](#multi-tenant-http---multi-tenant), which validates each
+   grant with the operator control capability in the server env.
 
 2. **Token** — set a strong `LOCUS_MCP_HTTP_TOKEN` (env or secret manager). Never commit it. Rotate on offboarding.
 
