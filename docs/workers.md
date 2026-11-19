@@ -15,7 +15,7 @@ Locus routes provider tools through a **worker** scoped to the active Binding ×
 When spawning:
 
 1. Ambient identity env is scrubbed (`AWS_PROFILE`, `GH_TOKEN`, …).
-2. Only the pinned binding’s `LOCUS_*` surface is injected.
+2. Only the pinned binding’s `LOCUS_*` surface is injected. Every child gets `LOCUS_WORKER_PROVIDER`, `LOCUS_WORKER_ACCOUNT` and `LOCUS_WORKER_DIR`; [community adapter](adapters.md#community-adapter-marketplace) workers also get `LOCUS_WORKER_BINDING`, `LOCUS_WORKER_BINDING_ID` and `LOCUS_WORKER_TENANT`.
 3. Optional `resolve_secrets` injects supported `env:` credentials into the child only. `phm:` resolution fails closed; see [credential compatibility](credential-compatibility.md).
 4. Private `GH_CONFIG_DIR` / AWS config paths under the session worker home.
 5. Optional **sandbox** (below) when `LOCUS_WORKER_SANDBOX=1` or `upstream.sandbox = true`.
@@ -216,6 +216,7 @@ let backend = McpStdioBackend::new(McpStdioConfig {
     extra_env: Default::default(),
     sandbox: false, // or true / LOCUS_WORKER_SANDBOX=1
     sandbox_no_network: false, // or true / LOCUS_WORKER_SANDBOX_NO_NETWORK=1
+    sandbox_incompatibility: None, // recipe readiness detail, set by mcp_config_from_upstream
 });
 let mut mgr = InMemoryWorkerManager::new(Box::new(backend));
 let slot = mgr.ensure(&session, &binding, "github")?;
@@ -285,6 +286,7 @@ credentials, arguments, or identity. MCP stdout remains reserved for JSON-RPC.
 
 The next ensure may restart a stopped child, with at most three recovery launches
 per slot. Failed recovery launches consume that budget too. Tool calls are never
-replayed. Explicit slot/session teardown resets the budget. This checkout does
-not yet contain a separate stdio-guard restart implementation; RSS recovery uses
-the existing manager's ensure/teardown lifecycle.
+replayed. Explicit slot/session teardown resets the budget. There is no separate
+restart supervisor: RSS recovery uses the manager's ensure/teardown lifecycle,
+and each spawned child is owned by a `ProcessGuard` that kills and reaps it on
+drop.
