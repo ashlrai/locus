@@ -2,6 +2,49 @@
 
 Thanks for helping make wrong-account action mechanically impossible.
 
+## Contribute with an agent
+
+Most changes to Locus are written by coding agents (Claude Code, Codex, Cursor
+and others), and a human's PR passes the same gate. This path works for both:
+
+1. Point the agent at [AGENTS.md](./AGENTS.md) first. It holds the isolation
+   rules, the safe local smoke and what must never be committed.
+2. Fork the repo and branch from `main`. Give each parallel agent its own
+   worktree (`git worktree add ../locus-<topic> -b <topic>`) so agents never
+   share a working tree.
+3. Smoke-test with a throwaway `LOCUS_HOME` (see [Test](#test)); never point
+   tests at your real `~/.locus`.
+4. Before pushing, run the local merge gate:
+
+   ```bash
+   git fetch origin && bash scripts/fast-check.sh
+   ```
+
+   It runs `cargo fmt --check`, then clippy `-D warnings` and `cargo test` for
+   the crates your change touches relative to `origin/main` (the whole
+   workspace when `Cargo.toml`, `Cargo.lock` or the toolchain changes). On a
+   fork, keep your `origin/main` in sync with upstream first.
+5. For docs changes, run the [docs checks](#test). If you edited `AGENTS.md`,
+   run `node apps/web/discoverability.mjs` to refresh its public mirror.
+6. Open the PR with the [template](./.github/PULL_REQUEST_TEMPLATE.md) and
+   state which isolation property changes, or "none".
+
+**What CI requires.** The one required check is **CI Gate**
+([`ci.yml`](./.github/workflows/ci.yml)). On a PR and in the merge queue it
+needs: fmt and workspace clippy `-D warnings` plus the installer test; the
+npm wrapper, discoverability (`--check`), public-site (`node --test apps/web`)
+and crypto-policy checks; the sandbox tests (run only when `locus-core`, Cargo
+files, the toolchain or `ci.yml` change); and two diff secret scans (Gitleaks
+and secret-shape). The full test suite, doctests, release build, end-to-end
+gate and MSRV check run on the daily schedule and on manual dispatch, not per
+PR, so run `cargo test` locally for the crates you touch.
+
+**Merging.** PRs land through the merge queue, which reruns CI Gate on the
+merged tree. A maintainer queues reviewed PRs; collaborators with write access
+can arm it with `gh pr merge --auto`. Paths listed in
+[`.github/CODEOWNERS`](./.github/CODEOWNERS) (workflows and files that make
+keyed or network requests) also need a code-owner review.
+
 ## Prerequisites
 
 - Rust **stable** (see [`rust-toolchain.toml`](./rust-toolchain.toml))
