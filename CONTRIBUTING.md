@@ -23,9 +23,19 @@ and others), and a human's PR passes the same gate. This path works for both:
    It runs `cargo fmt --check`, then clippy `-D warnings` and `cargo test` for
    the crates your change touches relative to `origin/main` (the whole
    workspace when `Cargo.toml`, `Cargo.lock` or the toolchain changes). On a
-   fork, keep your `origin/main` in sync with upstream first.
-5. For docs changes, run the [docs checks](#test). If you edited `AGENTS.md`,
-   run `node apps/web/discoverability.mjs` to refresh its public mirror.
+   fork, keep your `origin/main` in sync with upstream first. CI runs clippy
+   on the whole workspace, so if you change a `locus-core` API, also run
+   `cargo clippy --workspace --all-targets -- -D warnings`.
+5. For docs changes, run the [docs checks](#test). CI also runs
+   `node apps/web/discoverability.mjs --check`, which fails when `llms.txt`,
+   `llms-full.txt`, `apps/web/public/*` or the `disc:` regions of
+   `apps/web/public/index.html` are stale. They are built from `AGENTS.md`;
+   the README H1, tagline, `##` headings and "Install options" commands;
+   every `docs/*.md` file and its H1-H3 headings; the `SECURITY.md` contact;
+   the version (`Cargo.toml`, `CHANGELOG.md`, `apps/web/package.json`); the
+   top-level `locus` subcommands; and the MCP control tool names. If you
+   touched any of these, run `node apps/web/discoverability.mjs` and commit
+   its output.
 6. Open the PR with the [template](./.github/PULL_REQUEST_TEMPLATE.md) and
    state which isolation property changes, or "none".
 
@@ -154,6 +164,8 @@ bash scripts/check-support-links.sh   # every relative link in SUPPORT.md resolv
 node --test scripts/check-support-links.test.mjs
 node scripts/freshness/check.mjs      # generated release blocks are in sync
 node --test scripts/devin-wiki.test.mjs  # .devin/wiki.json stays valid and its paths resolve
+node apps/web/discoverability.mjs --check  # llms.txt, llms-full.txt and apps/web/public are fresh (CI Gate)
+node --test apps/web/*.test.mjs            # public-site tests (CI Gate)
 ```
 
 The `.devin/wiki.json` file steers DeepWiki's auto-generated wiki for this
