@@ -27,7 +27,7 @@ refs are environment variable names, never raw tokens. Supply each value outside
 
 ```bash
 locus binding add personal --tenant personal --provider github \
-  --account masonwyatt23 --credential-ref env:GH_TOKEN_PERSONAL --non-interactive
+  --account your-github-user --credential-ref env:GH_TOKEN_PERSONAL --non-interactive
 locus binding add ashlr --tenant ashlr --provider github \
   --account ashlrai --credential-ref env:GH_TOKEN_ASHLR --org ashlrai --non-interactive
 locus binding add client-acme --tenant acme --provider vercel \

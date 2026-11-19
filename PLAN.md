@@ -357,7 +357,7 @@ License: **MIT** (match Phantom) or Apache-2.0 OR MIT.
 
 1. Lock name + tagline + license  
 2. Domain/trademark smoke check  
-3. Bootstrap repo in `/Users/masonwyatt/Desktop/mmcp` from DESIGN.md  
+3. Bootstrap the repo from DESIGN.md  
 4. Phase 0 spike: daemon + pin + Supabase worker + isolation test  
 5. Dogfood on one real client BindingSet + personal BindingSet  
 6. Parallel: landing page draft (Phantom-quality mechanism-first copy)  
@@ -369,7 +369,7 @@ License: **MIT** (match Phantom) or Apache-2.0 OR MIT.
 
 | Artifact | Path |
 |----------|------|
-| Full architecture design | `/Users/masonwyatt/Desktop/mmcp/DESIGN.md` |
+| Full architecture design | [DESIGN.md](./DESIGN.md) |
 | This plan | session `plan.md` |
 | Phantom deep dive | explore agent (architecture, gaps, reuse) |
 | Phantom MCP gap analysis | explore agent (new product recommendation) |
