@@ -26,6 +26,17 @@ and `locus-mcp` binaries behave the same as 0.7.2.
 
 ### Changed
 
+- Contributor docs: CONTRIBUTING gains a "Contribute with an agent" section
+  (fork, one worktree per agent, `scripts/fast-check.sh`, CI gate contents,
+  merge queue, CODEOWNERS), its local smoke now includes the
+  `eval "$(locus hook bash)"` step that `pin` needs, and the PR template lists
+  the checks to run. `AGENTS.md` no longer claims CI enforces the full test and
+  release build, and SUPPORT links the new section
+  ([#982](https://github.com/ashlrai/locus/pull/982),
+  [#984](https://github.com/ashlrai/locus/pull/984)).
+- npm README, root README and landing page now say the npm wrappers fail closed
+  on checksum problems since v0.6.1 (previously named v0.6.2), and the
+  integrity test no longer skips itself.
 - README: a five-step **Get started** section now leads the README, with what
   you should see at each step. The MCP tool list (`locus_*`) is documented in
   the README, and the CLI block names the `adapter trust`, `adapter registry
