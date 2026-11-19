@@ -10,6 +10,7 @@ Agents start here. Locus is the identity plane for coding agents: a person pins 
 | [../llms.txt](../llms.txt) | Short index for agents |
 | [../llms-full.txt](../llms-full.txt) | Heading index of the README and these docs |
 | [../AGENTS.md](../AGENTS.md) | Rules when changing this repo |
+| [../CONTRIBUTING.md](../CONTRIBUTING.md#contribute-with-an-agent) | Contribute with an agent: fork, worktree, `fast-check.sh`, CI Gate |
 | [architecture.md](architecture.md) | How a pin becomes the only account |
 | [credential-compatibility.md](credential-compatibility.md) | `env:` and `phm:` refs |
 | [deepwiki.md](deepwiki.md) | DeepWiki auto-docs config (`.devin/wiki.json`) |
@@ -18,7 +19,7 @@ Agents start here. Locus is the identity plane for coding agents: a person pins 
 
 Locus is one of the open-source [Ashlr](https://ashlr.ai) tools: Phantom, phantom-secrets, ashlr-plugin, Locus, Lexicon, ashlr-md, and ashlr-stack. Together they aim to be a fully autonomous, code-first, agent-native software factory: agents do the work, and the human acts as a passive board member. The stated goal is chasing open-source RSI (recursive self-improvement). That is a direction, not a finished capability. In that factory Locus is the identity gate: a person pins, and agents act only inside the pin. Agents cannot pin; they can only ask for one. Each tool installs and runs on its own. See [README: Part of the Ashlr ecosystem](../README.md#part-of-the-ashlr-ecosystem).
 
-Agents also change this repo. They follow [../AGENTS.md](../AGENTS.md) and [../CONTRIBUTING.md](../CONTRIBUTING.md), and every change lands as a pull request that passes CI.
+Agents also change this repo. They follow [../AGENTS.md](../AGENTS.md) and [../CONTRIBUTING.md](../CONTRIBUTING.md), and every change lands as a pull request that passes the required **CI Gate** check ([ci.yml](../.github/workflows/ci.yml)) and then goes through the merge queue. To send a change with a coding agent, start at [Contribute with an agent](../CONTRIBUTING.md#contribute-with-an-agent).
 
 ## All docs by task
 
