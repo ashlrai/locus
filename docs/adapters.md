@@ -6,7 +6,7 @@ Adapters are the **only** place provider-specific knowledge should live in Locus
 
 1. Which **tools** appear when a binding includes that provider  
 2. How **scope freeze** rejects model-supplied account selectors  
-3. How tool calls are answered (today: identity/scope stubs; later: workers / upstream MCP)
+3. How tool calls are answered: synthetic identity/scope tools in-process, or an upstream MCP server spawned as an isolated worker (see [workers.md](./workers.md))
 
 Canonical design: [DESIGN.md §8](../DESIGN.md) (adapter model) and §9 (threat model).
 
@@ -219,13 +219,13 @@ Never put raw secrets in binding files — only CredentialRefs (`phm:` or `env:`
 
 ## Phase 1 vs later
 
-| Phase 1 (now) | Phase 2+ (roadmap) |
-|---------------|---------------------|
-| Synthetic tools, local freeze | Real upstream MCP / REST workers |
-| In-tree `ProviderAdapter` | Optional out-of-tree adapter packages / registry |
-| Policy stubs with `confirm` | Approval UX, dual-control, TTL elevation |
+| Now | Later (roadmap) |
+|-----|-----------------|
+| Synthetic tools with local freeze; upstream MCP stdio workers from recipes (`adapters/recipes.toml`, `locus upstream list`, [workers.md](./workers.md)) | REST workers |
+| In-tree `ProviderAdapter`; catalog parse + verify (`locus adapter`) | Optional out-of-tree adapter packages / dynamic load |
+| Policy `allow` / `deny` / `require_approval` / `dual_control`, approval CLI and session TTL ([policy.md](./policy.md)) | Elevation TTL |
 
-Prefer **wrapping** official upstream MCP servers with frozen env over reimplementing APIs — see DESIGN §8.3.
+Prefer **wrapping** official upstream MCP servers with frozen env over reimplementing APIs — see DESIGN §8.3 and [workers.md](./workers.md).
 
 ## Checklist before merge
 

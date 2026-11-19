@@ -200,7 +200,7 @@ cargo fmt --all
 
 ## Adding a provider adapter
 
-Adapters are the **only** place provider-specific knowledge should live. Phase 1 adapters expose **safe identity / scope tools** and enforce **scope freeze** (model cannot override frozen `project_ref`, `team_id`, orgs, etc.). Full upstream MCP workers come later.
+Adapters are the **only** place provider-specific knowledge should live. In-tree adapters expose **safe identity / scope tools** and enforce **scope freeze** (model cannot override frozen `project_ref`, `team_id`, orgs, etc.). To serve a provider's full tool set, prefer wrapping its official MCP server as an upstream worker recipe (`adapters/recipes.toml`, `locus upstream list`; see [docs/workers.md](./docs/workers.md)) over reimplementing its API.
 
 See **[docs/adapter-sdk.md](./docs/adapter-sdk.md)** (preferred) and **[docs/adapters.md](./docs/adapters.md)**. Template: `examples/adapters/_template/`. Catalog: `adapters/manifest.toml`.
 
