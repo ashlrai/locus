@@ -501,6 +501,7 @@ ready="$(printf '%s' "$report" | jq -r .ready)"
 CI ephemeral pin (optional):
 
 ```bash
+# ci mint is control-gated: LOCUS_CONTROL_CAPABILITY must be in this process's env
 mint="$(locus ci mint -b acme --json)"
 export LOCUS_SESSION_ID="$(printf '%s' "$mint" | jq -r .session_id)"
 locus agent report --json   # resolves via LOCUS_SESSION_ID; env_session_id set
@@ -610,9 +611,10 @@ export PATH="$HOME/.cargo/bin:$PATH"
 ./scripts/hub-smoke.sh
 ./scripts/hub-integration-test.sh
 
-# Manual:
+# Manual (one shell: the pin's authority broker exits with the shell that pinned):
 export LOCUS_HOME=/tmp/locus-hub-smoke
 locus init --with-samples
+eval "$(locus hook bash)"   # exports LOCUS_CONTROL_CAPABILITY for pin and mcp mint/list/revoke
 locus pin personal
 locus agent report --json | jq -e '
   .ready != null
