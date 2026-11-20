@@ -28,15 +28,18 @@ One laptop, many clients: **never** one mega-MCP with all accounts. One pin, one
 ## Install the kit
 
 Prerequisite — operator control capability: control commands (`init`, `enter`,
-`pin`, `leave`) require `LOCUS_CONTROL_CAPABILITY` in the shell. `locus init` /
+`pin`, `switch`, `leave`, `workspace`, `setup`, `agent setup --apply`,
+`mcp mint`) require `LOCUS_CONTROL_CAPABILITY` in the shell. `locus init` /
 `locus quickstart` mint and persist one (0600 at `~/.locus/control_capability`,
-respects `LOCUS_HOME`) when nothing exists; export it in new shells with
-`eval "$(locus hook zsh)"`, or manage it yourself:
+respects `LOCUS_HOME`) when nothing exists, but adopt it only for their own
+process. Load it into this shell, and every new one, with
+`eval "$(locus hook zsh)"` (or `bash` / `fish`), or manage it yourself:
 `export LOCUS_CONTROL_CAPABILITY="$(openssl rand -hex 32)"`. `locus doctor`
 flags missing/invalid/mismatched capabilities with the exact fix.
 
 ```bash
 locus init
+eval "$(locus hook zsh)"    # export the capability into this shell
 cp examples/agency-starter/bindings/*.toml ~/.locus/bindings/
 # edit project_ref / team_id / orgs; replace phm: refs with env: refs for execution
 cp examples/agency-starter/config.example.toml ~/.locus/config.toml   # optional

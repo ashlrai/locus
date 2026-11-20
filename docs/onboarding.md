@@ -36,18 +36,19 @@ locus init
 ```
 
 `locus init` **auto-mints the operator control
-capability** (`LOCUS_CONTROL_CAPABILITY`) when none exists, persists it 0600
-under `~/.locus/`, and adopts it for the current process. In every *new*
-shell, load it without echoing the value:
+capability** (`LOCUS_CONTROL_CAPABILITY`) when none exists and persists it 0600
+under `~/.locus/`, but adopts it only for its own process. Load it into this
+shell, and into every new shell, without echoing the value:
 
 ```bash
 eval "$(locus hook zsh)"    # or: bash | fish
 ```
 
-Control commands (`init` / `quickstart` / `enter` / `pin` / `leave`) require
-that capability; `locus-mcp` deliberately runs without it — agents never hold
-control authority. `locus doctor` names the exact fix if it is missing,
-invalid, or mismatched.
+Control commands (`init` / `quickstart` / `enter` / `pin` / `switch` /
+`leave`, plus `workspace`, `setup`, `agent setup --apply` and `mcp mint` below)
+require that capability; `locus-mcp` deliberately runs without it — agents
+never hold control authority. `locus doctor` names the exact fix if it is
+missing, invalid, or mismatched.
 
 Use explicitly supplied environment credentials. Bindings carry **CredentialRefs
 only** (`env:VAR`), never raw tokens. Current Phantom Secrets does not provide
@@ -172,6 +173,7 @@ locus agent report --json    # hub contract: ready / pin / mcp_registered / doct
 ## 4. Daily rhythm
 
 ```bash
+eval "$(locus hook zsh)" # new shell: load the capability first
 cd ~/work/globex-project
 locus enter            # resolves the workspace default (globex); or: locus enter ashlr
 locus whoami           # confirm tenant + providers + frozen scopes before any work
