@@ -87,10 +87,11 @@ locus watch --once --json     # one heartbeat tick (same pack, compact NDJSON)
 locus watch --json --require-ok --interval 30s   # continuous hub stream; fail closed
 ```
 
-**Claim result shape** (always; human mode also prints a compact summary):
+**Claim result shape** (with `--json`; human mode prints a compact summary, then the same object as one JSON line):
 
 ```json
 {
+  "schema": "locus.verify.claim.v1",
   "claim": "…",
   "confidence": "unknown" | "low" | "medium" | "high",
   "needs_tool": true,
@@ -113,6 +114,7 @@ locus watch --json --require-ok --interval 30s   # continuous hub stream; fail c
 
 ```json
 {
+  "schema": "locus.verify.session.v1",
   "kind": "session",
   "version": "0.x.y",
   "whoami": { "...": "…" },
@@ -137,6 +139,7 @@ locus watch --json --require-ok --interval 30s
 
 ```json
 {
+  "schema": "locus.watch.v1",
   "kind": "watch",
   "session_ok": true,
   "whoami": "acme",
@@ -152,7 +155,8 @@ locus watch --json --require-ok --interval 30s
 | `--once` | Single tick then exit |
 | `--require-ok` | Fail closed: non-zero exit whenever `session_ok` is false (including unpinned) |
 | `--once` only | Non-zero when pin was present/expected **and** `session_ok` is false; unpinned soft-exits 0 |
-| `--interval` | Poll period (`5s`, `30s`, `1m`; default `5s`; minimum `1s`) |
+| `--interval` | Poll period (`5s`, `30s`, `1m`, `2h`, or bare seconds such as `10`; default `5s`; minimum `1s`) |
+| neither flag | Runs until interrupted; a tick with `session_ok` false is reported but does not exit |
 
 Binding drift still freezes the pin (same as doctor / `verify_session`). Never includes secrets. Prefer `locus verify session --json` when hub needs the full doctor + whoami objects; use `watch` for continuous compact ticks.
 
@@ -162,10 +166,12 @@ Control tools (available unpinned and pinned):
 
 | Tool | Args | Result |
 |------|------|--------|
-| `locus_verify_claim` | `text` or `claim` (string) | Same JSON shape as CLI claim |
-| `locus_verify_session` | none | Same JSON as `locus verify session --json` (`whoami?`, `doctor`, `safe_next`, `session_ok`); runs real external probes |
+| `locus_verify_claim` | `text` or `claim` (string) | Same JSON shape as CLI claim, without the `schema` key |
+| `locus_verify_session` | none | Same pack as `locus verify session --json` without the `schema` key (`whoami?`, `doctor`, `safe_next`, `session_ok`); runs real external probes |
 
-Audit op: `mcp.verify_claim` / `verify.claim` / `verify.session` — confidence, signals, truncated claim preview / verdict flags only (no secrets).
+MCP tool payloads are not schema-stamped; only CLI `--json` output is (see [agent-contract.md](./agent-contract.md)).
+
+Audit ops: `verify.claim`, `verify.session` and `watch.tick` (CLI); `mcp.verify_claim` and `mcp.verify_session` (MCP). They record confidence, signals, a truncated claim preview, or verdict flags only (no secrets).
 
 ### Doctor (light)
 
@@ -211,9 +217,8 @@ Hub extension points: re-score using `signals`, require tools when `needs_tool`,
 Still open under verification plane:
 
 - Full team-tier SIEM (continuous remote append, chain verification beyond one-shot webhook)
-- Adapter SDK + signed registry
+- Signed release manifests and a published adapter registry root (see [registry-signing-status.md](./registry-signing-status.md))
 - Full hard sandbox (seccomp/VM) beyond Linux bubblewrap partial; bounty on seal logic
-- Streamable HTTP / remote multiplexor (beyond streamable-HTTP-lite)
 
 Shipped as partial M5:
 
@@ -227,6 +232,9 @@ Shipped as partial M5:
 - [x] Linux hard-sandbox **partial**: prefer bubblewrap (`LOCUS_WORKER_SANDBOX_BACKEND=bwrap`); fallback best-effort `path` (restricted PATH only — not kernel isolation); network allowed for MCP
 - [x] Core module + unit tests (heuristics only)
 - [x] Audit webhook sink — `locus events export --sink webhook` / `LOCUS_AUDIT_WEBHOOK_URL` (redacted POST; fail soft when unset)
+- [x] Conformance pack in CI (`.github/workflows/conformance.yml`)
+- [x] Adapter registry v0: manifest schema, `locus adapter list|verify` (`--require-signed`), ed25519 signatures and the `locus adapter trust` store
+- [x] Streamable HTTP / remote multiplexor: streamable-HTTP-lite on `locus-mcp --http` (session resume, SSE) and `locus-mcp --http --multi-tenant` with operator-minted grants (`locus mcp mint|list|revoke`); see [mcp.md](./mcp.md)
 
 ---
 
