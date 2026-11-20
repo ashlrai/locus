@@ -14,10 +14,10 @@ Locus routes provider tools through a **worker** scoped to the active Binding ×
 
 When spawning:
 
-1. Ambient identity env is scrubbed (`AWS_PROFILE`, `GH_TOKEN`, …).
-2. Only the pinned binding’s `LOCUS_*` surface is injected. Every child gets `LOCUS_WORKER_PROVIDER`, `LOCUS_WORKER_ACCOUNT` and `LOCUS_WORKER_DIR`; [community adapter](adapters.md#community-adapter-marketplace) workers also get `LOCUS_WORKER_BINDING`, `LOCUS_WORKER_BINDING_ID` and `LOCUS_WORKER_TENANT`.
-3. Optional `resolve_secrets` injects supported `env:` credentials into the child only. `phm:` resolution fails closed; see [credential compatibility](credential-compatibility.md).
-4. Private `GH_CONFIG_DIR` / AWS config paths under the session worker home.
+1. Ambient identity env is scrubbed (`AWS_PROFILE`, `GH_TOKEN`, …). The child env is built from a runtime allowlist, so unknown parent keys never reach it.
+2. Only the pinned binding’s `LOCUS_*` surface is injected, narrowed to the one addressed provider: `LOCUS_SESSION_ID`, `LOCUS_BINDING`, `LOCUS_BINDING_ID`, `LOCUS_TENANT`, `LOCUS_PRINCIPAL` (when set), `LOCUS_SEAL`, `LOCUS_WORKER_HOME`, `LOCUS_PROVIDERS`, and that provider’s frozen scope as `LOCUS_<P>_ACCOUNT`, `LOCUS_<P>_PROJECT_REF`, `LOCUS_<P>_TEAM_ID`, `LOCUS_<P>_ORGS`, … plus CLI aliases such as `SUPABASE_PROJECT_REF` or `VERCEL_TEAM_ID`. Every child also gets `LOCUS_WORKER_PROVIDER`, `LOCUS_WORKER_ACCOUNT` and `LOCUS_WORKER_DIR`; [community adapter](adapters.md#community-adapter-marketplace) workers also get `LOCUS_WORKER_BINDING`, `LOCUS_WORKER_BINDING_ID` and `LOCUS_WORKER_TENANT`.
+3. Optional `resolve_secrets` injects supported `env:` credentials into the child only and sets `LOCUS_<P>_CREDENTIAL_RESOLVED=1`. Any resolution failure refuses the launch. `phm:` resolution fails closed; see [credential compatibility](credential-compatibility.md).
+4. `HOME`, `GH_CONFIG_DIR` and the AWS config and credentials paths point under the session worker home. Community adapter workers get them under their own slot directory instead.
 5. Optional **sandbox** (below) when `LOCUS_WORKER_SANDBOX=1` or `upstream.sandbox = true`.
 
 ## Worker sandbox (best-effort / platform backends)
@@ -186,8 +186,11 @@ When `locus-mcp` is pinned:
 Worker children start from a positive runtime environment allowlist. Locus then
 adds frozen binding metadata and only the provider credential keys resolved for
 that provider. `McpStdioConfig::extra_env` remains for source compatibility but
-is intentionally ignored; arbitrary caller or parent environment cannot cross
-the worker boundary.
+is intentionally ignored. The only parent-side additions are the operator's
+opt-in `config.toml` settings: the `[gateway]` base URL (from config, never the
+parent env; an invalid block refuses credential resolution) and the exact names
+listed in `[exec] inherit_env`, applied last. Nothing else from the caller or
+parent environment crosses the worker boundary.
 
 ## API sketch
 
@@ -228,7 +231,7 @@ let slot = mgr.ensure(&session, &binding, "github")?;
 
 1. An authorized `tools/call` calls `ensure_provider`; explicit batch callers may use transactional `ensure_session` / `ensure_binding`.
 2. Existing slots in `Ready` / `Running` / `Pending` are **reused** — upstream MCP children are **not** respawned per list/call.
-3. Pin switch (`focus_session`) tears down slots for other `session_id`s.
+3. Pin switch (`focus_session`) tears down slots for other `session_id`s. In multi-tenant mode (`locus-mcp --http --multi-tenant`) this teardown is skipped, because one manager serves every tenant's sessions at once.
 4. Process exit / `Drop` tears down all remaining children.
 
 ### Optional idle timeout
