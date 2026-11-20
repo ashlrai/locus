@@ -101,10 +101,11 @@ locus pin acme              # seal session to binding "acme"
 locus whoami                # verify tenant + providers
 ```
 
-Control commands (init/quickstart/enter/pin/leave) require the operator
+Control commands (init/quickstart/enter/pin/switch/leave) require the operator
 control capability `LOCUS_CONTROL_CAPABILITY` (64 lowercase hex chars) in the
 shell env. `locus quickstart` / `locus init` mint and persist one when nothing
-exists; export it in new shells with `eval "$(locus hook zsh)"` (reads
+exists, but adopt it only for their own process: load it into this shell, and
+into every new shell, with `eval "$(locus hook zsh)"` (reads
 `$LOCUS_HOME/control_capability`, never echoes the value) or manage it
 yourself: `export LOCUS_CONTROL_CAPABILITY="$(openssl rand -hex 32)"`.
 `locus doctor` flags a missing, invalid, or mismatched capability with the
