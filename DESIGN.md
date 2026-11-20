@@ -146,7 +146,7 @@ JSON Schema (control-plane API / validation):
 version = 1
 default_binding = "acme"          # alias or id
 # Optional: allowlist of bindings this directory may pin to
-allowed_bindings = ["acme", "acme-readonly"]
+allowed_bindings = ["acme", "acme-ro"]
 # Optional: refuse to start agent without pin
 require_pin = true
 # Optional: inherit monorepo parent
@@ -245,7 +245,7 @@ There is **no** “if unsure, use personal account” path. Unbound = empty tool
   bindings/                   # one file per binding (or sqlite)
     personal.toml
     acme.toml
-    acme-readonly.toml
+    acme-ro.toml
   tenants/
     acme-corp.toml            # metadata, color, display name
   principals/
@@ -583,7 +583,7 @@ supervised authority broker:
 
 ```bash
 # Parent agent spawns helper with explicit pin — not ambient inheritance of wrong account
-locus run --binding acme-readonly -- claude -p "audit schema drift"
+locus run --binding acme-ro -- claude -p "audit schema drift"
 ```
 
 `locus run` creates a **child session** sealed to that binding, with its own workers, discarded on exit.
@@ -705,7 +705,7 @@ Shell prompt integration (optional):
 # .locus.toml committed to client repos (no secrets!)
 version = 1
 default_binding = "acme"
-allowed_bindings = ["acme", "acme-readonly"]
+allowed_bindings = ["acme", "acme-ro"]
 require_pin = true
 ```
 
@@ -725,9 +725,9 @@ Human phrases Locus should support as first-class:
 |--------|---------|
 | “Work on Acme” | `locus pin acme` |
 | “Switch to personal” | `locus pin personal` |
-| “Read-only Acme” | `locus pin acme-readonly` |
+| “Read-only Acme” | `locus pin acme-ro` |
 | “Who am I acting as?” | `locus whoami` / `locus_whoami` |
-| “Drop privileges” | `locus pin acme-readonly` or `locus leave` |
+| “Drop privileges” | `locus pin acme-ro` or `locus leave` |
 
 Agent-facing copy when wrong context suspected:
 
