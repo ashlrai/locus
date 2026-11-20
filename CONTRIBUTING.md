@@ -32,10 +32,12 @@ and others), and a human's PR passes the same gate. This path works for both:
    `apps/web/public/index.html` are stale. They are built from `AGENTS.md`;
    the README H1, tagline, `##` headings and "Install options" commands;
    every `docs/*.md` file and its H1-H3 headings; the `SECURITY.md` contact;
-   the version (`Cargo.toml`, `CHANGELOG.md`, `apps/web/package.json`); the
-   top-level `locus` subcommands; and the MCP control tool names. If you
-   touched any of these, run `node apps/web/discoverability.mjs` and commit
-   its output.
+   the version (`Cargo.toml`, `CHANGELOG.md`, `apps/web/package.json`) and
+   the published version (`scripts/freshness/published.json`); the top-level
+   `locus` subcommands; the MCP control tool names; and the `*.html` pages in
+   `apps/web/public`. If you touched any of these, run
+   `node apps/web/discoverability.mjs` and commit its output. The full map is
+   in [apps/web/README.md](./apps/web/README.md#agent-discoverability).
 6. Open the PR with the [template](./.github/PULL_REQUEST_TEMPLATE.md) and
    state which isolation property changes, or "none".
 
