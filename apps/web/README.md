@@ -84,15 +84,27 @@ Publish `apps/web/public` via Actions or a `gh-pages` branch that contains only 
 
 ## Agent discoverability
 
-`discoverability.mjs` generates the machine-readable surface under `public/`
-from the repo sources of truth (Cargo.toml version, CHANGELOG release date,
-README install blocks, docs/*.md headings, the clap `enum Commands` and the
-MCP `control_tools()` list):
+`discoverability.mjs` generates the machine-readable surface from the repo
+sources of truth:
+
+- the version: `Cargo.toml` `[workspace.package]`, which must match the newest
+  dated `CHANGELOG.md` release and `apps/web/package.json`
+- the published version in `scripts/freshness/published.json`, used for the
+  pinned install commands, `server.json`, JSON-LD, the eyebrow label and
+  `og.png`
+- `README.md`: its H1, the `**Your coding agent...**` tagline, the `##`
+  headings and the commands in the "Install options" fenced blocks
+- every `docs/*.md` file: its H1 title and its H2-H3 headings
+- `AGENTS.md`, the contact email in `SECURITY.md`, the top-level clap
+  `enum Commands` in `crates/locus-cli/src/main.rs`, the MCP `control_tools()`
+  names in `crates/locus-core/src/adapters/mod.rs`, and the `*.html` pages in
+  `public/`
 
 | File | Content |
 |------|---------|
-| `public/llms.txt` | H1 + tagline + link index over README and every docs page |
-| `public/llms-full.txt` | full heading tree of README and docs/*.md |
+| `public/llms.txt` | tagline, agent start (install, smoke, MCP wiring), then a link index over README, AGENTS.md and every docs page |
+| `public/llms-full.txt` | README `##` headings plus the H2-H3 heading tree of every docs/*.md |
+| `llms.txt`, `llms-full.txt` (repo root) | identical copies, so an agent that clones the repo finds the same indexes |
 | `public/sitemap.xml` | one `<url>` per page in `public/` under `https://locus.dev` |
 | `public/robots.txt` | allow-all plus `Sitemap:` |
 | `public/capabilities.json` | name/version/capabilities/install/commands/tools |
@@ -103,6 +115,10 @@ MCP `control_tools()` list):
 
 `index.html` also carries `<!-- disc:KEY -->` regions: the JSON-LD
 `SoftwareApplication` block and the eyebrow version label.
+
+CI Gate runs `node apps/web/discoverability.mjs --check` and
+`node --test apps/web` on every PR, so after changing any source above,
+regenerate and commit the output:
 
 ```bash
 cd apps/web
