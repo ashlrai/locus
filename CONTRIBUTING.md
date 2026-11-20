@@ -143,17 +143,21 @@ when changing platform-specific code or dependencies. If the minimum must rise,
 update the workspace declaration, installation documentation and npm fallback
 messages together. The Rust-version tests check those surfaces for agreement.
 
-Isolation and adapter behavior live primarily in `locus-core` unit tests. Prefer `LOCUS_HOME` for any local smoke tests so you do not touch `~/.locus`:
+Isolation and adapter behavior live primarily in `locus-core` unit tests. Prefer `LOCUS_HOME` for any local smoke tests so you do not touch `~/.locus`. From the repo root, this uses the debug binaries you just built rather than any installed `locus`:
 
 ```bash
-export LOCUS_HOME=/tmp/locus-dev
+cargo build --workspace
+export LOCUS_HOME=/tmp/locus-dev PATH="$PWD/target/debug:$PATH"
 locus init --with-samples
 eval "$(locus hook bash)"   # exports LOCUS_CONTROL_CAPABILITY, which pin needs
 locus pin personal
 locus whoami
 ```
 
-Run it in one shell. In a later shell, repeat the `export` and `eval` lines, then `locus enter personal`.
+Run it as one script in one shell: the pin's authority broker belongs to the
+shell that pinned and stops with it. In a later shell, from the repo root,
+repeat the `export` and `eval` lines, then `locus enter personal`. Only if
+enter is refused (expired pin, bad seal), run `locus leave --force` first.
 
 Docs checks (Node 18+, no dependencies):
 
