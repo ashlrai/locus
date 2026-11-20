@@ -39,8 +39,8 @@ Machine contract for **Phantom** (and similar orchestrators) to shell out to Loc
 | `LOCUS_HOME` | Store root (default `~/.locus`). Use a dedicated path in tests/CI. |
 | `LOCUS_SESSION_ID` | Optional. When set (e.g. after `locus ci mint`), locus resolves that sealed session instead of `sessions/active.json`. Echoed on agent report as `env_session_id` when present. |
 | `LOCUS_ENFORCE` | Opt-in pre-mutate / CI session gate for hub spawn sites. Wins over `config.locus.enforce` / `config.locus.firm` when set. See [Pre-mutate enforce](#pre-mutate-enforce-locus_enforce--configlocus) below. |
-| `LOCUS_CI_BINDING` / `LOCUS_BINDING` | Optional. When set, `runWithLocusSessionIfConfigured` mints an ephemeral pin (`ci mint`) for fleet/single-task paths instead of ambient `active.json`. |
-| `LOCUS_BIN` | Optional override for the `locus` binary path. |
+| `LOCUS_CI_BINDING` / `LOCUS_BINDING` | Optional. When set, `runWithLocusSessionIfConfigured` mints an ephemeral pin (`ci mint`) for fleet/single-task paths instead of ambient `active.json`. `LOCUS_CI_BINDING` wins over `LOCUS_BINDING`; an existing `LOCUS_SESSION_ID` is validated and reused instead of re-minting. With neither binding set, enforce mode throws and warn mode logs, then runs on the ambient env. |
+| `LOCUS_BIN` | Optional override for the `locus` binary path. Read once from `process.env` when the drop-in is imported, not from a per-call `env`. |
 | `LOCUS_NOTIFY` / `LOCUS_QUIET` | Prefer `0` / `1` in hub children (drop-in sets these on mint handles). |
 
 ```bash
@@ -352,7 +352,7 @@ Until a human pins, `locus-mcp` exposes **control tools only** (`locus_whoami`, 
 
 ```ts
 export const REQUIRED_SERVERS = ["locus", "phantom"] as const;
-// Also: (await locusAgentReport()).required_servers
+// Also: locusAgentReport().report?.required_servers (sync; report is null when the CLI is missing)
 ```
 
 | Server | Why |
@@ -504,7 +504,8 @@ contract); `classifyTenantAuthError` is the table above.
 the `locusCiMint` conventions (scrubbed spawn env, fail closed, never echo the
 token in errors). `locusMtPreflight` needs only global `fetch` (Node ≥ 18) —
 mode detection is sound both ways: with a tenant header the capabilities body
-carries `mode: "multi_tenant"` + `grant_id`; without one, only an MT server
+carries `mode: "multi_tenant"` (or `"swarm"`, reported as `multi_tenant`) +
+`grant_id`; without one, only an MT server
 answers `GET /mcp` with 401 `invalid_grant`.
 
 ---
