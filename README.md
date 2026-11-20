@@ -521,8 +521,11 @@ Roadmap and goals: [GOALS.md](./GOALS.md), [PLAN.md](./PLAN.md), [DESIGN.md](./D
 | 1 `locus-mcp`, credential resolve, adapters, scope freeze | done |
 | 2 Firm UX, doctor, run, graph, ci | done (0.1.1) |
 | 0.2 to 0.6 Dashboard, forensics, HTTP MCP, agent report, switch, registry | 0.6.2 released |
+| 3 Offboard an engagement as a unit (`locus offboard`) | released in 0.6.0 |
 | 3 SIEM NDJSON export | released in 0.7.0 |
-| 3 Remote binding graph sync, dual-control packs | planned |
+| 3 Shared remote binding graph, policy packs, authenticated dual-control authority | planned |
+
+`dual_control` policy rules already parse and fail closed: local approval labels never count, so matching calls stay blocked until an independent authority exists ([docs/policy.md](./docs/policy.md#dual-control)). The encrypted local graph share (`locus graph export|import`) shipped in phase 2.
 
 Agency kit: [examples/agency-starter](./examples/agency-starter/) and [docs/agency-starter.md](./docs/agency-starter.md). Recipes: [examples/recipes](./examples/recipes/).
 
