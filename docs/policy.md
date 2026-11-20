@@ -4,6 +4,22 @@ How Locus decides whether a tool call may proceed, and how humans grant (or deny
 
 Identity is resolved at the gate; policy is the second gate: **before** any adapter or upstream worker runs.
 
+For a provider tool call, the checks run in this order and the first refusal
+wins. None of them creates an approval record:
+
+1. Scope freeze: an undeclared provider or a mismatched account selector is an error.
+2. Closed adapter schema: undeclared arguments are rejected.
+3. `read_only` scope: a destructive tool on a provider pinned `read_only = true`
+   is refused with `denied_read_only_scope` (and hidden from `tools/list`).
+4. Session budget, only if `[budget]` is set in `config.toml`: see
+   [session budget caps](./session-budget.md) (`session_budget_exhausted`).
+5. Policy, below. Only this step can create a pending approval.
+
+`tools/list` shows the policy result in advance: a tool that would need approval
+gets `[requires human approval under current pin]` in its description, and a
+tool refused by an explicit rule gets `[denied by policy under current pin]`.
+A `default = "deny"` fallthrough is not marked.
+
 ## Binding policy surface
 
 ```toml
@@ -11,7 +27,7 @@ Identity is resolved at the gate; policy is the second gate: **before** any adap
 default = "allow"                 # allow | deny
 max_ttl = "8h"                    # hard cap on any pin (default 8h)
 default_ttl = "2h"                # optional: pin length when no --ttl is passed
-parallel_sessions = 4
+parallel_sessions = 4             # parsed, not enforced yet
 
 # Preferred: ordered structured rules (first match wins)
 [[binding.policy.rules]]
@@ -38,7 +54,16 @@ dual_control = []
 | `require_approval` | Legacy tool-name globs → fail-closed external authority gate |
 | `dual_control` | Legacy globs that require two externally authenticated identities |
 | `dual_control_all_approvals` | Every `require_approval` match (rule or legacy) needs two externally authenticated identities |
-| `default` | When nothing matches: `"allow"` or `"deny"`; any other value fails closed → deny and the binding refuses to load |
+| `default` | When nothing matches: `"allow"` (the default) or `"deny"`; any other value fails closed → deny and the binding refuses to load |
+| `max_ttl` | Cap on every pin; default `8h`. See [Session TTL](#session-ttl-auto-leave) |
+| `default_ttl` | Pin length when no `--ttl` is passed (min `1m`); capped by `max_ttl` |
+| `max_session_lifetime` | Opt-in bound for `locus renew` (`1m` to `30d`); unset disables renew |
+| `parallel_sessions` | Integer, default `4`. Parsed and stored, but no code path enforces it yet |
+
+`[binding.policy]` and each rule reject unknown keys, so a typo such as
+`require_approvals` makes the binding fail to load instead of silently dropping
+a gate. `default` and rule `action` values are compared trimmed and
+case-insensitively.
 
 ### Rule actions
 
@@ -190,6 +215,11 @@ Label default: `--as` → `LOCUS_PRINCIPAL` → `$USER`. These are caller-contro
 ### Dual-control
 
 Tools matching `action = "dual_control"`, legacy `dual_control` globs, or `require_approval` when `dual_control_all_approvals = true` need two distinct externally authenticated identities. Local labels never count, so authority remains `0/2`.
+
+Dual control is additive. Once a call is gated, any matching `dual_control`
+rule or glob makes it need two identities, even if that rule sits below the
+`require_approval` rule that matched first. It never overrides an earlier
+`allow` or `deny` rule: first match still decides whether the call is gated.
 
 ### Security notes
 

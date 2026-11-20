@@ -19,7 +19,7 @@ Either key can be used alone. A value of `0` is treated as unset (a zero budget 
 ## What happens at the cap
 
 - The call is refused with `{"error": "session_budget_exhausted", "detail": ..., "hint": ...}`. Nothing runs and no approval record is created.
-- The stop is sticky for that session, even if the cap is later raised. The session keeps its pin and seal. A human lifts the stop by pinning a new session (new sessions start a fresh count).
+- The stop is sticky for that session, even if the cap is later raised. The session keeps its pin and seal. A human lifts the stop by pinning a new session (new sessions start a fresh count), by deleting that session's counter file, or by removing every cap (with no positive `max_actions` or `max_minutes`, the check is skipped for all sessions).
 - One `budget.exhausted` entry is written to the audit log per stopped session.
 - Nothing is applied or undone automatically: no unpinning, no rollback, no credential change. The cap only refuses further calls.
 - If a cap is configured but the counter cannot be read or written, the call is refused (fail closed).
