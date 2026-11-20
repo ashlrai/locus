@@ -58,6 +58,15 @@ locus setup --client codex --print
 locus setup --client generic
 ```
 
+To write that entry instead of printing it, run `locus agent setup`. It merges the same control-only `locus-mcp` entry (with `LOCUS_AUTO_PIN=cwd` and `LOCUS_CLIENT`) into the client config and writes an agent guidance file. `--apply` needs the control capability. Preview first with `--dry-run`:
+
+```bash
+locus agent setup --dry-run --client claude
+locus agent setup --apply --client claude
+```
+
+`--client` takes `claude` (project `.mcp.json`), `cursor`, `codex`, `gemini` or `grok`. Without `--client` it sets up all five. For provider tools, use the supervised entry below instead.
+
 ## MCP config, provider tools
 
 Paste this when `locus` is on `PATH`. Launch the client from the shell that ran the hook and `locus enter`. Restart the client after a re-pin.
@@ -81,12 +90,6 @@ If the client CLIs are installed:
 ```bash
 claude mcp add locus -- locus mcp --supervised
 codex mcp add locus -- locus mcp --supervised
-```
-
-`locus agent setup --apply --client claude` writes that machine's client config. It needs the control capability. Use `--client cursor` or `--client codex` the same way. Add `--dry-run` to preview.
-
-```bash
-locus agent setup --dry-run --client claude
 ```
 
 ## Same shell, switch clients
