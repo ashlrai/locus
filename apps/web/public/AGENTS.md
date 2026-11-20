@@ -95,8 +95,12 @@ new shell, repeat the `export LOCUS_HOME=...` and `eval "$(locus hook bash)"`
 lines, then run `locus enter <alias>` (enter replaces a pin whose broker died);
 only if enter is refused (expired pin, bad seal), run `locus leave --force` first.
 
+From the repo root, this uses the debug binaries you just built rather than any
+installed `locus`:
+
 ```bash
-export LOCUS_HOME=/tmp/locus-agent-test
+cargo build --workspace
+export LOCUS_HOME=/tmp/locus-agent-test PATH="$PWD/target/debug:$PATH"
 locus init --with-samples
 eval "$(locus hook bash)"        # control commands need LOCUS_CONTROL_CAPABILITY
 locus pin personal
