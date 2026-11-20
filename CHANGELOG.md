@@ -63,6 +63,32 @@ binary change: three more `--json` commands now carry a `schema` id.
   [#990](https://github.com/ashlrai/locus/pull/990),
   [#991](https://github.com/ashlrai/locus/pull/991),
   [#992](https://github.com/ashlrai/locus/pull/992)).
+- Docs: `policy.md` lists the real `approve list|grant|wait` flags and the
+  `CI=true` banner rule; `workers.md` names the `LOCUS_WORKER_*` child env and
+  the `ProcessGuard` cleanup; `architecture.md` shows the real policy order and
+  that provider tools need a supervised launch; `mcp.md` lists the built-in
+  adapters, the supervised-launch rule, the HTTP pin steps and multi-tenant
+  mode ([#994](https://github.com/ashlrai/locus/pull/994),
+  [#996](https://github.com/ashlrai/locus/pull/996),
+  [#997](https://github.com/ashlrai/locus/pull/997),
+  [#999](https://github.com/ashlrai/locus/pull/999),
+  [#1000](https://github.com/ashlrai/locus/pull/1000)).
+- Docs: `firm-mode.md`, `DESIGN.md` and the workspace example use the
+  `acme-ro` binding name the samples ship, and the firm, agency, onboarding and
+  MCP pages now say `locus init` adopts the control capability only for its own
+  process, so each shell needs `eval "$(locus hook zsh)"` before `pin`,
+  `switch`, `workspace`, `setup`, `agent setup --apply` or `mcp mint`
+  ([#998](https://github.com/ashlrai/locus/pull/998),
+  [#1001](https://github.com/ashlrai/locus/pull/1001),
+  [#1002](https://github.com/ashlrai/locus/pull/1002),
+  [#1003](https://github.com/ashlrai/locus/pull/1003)).
+- Docs: the CONTRIBUTING smoke test builds first and puts `target/debug` on
+  `PATH`, explains the one-shell broker rule and the `leave --force` recovery,
+  and lists everything `apps/web/discoverability.mjs` reads; the README
+  development section names `scripts/fast-check.sh` and CI Gate
+  ([#1004](https://github.com/ashlrai/locus/pull/1004),
+  [#1005](https://github.com/ashlrai/locus/pull/1005),
+  [#1007](https://github.com/ashlrai/locus/pull/1007)).
 - The bug report form and issue chooser now point to the right place for
   setup help, and the PR template lists the checks to run
   ([#987](https://github.com/ashlrai/locus/pull/987),
