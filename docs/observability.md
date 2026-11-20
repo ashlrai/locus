@@ -27,10 +27,12 @@ Each line:
 The broker constructs its own audit records and timestamps. An executor capability can request only `session.exec`, `session.exec.delegated`, `session.run`, and `ci.run` records; it cannot write control-plane operations through the broker. When the broker is unavailable, the local fallback appends directly.
 
 ```bash
-locus events --last 50
+locus events                                       # last 50 (--last / --limit)
 locus events --last 100 --op scope_freeze --binding acme
-locus events --json
+locus events --json                                # JSON array
 ```
+
+`--op` matches an exact op or a substring. A filter that matches nothing prints a hint naming what the log does hold.
 
 ---
 
@@ -49,9 +51,9 @@ A **near miss** is an audit event that shows the identity plane stopped a wrong-
 "near_miss_count": 3
 ```
 
-Counted over the **last 24 hours**. Human doctor pane also prints the count; WARN findings still fire for recent scope_freeze / deny in the audit tail.
+Counted over the **last 24 hours**; events whose `ts` does not parse are left out. A non-zero count adds a `near_miss` WARN finding. Separately, `recent_scope_freeze` and `recent_deny` WARN findings fire for scope_freeze and deny events in the recent audit tail.
 
-Forensics packs embed a structured slice:
+Forensics packs embed a structured slice (filtered to `--binding` when given):
 
 ```json
 "near_miss": {
@@ -69,22 +71,25 @@ Forensics packs embed a structured slice:
 Shareable incident bundle for support / postmortems:
 
 ```bash
-locus forensics export
+locus forensics export                                 # writes ./pack.json
 locus forensics export --binding acme --out pack.json
-locus forensics export --binding acme --last 500 --json   # stdout when no --out
+locus forensics export --binding acme --last 500 --json   # full pack on stdout when no --out
 ```
+
+`--last` defaults to 200 events. With both `--json` and `--out`, the pack goes to the file and stdout gets a one-line summary (`path`, `pack_version`, `near_miss_count`, `audit_event_count`, `verdict`).
 
 Contents (no secrets):
 
 | Section | Contents |
 |---------|----------|
-| `pin` | Active session metadata (ids, tenant, seal_ok, frozen) |
+| `pack_version`, `locus_version`, `exported_at`, `home` | Pack metadata (`filter_binding` too when `--binding` is set) |
+| `pin` | Active session metadata (ids, tenant, principal, client, expiry, seal_ok, frozen, mode); absent when unpinned |
 | `bindings` | Summaries (alias, tenant, provider names) |
-| `audit_events` | Last N events (optional binding filter) |
-| `doctor` | Full doctor snapshot (SAFE/WARN/UNSAFE) |
-| `pending_approvals` | Approval ids, tools, args_digest, grants |
+| `audit_events`, `audit_event_count` | Last N events (optional binding filter); each `detail` is replaced by `{"redacted": true, "bytes": N}` |
+| `doctor` | Full doctor snapshot (SAFE/WARN/UNSAFE); its audit tail `detail` is redacted the same way |
+| `pending_approvals` | Approval ids, tools, args_digest, status, advisory grant counts |
 | `near_miss` | 24h near-miss counters |
-| `chain_tip` | SHA-256 of last event + optional seal HMAC |
+| `chain_tip` | Event count, SHA-256 of the last event, and its seal HMAC when the seal key is available |
 
 ```bash
 # Shape check in tests / CI
@@ -100,6 +105,8 @@ jq '{pack_version, near_miss, chain_tip, verdict: .doctor.verdict}' /tmp/pack.js
 (`2026-08-09T00:00:00Z`, any offset) or a bare date (`2026-08-09` = start of
 day UTC), inclusive. Events whose `ts` does not parse are dropped while a
 since filter is active; an unparseable bound is an error, not a silent skip.
+
+`--last` (default 200), `--op` and `--binding` filter the same way as `locus events`.
 
 ### JSON lines (default)
 
@@ -119,7 +126,7 @@ ticks):
 ```json
 {
   "schema": "locus.audit.v1",
-  "locus_version": "0.1.1",
+  "locus_version": "0.7.2",
   "exported_at": "2026-10-27T12:05:00Z",
   "ts": "2026-10-27T12:00:00Z",
   "op": "mcp.scope_freeze",
@@ -157,7 +164,7 @@ finished body must pass the same fail-closed secret scan as the webhook sink.
 ### OTLP-compatible logs JSON
 
 ```bash
-locus events export --otlp --last 200 --out otlp-logs.json
+locus events export --otlp --last 200 --out otlp-logs.json   # same as --format otlp
 ```
 
 Produces an OTLP **Logs** JSON body (`resourceLogs` → `scopeLogs` → `logRecords`) suitable for:
@@ -165,8 +172,15 @@ Produces an OTLP **Logs** JSON body (`resourceLogs` → `scopeLogs` → `logReco
 - OpenTelemetry Collector `otlphttp` receiver (POST body)
 - Offline inspection / conversion
 
-Attributes include `locus.op`, `locus.binding`, `service.name=locus`.  
-Scope freeze / require_approval map to severity **WARN** (13).
+Record attributes are `locus.op`, `locus.binding`, `locus.kind`, `service.name` (default `locus`; set with `--service-name`) and, when present, `locus.detail` (the detail JSON, clipped to 2048 bytes). The resource also carries `service.version`.
+
+Severity follows the op, and SIEM NDJSON uses the same mapping:
+
+| Op contains | Severity |
+|-------------|----------|
+| `scope_freeze`, `freeze`, `deny`, `require_approval` | **WARN** (13) |
+| `error`, `fail` | **ERROR** (17) |
+| anything else | **INFO** (9) |
 
 You can still pipe or POST yourself:
 
@@ -178,7 +192,7 @@ locus events export --otlp --last 100 | \
 
 ### Webhook sink (minimal SIEM / remote append)
 
-Optional HTTP(S) POST of the same redacted export body — team-tier primitive, not a full SIEM pipeline:
+Optional HTTP(S) POST of the same export body — team-tier primitive, not a full SIEM pipeline:
 
 ```bash
 # Explicit URL
@@ -194,12 +208,16 @@ locus events export --sink webhook --otlp --url http://127.0.0.1:4318/v1/logs
 
 | Behavior | Detail |
 |----------|--------|
-| Unset URL | **Fail soft** — prints skip message, exit 0 |
+| Unset URL | **Fail soft** — prints skip message to stderr, exit 0 |
 | Body secret scan | **Fail closed** — refuse POST if body matches token prefixes / secret field names |
-| Content-Type | `application/x-ndjson` (JSONL) or `application/json` (OTLP) |
-| Logs | Host only (`https://hooks.example.com`) — never full URL (query may hold tokens) |
+| URL scheme | `http://` or `https://` only |
+| Response | Any non-2xx status is an error; 15 s timeout |
+| Content-Type | `application/x-ndjson` (JSON lines, SIEM NDJSON) or `application/json` (OTLP) |
+| Headers | `X-Locus-Export: audit`, `User-Agent: locus/<version>` |
+| `--out` | Also writes the same body to a local file |
+| Logs | Scheme and host only (`https://hooks.example.com`) — never full URL (query may hold tokens) |
 
-Bodies are the same fleet-pulse / OTLP payloads as file export: ops, digests, aliases — never resolved credentials. Continuous chain-verified remote append remains a later team-tier item.
+Bodies are the same fleet-pulse / SIEM / OTLP payloads as file export: ops, digests, aliases — never resolved credentials. Pick `--format ndjson` when you want the extra detail redaction. Continuous chain-verified remote append remains a later team-tier item.
 
 ---
 
@@ -210,7 +228,7 @@ locus doctor
 locus doctor --json | jq '{verdict, near_miss_count, audit, pending_approvals}'
 ```
 
-Exit codes: SAFE=0, WARN=1, UNSAFE=2.
+Exit codes: SAFE=0, WARN=1, UNSAFE=2. A `WARN` whose findings are all setup advisories (such as `phantom_missing`) exits 0 while the report still says `WARN`; see [exit-codes.md](./exit-codes.md).
 
 MCP resource `locus://doctor` exposes the same JSON for agents (still no secrets).
 
