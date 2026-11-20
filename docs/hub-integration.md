@@ -154,11 +154,17 @@ Do not merge `process.env` wholesale into job children.
 ## CLI contracts (shell these out)
 
 Global flag: `--json` is available on most commands and is **required** for hub machine consumers.
-When a command run with the global `--json` fails, stderr carries one JSON line
-`{"ok": false, "error": "<message>"}` instead of the human `error:` line (same
-text, never secret values); stdout is unchanged and the exit code stays
-non-zero. Usage errors (unknown flag or subcommand, missing argument) take the
-same shape when `--json` appears before any `--`, and keep exit code 2.
+Most `--json` reports start with a `"schema": "locus.<name>.vN"` key (catalogue:
+[agent contract](agent-contract.md#json-schemas)); new fields are additive and
+keep the id.
+When a command run with the global `--json` fails, stderr carries one
+`locus.error.v1` line
+`{"schema": "locus.error.v1", "ok": false, "error": "<message>", "exit_code": N, "exit_code_name": "<name>"}`
+instead of the human `error:` line (same text, never secret values). The same
+document is printed on stdout unless the command already emitted its report,
+and the exit code stays non-zero. Usage errors (unknown flag or subcommand,
+missing argument) take the same shape when `--json` appears before any `--`,
+with `"exit_code": 2, "exit_code_name": "usage"`.
 
 ### Exit codes
 
@@ -171,34 +177,39 @@ same shape when `--json` appears before any `--`, and keep exit code 2.
 
 ### 1. `locus agent report --json`  ★ preferred hub entrypoint
 
-Single snapshot: pin + doctor + MCP registration probe + next commands.  
+Single snapshot: pin + doctor + MCP registration probe + next commands.
 Schema: [`schema/agent-report.schema.json`](../schema/agent-report.schema.json).
 
 ```bash
 locus agent report --json
-# also: locus agent report --json  (local flag) or locus --json agent report
+# also: locus --json agent report
 # exit: 0 ready | 1 protected | 2 unsafe
 ```
 
-**Stable top-level keys** (`AGENT_REPORT_JSON_KEYS`):
+**Required top-level keys** (`AGENT_REPORT_JSON_KEYS` in
+`crates/locus-core/src/agent_report.rs`): `version`, `ready`, `status`,
+`mcp_registered`, `doctor`, `commands`, `exit_code`, `status_oneline`, `home`,
+`required_servers`, `mcp_command`. The others below are omitted when empty.
 
 | Key | Type | Notes |
 |-----|------|--------|
+| `schema` | `"locus.agent.report.v1"` | First key (`locus.agent.doctor.v1` for `agent doctor`) |
 | `version` | string | CLI/crate version |
 | `ready` | bool | `true` only when `status=ready` |
 | `status` | `ready` \| `protected` \| `unsafe` | Hub gate |
 | `pin` | object \| omitted | Active pin slice when present |
-| `mcp_registered` | `{claude,cursor,codex}` | Whether server name `locus` is wired |
+| `mcp_registered` | `{claude, claude_scope?, cursor, codex, grok, gemini}` | Whether server name `locus` is wired per client; `claude_scope` is `project` \| `user` \| `local` \| `both` |
 | `doctor` | object | Full doctor report (see below) |
 | `commands` | object | Suggested next human commands |
+| `findings` | string[] | Agent-plane gaps; omitted when empty |
+| `next_steps` | string[] | Human next actions; omitted when empty |
+| `recovery` | string? | Human-only recovery command when a pin exists but can no longer be verified (dead broker, bad seal, expiry). Agents surface it; they cannot run it |
 | `exit_code` | 0 \| 1 \| 2 | Same as process exit |
-| `status_oneline` | string | Same as `locus status --oneline` |
+| `status_oneline` | string | Pin tokens of `locus status --oneline` |
 | `home` | path | Effective `LOCUS_HOME` |
 | `env_session_id` | string? | Present when `LOCUS_SESSION_ID` was set |
 | `required_servers` | `["locus","phantom"]` | **REQUIRED_SERVERS** |
 | `mcp_command` | `"locus-mcp"` | Multiplexor binary |
-| `findings` | string[] | Agent-plane gaps (optional empty) |
-| `next_steps` | string[] | Human next actions |
 
 **`status_oneline` tokens** (match `locus status --oneline`):
 
@@ -207,7 +218,14 @@ locus agent report --json
 - `frozen`
 - `invalid`
 
-**`pin` object** (when present): `alias`, `tenant`, `binding_id`, `expires_at`, `seal_ok`, `expired`, optional `principal` / `client`.
+(`locus status --oneline` also prints `require_pin` when unpinned inside a
+workspace whose `.locus.toml` sets `require_pin = true`; the agent report
+reports that case as `unpinned`.)
+
+**`pin` object** (when present): `alias`, `tenant`, `binding_id`, `expires_at`,
+`expires_in_secs`, `seal_ok`, `expired`, optional `authority_anchor_verified`
+(`false` with `seal_ok=true` means the authority check was skipped for lack of
+a control capability, not that it passed), optional `principal` / `client`.
 
 **`commands`**: at least `enter`, `whoami`; optional `pin`, `doctor`, `setup`.
 
@@ -225,7 +243,7 @@ Also available: `locus agent doctor` (same report, human-first default; honors `
 
 ### 2. `locus doctor --json`
 
-Full mission-control pane (also nested under agent report as `.doctor`).  
+Full mission-control pane (also nested under agent report as `.doctor`).
 Schema: [`schema/doctor.schema.json`](../schema/doctor.schema.json).
 
 ```bash
@@ -233,10 +251,12 @@ locus doctor --json
 # exit: 0 SAFE (or setup-advisory-only WARN) | 1 WARN | 2 UNSAFE
 ```
 
-Stable keys:  
-`version`, `home`, `seal_ok`, `bindings`, `runtime`, `approvals`, `pending_approvals`, `dual_control_waiting`, `phantom_on_path`, `unresolved_phm`, `autopin`, `workspace`, `audit`, `findings`, `issues`, `verdict`, `ok`.
+Stable keys (after `"schema": "locus.doctor.v1"` on the top-level CLI output):
+`version`, `home`, `seal_ok`, `bindings`, `runtime`, `approvals`, `pending_approvals`, `dual_control_waiting`, `phantom_on_path`, `unresolved_phm`, `autopin`, `workspace`, `audit`, `near_miss_count`, `near_miss`, `findings`, `issues`, `verdict`, `ok`.
 
-Optional when pinned: `pinned`, `pin`, `pin_seal_ok`.
+Optional when pinned: `pinned`, `pin`, `pin_seal_ok`. Present only when
+multi-tenant MCP grants exist: `mcp_multi_tenant` (values-free counts:
+`active_grants`, `expired_unswept`, `revoked_leftovers`, `grants_by_binding`).
 
 `unresolved_phm` contains structured `{ provider, source, code }` issues. Locator names and values are absent.
 
@@ -250,7 +270,11 @@ Active pin identity. **Errors if unpinned** (use `status` / `agent report` for u
 locus whoami --json
 ```
 
-Fields: `session_id`, `binding_alias`, `binding_id`, `tenant`, `principal?`, `providers[]`, `expires_at`, `worker_home`, `seal_ok`, `frozen`, `frozen_reason?`, `mode`, `namespaces?`.
+Fields (after `"schema": "locus.whoami.v1"`): `session_id`, `binding_alias`,
+`binding_id`, `tenant`, `principal?`, `providers[]`, `expires_at`,
+`expires_in_secs`, `worker_home`, `seal_ok`, `seal`, `authority`,
+`authority_anchor_ok`, `backing_type`, `backing_path`, `frozen`,
+`frozen_reason?`, `mode`, `namespaces?`.
 
 `providers[].credential` contains only `{ present, source }`; locator names and values are absent.
 
@@ -260,14 +284,23 @@ Fields: `session_id`, `binding_alias`, `binding_id`, `tenant`, `principal?`, `pr
 
 ```bash
 locus status --oneline
-# unpinned | alias:tenant | frozen | invalid
+# unpinned | require_pin | alias:tenant | frozen | invalid
 
 locus status --json
-# unpinned: { "pinned": false }
-# pinned:   { "pinned": true, "binding", "tenant", "session_id", "seal_ok",
-#             "frozen", "frozen_reason", "expired", "expires_at",
-#             "expires_in_secs", "mode", "namespaces" }
+# unpinned: { "schema": "locus.status.v1", "pinned": false, "require_pin" }
+# pinned:   { "schema": "locus.status.v1", "pinned": true, "binding", "tenant",
+#             "session_id", "seal_ok", "frozen", "frozen_reason", "expired",
+#             "require_pin", "mode", "namespaces", "authority_verified",
+#             "expires_at", "expires_in_secs", "ok", "error", "recovery" }
 ```
+
+`require_pin` is `true` when the current workspace's `.locus.toml` sets
+`require_pin = true`. When pinned, `ok` is true only for a sealed, usable,
+unfrozen, unexpired pin. `authority_verified` is `false` when the authority
+anchor could not be checked (no `LOCUS_CONTROL_CAPABILITY` in that shell);
+`ok` can still be true then, and `error` / `recovery` name the gap. When the
+pin is unusable, `error` says why and `recovery` (if set) is the command a
+human should run.
 
 `expires_at` is RFC 3339 UTC and `expires_in_secs` is clamped at 0 (the same
 field `locus enter --json` returns). Plain `locus status` prints the remaining
