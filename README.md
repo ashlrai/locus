@@ -495,16 +495,19 @@ Site: [locus.dev](https://locus.dev/) (same indexes at [/llms.txt](https://locus
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
+git fetch origin && bash scripts/fast-check.sh  # local merge gate: fmt, then clippy and tests for changed crates
 cargo test --workspace
 cargo build --release
 ./target/release/locus --help
 ```
 
 ```bash
-./scripts/e2e.sh
-./scripts/check-readme-quickstart.sh
-node scripts/check-readme-links.mjs
+./scripts/e2e.sh                       # end-to-end shell tests against target/release, in temp homes
+./scripts/check-readme-quickstart.sh   # replays "Get started" in a throwaway HOME
+node scripts/check-readme-links.mjs    # README links and anchors resolve
 ```
+
+The required PR check is CI Gate; [CONTRIBUTING.md](./CONTRIBUTING.md#contribute-with-an-agent) lists what it runs and the docs checks to run before pushing.
 
 Launch timing for [issue #170](https://github.com/ashlrai/locus/issues/170) is in [docs/exec-latency.md](./docs/exec-latency.md#comparing-launchers-for-issue-170). That page has the same-host procedure. The issue's timing report is not a guarantee about current releases.
 
