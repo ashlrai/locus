@@ -1,5 +1,5 @@
 # Commit this as .locus.toml at the root of a client repo.
 version = 1
 default_binding = "acme"
-allowed_bindings = ["acme", "acme-readonly"]
+allowed_bindings = ["acme", "acme-ro"]
 require_pin = true

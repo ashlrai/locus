@@ -101,7 +101,7 @@ Commit **`.locus.toml`** at the client repo root (no secrets):
 # examples/workspace.locus.toml
 version = 1
 default_binding = "acme"
-allowed_bindings = ["acme", "acme-readonly"]
+allowed_bindings = ["acme", "acme-ro"]
 require_pin = true
 ```
 
@@ -341,21 +341,21 @@ Never put service role keys in binding files. Never commit `.locus` seal keys or
 
 ## Operator checklist
 
-- [ ] One binding (or ro pair) per client tenant  
+- [ ] One binding (or ro pair) per client tenant
 - [ ] CredentialRefs only; namespaced by tenant
-- [ ] Client repos have `.locus.toml` with tight `allowed_bindings` + `require_pin`  
-- [ ] Prod/destructive globs on `require_approval` (+ `dual_control` for firm mode)  
-- [ ] Shell hook so pin is visible  
-- [ ] `locus whoami` before risky agent sessions  
-- [ ] `LOCUS_HOME` isolation for CI / test machines  
-- [ ] Offboard = binding + secrets + provider access  
+- [ ] Client repos have `.locus.toml` with tight `allowed_bindings` + `require_pin`
+- [ ] Prod/destructive globs on `require_approval` (+ `dual_control` for firm mode)
+- [ ] Shell hook so pin is visible
+- [ ] `locus whoami` before risky agent sessions
+- [ ] `LOCUS_HOME` isolation for CI / test machines
+- [ ] Offboard = binding + secrets + provider access
 
 ## Related
 
-- [agency-starter.md](./agency-starter.md) — copy-paste kit (personal ↔ A ↔ B + offboard)  
-- [../examples/agency-starter/](../examples/agency-starter/) — bindings + workspace templates  
-- [architecture.md](./architecture.md) — system diagram  
-- [mcp.md](./mcp.md) — wire agents  
-- [../examples/](../examples/) — sample binding + workspace  
-- [../SECURITY.md](../SECURITY.md) — threat summary  
-- [../DESIGN.md](../DESIGN.md) — full model  
+- [agency-starter.md](./agency-starter.md) — copy-paste kit (personal ↔ A ↔ B + offboard)
+- [../examples/agency-starter/](../examples/agency-starter/) — bindings + workspace templates
+- [architecture.md](./architecture.md) — system diagram
+- [mcp.md](./mcp.md) — wire agents
+- [../examples/](../examples/) — sample binding + workspace
+- [../SECURITY.md](../SECURITY.md) — threat summary
+- [../DESIGN.md](../DESIGN.md) — full model
