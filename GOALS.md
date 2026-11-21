@@ -22,7 +22,8 @@ Related: [PLAN.md](./PLAN.md) (phased roadmap) · [DESIGN.md](./DESIGN.md) (arch
 | **AI-native** | Agents get whoami/status/report/resources/prompts; they cannot pin; setup wires MCP in one command. |
 | **Hub-native** | Phantom (and peers) shell out to `agent report` / `ci mint`; REQUIRED_SERVERS = locus + phantom only. |
 
-Sibling: [Phantom](https://phm.dev) answers *can this secret enter the model?*  
+Siblings: [Phantom](https://phm.dev) is the agent workbench whose fleet gates jobs on Locus.
+[Phantom Secrets](https://phm.dev/secrets) answers *can this secret enter the model?*  
 Locus answers *as whom, against which tenant, right now?*
 
 ---
@@ -44,7 +45,7 @@ Northstar: wrong-account impossible · AI-native · hub-native
 ├─ 4. Hub composition
 │     agent-report contract · integrations/phantom · REQUIRED_SERVERS · doctor check
 │
-└─ 5. Verification plane (partial)
+└─ 5. Verification plane (mostly done)
       claim verify stubs · continuous whoami in CI · isolation pack · audit SIEM · bounty
 ```
 
@@ -74,7 +75,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] `pin` / `leave` / `whoami` / `status` / `exec`
 - [x] Ambient identity scrub + private GH/AWS worker dirs
 - [x] Scope freeze on account selectors (adapters)
-- [x] CredentialRefs: `phm:` / `env:` / `test:` (test-gated)
+- [x] CredentialRefs: `phm:` / `env:` / `test:` (test-gated). Since v0.5.1, `phm:` refs are kept but fail closed until a scoped bridge exists ([credential compatibility](./docs/credential-compatibility.md))
 - [x] Policy allow/deny/require_approval
 - [x] Workspace `.locus.toml` allowlist
 - [x] Isolation tests (INV surface)
@@ -102,7 +103,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Control-capability onboarding + posture — `init`/`quickstart` mint + persist `LOCUS_CONTROL_CAPABILITY` (0600; opt-out `--no-persist-capability`), `locus capability status|persist|unpersist`, shell hook export, doctor findings incl. INFO `control_capability_persisted` (never escalates the verdict); the agent boundary stays the MCP surface, not the CLI (SECURITY.md § Control-plane authority boundary)
 - [x] `quickstart` + shell hook frozen/require_pin UX
 - [x] `scripts/dogfood.sh` — quickstart → agent setup → report → doctor → forensics → verify session → Hub smoke; `DOGFOOD READY` only when every required probe is green
-- [x] Automated multi-client install probe — `scripts/dogfood-clients.sh` detects Claude Code / Cursor / Continue paths (macOS+Linux), dry-runs `locus agent setup` for found supported clients, soft-skips missing; optional `DOGFOOD_CLIENTS=1` step in `dogfood.sh`; `LOCUS_DOGFOOD_REQUIRE_CLIENTS=1` hard-fails when none found or setup fails
+- [x] Automated multi-client install probe — `scripts/dogfood-clients.sh` detects Claude Code / Cursor / Grok Build / Continue paths (macOS+Linux; Continue is detect-only), dry-runs `locus agent setup` for found supported clients, soft-skips missing; optional `DOGFOOD_CLIENTS=1` step in `dogfood.sh`; `LOCUS_DOGFOOD_REQUIRE_CLIENTS=1` hard-fails when none found or setup fails
 - [x] Multi-account dogfood operator path — `docs/dogfood-multi-account.md` + `scripts/dogfood-multi-account.sh` walks personal+client pins (enter → doctor/verify → agent report ready → leave) without requiring both IDEs; soft-skip missing aliases; `LOCUS_DOGFOOD_REQUIRE_MULTI=1` hard-fails
 - [x] Dual-IDE dogfood matrix (no secrets) — `scripts/dogfood-dual-ide.sh` dry-runs setup per found client (claude/cursor), validates MCP config path contains `locus` without printing values, optional multi-account walk when personal+client aliases set, prints matrix (found / locus_reg / multi_account); soft-skip missing; `LOCUS_DOGFOOD_REQUIRE_DUAL=1` hard-fails
 - [ ] Dogfood: agent report `ready` on real Claude Code + Cursor installs (personal + client) — dual-IDE matrix + multi-account scripts landed; **live dual-IDE UI** (both apps open, catalogs reload) still operator-manual
@@ -133,7 +134,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [ ] Always-on firm-mode enforce by default (still **off** unless `locus.firm` / `locus.enforce` / `LOCUS_ENFORCE` set — #258 lands opt-in firm profile; #277 soft-warns only; do not flip monorepo default until pin is guaranteed on all hub paths)
 - [x] Broader CI/job runners: `runWithLocusSessionIfConfigured` on swarm (#241), `runTask` (#252), simple-conductor (#256), `runBestOfN` (#257) — other raw daemon tick paths (if any) still open
 
-### M5 — Verification plane · **partial / in progress**
+### M5 — Verification plane · **mostly done**
 
 - [x] Architecture: [docs/verification-plane.md](./docs/verification-plane.md) (proposal → verify → act; confidence; tool grounding)
 - [x] `locus verify claim --text "…"` → `{ claim, confidence, needs_tool, suggestion, signals, grounding? }` (heuristics: numbers/URLs/versions/currency/percentages/absolute language)
@@ -143,7 +144,7 @@ Checkboxes are the machine-readable surface for `locus goal status`.
 - [x] Dogfood: `scripts/dogfood.sh` runs `verify session --json`; hard-requires `session_ok` when claiming DOGFOOD READY
 - [x] Doctor optional WARN `ungrounded_claims` when audit tail has many low-confidence patterns
 - [x] Conformance pack in CI: `.github/workflows/conformance.yml` — `invariants` + `locus-mcp` tests + `hub-smoke` + `e2e` (high timeout)
-- [x] Fail-closed sandboxed workers: `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox` requires macOS Seatbelt, denies authority state and inbound network, and refuses unsupported backends
+- [x] Fail-closed sandboxed workers: `LOCUS_WORKER_SANDBOX=1` / `upstream.sandbox` requires Seatbelt on macOS (fail closed if missing), denies authority state and inbound network, and fails closed on platforms with no backend (Linux backends below)
 - [x] Continuous whoami / `watch` in long agent sessions as first-class hub heartbeat (`locus watch` each tick runs `verify_session`; NDJSON `kind=watch` + `--require-ok` fail-closed)
 - [x] Audit export → SIEM / remote append — **minimal webhook sink** (`locus events export --sink webhook` / `LOCUS_AUDIT_WEBHOOK_URL`; redacted JSONL/OTLP POST; fail soft when unset; secret-scan fail closed). Full team-tier continuous append + chain verify still open
 - [x] Adapter registry v0: `adapters/manifest.toml` schema (`schema/adapter-manifest.schema.json`) + parse/list/verify in `locus-core` + `locus adapter list|verify` (+ `--require-signed` fail-closed; HMAC mock trust keys in tests; built-in catalog ships unsigned). Full plugin load + production trust store still open — see [docs/adapter-sdk.md](./docs/adapter-sdk.md)#signed-registry-roadmap
@@ -169,9 +170,12 @@ locus goal status
 # Hub readiness (machine)
 locus agent report --json   # exit 0 only when ready
 
-# Isolation smoke (dev)
-export LOCUS_HOME=/tmp/locus-goal-loop
-locus init --with-samples && locus enter personal && locus doctor
+# Isolation smoke (dev; one shell, so the pin's broker stays alive)
+cargo build --workspace
+export LOCUS_HOME=/tmp/locus-goal-loop PATH="$PWD/target/debug:$PATH"
+locus init --with-samples
+eval "$(locus hook bash)"   # exports LOCUS_CONTROL_CAPABILITY for enter
+locus enter personal && locus doctor
 ```
 
 ---
