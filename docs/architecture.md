@@ -66,15 +66,23 @@ Store root: `~/.locus/` (override with `LOCUS_HOME`).
 ~/.locus/
   config.toml
   daemon.key             # seal key (0600)
+  control_capability     # operator capability that `locus hook` exports (0600)
   bindings/*.toml
   workspaces/*.toml      # workspace templates for graph share
-  sessions/active.json
+  sessions/active.json   # plus run-*.json / ci-*.json temporary pins
+  runtime/authority.json # current authority broker endpoint
   approvals/<id>.json
   workers/<session>/…
   audit/events.jsonl
   engagements/  archives/
   trust/adapter-keys.toml
+  budgets/  mcp-grants/  backups/  credential-audit.key
 ```
+
+The last line appears only when used: `budgets/` with a `[budget]` block in
+`config.toml`, `mcp-grants/` after `locus mcp mint`, `backups/` after
+`locus doctor --fix --apply`, and `credential-audit.key` when the
+[credential audit](./credential-audit.md) is on.
 
 ## Pin path
 
@@ -91,6 +99,10 @@ locus pin acme
       │     agents cannot pin
       │     scope freeze: wrong project_ref / team_id → deny
       │
+      ├─► locus exec -- <cmd>  /  locus exec --for gh|vercel|supabase|aws
+      │     isolated child env with only the pinned binding's env: credentials
+      │     (--for: only the routed provider; see cli-routing.md)
+      │
       └─► locus exec --no-resolve -- <cmd>  (manual identity diagnostics)
             scrub ambient AWS_PROFILE / GH_TOKEN / SUPABASE_* / …
             validate binding identity + scope fingerprint
@@ -105,12 +117,17 @@ locus pin acme
 1. Valid session seal?           else DENY
 2. Tool provider ∈ binding?      else DENY
 3. Scope allowlist / freeze?     else DENY
-4. Policy rules, then legacy     first matching rule, then require_approval /
+4. Closed adapter schema?        undeclared arguments → DENY
+5. read_only scope?              destructive tool → DENY (denied_read_only_scope)
+6. Session budget left?          only with [budget]; else session_budget_exhausted
+7. Policy rules, then legacy     first matching rule, then require_approval /
    globs                         dual_control globs → ALLOW, DENY, or block for
                                  approval (local labels are advisory only)
-5. policy.default                ALLOW or DENY (unrecognized → DENY)
-6. Audit meta (no secret values)
+8. policy.default                ALLOW or DENY (unrecognized → DENY)
+9. Audit meta (no secret values)
 ```
+
+Only step 7 can create a pending approval. Detail: [policy.md](./policy.md).
 
 Unbound = empty provider surface (control tools only). No “fall back to personal.”
 
