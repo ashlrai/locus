@@ -121,6 +121,30 @@ binary change: three more `--json` commands now carry a `schema` id.
     `credential-compatibility.md` and `CLAUDE.md` say `phm:` has failed closed
     since v0.5.1; the onboarding page says `engagement init` writes a
     placeholder binding template.
+  - `observability.md` says a bare `forensics export` writes `./pack.json`,
+    lists every pack key, shows audit `detail` redacted to
+    `{"redacted": true, "bytes": N}`, and covers the OTLP severity mapping,
+    webhook rules and advisory WARN exit 0.
+  - `peers.md` covers the mode env vars, the `-32602` `initialize` refusal,
+    the `peer_operation_refused` envelope, catalog visibility and metadata
+    caps.
+  - `hub-integration.md` documents the `locus.error.v1` envelope, the full
+    agent report, `whoami` and `status` fields, and the TypeScript helpers as
+    `integrations/phantom/locus.ts` ships them (`required_servers` sits under
+    `.report`). Its manual validation loads the hook before `pin`.
+  - `copy-paste.md` lists `locus agent setup` with the print-only entries,
+    since it writes the control-only `locus-mcp` entry, and points to the
+    supervised entry for provider tools.
+  - `verification-plane.md` shows the schema stamps on the JSON examples, the
+    `watch.tick` and `mcp.verify_session` audit ops, and the shipped HTTP
+    multi-tenant mode.
+  - `PHANTOM-USAGE.md` says `--strict-creds` also applies to `locus ci run`
+    and that `child_env` accepts `*_API_BASE` names.
+  - The `AGENTS.md` safe local smoke builds first and puts `target/debug` on
+    `PATH`, as CONTRIBUTING does.
+  - The README lists `locus offboard` (released in 0.6.0) in the phase table
+    and `locus serve --swarm <graph.json>` in the command list; the planned
+    row now names authenticated dual-control authority, which is not shipped.
 
 ### Fixed
 
