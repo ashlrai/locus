@@ -135,23 +135,25 @@ locus doctor
 locus doctor --json
 ```
 
-Reports (mission-control JSON):
+Reports (`locus.doctor.v1` JSON, plus the shared `ashlr.doctor` wrapper described in [ashlr-handshake.md](./ashlr-handshake.md)):
 
 1. `home`, `seal_ok`, `bindings`
 2. Active `pin` (alias, tenant, expires, seal) + `pin_seal_ok`
 3. `runtime` (`verify_runtime` drift)
-4. `pending_approvals` + `dual_control_waiting`
+4. `approvals` health, `pending_approvals` + `dual_control_waiting`
 5. `phantom_on_path` + `unresolved_phm`
 6. `autopin` (`config.toml` / remote rules / `clients.auto_pin`)
 7. `workspace` (found path, allowlist, `require_pin`)
-8. `audit` (last 5 ops, recent `scope_freeze` / deny counts)
-9. `verdict`: **SAFE** (exit 0) · **WARN** (1, or 0 when every finding is setup advice such as missing phantom) · **UNSAFE** (2)
+8. `audit` (last 5 ops, recent `scope_freeze` / deny counts) + `near_miss_count` / `near_miss` (last 24h)
+9. `mcp_multi_tenant` (only when MCP grants exist)
+10. `findings` (code + severity), `issues` (same messages, flat), `ok` (true only when SAFE)
+11. `verdict`: **SAFE** (exit 0) · **WARN** (1, or 0 when every finding is setup advice: `approvals_missing`, `phantom_missing`, `control_capability_not_exported`, `executor_authority_unavailable`) · **UNSAFE** (2)
 
 | Verdict | When |
 |---------|------|
-| SAFE | No findings |
-| WARN | Unresolved phm, missing phantom, pending approvals, require_pin unmet, recent freeze/deny, bad autopin |
-| UNSAFE | Invalid seal, binding/tenant drift, corrupt/unwritable approvals, missing seal key |
+| SAFE | No WARN or UNSAFE findings (info notes are allowed) |
+| WARN | Unresolved phm, missing phantom, missing approvals dir, pending or dual-control-waiting approvals, require_pin unmet, pin outside the workspace allowlist, recent freeze/deny or near-miss, bad autopin, expired / expiring / wedged pin, authority anchor unavailable, no bindings |
+| UNSAFE | Invalid pin seal, binding / tenant / provider drift, frozen session, unreadable binding file, invalid workspace policy, corrupt/unwritable approvals, approved-looking records without authenticated authority, incomplete credential migration, missing seal key |
 
 ## Events
 
@@ -165,19 +167,22 @@ Append-only JSONL under `$LOCUS_HOME/audit/events.jsonl`. Never contains resolve
 
 ## Offboarding
 
-1. `locus leave` — no live pin to that alias  
-2. `locus binding rm client-a` (+ ro pair)  
-3. Rotate/revoke the client credentials in the secret store and providers
-4. Remove org/team/project invites  
-5. Strip client repo `.locus.toml` if custody ends  
-6. Export audit: `locus events --binding client-a --last 10000 --json`  
+1. Export audit first: `locus events --binding client-a --last 10000 --json`
+2. `locus offboard client-a` — read-only `locus.plan.v1` plan of every local record the alias owns
+3. `locus offboard client-a --apply` (+ `client-a-ro`) — drops the pin if active, removes the binding, approvals, sealed sessions, MCP grants and pin history; audit events stay. A single binding file can also go with `locus binding rm <alias> --yes`
+4. Rotate/revoke the client credentials in the secret store and providers
+5. Remove org/team/project invites
+6. Strip client repo `.locus.toml` if custody ends (offboard never touches it)
 7. Confirm with `locus doctor` / `locus binding list`
+
+Full checklist: [firm-mode.md](./firm-mode.md#offboard-a-client-checklist).
 
 ## Multi-client dogfood probe
 
-After wiring Claude Code / Cursor (and optionally Continue), run
+After wiring Claude Code / Cursor / Grok Build, run
 `scripts/dogfood-clients.sh` to detect common macOS/Linux config paths and
-dry-run `locus agent setup --client <x>` for each found supported client.
+dry-run `locus agent setup --client <x>` for each found supported client
+(Continue is detected only; there is no `--client continue` yet).
 Missing installs soft-skip (exit 0 + summary); set
 `LOCUS_DOGFOOD_REQUIRE_CLIENTS=1` only when you expect clients on the host.
 Optional soft step from the main dogfood path: `DOGFOOD_CLIENTS=1 scripts/dogfood.sh`.
