@@ -206,9 +206,13 @@ The before binary is parent commit `96c4a67`. The after binary is this
 change. Both were measured in that harness on this machine, in separate
 fresh homes.
 
-`LOCUS_EXEC_TRACE=1` prints phase timings on stderr (`locus_exec_phase`).
-It is off by default. Those runs are not the harness median: piping stderr
-drops the cost of writing the human banner to a terminal.
+`LOCUS_EXEC_TRACE=1` prints phase timings on stderr, one
+`locus_exec_phase <name> <ms>` line per phase, then `locus_exec_phase total
+<ms>` after the `audit` mark. It is off by default. The check is presence
+only, so any value (even `0` or empty) turns it on. Only the pinned operator
+path is marked; a delegated exact-session exec prints no phases. Those runs
+are not the harness median: piping stderr drops the cost of writing the
+human banner to a terminal.
 
 ## Harness medians
 
@@ -294,28 +298,41 @@ In the table above `audit` was the largest remaining phase — almost all of
 it the `fsync` (`~0.8ms` on that Linux host; `~4.6ms` on an Apple-silicon
 Mac, where it was ~40% of the traced total). The post-child audit record
 now goes to the authority broker over the same authenticated, bounded
-request channel already used for `Validate` and `GrantExecutor`: the broker
-appends the pre-sanitized line to `audit/events.jsonl` under its own home,
-answers, then `fsync`s on its own thread. The exec process waits only for
-the append acknowledgement — one extra broker round trip (~0.2–1ms) instead
-of a synchronous flush — and the file offset/lock ordering are unchanged.
-The broker rejects lines that are empty, contain a newline, or do not parse
-as a JSON object, so a malformed record cannot corrupt the log. If the
-broker cannot serve the append, the caller falls back to the original
-direct write + `fsync`; audit durability never depends on the broker being
-reachable. Preflight checks are untouched: seal, authority validate, drift
-compare and the executor grant all still gate the child.
+request channel already used for `Validate` and `GrantExecutor`. The client
+sends structured fields only (`op`, `binding`, `detail`), never a raw line:
+the broker stamps the timestamp, sanitizes the detail, builds the record
+and appends it to `audit/events.jsonl` under its own home. It sends the
+acknowledgement first and calls `fsync` after the response, so the exec
+process waits only for the append — one extra broker round trip (~0.2–1ms)
+instead of a synchronous flush. The append and its audit-file lock wait run
+with the broker's state lock released, so a slow audit write does not stall
+other authority requests. The broker refuses an empty `op` or `binding`.
+A request made with an executor credential may only record
+`session.exec`, `session.exec.delegated`, `session.run` or `ci.run`, and
+that record carries `"source":"executor"`. If the broker refuses or cannot
+serve the append, the caller falls back to the original direct write +
+`fsync` with the same record shape; audit durability never depends on the
+broker being reachable. Preflight checks are untouched: seal, authority
+validate, drift compare and the executor grant all still gate the child.
 
 Coverage: `Store::audit` keeps the direct path for non-hot call sites and
 is the fallback; `Store::audit_via_broker` is used at the post-child audit
 points in `exec`, `run`, `ci run` and the delegated exec path.
 `store::tests::audit_via_broker_falls_back_to_direct_write_without_a_broker`
-covers the fallback; the `exec_exit_codes`/`exec_for`/`mcp_supervised`
-integration tests cover the live broker append, including the executor
-credential path.
+covers the fallback, and
+`authority_anchor::tests::broker_builds_audit_records_and_marks_or_rejects_executor_ones`
+covers the record shape, the executor op list and the empty-field refusal.
+The `exec_exit_codes`/`exec_for`/`mcp_supervised` integration tests cover
+the live broker append, including the executor credential path.
 
 `crates/locus-cli/tests/exec_startup_budget.rs` gates the regression:
 median overhead `median(exec) − median(--version) − median(direct true)`
 must stay under 30ms, and the traced `audit` phase under 4ms. It is an
 ignored release benchmark like `exec_perf::exec_startup_ceiling`; run it on
-an idle host with `LOCUS_EXEC_BENCH_BIN` pointing at a release binary.
+an idle host against a release binary (never a debug build):
+
+```bash
+cargo build --release -p locus-cli
+LOCUS_EXEC_BENCH_BIN="$PWD/target/release/locus" \
+  cargo test -p locus-cli --test integration exec_startup_budget -- --ignored --nocapture
+```
