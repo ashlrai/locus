@@ -1,6 +1,6 @@
 # Credential compatibility
 
-This source checkout uses `env:VAR` for supported credential resolution. A binding stores only the variable name; a trusted operator supplies its value outside agent context before supervised execution. Locus scrubs ambient identity and injects only the pinned binding’s named provider keys. Never put values into binding files, agent prompts, or logs.
+Locus resolves credentials only from `env:VAR` references. A binding stores only the variable name; a trusted operator supplies its value outside agent context before supervised execution. Locus scrubs ambient identity and injects only the pinned binding’s named provider keys. Never put values into binding files, agent prompts, or logs.
 
 For example, a GitHub binding can contain this pointer:
 
@@ -16,13 +16,13 @@ Supply the named variable through your operator-controlled environment. Review t
 
 ## Phantom Secrets references
 
-`phm:NAME` remains a valid stored reference for metadata, migration and a future integration. It does not currently resolve a usable credential. Resolution returns an unsupported-integration error before invoking Phantom, and credential-resolving CLI launches fail before child or session effects. Doctor reports the same fixed issue code even when Phantom is installed or the referenced name exists. Credential-free metadata and `--no-resolve` operations retain their existing rules.
+`phm:NAME` remains a valid stored reference for metadata, migration and a future integration. It does not currently resolve a usable credential. Resolution returns an unsupported-integration error before invoking Phantom. Credential-resolving CLI launches (`locus exec`, `locus run`, `locus ci run`) fail before child or session effects, and a credential-resolving MCP upstream worker refuses to launch. Doctor reports the fixed issue code `unsupported-integration` even when Phantom is installed or the referenced name exists. Credential-free metadata and `--no-resolve` operations retain their existing rules.
 
 Secrets v0.7.9 protects `reveal` with a trusted-terminal boundary. The legacy Locus adapter’s `phantom reveal --yes NAME` call is incompatible with that release. Do not bypass the boundary, capture reveal output, or substitute Secrets `env`/`unwrap` commands: those commands generate env examples and undo package wrappers, respectively.
 
-A supported integration needs a separately reviewed, tenant-scoped, value-blind execution contract. Installation, stored reference presence, and a readable Secrets configuration do not establish that contract or grant execution authority. No bridge or runtime is activated by this change.
+A supported integration needs a separately reviewed, tenant-scoped, value-blind execution contract. Installation, stored reference presence, and a readable Secrets configuration do not establish that contract or grant execution authority. Locus ships no such bridge or runtime.
 
-The v0.5.2 source tag already contains this fail-closed correction. Published Locus v0.5.0 contains the legacy adapter; this behavior is not newly introduced by the 0.6.0 release. Existing `phm:` bindings are preserved for owner review rather than automatically rewritten.
+Every release tag from v0.5.1 onward fails closed on `phm:` resolution. v0.5.0 and earlier contain the legacy `phantom reveal` adapter. Existing `phm:` bindings are preserved for owner review rather than automatically rewritten.
 
 ## Configuration validation
 

@@ -103,4 +103,4 @@ Clients → data plane (locus-mcp / exec)
 
 ## Sibling product
 
-[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) protects credentials. Locus retains `phm:NAME` references but cannot resolve them until a supported scoped bridge exists. Use explicit `env:VAR` references supplied outside agent context; never capture trusted-terminal reveal output. This source change is unreleased; see [credential compatibility](./docs/credential-compatibility.md).
+[Phantom Secrets](https://github.com/ashlrai/phantom-secrets) protects credentials. Locus retains `phm:NAME` references but cannot resolve them until a supported scoped bridge exists; releases since v0.5.1 fail closed. Use explicit `env:VAR` references supplied outside agent context; never capture trusted-terminal reveal output. See [credential compatibility](./docs/credential-compatibility.md).
