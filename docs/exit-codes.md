@@ -22,11 +22,21 @@ new code and name.
 <!-- exit-codes:end -->
 
 The named outcomes 3–6 are reserved for command paths that identify these
-conditions specifically. Existing generic command errors continue to return
-1, and check commands continue to use 0/1/2. In particular, `unsafe` and
-`usage` share code 2: check commands print their report before exiting, while
-under `--json`, usage errors print a `locus.error.v1` envelope on stdout and
-stderr with `exit_code_name: "usage"`.
+conditions specifically. No command emits them yet: today every command error,
+including a policy refusal or a missing pin, exits 1 (`failure`), and check
+commands use 0/1/2. Do not branch on 3–6 until a release note says a command
+returns them.
+
+`unsafe` and `usage` share code 2. Check commands print their report before
+exiting 2. A usage error is a clap parse failure (unknown flag or subcommand,
+bad or missing value) or `--dry-run` on a command that cannot plan; under
+`--json` it prints a `locus.error.v1` envelope with `exit_code_name: "usage"`.
+
+Under `--json` (given before any `--`; after it the flag belongs to the
+child), every failing command prints the same `locus.error.v1` envelope
+(`schema`, `ok: false`, `error`, `exit_code`, `exit_code_name`) on stderr. It
+also prints it on stdout unless the command already wrote its stdout report,
+so stdout never holds two documents. `--help` and `--version` are not errors.
 
 `doctor` exits 0 on a `WARN` whose findings are all setup advisories, such as
 `phantom_missing`; any other `WARN` exits 1. The report still says `WARN`. See
@@ -34,4 +44,6 @@ the [agent contract](./agent-contract.md#exit-codes) for the full list.
 
 `exec`, `run`, `ci run`, and `mcp --supervised` pass through the child status
 when it starts (`128 + signal` when killed by a signal). Codes 126 and 127
-indicate that the child could not be started.
+indicate that the child could not be started (127: not found; 126: found but
+not executable, such as a directory or a file without the execute bit). Any
+other spawn failure exits 1.
