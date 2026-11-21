@@ -260,6 +260,14 @@ multi-tenant MCP grants exist: `mcp_multi_tenant` (values-free counts:
 
 `unresolved_phm` contains structured `{ provider, source, code }` issues. Locator names and values are absent.
 
+The top-level `locus doctor --json` output also carries the shared
+`ashlr.doctor` v1 wrapper keys: `kind` (`"ashlr.doctor"`), `schema_version`
+(`1`), `tool` (`"locus"`), `status` (`ok` \| `warn` \| `fail`), `native_status`
+(the Locus verdict) and `checks[]` (one `{ id, status, summary }` per finding).
+The wrapper never changes the exit code; field rules are in
+[the handshake doc](ashlr-handshake.md). The `.doctor` object nested in the
+agent report is the plain report without these keys.
+
 ---
 
 ### 3. `locus whoami --json`
@@ -348,6 +356,14 @@ locus agent setup --client all --apply
 
 Until a human pins, `locus-mcp` exposes **control tools only** (`locus_whoami`, `locus_status`, `locus_list_bindings`, `locus_request_pin`, …). No ambient personal fallthrough.
 
+A pin alone does not add provider tools to the entry above. A `locus-mcp`
+spawned directly by a client never receives an executor capability, so even
+with a valid pin it adds only `locus_providers`. To serve the pinned binding's
+provider tools, register `{ "command": "locus", "args": ["mcp", "--supervised"] }`
+and launch it from an environment that holds `LOCUS_CONTROL_CAPABILITY` and a
+live pin, or run the work under `locus exec`, `locus run` or `locus ci run`.
+See [Provider tools need a supervised launch](./mcp.md#provider-tools-need-a-supervised-launch).
+
 ### REQUIRED_SERVERS recommendation
 
 ```ts
@@ -357,7 +373,7 @@ export const REQUIRED_SERVERS = ["locus", "phantom"] as const;
 
 | Server | Why |
 |--------|-----|
-| `locus` | Identity plane + pinned provider tools only |
+| `locus` | Identity plane; the pinned binding's provider tools only under a supervised launch |
 | `phantom` | Secret vault; private credential references resolve outside the model |
 
 ---
