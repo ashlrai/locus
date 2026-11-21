@@ -27,6 +27,7 @@ crates/locus-core/src/adapters/
   anthropic.rs
   openai.rs
   cli.rs          # native CLI routing helpers (not a provider adapter)
+  model_api_tests.rs  # shared Anthropic/OpenAI freeze tests (cfg(test))
 ```
 
 Registration is a match arm in `adapter_for()`:
@@ -56,6 +57,17 @@ pub fn adapter_for(provider: &str) -> Option<Box<dyn ProviderAdapter>> {
 pub trait ProviderAdapter: Send + Sync {
     fn name(&self) -> &'static str;
 
+    // Optional native CLI routing (defaults shown; see cli-routing.md).
+    fn cli_name(&self) -> Option<&'static str> { None }
+    fn cli_required_credentials(&self) -> &'static [&'static str] {
+        crate::credential::inject_keys_for_provider(self.name())
+    }
+    fn configure_cli_env(
+        &self,
+        _provider: &ProviderBinding,
+        _vars: &mut BTreeMap<String, String>,
+    ) {}
+
     fn tools(
         &self,
         provider: &ProviderBinding,
@@ -72,6 +84,8 @@ pub trait ProviderAdapter: Send + Sync {
 }
 ```
 
+Only `name`, `tools` and `call` are required. Override `cli_name` (e.g. GitHub returns `gh`, AWS returns `aws`) to allow single-provider native CLI routing; `cli_required_credentials` lists the keys that must be nonempty before a routed CLI starts, and `configure_cli_env` adds provider defaults (AWS disables instance metadata and sets the frozen region). See [cli-routing.md](./cli-routing.md).
+
 `AdapterTool` fields:
 
 | Field | Purpose |
@@ -80,7 +94,7 @@ pub trait ProviderAdapter: Send + Sync {
 | `description` | Model-facing; **include frozen scope** so the agent sees the fence |
 | `input_schema` | JSON Schema object for arguments |
 | `provider` | Provider id string |
-| `destructive` | Hint for policy / UX; still enforce with `require_approval` globs |
+| `destructive` | Hidden from tools/list and denied at the call gate when the provider scope is `read_only = true`; also gate it with `require_approval` globs |
 
 ## Scope freeze (required)
 
@@ -98,21 +112,25 @@ let project_ref = freeze_string_arg(args, "project_ref", frozen)?;
 | Provider | Typical frozen knobs |
 |----------|----------------------|
 | Supabase | `project_ref`, `read_only` |
-| GitHub | `orgs[]`, `repos[]` |
-| Vercel | `team_id`, projects, env (preview/prod) |
+| GitHub | `orgs[]`, `repos[]` allowlists (empty = unrestricted; `*` and `owner/*` wildcards) |
+| Vercel | `team_id` (also the `team` key), `env` targets (preview/prod); `projects` reported |
+| Cloudflare | `account_id`; `zones` (from `projects` or `extra.zones`) reported |
+| AWS | `account_id`, plus `profile` and `region` from scope `extra`; `role_arn` reported |
+| Resend | `domain` must be in the `domains` allowlist (`projects` or `extra.domains`) |
+| Stripe | `account_id`, `livemode` (boolean, from scope `extra`) |
 | Anthropic | `account_id` (org id), `project_ref` (workspace id), `read_only` — per-tenant model-API spend isolation; aliases `org`/`org_id`/`organization`/`workspace`/`workspace_id` (+ camelCase) are freeze-netted |
 | OpenAI | `account_id` (org id), `project_ref` (project id), `read_only` — per-tenant model-API spend isolation; aliases `org`/`org_id`/`organization`/`project`/`project_id` (+ camelCase) are freeze-netted |
-| Cloudflare (future) | `account_id`, zones |
-| AWS (future) | account / region / role |
 
 **Rule:** if the binding freezes a selector, model-supplied mismatch → **error**, not warn.
+
+Before any adapter runs, the gate also freezes `project_ref`, `team_id` and `account_id` (plus provider-native and camelCase alias spellings, at any depth in the args), the org allowlist and `livemode` for every provider. Re-check your selectors in `call()` anyway.
 
 ## Tool naming and dispatch
 
 - Tools must be prefixed with the provider name: `supabase.table.delete`.
-- `call_tool` in `mod.rs` routes by the first segment before `.`.
-- Policy runs **before** adapter `call` (deny / require_approval / allow).
-- Destructive stubs should require `confirm: true` when matched by `require_approval` globs (e.g. `*.delete*`).
+- `call_tool` in `mod.rs` routes by the first segment before `.`; a prefix that is not a provider in the pinned binding is denied.
+- The gate runs **before** adapter `call`, in this order: scope freeze, closed schema (`additionalProperties: false` rejects undeclared args; `confirm` and `approval_id` are always accepted), `read_only` scope vs `destructive`, session budget, then policy (deny / require_approval / allow). See [policy.md](./policy.md).
+- `require_approval` (e.g. `*.delete*`) blocks the call and records a pending approval. Local `locus approve grant` records are advisory, and no external approval verifier ships yet, so approval-gated provider calls stay blocked even with `confirm: true`.
 
 ## What not to do
 
@@ -129,11 +147,11 @@ let project_ref = freeze_string_arg(args, "project_ref", frozen)?;
    - `myprovider.scope` — identity dump of frozen knobs (no secrets)
    - optional health/whoami-style tools
 4. **Implement** `call` with freeze on every selector.
-5. **Register** in `adapter_for` and `mod myprovider`.
+5. **Register** in `adapter_for`, `known_providers()` (the `known_providers_all_dispatch` test keeps them in sync) and `mod myprovider`.
 6. **Tests** in `adapters/mod.rs` or the new module:
    - freeze rejects wrong selector
    - happy path returns frozen scope
-   - policy blocks a destructive tool without `confirm`
+   - a destructive tool is denied under `read_only = true` and blocked by a `require_approval` glob
 7. **Docs**: one row in the matrix below; binding example if user-facing.
 8. **Credential confinement**: provider credentials may resolve into isolated `locus exec`, `locus run`, and `locus ci run` children by default. Use their shared `--no-resolve` mode for identity-only diagnostics; it rejects recipe-expanded resolving upstreams before effects. CI `mint/env --resolve` additionally requires `LOCUS_CI_ALLOW_SECRETS=1`. Never return credentials through MCP results or logs.
 
@@ -145,11 +163,11 @@ use crate::binding::{Binding, ProviderBinding};
 use crate::error::Result;
 use serde_json::{json, Value};
 
-pub struct CloudflareAdapter;
+pub struct MyproviderAdapter;
 
-impl ProviderAdapter for CloudflareAdapter {
+impl ProviderAdapter for MyproviderAdapter {
     fn name(&self) -> &'static str {
-        "cloudflare"
+        "myprovider"
     }
 
     fn tools(&self, provider: &ProviderBinding, binding: &Binding) -> Vec<AdapterTool> {
@@ -159,9 +177,9 @@ impl ProviderAdapter for CloudflareAdapter {
             .as_deref()
             .unwrap_or("<unset>");
         vec![AdapterTool {
-            name: "cloudflare.scope".into(),
+            name: "myprovider.scope".into(),
             description: format!(
-                "Frozen Cloudflare scope for `{}` / `{}`: account_id={account}",
+                "Frozen myprovider scope for `{}` / `{}`: account_id={account}",
                 binding.tenant, binding.alias
             ),
             input_schema: json!({
@@ -171,7 +189,7 @@ impl ProviderAdapter for CloudflareAdapter {
                 },
                 "additionalProperties": false
             }),
-            provider: "cloudflare".into(),
+            provider: "myprovider".into(),
             destructive: false,
         }]
     }
@@ -186,10 +204,10 @@ impl ProviderAdapter for CloudflareAdapter {
         let frozen = provider.scope.account_id.as_deref();
         let account_id = freeze_string_arg(args, "account_id", frozen)?;
         match tool {
-            "cloudflare.scope" => Ok(ToolCallResult {
+            "myprovider.scope" => Ok(ToolCallResult {
                 ok: true,
                 content: json!({
-                    "provider": "cloudflare",
+                    "provider": "myprovider",
                     "account": provider.account,
                     "account_id": account_id,
                     "tenant": binding.tenant,
@@ -222,7 +240,7 @@ Never put raw secrets in binding files — only CredentialRefs (`phm:` or `env:`
 | Now | Later (roadmap) |
 |-----|-----------------|
 | Synthetic tools with local freeze; upstream MCP stdio workers from recipes (`adapters/recipes.toml`, `locus upstream list`, [workers.md](./workers.md)) | REST workers |
-| In-tree `ProviderAdapter`; catalog parse + verify (`locus adapter`) | Optional out-of-tree adapter packages / dynamic load |
+| In-tree `ProviderAdapter`; catalog parse + verify (`locus adapter`); signed community adapters as isolated MCP workers ([below](#community-adapter-marketplace)) | Dynamic in-process adapter loading |
 | Policy `allow` / `deny` / `require_approval` / `dual_control`, approval CLI and session TTL ([policy.md](./policy.md)) | Elevation TTL |
 
 Prefer **wrapping** official upstream MCP servers with frozen env over reimplementing APIs — see DESIGN §8.3 and [workers.md](./workers.md).
