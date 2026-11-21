@@ -43,7 +43,7 @@ description = "Acme client engagement"
 [binding.policy]
 default = "allow"
 max_ttl = "8h"
-parallel_sessions = 4
+parallel_sessions = 4             # parsed, not enforced yet (docs/policy.md)
 # Structured rules (first match wins) — see docs/policy.md
 [[binding.policy.rules]]
 match = "*.delete*"
@@ -202,7 +202,9 @@ locus enter acme
 
 # Engagement ends
 locus engagement close acme --archive
-# → checklist: rotate Phantom secrets, revoke GH/Vercel/Supabase access
+# → leaves the pin if acme is active, marks the engagement closed, prints a
+#   checklist: rotate tenant credentials, revoke GH/Vercel/Supabase access,
+#   strip .locus.toml. Keeps the binding file (`locus offboard` removes it).
 # Does NOT delete vault secrets (Phantom owns those)
 ```
 
@@ -299,9 +301,13 @@ When engagement ends, remove the **unit** of access — not one token at a time 
 
 ```bash
 locus engagement close acme --archive
+# leaves the active pin if it is on acme
 # archives audit slice → ~/.locus/archives/acme-YYYYMMDD.jsonl
-# marks ~/.locus/engagements/acme.json closed_at
+# marks ~/.locus/engagements/acme.json closed_at (binding file is kept)
 ```
+
+Like `pin`, both engagement commands need the control capability the shell
+hook exports.
 
 Then remove the client's local records with `locus offboard` — it prints a
 `locus.plan.v1` plan by default and only mutates with `--apply`:
