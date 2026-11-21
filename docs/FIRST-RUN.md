@@ -112,15 +112,15 @@ Every listed `inputSchema` had `additionalProperties` false. Description text is
 
 ## Follow-ups
 
-Tracked as issues:
+Tracked as issues. The titles describe the 0.5.1 run; each note says what the current code and docs show, per `CHANGELOG.md`. Check the issue itself for its open or closed state.
 
-- [Dead-broker recovery hint names leave --force before enter](https://github.com/ashlrai/locus/issues/166)
-- [cargo install --git fails on rustc 1.83: declare rust-version](https://github.com/ashlrai/locus/issues/167)
-- [cargo install compiles locus-core twice](https://github.com/ashlrai/locus/issues/168)
-- [Shell installer for the release archive (one command without npm or Rust)](https://github.com/ashlrai/locus/issues/169)
-- [locus exec is 3 to 5x slower than direnv exec and sops exec-env](https://github.com/ashlrai/locus/issues/170)
-- [--dry-run missing on most mutating commands](https://github.com/ashlrai/locus/issues/171)
-- [doctor exits 1 right after a fresh quickstart](https://github.com/ashlrai/locus/issues/172)
-- [whoami credential.present is true while the env var is unset](https://github.com/ashlrai/locus/issues/173)
-- [Sample exec prints three unset-variable warnings on the happy path](https://github.com/ashlrai/locus/issues/174)
-- [binding add is not an idempotent no-op when the file matches](https://github.com/ashlrai/locus/issues/175)
+- [Dead-broker recovery hint names leave --force before enter](https://github.com/ashlrai/locus/issues/166): the current hint says `locus enter` first, and `leave --force` only if enter is refused ([broker recovery](broker-recovery-q8.md)).
+- [cargo install --git fails on rustc 1.83: declare rust-version](https://github.com/ashlrai/locus/issues/167): the workspace declares `rust-version = "1.89"` and every install path names it ([MSRV](MSRV.md)).
+- [cargo install compiles locus-core twice](https://github.com/ashlrai/locus/issues/168): still being investigated; how to reproduce it is in [CONTRIBUTING](../CONTRIBUTING.md#investigating-repeated-compilation-during-install).
+- [Shell installer for the release archive (one command without npm or Rust)](https://github.com/ashlrai/locus/issues/169): the checkout has `scripts/install.sh`, but release assets for every version and platform are not guaranteed ([README](../README.md#proposed-shell-installer)).
+- [locus exec is 3 to 5x slower than direnv exec and sops exec-env](https://github.com/ashlrai/locus/issues/170): the reproduction, phase timings and later changes are in [exec latency](exec-latency.md).
+- [--dry-run missing on most mutating commands](https://github.com/ashlrai/locus/issues/171): `--dry-run` is now a global flag ([dry-run matrix](dry-run-matrix-q8.md)).
+- [doctor exits 1 right after a fresh quickstart](https://github.com/ashlrai/locus/issues/172): a `WARN` made only of setup advice now exits 0 (see above).
+- [whoami credential.present is true while the env var is unset](https://github.com/ashlrai/locus/issues/173): presence now reports whether the reference resolves (see above).
+- [Sample exec prints three unset-variable warnings on the happy path](https://github.com/ashlrai/locus/issues/174): no change is recorded in the changelog, and this was not re-measured here.
+- [binding add is not an idempotent no-op when the file matches](https://github.com/ashlrai/locus/issues/175): re-adding an equivalent binding now exits 0 and writes nothing (`already matches; nothing written`).
