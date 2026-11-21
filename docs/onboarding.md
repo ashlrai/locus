@@ -2,7 +2,9 @@
 
 > `locus onboard` previews metadata hints, guides
 > explicit tenant/ref/scope input, saves a refs-only plan, and can provision the
-> current directory after operator consent. It never pins, resolves credentials,
+> current directory after operator consent. It accepts `env:VAR` credential
+> refs only (`phm:` refs are refused) and refuses to overwrite an existing
+> binding that differs from the plan. It never pins, resolves credentials,
 > or runs a live isolation demo. `--yes --json` applies only an already reviewed
 > saved plan; it never accepts detected candidates automatically.
 >
@@ -45,7 +47,8 @@ eval "$(locus hook zsh)"    # or: bash | fish
 ```
 
 Control commands (`init` / `quickstart` / `enter` / `pin` / `switch` /
-`leave`, plus `workspace`, `setup`, `agent setup --apply` and `mcp mint` below)
+`leave`, plus `onboard` (except `--detect-only` and `--dry-run`), `workspace`,
+`setup`, `agent setup --apply` and `mcp mint` / `list` / `revoke` below)
 require that capability; `locus-mcp` deliberately runs without it — agents
 never hold control authority. `locus doctor` names the exact fix if it is
 missing, invalid, or mismatched.
