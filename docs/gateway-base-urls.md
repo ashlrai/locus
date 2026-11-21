@@ -1,13 +1,13 @@
 # Model gateways and base URLs (audit note)
 
-> Update: an opt-in `[gateway]` config block now passes a validated base URL to the `locus exec` child. See [gateway-base-url.md](gateway-base-url.md). The default behaviour described below is unchanged.
+> Update: an opt-in `[gateway]` config block now passes a validated base URL to every child built from the isolated environment: `locus exec` (including routed `exec --for`), `locus run`, `locus ci run` and MCP stdio provider workers, but not `locus ci env` exports. See [gateway-base-url.md](gateway-base-url.md). The default behaviour described below is unchanged.
 
 This note describes the default environment and options for pointing an agent at a model gateway, such as a local LiteLLM proxy or a Phantom route.
 
 ## Findings
-- **Locus makes no model-provider calls.** The opt-in gateway and inherited-environment settings can pass validated base URLs to an exec child. Its HTTP surfaces are its own loopback servers (`locus serve` on 127.0.0.1, the MCP HTTP mode).
+- **Locus makes no model-provider calls.** The opt-in gateway and inherited-environment settings can pass validated base URLs to an isolated child. Its HTTP surfaces are its own loopback servers (`locus serve` on 127.0.0.1, the MCP HTTP mode).
 - **Locus injects credentials, not endpoints.** `inject_keys_for_provider` (`crates/locus-core/src/credential.rs`) maps a provider to the key environment variable that receives the resolved secret, for example `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`. The separate opt-in gateway configuration can set base URL variables.
-- **`locus exec` drops unknown variables.** `crates/locus-core/src/isolation.rs` rebuilds the child environment from a small runtime allowlist (`PATH`, `LANG`, `TERM`, `COLORTERM`, `NO_COLOR`, `TMPDIR`, `TMP`, `TEMP`, Windows basics and `LC_*`). Its comment states that identity, provider, cloud, proxy and application variables are excluded. A variable such as `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` or `HTTPS_PROXY` exported in the parent shell therefore does not reach an agent started through `locus exec`.
+- **`locus exec` drops unknown variables.** `crates/locus-core/src/isolation.rs` rebuilds the child environment from a small runtime allowlist (`PATH`, `LANG`, `TERM`, `COLORTERM`, `NO_COLOR`, `TMPDIR`, `TMP`, `TEMP`, Windows basics and `LC_*`). Its comment states that identity, provider, cloud, proxy and application variables are excluded. A variable such as `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` or `HTTPS_PROXY` exported in the parent shell therefore does not reach an agent started through `locus exec`. The same isolated environment is used for `locus run`, `locus ci run` and MCP stdio workers, and both opt-ins below apply to all of them.
 - The audit webhook is separate from the child gateway settings.
 
 ## What this means for a gateway
