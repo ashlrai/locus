@@ -73,4 +73,6 @@ When a script or agent must act as one account, add `--expect`:
 locus exec --expect acme -- gh pr create
 ```
 
-If `acme` is not the pinned binding (another alias is pinned, nothing is pinned, or the pin is frozen), Locus exits 1 before the command starts and prints which alias is pinned and `locus enter acme`. The message names aliases only, never credential references. It only refuses; it never pins or resolves anything for you.
+If `acme` is not the pinned binding (another alias is pinned, or nothing is pinned), Locus exits 1 with `pin_mismatch` before the command starts. The message says which alias is pinned, if any, and `Run: locus enter acme`. If `acme` is not a known binding, it also lists the known aliases and suggests the nearest one. It names aliases only, never credential references. It only refuses; it never pins or resolves anything for you.
+
+`--expect` only compares aliases. A pin that fails its seal or broker check is refused with that authority error, and `--expect` does not run. A drifted pin whose alias matches passes `--expect` and is then refused by the drift check. Either way the child does not start.
