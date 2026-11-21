@@ -32,7 +32,10 @@ cleaned up after the child exits. Ambient credentials, profile variables,
 credential reference names, `[exec] inherit_env` additions, and Locus control
 or executor capabilities are not passed to the child. Other providers' frozen
 scope variables are also omitted. An unrelated unavailable credential does
-not block the selected route. Child exit codes are preserved, and audit records
+not block the selected route. Two opt-in config blocks still apply: an
+enabled [`[gateway]`](gateway-base-url.md) base URL reaches the child, and a
+gateway block that fails validation (or a `[credential_audit]` issue) counts
+as a credential failure, so the route refuses. Child exit codes are preserved, and audit records
 identify the routed provider without recording resolved credential values.
 
 ## AWS credential bundle
