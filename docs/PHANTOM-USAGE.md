@@ -33,12 +33,13 @@ phantom exec -- locus exec -- my-agent
 
 Rules (`crates/locus-core/src/inherit_env.rs`):
 - **Exact names only.** A name must match `[A-Za-z_][A-Za-z0-9_]*`, at most 64 bytes, at most 32 names. Globs and patterns (`ANTHROPIC_*`) are refused. Names starting with `LOCUS_`, and `HOME`, `USERPROFILE`, `GH_CONFIG_DIR`, `AWS_CONFIG_FILE` and `AWS_SHARED_CREDENTIALS_FILE`, are refused too. An invalid list inherits nothing.
-- **Key-shaped names cross only as `phm_` placeholders.** A name containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `AUTH`, `PRIVATE` or `COOKIE` (any case) is inherited only when its value is a `phm_` placeholder. A real key under such a name is refused.
+- **Key-shaped names cross only as `phm_` placeholders.** A name containing `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL`, `AUTH`, `PRIVATE` or `COOKIE` (any case) is inherited only when its value is a `phm_` placeholder: `phm_` followed by 1 to 256 characters of `[A-Za-z0-9_-]`. A real key under such a name is refused.
 - **Other names are checked too, as a best effort.** A value that starts like a well-known key (for example `sk-`, `ghp_`, `github_pat_`, `xoxb-` or `AKIA`) is refused, and so is a URL with a user name or password. This is not a complete secret scanner, so list only variables you know.
+- **Values with control characters are refused.** A value containing a NUL, newline or carriage return never crosses, whatever its name.
 - **Base URLs follow the `[gateway]` rules.** A `*_BASE_URL` or `*_API_BASE` value must be `https`, or `http` only to `127.0.0.1` or `[::1]`. Any other host needs an exact `host:port` in `[gateway] allowed_hosts`. The Phantom proxy URL is loopback http, so it passes.
 - **Locus's own values win.** An inherited value never overwrites a variable Locus sets, the `[gateway]` URL, or a credential injected from the binding.
-- **Refusals carry no names or values.** A refused name is reported as a credential issue with `source=inherit_env` and a closed code (`inherit-env-invalid`, `inherit-env-secret-refused`, `inherit-env-base-url-refused`, `inherit-env-userinfo-refused`, `inherit-env-value-refused`). Under strict credential mode the run stops.
-- It applies to the `locus exec` child environment only, not to `locus ci env` exports.
+- **Refusals carry no names or values.** A refused variable is left out of the child environment and reported as a credential issue with `source=inherit_env` and a closed code (`inherit-env-invalid`, `inherit-env-secret-refused`, `inherit-env-base-url-refused`, `inherit-env-userinfo-refused`, `inherit-env-value-refused`). With `--strict-creds` on `locus exec` or `locus run`, any refusal stops the run before the child starts; without it, the child starts without the refused variables. An MCP stdio worker that resolves credentials refuses to launch.
+- **Where it applies.** Every child Locus builds from the pinned binding's isolated environment: `locus exec`, `locus run`, `locus ci run`, and the `locus mcp --supervised` server and its MCP stdio workers. It does not apply to `locus exec --for <cli>` routes, which ignore `inherit_env` even for `phm_` placeholders ([cli-routing.md](cli-routing.md)), or to `locus ci env` exports.
 
 Because the Phantom proxy URL changes every session, this route passes it through from the `phantom exec` session instead of writing it into `[gateway] base_url`.
 
@@ -63,7 +64,13 @@ For Locus, the LiteLLM proxy is what `[gateway] base_url` points at, for example
 
 ## What is tested
 
-The `[gateway]` rules and the child environment are covered by tests in `crates/locus-core/tests/gateway_base_url.rs`, and `[exec] inherit_env` by `crates/locus-core/tests/inherit_env.rs` and the unit tests in `inherit_env.rs`. The default-path pin in `crates/locus-core/tests/isolation.rs` is unchanged. This page was written by reading the source and the linked docs. The `phantom exec` combinations above and a live LiteLLM proxy were not run for it.
+- `crates/locus-core/tests/gateway_base_url.rs`: the `[gateway]` rules and the child environment.
+- `crates/locus-core/tests/inherit_env.rs` and the unit tests in `inherit_env.rs`: `[exec] inherit_env`.
+- `crates/locus-core/tests/litellm_compat.rs`: a hermetic LiteLLM check. A fake LiteLLM-shaped proxy listens on `127.0.0.1` with no network access. `[gateway]` points `OPENAI_BASE_URL` at it, and `inherit_env` passes a `phm_` `OPENAI_API_KEY`. A real child process started with exactly the isolated environment calls `/v1/chat/completions`. The test asserts that the request reaches the proxy and that only the placeholder key does; canary keys, an OAuth token and a real `OPENAI_API_KEY` never arrive.
+- `crates/locus-cli/tests/exec_for.rs`: `locus exec --for` routes ignore `inherit_env`.
+- The default-path pin in `crates/locus-core/tests/isolation.rs` is unchanged.
+
+This page was written by reading the source and the linked docs. The `phantom exec` combinations above and a real LiteLLM release were not run for it.
 
 ## Guard your agent's identity
 
