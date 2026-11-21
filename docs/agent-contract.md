@@ -25,7 +25,9 @@ With `--json`, the commands below print one JSON object whose first key is
 - The rest of the object is the command's existing payload. Older fields such
   as `schema_version`, `kind` and `version` stay for older readers.
 - No document carries a secret, a control-capability value or a credential.
-  `locus status`, `locus watch`, and `locus fleet-feed` print one line; the others are pretty JSON.
+  `locus status`, `locus watch`, `locus verify session`, `locus verify claim`,
+  `locus version`, `locus capability status`, `locus notify status` and the
+  four `fleet-*` commands print one line; the others are pretty JSON.
 - MCP tool payloads and the dashboard `/api/*` responses are not stamped.
 
 | Command | Schema |
@@ -61,8 +63,9 @@ With `--json`, the commands below print one JSON object whose first key is
 | `locus --ashlr-handshake` | `locus.ashlr.handshake.v1` |
 
 List commands (`binding list`, `events`, `approve list`, `mcp list`,
-`graph list`, `upstream list`) print a bare JSON array, unchanged, and are not
-stamped: wrapping them would break existing readers.
+`graph list`, `adapter list`, `upstream list`, `upstream suggest`) print a
+bare JSON array, unchanged, and are not stamped: wrapping them would break
+existing readers.
 
 Use the same commands with `--json` for scripts. `setup --print --json` and
 `setup --client generic --json` use the setup schema too; the nested client
@@ -221,7 +224,7 @@ then "nothing to do", still exit 0.
   still prompts; agents and CI have no terminal on stdin, or pass `--json`
   or `LOCUS_NON_INTERACTIVE=1`);
 - `--json` is not set;
-- `LOCUS_NON_INTERACTIVE` is unset (or `0`).
+- `LOCUS_NON_INTERACTIVE` is unset, empty or `0`.
 
 Otherwise a missing value fails closed with the flag to pass (exit 1),
 confirmations take their safe default (`adapter uninstall` without `--yes`
