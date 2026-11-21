@@ -13,7 +13,11 @@ cargo +1.89.0 check --workspace --all-targets --locked
 ```
 
 This check covers the host platform and locked dependencies, not every target
-platform. Rust 1.83 cannot parse the locked `idna_adapter` dependency's 2024
+platform. CI's `msrv (rustc 1.89)` job runs a narrower
+`cargo +1.89.0 check --workspace --locked` (no `--all-targets`) on Linux, on
+the daily schedule and on manual dispatch only. It is not a required check, so
+a pull request can merge without it; run the command above yourself when you
+change Rust code or dependencies. Rust 1.83 cannot parse the locked `idna_adapter` dependency's 2024
 edition; Cargo 1.85 through 1.88 can parse it but reject the declared minimum.
 
 If your compiler is older, install and select a supported toolchain with rustup:
@@ -27,3 +31,6 @@ cargo --version
 
 Alternatively, use `cargo +1.89.0` after installing that toolchain. A checkout's
 `rust-toolchain.toml` can select a toolchain independently of your default.
+This repository's `rust-toolchain.toml` selects `stable` (with rustfmt and
+clippy), so plain `cargo` inside the checkout uses current stable, not 1.89.
+Use `cargo +1.89.0` (or `RUSTUP_TOOLCHAIN=1.89.0`) to test the minimum.
