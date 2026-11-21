@@ -98,8 +98,15 @@ locus binding show globex
 ```
 
 Alternative for client tenants: `locus engagement init globex --tenant
-globex-corp --workspace` creates the binding (phm: stub only) plus a
-workspace file and `.locus/README.md` in one step.
+globex-corp --workspace` writes a template binding, a `.locus.toml` (default
+and only allowed binding `globex`, `require_pin`) and `.locus/README.md` in one
+step. The template is a starting point, not a working binding: its Supabase,
+GitHub and Vercel entries use `phm:` credential refs, which fail closed at
+resolution today, and its Supabase project ref and Vercel team id are
+`*_replace_me` placeholders. Replace the refs with `env:VAR` and the
+placeholders with real IDs before `locus enter globex`. The template also
+gates deletes, drops and production deploys behind `require_approval` (see
+[policy](./policy.md)).
 
 ## 2. Pin project directories to tenants
 
