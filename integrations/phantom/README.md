@@ -115,7 +115,7 @@ export LOCUS_HOME="${LOCUS_HOME:-$HOME/.locus}"
 locus agent report --json   # ★ hub entrypoint (exit 0|1|2)
 locus doctor --json         # full mission-control pane (SAFE|WARN|UNSAFE)
 locus whoami --json         # requires pin
-locus status --oneline      # unpinned | alias:tenant | frozen | invalid
+locus status --oneline      # unpinned | require_pin | alias:tenant | frozen | invalid
 locus status --json
 locus verify session --json # doctor + whoami + safe_next pack (hub heartbeat)
 locus watch --once --json   # compact NDJSON tick (kind=watch)
@@ -124,7 +124,12 @@ locus watch --once --json   # compact NDJSON tick (kind=watch)
 | Command | Exit 0 | Exit 1 | Exit 2 |
 |---------|--------|--------|--------|
 | `agent report` | ready | protected | unsafe |
-| `doctor` | SAFE | WARN | UNSAFE |
+| `doctor` | SAFE, or WARN from setup-only advisories | other WARN, or a Phantom preflight refusal | UNSAFE |
+
+The setup-only advisories are `approvals_missing`, `phantom_missing`,
+`control_capability_not_exported` and `executor_authority_unavailable`
+(`doctor_exit_code` in `crates/locus-cli/src/cmd_doctor.rs`). Gate on
+`verdict` / `status`, not on a zero exit alone.
 
 ---
 
@@ -144,7 +149,10 @@ export interface DoctorPin {
   tenant: string;
   binding_id: string;
   expires_at: string;
+  expires_in_secs: number;
   seal_ok: boolean;
+  /** false with seal_ok=true means the anchor check was skipped (no control capability). */
+  authority_anchor_verified?: boolean | null;
   principal?: string | null;
   client?: string | null;
   expired: boolean;
@@ -152,8 +160,11 @@ export interface DoctorPin {
 
 export interface McpRegistered {
   claude: boolean;
+  claude_scope?: "project" | "user" | "local" | "both";
   cursor: boolean;
   codex: boolean;
+  grok: boolean;
+  gemini: boolean;
 }
 
 export interface AgentCommands {
@@ -190,9 +201,13 @@ export interface DoctorReport {
   phantom_on_path: boolean;
   /** Safe resolution issues; locator names and provider stderr are absent. */
   unresolved_phm: Array<{ provider: string; source: string; code: string }>;
+  near_miss_count: number;
+  near_miss: Record<string, unknown>;
+  mcp_multi_tenant?: Record<string, unknown> | null;
   verdict: DoctorVerdict;
   ok: boolean;
-  findings: Array<{ severity: "warn" | "unsafe"; code: string; message: string }>;
+  /** "info" findings never escalate the verdict. */
+  findings: Array<{ severity: "info" | "warn" | "unsafe"; code: string; message: string }>;
   issues: string[];
   runtime: Record<string, unknown>;
   approvals: Record<string, unknown>;
@@ -203,6 +218,7 @@ export interface DoctorReport {
 
 /** Output of `locus agent report --json`. */
 export interface AgentReport {
+  schema: "locus.agent.report.v1";
   version: string;
   ready: boolean;
   status: AgentStatus;
@@ -212,6 +228,8 @@ export interface AgentReport {
   commands: AgentCommands;
   findings?: string[];
   next_steps?: string[];
+  /** Human-only recovery command when the pin can no longer be verified; agents surface it. */
+  recovery?: string | null;
   exit_code: LocusAgentExitCode;
   /** Same as `locus status --oneline` */
   status_oneline: string;
@@ -223,6 +241,7 @@ export interface AgentReport {
 
 /** Minimal whoami shape from `locus whoami --json`. */
 export interface WhoamiJson {
+  schema: "locus.whoami.v1";
   session_id: string;
   binding_alias: string;
   binding_id: string;
@@ -230,8 +249,10 @@ export interface WhoamiJson {
   principal?: string | null;
   providers: ProviderView[];
   expires_at: string;
+  expires_in_secs: number;
   worker_home: string;
   seal_ok: boolean;
+  authority_anchor_ok: boolean;
   frozen: boolean;
   frozen_reason?: string | null;
   mode: string;
@@ -239,6 +260,7 @@ export interface WhoamiJson {
 }
 
 export interface StatusPinnedJson {
+  schema: "locus.status.v1";
   pinned: true;
   binding: string;
   tenant: string;
@@ -247,12 +269,22 @@ export interface StatusPinnedJson {
   frozen: boolean;
   frozen_reason?: string | null;
   expired: boolean;
+  require_pin: boolean;
   mode: string;
   namespaces: string[];
+  authority_verified: boolean;
+  expires_at: string;
+  expires_in_secs: number;
+  /** seal_ok && usable && !frozen && !expired */
+  ok: boolean;
+  error?: string | null;
+  recovery?: string | null;
 }
 
 export interface StatusUnpinnedJson {
+  schema: "locus.status.v1";
   pinned: false;
+  require_pin: boolean;
 }
 
 export type StatusJson = StatusPinnedJson | StatusUnpinnedJson;

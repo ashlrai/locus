@@ -2,6 +2,26 @@
 
 Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus without forking this repo.
 
+## Prerequisites
+
+- Install the `locus` CLI and `locus-mcp` from this checkout, or build them as
+  described below, and make them available to the orchestrator on its `PATH`.
+  The hub must also discover and register its own Phantom MCP server; the
+  Locus helper only registers Locus.
+- A human must configure and pin an appropriate binding before interactive
+  use. The broker for that pin must remain alive. For jobs,
+  `withLocusSession` mints and validates an ephemeral session against the live
+  authority broker; pass the complete validated `env` from its callback to
+  children. A session ID by itself is not executor authority. Agents cannot
+  re-pin. See [fleet preflight](./fleet-preflight.md) and
+  [supervised MCP launch](../../docs/mcp.md#provider-tools-need-a-supervised-launch).
+- This checkout resolves supported `env:VAR` credential references supplied by
+  a trusted operator. `phm:NAME` references are preserved but currently fail
+  closed when resolved; installing Phantom does not provide a credential bridge.
+  Do not capture or bypass Phantom reveal. See
+  [credential compatibility](../../docs/credential-compatibility.md) for the
+  unreleased checkout and published-version distinction.
+
 | Artifact | Path |
 |----------|------|
 | Full contract | [`docs/hub-integration.md`](../../docs/hub-integration.md) |
@@ -9,7 +29,7 @@ Notes and types for wiring **ashlr-hub** (or any agent orchestrator) to Locus wi
 | Fleet preflight | [`fleet-preflight.md`](./fleet-preflight.md) — exact steps before agent dispatch |
 | MCP gateway patch | [`mcp-gateway-snippet.md`](./mcp-gateway-snippet.md) |
 | Doctor check | [`doctor-check.md`](./doctor-check.md) |
-| Schemas | [`schema/agent-report.schema.json`](../../schema/agent-report.schema.json), [`schema/doctor.schema.json`](../../schema/doctor.schema.json), [`schema/hub-gate.schema.json`](../../schema/hub-gate.schema.json) |
+| Schemas | [`schema/agent-report.schema.json`](../../schema/agent-report.schema.json), [`schema/doctor.schema.json`](../../schema/doctor.schema.json), [`schema/hub-gate.schema.json`](../../schema/hub-gate.schema.json), [`schema/locus-events.v1.schema.json`](../../schema/locus-events.v1.schema.json) (audit / session_tick / watch events for the router) |
 | Northstar | [`GOALS.md`](../../GOALS.md) · `locus goal status` |
 
 ---
@@ -62,7 +82,12 @@ Example MCP config fragment:
 }
 ```
 
-Optional env for CI children: `LOCUS_SESSION_ID` (from `locus ci mint --json`).
+This example registers the control-plane server. For provider tools, register
+`locus mcp --supervised` as described in [MCP setup](../../docs/mcp.md#supervised-launch-provider-tools).
+The JSON placeholder requires expansion by the client or replacement with the
+actual path; JSON itself does not expand variables. For CI children, use the
+validated session environment returned by `withLocusSession`, not just the
+session ID.
 
 Pre-mutate enforce at hub spawn sites (env `LOCUS_ENFORCE` wins over `~/.ashlr/config.json` → `locus.enforce` then `locus.firm`; hub #254 / #258):
 
@@ -90,7 +115,7 @@ export LOCUS_HOME="${LOCUS_HOME:-$HOME/.locus}"
 locus agent report --json   # ★ hub entrypoint (exit 0|1|2)
 locus doctor --json         # full mission-control pane (SAFE|WARN|UNSAFE)
 locus whoami --json         # requires pin
-locus status --oneline      # unpinned | alias:tenant | frozen | invalid
+locus status --oneline      # unpinned | require_pin | alias:tenant | frozen | invalid
 locus status --json
 locus verify session --json # doctor + whoami + safe_next pack (hub heartbeat)
 locus watch --once --json   # compact NDJSON tick (kind=watch)
@@ -99,7 +124,12 @@ locus watch --once --json   # compact NDJSON tick (kind=watch)
 | Command | Exit 0 | Exit 1 | Exit 2 |
 |---------|--------|--------|--------|
 | `agent report` | ready | protected | unsafe |
-| `doctor` | SAFE | WARN | UNSAFE |
+| `doctor` | SAFE, or WARN from setup-only advisories | other WARN, or a Phantom preflight refusal | UNSAFE |
+
+The setup-only advisories are `approvals_missing`, `phantom_missing`,
+`control_capability_not_exported` and `executor_authority_unavailable`
+(`doctor_exit_code` in `crates/locus-cli/src/cmd_doctor.rs`). Gate on
+`verdict` / `status`, not on a zero exit alone.
 
 ---
 
@@ -119,7 +149,10 @@ export interface DoctorPin {
   tenant: string;
   binding_id: string;
   expires_at: string;
+  expires_in_secs: number;
   seal_ok: boolean;
+  /** false with seal_ok=true means the anchor check was skipped (no control capability). */
+  authority_anchor_verified?: boolean | null;
   principal?: string | null;
   client?: string | null;
   expired: boolean;
@@ -127,8 +160,11 @@ export interface DoctorPin {
 
 export interface McpRegistered {
   claude: boolean;
+  claude_scope?: "project" | "user" | "local" | "both";
   cursor: boolean;
   codex: boolean;
+  grok: boolean;
+  gemini: boolean;
 }
 
 export interface AgentCommands {
@@ -165,9 +201,13 @@ export interface DoctorReport {
   phantom_on_path: boolean;
   /** Safe resolution issues; locator names and provider stderr are absent. */
   unresolved_phm: Array<{ provider: string; source: string; code: string }>;
+  near_miss_count: number;
+  near_miss: Record<string, unknown>;
+  mcp_multi_tenant?: Record<string, unknown> | null;
   verdict: DoctorVerdict;
   ok: boolean;
-  findings: Array<{ severity: "warn" | "unsafe"; code: string; message: string }>;
+  /** "info" findings never escalate the verdict. */
+  findings: Array<{ severity: "info" | "warn" | "unsafe"; code: string; message: string }>;
   issues: string[];
   runtime: Record<string, unknown>;
   approvals: Record<string, unknown>;
@@ -178,6 +218,7 @@ export interface DoctorReport {
 
 /** Output of `locus agent report --json`. */
 export interface AgentReport {
+  schema: "locus.agent.report.v1";
   version: string;
   ready: boolean;
   status: AgentStatus;
@@ -187,6 +228,8 @@ export interface AgentReport {
   commands: AgentCommands;
   findings?: string[];
   next_steps?: string[];
+  /** Human-only recovery command when the pin can no longer be verified; agents surface it. */
+  recovery?: string | null;
   exit_code: LocusAgentExitCode;
   /** Same as `locus status --oneline` */
   status_oneline: string;
@@ -198,6 +241,7 @@ export interface AgentReport {
 
 /** Minimal whoami shape from `locus whoami --json`. */
 export interface WhoamiJson {
+  schema: "locus.whoami.v1";
   session_id: string;
   binding_alias: string;
   binding_id: string;
@@ -205,8 +249,10 @@ export interface WhoamiJson {
   principal?: string | null;
   providers: ProviderView[];
   expires_at: string;
+  expires_in_secs: number;
   worker_home: string;
   seal_ok: boolean;
+  authority_anchor_ok: boolean;
   frozen: boolean;
   frozen_reason?: string | null;
   mode: string;
@@ -214,6 +260,7 @@ export interface WhoamiJson {
 }
 
 export interface StatusPinnedJson {
+  schema: "locus.status.v1";
   pinned: true;
   binding: string;
   tenant: string;
@@ -222,12 +269,22 @@ export interface StatusPinnedJson {
   frozen: boolean;
   frozen_reason?: string | null;
   expired: boolean;
+  require_pin: boolean;
   mode: string;
   namespaces: string[];
+  authority_verified: boolean;
+  expires_at: string;
+  expires_in_secs: number;
+  /** seal_ok && usable && !frozen && !expired */
+  ok: boolean;
+  error?: string | null;
+  recovery?: string | null;
 }
 
 export interface StatusUnpinnedJson {
+  schema: "locus.status.v1";
   pinned: false;
+  require_pin: boolean;
 }
 
 export type StatusJson = StatusPinnedJson | StatusUnpinnedJson;
@@ -296,15 +353,49 @@ const line = locusDoctorLine(); // { id, ok, detail, fix? }
 
 ---
 
-## Smoke
+## MCP config registration safety
 
-From the Locus repo:
+`registerLocusInMcpConfig` refuses malformed existing JSON and invalid server
+maps without replacing them. Changed configurations are staged beside the
+original, flushed and closed before a single rename. Existing POSIX owner,
+group and mode are preserved; preservation failure leaves the original intact.
+New configurations use mode `0600` where supported. Unchanged files are not rewritten.
+
+Final symlinks (including dangling links), hardlinks and nonregular files are
+refused rather than silently changing their meaning. This follows the guarded
+workspace-writer policy in `crates/locus-core/src/store.rs`; callers using linked
+configs must choose an appropriate regular destination explicitly. Extended
+ACLs and xattrs are not preserved by this helper; use an appropriate
+metadata-preserving editor for those configurations. This is not a
+concurrent-writer transaction or a power-loss durability guarantee. Catchable
+failures attempt to clean up the staging file; process termination can leave a
+`.locus-mcp-*.tmp` sibling while keeping the original intact. Staging begins
+at `0600`; after the complete write, an existing file's mode is applied before
+replacement. Atomic replacement requires a writable parent directory, unlike
+an in-place write to an already writable file.
+
+## Verification
+
+From the repository root, install the stable Rust toolchain with Cargo, `jq`,
+Node.js with `--experimental-strip-types` support (Node 22.6 or later), and
+`curl`. The scripts use Bash and local temporary directories. Build both debug
+binaries first so the checks exercise this checkout rather than an older
+installation:
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
+cargo build -p locus-cli -p locus-mcp
 ./scripts/hub-smoke.sh
 ./scripts/hub-integration-test.sh
 ```
+
+The first script checks CLI and agent-report contracts; the second exercises
+the TypeScript helpers and the multi-tenant MCP lifecycle. The scripts create
+and remove their own `LOCUS_HOME`, sample binding and project; they do not need
+a real pin, credentials or Phantom installation. `curl` and both current
+binaries are needed to run the multi-tenant checks: the script otherwise
+reports a skip for that section. Treat a skip or failure as incomplete
+verification. No values from minted sessions should be logged or copied into
+agent context.
 
 ---
 
