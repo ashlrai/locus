@@ -314,7 +314,10 @@ a nested router can serve; do not clear these markers in upstream wrappers.
 locus setup --client cursor
 ```
 
-Cursor MCP config is typically user-level JSON; setup merges a `locus` server entry pointing at `locus-mcp`. Restart Cursor after changes.
+Setup merges a `locus` server entry pointing at `locus-mcp` into the project's
+`.cursor/mcp.json` (created if missing), and into `~/.cursor/mcp.json` only
+when that user file already exists. Other servers are preserved. Restart
+Cursor after changes.
 
 ## Wire into Codex / other stdio MCP clients
 
@@ -346,7 +349,7 @@ Any client that can spawn a stdio MCP server can use:
 | Transport | stdio |
 | Command | `locus-mcp` |
 | Args | (none) |
-| Env | optional `LOCUS_HOME` for isolated stores |
+| Env | setup writes `LOCUS_AUTO_PIN=cwd` and `LOCUS_CLIENT=<client>` (advisory; see [MCP auto-pin](#mcp-auto-pin-advisory-only--the-server-never-pins)); optional `LOCUS_HOME` for isolated stores |
 
 ## Wire into Gemini CLI
 
@@ -401,10 +404,13 @@ locus setup --client generic
 locus agent setup --dry-run --client generic
 ```
 
-With the global `--json`, `locus setup` prints one JSON object instead:
-`{"ok", "client", "written": [paths], "supervised_command"}` after a write, or
-`"entry"` (mcpServers JSON) / `"entry_toml"` (Codex-style TOML) with
-`"written": []` for `--print` and `generic`.
+With the global `--json`, `locus setup` prints one JSON object instead,
+starting with `"schema": "locus.setup.v1"`:
+`{"ok", "client", "written": [paths], "serves": "control_tools", "supervised_command"}`
+after a write, or `"entry"` (mcpServers JSON) / `"entry_toml"` (Codex-style
+TOML) with `"written": []` for `--print` and `generic`. With `--dry-run` it
+prints a `locus.plan.v1` plan naming the files it would merge and writes
+nothing.
 
 Point the client at `locus-mcp` (absolute path for GUI launchers with a
 minimal PATH). `LOCUS_GROK_MCP_CONFIG` doubles as the probe override for such
@@ -484,7 +490,7 @@ Streamable clients get an opaque session id (MCP streamable HTTP). Locus keeps a
 | Step | Behavior |
 |------|----------|
 | `POST /mcp` `initialize` **without** `Mcp-Session-Id` | Mint a new opaque id (**`initialize` only**). Response includes `Mcp-Session-Id: <id>`. Persists under the session dir. |
-| Non-`initialize` POST **without** `Mcp-Session-Id` | Served **statelessly** — no mint, so garbage POSTs cannot exhaust session capacity. Provider `tools/call` is still pin-swap protected via a shared **process-level anchor** (a fresh sessionless `initialize` re-anchors it). |
+| Non-`initialize` POST **without** `Mcp-Session-Id` | Served **statelessly** — no mint, so garbage POSTs cannot exhaust session capacity. Provider `tools/call` is still pin-swap protected via a shared **process-level anchor** (a fresh sessionless `initialize` re-anchors it). Set `LOCUS_MCP_HTTP_REQUIRE_SESSION=1` (also `true`/`on`/`yes`) to refuse sessionless provider `tools/call` with **400** `session_required`; `locus_*` control tools stay callable without a session. |
 | `POST /mcp` **with** a known id | Bind to that session (memory hit, or **load-on-miss from disk**), refresh idle TTL, echo the same header. |
 | Unknown / expired / **corrupt** id | **404** `{ "error": "unknown_session", ... }` — fail closed (corrupt files are removed, never soft-allowed). |
 | Empty id | **400** `{ "error": "invalid_session", ... }`. |
@@ -687,8 +693,10 @@ requests and stateless provider POSTs are refused outright.
 
 ```bash
 # 1. Mint one grant per tenant job (local control only; agents cannot mint).
-#    --ttl takes 1s..24h (capped by the binding's policy.max_ttl); zero,
-#    negative or longer values are refused before anything is minted.
+#    --ttl takes 1s..24h, default 1h (capped by the binding's
+#    policy.max_ttl); zero, negative or longer values are refused before
+#    anything is minted. -b is short for --binding; --force allows a binding
+#    outside the workspace allowlist.
 locus mcp mint --binding cmp --ttl 1h --label "hub-job-42"
 # → {"grant_id":"3f2a…","token":"lmt_<grant_id>.<secret>", …}
 #   The token is printed exactly once — only its HMAC is stored at rest
@@ -726,8 +734,8 @@ locus mcp revoke <grant_id>        # or --binding <alias> | --all
   request because the gate re-reads the grant file every time.
 - **Per-session isolation** — catalogs, whoami, drift, resources, prompts,
   `GET /mcp`, and SSE ticks are computed from that grant's session only.
-  Agents cannot pin or pick a tenant: `locus_request_pin` returns
-  `tenant_fixed_by_grant`.
+  Agents cannot pin or pick a tenant: `locus_request_pin` and
+  `locus_enter_hint` return `tenant_fixed_by_grant`.
 - **Hard session partition** — MT `Mcp-Session-Id` records live under
   `$LOCUS_HOME/http-sessions-mt/` (or `LOCUS_MCP_SESSION_DIR` + `-mt`), so
   single-tenant servers can never resume tenant records and vice versa.
