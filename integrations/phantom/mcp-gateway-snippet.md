@@ -74,6 +74,8 @@ const mcpServers = {
 
 **CI / job children:** after `locus ci mint -b <alias> --json`, pass `LOCUS_SESSION_ID` (and `LOCUS_HOME`) into the child. Use `withLocusSession(binding, fn)` from `locus.ts`.
 
+**Control tools only.** The `locus` entry above spawns `locus-mcp` directly. A directly spawned `locus-mcp` never receives an executor capability, so it serves control tools (plus `locus_providers` once pinned) even with a valid pin or a minted `LOCUS_SESSION_ID`. To serve the pinned binding's provider tools, spawn `{ command: "locus", args: ["mcp", "--supervised"] }` from an environment that holds `LOCUS_CONTROL_CAPABILITY` and a live pin, or run the work under `locus exec`, `locus run` or `locus ci run`. See [Provider tools need a supervised launch](../../docs/mcp.md#provider-tools-need-a-supervised-launch).
+
 ---
 
 ## 3. Discovery filter (critical)
@@ -142,7 +144,7 @@ async function resolveMcpCatalog(opts: {
 When hub multiplexes as `<server>__<tool>`:
 
 - Control: `locus__locus_whoami`, `locus__locus_status`, …
-- Provider tools appear only after a human/CI pin, still under the `locus` server prefix (or as bare tool names if hub flattens one server).
+- Provider tools appear only for a pinned binding served by a supervised launch (see section 2), still under the `locus` server prefix (or as bare tool names if hub flattens one server).
 
 Do **not** re-expose `supabase__*` from a second process with ambient tokens.
 
@@ -181,6 +183,7 @@ if (!gateOk || !canMutate(report!.status, report!.status_oneline)) {
 - [ ] `REQUIRED_SERVERS = ["locus","phantom"]` exported and used by gateway bootstrap
 - [ ] Default discovery path is **locus-first** (no ambient supabase/vercel/github MCPs)
 - [ ] `LOCUS_SESSION_ID` forwarded for CI children from `ci mint` / `withLocusSession`
+- [ ] Provider-tool jobs launch `locus mcp --supervised` (or run under `locus exec` / `locus ci run`); a bare `locus-mcp` is control-plane only
 - [ ] Pre-mutate gate calls `ensureLocusReady` or equivalent
 - [ ] Agent report consumed for status (`ready|protected|unsafe`) — never soft-allow `unsafe`
 - [ ] Logs store alias/tenant and credential presence/source metadata only — never locators or resolved secrets
