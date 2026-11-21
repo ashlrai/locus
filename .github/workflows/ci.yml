@@ -89,6 +89,9 @@ jobs:
         with:
           ruby-version: "3.3"
 
+      - name: Test workspace paths with spaces
+        run: node --test scripts/e2e-workspace-spaced-tmpdir.test.mjs scripts/ci/e2e-release-gate.test.mjs
+
       # Includes the crypto policy check (Tier-1).
       - name: Validate distribution wrappers
         run: |
