@@ -363,6 +363,7 @@ locus doctor [--json]                 # SAFE|WARN|UNSAFE (exit 0/1/2; advisory-o
 locus doctor --fix [--apply]          # preview safe repairs; --apply makes them, backing up first
 locus watch [--once] [--interval 5s] [--require-ok]   # session heartbeat each tick (NDJSON with --json)
 locus dashboard · serve               # local identity UI + API (127.0.0.1)
+locus serve --swarm <graph.json>      # operator: grant-scoped swarm MCP broker (127.0.0.1)
 locus forensics export                # shareable pack (no secrets)
 locus verify session                  # verification plane: session pack
 locus verify claim --text "…"         # claim score
