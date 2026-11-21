@@ -3,9 +3,11 @@
 `locus-mcp --http 127.0.0.1:8742 --multi-tenant --peers ENGINES.json`
 adds a bounded, text-only peer relay to the existing authenticated MCP HTTP
 session layer. Start it from an operator shell with Locus control authority and
-the existing HTTP authentication configured; tenant clients continue to present
-their own `X-Locus-Tenant-Token` and `Mcp-Session-Id` on every request. See
-[multi-tenant MCP setup](mcp.md). No additional listener or credentials are created.
+the existing HTTP authentication configured (startup checks local control
+authority before it loads the manifest and fails without it); tenant clients
+continue to present their own `X-Locus-Tenant-Token` and `Mcp-Session-Id` on
+every request. See [multi-tenant MCP setup](mcp.md). No additional listener or
+credentials are created.
 
 The relay refuses every bind address except `127.0.0.1`, including `::1`,
 `127.0.0.2` and `0.0.0.0`, even with `LOCUS_MCP_HTTP_ALLOW_REMOTE=1`. It requires
@@ -63,9 +65,12 @@ pin no longer matches its anchor) fails `initialize` with JSON-RPC error `-32602
 
 “Attested sender” means Locus derives the sender's registration from the
 currently authenticated grant and HTTP session. It does not mean executable
-attestation or an independently signed message. PID liveness is checked with an
-OS process probe on Unix; unsupported platforms fail closed. PID reuse is not
-executable identity. Keep grant tokens private: possession authorizes that
+attestation or an independently signed message. PID liveness is checked with a
+signal-0 probe on Unix; unsupported platforms fail closed. The PID must be
+between 1 and 2147483647, and a process owned by another OS user reads as dead
+(the probe gets a permission error), so run engines as the same user as
+`locus-mcp`. PID reuse is not executable identity. Keep grant tokens private:
+possession authorizes that
 engine's sessions. Relayed message text is untrusted content, never authority to
 change pins, policy, or perform actions.
 
@@ -95,8 +100,9 @@ include the full binding/tenant/namespace identity.
 
 A `message` carries `id`, `sender` (the full peer record), `recipient` or
 `thread`, and `body`. `after` defaults to `0` and `limit` to `100`. Creating a
-thread takes `members` only (no `after` or `limit`); its members must be live peers
-in the caller's partition, with at least one other than the creator.
+thread takes `members` (1–16 IDs); `limit` must be omitted and `after`, if
+given, must be `0`. Its members must be live peers in the caller's partition,
+with at least one other than the creator.
 
 Send accepts exactly one destination. Arguments are closed: caller-supplied
 sender/tenant fields, non-string bodies, and unknown keys are refused. There is
@@ -105,13 +111,21 @@ session IDs and cannot authenticate requests. Message IDs increase monotonically
 and never repeat; use the last received ID as the next `after` cursor. Reads do
 not consume messages.
 
-Every refusal (bad arguments, unknown or departed peers, non-membership, read-only
-senders, capacity, secret-shaped text, or a policy deny or pending approval)
-returns the same tool error, without echoing the request:
+Every relay refusal (bad arguments, unknown or departed peers, non-membership,
+read-only senders, capacity, secret-shaped text, a policy deny or pending
+approval, or an exhausted session budget) returns the same tool error, without
+echoing the request:
 
 ```json
 {"error":"peer_operation_refused","hint":"Check registration, membership, text limits and binding policy."}
 ```
+
+Checks that run before the relay keep their usual responses. A swarm graph that
+does not allow the tool returns JSON-RPC error `-32003`. An unhealthy pin or
+grant returns the same tool errors as provider tools (`not_pinned`, `grant_*`,
+`pin_changed`, `invalid_seal`, `session_frozen: re-pin`, `session_expired` or
+`runtime_unhealthy`). When a `[budget]` is configured, every peer call that
+passes argument checks counts against it, reads included.
 
 ## Limits and lifecycle
 
