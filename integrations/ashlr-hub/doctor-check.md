@@ -106,6 +106,11 @@ Unpinned / incomplete:
           fix: locus enter <alias> && locus agent setup --apply
 ```
 
+`pin=` is the report's `status_oneline`: `alias:tenant`, `unpinned`, `frozen` or
+`invalid`. `fix` is the report's first `next_steps` entry; the line above is the
+fallback when that list is empty. A missing CLI gives detail
+`locus CLI not installed` with the `cargo install` command as `fix`.
+
 ---
 
 ## Full report path (optional)
@@ -175,9 +180,13 @@ await withLocusSession("acme", async ({ env }) => {
 export LOCUS_HOME=/tmp/ashlr-doctor-locus
 export PATH="$HOME/.cargo/bin:$PATH"
 locus init --with-samples
+eval "$(locus hook bash)"   # exports LOCUS_CONTROL_CAPABILITY, which pin needs
 locus pin personal
-# then run hub doctor — checkLocus should see pin=personal:personal
+# then run hub doctor from this same shell — checkLocus should see pin=personal:personal
 ```
+
+The pin's authority broker is supervised by the shell that pinned, so a later
+shell reports `no current broker endpoint ... human re-pin required`.
 
 Never point CI doctor at the developer's real `~/.locus` when tests mint/teardown state.
 
