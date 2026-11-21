@@ -18,7 +18,8 @@ Architecture: [architecture.md](./architecture.md) · full design: [DESIGN.md](.
 
 ```
 crates/locus-core/src/adapters/
-  mod.rs          # ProviderAdapter, freeze_*, adapter_for, dispatch, control tools
+  mod.rs          # ProviderAdapter, freeze_*, adapter_for, known_providers, dispatch, control tools
+  cli.rs          # CliRoute: native CLI credential routing for `locus exec --for`
   supabase.rs
   github.rs
   vercel.rs
@@ -40,7 +41,7 @@ Built-in providers and tools are listed in [`adapters/manifest.toml`](../adapter
 
 ### Registry CLI (v0)
 
-Discovery and signature verification over the catalog — **not** a plugin loader:
+Discovery and signature verification over the built-in catalog. These commands never load code:
 
 ```bash
 locus adapter list [--json]
@@ -58,6 +59,10 @@ locus topic adapter
 | `adapter trust list` | List keys from `$LOCUS_HOME/trust/adapter-keys.toml` + `LOCUS_ADAPTER_TRUST_KEYS` overlay |
 | `adapter trust add` | Pin an ed25519 public key under the file store (mode `0600`) |
 
+Release manifests of the built-in set: `locus adapter registry export [--out FILE] [--sign [--key FILE] [--key-id ID]]` and `locus adapter verify-manifest FILE [--allow-unsigned]` (see [registry-trust.md](./registry-trust.md)).
+
+Community adapters are separate: `locus adapter search|install|uninstall` and `locus adapter registry index add|list|remove` fetch signed full envelopes for out-of-tree MCP stdio workers, which run publisher code. See [adapters.md § Community adapter marketplace](./adapters.md#community-adapter-marketplace). This guide covers in-tree adapters only.
+
 Sibling: `locus upstream list` covers **spawn recipes** (`adapters/recipes.toml`); `locus adapter` covers the **provider catalog**.
 
 ---
@@ -67,6 +72,11 @@ Sibling: `locus upstream list` covers **spawn recipes** (`adapters/recipes.toml`
 ```rust
 pub trait ProviderAdapter: Send + Sync {
     fn name(&self) -> &'static str;
+
+    // Optional, with defaults: native CLI routing for `locus exec --for <cli>`.
+    fn cli_name(&self) -> Option<&'static str> { None }
+    fn cli_required_credentials(&self) -> &'static [&'static str] { /* inject keys for name() */ }
+    fn configure_cli_env(&self, _provider: &ProviderBinding, _vars: &mut BTreeMap<String, String>) {}
 
     fn tools(
         &self,
@@ -88,9 +98,11 @@ pub trait ProviderAdapter: Send + Sync {
 |---------------------|---------|
 | `name` | MCP tool name — convention `provider.action` |
 | `description` | Model-facing; **include frozen scope** so the agent sees the fence |
-| `input_schema` | JSON Schema for arguments |
+| `input_schema` | JSON Schema for arguments. With `"additionalProperties": false` the gate denies undeclared arguments before policy (`confirm` and `approval_id` are always accepted) |
 | `provider` | Provider id string (must match binding `provider`) |
-| `destructive` | UX/policy hint; still enforce with `require_approval` globs |
+| `destructive` | Hidden from `tools/list` and denied at call time (`denied_read_only_scope`) when the provider scope is `read_only = true`; still cover with `require_approval` globs |
+
+Only `gh`, `vercel`, `supabase` and `aws` override `cli_name` today. Leave the defaults unless the provider has a native CLI that should receive the pinned credentials.
 
 ---
 
@@ -114,7 +126,7 @@ let livemode = freeze_bool_arg(args, "livemode", Some(false))?;
 
 **Rule:** binding freezes a selector → model mismatch is **`Err` (scope freeze)**, never a soft warn.
 
-`call_tool_gated` runs `preflight_scope_freeze` **before** policy so a wrong `project_ref` cannot mint an approval grant for the wrong tenant.
+`call_tool_gated` runs `preflight_scope_freeze` **before** policy so a wrong `project_ref` cannot mint an approval grant for the wrong tenant. The preflight also denies a tool whose provider prefix is not in the pinned binding, and checks `project_ref` / `team_id` / `account_id`, `orgs` and `livemode` under their camelCase and provider-native spellings at any nesting depth. Adapters still re-check their own selectors in `call()`.
 
 ---
 
@@ -133,21 +145,28 @@ pub fn adapter_for(provider: &str) -> Option<Box<dyn ProviderAdapter>> {
 }
 ```
 
-3. Update `adapters/manifest.toml` with tools, frozen selectors, and capabilities.
-4. Add freeze + happy-path unit tests (module-local or `adapters/mod.rs` tests).
+3. Add the id to `known_providers()` in `adapters/mod.rs`.
+4. Update `adapters/manifest.toml` with tools, frozen selectors, and capabilities.
+5. Add freeze + happy-path unit tests (module-local or `adapters/mod.rs` tests).
 
-Unknown providers still get a generic `{provider}.scope` identity tool via `tools_for_binding` — fine for experiments, not for production freeze rules.
+Two drift tests fail if you miss a step: `known_providers_all_dispatch` (every `known_providers()` id dispatches through `adapter_for`) and `builtin_catalog_matches_dispatchable_providers` (`known_providers()` and `manifest.toml` list the same ids).
+
+Unknown providers still get a generic `{provider}.scope` identity tool via `tools_for_binding`. It returns credential metadata only, and any other tool for that provider errors with `no adapter for provider`. Fine for experiments, not for production freeze rules.
 
 ---
 
 ## Dispatch order
 
 ```
-tools/call
-  → preflight_scope_freeze   # hard error on selector mismatch
-  → enforce_policy           # deny | require_approval | allow
-  → adapter.call             # re-check freeze; build ToolCallResult
+tools/call → call_tool_gated → enforce_policy:
+  → preflight_scope_freeze   # hard error: provider not in binding, or selector mismatch
+  → reject_undeclared_args   # hard error: argument outside a closed input_schema
+  → enforce_read_only_scope  # denied_read_only_scope for destructive tools under read_only
+  → enforce_session_policy   # opt-in [budget] charge, then deny | require_approval | allow
+→ adapter.call               # re-check freeze; build ToolCallResult
 ```
+
+No external approval verifier ships today, so a `require_approval` tool always returns `requires_approval` with an advisory `approval_id`; see [policy.md](./policy.md).
 
 Tool names must be prefixed with the provider: `supabase.table.delete`.  
 Routing uses the first segment before `.`.
@@ -244,7 +263,8 @@ impl ProviderAdapter for MyProviderAdapter {
                     "provider": "myprovider",
                     "account": provider.account,
                     "account_id": account_id.or_else(|| provider.scope.account_id.clone()),
-                    "credential_ref": provider.credential_ref,
+                    // { present, source } only; the locator name never crosses.
+                    "credential": crate::credential::credential_metadata(&provider.credential_ref),
                     "tenant": binding.tenant,
                     "binding": binding.alias,
                 }),
@@ -261,6 +281,7 @@ impl ProviderAdapter for MyProviderAdapter {
 ## What not to do
 
 - Return secret values or resolved tokens in `ToolCallResult.content`
+- Return the raw `credential_ref` string (use `credential_metadata`, as the built-in adapters do)
 - Fall through to ambient `gh auth`, global AWS profile, or another binding’s env
 - Call remote APIs with credentials outside the pinned binding’s CredentialRefs
 - Log to stdout from MCP-adjacent code (stdout is JSON-RPC only)
@@ -274,7 +295,7 @@ impl ProviderAdapter for MyProviderAdapter {
 - [ ] Freeze unit tests (deny + happy path)  
 - [ ] Destructive tools: `destructive: true` + policy coverage  
 - [ ] No secrets in tool responses  
-- [ ] Registered in `adapter_for` + `adapters/manifest.toml`  
+- [ ] Registered in `adapter_for` + `known_providers()` + `adapters/manifest.toml`  
 - [ ] `cargo test -p locus-core` + `cargo clippy -p locus-core -- -D warnings`  
 - [ ] Row in this doc / [adapters.md](./adapters.md) if user-facing  
 
@@ -285,7 +306,7 @@ impl ProviderAdapter for MyProviderAdapter {
 | Now | Later |
 |-----|--------|
 | In-tree `ProviderAdapter`, synthetic identity tools | Upstream MCP / REST workers (partially landed via recipes) |
-| Manual `adapter_for` match | Optional out-of-tree packages / dynamic load |
+| Manual `adapter_for` match; community adapters run as signed out-of-tree MCP stdio workers ([adapters.md](./adapters.md#community-adapter-marketplace)) | Dynamic in-process load |
 | Catalog parse + **ed25519** (preferred) / HMAC-SHA256 (backcompat) verify (`locus adapter`) | Registry root publication |
 | Signed release manifests (`locus adapter registry export --sign` / `verify-manifest`, see [registry-trust.md](./registry-trust.md)) | CI-side signing (needs a provisioned `LOCUS_REGISTRY_SIGNING_KEY` secret) |
 | Policy + approval CLI | Elevation TTL, dual-control UX polish |
@@ -383,7 +404,7 @@ locus adapter verify --require-signed
 ### What is intentionally out of scope (now)
 
 - Dynamic `.so` / WASM / script adapter loading  
-- Network fetch of remote registries  
+- Network fetch of the built-in catalog (community indexes are a separate path)  
 - Replacing in-tree `adapter_for()` registration  
 - Returning or storing credential values in the catalog  
 - Baked-in production root keys (must be operator-supplied)
@@ -397,12 +418,12 @@ locus adapter verify --require-signed
 | Merge with `LOCUS_ADAPTER_TRUST_KEYS` | **Landed** (env overlays file) |
 | Publish registry root + sign release manifests in CI | Roadmap |
 | Offline pin rotation / revoke / expiry | Roadmap |
-| Optional remote signed index | Roadmap |
-| Out-of-tree packages | Roadmap |
+| Remote community index (untrusted discovery, signed full envelopes) | **Landed** ([adapters.md](./adapters.md#community-adapter-marketplace)) |
+| Out-of-tree packages | **Landed** as community MCP stdio workers; no in-process loading |
 | Whole-file signature + transparency log | Roadmap |
 
 1. **Publish a registry root** (ed25519) and sign release manifests in CI; ship the public key as a well-known pin, not a private secret.  
 2. **Offline pin + rotation** — multiple concurrent roots, expiry, and explicit revoke without soft-allow on unknown keys under `--require-signed`.  
-3. **Optional remote index** — signed HTTP feed of community adapters (still no auto-exec).  
-4. **Out-of-tree packages** — crate or MCP child declared in the catalog, still gated by pin + policy + freeze.  
+3. **Remote index** — landed for community adapters: HTTPS index of signed envelopes, explicit install consent, no auto-exec.  
+4. **Out-of-tree packages** — landed as community MCP children, gated by pin + policy + freeze; in-process crates remain out of scope.  
 5. **Whole-file signature** + optional transparency log once per-entry roots are stable.  

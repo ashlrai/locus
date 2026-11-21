@@ -21,6 +21,9 @@ Copy this folder when adding a new built-in provider adapter to Locus.
 
    // in adapter_for():
    "myprovider" => Some(Box::new(MyProviderAdapter)),
+
+   // in known_providers():
+   "myprovider",
    ```
 
 4. **Freeze every account selector** the model might smuggle (`freeze_string_arg`,
@@ -30,7 +33,7 @@ Copy this folder when adding a new built-in provider adapter to Locus.
 
 6. **Add tests** (freeze deny + happy path) in the module or `adapters/mod.rs`.
 
-7. **Catalog** the provider in `adapters/manifest.toml`.
+7. **Catalog** the provider in `adapters/manifest.toml` (a drift test checks it matches `known_providers()`).
 
 8. **Docs**: row in `docs/adapters.md` / `docs/adapter-sdk.md` if user-facing.
 

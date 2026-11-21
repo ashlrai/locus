@@ -63,7 +63,8 @@ impl ProviderAdapter for MyProviderAdapter {
                     "provider": "myprovider",
                     "account": provider.account,
                     "account_id": resolved,
-                    "credential_ref": provider.credential_ref,
+                    // { present, source } only; the locator name never crosses.
+                    "credential": crate::credential::credential_metadata(&provider.credential_ref),
                     "tenant": binding.tenant,
                     "binding": binding.alias,
                     // Never include resolved secret values.
