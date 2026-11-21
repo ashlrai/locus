@@ -108,7 +108,7 @@ locus watch --json --require-ok --interval 30s   # continuous hub stream; fail c
 }
 ```
 
-`grounding` is omitted when not identity-related or when unbound.
+`grounding` is omitted when not identity-related or when unbound. When it is attached, `signals` also includes `grounding_whoami`.
 
 **Session pack** (`locus verify session`):
 
@@ -124,7 +124,7 @@ locus watch --json --require-ok --interval 30s   # continuous hub stream; fail c
 }
 ```
 
-Never includes secrets. `session_ok` is true only when doctor is ok **and** `safe_next.ready`. `locus verify session` emits the pack for inspection but exits nonzero whenever `session_ok` is false; there is no success-status inspection bypass.
+Never includes secrets. `session_ok` is true only when doctor is ok **and** `safe_next.ready`. `locus verify session` emits the pack for inspection (human or `--json`) but exits nonzero whenever `session_ok` is false; there is no success-status inspection bypass. The CLI pack (like `locus watch`) also carries the operator-shell control-capability findings that `locus doctor` reports; the MCP tool's pack does not.
 
 ### Continuous watch (hub heartbeat stream)
 
@@ -158,7 +158,7 @@ locus watch --json --require-ok --interval 30s
 | `--interval` | Poll period (`5s`, `30s`, `1m`, `2h`, or bare seconds such as `10`; default `5s`; minimum `1s`) |
 | neither flag | Runs until interrupted; a tick with `session_ok` false is reported but does not exit |
 
-Binding drift still freezes the pin (same as doctor / `verify_session`). Never includes secrets. Prefer `locus verify session --json` when hub needs the full doctor + whoami objects; use `watch` for continuous compact ticks.
+`whoami` (the active binding alias) is omitted when there is none. Binding drift still freezes the pin (same as doctor / `verify_session`). Never includes secrets. Prefer `locus verify session --json` when hub needs the full doctor + whoami objects; use `watch` for continuous compact ticks.
 
 ### MCP
 
@@ -169,13 +169,15 @@ Control tools (available unpinned and pinned):
 | `locus_verify_claim` | `text` or `claim` (string) | Same JSON shape as CLI claim, without the `schema` key |
 | `locus_verify_session` | none | Same pack as `locus verify session --json` without the `schema` key (`whoami?`, `doctor`, `safe_next`, `session_ok`); runs real external probes |
 
+`locus_verify_session` differs from the CLI pack in two cases. A tenant-scoped grant (`locus-mcp --http --multi-tenant`) never sees the operator pack: it gets `scope: "tenant"`, `grant_id`, `whoami`, the grant's drift result as `runtime`, and `safe_next.action` `proceed` or `remint_grant` (with a `locus mcp mint --binding <alias>` command). When the MCP session is anchored to one identity, the body carries `mcp_anchor`; on the operator pack, if a *different* pin is now active, `session_ok` is forced false and `safe_next` becomes `reinitialize_client` with `locus enter <anchored alias>`. Either way `isError` stays false; gate on `session_ok`.
+
 MCP tool payloads are not schema-stamped; only CLI `--json` output is (see [agent-contract.md](./agent-contract.md)).
 
 Audit ops: `verify.claim`, `verify.session` and `watch.tick` (CLI); `mcp.verify_claim` and `mcp.verify_session` (MCP). They record confidence, signals, a truncated claim preview, or verdict flags only (no secrets).
 
 ### Doctor (light)
 
-When the recent audit tail has **many** detail blobs that look like ungrounded factual claims (numbers / URLs / versions), doctor adds a **WARN** finding:
+When the recent audit tail has **many** detail blobs that look like ungrounded factual claims (numbers / URLs / versions / currency / percentages / absolute language), doctor adds a **WARN** finding. Identity control ops are skipped because they are the grounding surface (`*whoami*`, `*heartbeat*`, `session.pin`, `session.leave`, `verify.*`):
 
 - code: `ungrounded_claims`
 - message points at `locus verify claim --text "…"`
@@ -195,9 +197,11 @@ Implemented in `locus_core::verify`:
 5. **Significant numbers** (2+ digits) → signal `number`
 6. **Absolute language** (`always`, `never`, `impossible`, `guaranteed`, …) → signal `absolute_language` → **low** confidence
 7. **Identity language** (pin, tenant, whoami, binding, acting as, wrong account, …) → signal `identity`
-8. If (1–6) fire → `confidence=low`, `needs_tool=true` (suggestion names concrete grounding steps)
-9. If identity + healthy pin → attach whoami grounding; `confidence=medium` when not also factual/absolute
-10. Else → `confidence=unknown`
+8. If identity + pin → attach whoami grounding and signal `grounding_whoami` (also when 1–6 fire)
+9. If (1–6) fire → `confidence=low`, `needs_tool=true` (suggestion names concrete grounding steps)
+10. Else identity + healthy pin (seal ok, not frozen) → `confidence=medium`, `needs_tool=false`
+11. Else identity with a bad seal or frozen pin, or with no pin → `confidence=low`, `needs_tool=true` (re-pin / doctor, or human `locus enter`)
+12. Else → `confidence=unknown`, `needs_tool=false`
 
 Hub extension points: re-score using `signals`, require tools when `needs_tool`, or demand multi-source agreement before allowing `high`.
 
@@ -247,6 +251,6 @@ Shipped as partial M5:
 | `crates/locus-core/src/workers/sandbox.rs` | macOS Seatbelt; Linux `bwrap` / best-effort `path` (tagged; not a VM) |
 | `crates/locus-core/src/events.rs` | Fleet pulse / OTLP export + optional webhook sink |
 | `crates/locus-cli` | `locus verify claim` · `locus verify session` · `locus watch` · `events export --sink webhook` |
-| `crates/locus-mcp` | `locus_verify_claim` control tool |
+| `crates/locus-mcp` | `locus_verify_claim` · `locus_verify_session` control tools |
 | `crates/locus-core/src/doctor.rs` | Optional audit signal finding |
 | `GOALS.md` | M5 checklist |
