@@ -8,14 +8,15 @@ no cross-binding credentials.
 **Related**
 
 - Automated walk: [`scripts/dogfood-multi-account.sh`](../scripts/dogfood-multi-account.sh)
-- IDE install probe (Claude/Cursor paths only): [`scripts/dogfood-clients.sh`](../scripts/dogfood-clients.sh)
+- IDE install probe (Claude Code, Cursor, Grok Build; Continue is detect-only): [`scripts/dogfood-clients.sh`](../scripts/dogfood-clients.sh)
 - Dual-IDE matrix (no secrets): [`scripts/dogfood-dual-ide.sh`](../scripts/dogfood-dual-ide.sh)
 - Firm ops: [firm-mode.md](./firm-mode.md) · [agency-starter.md](./agency-starter.md)
 - MCP wire-up: [mcp.md](./mcp.md)
 
 This path **does not** require Claude Code *and* Cursor at once. Wire **at
-least one** supported client so `locus agent report` can reach `ready`; the
-multi-account script itself is CLI-only. For a combined dual-IDE **matrix**
+least one** supported client (`claude`, `cursor`, `codex`, `grok` or `gemini`)
+so `locus agent report` can reach `ready`; the multi-account script itself is
+CLI-only. For a combined dual-IDE **matrix**
 (client found? locus registered? multi-account walked?) without printing
 secrets, use [`scripts/dogfood-dual-ide.sh`](../scripts/dogfood-dual-ide.sh).
 
@@ -29,14 +30,15 @@ secrets, use [`scripts/dogfood-dual-ide.sh`](../scripts/dogfood-dual-ide.sh).
 | `jq` | Report / session JSON gates |
 | Two bindings | Distinct tenants + CredentialRefs (never reuse personal PAT on client) |
 | Resolved credentials | Use `env:` refs with values supplied outside agent context; `phm:` refs fail closed |
-| MCP registered once | `locus agent setup --apply --client claude` **or** `cursor` (one is enough) |
-| Control capability | Scripts set `LOCUS_CONTROL_CAPABILITY` if unset (enter/pin/leave need it) |
+| MCP registered once | `locus agent setup --apply --client claude` (or `cursor`, `codex`, `grok`, `gemini`; one is enough) |
+| Control capability | enter/pin/leave need `LOCUS_CONTROL_CAPABILITY`. `locus init` persists one under the Locus home; `eval "$(locus hook bash)"` exports it into the shell. The scripts mint a throwaway value only when it is unset |
 
 Safe practice home (optional):
 
 ```bash
 export LOCUS_HOME=/tmp/locus-multi-dogfood
 locus init
+eval "$(locus hook bash)"   # exports this home's control capability
 # copy or create personal + client bindings under $LOCUS_HOME/bindings/
 ```
 
@@ -51,6 +53,7 @@ or `examples/agency-starter/bindings/personal.toml`):
 
 ```bash
 locus init   # once
+eval "$(locus hook bash)"   # in every shell that enters, pins or leaves
 # Edit scopes; CredentialRefs only — never raw tokens in TOML.
 cp examples/agency-starter/bindings/personal.toml ~/.locus/bindings/personal.toml
 # Set scopes and replace phm: refs with tenant-specific env: refs for execution.
@@ -91,7 +94,9 @@ locus binding list --json | jq -r '.[].alias'
 ## 3. Wire Claude **or** Cursor (not both required)
 
 Agent report `ready` needs locus-mcp registered for at least one supported
-client. You do **not** need dual-IDE sessions running.
+client (`claude`, `cursor`, `codex`, `grok` or `gemini`). You do **not** need
+dual-IDE sessions running. The dual-IDE matrix below probes Claude and Cursor
+only.
 
 ```bash
 # Claude Code (project or home .mcp.json)
@@ -128,6 +133,8 @@ walks are pure CLI.
 ## 4. Manual walk (personal → client)
 
 ```bash
+eval "$(locus hook bash)"           # control capability for enter/leave
+
 # ── Personal ──────────────────────────────────────────────
 locus leave                         # clear any residual pin
 locus enter personal                # or: locus pin personal
@@ -155,9 +162,9 @@ locus leave                         # end of day / switch complete
 | Check | Pass |
 |-------|------|
 | `locus enter <alias>` | Sealed session; prompt `alias:tenant` |
-| `doctor` | `SAFE` (no unresolved PHM; seal ok) |
+| `doctor` | `SAFE` (no unresolved PHM; seal ok); a setup-only WARN such as `phantom_missing` also exits 0 |
 | `verify session --json` | `kind=session`, `session_ok=true` |
-| `agent report --json` | `ready=true`, `status=ready`, `pin.alias` matches, `seal_ok=true` |
+| `agent report --json` | `ready=true`, `status=ready`, `pin.alias` matches, `pin.seal_ok=true` |
 | After `leave` | `locus status --oneline` → `unpinned` |
 
 Never paste report/doctor JSON into tickets if you suspect a leak; locus does
@@ -279,7 +286,7 @@ live) runs in `scripts/e2e.sh` step 31.
 
 | Still manual / separate | Tool |
 |-------------------------|------|
-| Detect Claude/Cursor install paths only | `scripts/dogfood-clients.sh` |
+| Detect Claude Code/Cursor/Grok Build installs only | `scripts/dogfood-clients.sh` |
 | Dual-IDE matrix (found + locus reg + multi walk) | `scripts/dogfood-dual-ide.sh` |
 | Full isolated `DOGFOOD READY` (sandbox, hub smoke, …) | `scripts/dogfood.sh` |
 | Live dual-IDE UI confirmation (both apps open, catalogs reload) | Operator eyes |
@@ -301,7 +308,7 @@ M3: multi-account playbook + dual-IDE **matrix script** (no secrets) landed;
 | `session_ok=false` / doctor WARN | Inspect `locus doctor --json \| jq .unresolved_phm`; replace unsupported `phm:` refs with supported `env:` refs where execution is needed |
 | `unsafe` / seal invalid | `locus leave` then `locus enter <alias>`; re-run `locus init` if home corrupt |
 | Wrong tenant in report | You entered the wrong alias — leave and enter the intended one |
-| Control capability errors | Export a non-empty `LOCUS_CONTROL_CAPABILITY` (script generates one if unset) |
+| Control capability errors | Run `eval "$(locus hook bash)"` to export the persisted capability (the scripts mint a throwaway one only if unset) |
 | Workspace allowlist blocks pin | Enter from a neutral cwd, or use audited `locus enter <alias> --force` |
 
 ---
@@ -310,7 +317,7 @@ M3: multi-account playbook + dual-IDE **matrix script** (no secrets) landed;
 
 - [ ] `personal` + client bindings on disk (CredentialRefs only)  
 - [ ] Environment-backed credentials are supplied; doctor SAFE under each pin
-- [ ] One IDE wired (`locus agent setup --apply --client claude|cursor`)  
+- [ ] One client wired (`locus agent setup --apply --client claude|cursor|codex|grok|gemini`)  
 - [ ] Manual or `scripts/dogfood-multi-account.sh` walk: personal ready → leave → client ready → leave  
 - [ ] Optional matrix: `scripts/dogfood-dual-ide.sh` (found / locus_reg / multi_account)  
 - [ ] Optional hard CI: `LOCUS_DOGFOOD_REQUIRE_MULTI=1` / `LOCUS_DOGFOOD_REQUIRE_DUAL=1`  
