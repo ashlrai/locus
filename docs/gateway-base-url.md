@@ -17,7 +17,7 @@ child_env = ["OPENAI_BASE_URL"]
 - The value comes from config only. The parent shell never selects a target, and a parent `OPENAI_BASE_URL` is still dropped and reported as scrubbed.
 - Only the URL is passed. Locus never forwards a gateway key, token or header. Keep the provider keys on the gateway side; Locus still injects only the binding's own credential variables.
 - A listed variable that Locus already sets is not overwritten.
-- It applies to the `locus exec` child environment only, not to `locus ci env` exports.
+- It applies to every child built from the isolated environment: `locus exec` (including routed `exec --for` CLIs), `locus run`, `locus ci run`, and MCP stdio provider workers. It does not apply to `locus ci env` exports.
 
 ## Rules
 These match phantom's governed-client gateway validator (`src/core/run/gateway-target.ts`).
@@ -25,9 +25,9 @@ These match phantom's governed-client gateway validator (`src/core/run/gateway-t
 - Loopback means the IP literals `127.0.0.1` and `[::1]` only. `localhost` and `*.localhost` are refused, as is every other IP literal (for example `10.0.0.5`).
 - A non-loopback host needs an exact `host:port` entry in `allowed_hosts`, including the port (`gw.example.com:443`). There are no wildcards and no suffix matching.
 - Refused: userinfo (`user:pass@`), a query, a fragment, non-canonical hosts (trailing dot, numeric shorthands such as `0x7f.1`, percent-encoding, non-ASCII), dot or empty path segments, backslashes, percent-encoding and whitespace.
-- `child_env` names must be upper-case and end in `_BASE_URL` or `_API_BASE`. Names that contain `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL` or `AUTH`, or start with `LOCUS_`, are refused. At most 8 names.
+- `child_env` names must be upper-case and end in `_BASE_URL` or `_API_BASE`. Names that contain `KEY`, `TOKEN`, `SECRET`, `PASSWORD`, `CREDENTIAL` or `AUTH`, or start with `LOCUS_`, are refused. List 1 to 8 names; an empty list is refused.
 
 ## When the block is refused
-If `enabled = true` but the block fails a rule, Locus fails closed. The run gets no gateway URL **and no credentials** (none are resolved), so a real key never reaches an agent that would talk to the provider directly instead of the gateway you configured. The failure is reported as a credential issue with `source=gateway` and a closed code such as `loopback-name-not-allowed`, `host-not-allowlisted` or `child-env-invalid`. The code never contains the URL. Under strict credential mode the run stops.
+If `enabled = true` but the block fails a rule (including a missing `base_url`), Locus fails closed. The run gets no gateway URL **and no credentials** (none are resolved), so a real key never reaches an agent that would talk to the provider directly instead of the gateway you configured. The failure is reported as a credential issue with `source=gateway` and a closed code such as `loopback-name-not-allowed`, `host-not-allowlisted` or `child-env-invalid`. The code never contains the URL. Under strict credential mode the run stops, and an MCP stdio worker that resolves credentials refuses to launch.
 
 A config file that does not parse at all (for example `allowed_hosts` given as a string) falls back to defaults, which means the gateway is off.
