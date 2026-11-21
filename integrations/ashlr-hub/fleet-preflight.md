@@ -138,6 +138,7 @@ const decision = decidePreMutateGate(
 | `status === "unsafe"` | `status=unsafe` |
 | `status !== "ready"` | `status=protected (not ready)` |
 | `ready !== true` | `ready=false` |
+| `doctor.findings` has `credential_migration_incomplete` | `credential migration reconciliation incomplete` |
 | Unhealthy oneline | `pin unhealthy: unpinned (unpinned)` |
 | Bad seal / expired / frozen pin | `pin.seal_ok=false` etc. |
 | `required_servers` lacks locus or phantom | `required_servers missing …` |
@@ -152,6 +153,10 @@ const decision = decidePreMutateGate(
 | `require_pin` | **no** |
 | `frozen` | **no** |
 | `invalid` | **no** |
+
+`locus agent report` emits `unpinned`, `frozen`, `invalid` or `alias:tenant`.
+`require_pin` comes from `locus status --oneline` (unpinned inside a
+`require_pin` workspace); the gate rejects it too, so either source is safe.
 
 ### 4. MCP catalog — locus-first
 
@@ -231,6 +236,7 @@ Only after `allowDispatch === true`:
 | unpinned / protected | `locus enter <alias>` or workspace auto-pin |
 | MCP unwired | `locus agent setup --apply --client all` or `registerLocusInMcpConfig` |
 | unsafe / invalid seal | `locus doctor`; re-init only if seal key lost (audit) |
+| credential migration incomplete | `locus binding migrate-credential-refs <alias>` previews; add `--write` to persist, then run it again to reconcile audit state |
 | required_servers contract | Upgrade locus; do not soft-allow missing phantom |
 | `require_approval` pending | Keep provider execution blocked pending a closed external authorization envelope; never convert local labels into retry authority |
 
@@ -252,8 +258,12 @@ printf '%s' "$report" | jq -e '
   and (.required_servers | index("locus") != null)
   and (.required_servers | index("phantom") != null)
   and .mcp_command == "locus-mcp"
+  and ([.doctor.findings[]?.code] | index("credential_migration_incomplete") == null)
 ' >/dev/null
 ```
+
+This mirrors `evaluateFleetGate` minus the `pin.*` flags. The contract half
+also lives in [`scripts/dogfood-ready.jq`](../../scripts/dogfood-ready.jq).
 
 Full composition smoke: [`scripts/hub-integration-test.sh`](../../scripts/hub-integration-test.sh).
 
