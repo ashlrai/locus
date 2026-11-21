@@ -97,6 +97,30 @@ binary change: three more `--json` commands now carry a `schema` id.
   version when it is missing, and slower test suites now run after merge to
   `main` ([#966](https://github.com/ashlrai/locus/pull/966),
   [#964](https://github.com/ashlrai/locus/pull/964)).
+- Docs audited against the code, no behavior change:
+  - `policy.md` now lists the gate order and every policy field, notes that
+    `parallel_sessions` is parsed but not enforced, and describes the additive
+    dual-control behavior; `session-budget.md` says how a stopped session is
+    released.
+  - `workers.md` lists the real isolated child env (`LOCUS_SESSION_ID`,
+    `LOCUS_SEAL`, `LOCUS_<P>_CREDENTIAL_RESOLVED`, `HOME` and so on), says the
+    opt-in `[gateway]` URL and `[exec] inherit_env` names do reach MCP workers,
+    and that multi-tenant HTTP mode skips focus teardown.
+  - `doctor-fix.md` covers `--dry-run`, the `no_locus_home` reason and the
+    `workspace_unreadable`, `malformed_ref` and `binding_unparseable` codes.
+  - `cli-routing.md` says routed `exec` still applies `[gateway]`;
+    `verification-plane.md` has the full decision order and the CLI-only
+    control-capability findings; `exit-codes.md` says codes 3 to 6 are defined
+    but no command emits them yet.
+  - `PHANTOM-USAGE.md` corrects where the `--expect` check runs (after the
+    seal and broker check, before the drift check).
+  - `gateway-base-url.md` and `gateway-base-urls.md` name every isolated child
+    that gets the `[gateway]` URL (`exec` including `--for`, `run`, `ci run`,
+    MCP stdio workers, not `ci env`), and `child_env` must list 1 to 8 names.
+  - `credential-audit.md` documents the per-caller failure behavior;
+    `credential-compatibility.md` and `CLAUDE.md` say `phm:` has failed closed
+    since v0.5.1; the onboarding page says `engagement init` writes a
+    placeholder binding template.
 
 ### Fixed
 
