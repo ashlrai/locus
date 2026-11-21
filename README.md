@@ -402,6 +402,26 @@ A plan uses schema `locus.plan.v1` and writes nothing. `exec`, `run`, `ci run`, 
 
 Runnable variants of the commands above: [docs/copy-paste.md](./docs/copy-paste.md).
 
+## Exit codes
+
+Locus exposes its exit codes with `locus topic agent-contract` and `locus topic agent-contract --json`.
+
+| Code | Name | Meaning |
+| --- | --- | --- |
+| 0 | `success` | success; check commands: healthy (doctor SAFE, agent ready, session ok) |
+| 1 | `failure` | command error or refusal; check commands: degraded (doctor WARN, agent protected, session not ok) |
+| 2 | `unsafe` | check commands: unsafe (doctor UNSAFE, agent unsafe, status pin invalid/frozen/expired) |
+| 2 | `usage` | usage error (bad flag/value, --dry-run on a command that cannot plan) |
+| 3 | `refused` | action refused by policy or an authority gate |
+| 4 | `repin_required` | human must establish a fresh pin before retrying |
+| 5 | `expired` | pin, credential, or authorization expired |
+| 6 | `misconfig` | local configuration is invalid or incomplete |
+| 126 | `cannot_execute` | child program exists but is not executable (exec/run/ci run) |
+| 127 | `not_found` | child program not found (exec/run/ci run) |
+| 141 | `stdout_closed` | stdout closed by the reader (128 + SIGPIPE) |
+
+Some codes describe named outcomes reserved for future command paths; general errors currently use 1. Usage errors and unsafe checks both use 2. Commands that start a child (`exec`, `run`, `ci run`, and `mcp --supervised`) pass through its exit status; a signal becomes 128 plus the signal number. See [exit codes](./docs/exit-codes.md) for details.
+
 ## When the pin breaks
 
 ### Recovering after the broker exits
