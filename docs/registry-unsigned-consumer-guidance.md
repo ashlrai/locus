@@ -19,7 +19,7 @@ Run the following locally, replacing the example filename with the actual
 asset name:
 
 ```bash
-locus adapter verify-manifest locus-adapters-v0.6.2.json --allow-unsigned
+locus adapter verify-manifest locus-adapters-vX.Y.Z.json --allow-unsigned
 ```
 
 The command reads the file locally and compares it with the catalog compiled

@@ -85,10 +85,10 @@ under the comparison rules, not artifact integrity or provenance.
 2. Run the verifier locally, explicitly opting in to an unsigned manifest:
 
    ```bash
-   locus adapter verify-manifest locus-adapters-v0.5.2.json --allow-unsigned
+   locus adapter verify-manifest locus-adapters-vX.Y.Z.json --allow-unsigned
    ```
 
-   Replace `v0.5.2` with the actual release tag and use a quoted filename if
+   Replace `vX.Y.Z` with the actual release tag and use a quoted filename if
    needed. The command reads the file locally; it does not download artifacts.
    Add `--json` for a machine-readable report. A matching unsigned manifest
    reports `signature unsigned`, `drift none`, and exits successfully. Without
@@ -195,11 +195,11 @@ refer to an existing Locus release signing key, public key, or trust setup.
 # Signing key: base64 (or 64-hex) of the 32-byte ed25519 seed, in a local file.
 # Locus never generates, prints, or logs private key material.
 locus adapter registry export --sign --key ~/keys/locus-registry-root \
-  --key-id root --out locus-adapters-v0.5.0.json
+  --key-id root --out locus-adapters-vX.Y.Z.json
 
 # Or via env (e.g. from a secrets manager; still never echoed):
 export LOCUS_REGISTRY_SIGNING_KEY="<base64-seed>"
-locus adapter registry export --sign --out locus-adapters-v0.5.0.json
+locus adapter registry export --sign --out locus-adapters-vX.Y.Z.json
 ```
 
 `--sign` **refuses** to export when no key is available — there is no silent
@@ -217,7 +217,7 @@ locus adapter trust add --id root --ed25519-pub '<base64-pubkey>'
 
 ```bash
 locus adapter trust add --id root --ed25519-pub '<base64-pubkey>'   # once
-locus adapter verify-manifest locus-adapters-v0.5.0.json [--json]
+locus adapter verify-manifest locus-adapters-vX.Y.Z.json [--json]
 ```
 
 ## What `verify-manifest` proves

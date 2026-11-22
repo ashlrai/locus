@@ -16,10 +16,10 @@ root, and enabling CI signing remain future work.
 2. Run the local comparison, substituting the actual asset name:
 
    ```bash
-   locus adapter verify-manifest locus-adapters-v0.6.2.json --allow-unsigned
+   locus adapter verify-manifest locus-adapters-vX.Y.Z.json --allow-unsigned
    ```
 
-   Replace `v0.6.2` with the actual release tag and quote the filename if it
+   Replace `vX.Y.Z` with the actual release tag and quote the filename if it
    contains shell-special characters. Add `--json` for a machine-readable
    report. A matching unsigned asset reports `signature unsigned` and
    `drift none` and exits zero. Without `--allow-unsigned`, an unsigned asset

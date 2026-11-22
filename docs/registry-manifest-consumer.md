@@ -33,10 +33,10 @@ Run the verifier locally. It reads the file and compares it with the catalog
 compiled into **the binary you run**; it downloads nothing.
 
 ```bash
-locus adapter verify-manifest locus-adapters-v0.5.2.json --allow-unsigned
+locus adapter verify-manifest locus-adapters-vX.Y.Z.json --allow-unsigned
 ```
 
-Replace `v0.5.2` with your release tag. A success reports `signature unsigned`
+Replace `vX.Y.Z` with your release tag. A success reports `signature unsigned`
 and `drift none`. That establishes:
 
 - The file parses and uses a supported schema, with no empty or duplicate
