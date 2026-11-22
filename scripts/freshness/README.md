@@ -9,11 +9,14 @@ node --test scripts/freshness/freshness.test.mjs
 ```
 
 Both commands work from any directory. No dependencies, credentials or network
-access are required. CI can call check directly; this change adds no workflows.
+access are required. No workflow runs these today; CI could call check directly.
+(CI does run `node scripts/release-version.mjs check`, which covers the
+version carriers, not these generated blocks.)
 
-Update `[workspace.package].version` in Cargo.toml, both npm wrapper versions,
-and the newest source CHANGELOG.md heading and its `Highlights:` paragraph
-before syncing. Source disagreement is an error, never silently repaired.
+Before syncing, set the source version with
+`node scripts/release-version.mjs sync X.Y.Z` (Cargo, Cargo.lock, npm package
+manifests and wrappers, `server.json`), then update the newest source
+CHANGELOG.md heading and its `Highlights:` paragraph. Source disagreement is an error, never silently repaired.
 The changelog release heading, date and highlights are authored sources; the
 summary above them is generated. Unreleased entries and historical versions
 are preserved, including benchmark results and compatibility warnings.

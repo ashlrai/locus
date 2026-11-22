@@ -27,4 +27,4 @@ HOME="$(mktemp -d)" cargo test -p locus-core --test registry_manifest --locked
 On schema upgrades, download the new dated URL without modifying its contents,
 update the root manifest's `$schema`, and record the new digest here. A schema
 or test update does not submit the server to a registry. Public submission
-requires Mason's approval.
+requires the release owner's approval.
