@@ -27,6 +27,8 @@ Every page in this folder appears once below.
 
 ### Start and daily use
 
+- [copy-paste.md](copy-paste.md): paste-ready blocks for install, JSON, MCP and the first pin
+- [agent-contract.md](agent-contract.md): `--json` schema ids, exit codes, `--dry-run` and non-interactive rules
 - [FIRST-RUN.md](FIRST-RUN.md): what the README install and first commands did on a clean home (2026-10-26)
 - [onboarding.md](onboarding.md): `locus onboard`, three clients across three tenants
 - [broker-recovery-q8.md](broker-recovery-q8.md): recovering a pin after its broker exits
