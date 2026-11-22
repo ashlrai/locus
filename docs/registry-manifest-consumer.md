@@ -10,7 +10,7 @@ questions see the [registry trust FAQ](./registry-trust-faq.md).
 ## Current status: unsigned
 
 The release workflow runs `locus adapter registry export` **without**
-`--sign` and attaches the resulting manifest to the tag-push release. The
+`--sign` and attaches the resulting manifest to the GitHub release. The
 asset therefore carries no signature. There is no configured CI signing setup
 and no published registry root for it. Signing in CI is future work, not a
 current release guarantee, and nothing on this page should be read as a

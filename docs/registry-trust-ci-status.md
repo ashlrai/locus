@@ -1,7 +1,7 @@
 # Adapter registry trust: CI status
 
 The release workflow currently exports the built-in adapter catalog **without
-`--sign`** and attaches the unsigned `locus-adapters-<tag>.json` to a tag-push
+`--sign`** and attaches the unsigned `locus-adapters-<tag>.json` to the GitHub
 release. It does not run `verify-manifest` on that export. There is no
 configured CI signing setup or published registry root. See the
 [registry trust guide](./registry-trust.md#current-release-status) and the
