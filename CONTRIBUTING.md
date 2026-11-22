@@ -200,9 +200,18 @@ cargo fmt --all
 | `crates/locus-core` | Bindings, sessions, seal, policy, store, adapters |
 | `crates/locus-cli` | `locus` binary — pin, exec, binding, setup |
 | `crates/locus-mcp` | Stdio MCP multiplexor hard-scoped to the active pin |
+| `tests/integration/` | Phantom ↔ Locus integration test (a `locus-cli` test target) |
+| `adapters/` | Adapter catalog (`manifest.toml`) and upstream MCP worker recipes (`recipes.toml`) |
+| `schema/` | JSON Schemas: agent report, doctor, hub gate, events, MCP grants, adapter manifest |
+| `examples/` | Sample bindings, `.locus.toml`, the agency starter kit and the adapter template |
+| `integrations/` | Phantom and ashlr-hub glue, Homebrew formula mirror |
+| `npm/`, `npm-mcp/` | npm wrappers `locus-cli` and `@ashlrai/locus-mcp` (fetch the release binary, or cargo-install) |
+| `apps/web/` | Static landing page and the discoverability generator (`llms.txt`, `apps/web/public/*`) |
+| `apps/dashboard/` | Local identity dashboard UI, embedded in the binary and opened by `locus dashboard` |
+| `scripts/` | `fast-check.sh`, docs and link checks, e2e and release helpers |
 | `DESIGN.md` | Architecture, threat model, adapter model |
 | `PLAN.md` | Phased roadmap |
-| `docs/` | Contributor-facing how-tos |
+| `docs/` | Contributor-facing how-tos (index: [docs/README.md](./docs/README.md)) |
 
 ## Adding a provider adapter
 
