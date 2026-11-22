@@ -265,6 +265,11 @@ and checks credential availability and the local `gh` executable. It never
 pins, freezes, grants authority, starts gh, or contacts GitHub. Readiness is a
 snapshot of local launch prerequisites; it cannot guarantee upstream token
 validity, network access, or the outcome of a particular gh operation.
+It requires an operator pin and the presence of every configured provider's
+credential, even if the next command only uses GitHub. The recovery hint can
+include the binding alias. The [fleet observation contract](agent-contract.md#fleet-observations)
+lists every `reason` and compares this check with `fleet-feed`, denial polling
+and command outcomes.
 
 
 ## Related

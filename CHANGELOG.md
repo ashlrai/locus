@@ -31,6 +31,12 @@ binary change: three more `--json` commands now carry a `schema` id.
 
 ### Changed
 
+- Fleet polling guidance distinguishes pin health from local GitHub launch
+  readiness, documents `fleet-preflight` reasons and recovery hints that can
+  include binding aliases, and shows `fleet-denials --cursor`. The README distinguishes the
+  checkout's command surface from published 0.7.0 packages, which lack
+  `fleet-outcomes`; its hero now uses the CLI's `ok entered personal (personal)`
+  output.
 - Contributor docs: CONTRIBUTING gains a "Contribute with an agent" section
   (fork, one worktree per agent, `scripts/fast-check.sh`, CI gate contents,
   merge queue, CODEOWNERS), its local smoke now includes the
@@ -97,6 +103,21 @@ binary change: three more `--json` commands now carry a `schema` id.
   version when it is missing, and slower test suites now run after merge to
   `main` ([#966](https://github.com/ashlrai/locus/pull/966),
   [#964](https://github.com/ashlrai/locus/pull/964)).
+- Release and registry docs now describe manual release dispatch, checksum
+  sidecars, npm publication after release assets, and unsigned adapter manifests
+  without implying configured signing authority
+  ([#1056](https://github.com/ashlrai/locus/pull/1056),
+  [#1057](https://github.com/ashlrai/locus/pull/1057),
+  [#1058](https://github.com/ashlrai/locus/pull/1058)).
+- Swarm and dashboard references now distinguish their server modes, document
+  the dashboard's unauthenticated `/api/health` route, and describe the
+  required broker transport token and grant-scoped tool allowlists
+  ([#1062](https://github.com/ashlrai/locus/pull/1062),
+  [#1065](https://github.com/ashlrai/locus/pull/1065)).
+- Contributor guidance removes tracked agent scratch files, and roadmap docs
+  distinguish shipped milestones from planned work
+  ([#1061](https://github.com/ashlrai/locus/pull/1061),
+  [#1064](https://github.com/ashlrai/locus/pull/1064)).
 - Docs audited against the code, no behavior change:
   - `policy.md` now lists the gate order and every policy field, notes that
     `parallel_sessions` is parsed but not enforced, and describes the additive
@@ -198,6 +219,12 @@ binary change: three more `--json` commands now carry a `schema` id.
 
 ### Added
 
+- `locus fleet-outcomes` emits a read-only JSON summary of `exec` and `ci run`
+  results from the latest 100 parsed audit records, plus pending approval counts
+  ([#963](https://github.com/ashlrai/locus/pull/963)). Missing exit codes are
+  `unknown`; an unreadable approvals directory is `null`. Output excludes
+  commands, binding names, timestamps, credentials and raw errors, and polling
+  never initializes `LOCUS_HOME`.
 - Drop-in end-to-end steps: new steps go in `scripts/e2e.d/NN-topic.sh`
   (see [scripts/e2e.d/README.md](scripts/e2e.d/README.md)) instead of
   growing `scripts/e2e.sh`, and `bash scripts/check-e2e-dropin.sh` proves the
