@@ -1,8 +1,22 @@
 # DESIGN (proposal): community adapter marketplace
 
-**Status:** proposal for future adapter discovery and installation commands.
-This phase-one checkout does not contain the marketplace implementation.
-Cargo and npm versions remain 0.5.0; this document does not announce a release.
+**Status:** shipped in 0.5.1 as `locus adapter search`, `install` and
+`uninstall` and `locus adapter registry index add | list | remove`, next to the
+existing `adapter trust`, `adapter registry export` and
+`adapter verify-manifest`. This page is the original proposal, kept for its
+rationale. The shipped behavior is documented in
+[docs/adapters.md](./docs/adapters.md#community-adapter-marketplace); where the
+two differ, that page wins. The main differences:
+- Community adapters are publisher-supplied executable code, not declarative
+  config: the upstream MCP command runs with the binding's credentials. Locus
+  still never loads adapter code into its own process.
+- A trusted signature binds the full install envelope (`manifest_version` 2)
+  to a pinned publisher key. It does not show that the command is safe, so
+  every install, including one that widens the tool list, needs explicit
+  consent.
+- Community credentials are `env:VAR` references only.
+- `install` also updates an installed adapter; there is no separate update
+  command.
 
 **Proposed defaults (subject to implementation and review):**
 - **Index model:** registry-agnostic from day one. Any HTTPS URL can serve a

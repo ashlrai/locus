@@ -1,8 +1,20 @@
 # DESIGN (proposal): guided multi-account binding setup wizard
 
-**Status:** proposal for a future `locus onboard` command. This phase-one
-checkout does not contain its CLI implementation. Cargo and npm versions are
-still 0.5.0; implementation, verification and a versioned release are separate.
+**Status:** shipped as `locus onboard` in 0.5.1. This page is the original
+proposal, kept for its rationale. The shipped command is documented in
+[docs/onboarding.md](./docs/onboarding.md); where the two differ, the shipped
+behavior wins. The main differences:
+- The command is `locus onboard` with `--detect-only`, `--yes` and `--reset`
+  (plus the global `--json` and `--dry-run`), not `locus setup wizard`.
+- It accepts `env:VAR` credential references only. `phm:` references are
+  refused, because no scoped Phantom bridge exists.
+- It never pins, resolves credentials or runs the `locus exec -- env`
+  isolation demo from step 6. It ends with a read-only `locus doctor` report.
+- `--json` prints one JSON object per event (each detected candidate, each
+  written binding, the final report). `--yes` applies only an already reviewed
+  saved plan (`$LOCUS_HOME/onboard-plan.json`); it never accepts detected
+  candidates.
+- An existing binding that differs from the plan is never overwritten.
 
 **Proposed defaults (subject to implementation and review):**
 - **Ambient import:** detect-only, never auto-import. Every candidate is an
