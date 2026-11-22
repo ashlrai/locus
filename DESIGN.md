@@ -858,6 +858,21 @@ hard_constraints = ["project_ref_immutable"]
 **Prefer wrap upstream MCP** when it exists; inject env + pre-call enforcement.  
 **Reimplement** only when upstream MCP is full-user OAuth without account scoping (e.g. some Vercel setups) — then Locus OAuth broker + REST tools with frozen `team_id`.
 
+Shipped surface: the trait is `ProviderAdapter` in
+`crates/locus-core/src/adapters/mod.rs`: `name`, `tools`, `call`, plus default
+CLI hooks `cli_name`, `cli_required_credentials` and `configure_cli_env`. There
+are nine built-in synthetic adapters (`known_providers()`): supabase, github,
+vercel, cloudflare, aws, resend, stripe, anthropic and openai. No
+Railway/Render/Fly adapter exists. There are no per-adapter package
+directories: `adapters/` holds only `manifest.toml` (built-in capabilities;
+`locus adapter list|verify`) and `recipes.toml` (upstream MCP stdio recipes;
+`locus upstream list|suggest`). Upstream MCP servers run as stdio workers
+behind the same freeze, schema, read-only, budget and policy gates
+([docs/workers.md](docs/workers.md)). There is no OAuth broker (see 4.3), and
+`phm:` refs fail closed, so credentials come from `env:` refs. See
+[docs/adapters.md](docs/adapters.md) and
+[docs/adapter-sdk.md](docs/adapter-sdk.md).
+
 ---
 
 ## 9. Security threat model
@@ -886,6 +901,18 @@ hard_constraints = ["project_ref_immutable"]
 | **Supply chain adapter** | Malicious adapter exfiltrates** | Signed adapters registry; hash pin; sandbox workers |
 | **Cross-binding proxy path guess** | Hit `/bind/{other}/` | Binding id high-entropy; require session seal header; localhost only |
 
+Shipped surface: some mitigations above are still design targets. The seal key
+is a 0600 file (`$LOCUS_HOME/daemon.key`), not a keychain entry, and there is
+no daemon or UDS; a per-pin authority broker is supervised by the pinning
+shell (see 4.1). The audit log has no HMAC chain yet (see 4.5); `locus
+forensics` exports a tip digest of the last event instead. Approval
+notifications are opt-in desktop notices (`[notify] enabled = true`), with no
+Touch ID. No `/bind/{id}/` proxy path exists (see 4.3). `locus adapter verify
+--require-signed` checks manifest signatures, but built-in entries ship
+unsigned. Worker sandboxing is opt-in (`sandbox = true` or
+`LOCUS_WORKER_SANDBOX=1`): Seatbelt on macOS, bubblewrap or a best-effort PATH
+restriction on Linux.
+
 ### 9.3 Non-goals (honest)
 
 - Protecting against root on the developer machine
@@ -904,7 +931,7 @@ INV-5  agent-initiated pin change ⇒ no state change without human approval rec
 INV-6  audit chain verifies after every N events in CI
 ```
 
-Conformance suite: `cargo test -p locus-core --test invariants` (run by `.github/workflows/conformance.yml`) covers these as integration tests.
+Conformance suite: `cargo test -p locus-core --test invariants` (run with nextest by `.github/workflows/conformance.yml`) covers INV-1 (store gate), INV-2, INV-4 and INV-5 plus seal tamper and scope-freeze properties. INV-3 is enforced by per-worker homes in `isolation.rs` (each worker gets its own `GH_CONFIG_DIR` / `AWS_CONFIG_FILE`) but has no dedicated invariant test. INV-6 waits on the audit chain (4.5).
 
 ---
 
@@ -957,6 +984,21 @@ Conformance suite: `cargo test -p locus-core --test invariants` (run by `.github
 - Kubernetes/session broker for org-hosted agents
 - Formal verification of seal/cap logic; bug bounty
 
+Status against the code (phases were not shipped in order):
+
+- Shipped: `locus-mcp` stdio plus `--http` (opt-in `--multi-tenant`), exclusive
+  sealed pins, `.locus.toml` workspaces, nine adapters including AWS,
+  Cloudflare and Resend, upstream MCP worker pools, `locus run`, `locus hook`,
+  `locus setup` (Claude Code, Cursor, Codex, Gemini CLI, Grok Build),
+  allow/deny/require_approval policy with opt-in notify, `locus events export`
+  (fleet, NDJSON for SIEM, OTLP) with a webhook sink, `locus ci mint|env|run`
+  ephemeral pins, passphrase-encrypted `locus graph` export/import, and the
+  adapter SDK with community `adapter search|install`.
+- Not shipped: the daemon/UDS, the Phantom `phm:` bridge (refs fail closed),
+  the binding-scoped HTTP gateway (`[gateway]` only passes a base URL), the
+  audit HMAC chain, Touch ID, cloud-hosted binding graphs, SSO unlock, a
+  Kubernetes broker and a signed adapter registry root.
+
 ---
 
 ## 11. Open source strategy
@@ -965,6 +1007,9 @@ Conformance suite: `cargo test -p locus-core --test invariants` (run by `.github
 
 - **Apache-2.0 OR MIT** dual-license (Rust ecosystem friendly; Apache for patent grant).  
   Match or exceed Phantom’s openness; if Phantom is MIT-only, Locus can be MIT for consistency — prefer dual if starting fresh.
+
+Shipped: Locus is MIT-licensed ([LICENSE](LICENSE); `license = "MIT"` in the
+workspace `Cargo.toml`).
 
 ### Repo layout
 
@@ -984,6 +1029,13 @@ locus/                    # or mmcp/ monorepo renaming later
   THREAT_MODEL.md
   README.md
 ```
+
+Shipped layout: three crates, `locus-core` (seal, policy, store, isolation,
+adapters, workers, audit events), `locus-cli` and `locus-mcp`, with no daemon
+or separate audit/adapter crates. `adapters/` holds the manifest and recipes,
+and integration tests live under `crates/*/tests/` and `tests/integration/`.
+There is no THREAT_MODEL.md: the threat model is section 9 here, and
+[SECURITY.md](SECURITY.md) covers reporting.
 
 ### Dual product with Phantom
 
