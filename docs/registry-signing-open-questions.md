@@ -135,7 +135,7 @@ release time.
 
 - Who owns the transition end to end — key ceremony, workflow change,
   documentation, tests, and the announcement — and what evidence, such as
-  a verified signed manifest on a real tag-push release, must exist
+  a verified signed manifest on a real GitHub release, must exist
   before these pages stop calling signing future work?
 
 ## Scope notes
