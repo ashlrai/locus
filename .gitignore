@@ -22,3 +22,8 @@ lcov.info
 # Python bytecode
 __pycache__/
 *.pyc
+
+# Agent scratch files (task plans, run notes, job logs); evidence goes in the PR body
+/notes.md
+/task_plan.md
+/close-dup.jsonl
