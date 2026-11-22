@@ -454,7 +454,7 @@
         </div>
 
         <h3>Read JSON</h3>
-        <p class="note">Run this in one shell. <code>LOCUS_HOME</code> keeps the trial off your real home directory. The first JSON key is <code>schema</code>. Nothing here prints a secret. <code>--expect acme</code> exits 1 with <code>pin_mismatch</code> and does not start the child.</p>
+        <p class="note">Run this in one shell. <code>LOCUS_HOME</code> keeps the trial off your real home directory. The first JSON key is <code>schema</code>. Nothing here prints a secret. <code>--expect personal</code> runs the child on the pin; <code>--expect acme</code> exits 1 with <code>pin_mismatch</code> and does not start the child.</p>
         <div class="term">
           <div class="term-head"><span class="cmt">throwaway home</span><button type="button" class="copy" data-target="src-json">Copy</button></div>
           <pre id="src-json">export LOCUS_HOME="$(mktemp -d)"
@@ -463,7 +463,9 @@ eval "$(locus hook bash)"
 locus enter personal
 locus whoami --json
 locus status --json
-locus doctor --json</pre>
+locus doctor --json
+locus exec --expect personal --no-resolve -- echo ok
+locus exec --expect acme -- echo ok   # refused: exit 1</pre>
         </div>
 
         <h3>MCP for Claude, Cursor, and Codex</h3>
