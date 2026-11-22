@@ -1088,78 +1088,93 @@ There is no THREAT_MODEL.md: the threat model is section 9 here, and
 
 Naive multi-config multiplies attack surface and decision load. Locus **collapses** decision load to a single pin and **enforces** it with PID boundaries, not instructions.
 
+Shipped surface: three rows are narrower today. Audit lines in
+`$LOCUS_HOME/audit/events.jsonl` carry `ts`, `op`, `binding` and `detail`;
+there is no principal field. `phm:` CredentialRefs fail closed until a scoped
+Phantom bridge exists, so working bindings use `env:VAR` refs supplied outside
+agent context ([docs/credential-compatibility.md](docs/credential-compatibility.md)).
+Directory binding is the `.locus.toml` `default_binding` used by a bare
+`locus enter`/`locus pin`; git-remote autopin is opt-in (`[autopin]` in
+`config.toml`).
+
 ---
 
 ## Appendix A — Example full config tree
 
+Shipped layout: `$LOCUS_HOME` (default `~/.locus`) holds `config.toml`,
+`daemon.key`, `bindings/*.toml`, `sessions/`, `audit/events.jsonl` and
+`approvals/`; there is no `tenants/` directory, because the tenant is a field
+on each binding. `locus init` writes the `config.toml` below. The `[daemon]`,
+`[credential]` and `[audit]` tables are parsed but not used, so they are
+omitted; `[clients] auto_pin` is shown by `locus doctor` only.
+
 ```toml
-# ~/.locus/config.toml
-[daemon]
-auto_start = true
-default_ttl = "8h"
-agent_can_pin = false
-approval_timeout = "15m"
+# ~/.locus/config.toml (no secrets)
+[notify]
+enabled = false            # opt-in approval banners: locus notify on
 
-[clients]
-auto_pin = "cwd"          # cwd | none | last
-
-[credential]
-preferred = "phantom"     # phantom | keychain
-
-[audit]
-enabled = true
-path = "~/.locus/audit/events.jsonl"
+# Opt-in git-remote → binding auto-pin (off by default)
+# [autopin]
+# enabled = false
+# [[autopin.remotes]]
+# match = "github.com/acme-corp"
+# binding = "acme"
 ```
 
-```toml
-# ~/.locus/tenants/acme-corp.toml
-id = "acme-corp"
-display_name = "Acme Corp"
-color = "#3B82F6"
-```
+Other optional tables, all off or empty by default: `[budget]`, `[gateway]`,
+`[credential_audit]`, `[exec] inherit_env`, `[history]`
+(`crates/locus-core/src/config.rs`).
 
 ```toml
-# ~/.locus/bindings/personal.toml
+# ~/.locus/bindings/acme.toml (trimmed from locus init --with-samples)
 [binding]
-id = "bnd_personal"
-alias = "personal"
-tenant = "personal"
-principal = "mason"
+id = "bnd_acme"
+alias = "acme"
+tenant = "acme-corp"
+
+[binding.policy]
+default = "allow"
+max_ttl = "8h"
+require_approval = ["*.delete*", "vercel.deploy.prod"]
 
 [[binding.providers]]
 provider = "github"
-account = "your-github-user"
-credential_ref = "phm:GH_TOKEN_PERSONAL"
-scope = { orgs = ["*"], repos = ["*"] }  # still isolated from acme workers
+account = "acme-corp"
+credential_ref = "env:LOCUS_GH_TOKEN_ACME"
+scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
 
 [[binding.providers]]
 provider = "supabase"
-account = "personal-sandbox"
-credential_ref = "phm:SUPABASE_PERSONAL"
-scope = { project_ref = "personalproj1", read_only = false }
+account = "acme-prod"
+credential_ref = "env:LOCUS_SUPABASE_ACME"
+scope = { project_ref = "acme_ref_replace_me", read_only = true }
 ```
 
 ## Appendix B — MCP control tools (JSON)
 
+Shipped schemas (`control_tools()` in `crates/locus-core/src/adapters/mod.rs`;
+descriptions shortened). `locus_request_pin` takes only `alias`; the full
+control tool list is in 5.2 and [docs/mcp.md](docs/mcp.md).
+
 ```json
 {
   "name": "locus_whoami",
-  "description": "Return the sealed identity of this session: tenant, binding, providers, scopes. Call before any infrastructure mutation if unsure.",
-  "inputSchema": { "type": "object", "properties": {} }
+  "description": "REQUIRED before infrastructure work when pin is unclear. Returns active pin: tenant, binding, providers, frozen scopes. Never secrets.",
+  "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
 }
 ```
 
 ```json
 {
   "name": "locus_request_pin",
-  "description": "Request the human to pin this session to a different binding. Does not change identity without human approval.",
+  "description": "Request the HUMAN to pin a binding. AGENTS CANNOT PIN — records a request and returns the exact shell command.",
   "inputSchema": {
     "type": "object",
-    "required": ["alias", "reason"],
     "properties": {
-      "alias": { "type": "string" },
-      "reason": { "type": "string" }
-    }
+      "alias": { "type": "string", "description": "Binding alias to request (e.g. acme)" }
+    },
+    "required": ["alias"],
+    "additionalProperties": false
   }
 }
 ```
@@ -1167,27 +1182,30 @@ scope = { project_ref = "personalproj1", read_only = false }
 ## Appendix C — Process diagram (exclusive pin)
 
 ```
-Human: locus pin acme
+Human (trusted shell): locus enter acme
         │
         ▼
-   daemon: create session seal(binding=acme)
+   sealed session (HMAC, daemon.key) in $LOCUS_HOME/sessions/
+   + per-pin authority broker supervised by this shell
         │
         ▼
-   locus-mcp: tools/list
+   locus mcp --supervised (launched from the pinned shell): tools/list
         │
-        ├── worker[supabase, ref=abc]  env: token_acme
-        ├── worker[vercel, team=acme]  env: oauth_acme
-        └── worker[github, org=acme]   GH_CONFIG_DIR=.../acme-only
+        ├── worker[supabase, ref=acme_ref]  env: LOCUS_SUPABASE_ACME value
+        ├── worker[vercel, team=acme]       env: LOCUS_VERCEL_TOKEN_ACME value
+        └── worker[github, org=acme-corp]   GH_CONFIG_DIR=<private per-session dir>
 
 Agent: tools/call list_tables
         │
         ▼
-   policy + seal OK → only worker[supabase, ref=abc]
+   policy + seal + frozen scope OK → only worker[supabase, ref=acme_ref]
         │
         ▼
-   upstream Supabase project abc  ✓
-   personal Supabase              ✗ not in process, not in catalog
+   upstream Supabase project acme_ref  ✓
+   personal Supabase                   ✗ not in process, not in catalog
 ```
+
+A client-launched `locus-mcp` (not supervised) serves the control tools only.
 
 ## Appendix D — One-liner positioning
 
