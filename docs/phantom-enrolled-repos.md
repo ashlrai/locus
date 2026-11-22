@@ -65,8 +65,8 @@ A malformed or unreadable `.locus.toml` fails closed.
 
 | Check | Command | Meaning |
 |---|---|---|
-| Readiness | `locus agent report --json` | `ready` / `protected` / `unsafe` |
-| Doctor | `locus doctor --json` | SAFE / WARN / UNSAFE; advisory-only WARN can exit 0, other WARN exits 1, UNSAFE exits 2; reports unresolved `phm:` refs |
+| Readiness | `locus agent report --json` | `status` is `ready` / `protected` / `unsafe`; exits 0 / 1 / 2 |
+| Doctor | `locus doctor --json` | SAFE / WARN / UNSAFE; a WARN whose only findings are setup advice (approvals, Phantom, control capability or executor authority missing) exits 0, other WARN exits 1, UNSAFE exits 2; reports unresolved `phm:` refs |
 | Who am I | `locus whoami --json` | the current pin, no secrets |
 
 Phantom should treat `unsafe` or exit 2 as "do not dispatch provider work in
