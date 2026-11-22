@@ -328,31 +328,52 @@ curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/v0.1.0.tar.gz" | sh
 
 ## What release.yml publishes
 
-On `push` of tag `v*`, the workflow:
+[`release.yml`](../.github/workflows/release.yml) runs on a `v*` tag push (the
+tag auto-tag creates), on a manual `workflow_dispatch` retry with
+`version=X.Y.Z` for an existing tag, and as a dry run on pull requests that
+change the release workflows or `scripts/release-version*.mjs`. Its jobs:
 
-1. Builds release binaries for:
-   - `aarch64-apple-darwin`
-   - `x86_64-apple-darwin`
+1. **Full suite green on release sha.** Resolves the release commit (on
+   dispatch, the existing tag `vX.Y.Z`; it fails if the tag is missing) and
+   requires a successful `workflow_dispatch` run of `ci.yml` on that exact
+   SHA. Every later job checks out that SHA, not the dispatch ref. PR dry runs
+   skip the evidence check.
+2. **Build.** Runs `node scripts/release-version.mjs check --tag vX.Y.Z` (plain
+   `check` on a PR), then builds `locus-cli` and `locus-mcp` in release mode for:
+   - `aarch64-apple-darwin` and `x86_64-apple-darwin` (one macOS job)
    - `x86_64-unknown-linux-gnu`
-2. Packs each as `locus-<target>.tar.gz` containing:
-   - `locus-<target>/locus`
-   - `locus-<target>/locus-mcp`
-   - `README.md`, `LICENSE` (best-effort)
-3. Creates a GitHub Release with `generate_release_notes: true` and attaches
-   those tarballs as assets.
+
+   Each target is packed as `locus-<target>.tar.gz` containing
+   `locus-<target>/locus`, `locus-<target>/locus-mcp`, and `README.md` and
+   `LICENSE` (best-effort), with a `locus-<target>.tar.gz.sha256` sidecar in
+   `sha256sum -c` format. The sidecar is integrity metadata, not a signature.
+   The PR dry run builds Linux only.
+3. **Create GitHub Release.** Requires exactly one matching sidecar per
+   archive, exports the built-in adapter catalog **unsigned** as
+   `locus-adapters-vX.Y.Z.json` (`locus adapter registry export`; see
+   [registry trust](registry-trust.md)), then creates the release with
+   `generate_release_notes: true` and attaches the archives, sidecars and
+   manifest. The PR dry run stops before creating a release.
+4. **Publish npm packages.** After the release exists (the wrappers download
+   its assets on first run), publishes `npm/` (`locus-cli`) and `npm-mcp/`
+   (`@ashlrai/locus-mcp`), one at a time, through npm trusted publishing
+   (OIDC, no `NPM_TOKEN`) with `--provenance`. Each package's version must
+   equal the tag; a version already on npm is skipped. Never runs on a PR.
 
 Asset URLs look like:
 
 ```text
-https://github.com/ashlrai/locus/releases/download/v0.1.1/locus-aarch64-apple-darwin.tar.gz
-https://github.com/ashlrai/locus/releases/download/v0.1.1/locus-x86_64-apple-darwin.tar.gz
-https://github.com/ashlrai/locus/releases/download/v0.1.1/locus-x86_64-unknown-linux-gnu.tar.gz
+https://github.com/ashlrai/locus/releases/download/vX.Y.Z/locus-aarch64-apple-darwin.tar.gz
+https://github.com/ashlrai/locus/releases/download/vX.Y.Z/locus-aarch64-apple-darwin.tar.gz.sha256
+https://github.com/ashlrai/locus/releases/download/vX.Y.Z/locus-x86_64-apple-darwin.tar.gz
+https://github.com/ashlrai/locus/releases/download/vX.Y.Z/locus-x86_64-unknown-linux-gnu.tar.gz
+https://github.com/ashlrai/locus/releases/download/vX.Y.Z/locus-adapters-vX.Y.Z.json
 ```
 
 Source archive (GitHub auto):
 
 ```text
-https://github.com/ashlrai/locus/archive/refs/tags/v0.1.1.tar.gz
+https://github.com/ashlrai/locus/archive/refs/tags/vX.Y.Z.tar.gz
 ```
 
 ## After the tag (Homebrew / npm)
@@ -383,8 +404,9 @@ the sanctioned flow. Verify both registry versions, integrity and gitHead.
 
 ```bash
 # GitHub CLI
-gh release view v0.1.1
-gh release download v0.1.1 -p 'locus-*.tar.gz' -D /tmp/locus-rel
+gh release view vX.Y.Z -R ashlrai/locus
+gh release download vX.Y.Z -R ashlrai/locus -p 'locus-*.tar.gz*' -D /tmp/locus-rel
+(cd /tmp/locus-rel && sha256sum -c locus-*.tar.gz.sha256)   # macOS: shasum -a 256 -c
 
 # Local binary
 tar -xzf /tmp/locus-rel/locus-aarch64-apple-darwin.tar.gz -C /tmp
