@@ -45,13 +45,16 @@ and others), and a human's PR passes the same gate. This path works for both:
 
 **What CI requires.** The one required check is **CI Gate**
 ([`ci.yml`](./.github/workflows/ci.yml)). On a PR and in the merge queue it
-needs: fmt and workspace clippy `-D warnings` plus the installer test; the
-npm wrapper, discoverability (`--check`), public-site (`node --test apps/web`)
-and crypto-policy checks; the sandbox tests (run only when `locus-core`, Cargo
-files, the toolchain or `ci.yml` change); and two diff secret scans (Gitleaks
-and secret-shape). The full test suite, doctests, release build, end-to-end
-gate and MSRV check run on the daily schedule and on manual dispatch, not per
-PR, so run `cargo test` locally for the crates you touch.
+needs: fmt and workspace clippy `-D warnings` plus the installer
+target-selection test; the [wrapper checks](#wrapper-checks) (npm wrapper
+tests, release-version agreement, discoverability `--check`, public-site
+`node --test apps/web`, installer download/checksum/extract tests, crypto
+policy and the Homebrew formula syntax); the sandbox tests (run only when
+`locus-core`, `.cargo/`, Cargo files, the toolchain or `ci.yml` change); and
+two diff secret scans (Gitleaks and secret-shape). The full test suite,
+doctests, release build, end-to-end gate, Phantom contract, recipes and MSRV
+check run on the daily schedule and on manual dispatch, not per PR, so run
+`cargo test` locally for the crates you touch.
 
 **Merging.** PRs land through the merge queue, which reruns CI Gate on the
 merged tree. A maintainer queues reviewed PRs; collaborators with write access
@@ -179,6 +182,22 @@ node --test apps/web/*.test.mjs            # public-site tests (CI Gate)
 The `.devin/wiki.json` file steers DeepWiki's auto-generated wiki for this
 repository. When adding a crate or a major doc, update it in the same change;
 see [DeepWiki auto-docs](./docs/deepwiki.md).
+
+### Wrapper checks
+
+CI Gate also runs these (Node 20 in CI; the last line needs Ruby). Run them
+when you touch `npm/`, `npm-mcp/`, the installers, version carriers, crypto
+code or the Homebrew formula:
+
+```bash
+node --test npm/test                       # npm wrapper tests
+node scripts/release-version.mjs check     # every version carrier agrees
+node --test scripts/release-version.test.mjs scripts/ci/release-workflow.test.mjs
+node --test scripts/install-extract.test.mjs scripts/install-checksum.test.mjs scripts/install-download.test.mjs
+node --test scripts/check-crypto.test.mjs  # crypto policy tests
+node scripts/check-crypto.mjs              # crypto policy check
+ruby -c integrations/homebrew/Formula/locus.rb
+```
 
 ## Lint and format
 
