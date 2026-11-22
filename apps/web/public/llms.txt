@@ -172,6 +172,6 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
 - [DESIGN.md](https://github.com/ashlrai/locus/blob/main/DESIGN.md): full architecture and threat model
 - [docs/agent-contract.md](https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md): JSON schemas, exit codes, dry-run
 - [llms-full.txt](https://locus.dev/llms-full.txt): complete heading index of README and docs
-- [PLAN.md](https://github.com/ashlrai/locus/blob/main/PLAN.md): roadmap
+- [PLAN.md](https://github.com/ashlrai/locus/blob/main/PLAN.md): original phased plan (historical; live status is in GOALS.md)
 - [SECURITY.md](https://github.com/ashlrai/locus/blob/main/SECURITY.md): vulnerability reporting
 - [Site](https://locus.dev/)
