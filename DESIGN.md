@@ -139,6 +139,13 @@ JSON Schema (control-plane API / validation):
 }
 ```
 
+Shipped surface: a binding accepts only `env:VAR` and `phm:NAME` credential
+refs, so the `oauth:` ref in the sketch above fails binding validation. `phm:`
+refs are kept but fail closed when resolved (see §4.3). `parallel_sessions` is
+parsed and stored but not enforced. The policy table also takes ordered
+`rules`, `default_ttl` and `max_session_lifetime`; the full field list is in
+[docs/policy.md](docs/policy.md).
+
 ### 3.3 Workspace schema
 
 ```toml
@@ -397,6 +404,17 @@ Gateway injects credentials + forces `project_ref` path prefix. Agent never hold
 - Per-binding access tokens minted with account scope.
 - Proactive refresh + per-account mutex (avoid refresh races under parallel tool calls).
 
+Shipped surface: only two ref forms exist. `env:VAR` is read from the parent
+process at launch and placed only in the isolated child env (exec, run,
+ci run, MCP stdio workers). `phm:NAME` is kept in
+bindings but fails closed (`unsupported-integration`) until a scoped Phantom
+bridge exists. `keychain:`, `oauth:` and `file:` refs did not ship and fail
+binding validation; there is no OAuth broker or daemon. There is no
+binding-scoped proxy path either: the opt-in `[gateway]` block only passes a
+configured base URL to the child and never forwards credentials. See
+[docs/credential-compatibility.md](docs/credential-compatibility.md) and
+[docs/gateway-base-url.md](docs/gateway-base-url.md).
+
 ### 4.4 Policy plane
 
 MVP: glob rules in binding TOML.  
@@ -428,6 +446,13 @@ when = 'args.owner == "acme-corp"'
   establish authority. The external verifier is intentionally absent today.
 - MCP tool result: report the closed external-envelope requirement and instruct agents not to retry after local advisory labels.
 - Optional: auto-deny after N minutes / macOS notification + Touch ID
+
+Shipped surface: rules are tool-name globs only, written as
+`[[binding.policy.rules]]` with `match` and `action` (`allow`, `deny`,
+`require_approval`, `dual_control`); first match wins. There is no `when`
+expression, CEL or Rego, and the sketch's `[[policy.rules]]` keys (`tool`,
+`when`) are unknown keys, so a binding using them fails to load. See
+[docs/policy.md](docs/policy.md).
 
 ### 4.5 Audit plane
 
