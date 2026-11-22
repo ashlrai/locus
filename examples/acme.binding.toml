@@ -1,5 +1,6 @@
 # Example binding — copy to ~/.locus/bindings/acme.toml and edit.
-# Never put raw secrets here; use phm: or env: refs.
+# Never put raw secrets here; use env: refs. phm: refs parse but fail closed
+# until a scoped Phantom bridge exists (docs/credential-compatibility.md).
 
 [binding]
 id = "bnd_acme"
@@ -10,11 +11,12 @@ description = "Acme client engagement"
 [binding.policy]
 default = "allow"
 require_approval = ["*.delete*", "*.drop*", "vercel.deploy.prod"]
-# Firm mode: these tools require two externally authenticated identities.
+# Firm mode: these tools need two externally authenticated identities. That
+# authority is not shipped, so today they stay blocked (docs/policy.md).
 dual_control = ["*.delete*", "vercel.deploy.prod"]
 # dual_control_all_approvals = true
 max_ttl = "8h"
-parallel_sessions = 4
+parallel_sessions = 4             # parsed, not enforced yet (docs/policy.md)
 
 [[binding.providers]]
 provider = "supabase"
@@ -27,7 +29,8 @@ provider = "github"
 account = "acme-corp"
 credential_ref = "phm:GH_TOKEN_ACME"
 scope = { orgs = ["acme-corp"], repos = ["acme-corp/*"] }
-# Optional: auto-spawn upstream MCP for this provider when pinned.
+# Optional: spawn an upstream MCP worker for this provider when pinned
+# (its tools need a supervised launch, `locus mcp --supervised`; docs/workers.md).
 # upstream = { command = "npx", args = ["-y", "@modelcontextprotocol/server-github"], resolve_secrets = true }
 
 [[binding.providers]]
