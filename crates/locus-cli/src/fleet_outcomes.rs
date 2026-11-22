@@ -161,3 +161,7 @@ pub(crate) fn run() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "fleet_outcomes_tests.rs"]
+mod tests;
