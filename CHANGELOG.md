@@ -170,6 +170,26 @@ binary change: three more `--json` commands now carry a `schema` id.
   - The README lists `locus offboard` (released in 0.6.0) in the phase table
     and `locus serve --swarm <graph.json>` in the command list; the planned
     row now names authenticated dual-control authority, which is not shipped.
+  - `DESIGN.md` keeps its design text but adds "Shipped" notes wherever the
+    code differs: no daemon (each pin's authority broker is supervised by the
+    pinning shell), only `env:` and `phm:` credential refs (`phm:` fails
+    closed), tool-name glob policy rules, `parallel_sessions` parsed but not
+    enforced, the real control tools and resources, the three-crate layout,
+    which roadmap items shipped, the MIT license, and appendices A to C
+    matched to the shipped config tree, control tools and pin process
+    ([#1074](https://github.com/ashlrai/locus/pull/1074),
+    [#1075](https://github.com/ashlrai/locus/pull/1075)).
+  - `PQ-READINESS.md` drops a private source path, limits production Ed25519
+    use to `adapter_registry.rs` and `adapter_trust.rs`, and documents the
+    `LOCUS_ADAPTER_TRUST_KEYS` overlay.
+  - The sample bindings under `examples/` say in comments that `phm:` refs
+    fail closed (use `env:`), that `parallel_sessions` is not enforced and
+    that upstream provider tools need `locus mcp --supervised`;
+    `examples/agency-starter/README.md` matches `docs/agency-starter.md`,
+    including `locus offboard` and the hook line after `init`.
+  - The Homebrew README points version bumps at
+    `scripts/release-version.mjs sync` and lists the `.sha256` sidecars; the
+    freshness README says no workflow runs its check today.
 
 ### Fixed
 
