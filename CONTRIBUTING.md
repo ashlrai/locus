@@ -39,7 +39,9 @@ and others), and a human's PR passes the same gate. This path works for both:
    `node apps/web/discoverability.mjs` and commit its output. The full map is
    in [apps/web/README.md](./apps/web/README.md#agent-discoverability).
 6. Open the PR with the [template](./.github/PULL_REQUEST_TEMPLATE.md) and
-   state which isolation property changes, or "none".
+   state which isolation property changes, or "none". Put the agent's
+   evidence (what it checked, test counts) in the PR body, and keep its
+   scratch files (task plans, run notes, job logs) out of the commit.
 
 **What CI requires.** The one required check is **CI Gate**
 ([`ci.yml`](./.github/workflows/ci.yml)). On a PR and in the merge queue it
