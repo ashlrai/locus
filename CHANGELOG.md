@@ -142,6 +142,10 @@ binary change: three more `--json` commands now carry a `schema` id.
     and that `child_env` accepts `*_API_BASE` names.
   - The `AGENTS.md` safe local smoke builds first and puts `target/debug` on
     `PATH`, as CONTRIBUTING does.
+  - `DESIGN-onboarding-wizard.md` and `DESIGN-adapter-marketplace.md` no
+    longer say they are unimplemented proposals at 0.5.0. Both say the
+    feature shipped in 0.5.1, link the page that documents it, and list where
+    the shipped behavior differs from the proposal.
   - The README lists `locus offboard` (released in 0.6.0) in the phase table
     and `locus serve --swarm <graph.json>` in the command list; the planned
     row now names authenticated dual-control authority, which is not shipped.
