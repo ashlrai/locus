@@ -8,9 +8,15 @@ Local mission-control UI for the Locus identity plane.
 # Build CLI, then launch UI + API on 127.0.0.1:8750 and open a browser
 cargo run -p locus-cli -- dashboard
 
+# Serve and print the URL without opening a browser
+cargo run -p locus-cli -- dashboard --no-open
+
 # API only (no browser)
 cargo run -p locus-cli -- serve --port 8750
+curl -s http://127.0.0.1:8750/api/health
 ```
+
+`locus serve --swarm <graph.json>` is a different mode: it serves a grant-scoped MCP broker instead of this dashboard (see [docs/swarm-broker.md](../../docs/swarm-broker.md)).
 
 Optional shared-secret (recommended if other local users share the machine):
 
@@ -25,16 +31,17 @@ All bind **127.0.0.1 only**. Responses never include resolved secrets — only a
 
 | Method | Path | Notes |
 |--------|------|--------|
-| GET | `/` | Static dashboard |
+| GET | `/`, `/index.html` | Static dashboard |
+| GET | `/api/health` | Liveness: `ok`, `service`, `version`, `bind`. Never token-gated |
 | GET | `/api/status` | Active pin summary |
 | GET | `/api/whoami` | Whoami (CredentialRefs only) |
 | GET | `/api/bindings` | Binding list |
 | GET | `/api/approvals` | Pending approvals |
 | GET | `/api/doctor` | Full doctor report |
-| GET | `/api/events?last=N` | Audit tail |
-| POST | `/api/approve/{id}/grant` | Records an untrusted local advisory label; never authorizes provider execution |
+| GET | `/api/events?last=N&op=OP&binding=ALIAS` | Audit tail. `last` defaults to 50 and is clamped to 1–500; `op` matches exactly or as a substring (e.g. `scope_freeze`); `binding` matches exactly |
+| POST | `/api/approve/{id}/grant` | JSON body `{"principal": "...", "ttl": "..."}` (`ttl` optional). Records an untrusted local advisory label; never authorizes provider execution |
 
-If `LOCUS_DASHBOARD_TOKEN` (or `--token`) is set, every `/api/*` call requires:
+If `LOCUS_DASHBOARD_TOKEN` (or `--token`) is set, every `/api/*` call except `/api/health` requires:
 
 - `Authorization: Bearer <token>`, or
 - `X-Locus-Token: <token>`, or
