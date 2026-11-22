@@ -1,3 +1,7 @@
+# Example binding — copy to ~/.locus/bindings/personal.toml and edit.
+# Never put raw secrets here; use env: refs. phm: refs parse but fail closed
+# until a scoped Phantom bridge exists (docs/credential-compatibility.md).
+
 [binding]
 id = "bnd_personal"
 alias = "personal"

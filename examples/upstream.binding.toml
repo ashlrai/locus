@@ -1,11 +1,13 @@
 # Example binding with an upstream MCP mock.
 #
 # Copy to ~/.locus/bindings/upstream-demo.toml (or `locus binding add` equivalent)
-# and edit. Never put raw secrets here — use phm: or env: refs.
+# and edit. Never put raw secrets here — use env: refs. phm: refs parse but
+# fail closed until a scoped Phantom bridge exists (docs/credential-compatibility.md).
 #
 # When a provider has `upstream`, Locus can spawn that MCP server with an
 # isolated env (ambient identity scrubbed; only this binding's surface).
-# Without upstream, tools come from the in-process synthetic adapter.
+# Without upstream, tools come from the in-process synthetic adapter. Either
+# way, provider tools are served by `locus mcp --supervised` (docs/workers.md).
 
 [binding]
 id = "bnd_upstream_demo"
@@ -17,7 +19,7 @@ description = "Demo pin with a mock upstream MCP + synthetic adapters"
 default = "allow"
 require_approval = ["*.delete*", "*.drop*"]
 max_ttl = "2h"
-parallel_sessions = 2
+parallel_sessions = 2             # parsed, not enforced yet (docs/policy.md)
 
 # ── Upstream mock (stdio MCP) ─────────────────────────────────────────────
 # Prefer built-in recipes (`locus upstream list` / `locus upstream suggest`):
@@ -29,8 +31,9 @@ parallel_sessions = 2
 #   upstream = { recipe = "filesystem-mcp", args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/locus-demo"] }
 # Explicit command/args still work (and override recipe defaults when both set).
 #
-# resolve_secrets = true injects resolved credential_ref values into the child
-# only (never into MCP tool responses).
+# resolve_secrets = true injects resolved env: credential_ref values into the
+# child only (never into MCP tool responses). Any resolution failure, including
+# a phm: ref, refuses the launch.
 [[binding.providers]]
 provider = "github"
 account = "demo-gh"
