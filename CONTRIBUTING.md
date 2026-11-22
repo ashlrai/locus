@@ -22,7 +22,10 @@ and others), and a human's PR passes the same gate. This path works for both:
 
    It runs `cargo fmt --check`, then clippy `-D warnings` and `cargo test` for
    the crates your change touches relative to `origin/main` (the whole
-   workspace when `Cargo.toml`, `Cargo.lock` or the toolchain changes). On a
+   workspace when `Cargo.toml`, `Cargo.lock`, `.cargo/` or the toolchain
+   changes). It maps only paths under `crates/`, so a change confined to
+   `tests/integration/` (a `locus-cli` test target) reports no changed
+   crates; run `cargo test -p locus-cli --test phantom_locus` for it. On a
    fork, keep your `origin/main` in sync with upstream first. CI runs clippy
    on the whole workspace, so if you change a `locus-core` API, also run
    `cargo clippy --workspace --all-targets -- -D warnings`.
@@ -185,11 +188,13 @@ see [DeepWiki auto-docs](./docs/deepwiki.md).
 
 ### Wrapper checks
 
-CI Gate also runs these (Node 20 in CI; the last line needs Ruby). Run them
-when you touch `npm/`, `npm-mcp/`, the installers, version carriers, crypto
-code or the Homebrew formula:
+CI Gate also runs these (Node 20 in CI; the Homebrew line needs Ruby and the
+installer line Python 3). Run them when you touch `npm/`, `npm-mcp/`, the
+installers, version carriers, crypto code or the Homebrew formula:
 
 ```bash
+node --check npm/install.js && node --check npm/bin/locus.js  # wrapper syntax
+node --check npm-mcp/install.js && node --check npm-mcp/bin/locus-mcp.js
 node --test npm/test                       # npm wrapper tests
 node scripts/release-version.mjs check     # every version carrier agrees
 node --test scripts/release-version.test.mjs scripts/ci/release-workflow.test.mjs
@@ -197,6 +202,15 @@ node --test scripts/install-extract.test.mjs scripts/install-checksum.test.mjs s
 node --test scripts/check-crypto.test.mjs  # crypto policy tests
 node scripts/check-crypto.mjs              # crypto policy check
 ruby -c integrations/homebrew/Formula/locus.rb
+python3 -m unittest discover -s scripts/tests -p 'test_installer_target_selection.py'
+```
+
+When a PR touches `locus-core`, `.cargo/`, a `Cargo.toml` or `Cargo.lock`,
+the toolchain or `ci.yml`, CI Gate also runs the worker sandbox tests and
+fails if none are selected:
+
+```bash
+cargo test -p locus-core --lib --locked sandbox
 ```
 
 ## Lint and format
