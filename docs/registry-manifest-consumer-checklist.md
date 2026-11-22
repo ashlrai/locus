@@ -40,10 +40,10 @@ about your own review, not a defect in the artifact.
 - [ ] Run the drift comparison, substituting the real asset name:
 
   ```bash
-  locus adapter verify-manifest locus-adapters-v0.6.2.json --allow-unsigned
+  locus adapter verify-manifest locus-adapters-vX.Y.Z.json --allow-unsigned
   ```
 
-- [ ] Replace `v0.6.2` with the actual release tag; quote the filename if it
+- [ ] Replace `vX.Y.Z` with the actual release tag; quote the filename if it
   contains shell-special characters. The command reads the local file and
   does not download either artifact.
 - [ ] Expected pass output: `signature unsigned`, `drift none`, exit 0. Add
