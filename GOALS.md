@@ -8,7 +8,7 @@ Living progress surface for the product. Print anytime:
 locus goal status
 ```
 
-Related: [PLAN.md](./PLAN.md) (phased roadmap) · [DESIGN.md](./DESIGN.md) (architecture + threat model) · [docs/hub-integration.md](./docs/hub-integration.md)
+Related: [PLAN.md](./PLAN.md) (original phased plan, historical) · [DESIGN.md](./DESIGN.md) (architecture + threat model) · [docs/hub-integration.md](./docs/hub-integration.md)
 
 ---
 
