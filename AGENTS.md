@@ -118,7 +118,7 @@ locus exec -- env | grep LOCUS_
 | `docs/` | Operational how-tos (MCP, adapters, workers, architecture, firm mode) |
 | `examples/` | Sample bindings + `.locus.toml` |
 | `DESIGN.md` | Full architecture + threat model |
-| `PLAN.md` | Phased roadmap |
+| `PLAN.md` | Original phased plan (historical; live status is in `GOALS.md`) |
 | `SECURITY.md` | Reporting + threat summary |
 
 ## Architecture (one screen)
@@ -222,7 +222,7 @@ Firm / multi-client workflow: [docs/firm-mode.md](./docs/firm-mode.md).
 | [integrations/phantom/](./integrations/phantom/) | Phantom hub drop-in TS + gateway/doctor snippets |
 | [GOALS.md](./GOALS.md) | Northstar goal loop (`locus goal status`) |
 | [DESIGN.md](./DESIGN.md) | Full design + threat model |
-| [PLAN.md](./PLAN.md) | Roadmap |
+| [PLAN.md](./PLAN.md) | Original phased plan (historical) |
 | [SECURITY.md](./SECURITY.md) | Vulnerability reporting |
 
 ## Security reports

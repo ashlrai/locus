@@ -258,7 +258,7 @@ function llmsTxt({ info, docs }) {
     `- [DESIGN.md](${REPO_BLOB}/DESIGN.md): full architecture and threat model`,
     `- [docs/agent-contract.md](${REPO_BLOB}/docs/agent-contract.md): JSON schemas, exit codes, dry-run`,
     `- [llms-full.txt](${SITE}/llms-full.txt): complete heading index of README and docs`,
-    `- [PLAN.md](${REPO_BLOB}/PLAN.md): roadmap`,
+    `- [PLAN.md](${REPO_BLOB}/PLAN.md): original phased plan (historical; live status is in GOALS.md)`,
     `- [SECURITY.md](${REPO_BLOB}/SECURITY.md): vulnerability reporting`,
     `- [Site](${SITE}/)`,
     '',
