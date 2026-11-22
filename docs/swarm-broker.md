@@ -35,6 +35,17 @@ does not expose MCP resources or prompts. Transport health, grant-local
 identity metadata, and session SSE ticks remain available to authenticated
 grants; a zero-tool catalog does not conceal a grant's own identity metadata.
 
+What a client sees in swarm mode:
+
+| Request | Result |
+| --- | --- |
+| `tools/list` | Only the node's granted tools that are live; `[]` for an unmapped grant or unhealthy session |
+| `tools/call` outside the grant, or with an unhealthy session | JSON-RPC `-32003` `tool unavailable for this swarm agent` |
+| `resources/list`, `prompts/list` | Empty lists |
+| `resources/read`, `prompts/get` | JSON-RPC `-32601` `method unavailable in swarm mode` |
+| `GET /mcp` | `"mode": "swarm"`, only the `tools` capability, and the same filtered tool names |
+| Audit store unavailable | JSON-RPC `-32000` `swarm audit unavailable` for list and call |
+
 ## Graph format
 
 Keep this operator-controlled JSON outside agent-writable workspaces. It stores
@@ -68,6 +79,24 @@ changes; deleting or editing the file does not revoke existing authority.
 Revoke the tenant grant to block its next request. An in-flight call that
 already passed the execution gate may complete.
 
+Field rules: `version` must be `1`. A node `id` uses letters, digits and
+`_ - . : /`. A `grant_id` is the 16-character lowercase hex public grant ID
+(the part after `lmt_` and before `.` in a tenant token). A tool name uses
+letters, digits and `_ - .`, so `*` and other glob characters fail. The file
+must be a regular file. A bad manifest fails as a whole with one of these
+codes, which never include the path, file contents or parser output:
+
+| Code | Cause |
+| --- | --- |
+| `swarm_manifest_unreadable` | Missing, unreadable, or not a regular file |
+| `swarm_manifest_too_large` | Over 1 MiB |
+| `swarm_manifest_invalid` | Malformed JSON, unknown or duplicate keys, wrong types |
+| `swarm_manifest_version_unsupported` | `version` is not `1` |
+| `swarm_manifest_too_many_agents` / `swarm_manifest_too_many_tools` | Over 1,024 nodes, or over 1,024 tools in one node |
+| `swarm_manifest_agent_id_invalid` / `swarm_manifest_grant_id_invalid` / `swarm_manifest_tool_name_invalid` | Field breaks the rules above |
+| `swarm_manifest_duplicate_identity` | Two nodes share an `id` or a `grant_id` |
+| `swarm_manifest_duplicate_tool` | A tool name repeats within one node |
+
 ## Operator launch
 
 Before launch, configure bindings and mint a separate grant for each agent using
@@ -89,9 +118,26 @@ session before launching. It uses the sibling `locus-mcp` binary or searches
 matching CLI and MCP versions. `--open` and dashboard `--token` are incompatible
 with swarm mode; unset `LOCUS_DASHBOARD_TOKEN` if it is present in the shell.
 
+Launch preflight refuses with these codes before starting the server:
+
+| Code | Cause |
+| --- | --- |
+| `swarm_grant_unavailable` | A graph `grant_id` is missing, revoked, or expired |
+| `swarm_grant_session_unavailable` | The grant's sealed session cannot be loaded |
+| `swarm_grant_session_mismatch` | The session's binding or tenant differs from the grant's |
+| `swarm_grant_session_unhealthy` | The session fails the binding drift and scope freeze check |
+| `swarm_credential_env_reserved` | A graph binding's `env:` locator uses a reserved name (below) |
+
+`LOCUS_CONTROL_CAPABILITY` and `LOCUS_MCP_HTTP_TOKEN` must both be set and
+non-empty (`<NAME> is required for the swarm broker`), and `--port 0` is
+refused.
+
 The supervisor clears the inherited environment, retaining runtime necessities,
 the explicit Locus home, transport/operator capabilities, and only `env:`
-credential locators referenced by the graph's validated bindings. It does not
+credential locators referenced by the graph's validated bindings. The runtime
+names kept are `PATH`, `HOME`, `LANG`, `LC_*`, `TERM`, `COLORTERM`, `NO_COLOR`,
+`TMPDIR`, `TMP`, `TEMP`, and the Windows names `USERPROFILE`, `SystemRoot`,
+`WINDIR`, `PATHEXT` and `ComSpec`. It does not
 mint grants, pin, or resolve credentials. Runtime, loader, proxy, CLI config,
 and Locus authority/transport credential locator names are refused. The
 `LOCUS_GH_TOKEN_*`, `LOCUS_SUPABASE_*`, and `LOCUS_VERCEL_TOKEN_*` sample
@@ -121,6 +167,12 @@ authorization decision before dispatch. Its `allowed` field means the graph
 and session gate passed; it does not assert execution succeeded. Existing MCP
 provider execution audit events record downstream outcomes and include the public grant
 ID for correlation.
+
+| Op | Detail fields |
+| --- | --- |
+| `swarm.serve` | `phase: "start"` with `agents` and `port`; `phase: "exit"` with `exit` and `spawn_failed` |
+| `mcp.swarm.tools_list` | `agent_id`, `grant_id`, `tool_count` |
+| `mcp.swarm.tool_call` | `agent_id`, `grant_id`, `allowed`, `tool` (only when allowed), `tool_digest` |
 
 These swarm events contain no arguments or bearer tokens. Denied tool names are
 hashed rather than copied from untrusted input. If the audit append fails, the
