@@ -1,6 +1,23 @@
 # Locus — Identity Plane for Coding Agents
 
-Current swarm execution backlog: [RQ-PLAN-LOCUS child jobs](docs/swarm-child-jobs.md).
+
+**Status:** historical. This is the pre-build research plan, written when the
+repo was the empty `mmcp` workspace, and kept for its rationale. It is not the
+live roadmap: current status is in [GOALS.md](./GOALS.md) and the phase table
+under [Development](./README.md#development) in the README. Where this plan and
+the shipped code differ, the code and its docs win. How each phase turned out:
+
+| Plan phase | Outcome |
+|------------|---------|
+| 0 Spike | Done without a daemon: `pin`, `whoami`, `exec` and the isolation tests run in-process. |
+| 1 MVP | Done: `locus-mcp`, sealed pins, `.locus.toml` auto-pin, policy rules, the HMAC audit chain and `locus setup`. One exception: `phm:NAME` references fail closed (since v0.5.1) until a scoped Phantom bridge exists, so bindings use `env:VAR` ([credential compatibility](./docs/credential-compatibility.md)). |
+| 2 Parallel-agent hard mode | Mostly done: worker pools, experimental `locus pin --ns`, the AWS, Cloudflare and Resend adapters, drift checks, `locus hook`, `locus run` and optional Touch ID approval. No prod elevation TTL was built. |
+| 3 Team / firm | Partly done: `locus offboard` (0.6.0), SIEM NDJSON export (0.7.0) and the encrypted local `locus graph export\|import`. `dual_control` rules parse and fail closed; a shared remote binding graph, policy packs and an independent dual-control authority are still planned. |
+| 4 Platform | Partly done: the [adapter SDK guide](./docs/adapter-sdk.md), community adapters (`locus adapter search\|install`), an unsigned adapter registry manifest ([signing is open](./docs/registry-trust.md)), CI pins (`locus ci mint`), streamable HTTP and multi-tenant MCP, and an opt-in [worker sandbox](./docs/workers.md). No bug bounty is offered. |
+
+Built-in adapters today: Supabase, GitHub, Vercel, Cloudflare, AWS, Resend,
+Stripe, Anthropic and OpenAI (there is no xAI adapter). The proposed swarm
+backlog that followed this plan is in [RQ-PLAN-LOCUS child jobs](docs/swarm-child-jobs.md).
 
 **Repo codename:** `mmcp` · **Recommended product name:** **Locus** · **Workspace:** greenfield  
 **Full design already drafted:** [`DESIGN.md`](./DESIGN.md) (~1k lines)  

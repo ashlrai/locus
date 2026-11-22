@@ -212,7 +212,7 @@ cargo fmt --all
 | `apps/dashboard/` | Local identity dashboard UI, embedded in the binary and opened by `locus dashboard` |
 | `scripts/` | `fast-check.sh`, docs and link checks, e2e and release helpers |
 | `DESIGN.md` | Architecture, threat model, adapter model |
-| `PLAN.md` | Phased roadmap |
+| `PLAN.md` | Original phased plan (historical; live status is in `GOALS.md`) |
 | `docs/` | Contributor-facing how-tos (index: [docs/README.md](./docs/README.md)) |
 
 ## Adding a provider adapter
