@@ -92,6 +92,7 @@ listed verbatim so an agent can jump straight to the right document.
 
 - [Agent contract: JSON schemas, exit codes, --dry-run](https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md)
   - JSON schemas
+    - Fleet observations
     - Errors
   - Exit codes
   - --dry-run
@@ -193,6 +194,7 @@ listed verbatim so an agent can jump straight to the right document.
 - [Copy-paste examples](https://github.com/ashlrai/locus/blob/main/docs/copy-paste.md)
   - Install
   - Pin a sample and read JSON
+  - Poll fleet observations
   - Preview without writing
   - MCP config, print only
   - MCP config, provider tools

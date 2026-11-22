@@ -189,6 +189,10 @@ fn readme_for_agents_read_only_commands_run_as_written() {
         ),
         (&["status", "--json"][..], "locus.status.v1"),
         (&["init", "--dry-run", "--json"][..], "locus.plan.v1"),
+        (&["fleet-feed"][..], "locus.fleet_feed.v1"),
+        (&["fleet-preflight"][..], "locus.fleet_preflight.v1"),
+        (&["fleet-denials"][..], "locus.fleet_denials.v1"),
+        (&["fleet-outcomes"][..], "locus.fleet_outcomes.v1"),
     ] {
         let (out, home) = run(args);
         assert!(out.status.success(), "{args:?} failed:\n{}", text(&out));
@@ -206,6 +210,34 @@ fn readme_for_agents_read_only_commands_run_as_written() {
                 !home.path().join(".locus").exists(),
                 "init --dry-run must not create the Locus home"
             );
+        }
+        // Fleet exit zero certifies an observation, even when execution is
+        // blocked. Only fleet-feed opens (and initializes) the store.
+        match args[0] {
+            "fleet-feed" => {
+                assert_eq!(value["state"], "unpinned");
+                assert_eq!(value["session_ok"], false);
+                assert!(home.path().join(".locus").exists());
+            }
+            "fleet-preflight" => {
+                assert_eq!(value["exec_ready"], false);
+                assert_eq!(value["reason"], "uninitialized");
+                assert_eq!(value["human_command"], "locus init");
+                assert!(!home.path().join(".locus").exists());
+            }
+            "fleet-denials" => {
+                assert_eq!(value["denials"], serde_json::json!([]));
+                assert_eq!(value["next_cursor"], 0);
+                assert_eq!(value["has_more"], false);
+                assert!(!home.path().join(".locus").exists());
+            }
+            "fleet-outcomes" => {
+                assert_eq!(value["log"], "missing");
+                assert_eq!(value["outcomes"], serde_json::json!([]));
+                assert_eq!(value["pending_approvals"], 0);
+                assert!(!home.path().join(".locus").exists());
+            }
+            _ => {}
         }
     }
 

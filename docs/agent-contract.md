@@ -71,6 +71,15 @@ Use the same commands with `--json` for scripts. `setup --print --json` and
 `setup --client generic --json` use the setup schema too; the nested client
 configuration stays unchanged. Without `--json`, output stays unchanged.
 
+### Fleet observations
+
+All four `fleet-*` commands emit JSON even without `--json`. Exit zero means an
+observation was emitted; it does not authorize execution. Their schemas are in
+the table above. `fleet-outcomes` was added in 0.7.2; the other three commands
+are also available in 0.7.0. Check the installed binary's `--help` before polling.
+
+#### Pin health
+
 `locus fleet-feed` emits one read-only workbench resource observation with
 `kind: "locus_session"`, `state: "pinned" | "unpinned" | "unhealthy"`, and
 `session_ok` (true only for a verified, unexpired, unfrozen pin with an existing
@@ -79,6 +88,65 @@ are unhealthy. The feed contains no identity strings, credentials, seals, paths,
 or raw errors. Exit zero means the observation was emitted, including unhealthy
 observations; consumers must gate readiness on `session_ok`. Breaking changes
 require a new schema version; additive fields retain v1.
+
+Unlike the other three observations, `fleet-feed` opens the store and can
+initialize a missing `LOCUS_HOME`. It does not compare binding fingerprints
+or freeze drifted pins; `fleet-preflight` includes the runtime drift check.
+
+#### Local GitHub launch readiness
+
+`locus fleet-preflight` reports `exec_ready`, `reason` and `human_command`.
+Gate on `exec_ready`, not the exit code. It reads existing local state without
+initializing the home, pinning, freezing, resolving credential values, launching
+`gh`, or contacting GitHub. It checks an operator pin, seal, broker authority,
+expiry, drift, supported credential sources, a GitHub provider, the presence of
+all configured provider credentials, and an executable `gh` on `PATH`.
+
+| `reason` | Meaning |
+| --- | --- |
+| `uninitialized` | The Locus home could not be opened as an existing store. |
+| `unpinned` | No active pin and no explicit session selected. |
+| `session_invalid` | The selected session or its authority could not be verified. |
+| `expired` | The selected pin has expired. |
+| `operator_pin_required` | The session is delegated; this observation does not certify delegated grants or budgets. |
+| `drift` | Runtime verification no longer matches the binding. |
+| `credential_unsupported` | Credential preflight refuses this binding, including unsupported `phm:` resolution. |
+| `github_missing` | The binding has no provider that routes to `gh`. |
+| `credential_unavailable` | At least one configured provider credential is absent. |
+| `gh_missing` | No executable `gh` was found on `PATH`. |
+| `ready` | Local launch prerequisites passed; `exec_ready` is true and `human_command` is null. |
+
+When blocked, `human_command` is recovery guidance for an operator and can
+include the binding alias. The command contains no credential values. This
+snapshot does not prove upstream token validity, network access, policy approval,
+or that a particular GitHub operation will succeed. The actual launch still
+applies its normal authority and policy gates. See [onboarding](onboarding.md#5-troubleshooting).
+
+#### Denial polling
+
+`fleet-denials` projects only fixed denial kinds and numeric audit positions. It
+scans the latest 100 parsed records by default; `--cursor N` scans up to 100
+records after N. Persist `next_cursor`, and continue while `has_more` is true.
+
+An explicit cursor validates only the scanned page and the parsed lookahead needed
+to set `has_more`. A successful partial page does not certify unread later bytes.
+Continue with its `next_cursor`: a later unreadable or invalid-UTF-8 page fails
+with a sanitized error, without advancing the cursor or returning an empty-complete
+result. Without a cursor, the command scans the log to find the recent window.
+Corrupt lines are skipped. Cursors assume an append-only log; restart without a
+cursor after replacing or truncating the log. This local observation grants no
+execution authority and includes no audit strings or credential values.
+
+#### Command outcomes
+
+`fleet-outcomes` answers "did the recent commands work?" in one call: the last
+100 audit records' `exec` / `ci` outcomes (`position`, `kind`, `result` =
+`succeeded|failed|spawn_failed|unknown`, `exit`), `counts`, and
+`pending_approvals`. Missing data is explicit: no log gives `"log": "missing"`
+with empty lists, an outcome with no exit code is `unknown`, and
+`pending_approvals` is `null` only when the approvals directory is unreadable
+(an absent directory is `0`). It is read-only and never initializes
+`LOCUS_HOME`; no commands, bindings, timestamps or error text are emitted.
 
 ### Errors
 
@@ -231,25 +299,3 @@ confirmations take their safe default (`adapter uninstall` without `--yes`
 declines), and `graph export/import` require `LOCUS_GRAPH_PASSPHRASE`.
 Destructive commands keep their explicit flags (`binding rm --yes`,
 `adapter install --yes`) whether or not a terminal is present.
-
-`fleet-outcomes` answers "did the recent commands work?" in one call: the last
-100 audit records' `exec` / `ci` outcomes (`position`, `kind`, `result` =
-`succeeded|failed|spawn_failed|unknown`, `exit`), `counts`, and
-`pending_approvals`. Missing data is explicit: no log gives `"log": "missing"`
-with empty lists, an outcome with no exit code is `unknown`, and
-`pending_approvals` is `null` only when the approvals directory is unreadable
-(an absent directory is `0`). It is read-only and never initializes
-`LOCUS_HOME`; no commands, bindings, timestamps or error text are emitted.
-
-`fleet-denials` projects only fixed denial kinds and numeric audit positions. It
-scans the latest 100 parsed records by default; `--cursor N` scans up to 100
-records after N. Persist `next_cursor`, and continue while `has_more` is true.
-
-An explicit cursor validates only the scanned page and the parsed lookahead needed
-to set `has_more`. A successful partial page does not certify unread later bytes.
-Continue with its `next_cursor`: a later unreadable or invalid-UTF-8 page fails
-with a sanitized error, without advancing the cursor or returning an empty-complete
-result. Without a cursor, the command scans the log to find the recent window.
-Corrupt lines are skipped. Cursors assume an append-only log; restart without a
-cursor after replacing or truncating the log. This local observation grants no
-execution authority and includes no audit strings or credential values.

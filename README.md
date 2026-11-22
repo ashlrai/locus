@@ -104,6 +104,16 @@ locus topic agent-contract --json
 
 `locus doctor --json` can exit 0 while `verdict` is `WARN` and `ok` is false. Exit 0 means the findings are setup advice, not that setup is finished.
 
+For fleet polling, `locus fleet-feed` reports pin health, `locus fleet-denials`
+reports refusals, and `locus fleet-outcomes` reports recent command results.
+`locus fleet-preflight` checks local readiness for `locus exec -- gh` and can
+include a binding alias in its human recovery hint. These commands always emit
+JSON; a successful observation can still report an unhealthy or blocked pin.
+Gate on `session_ok` or `exec_ready`, respectively. See the
+[fleet observation contract](./docs/agent-contract.md#fleet-observations).
+`fleet-outcomes` was added in 0.7.2 and is absent from the published 0.7.0
+packages; check `locus --version` and `locus --help` on the installed binary.
+
 Print the MCP entries without writing a client config:
 
 ```bash
@@ -340,6 +350,9 @@ Homebrew formula (for taps): [integrations/homebrew](./integrations/homebrew).
 
 ## CLI
 
+This is the command surface in this checkout. Installed releases can have fewer
+commands; use `locus --help` to check your binary.
+
 ```
 locus init [--with-samples] · quickstart
 locus onboard [--detect-only] [--yes] [--reset]  # guided refs-only tenant setup
@@ -350,7 +363,8 @@ locus switch <alias>                  # one-shot leave + enter
 locus leave · renew                   # clear pin; extend expiry (opt-in per binding)
 locus whoami [--json]
 locus status [--oneline] [--json]
-locus fleet-feed · fleet-denials · fleet-outcomes · fleet-preflight  # value-free JSON for hub/workbench polls
+locus fleet-feed · fleet-denials · fleet-outcomes · fleet-preflight  # JSON for hub/workbench polls
+locus fleet-denials --cursor <N>      # resume after N parsed audit records; persist next_cursor
 locus exec -- <command> [args...]
 locus exec --expect <alias> -- <cmd>  # refuse (exit 1, child never starts) unless <alias> is pinned
 locus exec --for gh -- gh pr list    # inject only the pinned GitHub credential

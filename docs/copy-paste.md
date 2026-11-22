@@ -39,6 +39,30 @@ locus exec --expect acme -- echo ok
 
 Schema ids and exit codes: `locus topic agent-contract --json`, or [agent-contract.md](agent-contract.md).
 
+## Poll fleet observations
+
+These commands always print JSON. Run them from the operator's pinned shell
+when checking a live pin; they do not enter a binding or grant authority.
+
+```bash
+locus fleet-feed
+locus fleet-preflight
+locus fleet-denials
+locus fleet-outcomes
+```
+
+Read `session_ok` from `fleet-feed` and `exec_ready` from `fleet-preflight`;
+exit zero only means an observation was emitted. `fleet-preflight` checks local
+GitHub CLI launch prerequisites and does not contact GitHub. Its `human_command`
+can name a binding. `fleet-outcomes` requires 0.7.2 or a checkout containing that
+command; the published 0.7.0 packages lack it.
+
+For incremental denial polling, pass the previous result's `next_cursor` as
+`locus fleet-denials --cursor <N>` and continue while `has_more` is true. Restart
+without a cursor after replacing or truncating the audit log. See the
+[fleet observation contract](agent-contract.md#fleet-observations) for fields,
+readiness reasons, and missing-data behavior.
+
 ## Preview without writing
 
 ```bash
