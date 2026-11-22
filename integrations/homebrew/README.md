@@ -74,7 +74,8 @@ brew uninstall locus
 
 On every tagged release (`vX.Y.Z`):
 
-1. Confirm [`.github/workflows/release.yml`](../../.github/workflows/release.yml) uploaded `locus-<target>.tar.gz` assets.
+1. Confirm [`.github/workflows/release.yml`](../../.github/workflows/release.yml) uploaded the `locus-<target>.tar.gz` assets and their `.sha256` sidecars
+   (targets: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`).
 2. **Source formula:** update `version` and `sha256` for  
    `https://github.com/ashlrai/locus/archive/refs/tags/vX.Y.Z.tar.gz`:
 
@@ -82,11 +83,19 @@ On every tagged release (`vX.Y.Z`):
    curl -sL "https://github.com/ashlrai/locus/archive/refs/tags/vX.Y.Z.tar.gz" | shasum -a 256
    ```
 
-3. **Prebuilt formula (optional):** compute per-target sha256 of the release assets and uncomment/switch the prebuilt block in `Formula/locus.rb`.
+3. **Prebuilt formula (optional):** take each target's sha256 from its `.sha256` sidecar (or recompute it from the asset) and uncomment/switch the prebuilt block in `Formula/locus.rb`.
 4. PR the same bump into the live tap (`homebrew-ashlr` or `homebrew-locus`).
-5. Bump `VERSION` in `npm/bin/locus.js` and `npm-mcp/bin/locus-mcp.js` if publishing npm wrappers.
+
+npm wrapper versions are not a Homebrew step. They are synchronized before the
+tag with `node scripts/release-version.mjs sync X.Y.Z`, CI and `release.yml`
+refuse a mismatch, and `release.yml` publishes both npm packages. See
+[docs/RELEASE.md](../../docs/RELEASE.md).
 
 ## Formula behavior
+
+This describes the mirrored v0.5.0 formula. Current main builds both binaries
+from `locus-cli`, so its separate `locus-mcp` install step needs updating
+before the formula targets a newer source release.
 
 | Mode | What it does |
 |------|----------------|
