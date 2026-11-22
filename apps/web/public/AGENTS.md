@@ -162,7 +162,7 @@ Test surface lives primarily in `locus-core` unit tests + `crates/locus-core/tes
 
 ## Coding rules
 
-- **Adapters only** hold provider-specific knowledge (`crates/locus-core/src/adapters/`). Register in `adapter_for()`.
+- **Adapters only** hold provider-specific knowledge (`crates/locus-core/src/adapters/`). Register each one in `adapter_for()`, `known_providers()` and `adapters/manifest.toml`; the `known_providers_all_dispatch` and `builtin_catalog_matches_dispatchable_providers` tests fail on a missed step.
 - Use `freeze_string_arg` (or equivalent) for every account selector the model might smuggle.
 - Mark destructive tools `destructive: true`; enforce with policy `require_approval` globs.
 - Prefer small modules over control-flow in `main`.
@@ -183,7 +183,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) and [docs/adapters.md](./docs/adapters.
 
 - Do **not** paste secrets into chat, commits, issues, or MCP tool args.
 - Use explicit `env:VAR` references for supported resolution; values must be supplied outside agent context. `phm:NAME` references remain readable but fail closed until a supported scoped bridge exists. Do not invoke or capture `phantom reveal` to emulate one.
-- Published Locus v0.5.0 has the incompatible legacy reveal adapter; v0.6.0 fails closed for `phm:` credential resolution. See [credential compatibility](./docs/credential-compatibility.md).
+- Locus v0.5.0 and earlier have the incompatible legacy reveal adapter; every release from v0.5.1 onward fails closed for `phm:` credential resolution. See [credential compatibility](./docs/credential-compatibility.md).
 - `test:VALUE` is available only inside compiled unit tests and is rejected by production binaries.
 - If a secret lands in git history, rotate it; do not only delete the file.
 
@@ -203,14 +203,19 @@ Firm / multi-client workflow: [docs/firm-mode.md](./docs/firm-mode.md).
 | Doc | Topic |
 |-----|--------|
 | [CLAUDE.md](./CLAUDE.md) | Short dev quick-reference |
+| [CONTRIBUTING.md](./CONTRIBUTING.md#contribute-with-an-agent) | Contribute with an agent: setup, local merge gate, CI Gate, PR flow |
 | [docs/architecture.md](./docs/architecture.md) | System diagram (DESIGN distilled) |
 | [docs/policy.md](./docs/policy.md) | Policy rules, evaluation order, approval UX |
 | [docs/firm-mode.md](./docs/firm-mode.md) | Agencies: bindings, dual-control, workspaces |
 | [docs/agency-starter.md](./docs/agency-starter.md) | Agency starter kit + doctor single pane |
 | [examples/agency-starter/](./examples/agency-starter/) | Sample multi-client bindings + offboarding |
+| [docs/agent-contract.md](./docs/agent-contract.md) | `--json` schema ids, exit codes, `--dry-run`, non-interactive rules |
+| [docs/copy-paste.md](./docs/copy-paste.md) | Runnable copy-paste examples |
 | [docs/mcp.md](./docs/mcp.md) | Wire `locus-mcp` into clients (provider tools need `locus mcp --supervised`) |
 | [docs/onboarding.md](./docs/onboarding.md) | `locus onboard` wizard + multi-client, multi-tenant walkthrough |
 | [docs/adapters.md](./docs/adapters.md) | Write a provider adapter |
+| [docs/adapter-sdk.md](./docs/adapter-sdk.md) | Adapter SDK: freeze rules, tools, tests, registration |
+| [docs/credential-compatibility.md](./docs/credential-compatibility.md) | `env:` and `phm:` reference support by release |
 | [docs/workers.md](./docs/workers.md) | Synthetic vs MCP stdio workers |
 | [docs/hub-integration.md](./docs/hub-integration.md) | Phantom (hub) contract + agent report |
 | [docs/verification-plane.md](./docs/verification-plane.md) | Claim verify stubs (propose → verify → act) |
