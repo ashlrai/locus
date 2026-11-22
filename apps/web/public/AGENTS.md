@@ -115,8 +115,16 @@ locus exec -- env | grep LOCUS_
 | `crates/locus-core` | Binding, session, seal, policy, store, isolation, adapters, workers |
 | `crates/locus-cli` | `locus` - enter, pin, leave, whoami, exec, run, binding, onboard, setup, mcp, doctor, … (`locus --help` lists every command by group) |
 | `crates/locus-mcp` | Stdio MCP server hard-scoped to active pin |
-| `docs/` | Operational how-tos (MCP, adapters, workers, architecture, firm mode) |
-| `examples/` | Sample bindings + `.locus.toml` |
+| `tests/integration/` | Phantom ↔ Locus integration test (a `locus-cli` test target) |
+| `adapters/` | Adapter catalog (`manifest.toml`) and upstream MCP worker recipes (`recipes.toml`) |
+| `schema/` | JSON Schemas: agent report, doctor, hub gate, events, MCP grants, adapter manifest |
+| `docs/` | Operational how-tos (MCP, adapters, workers, architecture, firm mode); index: `docs/README.md` |
+| `examples/` | Sample bindings, `.locus.toml`, the agency starter kit and the adapter template |
+| `integrations/` | Phantom and ashlr-hub glue, Homebrew formula mirror |
+| `npm/`, `npm-mcp/` | npm wrappers `locus-cli` and `@ashlrai/locus-mcp` |
+| `apps/web/` | Static landing page and the discoverability generator (`llms.txt`, `apps/web/public/*`) |
+| `apps/dashboard/` | Local identity dashboard UI, embedded in the binary (`locus dashboard`) |
+| `scripts/` | `fast-check.sh`, docs and link checks, e2e and release helpers |
 | `DESIGN.md` | Full architecture + threat model |
 | `PLAN.md` | Original phased plan (historical; live status is in `GOALS.md`) |
 | `SECURITY.md` | Reporting + threat summary |
