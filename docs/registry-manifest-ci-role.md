@@ -17,6 +17,12 @@ adapter catalog **without** `--sign`. It attaches the resulting
 GitHub Release. This export is a separate CLI build, not a manifest extracted
 from a packaged binary. The workflow does not run `verify-manifest` on it.
 
+The release can also be re-run by hand with
+`gh workflow run release.yml -f version=X.Y.Z`. The tag `vX.Y.Z` must
+already exist; the run checks out that tag's commit rather than the dispatch
+ref, applies the same CI evidence gate, and names the manifest
+`locus-adapters-vX.Y.Z.json`.
+
 A pull request changing the release workflow triggers a dry run: it builds
 the Linux archive, checks the sidecars, and exports an unsigned manifest, but
 does not publish a release or npm packages. The dry run does not require the

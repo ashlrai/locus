@@ -5,7 +5,7 @@ The detailed source of truth is [adapter registry release manifests](./registry-
 
 ## What is the release manifest, and why is it unsigned?
 
-The tag-push release workflow builds a CLI, exports its embedded adapter catalog
+The release workflow builds a CLI, exports its embedded adapter catalog
 without `--sign`, and attaches the resulting `locus-adapters-<tag>.json` to the
 release. It describes adapter IDs, names, versions, tools, and catalog metadata
 digests. The workflow has no configured signing setup or published registry root

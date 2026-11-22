@@ -11,7 +11,8 @@ model in detail.
 1. The catalog starts in [`adapters/manifest.toml`](../adapters/manifest.toml)
    and is compiled into Locus. It describes built-in adapter metadata, not
    downloaded plugins or the implementation of each adapter.
-2. For a `v*` tag push, release CI checks out the source and, in the release
+2. For a `v*` tag push, or a manual dispatch for an existing `vX.Y.Z` tag,
+   release CI checks out the tagged source and, in the release
    job, builds and runs `locus-cli` with `cargo run --release --locked`. The
    command `locus adapter registry export` produces the canonical JSON from
    that CLI's embedded catalog and workspace version. Adapter and tool lists

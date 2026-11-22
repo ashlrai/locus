@@ -14,7 +14,7 @@ about your own review, not a defect in the artifact.
 ## 1. Identify the artifact
 
 - [ ] **File:** `locus-adapters-<tag>.json`, attached by the release workflow
-  to the tag-push release for `<tag>`. The filename names a tag, but the
+  to the GitHub release for `<tag>`. The filename names a tag, but the
   manifest does not bind that tag, a commit, a build process, or any release
   archive.
 - [ ] **Signature status: unsigned.** Release CI exports the manifest with

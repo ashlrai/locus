@@ -34,7 +34,9 @@ For the open decisions of the unsigned-to-signed transition itself, see
 
 The current release workflow runs `locus adapter registry export` without
 `--sign` and attaches the resulting **unsigned** `locus-adapters-<tag>.json`
-to a tag-push release. The repository does not provide a configured CI
+to the GitHub release it creates, either on a `v*` tag push or on a manual
+dispatch that re-runs the release for an existing tag (see
+[CI's role](./registry-manifest-ci-role.md)). The repository does not provide a configured CI
 signing setup or a published registry root for this artifact. Provisioning a
 signing key, publishing its public key, and enabling CI signing are future
 work; the commented workflow example is a TODO, not an active step. The
@@ -250,8 +252,12 @@ is only a claim unless the signature status is `valid`.
 
 ## Non-goals
 
-- Not a plugin loader — adapters remain in-tree
-  (`crates/locus-core/src/adapters/`, registered in `adapter_for()`).
+- Not a plugin loader. The manifest lists only the built-in adapters compiled
+  into the binary (`crates/locus-core/src/adapters/`, registered in
+  `adapter_for()`). Community adapters installed with `locus adapter install`
+  run as out-of-tree MCP stdio workers; they are not listed in the release
+  manifest and `verify-manifest` does not check them (see
+  [adapters.md](./adapters.md#community-adapter-marketplace)).
 - Per-entry catalog signatures in `adapters/manifest.toml` are a separate,
   complementary surface (`locus adapter verify [--require-signed]`); see
   [adapter-sdk.md](./adapter-sdk.md).
