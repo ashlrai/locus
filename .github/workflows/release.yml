@@ -236,6 +236,8 @@ jobs:
           path: |
             dist/locus-*.tar.gz
             dist/locus-*.tar.gz.sha256
+            dist/locus-*.zip
+            dist/locus-*.zip.sha256
           if-no-files-found: error
 
   release:
