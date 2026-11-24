@@ -74,6 +74,7 @@ fn inherit_env_end_to_end() {
     const SPACE_VALUE: &str = "  inherited value  with spaces  ";
     if std::env::var_os("LOCUS_INHERIT_SPACE_CHILD").is_some() {
         assert!(std::env::var("INHERIT_TEST_SPACES").is_ok_and(|v| v == SPACE_VALUE));
+        assert_eq!(std::env::var_os("INHERIT_TEST_EMPTY"), Some("".into()));
         return;
     }
     let home = tempdir().unwrap();
@@ -114,13 +115,21 @@ fn inherit_env_end_to_end() {
     assert_eq!(iso.vars.keys().cloned().collect::<Vec<_>>(), baseline);
     assert!(iso.secrets_failed.is_empty());
 
-    // Preserve whitespace through the isolated environment into a real child.
+    // Preserve whitespace and an explicitly empty value into a real child.
     std::env::set_var("INHERIT_TEST_SPACES", SPACE_VALUE);
+    std::env::set_var("INHERIT_TEST_EMPTY", "");
     store
-        .save_config(&cfg(&["INHERIT_TEST_SPACES"], GatewayConfig::default()))
+        .save_config(&cfg(
+            &["INHERIT_TEST_SPACES", "INHERIT_TEST_EMPTY"],
+            GatewayConfig::default(),
+        ))
         .unwrap();
     let iso = build_isolated_env_opts(&s, &b, true);
     assert!(iso.secrets_failed.is_empty());
+    assert_eq!(
+        iso.vars.get("INHERIT_TEST_EMPTY").map(String::as_str),
+        Some("")
+    );
     let status = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "inherit_env_end_to_end"])
         .env_clear()
@@ -133,6 +142,7 @@ fn inherit_env_end_to_end() {
         "child did not receive the unchanged value"
     );
     std::env::remove_var("INHERIT_TEST_SPACES");
+    std::env::remove_var("INHERIT_TEST_EMPTY");
 
     // An optional allowlisted variable that is absent in the parent stays absent.
     // A present neighbor confirms the allowlist is still applied.
