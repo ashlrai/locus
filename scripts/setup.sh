@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # One-command development setup for Linux and macOS.
-# Idempotent and non-interactive: safe to run again.
-# Installs Rust (rustup) and Node 20 when they are missing, builds the CLI,
-# and runs `locus --version` in a temporary LOCUS_HOME.
+# Installs Node 20 when it is missing, then runs scripts/setup.mjs, which
+# installs Rust when it is missing, builds the CLI, and smokes `locus --version`.
+# Safe to run again. Windows: powershell -File scripts/setup.ps1
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+if command -v node >/dev/null 2>&1; then
+  exec node "$ROOT/scripts/setup.mjs"
+fi
+
 os="$(uname -s)"
 case "$os" in
   Linux|Darwin) ;;
   *)
-    printf 'setup.sh supports Linux and macOS (this host is %s)\n' "$os" >&2
+    printf 'setup.sh supports Linux and macOS (this host is %s). On Windows run: powershell -File scripts/setup.ps1\n' "$os" >&2
     exit 1
     ;;
 esac
@@ -26,24 +30,7 @@ need() {
 }
 
 need curl
-need git
 need tar
-
-ensure_rust() {
-  if [[ -x "${HOME}/.cargo/bin/cargo" ]]; then
-    export PATH="${HOME}/.cargo/bin:${PATH}"
-  fi
-  if ! command -v cargo >/dev/null 2>&1; then
-    printf 'setup.sh: installing Rust with rustup\n'
-    curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
-      | sh -s -- -y --profile minimal --component rustfmt,clippy
-    # shellcheck disable=SC1091
-    . "${HOME}/.cargo/env"
-  fi
-  if command -v rustup >/dev/null 2>&1; then
-    rustup component add rustfmt clippy
-  fi
-}
 
 node_arch() {
   case "$(uname -m)" in
@@ -77,9 +64,6 @@ check_sha256() {
 }
 
 ensure_node() {
-  if command -v node >/dev/null 2>&1; then
-    return 0
-  fi
   local dest="${HOME}/.local/share/locus-setup/node"
   if [[ -x "${dest}/bin/node" ]]; then
     export PATH="${dest}/bin:${PATH}"
@@ -112,18 +96,5 @@ ensure_node() {
   export PATH="${dest}/bin:${PATH}"
 }
 
-smoke() {
-  printf 'setup.sh: building locus\n'
-  cargo build -p locus-cli
-  local home
-  home="$(mktemp -d)"
-  LOCUS_HOME="$home" "${ROOT}/target/debug/locus" --version
-  rm -rf "$home"
-  printf 'setup.sh: smoke passed\n'
-}
-
-ensure_rust
 ensure_node
-smoke
-printf 'setup.sh: cargo %s\n' "$(command -v cargo)"
-printf 'setup.sh: node %s\n' "$(command -v node)"
+exec node "$ROOT/scripts/setup.mjs"

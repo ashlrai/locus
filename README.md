@@ -273,48 +273,54 @@ If a pin kept an agent on the right account, star the repo so the next person ca
 
 ## Install options
 
-Homebrew, npm, and Cargo are the current installation options. npm tracks the
-latest release; the Homebrew tap can lag behind it, so check `locus --version`
-after `brew install`.
-Since v0.6.1 the npm wrappers fail closed if a release checksum sidecar is missing,
-unparseable, unreachable or mismatched; a checksum failure does not fall back
-to Cargo. Earlier v0.6.0 wrappers could install without verification on a
-missing or unparseable sidecar and could fall back to Cargo on a mismatch.
-Checksums detect corruption, not publisher authenticity. See the
-[CLI wrapper notes](./npm/README.md) and [MCP wrapper notes](./npm-mcp/README.md).
+One command on each system. Since v0.6.1 the npm wrappers fail closed if a release checksum sidecar is missing, unparseable, unreachable, or mismatched. A checksum failure does not fall back to Cargo. npm 11 skips install scripts unless the packages are named, so the npm line below includes `--allow-scripts`. On npm 10 and earlier, `npm install -g locus-cli @ashlrai/locus-mcp` still runs those scripts. Checksums detect corruption, not publisher authenticity. See the [CLI wrapper notes](./npm/README.md) and [MCP wrapper notes](./npm-mcp/README.md).
+
+### macOS
 
 ```bash
-# Homebrew (tap live). Installs both binaries
-brew install ashlrai/tap/locus
-
-# npm (release binary, or cargo if this platform has no asset)
-npm install -g locus-cli @ashlrai/locus-mcp
-npx locus-cli --help
-npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
+curl -fsSL https://raw.githubusercontent.com/ashlrai/locus/main/scripts/install.sh | bash
 ```
 
-npm 11 skips dependency install scripts unless the package is named. These wrappers use `postinstall` to download the release binary and link it before the first command. On npm 11, install with:
+```bash
+brew install ashlrai/tap/locus
+```
+
+The tap can lag the latest release, so check `locus --version` after `brew install`.
+
+```bash
+npm install -g --allow-scripts=@ashlrai/locus-mcp,locus-cli locus-cli @ashlrai/locus-mcp
+npx locus-cli --help
+```
+
+### Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ashlrai/locus/main/scripts/install.sh | bash
+```
 
 ```bash
 npm install -g --allow-scripts=@ashlrai/locus-mcp,locus-cli locus-cli @ashlrai/locus-mcp
 ```
 
-To allow those scripts for later global installs:
+The shell installer supports Linux x86_64. On Linux arm64, use npm or Cargo.
 
-```bash
-npm config set allow-scripts=@ashlrai/locus-mcp,locus-cli --location=user
+### Windows
+
+No Windows release archive is published. This command installs the npm packages, which build from source on Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/ashlrai/locus/main/scripts/install.ps1 | iex
 ```
 
-On npm 10 and earlier, `npm install -g locus-cli @ashlrai/locus-mcp` still runs the scripts.
+The same npm command works in PowerShell or cmd:
 
-### Proposed shell installer
+```powershell
+npm install -g --allow-scripts=@ashlrai/locus-mcp,locus-cli locus-cli @ashlrai/locus-mcp
+```
 
-[Issue #169](https://github.com/ashlrai/locus/issues/169) proposes a
-one-command installation path for machines without npm or Rust. The repository
-contains an [installer implementation](./scripts/install.sh), but this proposal
-does not establish that a published one-command installation path or matching
-assets are available for every release. Use the current options above or the
-source install below in the meantime.
+### Shell installer
+
+[scripts/install.sh](./scripts/install.sh) is the macOS and Linux x86_64 command under [Install options](#install-options). It verifies the release checksum before replacing binaries. Windows has no release archive; [scripts/install.ps1](./scripts/install.ps1) installs the npm packages instead.
 
 The intended installer selects a platform-specific `locus-<target>.tar.gz`
 release archive and its required `.sha256` sidecar, verifies the archive, and

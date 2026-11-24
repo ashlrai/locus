@@ -22,6 +22,7 @@ const {
   unlinkSync,
   writeFileSync,
 } = require("fs");
+const os = require("os");
 const { dirname, join } = require("path");
 const https = require("https");
 const crypto = require("crypto");
@@ -35,11 +36,21 @@ const CARGO_PACKAGE = "locus-cli";
 const MIN_RUST_VERSION = "1.89";
 // `cargo install` takes the crate as a positional argument; it has no --package flag.
 const INSTALL_FROM_SOURCE = `cargo install --git https://github.com/${REPO} ${CARGO_PACKAGE} --locked`;
-const CACHE_DIR = join(
-  process.env.HOME || process.env.USERPROFILE || "/tmp",
-  ".locus",
-  "bin"
-);
+function userHome() {
+  const explicit = [process.env.HOME, process.env.USERPROFILE].find(
+    (value) => typeof value === "string" && value.trim() !== ""
+  );
+  if (explicit) return explicit;
+  try {
+    const home = os.homedir();
+    if (home) return home;
+  } catch {
+    // os.homedir throws when the account has no home directory.
+  }
+  return os.tmpdir();
+}
+
+const CACHE_DIR = join(userHome(), ".locus", "bin");
 
 const SUPPORTED_TARGETS = Object.freeze({
   "darwin-arm64": "aarch64-apple-darwin",
@@ -326,9 +337,7 @@ function removeIfExists(path) {
 }
 
 function cargoBinPath() {
-  const home = process.env.HOME || process.env.USERPROFILE || "/tmp";
-  const name = getBinaryFilename();
-  return join(home, ".cargo", "bin", name);
+  return join(userHome(), ".cargo", "bin", getBinaryFilename());
 }
 
 function isNodeShim(path) {
@@ -597,7 +606,9 @@ if (require.main === module) {
 }
 
 module.exports = {
+  userHome,
   getBinaryPath,
+  readBinaryVersion,
   isCachedBinaryStale,
   compareVersions,
   assertCanReplace,

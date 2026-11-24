@@ -65,7 +65,7 @@ Early design docs ([DESIGN.md](./DESIGN.md), [PLAN.md](./PLAN.md)) use the coden
 
 ## Build / test / lint
 
-One-command setup on Linux or macOS (safe to run again, no prompts): `bash scripts/setup.sh`. It installs Rust and Node 20 when they are missing, builds `locus`, and runs `locus --version` in a temporary `LOCUS_HOME`. Details: [CONTRIBUTING.md](./CONTRIBUTING.md#start-here).
+One-command setup (safe to run again, no prompts): `node scripts/setup.mjs`. On macOS and Linux, `bash scripts/setup.sh` installs Node 20 first when it is missing. On Windows, `powershell -File scripts/setup.ps1` does the same. The setup installs Rust when it is missing, builds `locus`, and runs `locus --version` in a temporary `LOCUS_HOME`. Before pushing, `node scripts/fast-check.mjs` is the cross-platform merge gate (`bash scripts/fast-check.sh` on macOS and Linux). Details: [CONTRIBUTING.md](./CONTRIBUTING.md#start-here).
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -87,7 +87,8 @@ Local install from this checkout (`locus-cli` installs both binaries):
 cargo install --locked --path crates/locus-cli
 ```
 
-Before pushing, run the local merge gate: `git fetch origin && bash scripts/fast-check.sh`
+Before pushing, run the local merge gate: `git fetch origin && node scripts/fast-check.mjs`
+(`bash scripts/fast-check.sh` is the same gate on macOS and Linux).
 (fmt, then clippy `-D warnings` and tests for the crates changed relative to `origin/main`).
 The required PR check, CI Gate (`.github/workflows/ci.yml`), runs fmt, clippy, wrapper,
 discoverability and crypto checks, path-selected sandbox tests and diff secret scans;
