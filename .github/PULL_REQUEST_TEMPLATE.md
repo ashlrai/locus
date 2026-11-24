@@ -23,3 +23,10 @@
 <!-- Anything risky, breaking, or worth a closer look -->
 
 <!-- Security vulnerabilities: do not open a PR or issue. See SECURITY.md. -->
+
+## Agent used (optional)
+
+<!-- Helps us learn which coding tools contribute. Leave blank for a fully human PR.
+     Examples: Codex, Claude Code, Cursor, GitHub Copilot, Gemini CLI, Grok, Devin, Aider, Windsurf, local model (name it). -->
+
+Agent used:
