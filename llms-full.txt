@@ -23,6 +23,7 @@ listed verbatim so an agent can jump straight to the right document.
   - Docs
   - Development
   - Part of the Ashlr ecosystem
+  - Join the mission
   - Contributing
   - License
 
