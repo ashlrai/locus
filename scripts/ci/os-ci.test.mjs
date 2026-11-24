@@ -66,6 +66,17 @@ test("the first panic becomes file:line", () => {
   assert.equal(found.line, "12");
 });
 
+test("a manifest warning is not reported ahead of a later error", () => {
+  const found = firstFailure([
+    "warning: unused field `homepage`",
+    "  --> Cargo.toml:16:1",
+    "error: linking with link.exe failed: exit code: 1",
+    "  --> crates/locus-cli/src/main.rs:1:1",
+  ].join("\n"));
+  assert.equal(found.file, "crates/locus-cli/src/main.rs");
+  assert.equal(found.line, "1");
+});
+
 test("checksum verification fails closed before a caller could execute", () => {
   const dir = mkdtempSync(join(tmpdir(), "locus-sum-"));
   const file = join(dir, "locus");

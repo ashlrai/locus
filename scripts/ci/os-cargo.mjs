@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 import { dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { reportFailure, stripAnsi } from "./fail-report.mjs";
+import { failureTail, reportFailure, stripAnsi } from "./fail-report.mjs";
 
 const DOCS = /\.(md|markdown|svg|png|gif|webp|jpg|jpeg)$/i;
 
@@ -71,6 +71,8 @@ function fail(output, status) {
   if (reported?.summary && process.env.GITHUB_STEP_SUMMARY) {
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, reported.summary);
   }
+  const tail = failureTail(output);
+  if (tail) console.log(tail);
   process.exit(status && status > 0 ? status : 1);
 }
 
