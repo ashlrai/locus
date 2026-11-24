@@ -260,6 +260,35 @@ fn doubled_separators(url: &str) -> usize {
     after_scheme.matches("//").count()
 }
 
+#[test]
+fn path_prefix_is_preserved_when_joining_request_path() {
+    use locus_core::gateway::{resolve, GatewayChild};
+
+    for base in [
+        "https://gw.example.com/proxy/openai/v1",
+        "https://gw.example.com/proxy/openai/v1/",
+    ] {
+        let GatewayChild::Set { target, vars } = resolve(&GatewayConfig {
+            enabled: true,
+            base_url: Some(base.into()),
+            child_env: vec!["OPENAI_BASE_URL".into()],
+            allowed_hosts: vec!["gw.example.com:443".into()],
+        }) else {
+            panic!("path-prefixed base URL {base} was refused");
+        };
+        assert_eq!(target.base_url, base);
+        assert_eq!(vars, vec!["OPENAI_BASE_URL".to_string()]);
+
+        for path in ["chat/completions", "/chat/completions"] {
+            assert_eq!(
+                join(&target.base_url, path),
+                "https://gw.example.com/proxy/openai/v1/chat/completions",
+                "{base} + {path}"
+            );
+        }
+    }
+}
+
 /// Pure (no env, no store), so it can share the binary with the end-to-end
 /// test above.
 #[test]
