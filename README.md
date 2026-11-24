@@ -24,6 +24,8 @@ Agents are first-class users. Start with [Get started](#get-started). Machine in
 [![npm: locus-cli](https://img.shields.io/npm/v/locus-cli?style=for-the-badge&logo=npm&label=locus-cli&labelColor=0b0b14)](https://www.npmjs.com/package/locus-cli)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge&labelColor=0b0b14)](./LICENSE)
 [![Rust ≥1.89](https://img.shields.io/badge/rust-%E2%89%A51.89-CE412B?style=for-the-badge&logo=rust&labelColor=0b0b14)](./docs/MSRV.md)
+[![GitHub stars](https://img.shields.io/github/stars/ashlrai/locus?style=for-the-badge&labelColor=0b0b14&logo=github)](https://github.com/ashlrai/locus/stargazers)
+[![npm downloads](https://img.shields.io/npm/dm/locus-cli?style=for-the-badge&labelColor=0b0b14&logo=npm&label=npm%20downloads)](https://www.npmjs.com/package/locus-cli)
 
 <!-- fresh:begin release -->
 Latest release: [v0.7.0](https://github.com/ashlrai/locus/releases/tag/v0.7.0) (2026-11-06).
@@ -562,6 +564,31 @@ In that factory, Locus is the identity gate. Agents act without a person approvi
 ### How agents work on this repo
 
 Agents also change Locus itself. They follow [AGENTS.md](./AGENTS.md) and [CLAUDE.md](./CLAUDE.md), and each change lands as a pull request that passes the same required check as any other, CI Gate ([ci.yml](./.github/workflows/ci.yml)): `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, the wrapper, site and crypto-policy checks, path-selected sandbox tests and diff secret scans. The full test suite and release build run on the daily schedule, so contributors run `bash scripts/fast-check.sh` and `cargo test` for the crates they touch before pushing. The product rules apply to them too: they cannot pin, and they never commit secrets.
+
+## Join the mission
+
+AshlrAI is an engineering firm. We build tools like Locus to make our own work faster and more AI-native, then open-source them so every engineer can do the same. If you build with coding agents, build this with us.
+
+- **Start here:** read [CONTRIBUTING.md](CONTRIBUTING.md). Your coding agent can follow [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt).
+- **Pick an issue:** [`good first issue`](https://github.com/ashlrai/locus/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) or [`help wanted`](https://github.com/ashlrai/locus/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22).
+- **See the whole lineup:** [ashlr.ai/open-source](https://ashlr.ai/open-source).
+<!-- TODO(discord): add the AshlrAI Discord invite here, and a Discord badge in the header, once the public invite link is confirmed. -->
+
+### Star history
+
+<a href="https://star-history.com/#ashlrai/locus&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ashlrai/locus&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ashlrai/locus&type=Date" />
+    <img alt="Locus star history" src="https://api.star-history.com/svg?repos=ashlrai/locus&type=Date" width="600" />
+  </picture>
+</a>
+
+### Contributors
+
+<a href="https://github.com/ashlrai/locus/graphs/contributors">
+  <img alt="Locus contributors" src="https://contrib.rocks/image?repo=ashlrai/locus" />
+</a>
 
 ## Contributing
 
