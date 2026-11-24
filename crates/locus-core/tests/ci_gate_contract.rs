@@ -5,8 +5,9 @@
 //! never reports hangs every queue entry. The current design keeps the heavy
 //! suites schedule-only and makes the `gate` job in ci.yml the one required
 //! check, so the invariant is pinned here instead of on one trigger line:
-//! ci.yml must report on `merge_group`, the gate must aggregate every sibling
-//! job, and nothing else may join the queue or run as an unscoped PR check.
+//! ci.yml must report on `merge_group`, the gate must aggregate the original
+//! Linux jobs, and nothing else may join the queue or run as an unscoped PR check.
+//! Per-OS gates and install smokes report beside CI Gate and stay out of its needs.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -190,11 +191,43 @@ fn gate_aggregates_every_ci_job() {
     );
 
     let needs = inline_list(&gate, "needs", 4);
+    // These jobs report beside the required check. A new ci.yml job that is
+    // not listed here must still join CI Gate.
+    let beside = [
+        "os-classify",
+        "windows-fast",
+        "macos-fast",
+        "install-smoke-linux",
+        "install-smoke-windows",
+        "install-smoke-macos",
+        "gate-linux",
+        "gate-windows",
+        "gate-macos",
+    ];
+    for name in beside {
+        assert!(names.contains(name), "missing per-OS job {name}");
+        assert!(!needs.contains(name), "{name} joined CI Gate");
+    }
     let expected: BTreeSet<String> = names
         .iter()
-        .filter(|name| *name != "gate" && *name != "fixup-queue")
+        .filter(|name| {
+            *name != "gate" && *name != "fixup-queue" && !beside.contains(&name.as_str())
+        })
         .cloned()
         .collect();
+    let historical: BTreeSet<String> = [
+        "check",
+        "fast",
+        "msrv",
+        "sandbox",
+        "secret-scan",
+        "secret-shape",
+        "wrappers",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(needs, historical, "CI Gate needs changed");
     assert_eq!(
         needs, expected,
         "gate `needs:` must cover every ci.yml job except itself and \
@@ -228,6 +261,57 @@ fn merge_group_runs_never_cancel() {
         "only superseded PR runs may cancel: a cancelled merge_group check \
          ejects the queue entry"
     );
+}
+
+#[test]
+fn per_os_gates_report_from_ubuntu() {
+    let jobs = section(CI, "jobs");
+    for (id, title) in [
+        ("gate-linux", "Gate (linux)"),
+        ("gate-windows", "Gate (windows)"),
+        ("gate-macos", "Gate (macos)"),
+    ] {
+        let block = child_block(&jobs, id, 2);
+        assert!(
+            block
+                .iter()
+                .any(|line| line.trim() == format!("name: {title}")),
+            "{id} name"
+        );
+        assert!(
+            block.iter().any(|line| line.trim() == "if: always()"),
+            "{id} must report when a dependency is skipped"
+        );
+        assert!(
+            block
+                .iter()
+                .any(|line| line.trim() == "runs-on: ubuntu-latest"),
+            "{id} must not take a macOS or Windows runner"
+        );
+    }
+    for (id, runner) in [
+        ("install-smoke-linux", "ubuntu-latest"),
+        ("install-smoke-windows", "windows-latest"),
+        ("install-smoke-macos", "macos-latest"),
+    ] {
+        let block = child_block(&jobs, id, 2);
+        assert!(
+            block
+                .iter()
+                .any(|line| line.trim().starts_with("name: install smoke (")),
+            "{id} name"
+        );
+        assert!(
+            block
+                .iter()
+                .any(|line| line.trim() == format!("runs-on: {runner}")),
+            "{id} runner"
+        );
+        let text = block.join("\n");
+        assert!(text.contains("persist-credentials: false"));
+        assert!(!text.contains("secrets."));
+        assert!(!text.contains("@v"));
+    }
 }
 
 #[test]
