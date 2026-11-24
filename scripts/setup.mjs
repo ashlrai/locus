@@ -11,7 +11,7 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { homedir, platform, arch, tmpdir } from 'node:os';
-import { delimiter, dirname, join, resolve } from 'node:path';
+import path, { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -24,8 +24,8 @@ export function locusBinName() {
   return platform() === 'win32' ? 'locus.exe' : 'locus';
 }
 
-export function cargoHomeBin() {
-  return join(homedir(), '.cargo', 'bin');
+export function cargoHomeBin(home = homedir(), paths = path) {
+  return paths.join(home, '.cargo', 'bin');
 }
 
 function prependPath(dir) {

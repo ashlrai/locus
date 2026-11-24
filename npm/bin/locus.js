@@ -102,8 +102,16 @@ function getBinaryFilename() {
   return process.platform === "win32" ? `${BINARY_NAME}.exe` : BINARY_NAME;
 }
 
+function cacheBinaryPath(home, filename, pathApi = require("path")) {
+  return pathApi.join(home, ".locus", "bin", filename);
+}
+
+function cargoBinaryPath(home, filename, pathApi = require("path")) {
+  return pathApi.join(home, ".cargo", "bin", filename);
+}
+
 function getBinaryPath() {
-  return join(CACHE_DIR, getBinaryFilename());
+  return cacheBinaryPath(userHome(), getBinaryFilename());
 }
 
 function getVersionSidecarPath(binaryPath) {
@@ -337,7 +345,7 @@ function removeIfExists(path) {
 }
 
 function cargoBinPath() {
-  return join(userHome(), ".cargo", "bin", getBinaryFilename());
+  return cargoBinaryPath(userHome(), getBinaryFilename());
 }
 
 function isNodeShim(path) {
@@ -607,6 +615,8 @@ if (require.main === module) {
 
 module.exports = {
   userHome,
+  cacheBinaryPath,
+  cargoBinaryPath,
   getBinaryPath,
   readBinaryVersion,
   isCachedBinaryStale,
