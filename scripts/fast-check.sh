@@ -43,7 +43,13 @@ done < "$changes"
 if $all; then packages=(--workspace); fi
 if ((${#packages[@]})); then
     step clippy cargo clippy --locked --all-targets "${packages[@]}" -- -D warnings
-    step tests cargo test --locked "${packages[@]}"
+    # Hosted ubuntu CI runs the affected cargo test. Opt in locally with
+    # LOCUS_FAST_CHECK_TESTS=1.
+    if [[ "${LOCUS_FAST_CHECK_TESTS:-}" == 1 ]]; then
+        step tests cargo test --locked "${packages[@]}"
+    else
+        printf 'PASS tests (opt-in; hosted CI runs affected tests)\n'
+    fi
 else
-    printf 'PASS clippy (no changed crates)\nPASS tests (no changed crates)\n'
+    printf 'PASS clippy (no changed crates)\nPASS tests (opt-in; hosted CI runs affected tests)\n'
 fi

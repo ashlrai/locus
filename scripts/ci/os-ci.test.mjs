@@ -6,7 +6,7 @@ import test from "node:test";
 import { firstFailure } from "./fail-report.mjs";
 import { parseSha256Sidecar, releaseFromApiBody, sha256File, verifyBeforeExecute } from "./install-smoke.mjs";
 import { gateProblems } from "./os-gate.mjs";
-import { selectPackages } from "./os-cargo.mjs";
+import { cargoVerbs, selectPackages } from "./os-cargo.mjs";
 import { isInstallerPath, isPlatformPath, plan } from "./os-path-gate.mjs";
 
 test("docs-only diffs skip windows and macos", () => {
@@ -89,6 +89,13 @@ test("checksum verification fails closed before a caller could execute", () => {
 test("release tag parsing rejects a missing tag", () => {
   assert.equal(releaseFromApiBody({ tag_name: "v0.7.2" }).version, "0.7.2");
   assert.throws(() => releaseFromApiBody({}), /unexpected release tag/);
+});
+
+test("macOS skips cargo test and ubuntu runs only test", () => {
+  assert.deepEqual(cargoVerbs("check,build"), ["check", "build"]);
+  assert.deepEqual(cargoVerbs("test"), ["test"]);
+  assert.deepEqual(cargoVerbs(""), ["check", "build", "test"]);
+  assert.throws(() => cargoVerbs("bench"), /unknown cargo verb/);
 });
 
 test("affected crates follow the diff and include dependents", () => {
