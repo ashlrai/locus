@@ -8,7 +8,8 @@ const e2eStep = fullJob?.match(/      - name: Release end-to-end gate\n([\s\S]*?
 
 test("release e2e runs only in the existing scheduled/manual Linux full job", () => {
   assert.ok(fullJob);
-  assert.match(fullJob, /if: github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch'/);
+  assert.match(fullJob, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(fullJob, /github\.event\.schedule == '0 10 \* \* \*'/);
   assert.match(fullJob, /runs-on: ubuntu-latest/);
   assert.equal(workflow.match(/bash scripts\/e2e\.sh/g)?.length, 1);
   assert.ok(e2eStep);

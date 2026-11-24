@@ -2,10 +2,10 @@ name: CI
 
 # PR and merge_group run one fast required check (CI Gate): fmt, clippy,
 # the distribution wrapper and crypto policy checks, the sandbox tests and
-# a pinned diff secret scan. The full suite (nextest, doctests, release
-# build, Phantom contract, recipes, MSRV, conformance, coverage, macOS npm
-# smoke) runs at 6 AM and 6 PM ET on main and on workflow_dispatch; a red
-# scheduled run files a P0 FIX-MAIN issue (fix-main.yml). Pushes to main no
+# a pinned diff secret scan. The full suite runs on the 10:00 UTC schedule
+# and on workflow_dispatch. Install smokes run at 16:23 UTC, off the :00, :57
+# and :59 slots. Per-OS gates report beside CI Gate and are not part of its
+# needs. A red scheduled run files a P0 FIX-MAIN issue (fix-main.yml). Pushes to main no
 # longer run CI: the merge queue already ran the gate on the merged tree.
 # The phantom+locus integration lives in integration.yml.
 on:
@@ -14,8 +14,10 @@ on:
     types: [opened, synchronize, reopened]
   merge_group:
   schedule:
-    # Daily full suite at 06:00 ET (10:00 UTC).
+    # Full suite at 06:00 ET (10:00 UTC).
     - cron: "0 10 * * *"
+    # Install smokes only. 16:23 UTC avoids :00, :57 and :59.
+    - cron: "23 16 * * *"
   workflow_dispatch:
 
 # Cancel superseded PR runs; never cancel queue or scheduled runs. Schedule and
@@ -33,6 +35,8 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  FULL_SUITE_CRON: "0 10 * * *"
+  INSTALL_SMOKE_CRON: "23 16 * * *"
 
 jobs:
   fast:
@@ -107,6 +111,7 @@ jobs:
           node --test scripts/check-crypto.test.mjs
           node --test scripts/install-checksum.test.mjs
           node --test scripts/install-download.test.mjs
+          node --test scripts/ci/os-ci.test.mjs
           node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
 
@@ -164,7 +169,7 @@ jobs:
 
   check:
     name: fmt · clippy · test · release build
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 10 * * *' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -259,7 +264,7 @@ jobs:
   msrv:
     name: msrv (rustc 1.89)
     runs-on: ubuntu-latest
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.schedule == '0 10 * * *' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -378,12 +383,13 @@ jobs:
         env:
           NEEDS: ${{ toJSON(needs) }}
           EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
         run: |
           set -euo pipefail
           # Exact dependency keys: a missing or extra job fails closed.
           printf '%s' "$NEEDS" | jq -e --argjson exp "[\"check\", \"fast\", \"msrv\", \"sandbox\", \"secret-scan\", \"secret-shape\", \"wrappers\"]" '(keys | sort) == $exp' > /dev/null || { echo "::error::gate dependency inventory changed"; exit 1; }
           full=false
-          if [ "$EVENT" = "schedule" ] || [ "$EVENT" = "workflow_dispatch" ]; then full=true; fi
+          if [ "$EVENT" = "workflow_dispatch" ] || { [ "$EVENT" = "schedule" ] && [ "$SCHEDULE" = "$FULL_SUITE_CRON" ]; }; then full=true; fi
           bad="$(printf '%s' "$NEEDS" | jq -r --argjson full "$full" 'to_entries[] | select(.value.result != "success") | select(($full | not) and (.key == "check" or .key == "msrv") and .value.result == "skipped" | not) | "\(.key)=\(.value.result)"')"
           if [ -n "$bad" ]; then echo "::error::CI Gate: $bad"; exit 1; fi
           echo "CI Gate passed ($EVENT)"
@@ -428,3 +434,257 @@ jobs:
           path: fixup-queue.txt
           if-no-files-found: error
           retention-days: 7
+
+  os-classify:
+    name: Classify OS legs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      fast_windows: ${{ steps.plan.outputs.fast_windows }}
+      fast_macos: ${{ steps.plan.outputs.fast_macos }}
+      smoke_linux: ${{ steps.plan.outputs.smoke_linux }}
+      smoke_windows: ${{ steps.plan.outputs.smoke_windows }}
+      smoke_macos: ${{ steps.plan.outputs.smoke_macos }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - id: plan
+        name: Decide which OS legs run
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          files=""
+          if [ "$EVENT" = pull_request ] || [ "$EVENT" = merge_group ]; then
+            base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+            files="$(git diff --name-only "$base" "$HEAD_SHA")"
+          fi
+          printf '%s\n' "$files" | node scripts/ci/os-path-gate.mjs plan
+
+  windows-fast:
+    name: Windows fast checks
+    needs: os-classify
+    if: needs.os-classify.outputs.fast_windows == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'merge_group' || github.event_name == 'push' }}
+      - name: Affected check, build, and test
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node scripts/ci/os-cargo.mjs
+
+  macos-fast:
+    name: macOS fast checks
+    needs: os-classify
+    if: needs.os-classify.outputs.fast_macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'merge_group' || github.event_name == 'push' }}
+      - name: Affected check, build, and test
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node scripts/ci/os-cargo.mjs
+
+  install-smoke-linux:
+    name: install smoke (linux)
+    needs: os-classify
+    if: needs.os-classify.outputs.smoke_linux == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'merge_group' || github.event_name == 'push' }}
+      - name: This commit
+        run: node scripts/ci/install-smoke.mjs commit
+      - name: Latest published release
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '23 16 * * *'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/install-smoke.mjs release
+
+  install-smoke-windows:
+    name: install smoke (windows)
+    needs: os-classify
+    if: needs.os-classify.outputs.smoke_windows == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'merge_group' || github.event_name == 'push' }}
+      - name: This commit
+        run: node scripts/ci/install-smoke.mjs commit
+      - name: Latest published release
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '23 16 * * *'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/install-smoke.mjs release
+
+  install-smoke-macos:
+    name: install smoke (macos)
+    needs: os-classify
+    if: needs.os-classify.outputs.smoke_macos == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          save-if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'merge_group' || github.event_name == 'push' }}
+      - name: This commit
+        run: node scripts/ci/install-smoke.mjs commit
+      - name: Latest published release
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '23 16 * * *'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/ci/install-smoke.mjs release
+
+  gate-linux:
+    name: Gate (linux)
+    if: always()
+    needs: [fast, wrappers, sandbox, secret-scan, secret-shape, check, msrv, install-smoke-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Require this OS
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          GATE_NAME: Gate (linux)
+        run: node scripts/ci/os-gate.mjs
+
+  gate-windows:
+    name: Gate (windows)
+    if: always()
+    needs: [os-classify, windows-fast, install-smoke-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Require this OS
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          GATE_NAME: Gate (windows)
+        run: node scripts/ci/os-gate.mjs
+
+  gate-macos:
+    name: Gate (macos)
+    if: always()
+    needs: [os-classify, macos-fast, install-smoke-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+      - name: Require this OS
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          GATE_NAME: Gate (macos)
+        run: node scripts/ci/os-gate.mjs
