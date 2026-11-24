@@ -102,8 +102,27 @@ function getPlatformTarget(runtime = process) {
   return target;
 }
 
-function getBinaryFilename() {
-  return process.platform === "win32" ? `${BINARY_NAME}.exe` : BINARY_NAME;
+function binaryFileName(baseName, runtime = process) {
+  return runtime.platform === "win32" ? `${baseName}.exe` : baseName;
+}
+
+function releaseAssetName(target, runtime = process) {
+  const ext = runtime.platform === "win32" ? "zip" : "tar.gz";
+  return `locus-${target}.${ext}`;
+}
+
+function missingWindowsBinaryMessage(target, runtime = process) {
+  const asset = releaseAssetName(target, runtime);
+  const exe = binaryFileName(BINARY_NAME, runtime);
+  return (
+    `No Windows release binary for ${runtime.platform}-${runtime.arch} in v${VERSION}. ` +
+    `Expected ${asset} containing ${exe} on the GitHub release. ` +
+    `This release does not publish that archive, so the install stops.`
+  );
+}
+
+function getBinaryFilename(runtime = process) {
+  return binaryFileName(BINARY_NAME, runtime);
 }
 
 function cacheBinaryPath(home, filename, pathApi = require("path")) {
@@ -397,9 +416,7 @@ function installViaCargo(binaryPath, options) {
 async function downloadReleaseBinary(binaryPath, options) {
   assertCanReplace(binaryPath, options);
   const target = getPlatformTarget();
-  const isWindows = process.platform === "win32";
-  const archiveExt = isWindows ? "zip" : "tar.gz";
-  const archiveName = `locus-${target}.${archiveExt}`;
+  const archiveName = releaseAssetName(target);
   const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${archiveName}`;
   const sha256Url = `${url}.sha256`;
 
@@ -492,6 +509,11 @@ async function ensureBinary(options = {}) {
     // Unsupported platform: downloadReleaseBinary reports it, then cargo runs.
   }
   if (target && !hasPrebuiltBinary(target)) {
+    if (process.platform === "win32") {
+      const err = new Error(missingWindowsBinaryMessage(target));
+      err.code = "LOCUS_NPM_NO_BINARY";
+      throw err;
+    }
     console.error(cargoFallbackMessage(process, "no-prebuilt"));
     try {
       return installViaCargo(binaryPath, options);
@@ -505,7 +527,8 @@ async function ensureBinary(options = {}) {
     return await downloadReleaseBinary(binaryPath, options);
   } catch (err) {
     // A refusal or failed integrity check must not fall through to cargo.
-    if (err.code === "LOCUS_NPM_DOWNGRADE" || err.code === "LOCUS_NPM_CHECKSUM") throw err;
+    if (err.code === "LOCUS_NPM_DOWNGRADE" || err.code === "LOCUS_NPM_CHECKSUM" || err.code === "LOCUS_NPM_NO_BINARY") throw err;
+    if (process.platform === "win32") throw err;
     console.error(`Failed to download locus-mcp: ${err.message}`);
     console.error(cargoFallbackMessage(process, "download-failed"));
     try {
@@ -553,6 +576,9 @@ module.exports = {
   downloadReleaseBinary,
   ensureBinary,
   INSTALL_FROM_SOURCE,
+  binaryFileName,
+  releaseAssetName,
+  missingWindowsBinaryMessage,
   PREBUILT_TARGETS,
   SUPPORTED_TARGETS,
   cargoFallbackMessage,

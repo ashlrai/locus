@@ -306,13 +306,13 @@ The shell installer supports Linux x86_64. On Linux arm64, use npm or Cargo.
 
 ### Windows
 
-No Windows release archive is published. This command installs the npm packages, which build from source on Windows:
+No Windows release archive is published yet. `npm install -g` on Windows stops with a message that names `locus-x86_64-pc-windows-msvc.zip` (x64) or `locus-aarch64-pc-windows-msvc.zip` (arm64) and the `.exe` inside it. It does not fall through to a Cargo build. The release change that publishes those archives is `docs/handoff/windows-release.patch`. Until that ships, this command is the one Windows install and it fails closed:
 
 ```powershell
 irm https://raw.githubusercontent.com/ashlrai/locus/main/scripts/install.ps1 | iex
 ```
 
-The same npm command works in PowerShell or cmd:
+The same npm command is what that script runs:
 
 ```powershell
 npm install -g --allow-scripts=@ashlrai/locus-mcp,locus-cli locus-cli @ashlrai/locus-mcp

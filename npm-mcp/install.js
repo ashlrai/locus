@@ -4,9 +4,22 @@
 // (or is cargo-installed) lazily on first run via bin/locus-mcp.js.
 
 const { existsSync } = require("fs");
-const { getBinaryPath } = require("./bin/locus-mcp.js");
+const wrapper = require("./bin/locus-mcp.js");
 
-const binaryPath = getBinaryPath();
+const binaryPath = wrapper.getBinaryPath();
+
+if (process.platform === "win32") {
+  try {
+    const target = wrapper.getPlatformTarget();
+    if (!wrapper.hasPrebuiltBinary(target)) {
+      console.error(wrapper.missingWindowsBinaryMessage(target));
+      process.exit(1);
+    }
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
+}
 
 if (existsSync(binaryPath)) {
   console.log("locus-mcp binary already installed.");
