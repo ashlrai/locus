@@ -87,6 +87,10 @@ jobs:
 
   build:
     needs: [full-suite-evidence]
+    # Narrower than the workflow token. Release publication stays on the
+    # release job, which inherits contents: write.
+    permissions:
+      contents: read
     # The PR dry run builds Linux and Windows. The macOS job becomes a no-op
     # on ubuntu so it never queues behind the shared macOS runners.
     name: Build ${{ matrix.name }}${{ github.event_name == 'pull_request' && matrix.release_only && ' (release only)' || '' }}
@@ -202,9 +206,23 @@ jobs:
               fi
               # Checksum of the final archive bytes, in `sha256sum -c` format.
               # Integrity metadata only: not a signature or publisher attestation.
-              python -c 'import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")' "$archive" > "${archive}.sha256"
+              # macOS has python3, not python. Either interpreter is enough.
+              if command -v python3 >/dev/null 2>&1; then
+                py=python3
+              elif command -v python >/dev/null 2>&1; then
+                py=python
+              else
+                echo "checksum needs python3 or python" >&2
+                exit 1
+              fi
+              "$py" -c 'import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")' "$archive" > "${archive}.sha256"
               if command -v sha256sum >/dev/null 2>&1; then
                 sha256sum -c "${archive}.sha256"
+              elif command -v shasum >/dev/null 2>&1; then
+                shasum -a 256 -c "${archive}.sha256"
+              else
+                echo "checksum self-check needs sha256sum or shasum" >&2
+                exit 1
               fi
             )
             echo "Packed ${archive}"
