@@ -28,6 +28,14 @@ locus exec --expect personal --no-resolve -- echo ok
 
 `locus exec --expect acme -- echo ok` exits 1 with `pin_mismatch`. The child does not start.
 
+npm 11 skips install scripts unless the package is allowed. The wrappers use `postinstall` to download the release binary and link it before the first command. Install with:
+
+```bash
+npm install -g --allow-scripts=@ashlrai/locus-mcp,locus-cli locus-cli @ashlrai/locus-mcp
+```
+
+To allow those scripts for later global installs: `npm config set allow-scripts=@ashlrai/locus-mcp,locus-cli --location=user`. On npm 10 and earlier, `npm install -g locus-cli @ashlrai/locus-mcp` still runs the scripts.
+
 Claude Code (`.mcp.json`) and Cursor (`~/.cursor/mcp.json`). Codex uses the TOML below. Provider tools need the supervised command, a live pin, and the control capability in the shell that launches the client. Restart the client after a re-pin.
 
 ```json
@@ -57,6 +65,8 @@ Early design docs ([DESIGN.md](./DESIGN.md), [PLAN.md](./PLAN.md)) use the coden
 
 ## Build / test / lint
 
+One-command setup (safe to run again, no prompts): `node scripts/setup.mjs`. On macOS and Linux, `bash scripts/setup.sh` installs Node 20 first when it is missing. On Windows, `powershell -File scripts/setup.ps1` does the same. The setup installs Rust when it is missing, builds `locus`, and runs `locus --version` in a temporary `LOCUS_HOME`. Before pushing, `node scripts/fast-check.mjs` is the cross-platform merge gate (`bash scripts/fast-check.sh` on macOS and Linux). Details: [CONTRIBUTING.md](./CONTRIBUTING.md#start-here).
+
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -77,7 +87,8 @@ Local install from this checkout (`locus-cli` installs both binaries):
 cargo install --locked --path crates/locus-cli
 ```
 
-Before pushing, run the local merge gate: `git fetch origin && bash scripts/fast-check.sh`
+Before pushing, run the local merge gate: `git fetch origin && node scripts/fast-check.mjs`
+(`bash scripts/fast-check.sh` is the same gate on macOS and Linux).
 (fmt, then clippy `-D warnings` and tests for the crates changed relative to `origin/main`).
 The required PR check, CI Gate (`.github/workflows/ci.yml`), runs fmt, clippy, wrapper,
 discoverability and crypto checks, path-selected sandbox tests and diff secret scans;

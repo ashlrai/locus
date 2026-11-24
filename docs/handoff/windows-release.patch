@@ -1,0 +1,188 @@
+--- a/.github/workflows/release.yml	2026-11-24 08:11:01.382927028 +0000
++++ b/.github/workflows/release.yml	2026-11-24 08:11:01.382927028 +0000
+@@ -112,6 +112,12 @@
+             targets: x86_64-unknown-linux-gnu
+             rust_targets: x86_64-unknown-linux-gnu
+             os: ubuntu-latest
++          # Windows x64. arm64 is mapped by the npm wrapper but is not built here.
++          - name: x86_64-pc-windows-msvc
++            targets: x86_64-pc-windows-msvc
++            rust_targets: x86_64-pc-windows-msvc
++            os: windows-latest
++            release_only: true
+ 
+     steps:
+       - name: Checkout
+@@ -167,27 +173,50 @@
+           set -euo pipefail
+           OUT="dist"
+           mkdir -p "$OUT"
++          checksum_file() {
++            local file="$1"
++            if command -v sha256sum >/dev/null 2>&1; then
++              sha256sum "$file" > "${file}.sha256"
++              sha256sum -c "${file}.sha256"
++            elif command -v shasum >/dev/null 2>&1; then
++              shasum -a 256 "$file" > "${file}.sha256"
++              shasum -a 256 -c "${file}.sha256"
++            else
++              local hash
++              hash="$(powershell.exe -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath '$file').Hash.ToLower()")"
++              printf '%s  %s\n' "$hash" "$(basename "$file")" > "${file}.sha256"
++            fi
++          }
+           for TARGET in $TARGETS; do
+             BIN_DIR="target/${TARGET}/release"
+-            # Strip where available (macOS/Linux)
+-            if command -v strip >/dev/null 2>&1; then
+-              strip "${BIN_DIR}/locus" || true
+-              strip "${BIN_DIR}/locus-mcp" || true
+-            fi
+             STAGE="locus-${TARGET}"
+             mkdir -p "${OUT}/${STAGE}"
+-            cp "${BIN_DIR}/locus" "${OUT}/${STAGE}/"
+-            cp "${BIN_DIR}/locus-mcp" "${OUT}/${STAGE}/"
+-            cp README.md LICENSE "${OUT}/${STAGE}/" 2>/dev/null || true
+-            (
+-              cd "$OUT"
+-              tar -czf "locus-${TARGET}.tar.gz" "${STAGE}"
+-              # Checksum of the final archive bytes, in `sha256sum -c` format.
+-              # Integrity metadata only: not a signature or publisher attestation.
+-              shasum -a 256 "locus-${TARGET}.tar.gz" > "locus-${TARGET}.tar.gz.sha256"
+-              shasum -a 256 -c "locus-${TARGET}.tar.gz.sha256"
+-            )
+-            echo "Packed locus-${TARGET}.tar.gz"
++            if [[ "$TARGET" == *windows* ]]; then
++              cp "${BIN_DIR}/locus.exe" "${OUT}/${STAGE}/"
++              cp "${BIN_DIR}/locus-mcp.exe" "${OUT}/${STAGE}/"
++              cp README.md LICENSE "${OUT}/${STAGE}/" 2>/dev/null || true
++              (
++                cd "$OUT"
++                # bsdtar on the Windows runner writes a zip when -a sees .zip.
++                tar -a -cf "locus-${TARGET}.zip" "${STAGE}"
++                checksum_file "locus-${TARGET}.zip"
++              )
++              echo "Packed locus-${TARGET}.zip"
++            else
++              if command -v strip >/dev/null 2>&1; then
++                strip "${BIN_DIR}/locus" || true
++                strip "${BIN_DIR}/locus-mcp" || true
++              fi
++              cp "${BIN_DIR}/locus" "${OUT}/${STAGE}/"
++              cp "${BIN_DIR}/locus-mcp" "${OUT}/${STAGE}/"
++              cp README.md LICENSE "${OUT}/${STAGE}/" 2>/dev/null || true
++              (
++                cd "$OUT"
++                tar -czf "locus-${TARGET}.tar.gz" "${STAGE}"
++                checksum_file "locus-${TARGET}.tar.gz"
++              )
++              echo "Packed locus-${TARGET}.tar.gz"
++            fi
+           done
+ 
+       - name: Upload artifact
+@@ -198,6 +227,8 @@
+           path: |
+             dist/locus-*.tar.gz
+             dist/locus-*.tar.gz.sha256
++            dist/locus-*.zip
++            dist/locus-*.zip.sha256
+           if-no-files-found: error
+ 
+   release:
+@@ -222,7 +253,7 @@
+         run: |
+           set -euo pipefail
+           mkdir -p release-assets
+-          find artifacts -type f \( -name 'locus-*.tar.gz' -o -name 'locus-*.tar.gz.sha256' \) \
++          find artifacts -type f \( -name 'locus-*.tar.gz' -o -name 'locus-*.tar.gz.sha256' -o -name 'locus-*.zip' -o -name 'locus-*.zip.sha256' \) \
+             -exec cp {} release-assets/ \;
+           ls -la release-assets/
+ 
+@@ -234,8 +265,8 @@
+         run: |
+           set -euo pipefail
+           shopt -s nullglob
+-          archives=(locus-*.tar.gz)
+-          sidecars=(locus-*.tar.gz.sha256)
++          archives=(locus-*.tar.gz locus-*.zip)
++          sidecars=(locus-*.tar.gz.sha256 locus-*.zip.sha256)
+           [ "${#archives[@]}" -gt 0 ] || { echo "no release archives" >&2; exit 1; }
+           [ "${#archives[@]}" -eq "${#sidecars[@]}" ] || { echo "archive/sidecar count mismatch" >&2; exit 1; }
+           for asset in "${archives[@]}"; do
+--- a/npm/bin/locus.js	2026-11-24 08:11:01.386927035 +0000
++++ b/npm/bin/locus.js	2026-11-24 08:11:01.386927035 +0000
+@@ -67,6 +67,7 @@
+ const PREBUILT_TARGETS = Object.freeze([
+   "aarch64-apple-darwin",
+   "x86_64-apple-darwin",
++  "x86_64-pc-windows-msvc",
+   "x86_64-unknown-linux-gnu",
+ ]);
+ 
+--- a/npm-mcp/bin/locus-mcp.js	2026-11-24 08:11:01.386927035 +0000
++++ b/npm-mcp/bin/locus-mcp.js	2026-11-24 08:11:01.386927035 +0000
+@@ -71,6 +71,7 @@
+ const PREBUILT_TARGETS = Object.freeze([
+   "aarch64-apple-darwin",
+   "x86_64-apple-darwin",
++  "x86_64-pc-windows-msvc",
+   "x86_64-unknown-linux-gnu",
+ ]);
+ 
+--- /dev/null
++++ b/.github/workflows/windows-install-smoke.yml
+@@ -0,0 +1,53 @@
++name: Windows install smoke
++
++# Not part of the default CI matrix. Runs on a release tag, on manual
++# dispatch, and on a pull request only when installer, wrapper, or OS
++# setup paths change.
++on:
++  pull_request:
++    paths:
++      - "npm/**"
++      - "npm-mcp/**"
++      - "scripts/install.sh"
++      - "scripts/install.ps1"
++      - "scripts/setup.mjs"
++      - "scripts/setup.ps1"
++      - "scripts/setup.sh"
++      - ".github/workflows/release.yml"
++      - ".github/workflows/windows-install-smoke.yml"
++  push:
++    tags:
++      - "v*"
++  workflow_dispatch:
++
++permissions:
++  contents: read
++
++jobs:
++  smoke:
++    name: install smoke (windows)
++    runs-on: windows-latest
++    timeout-minutes: 30
++    steps:
++      - name: Checkout
++        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
++        with:
++          persist-credentials: false
++
++      - name: Install Rust toolchain
++        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
++
++      - name: Build the Windows binaries
++        run: cargo build --release --locked -p locus-cli -p locus-mcp
++
++      - name: Smoke the Windows binaries
++        shell: pwsh
++        run: |
++          ./target/release/locus.exe --version
++          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
++          ./target/release/locus-mcp.exe --version
++          exit $LASTEXITCODE
++
++      - name: Wrapper names the Windows zip and exe
++        shell: pwsh
++        run: node --test npm/test/win32-paths.test.js npm/test/wrappers.test.js

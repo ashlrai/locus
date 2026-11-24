@@ -13,7 +13,22 @@ const { join } = require("path");
 async function run() {
   const wrapper = require("./bin/locus.js");
   const wrapperPath = join(__dirname, "bin", "locus.js");
-  if (process.platform === "win32" || process.env.LOCUS_NPM_NO_LINK) {
+  if (process.platform === "win32") {
+    let target;
+    try {
+      target = wrapper.getPlatformTarget();
+    } catch (err) {
+      console.error(err.message);
+      process.exitCode = 1;
+      return;
+    }
+    if (!wrapper.hasPrebuiltBinary(target)) {
+      console.error(wrapper.missingWindowsBinaryMessage(target));
+      process.exitCode = 1;
+      return;
+    }
+  }
+  if (process.env.LOCUS_NPM_NO_LINK) {
     console.log("locus will download (or cargo-install) on first use.");
     return;
   }

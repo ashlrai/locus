@@ -6,6 +6,14 @@ npm install -g locus-cli @ashlrai/locus-mcp
 ```
 <!-- fresh:end -->
 
+npm 11 skips install scripts unless the package is allowed. `postinstall` downloads the release binary and links it before the first command. On npm 11:
+
+```bash
+npm install -g --allow-scripts=@ashlrai/locus-mcp,locus-cli locus-cli @ashlrai/locus-mcp
+```
+
+Or persist it, then install as usual: `npm config set allow-scripts=@ashlrai/locus-mcp,locus-cli --location=user`.
+
 **Release integrity:** Wrappers from v0.6.1 onward enforce the fail-closed
 checksum behavior described below. Earlier v0.6.0 wrappers could install
 without verification when a checksum sidecar was missing or unparseable and

@@ -44,6 +44,29 @@ for (const [name, file] of Object.entries(wrappers)) {
     for (const t of mod.PREBUILT_TARGETS) assert.ok(supported.includes(t), t);
     assert.equal(mod.hasPrebuiltBinary("aarch64-unknown-linux-gnu"), false);
     assert.equal(mod.hasPrebuiltBinary("x86_64-unknown-linux-gnu"), true);
+    assert.equal(mod.hasPrebuiltBinary("x86_64-pc-windows-msvc"), false);
+  });
+
+  test(`${name}: windows x64 and arm64 map to an exe inside a zip`, () => {
+    const x64 = { platform: "win32", arch: "x64" };
+    const arm = { platform: "win32", arch: "arm64" };
+    assert.equal(mod.getPlatformTarget(x64), "x86_64-pc-windows-msvc");
+    assert.equal(mod.getPlatformTarget(arm), "aarch64-pc-windows-msvc");
+    const exe = name === "locus" ? "locus.exe" : "locus-mcp.exe";
+    assert.equal(mod.binaryFileName(name === "locus" ? "locus" : "locus-mcp", x64), exe);
+    assert.equal(mod.releaseAssetName("x86_64-pc-windows-msvc", x64), "locus-x86_64-pc-windows-msvc.zip");
+    assert.equal(
+      mod.releaseAssetName("aarch64-pc-windows-msvc", arm),
+      "locus-aarch64-pc-windows-msvc.zip",
+    );
+    const message = mod.missingWindowsBinaryMessage("x86_64-pc-windows-msvc", x64);
+    assert.match(message, /No Windows release binary for win32-x64/);
+    assert.match(message, /locus-x86_64-pc-windows-msvc\.zip/);
+    assert.match(message, new RegExp(exe.replace(".", "\\.")));
+    assert.throws(
+      () => mod.getPlatformTarget({ platform: "win32", arch: "ia32" }),
+      /Unsupported platform: win32-ia32/,
+    );
   });
 
   test(`${name}: fallback message names the platform, version and cost`, () => {

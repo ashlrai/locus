@@ -2,6 +2,55 @@
 
 Thanks for helping make wrong-account action mechanically impossible.
 
+## Start here
+
+Talk with other contributors in [The Dev Shack](https://discord.gg/jBQrSU6XeD) on Discord. Conduct reports go to the contact in [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md). Security reports stay private: see [SECURITY.md](./SECURITY.md).
+
+One command prepares a checkout. It is safe to run again. It installs Rust and Node 20 when they are missing, builds the CLI, and runs `locus --version` in a temporary home.
+
+### macOS
+
+```bash
+bash scripts/setup.sh
+```
+
+`node scripts/setup.mjs` is the same setup when Node is already installed.
+
+### Linux
+
+```bash
+bash scripts/setup.sh
+```
+
+`node scripts/setup.mjs` is the same setup when Node is already installed.
+
+### Windows
+
+```powershell
+powershell -File scripts/setup.ps1
+```
+
+When Node is already installed: `node scripts/setup.mjs`.
+
+Run the tests from the repository root. On Windows, `node scripts/fast-check.mjs` is the merge gate. On macOS and Linux, `bash scripts/fast-check.sh` is the same gate.
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo test --workspace
+```
+
+Docs checks, wrapper checks, and the local merge gate are in [Test](#test).
+
+Pick a small task from the open [`good first issue`](https://github.com/ashlrai/locus/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) list, or from [`help wanted`](https://github.com/ashlrai/locus/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22). Read the issue, then follow the pull request flow below.
+
+### Pull request flow
+
+1. Fork the repository and clone your fork.
+2. Branch from `main`.
+3. Open a pull request into `main`. Use the [template](./.github/PULL_REQUEST_TEMPLATE.md) and say which isolation property changes, or "none".
+4. Wait until the required check, CI Gate, is green. What that check runs is under [Contribute with an agent](#contribute-with-an-agent).
+5. Maintainers merge through the merge queue. The queue reruns CI Gate on the merged tree. A maintainer queues a reviewed pull request. Collaborators with write access can arm that with `gh pr merge --auto`.
+
 ## Contribute with an agent
 
 Most changes to Locus are written by coding agents (Claude Code, Codex, Cursor
@@ -17,7 +66,8 @@ and others), and a human's PR passes the same gate. This path works for both:
 4. Before pushing, run the local merge gate:
 
    ```bash
-   git fetch origin && bash scripts/fast-check.sh
+   git fetch origin && node scripts/fast-check.mjs
+   # macOS and Linux can also run: bash scripts/fast-check.sh
    ```
 
    It runs `cargo fmt --check`, then clippy `-D warnings` and `cargo test` for
@@ -174,7 +224,8 @@ Docs checks (Node 18+, no dependencies):
 ```bash
 node scripts/check-readme-links.mjs README.md docs/*.md  # README and docs links and anchors resolve
 node --test scripts/check-readme-links.test.mjs
-bash scripts/check-support-links.sh   # every relative link in SUPPORT.md resolves
+node scripts/check-readme-links.mjs SUPPORT.md  # relative links, including on Windows
+bash scripts/check-support-links.sh   # same SUPPORT.md check, bash
 node --test scripts/check-support-links.test.mjs
 node scripts/freshness/check.mjs      # generated release blocks are in sync
 node --test scripts/devin-wiki.test.mjs  # .devin/wiki.json stays valid and its paths resolve
@@ -243,7 +294,7 @@ cargo fmt --all
 | `npm/`, `npm-mcp/` | npm wrappers `locus-cli` and `@ashlrai/locus-mcp` (fetch the release binary, or cargo-install) |
 | `apps/web/` | Static landing page and the discoverability generator (`llms.txt`, `apps/web/public/*`) |
 | `apps/dashboard/` | Local identity dashboard UI, embedded in the binary and opened by `locus dashboard` |
-| `scripts/` | `fast-check.sh`, docs and link checks, e2e and release helpers |
+| `scripts/` | `setup.mjs`, `setup.ps1`, `install.ps1`, `fast-check.mjs`, plus the bash twins and e2e helpers |
 | `DESIGN.md` | Architecture, threat model, adapter model |
 | `PLAN.md` | Original phased plan (historical; live status is in `GOALS.md`) |
 | `docs/` | Contributor-facing how-tos (index: [docs/README.md](./docs/README.md)) |
