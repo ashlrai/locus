@@ -12,6 +12,7 @@ use locus_core::session::{PinSource, Session};
 use locus_core::{
     build_isolated_env_opts, Binding, BindingBody, Policy, ProviderBinding, Scope, Store,
 };
+use std::process::Command;
 use tempfile::tempdir;
 
 const BOUND: &str = "inherit-test-bound-credential-789";
@@ -70,6 +71,11 @@ fn cfg(inherit: &[&str], gateway: GatewayConfig) -> LocusConfig {
 
 #[test]
 fn inherit_env_end_to_end() {
+    const SPACE_VALUE: &str = "  inherited value  with spaces  ";
+    if std::env::var_os("LOCUS_INHERIT_SPACE_CHILD").is_some() {
+        assert!(std::env::var("INHERIT_TEST_SPACES").is_ok_and(|v| v == SPACE_VALUE));
+        return;
+    }
     let home = tempdir().unwrap();
     std::env::set_var("LOCUS_HOME", home.path());
     std::env::set_var("LOCUS_INHERIT_TEST_TOKEN", BOUND);
@@ -107,6 +113,26 @@ fn inherit_env_end_to_end() {
     let iso = build_isolated_env_opts(&s, &b, true);
     assert_eq!(iso.vars.keys().cloned().collect::<Vec<_>>(), baseline);
     assert!(iso.secrets_failed.is_empty());
+
+    // Preserve whitespace through the isolated environment into a real child.
+    std::env::set_var("INHERIT_TEST_SPACES", SPACE_VALUE);
+    store
+        .save_config(&cfg(&["INHERIT_TEST_SPACES"], GatewayConfig::default()))
+        .unwrap();
+    let iso = build_isolated_env_opts(&s, &b, true);
+    assert!(iso.secrets_failed.is_empty());
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "inherit_env_end_to_end"])
+        .env_clear()
+        .envs(&iso.vars)
+        .env("LOCUS_INHERIT_SPACE_CHILD", "1")
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "child did not receive the unchanged value"
+    );
+    std::env::remove_var("INHERIT_TEST_SPACES");
 
     // An optional allowlisted variable that is absent in the parent stays absent.
     // A present neighbor confirms the allowlist is still applied.
