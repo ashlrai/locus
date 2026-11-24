@@ -1,6 +1,6 @@
 # GitHub Copilot instructions
 
-[AGENTS.md](AGENTS.md) is the canonical brief for every coding agent working in `locus` (Codex, Claude Code, Cursor, GitHub Copilot, Gemini CLI, Grok, Devin, Aider, Windsurf, or a local model). Read it before changing anything; it wins over this file if they ever disagree.
+[AGENTS.md](../AGENTS.md) is the canonical brief for every coding agent working in `locus` (Codex, Claude Code, Cursor, GitHub Copilot, Gemini CLI, Grok, Devin, Aider, Windsurf, or a local model). Read it before changing anything; it wins over this file if they ever disagree.
 
 Quick reference (details and exceptions live in AGENTS.md and CONTRIBUTING.md):
 
