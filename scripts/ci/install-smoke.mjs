@@ -138,7 +138,18 @@ export function releaseFromApiBody(body) {
   if (!/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$/.test(tag)) {
     throw new Error(`unexpected release tag: ${tag || "(missing)"}`);
   }
-  return { tag, version: tag.slice(1) };
+  const assets = Array.isArray(body.assets)
+    ? body.assets.map((asset) => (asset && typeof asset.name === "string" ? asset.name : "")).filter(Boolean)
+    : null;
+  return { tag, version: tag.slice(1), assets };
+}
+
+// A release that lists its assets and lists neither the archive nor its
+// .sha256 for this host has no binary to verify. Any other case, including a
+// listed asset that then fails to download, still goes through downloadVerified.
+export function releaseShipsArchive(release, filename) {
+  if (!Array.isArray(release.assets)) return true;
+  return release.assets.includes(filename) || release.assets.includes(`${filename}.sha256`);
 }
 
 async function latestRelease(repo) {
@@ -156,15 +167,20 @@ function hostTarget() {
 }
 
 async function installRelease(repo, cwd) {
-  const { tag } = await latestRelease(repo);
+  const release = await latestRelease(repo);
+  const { tag } = release;
   console.log(`latest published release: ${tag}`);
   const target = hostTarget();
   const ext = process.platform === "win32" ? "zip" : "tar.gz";
   const filename = `locus-${target}.${ext}`;
-  const url = `https://github.com/${repo}/releases/download/${tag}/${filename}`;
-  const dest = `${cwd}/${filename}`;
-  await downloadVerified(url, filename, dest);
-  console.log(`verified ${filename} from ${tag}; not executing an unverified archive`);
+  if (releaseShipsArchive(release, filename)) {
+    const url = `https://github.com/${repo}/releases/download/${tag}/${filename}`;
+    const dest = `${cwd}/${filename}`;
+    await downloadVerified(url, filename, dest);
+    console.log(`verified ${filename} from ${tag}; not executing an unverified archive`);
+  } else {
+    console.log(`::warning::${tag} publishes no ${filename}; checking the source install of ${tag} only`);
+  }
   run("cargo", ["install", "--git", `https://github.com/${repo}`, "--tag", tag, "locus-cli", "--locked", "--root", `${cwd}/.smoke-release`], { cwd });
   const binName = process.platform === "win32" ? "locus.exe" : "locus";
   runVersion(`${cwd}/.smoke-release/bin/${binName}`);
