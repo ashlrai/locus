@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { firstFailure } from "./fail-report.mjs";
-import { parseSha256Sidecar, releaseFromApiBody, sha256File, verifyBeforeExecute } from "./install-smoke.mjs";
+import { parseSha256Sidecar, releaseFromApiBody, releaseShipsArchive, sha256File, verifyBeforeExecute } from "./install-smoke.mjs";
 import { gateProblems } from "./os-gate.mjs";
 import { selectPackages } from "./os-cargo.mjs";
 import { isInstallerPath, isPlatformPath, plan } from "./os-path-gate.mjs";
@@ -89,6 +89,18 @@ test("checksum verification fails closed before a caller could execute", () => {
 test("release tag parsing rejects a missing tag", () => {
   assert.equal(releaseFromApiBody({ tag_name: "v0.7.2" }).version, "0.7.2");
   assert.throws(() => releaseFromApiBody({}), /unexpected release tag/);
+});
+
+test("a release that lists no archive for this host skips only the archive check", () => {
+  const win = "locus-x86_64-pc-windows-msvc.zip";
+  const v070 = releaseFromApiBody({
+    tag_name: "v0.7.0",
+    assets: [{ name: "locus-x86_64-unknown-linux-gnu.tar.gz" }, { name: "locus-x86_64-unknown-linux-gnu.tar.gz.sha256" }],
+  });
+  assert.equal(releaseShipsArchive(v070, win), false);
+  assert.equal(releaseShipsArchive(v070, "locus-x86_64-unknown-linux-gnu.tar.gz"), true);
+  assert.equal(releaseShipsArchive(releaseFromApiBody({ tag_name: "v0.7.2", assets: [{ name: `${win}.sha256` }] }), win), true);
+  assert.equal(releaseShipsArchive(releaseFromApiBody({ tag_name: "v0.7.2" }), win), true);
 });
 
 test("affected crates follow the diff and include dependents", () => {
