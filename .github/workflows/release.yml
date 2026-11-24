@@ -87,8 +87,8 @@ jobs:
 
   build:
     needs: [full-suite-evidence]
-    # The PR dry run builds Linux only: the macOS job becomes a no-op on
-    # ubuntu so it never queues behind the shared macOS runners.
+    # The PR dry run builds Linux and Windows. The macOS job becomes a no-op
+    # on ubuntu so it never queues behind the shared macOS runners.
     name: Build ${{ matrix.name }}${{ github.event_name == 'pull_request' && matrix.release_only && ' (release only)' || '' }}
     runs-on: ${{ github.event_name == 'pull_request' && matrix.release_only && 'ubuntu-latest' || matrix.os }}
     env:
@@ -112,6 +112,12 @@ jobs:
             targets: x86_64-unknown-linux-gnu
             rust_targets: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+          # GitHub-hosted Windows. The npm wrapper downloads
+          # locus-<target>.zip, so this job packs a zip rather than tar.gz.
+          - name: x86_64-pc-windows-msvc
+            targets: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
+            os: windows-latest
 
     steps:
       - name: Checkout
@@ -169,30 +175,44 @@ jobs:
           mkdir -p "$OUT"
           for TARGET in $TARGETS; do
             BIN_DIR="target/${TARGET}/release"
-            # Strip where available (macOS/Linux)
-            if command -v strip >/dev/null 2>&1; then
-              strip "${BIN_DIR}/locus" || true
-              strip "${BIN_DIR}/locus-mcp" || true
-            fi
             STAGE="locus-${TARGET}"
             mkdir -p "${OUT}/${STAGE}"
-            cp "${BIN_DIR}/locus" "${OUT}/${STAGE}/"
-            cp "${BIN_DIR}/locus-mcp" "${OUT}/${STAGE}/"
+            if [[ "$TARGET" == *windows* ]]; then
+              cp "${BIN_DIR}/locus.exe" "${OUT}/${STAGE}/"
+              cp "${BIN_DIR}/locus-mcp.exe" "${OUT}/${STAGE}/"
+              archive="locus-${TARGET}.zip"
+            else
+              if command -v strip >/dev/null 2>&1; then
+                strip "${BIN_DIR}/locus" || true
+                strip "${BIN_DIR}/locus-mcp" || true
+              fi
+              cp "${BIN_DIR}/locus" "${OUT}/${STAGE}/"
+              cp "${BIN_DIR}/locus-mcp" "${OUT}/${STAGE}/"
+              archive="locus-${TARGET}.tar.gz"
+            fi
             cp README.md LICENSE "${OUT}/${STAGE}/" 2>/dev/null || true
             (
               cd "$OUT"
-              tar -czf "locus-${TARGET}.tar.gz" "${STAGE}"
+              if [[ "$archive" == *.zip ]]; then
+                stage_win="$(cygpath -w "${STAGE}")"
+                archive_win="$(cygpath -w "${archive}")"
+                powershell.exe -NoProfile -NonInteractive -Command "Compress-Archive -LiteralPath '${stage_win}' -DestinationPath '${archive_win}' -Force"
+              else
+                tar -czf "$archive" "${STAGE}"
+              fi
               # Checksum of the final archive bytes, in `sha256sum -c` format.
               # Integrity metadata only: not a signature or publisher attestation.
-              shasum -a 256 "locus-${TARGET}.tar.gz" > "locus-${TARGET}.tar.gz.sha256"
-              shasum -a 256 -c "locus-${TARGET}.tar.gz.sha256"
+              python -c 'import hashlib, pathlib, sys; p = pathlib.Path(sys.argv[1]); print(f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}")' "$archive" > "${archive}.sha256"
+              if command -v sha256sum >/dev/null 2>&1; then
+                sha256sum -c "${archive}.sha256"
+              fi
             )
-            echo "Packed locus-${TARGET}.tar.gz"
+            echo "Packed ${archive}"
           done
 
       - name: Upload artifact
         if: env.SKIP_BUILD != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: locus-${{ matrix.name }}
           path: |
@@ -212,7 +232,7 @@ jobs:
           persist-credentials: false
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: artifacts
           merge-multiple: false
@@ -222,7 +242,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release-assets
-          find artifacts -type f \( -name 'locus-*.tar.gz' -o -name 'locus-*.tar.gz.sha256' \) \
+          find artifacts -type f \( -name 'locus-*.tar.gz' -o -name 'locus-*.tar.gz.sha256' -o -name 'locus-*.zip' -o -name 'locus-*.zip.sha256' \) \
             -exec cp {} release-assets/ \;
           ls -la release-assets/
 
@@ -234,8 +254,8 @@ jobs:
         run: |
           set -euo pipefail
           shopt -s nullglob
-          archives=(locus-*.tar.gz)
-          sidecars=(locus-*.tar.gz.sha256)
+          archives=(locus-*.tar.gz locus-*.zip)
+          sidecars=(locus-*.tar.gz.sha256 locus-*.zip.sha256)
           [ "${#archives[@]}" -gt 0 ] || { echo "no release archives" >&2; exit 1; }
           [ "${#archives[@]}" -eq "${#sidecars[@]}" ] || { echo "archive/sidecar count mismatch" >&2; exit 1; }
           for asset in "${archives[@]}"; do
