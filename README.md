@@ -26,6 +26,7 @@ Agents are first-class users. Start with [Get started](#get-started). Machine in
 [![Rust ≥1.89](https://img.shields.io/badge/rust-%E2%89%A51.89-CE412B?style=for-the-badge&logo=rust&labelColor=0b0b14)](./docs/MSRV.md)
 [![GitHub stars](https://img.shields.io/github/stars/ashlrai/locus?style=for-the-badge&labelColor=0b0b14&logo=github)](https://github.com/ashlrai/locus/stargazers)
 [![npm downloads](https://img.shields.io/npm/dm/locus-cli?style=for-the-badge&labelColor=0b0b14&logo=npm&label=npm%20downloads)](https://www.npmjs.com/package/locus-cli)
+[![Discord: The Dev Shack](https://img.shields.io/badge/discord-The%20Dev%20Shack-5865F2?style=for-the-badge&logo=discord&logoColor=white&labelColor=0b0b14)](https://discord.gg/jBQrSU6XeD)
 
 <!-- fresh:begin release -->
 Latest release: [v0.7.0](https://github.com/ashlrai/locus/releases/tag/v0.7.0) (2026-11-06).
@@ -572,7 +573,7 @@ AshlrAI is an engineering firm. We build tools like Locus to make our own work f
 - **Start here:** read [CONTRIBUTING.md](CONTRIBUTING.md). Your coding agent can follow [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt).
 - **Pick an issue:** [`good first issue`](https://github.com/ashlrai/locus/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) or [`help wanted`](https://github.com/ashlrai/locus/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22).
 - **See the whole lineup:** [ashlr.ai/open-source](https://ashlr.ai/open-source).
-<!-- TODO(discord): add the AshlrAI Discord invite here, and a Discord badge in the header, once the public invite link is confirmed. -->
+- **Talk with us:** [The Dev Shack](https://discord.gg/jBQrSU6XeD) on Discord.
 
 ### Star history
 
