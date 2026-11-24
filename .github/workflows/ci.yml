@@ -47,6 +47,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Rust toolchain
@@ -71,6 +72,21 @@ jobs:
 
       - name: Installer target selection
         run: python3 -m unittest discover -s scripts/tests -p 'test_installer_target_selection.py'
+
+      # Affected cargo test moved off macos-latest. The 15 minute job cap is the
+      # existing fast-job timeout. Scheduled cargo test p95 is 123s (n=15).
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 20
+
+      - name: Affected tests
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CARGO_VERBS: test
+        run: node scripts/ci/os-cargo.mjs
 
   # Runs beside fast so Node and Ruby setup stay off the Clippy critical path.
   wrappers:
@@ -526,11 +542,12 @@ jobs:
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           save-if: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'merge_group' || github.event_name == 'push' }}
-      - name: Affected check, build, and test
+      - name: Affected check and build
         env:
           EVENT: ${{ github.event_name }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CARGO_VERBS: check,build
         run: node scripts/ci/os-cargo.mjs
 
   install-smoke-linux:

@@ -102,19 +102,34 @@ function metadata() {
   return JSON.parse(result.stdout);
 }
 
+const ALLOWED_VERBS = ["check", "build", "test"];
+
+export function cargoVerbs(value = process.env.CARGO_VERBS) {
+  const verbs = (value && value.trim() ? value : ALLOWED_VERBS.join(","))
+    .split(",")
+    .map((verb) => verb.trim())
+    .filter(Boolean);
+  for (const verb of verbs) {
+    if (!ALLOWED_VERBS.includes(verb)) throw new Error(`unknown cargo verb: ${verb}`);
+  }
+  return verbs;
+}
+
 function main() {
   const event = process.env.EVENT ?? "";
+  const verbs = cargoVerbs();
   const files = changedFiles(event, process.env.BASE_SHA ?? "", process.env.HEAD_SHA ?? "");
   const meta = metadata();
   const packages = selectPackages(files, meta);
   if (packages.length === 0) {
-    console.log("no affected crates; skipping cargo check, build, and test");
+    console.log(`no affected crates; skipping cargo ${verbs.join(", ")}`);
     return;
   }
   console.log(`affected crates: ${packages.join(" ")}`);
   const selected = cargoArgs(packages, meta);
-  for (const verb of ["check", "build", "test"]) {
-    const extra = verb === "check" || verb === "build" ? ["--all-targets"] : [];
+  for (const verb of verbs) {
+    // cargo test fails fast by default. Pass it explicitly so a later flag cannot turn that off.
+    const extra = verb === "test" ? ["--fail-fast"] : ["--all-targets"];
     const result = runCargo([verb, ...selected, ...extra]);
     if (result.error || result.status !== 0) fail(result.output, result.status);
     console.log(`cargo ${verb} ok (${packages.length} crate${packages.length === 1 ? "" : "s"})`);
