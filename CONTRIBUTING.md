@@ -2,6 +2,35 @@
 
 Thanks for helping make wrong-account action mechanically impossible.
 
+## Start here
+
+Talk with other contributors in [The Dev Shack](https://discord.gg/jBQrSU6XeD) on Discord. Conduct reports go to the contact in [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md). Security reports stay private: see [SECURITY.md](./SECURITY.md).
+
+One command prepares a Linux or macOS checkout. It is safe to run again. It installs Rust and Node 20 when they are missing, builds the CLI, and runs `locus --version` in a temporary home:
+
+```bash
+bash scripts/setup.sh
+```
+
+Run the tests from the repository root:
+
+```bash
+export PATH="$HOME/.cargo/bin:$PATH"
+cargo test --workspace
+```
+
+Docs checks, wrapper checks, and the local merge gate are in [Test](#test).
+
+Pick a small task from the open [`good first issue`](https://github.com/ashlrai/locus/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) list, or from [`help wanted`](https://github.com/ashlrai/locus/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22). Read the issue, then follow the pull request flow below.
+
+### Pull request flow
+
+1. Fork the repository and clone your fork.
+2. Branch from `main`.
+3. Open a pull request into `main`. Use the [template](./.github/PULL_REQUEST_TEMPLATE.md) and say which isolation property changes, or "none".
+4. Wait until the required check, CI Gate, is green. What that check runs is under [Contribute with an agent](#contribute-with-an-agent).
+5. Maintainers merge through the merge queue. The queue reruns CI Gate on the merged tree. A maintainer queues a reviewed pull request. Collaborators with write access can arm that with `gh pr merge --auto`.
+
 ## Contribute with an agent
 
 Most changes to Locus are written by coding agents (Claude Code, Codex, Cursor
@@ -243,7 +272,7 @@ cargo fmt --all
 | `npm/`, `npm-mcp/` | npm wrappers `locus-cli` and `@ashlrai/locus-mcp` (fetch the release binary, or cargo-install) |
 | `apps/web/` | Static landing page and the discoverability generator (`llms.txt`, `apps/web/public/*`) |
 | `apps/dashboard/` | Local identity dashboard UI, embedded in the binary and opened by `locus dashboard` |
-| `scripts/` | `fast-check.sh`, docs and link checks, e2e and release helpers |
+| `scripts/` | `setup.sh`, `fast-check.sh`, docs and link checks, e2e and release helpers |
 | `DESIGN.md` | Architecture, threat model, adapter model |
 | `PLAN.md` | Original phased plan (historical; live status is in `GOALS.md`) |
 | `docs/` | Contributor-facing how-tos (index: [docs/README.md](./docs/README.md)) |
