@@ -549,6 +549,8 @@ Launch timing for [issue #170](https://github.com/ashlrai/locus/issues/170) is i
 
 Landing page: [apps/web](./apps/web). Local dashboard: `locus dashboard` on `http://127.0.0.1:8750`.
 
+## Roadmap
+
 Goals and live status: [GOALS.md](./GOALS.md). Design: [DESIGN.md](./DESIGN.md). Original phased plan (historical): [PLAN.md](./PLAN.md).
 
 | Phase | Status |

@@ -22,6 +22,7 @@ listed verbatim so an agent can jump straight to the right document.
   - Security model
   - Docs
   - Development
+  - Roadmap
   - Part of the Ashlr ecosystem
   - Join the mission
   - Contributing
