@@ -55,6 +55,8 @@ locus exec --expect personal --no-resolve -- echo ok
 locus exec --expect acme -- echo ok     # refused: exit 1, the child never starts
 ```
 
+npm 11 skips install scripts unless you allow them. The wrappers use `postinstall` to fetch the release binary during install. On npm 11, use the command in [Install options](#install-options). The `npm install -g` line above is enough on npm 10 and earlier.
+
 What you should see:
 
 - **Step 2:** `pinned personal`, a `whoami personal` line, and a `doctor` verdict. A `phantom_missing` WARN is expected unless you use Phantom Secrets.
@@ -89,6 +91,8 @@ Install the CLI and MCP packages:
 ```bash
 npm install -g locus-cli @ashlrai/locus-mcp
 ```
+
+On npm 11, allow the install scripts or the release binary is not linked until a later run. The exact command is in [Install options](#install-options).
 
 Homebrew and Cargo are in [Install options](#install-options). npm tracks the latest release. The Homebrew tap can lag behind it, so check `locus --version` after `brew install`.
 
@@ -288,6 +292,20 @@ npm install -g locus-cli @ashlrai/locus-mcp
 npx locus-cli --help
 npx @ashlrai/locus-mcp   # MCP server for Claude Code / Cursor
 ```
+
+npm 11 skips dependency install scripts unless the package is named. These wrappers use `postinstall` to download the release binary and link it before the first command. On npm 11, install with:
+
+```bash
+npm install -g --allow-scripts=@ashlrai/locus-mcp,locus-cli locus-cli @ashlrai/locus-mcp
+```
+
+To allow those scripts for later global installs:
+
+```bash
+npm config set allow-scripts=@ashlrai/locus-mcp,locus-cli --location=user
+```
+
+On npm 10 and earlier, `npm install -g locus-cli @ashlrai/locus-mcp` still runs the scripts.
 
 ### Proposed shell installer
 

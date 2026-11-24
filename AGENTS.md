@@ -28,6 +28,14 @@ locus exec --expect personal --no-resolve -- echo ok
 
 `locus exec --expect acme -- echo ok` exits 1 with `pin_mismatch`. The child does not start.
 
+npm 11 skips install scripts unless the package is allowed. The wrappers use `postinstall` to download the release binary and link it before the first command. Install with:
+
+```bash
+npm install -g --allow-scripts=@ashlrai/locus-mcp,locus-cli locus-cli @ashlrai/locus-mcp
+```
+
+To allow those scripts for later global installs: `npm config set allow-scripts=@ashlrai/locus-mcp,locus-cli --location=user`. On npm 10 and earlier, `npm install -g locus-cli @ashlrai/locus-mcp` still runs the scripts.
+
 Claude Code (`.mcp.json`) and Cursor (`~/.cursor/mcp.json`). Codex uses the TOML below. Provider tools need the supervised command, a live pin, and the control capability in the shell that launches the client. Restart the client after a re-pin.
 
 ```json
@@ -56,6 +64,8 @@ Rust workspace (`locus-core`, `locus-cli`, `locus-mcp`) implementing:
 Early design docs ([DESIGN.md](./DESIGN.md), [PLAN.md](./PLAN.md)) use the codename `mmcp`; the product, crates, and binaries are **Locus**.
 
 ## Build / test / lint
+
+One-command setup on Linux or macOS (safe to run again, no prompts): `bash scripts/setup.sh`. It installs Rust and Node 20 when they are missing, builds `locus`, and runs `locus --version` in a temporary `LOCUS_HOME`. Details: [CONTRIBUTING.md](./CONTRIBUTING.md#start-here).
 
 ```bash
 export PATH="$HOME/.cargo/bin:$PATH"
