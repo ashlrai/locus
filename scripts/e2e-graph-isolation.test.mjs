@@ -10,10 +10,77 @@ import { test } from 'node:test';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const source = readFileSync(join(root, 'scripts/e2e.sh'), 'utf8');
 const graph = source.slice(source.indexOf('# ── 16. graph'), source.indexOf('# ── 17. ci'));
-const cleanup = source.slice(source.indexOf('e2e_cleanup() {'), source.indexOf("trap 'e2e_cleanup' EXIT"));
+const cleanup = source.match(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m)?.[0];
+const installTraps = source.match(/^e2e_install_traps\(\) \{[\s\S]*?^\}/m)?.[0];
 const createGraphHome = source.match(/^create_graph_home\(\) \{[\s\S]*?^\}/m)?.[0];
 assert.ok(graph.includes('create_graph_home') && cleanup.includes('"${GRAPH_HOME:-}"'));
 assert.ok(createGraphHome, 'missing create_graph_home function');
+assert.ok(installTraps, 'missing e2e_install_traps function');
+
+// Record the allocation itself, before init/import can fail. Exit from the
+// stubbed init so the section's explicit rm cannot mask a broken EXIT trap.
+for (const exitStatus of [0, 73]) {
+  test(`recorded graph import directory is removed on exit ${exitStatus}`, (t) => {
+    const fixture = mkdtempSync(join(tmpdir(), 'locus-graph-exit-'));
+    t.after(() => rmSync(fixture, { recursive: true, force: true }));
+    const scratch = join(fixture, 'custom temp with spaces');
+    const home = join(fixture, 'main-home');
+    const record = join(fixture, 'allocated-home');
+    const entered = join(fixture, 'init-home');
+    mkdirSync(scratch);
+    mkdirSync(home);
+    writeFileSync(join(scratch, 'keep'), 'unrelated');
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+export LOCUS_HOME="$TEST_MAIN_HOME"
+GRAPH_HOME="" GRAPH_HOMES="" WS_DIR="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+log() { :; }
+ok() { :; }
+skip() { exit 90; }
+die() { printf '%s\\n' "$*" >&2; exit 1; }
+has_cmd() { return 0; }
+mktemp() {
+  local allocated
+  allocated="$(command mktemp "$@")" || return 1
+  [[ -d "$allocated" ]] || return 1
+  printf '%s' "$allocated" > "$TEST_RECORD"
+  printf '%s\\n' "$allocated"
+}
+locus() {
+  case "$1:\${2:-}" in
+    graph:export) printf 'LOCUSGRAPH00' > "$4" ;;
+    graph:import) return 1 ;;
+    init:*)
+      [[ -d "$LOCUS_HOME" && "$LOCUS_HOME" == "$(cat "$TEST_RECORD")" ]] || exit 91
+      touch "$LOCUS_HOME/cleanup-sentinel"
+      printf '%s' "$LOCUS_HOME" > "$TEST_ENTERED"
+      exit "$TEST_EXIT_STATUS" ;;
+    *) return 1 ;;
+  esac
+}
+${cleanup}
+${createGraphHome}
+${installTraps}
+e2e_install_traps
+${graph}
+exit 92
+`], {
+      env: { ...process.env, TMPDIR: scratch, TEST_MAIN_HOME: home,
+        TEST_RECORD: record, TEST_ENTERED: entered, TEST_EXIT_STATUS: String(exitStatus),
+        LOCUS_GRAPH_PASSPHRASE: 'graph-test' },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+    assert.equal(result.signal, null);
+    assert.equal(result.status, exitStatus, result.stderr);
+    const allocated = readFileSync(record, 'utf8');
+    assert.equal(dirname(allocated), scratch, 'allocation must be directly beneath TMPDIR');
+    assert.match(allocated, /\/locus-graph-imp\.[^/]+$/);
+    assert.equal(readFileSync(entered, 'utf8'), allocated, 'init must use the recorded allocation');
+    assert.throws(() => lstatSync(allocated), { code: 'ENOENT' },
+      'EXIT trap must remove the populated graph import directory');
+    assert.deepEqual(readdirSync(scratch), ['keep'], 'TMPDIR and unrelated data must survive');
+  });
+}
 
 for (const scenario of ['same-home', 'success', 'init-failure', 'import-failure', 'cleanup-failure', 'relocated']) {
   test(`graph ${scenario} uses and cleans the expected home`, (t) => {
