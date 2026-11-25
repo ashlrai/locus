@@ -11,6 +11,49 @@ use locus_core::{
 use tempfile::tempdir;
 
 #[test]
+fn empty_workspace_initializes_without_affecting_another_workspace() {
+    let root = tempdir().unwrap();
+    let existing = root.path().join("existing");
+    let empty = root.path().join("empty");
+    std::fs::create_dir(&existing).unwrap();
+    std::fs::create_dir(&empty).unwrap();
+
+    let existing_policy = existing.join(".locus.toml");
+    let existing_contents =
+        b"default_binding = \"acme\"\nallowed_bindings = [\"acme\"]\nrequire_pin = true\n";
+    std::fs::write(&existing_policy, existing_contents).unwrap();
+    let before = find_workspace(&existing).unwrap().unwrap();
+    assert_eq!(before.0, existing_policy);
+    assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0);
+    assert!(find_workspace(&empty).unwrap().is_none());
+
+    let empty_policy = empty.join(".locus.toml");
+    stage_file_replace(
+        &empty_policy,
+        b"default_binding = \"personal\"\nallowed_bindings = [\"personal\"]\n",
+    )
+    .unwrap()
+    .commit()
+    .unwrap();
+
+    let (path, initialized) = find_workspace(&empty).unwrap().unwrap();
+    assert_eq!(path, empty_policy);
+    assert_eq!(initialized.default_binding.as_deref(), Some("personal"));
+    assert!(initialized.allows("personal"));
+    assert!(!initialized.allows("acme"));
+    assert!(!initialized.require_pin);
+    assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 1);
+
+    let after = find_workspace(&existing).unwrap().unwrap();
+    assert_eq!(after, before);
+    assert!(after.1.allows("acme"));
+    assert!(!after.1.allows("personal"));
+    assert!(after.1.require_pin);
+    assert_eq!(std::fs::read(&existing_policy).unwrap(), existing_contents);
+    assert_eq!(std::fs::read_dir(&existing).unwrap().count(), 1);
+}
+
+#[test]
 fn independently_created_workspace_policy_changes_are_isolated() {
     let root = tempdir().unwrap();
     let first = root.path().join("first");
