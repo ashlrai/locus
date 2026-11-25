@@ -370,3 +370,92 @@ test('a nonexistent TMPDIR fails closed without creating a workspace', (t) => {
   assert.throws(() => lstatSync(observed), { code: 'ENOENT' },
     'no workspace path may be recorded');
 });
+
+test('workspace creation failure exits nonzero and cleans the earlier home', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, 'scratch with spaces');
+  const attempted = join(dir, 'attempted');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const shim = `mktemp() {
+  if [[ "\${2:-}" == "$TMPDIR/locus-ws.XXXXXX" ]]; then
+    [[ -d "$LOCUS_HOME" ]] || exit 70
+    printf '%s' "$LOCUS_HOME" > "$HOME_CREATED"
+    printf '%s' "$2" > "$ATTEMPTED"
+    return 73
+  fi
+  command mktemp "$@"
+}
+`;
+
+  const source = readFileSync(script, 'utf8');
+  const createHome = source.match(/^create_locus_home\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(createHome, 'e2e.sh must contain the home allocation');
+  const { cleanup, createWorkspace } = workspaceParts();
+  const homeCreated = join(dir, 'home-created');
+  const observed = join(dir, 'observed');
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${createHome}
+${cleanup}
+${createWorkspace}
+${shim}
+create_locus_home
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+create_workspace
+printf '%s' "$WS_DIR" > "$OBSERVED"
+`], { env: { ...process.env, TMPDIR: scratch, ATTEMPTED: attempted,
+    HOME_CREATED: homeCreated, OBSERVED: observed }, encoding: 'utf8' });
+
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the workspace allocation failure must stop the suite');
+  assert.equal(readFileSync(attempted, 'utf8'), `${scratch}/locus-ws.XXXXXX`);
+  assert.doesNotMatch(result.stdout, /ok workspace is created directly beneath TMPDIR/);
+  assert.throws(() => lstatSync(observed), { code: 'ENOENT' });
+  const home = readFileSync(homeCreated, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.match(home, /\/locus-e2e\.[A-Za-z0-9]{6}$/);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' },
+    'the earlier home must be removed by the EXIT trap');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'unrelated files must survive cleanup');
+});
+
+test('the full script cleans its home when workspace creation fails offline', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, 'scratch with spaces');
+  const homeRecord = join(dir, 'home-record');
+  const failureRecord = join(dir, 'failure-record');
+  const hook = join(dir, 'hook');
+  const binary = join(dir, 'locus-stub');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  writeFileSync(binary, '#!/usr/bin/env bash\ntouch "$LOCUS_HOME/initialized"\n', { mode: 0o755 });
+  writeFileSync(hook, `cargo() { :; }
+mktemp() {
+  if [[ "\${2:-}" == */locus-ws.XXXXXX ]]; then
+    printf '%s' "$2" > "$FAILURE_RECORD"
+    return 73
+  fi
+  local created
+  created="$(command mktemp "$@")" || return
+  if [[ "$2" == "$OUTER_TMP/locus-e2e.XXXXXX" ]]; then
+    printf '%s' "$created" > "$HOME_RECORD"
+  fi
+  printf '%s\\n' "$created"
+}
+`);
+  const result = spawnSync('bash', [script], {
+    env: { ...process.env, TMPDIR: scratch, OUTER_TMP: scratch, HOME_RECORD: homeRecord,
+      FAILURE_RECORD: failureRecord, BASH_ENV: hook, LOCUS_BIN: binary, MCP_BIN: binary },
+    encoding: 'utf8',
+  });
+
+  assert.equal(result.signal, null);
+  assert.notEqual(result.status, 0, 'the full script must stop on workspace allocation failure');
+  assert.match(result.stderr, /FAIL workspace was not created beneath the space-containing TMPDIR/);
+  const home = readFileSync(homeRecord, 'utf8');
+  assert.equal(dirname(home), scratch);
+  assert.equal(readFileSync(failureRecord, 'utf8'), `${home}/workspace  ws temp root/locus-ws.XXXXXX`);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' }, 'the outer home must be cleaned on exit');
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
