@@ -1,7 +1,7 @@
 // Run: node --test scripts/e2e-security-cleanup.test.mjs
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,9 +11,9 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const source = readFileSync(join(root, 'scripts', 'e2e.sh'), 'utf8');
 
 // Real pieces of e2e.sh: the exit trap, the two creators, and the opening of
-// section 24 (creation, containment check, first binding probes). Only the
-// locus binary is a stub, so a probe failure goes through the script's own
-// die() and the script's own EXIT trap.
+// section 24 (creation, containment check, first binding probes). A recording
+// mktemp delegates to the real allocator; only the locus binary is a stub.
+// A probe failure goes through the script's own die() and EXIT trap.
 function piece(re, what) {
   const m = source.match(re)?.[0];
   assert.ok(m, `e2e.sh must contain ${what}`);
@@ -46,7 +46,7 @@ esac
 function run(t, mode) {
   const dir = mkdtempSync(join(tmpdir(), 'locus-e2e-security-cleanup-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const scratch = join(dir, 'scratch');
+  const scratch = join(dir, 'scratch with  spaces');
   const mainHome = join(dir, 'main-home');
   const stub = join(dir, 'locus-stub');
   const seen = join(dir, 'seen');
@@ -56,6 +56,14 @@ function run(t, mode) {
   writeFileSync(stub, STUB);
   chmodSync(stub, 0o755);
   const script = `set -euo pipefail
+mktemp() {
+  local created
+  created="$(command mktemp "$@")" || return $?
+  [[ -d "$created" ]] || return 72
+  touch "$created/cleanup-sentinel"
+  printf '%s\\n' "$created" >> "$SEEN"
+  printf '%s\\n' "$created"
+}
 ${piece(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m, 'e2e_cleanup')}
 ${piece(/^create_security_home\(\) \{[\s\S]*?^\}/m, 'create_security_home')}
 ${piece(/^create_security_workspace\(\) \{[\s\S]*?^\}/m, 'create_security_workspace')}
@@ -67,7 +75,6 @@ LOCUS_HOME="$MAIN_HOME"
 WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
 trap 'e2e_cleanup' EXIT
 ${section24Head()}
-printf '%s\\n%s\\n' "$SECURITY_HOME" "$SECURITY_WS" > "$SEEN"
 `;
   const result = spawnSync('bash', ['-c', script], {
     env: { ...process.env, TMPDIR: scratch, MAIN_HOME: mainHome, STUB: stub, SEEN: seen, STUB_MODE: mode },
@@ -77,27 +84,39 @@ printf '%s\\n%s\\n' "$SECURITY_HOME" "$SECURITY_WS" > "$SEEN"
   return { scratch, mainHome, seen, result };
 }
 
+function assertSecurityDirectoriesRemoved({ scratch, mainHome, seen, result }) {
+  assert.ifError(result.error);
+  assert.equal(result.signal, null, 'the shell must exit normally');
+  const paths = readFileSync(seen, 'utf8').trimEnd().split('\n');
+  assert.equal(paths.length, 2, 'both security allocations must be recorded');
+  const [home, ws] = paths;
+  assert.notEqual(home, ws, 'security home and workspace must be distinct');
+  assert.equal(dirname(home), scratch, 'security home must be directly beneath TMPDIR');
+  assert.equal(dirname(ws), scratch, 'security workspace must be directly beneath TMPDIR');
+  assert.match(home, /\/locus-security-e2e\.[^/]+$/);
+  assert.match(ws, /\/locus-security-ws\.[^/]+$/);
+  for (const path of paths) {
+    assert.throws(() => lstatSync(path), { code: 'ENOENT' },
+      'each populated security directory must be removed on exit');
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+  assert.ok(!existsSync(mainHome), 'the exit trap also removes the main home');
+}
+
 test('security home and workspace are removed when section 24 passes', (t) => {
-  const { scratch, mainHome, seen, result } = run(t, 'ok');
+  const observed = run(t, 'ok');
+  const { result } = observed;
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /ok binding add rejects conflicting content/);
-  const [home, ws] = readFileSync(seen, 'utf8').trim().split('\n');
-  assert.match(home, /\/locus-security-e2e\./);
-  assert.match(ws, /\/locus-security-ws\./);
-  assert.ok(!existsSync(home), 'security home must be removed on exit');
-  assert.ok(!existsSync(ws), 'security workspace must be removed on exit');
-  assert.deepEqual(readdirSync(scratch), ['keep']);
-  assert.ok(!existsSync(mainHome), 'the exit trap also removes the main home');
+  assertSecurityDirectoriesRemoved(observed);
 });
 
 test('security home and workspace are removed when a security probe fails', (t) => {
-  const { scratch, mainHome, result } = run(t, 'mutate');
+  const observed = run(t, 'mutate');
+  const { result } = observed;
   assert.equal(result.status, 1, 'the failed probe must fail the suite');
   assert.match(result.stderr, /FAIL identical binding retry changed existing file/);
-  // `seen` is never written on failure, so identify leftovers by prefix.
-  assert.deepEqual(readdirSync(scratch), ['keep'],
-    'no locus-security-e2e.* or locus-security-ws.* directory may survive a failed probe');
-  assert.ok(!existsSync(mainHome), 'the exit trap also removes the main home');
+  assertSecurityDirectoriesRemoved(observed);
 });
 
 test('security home creation failure stops section 24 before security checks', (t) => {
