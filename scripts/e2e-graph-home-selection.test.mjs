@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -274,8 +274,11 @@ exit 1
 function rehearse2i(home, locus, { shim = '', extraEnv = {}, omitGraphCleanup = false, skipGraphCleanupOn73 = false } = {}) {
   const parts = graphParts();
   let cleanup = parts.cleanup;
+  // Disable both removal routes in these controlled defects; otherwise the
+  // registry repairs the omitted GRAPH_HOME cleanup and hides the mutation.
   if (omitGraphCleanup) {
-    cleanup = cleanup.replace('"${GRAPH_HOME:-}"', '""');
+    cleanup = cleanup.replace('"${GRAPH_HOME:-}"', '""')
+      .replace('rm -rf -- "$registered_graph_home"', ':');
     assert.ok(cleanup !== parts.cleanup, 'mutation must remove the graph cleanup argument');
   }
   if (skipGraphCleanupOn73) {
@@ -285,7 +288,9 @@ function rehearse2i(home, locus, { shim = '', extraEnv = {}, omitGraphCleanup = 
     cleanup = cleanup
       .replace('e2e_cleanup() {', 'e2e_cleanup() {\n  local _e2e_rc=$?')
       .replace('rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"',
-        'if [[ "$_e2e_rc" -eq 73 ]]; then\n    rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"\n  else\n    rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"\n  fi');
+        'if [[ "$_e2e_rc" -eq 73 ]]; then\n    rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"\n  else\n    rm -rf "$LOCUS_HOME" "${WS_DIR:-}" "${GRAPH_HOME:-}" "${SECURITY_HOME:-}" "${SECURITY_WS:-}"\n  fi')
+      .replace('rm -rf -- "$registered_graph_home"',
+        'if [[ "$_e2e_rc" -ne 73 ]]; then rm -rf -- "$registered_graph_home"; fi');
     assert.ok(cleanup.includes('local _e2e_rc=$?') && cleanup.includes('"$_e2e_rc" -eq 73'),
       'mutation must skip graph cleanup only on exit status 73');
   }
@@ -614,9 +619,8 @@ test('the verbatim block honors a controlled TMPDIR with a trailing slash', (t) 
 });
 
 // A mktemp regression that relocates the repeated homes must stop the suite at
-// the block's own containment check. The misplaced pair is left beneath the
-// wrong root (the script header documents leftover temp dirs on failure)
-// while the supplied root stays untouched.
+// the block's own containment check. The EXIT registry must remove the
+// misplaced pair while the supplied root stays untouched.
 test('repeated homes created outside the controlled TMPDIR stop the block', (t) => {
   const dir = fixture(t);
   const scratch = join(dir, 'controlled root');
@@ -642,14 +646,12 @@ test('repeated homes created outside the controlled TMPDIR stop the block', (t) 
   assert.match(result.stderr,
     /FAIL repeated graph homes were not created directly beneath the temp root/);
   assert.doesNotMatch(result.stdout, /ok two graph homes are distinct/);
-  const misplaced = readdirSync(wrongRoot);
-  assert.equal(misplaced.length, 2, 'both misplaced homes stay beneath the wrong root');
-  assert.ok(misplaced.every((n) => n.startsWith('locus-graph-imp.')));
+  assert.deepEqual(readdirSync(wrongRoot), [], 'the EXIT registry removes both misplaced homes');
   assert.deepEqual(readdirSync(scratch), ['keep']);
 });
 
 // A regression that hands back one directory twice must die at the
-// distinctness check before either home is removed.
+// distinctness check; the EXIT registry must still remove the shared home.
 test('a repeated creation returning the same directory stops the block', (t) => {
   const dir = fixture(t);
   const scratch = join(dir, 'controlled root');
@@ -675,6 +677,6 @@ test('a repeated creation returning the same directory stops the block', (t) => 
     /FAIL repeated graph home creation returned the same directory/);
   const dup = readFileSync(seen, 'utf8').trim();
   assert.equal(dirname(dup), scratch);
-  assert.deepEqual(readdirSync(scratch), [basename(dup)],
-    'only the duplicated home is left beneath the supplied root');
+  assert.throws(() => lstatSync(dup), { code: 'ENOENT' }, 'the duplicated home is removed on exit');
+  assert.deepEqual(readdirSync(scratch), [], 'no graph home survives the distinctness failure');
 });
