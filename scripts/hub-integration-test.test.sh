@@ -33,6 +33,51 @@ if [[ -n "$(find "$test_root/tmp with spaces" -mindepth 1 -print -quit)" ]]; the
 fi
 echo 'ok: first directory allocation failure stops without leaving temporary paths'
 
+# Real mktemp must fail against an unwritable parent before any integration
+# commands run. As in install-test.sh, emulate permission denial for root,
+# which bypasses directory mode bits; ordinary users exercise the real failure.
+mkdir "$test_root/unwritable parent"
+printf '%s\n' keep > "$test_root/unwritable parent/sentinel"
+cat > "$test_root/unwritable-shim.sh" <<'SHIM'
+jq() { printf 'jq\n' >> "$TEST_ROOT/unwritable-workload"; return 91; }
+node() { printf 'node\n' >> "$TEST_ROOT/unwritable-workload"; return 91; }
+cargo() { printf 'cargo\n' >> "$TEST_ROOT/unwritable-workload"; return 91; }
+locus() { printf 'locus\n' >> "$TEST_ROOT/unwritable-workload"; return 91; }
+mktemp() {
+  printf '%s\n' "$*" >> "$TEST_ROOT/unwritable-attempts"
+  if [[ $EUID -eq 0 && "$2" == "$TMPDIR/"* ]]; then
+    printf 'mktemp: Permission denied\n' >&2
+    return 1
+  fi
+  command mktemp "$@"
+}
+SHIM
+
+# Restore permissions even if the test is interrupted, so its own fixture
+# cleanup can remove the sentinel and parent.
+trap 'chmod 700 "$test_root/unwritable parent"; rm -rf -- "$test_root"' EXIT
+chmod 500 "$test_root/unwritable parent"
+status=0
+HOME="$test_root/home" TMPDIR="$test_root/unwritable parent" TEST_ROOT="$test_root" \
+  LC_ALL=C BASH_ENV="$test_root/unwritable-shim.sh" bash "$ROOT/scripts/hub-integration-test.sh" \
+  >"$test_root/stdout" 2>"$test_root/stderr" || status=$?
+chmod 700 "$test_root/unwritable parent"
+if [[ $status -eq 0 || -s "$test_root/stdout" || -e "$test_root/unwritable-workload" ]] ||
+  ! grep -Fq 'mktemp:' "$test_root/stderr" ||
+  ! grep -Fq 'Permission denied' "$test_root/stderr" ||
+  [[ "$(cat "$test_root/unwritable-attempts")" != "-d $test_root/unwritable parent/locus-hub-int.XXXXXX" ]]; then
+  echo 'FAIL: unwritable parent did not stop at the first allocation' >&2
+  exit 1
+fi
+if [[ "$(ls -A "$test_root/unwritable parent")" != sentinel ||
+      "$(cat "$test_root/unwritable parent/sentinel")" != keep ||
+      -n "$(ls -A "$test_root/home")" ||
+      -n "$(ls -A "$test_root/tmp with spaces")" ]]; then
+  echo 'FAIL: unwritable parent failure changed the fixtures or left artifacts' >&2
+  exit 1
+fi
+echo 'ok: unwritable temporary parent stops without running integration commands or leaving artifacts'
+
 # BASH_ENV supplies the shim to the real script, including its command
 # substitutions. Record the first allocation outside the cleanup target.
 cat > "$test_root/shim.sh" <<'SHIM'
