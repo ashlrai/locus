@@ -99,3 +99,43 @@ test('security home and workspace are removed when a security probe fails', (t) 
     'no locus-security-e2e.* or locus-security-ws.* directory may survive a failed probe');
   assert.ok(!existsSync(mainHome), 'the exit trap also removes the main home');
 });
+
+test('security home creation failure stops section 24 before security checks', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'locus-e2e-security-failure-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const mainHome = join(dir, 'main-home');
+  const attempts = join(dir, 'attempts');
+  const probe = join(dir, 'probe');
+  const stub = join(dir, 'locus-stub');
+  mkdirSync(mainHome);
+  writeFileSync(stub, '#!/usr/bin/env bash\ntouch "$PROBE"\n');
+  chmodSync(stub, 0o755);
+  const script = `set -euo pipefail
+${piece(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m, 'e2e_cleanup')}
+mktemp() {
+  printf '%s\\n' "\${2:-}" >> "$ATTEMPTS"
+  if [[ "\${2:-}" == */locus-security-e2e.XXXXXX ]]; then return 73; fi
+  command mktemp "$@"
+}
+${piece(/^create_security_home\(\) \{[\s\S]*?^\}/m, 'create_security_home')}
+${piece(/^create_security_workspace\(\) \{[\s\S]*?^\}/m, 'create_security_workspace')}
+log() { :; }
+ok() { :; }
+die() { exit 1; }
+LOCUS_BIN="$STUB"
+LOCUS_HOME="$MAIN_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+trap 'e2e_cleanup' EXIT
+${section24Head()}
+`;
+  const result = spawnSync('bash', ['-c', script], {
+    env: { ...process.env, TMPDIR: dir, MAIN_HOME: mainHome, STUB: stub, ATTEMPTS: attempts, PROBE: probe },
+    encoding: 'utf8', timeout: 30_000,
+  });
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the allocation failure must fail the suite');
+  assert.deepEqual(readFileSync(attempts, 'utf8').trim().split('\n'),
+    [join(dir, 'locus-security-e2e.XXXXXX')], 'workspace allocation must not run');
+  assert.ok(!existsSync(probe), 'the security checks must not run');
+  assert.ok(!existsSync(mainHome), 'the exit trap must still clean up');
+});
