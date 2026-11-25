@@ -151,6 +151,42 @@ fn enable_action_cap(store: &Store, cap: u64) {
 }
 
 #[test]
+fn zero_caps_bypass_an_existing_stop_without_changing_budget_state() {
+    let dir = tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let cfg = caps(Some(1), None);
+    let now = chrono::Utc::now();
+    assert_eq!(
+        charge(&store, &cfg, "ses_zero", now).unwrap(),
+        BudgetVerdict::Allowed
+    );
+    let exhausted = charge(&store, &cfg, "ses_zero", now).unwrap();
+    assert!(matches!(exhausted, BudgetVerdict::Exhausted { .. }));
+    let state_path = dir.path().join("budgets/ses_zero.json");
+    let stopped = fs::read(&state_path).unwrap();
+    let audit = fs::read(store.audit_path()).unwrap();
+
+    // Zero means unset: with no positive cap, even stopped sessions bypass the check.
+    let cfg = LocusConfig::parse("[budget]\nmax_actions = 0\nmax_minutes = 0\n").unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            charge(&store, &cfg.budget, "ses_zero", now).unwrap(),
+            BudgetVerdict::Allowed
+        );
+    }
+    assert_eq!(fs::read(&state_path).unwrap(), stopped);
+    assert_eq!(fs::read(store.audit_path()).unwrap(), audit);
+
+    // Bypassing the check preserves the sticky stop if a cap is enabled again.
+    assert_eq!(
+        charge(&store, &caps(Some(1), None), "ses_zero", now).unwrap(),
+        exhausted
+    );
+    assert_eq!(fs::read(&state_path).unwrap(), stopped);
+    assert_eq!(fs::read(store.audit_path()).unwrap(), audit);
+}
+
+#[test]
 fn invalid_session_ids_are_refused_before_any_budget_io() {
     let dir = tempdir().unwrap();
     let store = Store::open(dir.path()).unwrap();
