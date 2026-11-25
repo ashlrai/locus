@@ -119,44 +119,75 @@ test('security home and workspace are removed when a security probe fails', (t) 
   assertSecurityDirectoriesRemoved(observed);
 });
 
-test('security home creation failure stops section 24 before security checks', (t) => {
+test('security home creation failure removes all previously allocated temporary paths', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'locus-e2e-security-failure-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const mainHome = join(dir, 'main-home');
+  const scratch = join(dir, 'scratch with spaces');
+  const seen = join(dir, 'seen');
   const attempts = join(dir, 'attempts');
   const probe = join(dir, 'probe');
   const stub = join(dir, 'locus-stub');
-  mkdirSync(mainHome);
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
   writeFileSync(stub, '#!/usr/bin/env bash\ntouch "$PROBE"\n');
   chmodSync(stub, 0o755);
+  // Use the real creators for populated earlier fixtures; fail only the
+  // security-home allocation. No cargo or provider is called.
   const script = `set -euo pipefail
 ${piece(/^e2e_cleanup\(\) \{[\s\S]*?^\}/m, 'e2e_cleanup')}
+${piece(/^e2e_install_traps\(\) \{[\s\S]*?^\}/m, 'e2e_install_traps')}
 mktemp() {
   printf '%s\\n' "\${2:-}" >> "$ATTEMPTS"
-  if [[ "\${2:-}" == */locus-security-e2e.XXXXXX ]]; then return 73; fi
-  command mktemp "$@"
+  if [[ "\${2:-}" == */locus-security-e2e.XXXXXX ]]; then
+    while IFS= read -r path; do
+      [[ -f "$path/cleanup-sentinel" ]] || return 74
+    done < "$SEEN"
+    return 73
+  fi
+  local created
+  created="$(command mktemp "$@")" || return $?
+  touch "$created/cleanup-sentinel"
+  printf '%s\\n' "$created" >> "$SEEN"
+  printf '%s\\n' "$created"
 }
+${piece(/^create_locus_home\(\) \{[\s\S]*?^\}/m, 'create_locus_home')}
+${piece(/^create_workspace\(\) \{[\s\S]*?^\}/m, 'create_workspace')}
+${piece(/^create_graph_home\(\) \{[\s\S]*?^\}/m, 'create_graph_home')}
 ${piece(/^create_security_home\(\) \{[\s\S]*?^\}/m, 'create_security_home')}
 ${piece(/^create_security_workspace\(\) \{[\s\S]*?^\}/m, 'create_security_workspace')}
 log() { :; }
 ok() { :; }
 die() { exit 1; }
 LOCUS_BIN="$STUB"
-LOCUS_HOME="$MAIN_HOME"
-WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
-trap 'e2e_cleanup' EXIT
+WS_DIR="" GRAPH_HOME="" GRAPH_HOMES="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+create_locus_home
+e2e_install_traps
+create_workspace
+create_graph_home
 ${section24Head()}
 `;
   const result = spawnSync('bash', ['-c', script], {
-    env: { ...process.env, TMPDIR: dir, MAIN_HOME: mainHome, STUB: stub, ATTEMPTS: attempts, PROBE: probe },
+    env: { ...process.env, TMPDIR: scratch, STUB: stub, ATTEMPTS: attempts, PROBE: probe, SEEN: seen },
     encoding: 'utf8', timeout: 30_000,
   });
+  assert.ifError(result.error);
   assert.equal(result.signal, null);
   assert.equal(result.status, 73, 'the allocation failure must fail the suite');
+  const prefixes = ['locus-e2e.', 'locus-ws.', 'locus-graph-imp.'];
   assert.deepEqual(readFileSync(attempts, 'utf8').trim().split('\n'),
-    [join(dir, 'locus-security-e2e.XXXXXX')], 'workspace allocation must not run');
+    [...prefixes, 'locus-security-e2e.'].map((prefix) => join(scratch, `${prefix}XXXXXX`)),
+    'only security-home creation must fail; security-workspace allocation must not run');
+  const paths = readFileSync(seen, 'utf8').trim().split('\n');
+  assert.equal(paths.length, prefixes.length, 'all three earlier allocations must succeed');
+  for (const [index, path] of paths.entries()) {
+    assert.equal(dirname(path), scratch);
+    assert.ok(path.startsWith(join(scratch, prefixes[index])));
+    assert.throws(() => lstatSync(path), { code: 'ENOENT' },
+      'each previously populated temporary directory must be removed');
+  }
   assert.ok(!existsSync(probe), 'the security checks must not run');
-  assert.ok(!existsSync(mainHome), 'the exit trap must still clean up');
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'unrelated');
 });
 
 test('security workspace creation failure removes the allocated security home', (t) => {
