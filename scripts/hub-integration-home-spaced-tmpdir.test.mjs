@@ -24,19 +24,19 @@ const harness = `
 node() { :; }
 jq() { :; }
 cargo() { :; }
+record_argv() {
+  printf '%s\\0' "$@" >> "$SMOKE_ARGV"
+}
 mktemp() {
+  record_argv mktemp "$#" "$@"
   local last="\${!#}"
   if [[ "$last" == "$TMPDIR"/locus-hub-int.XXXXXX ]]; then
     [[ $# -eq 2 && "\${1:-}" == -d ]] || return 71
-    printf 'mktemp %s %s\\n' "$#" "$last" >> "$SMOKE_ARGV"
   fi
   command mktemp "$@"
 }
 rm() {
-  local arg
-  for arg in "$@"; do
-    [[ "$arg" == "$TMPDIR"/* ]] && printf 'rm %s %s\\n' "$#" "$arg" >> "$SMOKE_ARGV"
-  done
+  record_argv rm "$#" "$@"
   command rm "$@"
 }
 locus() {
@@ -51,9 +51,24 @@ locus() {
     return 73
   fi
 }
-export -f node jq cargo mktemp rm locus
+export -f node jq cargo record_argv mktemp rm locus
 exec bash "$1"
 `;
+
+// NUL framing preserves every argument verbatim, including whitespace and
+// newlines; the count separates successive invocations without shell parsing.
+function readArgv(record) {
+  const fields = readFileSync(record, 'utf8').split('\0');
+  assert.equal(fields.pop(), '', 'every recorded argument must be terminated');
+  const calls = [];
+  while (fields.length) {
+    const command = fields.shift();
+    const count = Number(fields.shift());
+    assert.ok(Number.isInteger(count) && count > 0 && count <= fields.length);
+    calls.push({ command, args: fields.splice(0, count) });
+  }
+  return calls;
+}
 
 // decoys: directory names placed beside the requested root. A word-splitting
 // regression could let a locus-hub-int.* fragment land in one of them.
@@ -83,19 +98,18 @@ function run(t, scratchName, decoys = []) {
   const home = readFileSync(homeFile, 'utf8').trim();
   assert.ok(result.stdout.includes(`== hub-integration-test LOCUS_HOME=${home} ==`),
     'the recorded directory must be the exported LOCUS_HOME');
-  return { root, scratch, home, argv: readFileSync(record, 'utf8').trim().split('\n') };
+  return { root, scratch, home, argv: readArgv(record) };
 }
 
 test('mktemp receives the SMOKE_HOME template as one argument beneath a space-containing TMPDIR', (t) => {
   const { scratch, home, argv } = run(t, 'home workspace dir');
 
-  // mktemp was called once for SMOKE_HOME, with exactly -d and the full
+  // The first mktemp call allocates SMOKE_HOME, with exactly -d and the full
   // template — the spaced TMPDIR survived as a single argument.
-  const mk = argv.filter((line) => line.startsWith('mktemp '));
-  assert.equal(mk.length, 1, 'mktemp must be called once for SMOKE_HOME');
-  const mkParts = mk[0].split(' ');
-  assert.equal(mkParts[1], '2', 'mktemp receives -d and the full template as two arguments');
-  assert.equal(mkParts.slice(2).join(' '), `${scratch}/locus-hub-int.XXXXXX`);
+  const mk = argv.filter((call) => call.command === 'mktemp');
+  assert.equal(mk.length, 2, 'mktemp must allocate the home and project');
+  assert.deepEqual(mk[0].args, ['-d', `${scratch}/locus-hub-int.XXXXXX`]);
+  assert.deepEqual(mk[1].args, ['-d', `${scratch}/locus-hub-int-proj.XXXXXX`]);
 
   // The directory materialized directly beneath the exact requested root.
   assert.equal(dirname(home), scratch);
@@ -103,15 +117,17 @@ test('mktemp receives the SMOKE_HOME template as one argument beneath a space-co
 
   // The EXIT trap removes the scan-listing glob and both directories: each
   // argument reaches rm unsplit, the populated home inside the one rm -rf.
-  const rmLines = argv.filter((line) => line.startsWith('rm '));
-  assert.equal(rmLines.length, 3, 'cleanup passes the scan glob, home and project to rm');
-  assert.ok(rmLines.some((line) => line.includes('.locus-hub-int-scan.')),
-    'cleanup must pass the scan-listing glob beneath TMPDIR to rm');
-  const rmHome = rmLines.find((line) => line.includes('locus-hub-int.') && !line.includes('-proj.'));
-  assert.ok(rmHome, 'cleanup must pass SMOKE_HOME to rm');
-  const rmParts = rmHome.split(' ');
-  assert.equal(rmParts[1], '4', 'rm -rf -- home proj: four arguments total');
-  assert.equal(rmParts.slice(2).join(' '), home, 'the populated home reaches rm verbatim');
+  const removals = argv.filter((call) => call.command === 'rm');
+  assert.equal(removals.length, 2, 'cleanup removes scan listings then both directories');
+  assert.deepEqual(removals[0].args.slice(0, 2), ['-f', '--']);
+  assert.equal(removals[0].args.length, 3);
+  assert.equal(dirname(removals[0].args[2]), scratch);
+  assert.match(basename(removals[0].args[2]), /^\.locus-hub-int-scan\.\d+\.\*$/);
+  const project = removals[1].args[3];
+  assert.equal(dirname(project), scratch);
+  assert.match(basename(project), /^locus-hub-int-proj\.[A-Za-z0-9]{6}$/);
+  assert.deepEqual(removals[1].args, ['-rf', '--', home, project],
+    'the populated home reaches rm verbatim as exactly one argument');
 
   assert.equal(existsSync(home), false, 'the populated SMOKE_HOME must be removed on exit');
   assert.deepEqual(readdirSync(scratch), ['sentinel'], 'the requested root keeps only its own entries');
@@ -124,9 +140,9 @@ test('SMOKE_HOME lands beneath the exact requested root, not a word-split fragme
   // and nothing may land beneath 'tmp', the first word-split fragment.
   const { root, scratch, home, argv } = run(t, 'tmp  dir', ['tmp']);
 
-  const mk = argv.filter((line) => line.startsWith('mktemp '));
-  assert.equal(mk.length, 1, 'mktemp must be called once for SMOKE_HOME');
-  assert.equal(mk[0].split(' ').slice(2).join(' '), `${scratch}/locus-hub-int.XXXXXX`,
+  const mk = argv.filter((call) => call.command === 'mktemp');
+  assert.equal(mk.length, 2, 'mktemp must allocate the home and project');
+  assert.deepEqual(mk[0].args, ['-d', `${scratch}/locus-hub-int.XXXXXX`],
     'the template keeps the consecutive spaces of the requested root');
   assert.equal(dirname(home), scratch);
   assert.match(basename(home), /^locus-hub-int\.[A-Za-z0-9]{6}$/);
@@ -142,11 +158,23 @@ test('SMOKE_HOME lands beneath the exact requested root, not a word-split fragme
 test('SMOKE_HOME stays under a spaced TMPDIR containing shell metacharacters', (t) => {
   const { scratch, home, argv } = run(t, 'home [*] workspace');
 
-  const mk = argv.filter((line) => line.startsWith('mktemp '));
-  assert.equal(mk.length, 1);
-  assert.equal(mk[0].split(' ').slice(2).join(' '), `${scratch}/locus-hub-int.XXXXXX`);
+  const mk = argv.filter((call) => call.command === 'mktemp');
+  assert.equal(mk.length, 2);
+  assert.deepEqual(mk[0].args, ['-d', `${scratch}/locus-hub-int.XXXXXX`]);
   assert.equal(dirname(home), scratch);
   assert.match(basename(home), /^locus-hub-int\.[A-Za-z0-9]{6}$/);
+  assert.equal(existsSync(home), false);
+  assert.deepEqual(readdirSync(scratch), ['sentinel']);
+});
+
+
+test('argument records preserve tabs and newlines within a spaced temporary home', (t) => {
+  const { scratch, home, argv } = run(t, 'home \twith\nspaces');
+  const allocations = argv.filter((call) => call.command === 'mktemp');
+  assert.deepEqual(allocations[0].args, ['-d', `${scratch}/locus-hub-int.XXXXXX`]);
+  const cleanup = argv.find((call) => call.command === 'rm' && call.args[0] === '-rf');
+  assert.equal(cleanup.args.length, 4);
+  assert.equal(cleanup.args[2], home, 'whitespace stays inside one home argument');
   assert.equal(existsSync(home), false);
   assert.deepEqual(readdirSync(scratch), ['sentinel']);
 });
