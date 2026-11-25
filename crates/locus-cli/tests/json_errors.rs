@@ -59,6 +59,8 @@ fn malformed_commands_return_json_usage_errors() {
     let home = tempfile::tempdir().unwrap();
     let cwd = tempfile::tempdir().unwrap();
     for args in [
+        // JSON mode with no command is still a usage error (exit 2).
+        &["--json"][..],
         &["--json", "not-a-command"][..],
         &["binding", "show", "--json"][..],
     ] {
@@ -70,6 +72,7 @@ fn malformed_commands_return_json_usage_errors() {
         assert_eq!(error["schema"], "locus.error.v1");
         assert_eq!(error["ok"], false);
         assert_eq!(error["exit_code"], 2);
+        assert_eq!(error["exit_code_name"], "usage");
         assert!(error["error"].as_str().is_some_and(|s| !s.is_empty()));
     }
 }
