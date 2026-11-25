@@ -291,22 +291,31 @@ exit "$?"
 });
 
 // Exercise the mainline's hard failure when only the step 8b allocation fails.
-test('dogfood stops before multi-tenant execution when probe allocation fails', (t) => {
+test('multi-tenant allocation failure exits nonzero and cleans up earlier dogfood directories', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-mt-allocation-failure-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const scratch = join(root, 'scratch');
+  const scratch = join(root, 'scratch with spaces');
   mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
   const dogfood = fixture(root);
   const failure = join(root, 'allocation-failed');
   const afterFailure = join(root, 'after-failure');
   const attempts = join(root, 'allocation-attempts');
+  const allocations = join(root, 'allocations');
+  const liveHome = join(root, 'live-home');
   writeFileSync(join(root, 'fixture', 'target', 'debug', 'mktemp'), `#!/bin/bash
 if [[ "\${!#}" == */locus-mt-dogfood.XXXXXX ]]; then
   printf '%s\\n' "\${!#}" >> "$MT_ATTEMPTS"
+  [[ -d "$LOCUS_HOME/project" && -f "$LOCUS_HOME/pack.json" ]] || exit 91
+  printf '%s\\n' "$LOCUS_HOME" > "$MT_LIVE_HOME"
   touch "$MT_FAIL_MARKER"
+  printf 'injected multi-tenant allocation failure\\n' >&2
   exit 1
 fi
-exec /usr/bin/mktemp "$@"
+allocated="$(/usr/bin/mktemp "$@")" || exit
+[[ -d "$allocated" ]] || exit 92
+printf '%s\\n' "$allocated" >> "$MT_ALLOCATIONS"
+printf '%s\\n' "$allocated"
 `, { mode: 0o755 });
   const result = spawnSync('bash', [dogfood], {
     cwd: root,
@@ -314,13 +323,15 @@ exec /usr/bin/mktemp "$@"
       PROBE_FILE: join(root, 'probe'), MT_PROBE_FILE: join(root, 'mt-probe'),
       MT_LISTING: join(root, 'mt-listing'), MT_STATE_DIR: root,
       MT_PID_FILE: join(root, 'mt-server-pid'), FIXTURE_ROOT: root,
-      MT_FAIL_MARKER: failure, MT_AFTER_FAILURE: afterFailure, MT_ATTEMPTS: attempts },
+      MT_FAIL_MARKER: failure, MT_AFTER_FAILURE: afterFailure, MT_ATTEMPTS: attempts,
+      MT_ALLOCATIONS: allocations, MT_LIVE_HOME: liveHome },
     encoding: 'utf8', timeout: 60_000,
   });
 
   assert.ifError(result.error);
   assert.equal(result.signal, null);
-  assert.notEqual(result.status, 0);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /injected multi-tenant allocation failure/);
   assert.match(result.stderr, /multi-tenant probe failed/);
   assert.doesNotMatch(result.stdout, /DOGFOOD READY/);
   assert.equal(readFileSync(attempts, 'utf8').trim(), `${scratch}/locus-mt-dogfood.XXXXXX`);
@@ -328,5 +339,16 @@ exec /usr/bin/mktemp "$@"
   assert.equal(existsSync(join(root, 'mt-probe')), false);
   assert.equal(existsSync(join(root, 'mint-attempted')), false);
   assert.equal(existsSync(join(root, 'mt-server-pid')), false);
-  assert.deepEqual(readdirSync(scratch), []);
+  const created = readFileSync(allocations, 'utf8').trim().split('\n');
+  assert.equal(created.length, 2, 'the home and sandbox root must be allocated before the failure');
+  assert.equal(created[0], readFileSync(liveHome, 'utf8').trim(),
+    'the allocated home must still contain the project and pack when multi-tenant allocation fails');
+  assert.match(basename(created[0]), /^locus-dogfood\.[^/]+$/);
+  assert.match(basename(created[1]), /^locus-sandbox-dogfood\.[^/]+$/);
+  for (const directory of created) {
+    assert.equal(dirname(directory), scratch);
+    assert.equal(existsSync(directory), false, 'earlier allocations must be removed before test teardown');
+  }
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'unrelated');
 });
