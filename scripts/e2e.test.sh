@@ -33,27 +33,43 @@ printf 'ok: custom TMPDIR workspace is created and cleaned on exit\n'
 
 # Exercise every suite allocator together under a spaced root, and verify the
 # shared exit trap removes each allocation without removing the caller's root.
-(
-  export TMPDIR="$root"
-  WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
-  die() { exit 1; }
-  create_locus_home
-  trap 'e2e_cleanup' EXIT
-  create_workspace
-  create_graph_home
-  create_security_home
-  create_security_workspace
-  for path in "$LOCUS_HOME" "$WS_DIR" "$GRAPH_HOME" "$SECURITY_HOME" "$SECURITY_WS"; do
-    [[ -d "$path" && "${path%/*}" == "$TMPDIR" ]]
-    printf '%s\n' "$path" >> "$fixture/allocated-paths"
-    touch "$path/sentinel"
-  done
-)
-while IFS= read -r path; do
-  [[ ! -e "$path" && ! -L "$path" ]]
-done < "$fixture/allocated-paths"
-[[ $(wc -l < "$fixture/allocated-paths" | tr -d ' ') == 5 && -f "$root/keep" ]]
-printf 'ok: all temporary directories honor spaced TMPDIR and are cleaned\n'
+for expected_status in 0 42; do
+  paths="$fixture/allocated-paths-$expected_status"
+  # A separate shell keeps errexit active even while we capture its status.
+  set +e
+  (
+    set -e
+    export TMPDIR="$root"
+    WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+    die() { exit 1; }
+    create_locus_home
+    e2e_install_traps
+    create_workspace
+    create_graph_home
+    create_security_home
+    create_security_workspace
+    [[ "$LOCUS_HOME" != "$WS_DIR" && ! "$LOCUS_HOME" -ef "$WS_DIR" ]]
+    printf 'home' > "$LOCUS_HOME/sentinel"
+    printf 'workspace' > "$WS_DIR/sentinel"
+    [[ "$(cat "$LOCUS_HOME/sentinel")" == home && "$(cat "$WS_DIR/sentinel")" == workspace ]]
+    for path in "$LOCUS_HOME" "$WS_DIR" "$GRAPH_HOME" "$SECURITY_HOME" "$SECURITY_WS"; do
+      [[ -d "$path" && "${path%/*}" == "$TMPDIR" ]]
+      printf '%s\n' "$path" >> "$paths"
+      touch "$path/sentinel"
+    done
+    exit "$expected_status"
+  )
+  status=$?
+  set -e
+  [[ "$status" -eq "$expected_status" ]]
+  while IFS= read -r path; do
+    [[ ! -e "$path" && ! -L "$path" ]]
+  done < "$paths"
+  [[ $(sort -u "$paths" | wc -l | tr -d ' ') == 5 ]]
+  [[ -d "$root" && -f "$root/keep" ]]
+  [[ $(find "$root" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ') == 1 ]]
+  printf 'ok: distinct temporary paths honor spaced TMPDIR and are cleaned on exit %s\n' "$expected_status"
+done
 
 # Run the production interruption rehearsal offline. Its readiness handshake
 # ensures SIGTERM arrives only after the child has created its temporary paths.
