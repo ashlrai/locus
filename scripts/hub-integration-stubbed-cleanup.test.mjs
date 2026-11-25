@@ -18,47 +18,63 @@ test('first temporary directory allocation failure stops integration commands', 
   assert.equal(result.status, 0, 'shell regression test must pass');
 });
 
-test('project allocation failure removes the earlier home and stops integration commands', (t) => {
+test('second mktemp failure removes the earlier populated home and stops integration commands', (t) => {
   const scratch = mkdtempSync(join(tmpdir(), 'locus-hub-int-project-failure-'));
   t.after(() => rmSync(scratch, { recursive: true, force: true }));
   const tmp = join(scratch, 'temporary directory');
   const record = join(scratch, 'home.record');
   const calls = join(scratch, 'calls');
+  const home = join(scratch, 'home');
   mkdirSync(tmp);
+  mkdirSync(home);
   const sibling = join(tmp, 'keep');
   writeFileSync(sibling, 'untouched');
 
   const stub = `
 mktemp() {
-  case "$2" in
-    */locus-hub-int-proj.XXXXXX) printf 'project\\n' >> "$CALLS"; return 73 ;;
-    */locus-hub-int.XXXXXX)
-      printf 'home\\n' >> "$CALLS"
+  # Command substitutions run in subshells; persist the count on disk.
+  printf 'mktemp\\n' >> "$CALLS"
+  case "$(wc -l < "$CALLS" | tr -d ' ')" in
+    1)
+      [[ "$#" == 2 && "$1" == -d && "$2" == "$TMPDIR/locus-hub-int.XXXXXX" ]] || return 74
       local created
       created="$(command mktemp "$@")" || return
+      printf 'allocated\\n' > "$created/sentinel"
       printf '%s\\n' "$created" > "$RECORD"
       printf '%s\\n' "$created"
+      ;;
+    2)
+      [[ "$#" == 2 && "$1" == -d && "$2" == "$TMPDIR/locus-hub-int-proj.XXXXXX" ]] || return 74
+      [[ -d "$(cat "$RECORD")" && -f "$(cat "$RECORD")/sentinel" ]] || return 75
+      printf 'injected second mktemp failure\\n' >&2
+      return 73
       ;;
     *) return 74 ;;
   esac
 }
 node() { printf 'node\\n' >> "$CALLS"; }
-jq() { :; }
-export -f mktemp node jq
+jq() { printf 'jq\\n' >> "$CALLS"; }
+cargo() { printf 'cargo\\n' >> "$CALLS"; }
+locus() { printf 'locus\\n' >> "$CALLS"; }
+locus-mcp() { printf 'locus-mcp\\n' >> "$CALLS"; }
+export -f mktemp node jq cargo locus locus-mcp
 exec bash "$1"
 `;
   const result = spawnSync('bash', ['-c', stub, 'project-failure', script], {
-    env: { ...process.env, TMPDIR: tmp, RECORD: record, CALLS: calls, LOCUS_CONTROL_CAPABILITY: 'synthetic' },
+    env: { ...process.env, HOME: home, TMPDIR: tmp, RECORD: record, CALLS: calls, LOCUS_CONTROL_CAPABILITY: 'synthetic' },
     encoding: 'utf8',
   });
 
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 73, 'project allocation failure must propagate');
-  assert.equal(readFileSync(calls, 'utf8'), 'home\nproject\n', 'integration commands must not run');
-  const home = readFileSync(record, 'utf8').trim();
-  assert.equal(dirname(home), tmp);
-  assert.equal(existsSync(home), false, 'the successfully allocated home must be removed');
+  assert.match(result.stderr, /injected second mktemp failure/);
+  assert.equal(result.stdout, '', 'integration output must not start');
+  assert.equal(readFileSync(calls, 'utf8'), 'mktemp\nmktemp\n', 'exactly two allocations and no integration commands must run');
+  const allocatedHome = readFileSync(record, 'utf8').trim();
+  assert.equal(dirname(allocatedHome), tmp);
+  assert.equal(existsSync(allocatedHome), false, 'the successfully allocated populated home must be removed');
+  assert.deepEqual(readdirSync(home), [], 'the isolated user home must remain untouched');
   assert.deepEqual(readdirSync(tmp), ['keep'], 'cleanup must preserve unrelated files');
   assert.equal(readFileSync(sibling, 'utf8'), 'untouched');
 });
