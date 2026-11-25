@@ -36,13 +36,25 @@ printf 'ok: custom TMPDIR workspace is created and cleaned on exit\n'
 for expected_status in 0 42; do
   paths="$fixture/allocated-paths-$expected_status"
   home_mode="$fixture/home-mode-$expected_status"
+  allocation_args="$fixture/allocation-args-$expected_status"
+  cleanup_args="$fixture/cleanup-args-$expected_status"
   # A separate shell keeps errexit active even while we capture its status.
   set +e
   (
     set -e
     export TMPDIR="$root"
-    WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+    WS_DIR="" GRAPH_HOME="" GRAPH_HOMES="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
     die() { exit 1; }
+    # Record argument boundaries, not $*: paths containing spaces must reach
+    # both commands intact. Delegate only to local filesystem utilities.
+    mktemp() {
+      printf '%s\0' "$#" "$@" >> "$allocation_args"
+      command mktemp "$@"
+    }
+    rm() {
+      printf '%s\0' "$#" "$@" >> "$cleanup_args"
+      command rm "$@"
+    }
     # Even a permissive caller must get a private home for suite state.
     umask 000
     create_locus_home
@@ -72,6 +84,21 @@ for expected_status in 0 42; do
   status=$?
   set -e
   [[ "$status" -eq "$expected_status" ]]
+  for prefix in locus-e2e locus-ws locus-graph-imp locus-security-e2e locus-security-ws; do
+    printf '%s\0' 2 -d "$root/$prefix.XXXXXX"
+  done > "$fixture/expected-allocation-args"
+  cmp "$fixture/expected-allocation-args" "$allocation_args"
+  allocated=()
+  while IFS= read -r path; do
+    allocated+=("$path")
+  done < "$paths"
+  # Cleanup removes all five paths, then revisits the registered graph home.
+  {
+    printf '%s\0' 6 -rf "${allocated[@]}"
+    printf '%s\0' 3 -rf -- "${allocated[2]}"
+  } > "$fixture/expected-cleanup-args"
+  cmp "$fixture/expected-cleanup-args" "$cleanup_args"
+  printf 'ok: mktemp and rm receive each spaced path as one argument on exit %s\n' "$expected_status"
   [[ "$(cat "$home_mode")" == 700 ]] || {
     printf 'temporary home was not private (0700) while in use\n' >&2; exit 1;
   }
