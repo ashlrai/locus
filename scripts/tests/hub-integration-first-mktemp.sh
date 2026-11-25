@@ -5,20 +5,30 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 test_dir="$(mktemp -d "${TMPDIR:-/tmp}/hub-integration-first-mktemp.XXXXXX")"
 trap 'rm -rf -- "$test_dir"' EXIT
+mkdir "$test_dir/tmp with spaces"
+printf 'untouched\n' >"$test_dir/tmp with spaces/keep"
 
 cat >"$test_dir/stubs.sh" <<'STUBS'
 mktemp() { printf 'mktemp\n' >>"$TEST_COMMANDS"; return 73; }
 node() { printf 'node\n' >>"$TEST_COMMANDS"; return 0; }
 locus() { printf 'locus\n' >>"$TEST_COMMANDS"; return 0; }
+locus-mcp() { printf 'locus-mcp\n' >>"$TEST_COMMANDS"; return 0; }
 cargo() { printf 'cargo\n' >>"$TEST_COMMANDS"; return 0; }
 jq() { printf 'jq\n' >>"$TEST_COMMANDS"; return 0; }
 STUBS
 
 status=0
-TEST_COMMANDS="$test_dir/commands" BASH_ENV="$test_dir/stubs.sh" \
+TMPDIR="$test_dir/tmp with spaces" \
+  TEST_COMMANDS="$test_dir/commands" BASH_ENV="$test_dir/stubs.sh" \
   LOCUS_CONTROL_CAPABILITY=synthetic \
   bash "$root/scripts/hub-integration-test.sh" >"$test_dir/stdout" 2>"$test_dir/stderr" || status=$?
 
 [[ $status -eq 73 ]] || { echo 'first mktemp failure did not propagate' >&2; exit 1; }
 [[ "$(cat "$test_dir/commands")" == mktemp ]] || { echo 'integration command ran after allocation failure' >&2; exit 1; }
 [[ ! -s "$test_dir/stdout" ]] || { echo 'unexpected integration output' >&2; exit 1; }
+shopt -s nullglob dotglob
+remaining=("$test_dir/tmp with spaces/"*)
+[[ ${#remaining[@]} -eq 1 && "${remaining[0]}" == "$test_dir/tmp with spaces/keep" ]] || {
+  echo 'temporary files left after first allocation failure' >&2; exit 1;
+}
+[[ "$(cat "${remaining[0]}")" == untouched ]] || { echo 'unrelated file changed' >&2; exit 1; }
