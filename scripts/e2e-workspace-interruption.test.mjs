@@ -20,10 +20,9 @@ function extract(name) {
   return body;
 }
 
-const trapLine = source.match(/^trap 'e2e_cleanup' EXIT$/m)?.[0];
-
 test('e2e.sh installs the cleanup trap on EXIT', () => {
-  assert.ok(trapLine, "e2e.sh must keep trap 'e2e_cleanup' EXIT");
+  assert.match(extract('e2e_install_traps'), /^\s+trap 'e2e_cleanup' EXIT$/m);
+  assert.match(source, /^e2e_install_traps$/m, 'e2e.sh must install its cleanup traps');
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -42,7 +41,8 @@ LOCUS_HOME="$(mktemp -d "$TMPDIR/locus-e2e.XXXXXX")"
 HTTP_MCP_PID=""; MT_MCP_PID=""; WS_DIR=""; GRAPH_HOME=""; SECURITY_HOME=""; SECURITY_WS=""
 ${extract('create_workspace')}
 ${extract('e2e_cleanup')}
-${trapLine}
+${extract('e2e_install_traps')}
+e2e_install_traps
 create_workspace
 touch "$WS_DIR/fixture"
 printf '%s' "$WS_DIR" > "$RECORD"

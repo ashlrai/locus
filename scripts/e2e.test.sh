@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Offline regression test for the workspace lifecycle in e2e.sh.
+# Offline regression tests for temporary home privacy and resource cleanup in e2e.sh.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -35,6 +35,7 @@ printf 'ok: custom TMPDIR workspace is created and cleaned on exit\n'
 # shared exit trap removes each allocation without removing the caller's root.
 for expected_status in 0 42; do
   paths="$fixture/allocated-paths-$expected_status"
+  home_mode="$fixture/home-mode-$expected_status"
   # A separate shell keeps errexit active even while we capture its status.
   set +e
   (
@@ -42,6 +43,8 @@ for expected_status in 0 42; do
     export TMPDIR="$root"
     WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
     die() { exit 1; }
+    # Even a permissive caller must get a private home for suite state.
+    umask 000
     create_locus_home
     e2e_install_traps
     create_workspace
@@ -52,6 +55,13 @@ for expected_status in 0 42; do
     printf 'home' > "$LOCUS_HOME/sentinel"
     printf 'workspace' > "$WS_DIR/sentinel"
     [[ "$(cat "$LOCUS_HOME/sentinel")" == home && "$(cat "$WS_DIR/sentinel")" == workspace ]]
+    # Record permissions while the populated home is in use, before EXIT
+    # removes it. GNU and BSD stat use different flags for the octal mode.
+    if stat -c '%a' "$LOCUS_HOME" > "$home_mode" 2>/dev/null; then
+      :
+    else
+      stat -f '%Lp' "$LOCUS_HOME" > "$home_mode"
+    fi
     for path in "$LOCUS_HOME" "$WS_DIR" "$GRAPH_HOME" "$SECURITY_HOME" "$SECURITY_WS"; do
       [[ -d "$path" && "${path%/*}" == "$TMPDIR" ]]
       printf '%s\n' "$path" >> "$paths"
@@ -62,6 +72,9 @@ for expected_status in 0 42; do
   status=$?
   set -e
   [[ "$status" -eq "$expected_status" ]]
+  [[ "$(cat "$home_mode")" == 700 ]] || {
+    printf 'temporary home was not private (0700) while in use\n' >&2; exit 1;
+  }
   while IFS= read -r path; do
     [[ ! -e "$path" && ! -L "$path" ]]
   done < "$paths"
@@ -69,6 +82,7 @@ for expected_status in 0 42; do
   [[ -d "$root" && -f "$root/keep" ]]
   [[ $(find "$root" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ') == 1 ]]
   printf 'ok: distinct temporary paths honor spaced TMPDIR and are cleaned on exit %s\n' "$expected_status"
+  printf 'ok: populated temporary home is private (0700) before exit %s\n' "$expected_status"
 done
 
 # Run the production interruption rehearsal offline. Its readiness handshake

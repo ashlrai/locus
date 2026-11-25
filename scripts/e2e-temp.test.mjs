@@ -85,7 +85,7 @@ test('successful exit removes the populated isolated home', (t) => {
   // The full e2e success path is covered separately by e2e.test.mjs.
   const source = readFileSync(script, 'utf8');
   const start = source.indexOf('create_locus_home() {\n');
-  const trap = "trap 'e2e_cleanup' EXIT";
+  const trap = '\ne2e_install_traps\n';
   const end = source.indexOf(trap, start);
   assert.ok(start >= 0 && end > start, 'home setup and cleanup trap must exist');
   const setupSource = source.slice(start, end + trap.length);
@@ -124,7 +124,7 @@ test('successful home cleanup preserves an inherited home and symlink target', (
 
   const source = readFileSync(script, 'utf8');
   const start = source.indexOf('create_locus_home() {\n');
-  const trap = "trap 'e2e_cleanup' EXIT";
+  const trap = '\ne2e_install_traps\n';
   const end = source.indexOf(trap, start);
   assert.ok(start >= 0 && end > start, 'home setup and cleanup trap must exist');
   const result = spawnSync('bash', ['-c', `set -euo pipefail
