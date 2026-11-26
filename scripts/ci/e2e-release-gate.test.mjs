@@ -26,6 +26,7 @@ test("gate requires fixture tools and executes this wiring check", () => {
   assert.match(e2eStep, /for tool in bash cargo python3 curl git jq; do/);
   assert.match(e2eStep, /command -v "\$tool"/);
   assert.match(e2eStep, /node --test scripts\/ci\/e2e-release-gate.test.mjs/);
+  assert.match(e2eStep, /node --test scripts\/e2e-security-workspace-selection\.test\.mjs/);
 });
 
 test("wiring adds no credentials, publication command or permission override", () => {
