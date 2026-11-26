@@ -261,6 +261,46 @@ PATH=/usr/bin:/bin mktemp "$@"
     'no fallback directory may be allocated beneath another root');
 });
 
+test('a main dogfood home allocation failure stops before dogfood commands', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-allocation-failure-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const calls = join(root, 'calls');
+  const scratch = join(root, 'scratch');
+  mkdirSync(scratch);
+
+  const dogfood = fixture(root, `#!/bin/sh
+printf 'locus\\n' >> "$CALLS"
+exit 0
+`, {
+    mktemp: `#!/bin/sh
+printf 'mktemp %s %s\\n' "$1" "$2" >> "$CALLS"
+printf 'injected allocation failure\\n' >&2
+exit 73
+`,
+    mkdir: `#!/bin/sh
+printf 'mkdir\\n' >> "$CALLS"
+exit 0
+`,
+  });
+  const result = spawnSync('bash', [dogfood], {
+    cwd: root,
+    env: { ...process.env, HOME: root, TMPDIR: scratch, CALLS: calls,
+      DOGFOOD_USE_REAL_HOME: '0', DOGFOOD_SELF_TEST: '0',
+      LOCUS_CONTROL_CAPABILITY: 'offline-test' },
+    encoding: 'utf8',
+    timeout: 10000,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'the allocation failure must stop the script');
+  assert.match(result.stderr, /injected allocation failure/);
+  assert.equal(readFileSync(calls, 'utf8'), `mktemp -d ${scratch}/locus-dogfood.XXXXXX\n`,
+    'only the main allocation may run; no project or Locus command may follow');
+  assert.doesNotMatch(result.stdout, /isolated LOCUS_HOME|DOGFOOD READY/);
+  assert.deepEqual(readdirSync(scratch), []);
+});
+
 // The parent already holds other people's directories, including one named
 // exactly like the script's own (locus-dogfood.XXXXXX) and one that is a
 // symlink to a directory outside the parent. Cleanup may remove only the home
