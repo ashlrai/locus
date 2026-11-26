@@ -11,6 +11,51 @@ import { test } from 'node:test';
 
 const script = join(dirname(fileURLToPath(import.meta.url)), 'hub-smoke.sh');
 
+test('mktemp receives distinct directory and error-file templates under TMPDIR offline', (t) => {
+  const root = mkdtempSync('/tmp/locus-mktemp-argv-');
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, "scratch with spaces [*] 'quoted'");
+  const record = join(root, 'mktemp-argv');
+  const hook = join(root, 'hook.sh');
+  mkdirSync(scratch);
+  // NUL-delimited arguments and empty records preserve argument boundaries.
+  // Exit at the first CLI probe, after allocation, before any build or broker.
+  writeFileSync(hook, `mktemp() {
+  { printf '%s\\0' "$@"; printf '\\0'; } >> "$MKTEMP_ARGV"
+  command mktemp "$@"
+}
+jq() { exit 74; }
+cargo() { exit 75; }
+locus() { exit 73; }
+`);
+  const result = spawnSync('bash', [script], {
+    env: {
+      PATH: process.env.PATH, HOME: root, TMPDIR: scratch,
+      BASH_ENV: hook, MKTEMP_ARGV: record,
+      LOCUS_CONTROL_CAPABILITY: 'synthetic-test-capability',
+    },
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'must reach the offline CLI probe after allocating');
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, '');
+  const recorded = readFileSync(record, 'utf8');
+  assert.ok(recorded.endsWith('\0\0'), 'every call must have a complete record');
+  const calls = recorded.slice(0, -2).split('\0\0').map((call) => call.split('\0'));
+  assert.deepEqual(calls, [
+    ['-d', `${scratch}/locus-hub-smoke.XXXXXX`],
+    ['-d', `${scratch}/locus-hub-proj.XXXXXX`],
+    [`${scratch}/locus-hub-smoke-err.XXXXXX`],
+  ]);
+  assert.equal(new Set(calls.map((args) => args.at(-1))).size, 3,
+    'all three resources must use distinct templates');
+  assert.deepEqual(readdirSync(scratch), [], 'the EXIT trap must remove the allocations');
+});
+
 const stub = `#!/usr/bin/env bash
 case "$1 $2" in
   "agent report")
