@@ -838,6 +838,73 @@ exit 42
   assert.equal(readFileSync(join(existingHome, 'keep'), 'utf8'), 'preserve');
 });
 
+for (const [prerequisite, expectedCalls] of [
+  ['init', ['init']],
+  ['binding', ['init', 'binding']],
+  ['quickstart', ['init', 'binding', '--version', 'quickstart']],
+]) {
+  test(`dogfood reports a failing ${prerequisite} prerequisite and cleans up offline`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-prerequisite-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const scratch = join(root, 'temporary parent with spaces');
+    const home = join(root, 'home');
+    const fixtureRoot = join(root, 'fixture');
+    const bin = join(fixtureRoot, 'target', 'debug');
+    const fixtureScript = join(fixtureRoot, 'scripts', 'dogfood.sh');
+    mkdirSync(scratch);
+    mkdirSync(home);
+    mkdirSync(bin, { recursive: true });
+    mkdirSync(dirname(fixtureScript));
+    writeFileSync(join(scratch, 'keep'), 'preserve');
+    writeFileSync(fixtureScript, readFileSync(script));
+    writeFileSync(join(bin, 'cargo'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    // jq is only checked for existence before these prerequisites. Any actual
+    // invocation or MCP execution here is unexpected; no installed tools run.
+    for (const command of ['jq', 'locus-mcp']) {
+      writeFileSync(join(bin, command), '#!/bin/sh\nexit 91\n', { mode: 0o755 });
+    }
+    writeFileSync(join(bin, 'locus'), `#!/bin/bash
+printf '%s\\n' "$1" >> "$CALLS_FILE"
+case "$1" in
+  init)
+    [[ -d "$LOCUS_HOME/project" && "$PWD" == "$LOCUS_HOME/project" ]] || exit 89
+    printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"
+    touch "$LOCUS_HOME/sentinel" ;;
+  binding) [[ "$2 $3" == 'add dogfood' ]] || exit 90 ;;
+  --version|quickstart) ;;
+  *) exit 91 ;;
+esac
+if [[ "$1" == "$FAIL_COMMAND" ]]; then
+  printf 'injected %s prerequisite failure\\n' "$1" >&2
+  exit 42
+fi
+`, { mode: 0o755 });
+    const probe = join(root, 'probe');
+    const calls = join(root, 'calls');
+    const result = spawnSync('bash', [fixtureScript], {
+      cwd: root,
+      env: { PATH: '/usr/bin:/bin', HOME: home, TMPDIR: scratch,
+        FAIL_COMMAND: prerequisite, PROBE_FILE: probe, CALLS_FILE: calls },
+      encoding: 'utf8',
+      timeout: 10_000,
+    });
+
+    assert.ifError(result.error);
+    assert.equal(result.signal, null);
+    assert.equal(result.status, 42, 'the prerequisite failure must propagate');
+    assert.match(result.stderr, new RegExp(`injected ${prerequisite} prerequisite failure`));
+    assert.doesNotMatch(result.stdout, /DOGFOOD READY/);
+    assert.deepEqual(readFileSync(calls, 'utf8').trim().split('\n'), expectedCalls,
+      'the script must stop at the failing prerequisite');
+    const allocated = readFileSync(probe, 'utf8').trim();
+    assert.equal(dirname(allocated), scratch);
+    assert.match(basename(allocated), /^locus-dogfood\.[A-Za-z0-9]{6}$/);
+    assert.equal(existsSync(allocated), false, 'cleanup must remove the populated home');
+    assert.deepEqual(readdirSync(scratch), ['keep']);
+    assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'preserve');
+  });
+}
+
 test('SIGTERM removes the isolated dogfood home under a custom TMPDIR', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-signal-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
