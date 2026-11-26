@@ -16,7 +16,7 @@ function functionSource(name) {
   return match[0];
 }
 
-test('successful stubbed workspace rehearsal removes its populated workspace', (t) => {
+test('offline workspace rehearsal preserves command arguments under a spaced TMPDIR and cleans up', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-ws-success-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const home = join(root, 'main home');
@@ -25,11 +25,13 @@ test('successful stubbed workspace rehearsal removes its populated workspace', (
   mkdirSync(home);
   writeFileSync(join(home, 'keep'), 'unrelated');
   writeFileSync(stub, `#!/bin/bash
-case "$*" in
+set -euo pipefail
+case "$1" in
   init) [[ -d "$LOCUS_HOME" ]] ;;
-  'workspace --default acme --allow acme')
+  workspace)
+    [[ -d "$PWD" && -d "$LOCUS_HOME" ]]
     printf 'allowlist\n' > .locus.toml
-    printf '%s' "$PWD" > "$WORKSPACE_RECORD" ;;
+    printf '%s\\0' "$PWD" "$@" > "$WORKSPACE_RECORD" ;;
   *) exit 1 ;;
 esac
 `, { mode: 0o755 });
@@ -51,8 +53,11 @@ ${source.slice(start, end)}
 
   assert.equal(result.signal, null);
   assert.equal(result.status, 0, result.stderr);
-  const workspace = readFileSync(record, 'utf8');
-  assert.equal(workspace, readFileSync(join(home, 'workspace  ws temp root', 'workspace-path'), 'utf8'));
+  const workspace = readFileSync(join(home, 'workspace  ws temp root', 'workspace-path'), 'utf8');
+  assert.ok(workspace.includes(' '), 'the command must run in a workspace whose path contains spaces');
+  assert.deepEqual(readFileSync(record, 'utf8').split('\0'),
+    [workspace, 'workspace', '--default', 'acme', '--allow', 'acme', ''],
+    'the stub must receive the complete workspace as its cwd and each CLI argument intact');
   assert.equal(existsSync(workspace), false, 'the populated workspace must be removed on success');
   assert.equal(readFileSync(join(home, 'keep'), 'utf8'), 'unrelated');
   assert.ok(existsSync(join(home, 'workspace', 'decoy-sentinel')));
