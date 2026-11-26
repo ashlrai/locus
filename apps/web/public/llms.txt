@@ -57,8 +57,8 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
 
 - [README](https://github.com/ashlrai/locus/blob/main/README.md): install options, get started, MCP wiring
 - [AGENTS.md](https://github.com/ashlrai/locus/blob/main/AGENTS.md): agent operating rules and invariants
-- [capabilities.json](https://locus.dev/capabilities.json): machine-readable capabilities, install and commands
-- [server.json](https://locus.dev/server.json): MCP registry manifest for io.github.ashlrai/locus-mcp
+- [capabilities.json](https://raw.githubusercontent.com/ashlrai/locus/main/apps/web/public/capabilities.json): machine-readable capabilities, install and commands
+- [server.json](https://raw.githubusercontent.com/ashlrai/locus/main/apps/web/public/server.json): MCP registry manifest for io.github.ashlrai/locus-mcp
 
 ## Guides
 
@@ -177,7 +177,7 @@ Provider tools need `locus mcp --supervised`, a live pin, and the control capabi
 
 - [DESIGN.md](https://github.com/ashlrai/locus/blob/main/DESIGN.md): full architecture and threat model
 - [docs/agent-contract.md](https://github.com/ashlrai/locus/blob/main/docs/agent-contract.md): JSON schemas, exit codes, dry-run
-- [llms-full.txt](https://locus.dev/llms-full.txt): complete heading index of README and docs
+- [llms-full.txt](https://raw.githubusercontent.com/ashlrai/locus/main/llms-full.txt): complete heading index of README and docs
 - [PLAN.md](https://github.com/ashlrai/locus/blob/main/PLAN.md): original phased plan (historical; live status is in GOALS.md)
 - [SECURITY.md](https://github.com/ashlrai/locus/blob/main/SECURITY.md): vulnerability reporting
-- [Site](https://locus.dev/)
+- [Website source and local preview](https://github.com/ashlrai/locus/blob/main/apps/web/README.md)

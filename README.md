@@ -525,7 +525,7 @@ Details: [SECURITY.md](./SECURITY.md). Threat model: [DESIGN.md](./DESIGN.md).
 | [SECURITY.md](./SECURITY.md) | Reporting |
 | [SUPPORT.md](./SUPPORT.md) | Where to get help |
 
-Site: [locus.dev](https://locus.dev/) (same indexes at [/llms.txt](https://locus.dev/llms.txt) and [/llms-full.txt](https://locus.dev/llms-full.txt)).
+For a local preview of the landing page, see the [website source and setup instructions](./apps/web/README.md).
 
 ## Development
 
