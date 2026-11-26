@@ -8,6 +8,10 @@ Sibling: [Phantom](https://phm.dev) answers *can this secret enter the model?* L
 
 Ecosystem: Locus is one of the [Ashlr](https://ashlr.ai) tools (Phantom, phantom-secrets, ashlr-plugin, Locus, Lexicon, ashlr-md, ashlr-stack). Together they aim to be a fully autonomous, code-first, agent-native software factory: agents do the work, and the human acts as a passive board member, chasing open-source RSI (recursive self-improvement). Agents working on this repo are part of that loop: follow the rules below and land each change as a pull request that passes the required CI Gate check (see [Build / test / lint](#build--test--lint)). See [README: Part of the Ashlr ecosystem](./README.md#part-of-the-ashlr-ecosystem).
 
+## Article 1: Full autonomy, always forward
+
+Follow the [Ashlr Fleet Constitution, Article 1](https://github.com/ashlrai/phantom/blob/master/AGENTS.md#article-1-full-autonomy-always-forward). Agents may open, arm auto-merge for and land Locus PRs through the required CI Gate when their standing scope allows. Agents may dispatch the [sanctioned release workflow](.github/workflows/release.yml) for an existing release tag after its required verification. Use the fork PR flow and honor Security GATES v3 and the fleet hold list. Preserve GitHub rulesets, required checks and reviews, and Locus human-only tenant pinning. No force-push to default branches, admin overrides, billing changes, secret disclosure, or making private material public.
+
 ## Using Locus from an agent
 
 You cannot pin. Ask a person to pin, then use the tools. Indexes: [llms.txt](./llms.txt), [llms-full.txt](./llms-full.txt), [docs/copy-paste.md](./docs/copy-paste.md), [docs/agent-contract.md](./docs/agent-contract.md).
