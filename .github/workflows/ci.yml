@@ -112,6 +112,7 @@ jobs:
           node --test scripts/install-checksum.test.mjs
           node --test scripts/install-download.test.mjs
           node --test scripts/hub-smoke-syntax.test.mjs
+          node --test scripts/hub-integration-syntax.test.mjs
           node --test scripts/ci/os-ci.test.mjs
           node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
@@ -218,6 +219,7 @@ jobs:
           node --test scripts/install-checksum.test.mjs
           node --test scripts/install-download.test.mjs
           node --test scripts/hub-smoke-syntax.test.mjs
+          node --test scripts/hub-integration-syntax.test.mjs
           node scripts/check-crypto.mjs
           ruby -c integrations/homebrew/Formula/locus.rb
 
