@@ -11,7 +11,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const script = join(root, 'scripts', 'e2e.sh');
 const locus = join(root, 'target', 'release', 'locus');
 
-test('temporary home and workspace are removed after a successful e2e exit', { timeout: 1_800_000 }, (t) => {
+test('temporary home and workspace are removed after a successful offline e2e exit', { timeout: 1_800_000 }, (t) => {
   const fixture = mkdtempSync(join(tmpdir(), 'locus-e2e-success-test-'));
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
   const scratch = join(fixture, 'custom tmp $literal; [test]');
@@ -58,7 +58,8 @@ printf '%s\\n' "$created"
   // only at the suite's own workspace call, where LOCUS_HOME still names the
   // suite home beneath the outer root.
   writeFileSync(wrapper, `#!/bin/bash
-if [[ "\${1:-}" == workspace && "$LOCUS_HOME" == "$SUITE_TMPDIR"/locus-e2e.* ]]; then
+if [[ "\${1:-}" == workspace && "\${LOCUS_HOME%/*}" == "$SUITE_TMPDIR" && \
+      "\${LOCUS_HOME##*/}" == locus-e2e.* ]]; then
   [[ -d "$LOCUS_HOME" ]] || exit 1
   printf '%s' "$LOCUS_HOME" > "$HOME_USED"
   [[ -d "$PWD" && "$PWD" == "$(cat "$WORKSPACE_CREATED")" ]] || exit 1
@@ -69,10 +70,12 @@ fi
 exec '${locus.replaceAll("'", "'\\''")}' "$@"
 `, { mode: 0o755 });
 
+  // The full script builds its binaries; require cached dependencies so the
+  // successful-run cleanup regression does not need network access.
   const result = spawnSync('bash', [script], {
     cwd: root,
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: scratch,
-      SUITE_TMPDIR: scratch,
+      SUITE_TMPDIR: scratch, CARGO_NET_OFFLINE: 'true',
       LOCUS_HOME: inherited, LOCUS_BIN: wrapper, HOME_CREATED: homeCreated,
       HOME_USED: homeUsed, CLEANUP_OBSERVED: cleanupObserved, WORKSPACE_CREATED: workspaceCreated,
       WORKSPACE_USED: workspaceUsed, REAL_MKTEMP: realMktemp, REAL_RM: realRm },
