@@ -221,6 +221,8 @@ test('e2e.sh graph section passes the configured TMPDIR to a stubbed mktemp', (t
   t.after(() => rmSync(fixture, { recursive: true, force: true }));
   const scratch = join(fixture, 'temp with spaces');
   const templates = join(fixture, 'templates');
+  const importedHome = join(fixture, 'imported-home');
+  const phaseComplete = join(fixture, 'phase-complete');
   mkdirSync(scratch);
   mkdirSync(join(fixture, 'main-home'));
   const harness = `#!/bin/bash
@@ -236,7 +238,10 @@ mktemp() { printf '%s\\n' "$2" >> "$TEST_TEMPLATES"; command mktemp "$@"; }
 locus() {
   case "$1:\${2:-}" in
     graph:export) printf 'LOCUSGRAPH00' > "$4" ;;
-    graph:import) [[ "$LOCUS_HOME" != "$TEST_MAIN_HOME" ]] ;;
+    graph:import)
+      [[ "$LOCUS_HOME" != "$TEST_MAIN_HOME" && -d "$LOCUS_HOME" ]] || return 1
+      printf '%s' "$LOCUS_HOME" > "$TEST_IMPORTED_HOME"
+      touch "$LOCUS_HOME/import-sentinel" ;;
     *) return 0 ;;
   esac
 }
@@ -244,10 +249,15 @@ ${cleanup}
 ${createGraphHome}
 trap 'e2e_cleanup' EXIT
 ${graph}
+# This runs before the EXIT trap, so it proves phase cleanup rather than exit cleanup.
+imported="$(cat "$TEST_IMPORTED_HOME")"
+[[ ! -e "$imported" && ! -L "$imported" ]] || exit 93
+printf '%s' "$imported" > "$TEST_PHASE_COMPLETE"
 `;
   const result = spawnSync('bash', ['-c', harness], {
     env: { ...process.env, TMPDIR: scratch, TEST_MAIN_HOME: join(fixture, 'main-home'),
-      TEST_TEMPLATES: templates, LOCUS_GRAPH_PASSPHRASE: 'graph-test' },
+      TEST_TEMPLATES: templates, TEST_IMPORTED_HOME: importedHome,
+      TEST_PHASE_COMPLETE: phaseComplete, LOCUS_GRAPH_PASSPHRASE: 'graph-test' },
     encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);
@@ -255,4 +265,10 @@ ${graph}
   const lines = readFileSync(templates, 'utf8').trim().split('\n');
   assert.ok(lines.includes(`${scratch}/locus-graph-imp.XXXXXX`), lines.join('\n'));
   assert.ok(lines.every((l) => l.startsWith(`${scratch}/`)), 'a template escaped TMPDIR');
+  const imported = readFileSync(importedHome, 'utf8');
+  assert.equal(dirname(imported), scratch, 'import home must be directly beneath TMPDIR');
+  assert.match(imported, /\/locus-graph-imp\.[^/]+$/);
+  assert.equal(readFileSync(phaseComplete, 'utf8'), imported, 'phase cleanup must remove the imported home');
+  assert.throws(() => lstatSync(imported), { code: 'ENOENT' });
+  assert.deepEqual(readdirSync(scratch), [], 'cleanup must preserve the temporary root');
 });
