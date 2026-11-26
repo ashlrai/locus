@@ -93,6 +93,7 @@ rm() {
   assert.equal(readFileSync(calls, 'utf8'), 'mktemp\nmktemp\nmktemp\ncleanup\n');
   const resources = readFileSync(join(tmp, 'resources'), 'utf8').trimEnd().split('\n');
   assert.equal(resources.length, 3);
+  assert.equal(new Set(resources).size, 3, 'temporary resources must have distinct paths');
   for (const [index, prefix] of ['locus-hub-smoke.', 'locus-hub-proj.', 'locus-hub-smoke-err.'].entries()) {
     assert.equal(dirname(resources[index]), scratch);
     assert.ok(resources[index].slice(scratch.length + 1).startsWith(prefix));
@@ -147,6 +148,7 @@ exit 42
   assert.equal(result.signal, null);
   const paths = readFileSync(record, 'utf8').trim().split('\n');
   assert.equal(paths.length, 3);
+  assert.equal(new Set(paths).size, 3, 'temporary allocations must have distinct paths');
   for (const [index, prefix] of ['locus-hub-smoke.', 'locus-hub-proj.', 'locus-hub-smoke-err.'].entries()) {
     assert.equal(dirname(paths[index]), scratch);
     assert.ok(paths[index].slice(scratch.length + 1).startsWith(prefix));
