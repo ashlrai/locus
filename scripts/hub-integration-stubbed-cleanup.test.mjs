@@ -81,7 +81,7 @@ exec bash "$1"
 
 // Exported bash functions shadow the real commands in the child script. The
 // canned answers satisfy every check; `mcp` fails so the multi-tenant slice
-// soft-skips. The final `locus` call lists SMOKE_HOME/SMOKE_PROJ for the test.
+// soft-skips. At init, record both real directories before the EXIT trap runs.
 const harness = `
 node() { [[ "\${HUB_MINT_JSON:-}" == EXPIRED ]] && return 1; return 0; }
 jq() { [[ "$*" == *'has("credential_ref")'* || "$*" == *dogfood-ready.jq* ]] && return 1; return 0; }
@@ -96,8 +96,10 @@ locus() {
     *" pin "*) rm -f "$LOCUS_HOME/unpinned" ;;
     *" --ttl 1s "*) echo EXPIRED ;;
     *" init "*)
+      [[ -d "$SMOKE_HOME" && -d "$SMOKE_PROJ" && "$LOCUS_HOME" == "$SMOKE_HOME" ]] || return 74
       echo seeded > "$LOCUS_HOME/store.txt"
-      printf '%s\\n' "$LOCUS_HOME" > "$RECORD"
+      echo seeded > "$SMOKE_PROJ/fixture.txt"
+      printf '%s\\n' "$SMOKE_HOME" "$SMOKE_PROJ" > "$RECORD"
       # Model a scan listing left behind by an interrupted scan; the EXIT trap
       # must remove it even when the rest of the smoke run succeeds.
       : > "$TMPDIR/.locus-hub-int-scan.$$.fixture"
@@ -125,11 +127,12 @@ test('stubbed successful run removes both temporary directories', (t) => {
 
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
-  const home = readFileSync(record, 'utf8').trim();
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2, 'both directories must be recorded during the run');
+  const [home, project] = paths;
+  assert.notEqual(home, project);
   assert.equal(dirname(home), tmp, 'SMOKE_HOME must be allocated beneath TMPDIR');
   assert.equal(existsSync(home), false, 'SMOKE_HOME must be removed on exit');
-  const project = /ambient canary absent under (\S+locus-hub-int-proj\.\w+)/.exec(result.stdout)?.[1];
-  assert.ok(project, 'the run must scan the smoke project');
   assert.equal(dirname(project), tmp, 'SMOKE_PROJ must be allocated beneath TMPDIR');
   assert.equal(existsSync(project), false, 'SMOKE_PROJ must be removed on exit');
   const listing = readFileSync(scanRecord, 'utf8').trim();
@@ -155,9 +158,10 @@ test('spaced TMPDIR contains both temporary directories and preserves a sibling 
 
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   assert.match(result.stdout, /^== hub-integration-test OK ==$/m);
-  const home = readFileSync(record, 'utf8').trim();
-  const project = /^ok\s+ambient canary absent under (.+locus-hub-int-proj\.\w+)$/m.exec(result.stdout)?.[1];
-  assert.ok(project, 'the run must scan the smoke project');
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2, 'both directories must be recorded during the run');
+  const [home, project] = paths;
+  assert.notEqual(home, project);
   for (const path of [home, project]) {
     assert.equal(dirname(path), tmp, 'temporary directory must be directly beneath TMPDIR');
     assert.equal(existsSync(path), false, 'temporary directory must be removed on exit');
