@@ -120,6 +120,25 @@ function createFn() {
   return create;
 }
 
+test('SECURITY_WS requests the fallback mktemp template when TMPDIR is unset or empty', () => {
+  for (const mode of ['unset', 'empty']) {
+    const env = { ...process.env };
+    if (mode === 'unset') delete env.TMPDIR; else env.TMPDIR = '';
+    const result = spawnSync('bash', ['-c', `set -euo pipefail
+${createFn()}
+mktemp() {
+  [[ "$#" == 2 && "$1" == -d ]] || exit 70
+  printf '%s' "$2" >&2
+  printf '%s' /tmp/locus-security-ws.stubbed
+}
+create_security_workspace
+[[ "$SECURITY_WS" == /tmp/locus-security-ws.stubbed ]]
+`], { env, encoding: 'utf8' });
+    assert.equal(result.status, 0, `${mode}: stubbed allocation failed`);
+    assert.equal(result.stderr, '/tmp/locus-security-ws.XXXXXX', mode);
+  }
+});
+
 test('SECURITY_WS falls back to /tmp when TMPDIR is unset or empty', (t) => {
   for (const mode of ['unset', 'empty']) {
     const env = { ...process.env };
