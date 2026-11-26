@@ -98,6 +98,45 @@ printf 'payload' > "$WS_DIR/nested dir/f.toml" || exit 73
   assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
 });
 
+test('the script-installed exit trap removes the recorded workspace after failure', (t) => {
+  const dir = fixture(t);
+  const scratch = join(dir, 'caller tmp with spaces');
+  const home = join(dir, 'isolated home');
+  const observed = join(dir, 'workspace-path');
+  mkdirSync(scratch);
+  mkdirSync(home);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+  const source = readFileSync(script, 'utf8');
+  const installTraps = source.match(/^e2e_install_traps\(\) \{[\s\S]*?^\}/m)?.[0];
+  assert.ok(installTraps, 'e2e.sh must install its cleanup traps');
+  const { cleanup, createWorkspace } = workspaceParts();
+  const result = spawnSync('bash', ['-c', `set -euo pipefail
+${cleanup}
+${createWorkspace}
+${installTraps}
+log() { :; }
+ok() { :; }
+die() { exit 1; }
+LOCUS_HOME="$MAIN_HOME"
+WS_DIR="" GRAPH_HOME="" SECURITY_HOME="" SECURITY_WS="" HTTP_MCP_PID="" MT_MCP_PID=""
+e2e_install_traps
+${selectionBlock()}
+[[ -d "$WS_DIR" ]] || exit 71
+printf 'payload' > "$WS_DIR/sentinel"
+printf '%s' "$WS_DIR" > "$OBSERVED"
+exit 73
+`], { env: { ...process.env, TMPDIR: scratch, MAIN_HOME: home, OBSERVED: observed }, encoding: 'utf8' });
+
+  assert.ifError(result.error);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, result.stderr);
+  const workspace = readFileSync(observed, 'utf8');
+  assert.equal(dirname(workspace), scratch);
+  assert.throws(() => lstatSync(workspace), { code: 'ENOENT' });
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' });
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+});
+
 test('a supplied TMPDIR with spaces reaches mktemp inside one template argument', (t) => {
   const dir = fixture(t);
   const scratch = join(dir, 'scratch dir with  spaces');
