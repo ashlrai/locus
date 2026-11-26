@@ -89,6 +89,43 @@ esac
     'cleanup must preserve unrelated files in the controlled root');
 });
 
+test('a literal dollar sign in TMPDIR is preserved and the dogfood home is cleaned up', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-dollar-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'literal $HOME directory');
+  const probe = join(root, 'allocated-home');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+
+  const dogfood = fixture(root, `#!/usr/bin/env bash
+case "$1" in
+  init)
+    [[ -d "$LOCUS_HOME" && ! -L "$LOCUS_HOME" && "\${LOCUS_HOME%/*}" == "$TMPDIR" ]] || exit 71
+    printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"
+    ;;
+  binding|--version) ;;
+  quickstart) exit 42 ;;
+  *) exit 92 ;;
+esac
+`);
+  const result = spawnSync('bash', [dogfood], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, PROBE_FILE: probe,
+      DOGFOOD_USE_REAL_HOME: '0', DOGFOOD_SELF_TEST: '0' },
+    encoding: 'utf8',
+    timeout: 10000,
+  });
+
+  assert.ifError(result.error);
+  assert.equal(result.status, 42, 'the run must reach the controlled quickstart failure');
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.equal(dirname(home), scratch);
+  assert.match(basename(home), /^locus-dogfood\.[A-Za-z0-9]{6}$/);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' });
+  assert.deepEqual(readdirSync(scratch), ['keep']);
+  assert.equal(readFileSync(join(scratch, 'keep'), 'utf8'), 'unrelated');
+});
+
 test('TERM removes the allocated dogfood home and exits nonzero', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-term-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
