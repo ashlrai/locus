@@ -149,7 +149,7 @@ rm() {
   assert.equal(existsSync(scratch), true);
 });
 
-test('early command failure removes every allocated temporary path', (t) => {
+test('a failing build prerequisite reports its error and removes every temporary path offline', (t) => {
   const tmp = mkdtempSync('/tmp/locus-stub-failure-');
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const fakeRoot = join(tmp, 'repo');
@@ -175,22 +175,30 @@ path="$("$REAL_MKTEMP" "$@")" || exit 1
 printf '%s\\n' "$path" >> "$ALLOCATIONS"
 printf '%s\\n' "$path"
 `, { mode: 0o755 });
+  // Only jq discovery precedes the failed build; never depend on an installed jq.
+  writeFileSync(join(bin, 'jq'), '#!/usr/bin/env bash\nexit 99\n', { mode: 0o755 });
   // A failed help probe triggers this build, after all allocations.
   writeFileSync(join(bin, 'cargo'), `#!/usr/bin/env bash
+[[ "$*" == 'build -q -p locus-cli' ]] || exit 98
 [[ $(wc -l < "$ALLOCATIONS") -eq 3 ]] || exit 98
 while IFS= read -r path; do [[ -e "$path" ]] || exit 98; done < "$ALLOCATIONS"
+printf 'synthetic cargo build prerequisite failure\\n' >&2
 exit 42
 `, { mode: 0o755 });
 
-  const env = { ...process.env, BASH_ENV: '', HOME: home, TMPDIR: scratch,
+  const env = { HOME: home, TMPDIR: scratch,
     PATH: `${bin}:${process.env.PATH}`, REAL_MKTEMP: lookup.stdout.trim(), ALLOCATIONS: record,
     LOCUS_CONTROL_CAPABILITY: 'synthetic-test-capability' };
   const result = spawnSync('bash', [join(fakeRoot, 'scripts', 'hub-smoke.sh')], {
-    env, encoding: 'utf8',
+    env, encoding: 'utf8', timeout: 15_000,
   });
 
+  assert.equal(result.error, undefined);
   assert.equal(result.status, 42);
   assert.equal(result.signal, null);
+  assert.match(result.stdout, /building locus with agent report/);
+  assert.equal(result.stderr, 'synthetic cargo build prerequisite failure\n');
+  assert.doesNotMatch(result.stdout, /== hub-smoke (OK|FAILED) ==/);
   const paths = readFileSync(record, 'utf8').trim().split('\n');
   assert.equal(paths.length, 3);
   assert.equal(new Set(paths).size, 3, 'temporary allocations must have distinct paths');
