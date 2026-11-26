@@ -45,6 +45,8 @@ export const PAGE = join(PUBLIC, 'index.html');
 export const SITE = 'https://locus.dev';
 export const REPO = 'https://github.com/ashlrai/locus';
 export const REPO_BLOB = `${REPO}/blob/main`;
+const REPO_RAW = 'https://raw.githubusercontent.com/ashlrai/locus/main';
+const PUBLIC_RAW = `${REPO_RAW}/apps/web/public`;
 export const MCP_NAME = 'io.github.ashlrai/locus-mcp';
 export const MCP_PACKAGE = '@ashlrai/locus-mcp';
 export const NPM_PACKAGE = 'locus-cli';
@@ -252,8 +254,8 @@ function llmsTxt({ info, docs }) {
     '',
     `- [README](${REPO_BLOB}/README.md): install options, get started, MCP wiring`,
     `- [AGENTS.md](${REPO_BLOB}/AGENTS.md): agent operating rules and invariants`,
-    `- [capabilities.json](${SITE}/capabilities.json): machine-readable capabilities, install and commands`,
-    `- [server.json](${SITE}/server.json): MCP registry manifest for ${MCP_NAME}`,
+    `- [capabilities.json](${PUBLIC_RAW}/capabilities.json): machine-readable capabilities, install and commands`,
+    `- [server.json](${PUBLIC_RAW}/server.json): MCP registry manifest for ${MCP_NAME}`,
     '',
     '## Guides',
     '',
@@ -263,10 +265,10 @@ function llmsTxt({ info, docs }) {
     '',
     `- [DESIGN.md](${REPO_BLOB}/DESIGN.md): full architecture and threat model`,
     `- [docs/agent-contract.md](${REPO_BLOB}/docs/agent-contract.md): JSON schemas, exit codes, dry-run`,
-    `- [llms-full.txt](${SITE}/llms-full.txt): complete heading index of README and docs`,
+    `- [llms-full.txt](${REPO_RAW}/llms-full.txt): complete heading index of README and docs`,
     `- [PLAN.md](${REPO_BLOB}/PLAN.md): original phased plan (historical; live status is in GOALS.md)`,
     `- [SECURITY.md](${REPO_BLOB}/SECURITY.md): vulnerability reporting`,
-    `- [Site](${SITE}/)`,
+    `- [Website source and local preview](${REPO_BLOB}/apps/web/README.md)`,
     '',
   ];
   return lines.join('\n');
@@ -298,12 +300,12 @@ function llmsFull({ info, docs }) {
   lines.push(
     '## Agent surfaces',
     '',
-    `- [capabilities.json](${SITE}/capabilities.json)`,
-    `- [server.json](${SITE}/server.json)`,
-    `- [robots.txt](${SITE}/robots.txt)`,
-    `- [sitemap.xml](${SITE}/sitemap.xml)`,
-    `- [AGENTS.md](${SITE}/AGENTS.md)`,
-    `- [.well-known/security.txt](${SITE}/.well-known/security.txt)`,
+    `- [capabilities.json](${PUBLIC_RAW}/capabilities.json)`,
+    `- [server.json](${PUBLIC_RAW}/server.json)`,
+    `- [robots.txt](${PUBLIC_RAW}/robots.txt)`,
+    `- [sitemap.xml](${PUBLIC_RAW}/sitemap.xml)`,
+    `- [AGENTS.md](${PUBLIC_RAW}/AGENTS.md)`,
+    `- [.well-known/security.txt](${PUBLIC_RAW}/.well-known/security.txt)`,
     '',
   );
   return lines.join('\n');

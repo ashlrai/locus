@@ -962,9 +962,9 @@ listed verbatim so an agent can jump straight to the right document.
 
 ## Agent surfaces
 
-- [capabilities.json](https://locus.dev/capabilities.json)
-- [server.json](https://locus.dev/server.json)
-- [robots.txt](https://locus.dev/robots.txt)
-- [sitemap.xml](https://locus.dev/sitemap.xml)
-- [AGENTS.md](https://locus.dev/AGENTS.md)
-- [.well-known/security.txt](https://locus.dev/.well-known/security.txt)
+- [capabilities.json](https://raw.githubusercontent.com/ashlrai/locus/main/apps/web/public/capabilities.json)
+- [server.json](https://raw.githubusercontent.com/ashlrai/locus/main/apps/web/public/server.json)
+- [robots.txt](https://raw.githubusercontent.com/ashlrai/locus/main/apps/web/public/robots.txt)
+- [sitemap.xml](https://raw.githubusercontent.com/ashlrai/locus/main/apps/web/public/sitemap.xml)
+- [AGENTS.md](https://raw.githubusercontent.com/ashlrai/locus/main/apps/web/public/AGENTS.md)
+- [.well-known/security.txt](https://raw.githubusercontent.com/ashlrai/locus/main/apps/web/public/.well-known/security.txt)
