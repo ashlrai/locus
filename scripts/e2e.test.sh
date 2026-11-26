@@ -155,3 +155,49 @@ APP
   }
 )
 printf 'ok: home allocation failure stops before Locus\n'
+
+# Run the actual script offline and interrupt it at its first ready checkpoint,
+# after LOCUS_HOME exists and the production cleanup traps have been installed.
+(
+  test_dir="$(mktemp -d "${TMPDIR:-/tmp}/locus-e2e-term-test.XXXXXX")"
+  trap 'rm -rf -- "$test_dir"' EXIT
+  mkdir "$test_dir/scratch with spaces"
+  touch "$test_dir/scratch with spaces/keep"
+
+  cat >"$test_dir/stubs.sh" <<'STUBS'
+cargo() { return 0; }
+printf() {
+  if [[ $# -eq 2 && "$1" == '  ok  %s\n' && "$2" == 'isolated home ready' ]]; then
+    [[ -d "$LOCUS_HOME" ]] || exit 74
+    touch "$LOCUS_HOME/cleanup-sentinel"
+    command printf '%s' "$LOCUS_HOME" >"$TEST_DIR/home-path"
+    kill -TERM "$$"
+    # If TERM fails to stop the script, fail without allowing later probes.
+    exit 75
+  fi
+  command printf "$@"
+}
+STUBS
+  cat >"$test_dir/app" <<'APP'
+#!/usr/bin/env bash
+touch "$TEST_DIR/app-called"
+exit 76
+APP
+  chmod +x "$test_dir/app"
+
+  status=0
+  TEST_DIR="$test_dir" TMPDIR="$test_dir/scratch with spaces" \
+    BASH_ENV="$test_dir/stubs.sh" LOCUS_CONTROL_CAPABILITY=synthetic \
+    LOCUS_BIN="$test_dir/app" MCP_BIN="$test_dir/app" \
+    bash "$script_dir/e2e.sh" >"$test_dir/stdout" 2>"$test_dir/stderr" || status=$?
+
+  [[ $status -eq 143 ]] || { echo 'TERM did not exit with status 143' >&2; exit 1; }
+  [[ -s "$test_dir/home-path" ]] || { echo 'TERM checkpoint was not reached' >&2; exit 1; }
+  home="$(cat "$test_dir/home-path")"
+  [[ "${home%/*}" == "$test_dir/scratch with spaces" && "${home##*/}" == locus-e2e.* ]]
+  [[ ! -e "$home" && ! -L "$home" ]] || { echo 'home survived TERM cleanup' >&2; exit 1; }
+  [[ -f "$test_dir/scratch with spaces/keep" ]]
+  [[ $(find "$test_dir/scratch with spaces" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ') == 1 ]]
+  [[ ! -e "$test_dir/app-called" ]] || { echo 'application ran before TERM' >&2; exit 1; }
+)
+printf 'ok: TERM removes the created home and exits nonzero\n'
