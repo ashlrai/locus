@@ -39,7 +39,7 @@ test('failure guide tracks allocation order, diagnostics and cleanup', () => {
   }
 });
 
-for (const [index, [variable, template, diagnostic]] of failureCases.entries()) {
+for (const [index, [variable, , diagnostic]] of failureCases.entries()) {
   test(`${variable} allocation failure stops later allocations and cleans earlier paths`, (t) => {
     const fixture = mkdtempSync(join(tmpdir(), 'hub-smoke-failures-'));
     t.after(() => rmSync(fixture, { recursive: true, force: true }));
@@ -64,7 +64,7 @@ jq() { : > "$SMOKE_MARKER"; return 1; }
     assert.equal(lookup.status, 0);
     writeFileSync(join(bin, 'mktemp'), `#!/usr/bin/env bash
 printf '%s\\n' "\${!#}" >> "$ATTEMPTS"
-if [[ "\${!#}" == */"$FAIL_TEMPLATE" ]]; then exit 1; fi
+if [[ "$(wc -l < "$ATTEMPTS" | tr -d " ")" == "$FAIL_ATTEMPT" ]]; then exit 1; fi
 path="$("$REAL_MKTEMP" "$@")" || exit 1
 [[ "$1" == -d && -d "$path" ]] || exit 1
 mkdir "$path/nested"
@@ -74,7 +74,7 @@ printf '%s\\n' "$path"
 `, { mode: 0o755 });
     const result = spawnSync('bash', [script], {
       env: { ...process.env, BASH_ENV: hook, TMPDIR: scratch, PATH: `${bin}:${process.env.PATH}`,
-        ATTEMPTS: record, CREATED: created, FAIL_TEMPLATE: template, REAL_MKTEMP: lookup.stdout.trim(),
+        ATTEMPTS: record, CREATED: created, FAIL_ATTEMPT: String(index + 1), REAL_MKTEMP: lookup.stdout.trim(),
         SMOKE_MARKER: marker },
       encoding: 'utf8',
       timeout: 15_000,
