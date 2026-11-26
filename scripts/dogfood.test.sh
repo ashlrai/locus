@@ -35,6 +35,24 @@ grep -q 'injected allocation failure' "$test_root/stderr" || {
 }
 printf 'PASS: multi-tenant probe stops when directory creation fails\n'
 
+# A failed allocator may still write to stdout. Its output is not a usable
+# directory, and must not cause the probe to proceed even in an OR-list.
+(
+  source "$ROOT/scripts/dogfood.sh"
+  mktemp() { printf '%s\n' "$test_root/not-created"; return 1; }
+  locus() { printf 'locus\n' >> "$test_root/unexpected-output"; }
+  cd() { printf 'cd\n' >> "$test_root/unexpected-output"; }
+  rm() { printf 'rm\n' >> "$test_root/unexpected-output"; }
+  if mt_grant_probe; then
+    printf 'FAIL: multi-tenant probe accepted output from a failed allocation\n' >&2
+    exit 1
+  fi
+)
+[[ ! -e "$test_root/unexpected-output" && ! -e "$test_root/not-created" ]] || {
+  printf 'FAIL: probe used output from a failed allocation\n' >&2; exit 1;
+}
+printf 'PASS: multi-tenant probe ignores output from a failed allocation\n'
+
 # Interrupt each isolated probe after it has allocated its home, without running
 # a real Locus command or contacting a provider.
 for probe in sandbox_attestation mt_grant_probe; do
