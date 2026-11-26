@@ -142,6 +142,18 @@ fn hub_smoke_allocates_and_cleans_temp_paths_under_tmpdir_with_spaces() {
 }
 
 #[test]
+fn hub_smoke_allocates_and_cleans_temp_paths_under_tmpdir_with_dollar_sign() {
+    let fixture = tempfile::tempdir().unwrap();
+    let fixture_root = fixture.path().canonicalize().unwrap();
+    let tmpdir = fixture_root.join("tmp $literal").join("nested $dir");
+    std::fs::create_dir_all(&tmpdir).unwrap();
+
+    let run = run_smoke(Some(&tmpdir), &fixture_root);
+    assert_under_and_cleaned(&run, &tmpdir);
+    assert_eq!(std::fs::read_dir(&tmpdir).unwrap().count(), 0);
+}
+
+#[test]
 fn hub_smoke_falls_back_to_slash_tmp_when_tmpdir_unset_or_empty() {
     for tmpdir in [None, Some(Path::new(""))] {
         let fixture = tempfile::tempdir().unwrap();
