@@ -349,12 +349,15 @@ test('failed project allocation cleans the temporary home', (t) => {
   assert.deepEqual(readdirSync(scratch).sort(), ['.locus-hub-int-scan.unrelated', 'keep']);
 });
 
-test('a controlled early failure removes both allocated temporary directories', (t) => {
+test('a failing prerequisite reports its error and removes both temporary directories', (t) => {
   const root = mkdtempSync('/tmp/lhi-early-fail-');
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const scratch = join(root, 'scratch with spaces');
   const record = join(root, 'observed');
+  const unexpectedCommand = join(root, 'unexpected-command');
+  const homeDir = join(root, 'home');
   mkdirSync(scratch);
+  mkdirSync(homeDir);
   writeFileSync(join(scratch, 'keep'), 'sentinel');
 
   // Fail at the first node --test prerequisite — the earliest point where both
@@ -363,29 +366,36 @@ test('a controlled early failure removes both allocated temporary directories', 
   // both directories first so cleanup must remove non-empty trees.
   const harness = `
 node() {
-  [[ "$1" == --test ]] || return 74
+  [[ "$#" == 2 && "$1" == --test && "$2" == "$ROOT/integrations/phantom/readme.test.mjs" ]] || return 74
   [[ -d "$SMOKE_HOME" && -d "$SMOKE_PROJ" && "$SMOKE_HOME" != "$SMOKE_PROJ" ]] || return 75
   [[ -z "$(ls -A "$SMOKE_HOME")" && -z "$(ls -A "$SMOKE_PROJ")" ]] || return 76
   mkdir -p "$SMOKE_HOME/nested" "$SMOKE_PROJ/nested" || return 77
   : > "$SMOKE_HOME/nested/fixture" || return 78
   : > "$SMOKE_PROJ/nested/fixture" || return 79
   printf '%s\\n' "$SMOKE_HOME" "$SMOKE_PROJ" > "$OBSERVED"
+  printf 'error: injected node prerequisite failure\\n' >&2
   return 73
 }
 jq() { :; }
-cargo() { :; }
-locus() { :; }
+cargo() { : > "$UNEXPECTED_COMMAND"; return 80; }
+locus() { : > "$UNEXPECTED_COMMAND"; return 81; }
 export -f node jq cargo locus
 exec bash "$1"
 `;
   const result = spawnSync('bash', ['-c', harness, 'early-failure-test', script], {
-    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: scratch, OBSERVED: record },
+    env: { PATH: process.env.PATH, HOME: homeDir, TMPDIR: scratch, OBSERVED: record,
+      UNEXPECTED_COMMAND: unexpectedCommand },
     encoding: 'utf8',
+    timeout: 10_000,
   });
 
   assert.equal(result.error, undefined);
   assert.equal(result.signal, null);
   assert.equal(result.status, 73, 'the injected prerequisite failure must propagate');
+  assert.match(result.stderr, /^error: injected node prerequisite failure$/m);
+  assert.doesNotMatch(result.stdout, /== hub-integration-test OK ==/);
+  assert.equal(existsSync(unexpectedCommand), false, 'later commands must not run after prerequisite failure');
+  assert.deepEqual(readdirSync(homeDir), [], 'the isolated HOME must remain untouched');
   const paths = readFileSync(record, 'utf8').trim().split('\n');
   assert.equal(paths.length, 2, 'both temporary directories must be recorded');
   const [home, project] = paths;
