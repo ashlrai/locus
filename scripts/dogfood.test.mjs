@@ -867,7 +867,8 @@ kill -TERM "$PPID"
   });
 
   assert.ifError(result.error);
-  assert.equal(result.signal, 'SIGTERM');
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 143, 'the TERM trap must exit nonzero');
   const home = readFileSync(probe, 'utf8').trim();
   assert.match(home, /\/locus-dogfood\.[^/]+$/);
   assert.equal(dirname(home), scratch);

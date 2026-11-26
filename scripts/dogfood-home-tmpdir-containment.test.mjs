@@ -89,6 +89,42 @@ esac
     'cleanup must preserve unrelated files in the controlled root');
 });
 
+test('TERM removes the allocated dogfood home and exits nonzero', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'locus-dogfood-term-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scratch = join(root, 'scratch');
+  const probe = join(root, 'allocated-home');
+  mkdirSync(scratch);
+  writeFileSync(join(scratch, 'keep'), 'unrelated');
+
+  const dogfood = fixture(root, `#!/usr/bin/env bash
+case "$1" in
+  init)
+    [[ -d "$LOCUS_HOME" && "\${LOCUS_HOME%/*}" == "$TMPDIR" ]] || exit 71
+    printf '%s\\n' "$LOCUS_HOME" > "$PROBE_FILE"
+    kill -TERM "$PPID"
+    ;;
+  *) exit 72 ;;
+esac
+`);
+  const result = spawnSync('bash', [dogfood], {
+    cwd: root,
+    env: { ...process.env, TMPDIR: scratch, PROBE_FILE: probe,
+      DOGFOOD_USE_REAL_HOME: '0', DOGFOOD_SELF_TEST: '0' },
+    encoding: 'utf8',
+    timeout: 10000,
+  });
+
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 143, 'the TERM trap must exit nonzero');
+  const home = readFileSync(probe, 'utf8').trim();
+  assert.equal(dirname(home), scratch);
+  assert.match(basename(home), /^locus-dogfood\.[^/]+$/);
+  assert.throws(() => lstatSync(home), { code: 'ENOENT' });
+  assert.deepEqual(readdirSync(scratch), ['keep'], 'cleanup must preserve unrelated files');
+});
+
 // TMP, TEMP, the working directory and an inherited DOGFOOD_HOME are all
 // plausible but wrong roots: the script must read TMPDIR alone when it chooses
 // where the isolated home goes.
