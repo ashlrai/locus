@@ -169,7 +169,16 @@ done
 # Stop after both real allocations, exercising the EXIT trap entirely offline.
 cat > "$test_root/spaces-shim.sh" <<'SHIM'
 jq() { return 0; }
-node() { return 42; }
+node() {
+  local dir count=0
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || return 43
+    : > "$dir/failure-fixture" || return 43
+    count=$((count + 1))
+  done < "$TEST_ROOT/allocated-dirs"
+  [[ $count -eq 2 ]] || return 43
+  return 42
+}
 mktemp() {
   local dir
   dir="$(command mktemp "$@")" || return
