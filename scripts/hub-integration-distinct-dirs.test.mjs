@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 
@@ -25,6 +25,37 @@ locus() {
 export -f node jq cargo locus
 exec bash "$1"
 `;
+
+test('unset TMPDIR uses /tmp for both directories and removes them on exit', (t) => {
+  const scratch = mkdtempSync('/tmp/locus-unset-test-');
+  const record = join(scratch, 'observed');
+  t.after(() => {
+    if (existsSync(record)) {
+      for (const path of readFileSync(record, 'utf8').trim().split('\n')) {
+        if (dirname(path) === '/tmp' && /^locus-hub-int(?:-proj)?\.[A-Za-z0-9]{6}$/.test(basename(path))) {
+          rmSync(path, { recursive: true, force: true });
+        }
+      }
+    }
+    rmSync(scratch, { recursive: true, force: true });
+  });
+  const result = spawnSync('bash', ['-c', harness, 'unset-test', script], {
+    // Explicit environment ensures TMPDIR is absent, even when the runner sets it.
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, RECORD: record },
+    encoding: 'utf8',
+  });
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 73, 'both directories must exist when init runs');
+  const paths = readFileSync(record, 'utf8').trim().split('\n');
+  assert.equal(paths.length, 2);
+  assert.notEqual(paths[0], paths[1]);
+  for (const [index, prefix] of ['locus-hub-int', 'locus-hub-int-proj'].entries()) {
+    assert.equal(dirname(paths[index]), '/tmp');
+    assert.match(basename(paths[index]), new RegExp(`^${prefix}\\.[A-Za-z0-9]{6}$`));
+    assert.equal(existsSync(paths[index]), false, 'removed on exit');
+  }
+});
 
 test('SMOKE_HOME and SMOKE_PROJ are two distinct, non-nested directories under TMPDIR', (t) => {
   const scratch = mkdtempSync('/tmp/locus-distinct-test-');
