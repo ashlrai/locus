@@ -1797,8 +1797,12 @@ if ! has_cmd serve && ! has_cmd dashboard; then
   skip "serve/dashboard not available"
 else
   need curl
-  # Pick a free high port to avoid colliding with a developer dashboard.
-  DASH_PORT=$((18750 + RANDOM % 1000))
+  # Ask the kernel for a free port (same as the MCP probes below). A random
+  # fixed-range port can collide with a developer dashboard or another job on a
+  # shared runner, which made this step fail the daily CI run.
+  DASH_PORT="$(
+    python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
+  )"
   serve_log="$LOCUS_HOME/e2e-serve.log"
   # serve defaults to no browser open (only dashboard opens by default).
   "$LOCUS_BIN" serve --port "$DASH_PORT" >"$serve_log" 2>&1 &
@@ -1808,7 +1812,7 @@ else
     wait "$serve_pid" 2>/dev/null || true
   }
   health_ok=0
-  for _ in $(seq 1 25); do
+  for _ in $(seq 1 80); do
     if ! kill -0 "$serve_pid" 2>/dev/null; then
       break
     fi
