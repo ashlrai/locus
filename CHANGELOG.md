@@ -191,6 +191,42 @@ binary change: three more `--json` commands now carry a `schema` id.
     `scripts/release-version.mjs sync` and lists the `.sha256` sidecars; the
     freshness README says no workflow runs its check today.
 
+- CI: per-OS gates and path-gated install smokes. **Gate (linux)**,
+  **Gate (windows)** and **Gate (macos)** report beside CI Gate without joining
+  its `needs`; the Windows and macOS fast checks and install smokes run only
+  for platform paths, and each smoke verifies a checksum before it executes a
+  download or build. The smoke falls back to the source install when a release
+  has no archive for that OS, and a Cargo warning is no longer reported as the
+  first failure. Workflow actions are pinned to commit SHAs with a grouped weekly
+  Dependabot update. CONTRIBUTING describes the new gates
+  ([#1088](https://github.com/ashlrai/locus/pull/1088),
+  [#1091](https://github.com/ashlrai/locus/pull/1091),
+  [#1092](https://github.com/ashlrai/locus/pull/1092),
+  [#1093](https://github.com/ashlrai/locus/pull/1093)).
+- Docs: `scripts/setup.sh` is a one-command, idempotent setup for Linux and
+  macOS (installs Rust and Node 20 when missing, builds `locus`, runs
+  `locus --version` in a temporary `LOCUS_HOME`), and the README and npm README
+  give the npm 11 install step (`--allow-scripts=@ashlrai/locus-mcp,locus-cli`)
+  because npm 11 skips `postinstall` otherwise
+  ([#1085](https://github.com/ashlrai/locus/pull/1085)).
+- Docs: the README gains live star and download badges, a Discord link and a
+  "Join the mission" section, and its agent links point at reachable files
+  ([#1083](https://github.com/ashlrai/locus/pull/1083),
+  [#1126](https://github.com/ashlrai/locus/pull/1126)). Any-agent instruction
+  files (`GEMINI.md`, `.cursor/rules/agents.mdc`,
+  `.github/copilot-instructions.md`) and an optional "Agent used" PR template
+  field were added, and `AGENTS.md` carries the Ashlr Fleet rules
+  ([#1084](https://github.com/ashlrai/locus/pull/1084),
+  [#1120](https://github.com/ashlrai/locus/pull/1120)).
+- Tests only, no behavior change: `fleet-outcomes` unit tests, `--json` error
+  envelope, isolation, session-budget, `inherit_env` and gateway base URL
+  coverage, README command-list checks, and temp-directory, cleanup and
+  interruption cases for the e2e, dogfood and hub-smoke scripts
+  ([#1066](https://github.com/ashlrai/locus/pull/1066),
+  [#1079](https://github.com/ashlrai/locus/pull/1079),
+  [#1098](https://github.com/ashlrai/locus/pull/1098) to
+  [#1146](https://github.com/ashlrai/locus/pull/1146)).
+
 ### Fixed
 
 - The security contact address in the docs is corrected
