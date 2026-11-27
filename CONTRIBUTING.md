@@ -88,6 +88,17 @@ doctests, release build, end-to-end gate, Phantom contract, recipes and MSRV
 check run on the daily schedule and on manual dispatch, not per PR, so run
 `cargo test` locally for the crates you touch.
 
+Three more checks report beside CI Gate and are not part of its `needs`:
+**Gate (linux)**, **Gate (windows)** and **Gate (macos)**. The Windows and
+macOS legs run their fast checks and an install smoke only when a PR touches
+platform paths (crates, Cargo and package manifests, scripts, the npm and
+Homebrew wrappers, `ci.yml`); docs-only diffs skip them. Each install smoke
+verifies a checksum before it executes a download or build, and falls back to
+the source install when the latest release ships no archive for that OS. The
+path rules live in `scripts/ci/os-path-gate.mjs`. Third-party actions in the
+workflows are pinned to full commit SHAs, and Dependabot opens one grouped
+weekly PR to keep those pins current.
+
 **Merging.** PRs land through the merge queue, which reruns CI Gate on the
 merged tree. A maintainer queues reviewed PRs; collaborators with write access
 can arm it with `gh pr merge --auto`. Paths listed in
