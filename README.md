@@ -569,18 +569,9 @@ Agency kit: [examples/agency-starter](./examples/agency-starter/) and [docs/agen
 
 ## Part of the Ashlr ecosystem
 
-Locus is one of the open-source tools from [Ashlr](https://ashlr.ai). Together they aim to be a fully autonomous, code-first, agent-native software factory: agents do the work, and the human acts as a passive board member. The stated goal is chasing open-source RSI (recursive self-improvement): agents improving the tools they run on. That is a direction, not a finished capability. Each tool installs and runs on its own.
+Locus is the identity layer in the [AshlrAI open-source ecosystem](https://github.com/ashlrai#the-open-source-ecosystem). A person pins a binding, and supported CLI and MCP tools operate within that account and tenant. Agents can ask for a different binding; they cannot switch it themselves. Locus works on its own or alongside [Phantom](https://phm.dev), which coordinates work across agents and worker machines.
 
-- **[Phantom](https://phm.dev)** (`phm`): the agent workbench. Source: [ashlrai/phantom](https://github.com/ashlrai/phantom).
-- **[Phantom Secrets](https://phm.dev/secrets)** (`phantom`): keeps real API keys out of agent context with `phm_` placeholders. Source: [ashlrai/phantom-secrets](https://github.com/ashlrai/phantom-secrets).
-- **[Lexicon](https://lexicon.ashlr.ai)** (`lexicon`): fixes the words dictation gets wrong.
-- **[Ashlr MD](https://md.ashlr.ai)**: a Markdown app with an MCP server.
-- **[Ashlr Stack](https://stack.ashlr.ai)** (`stack`): provisions services and stores their keys in Phantom Secrets.
-- **[ashlr-plugin](https://plugin.ashlr.ai/)** (`ashlr-plugin`): token-efficiency tools for Claude Code and Codex.
-
-Phantom answers "can this secret enter the model?" Locus answers "as whom, against which tenant, right now?" Wire both. Do not put raw Supabase, Vercel, or GitHub MCP servers with ambient tokens next to Locus. They bypass the pin. Contract: [docs/hub-integration.md](./docs/hub-integration.md).
-
-In that factory, Locus is the identity gate. Agents act without a person approving each command, so the account they act as is fixed by a person ahead of time, not chosen in the prompt. A person pins once. Agents work inside that pin and can only ask for a different one.
+[Phantom Secrets](https://phm.dev/secrets) is a separate tool: it keeps raw provider keys out of supported agent workflows, while Locus constrains which identity those tools use. Do not configure direct provider MCP servers with ambient credentials next to Locus; they do not inherit the pin. See the [integration contract](./docs/hub-integration.md).
 
 ### How agents work on this repo
 
@@ -592,7 +583,7 @@ AshlrAI is an engineering firm. We build tools like Locus to make our own work f
 
 - **Start here:** read [CONTRIBUTING.md](CONTRIBUTING.md). Your coding agent can follow [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt).
 - **Pick an issue:** [`good first issue`](https://github.com/ashlrai/locus/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22) or [`help wanted`](https://github.com/ashlrai/locus/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22).
-- **See the whole lineup:** [ashlr.ai/open-source](https://ashlr.ai/open-source).
+- **See the whole lineup:** [AshlrAI open-source ecosystem](https://github.com/ashlrai#the-open-source-ecosystem).
 - **Talk with us:** [The Dev Shack](https://discord.gg/jBQrSU6XeD) on Discord.
 
 ### Star history
