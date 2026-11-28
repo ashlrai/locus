@@ -35,3 +35,24 @@ test("prerequisites reflect the supported credential and session contracts", () 
     assert.ok(existsSync(resolve(root, path)), `${path} exists`);
   }
 });
+
+test("hub smoke prerequisites describe the script's local setup and exit contract", () => {
+  const guide = read("docs/hub-integration-prerequisites.md");
+  const script = read("scripts/hub-integration-test.sh");
+  assert.match(read("docs/hub-integration.md"), /\]\(hub-integration-prerequisites\.md\)/);
+  for (const term of ["jq", "Node", "--experimental-strip-types", "Cargo", "curl",
+    "TMPDIR", "LOCUS_HOME", "LOCUS_SESSION_ID", "LOCUS_CONTROL_CAPABILITY",
+    "HUB_INT_AMBIENT_CANARY", "127.0.0.1", "locus-mcp"]) {
+    assert.ok(guide.includes(term), `guide missing ${term}`);
+    assert.ok(script.includes(term === "Cargo" ? "cargo" : term === "Node" ? "node" : term),
+      `script no longer references ${term}`);
+  }
+  assert.match(guide, /No running Phantom service[\s\S]*existing Locus pin is required/);
+  assert.match(guide, /cargo build -p locus-cli -p locus-mcp\n\.\/scripts\/hub-integration-test\.sh/);
+  assert.match(guide, /skip[\s\S]*does \*\*not\*\*[\s\S]*fail/);
+  assert.match(script, /skip  multi-tenant MCP smoke/);
+  assert.match(guide, /set -euo pipefail/);
+  assert.match(script, /set -euo pipefail/);
+  assert.match(guide, /== hub-integration-test OK ==/);
+  assert.match(script, /== hub-integration-test OK ==/);
+});
