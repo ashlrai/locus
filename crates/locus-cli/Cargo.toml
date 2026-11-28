@@ -38,8 +38,14 @@ tempfile = { workspace = true }
 # dep via `toml` 0.8, so this adds no new lockfile entries).
 toml_edit = "0.22"
 
-[dev-dependencies]
 sha2 = { workspace = true }
+tree-sitter = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-go = "0.25"
+
+[dev-dependencies]
 toml = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 jsonschema = { workspace = true }
