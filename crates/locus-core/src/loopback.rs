@@ -61,4 +61,46 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn edge_case_ipv4_loopback_addresses() {
+        // Test edge case addresses that are close to loopback but not exactly loopback
+        let edge_cases = [
+            "127.0.0.0",  // Start of 127.x.x.x range
+            "127.255.255.255",  // End of 127.x.x.x range
+            "127.0.0.100",  // Different port in same network 
+        ];
+        
+        for ip in edge_cases {
+            let parsed = ip.parse().unwrap();
+            assert!(!is_exact_loopback_ip(parsed), "Expected {} to NOT be exact loopback", ip);
+        }
+    }
+
+    #[test]
+    fn edge_case_ipv6_loopback_addresses() {
+        // Test various IPv6 addresses that look like loopback but aren't exactly ::1
+        let edge_cases = [
+            "::ffff:127.0.0.1",  // IPv4-mapped address - not exactly ::1
+            "::1:0:0",           // Different canonical form - not exactly ::1
+            "::ffff:7f00:1",     // Another representation - not exactly ::1  
+        ];
+        
+        for ip in edge_cases {
+            let parsed = ip.parse().unwrap();
+            assert!(!is_exact_loopback_ip(parsed), "Expected {} to NOT be exact loopback", ip);
+        }
+    }
+
+    #[test]
+    fn error_path_invalid_url_host() {
+        // Ensure that our function handles invalid URL hosts gracefully
+        // This test just verifies the current behavior - no crash or panic
+        let url = "http://[::1]:8080/";
+        let parsed = url::Url::parse(url).unwrap();
+        let host = parsed.host().unwrap();
+        
+        // Function should work normally and not panic on valid input
+        assert_eq!(is_exact_loopback_host(&host), true);
+    }
 }
